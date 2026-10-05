@@ -2,12 +2,21 @@
 
 use crate::Error;
 
-const READ_BITS: u16 = 2000;
-const READ_REGISTERS: u16 = 125;
-const WRITE_BITS: u16 = 1968;
-const WRITE_REGISTERS: u16 = 123;
-const ON: u16 = 0xFF00;
+const READ_COILS: u8 = 1;
+const READ_DISCRETE_INPUTS: u8 = 2;
+const READ_HOLDING_REGISTERS: u8 = 3;
+const READ_INPUT_REGISTERS: u8 = 4;
+const WRITE_COIL: u8 = 5;
+const WRITE_REGISTER: u8 = 6;
+const WRITE_COILS: u8 = 15;
+const WRITE_REGISTERS: u8 = 16;
 const EXCEPTION: u8 = 0x80;
+
+const MAX_READ_BITS: u16 = 2000;
+const MAX_READ_REGISTERS: u16 = 125;
+const MAX_WRITE_BITS: u16 = 1968;
+const MAX_WRITE_REGISTERS: u16 = 123;
+const ON: u16 = 0xFF00;
 
 /// One of the four Modbus data tables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,10 +34,20 @@ pub enum Table {
 impl Table {
     fn function(self) -> u8 {
         match self {
-            Self::Coils => 1,
-            Self::DiscreteInputs => 2,
-            Self::HoldingRegisters => 3,
-            Self::InputRegisters => 4,
+            Self::Coils => READ_COILS,
+            Self::DiscreteInputs => READ_DISCRETE_INPUTS,
+            Self::HoldingRegisters => READ_HOLDING_REGISTERS,
+            Self::InputRegisters => READ_INPUT_REGISTERS,
+        }
+    }
+
+    fn of(function: u8) -> Option<Self> {
+        match function {
+            READ_COILS => Some(Self::Coils),
+            READ_DISCRETE_INPUTS => Some(Self::DiscreteInputs),
+            READ_HOLDING_REGISTERS => Some(Self::HoldingRegisters),
+            READ_INPUT_REGISTERS => Some(Self::InputRegisters),
+            _ => None,
         }
     }
 
@@ -87,72 +106,48 @@ impl Request {
     /// [`Error::Count`] or [`Error::Range`]. `out` is unchanged then.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
         self.size()?;
-        out.push(self.function());
-        match self {
-            Self::Read { start, count, .. } => put(out, [*start, *count]),
-            Self::WriteCoil { address, value } => put(out, [*address, coil(*value)]),
-            Self::WriteRegister { address, value } => put(out, [*address, *value]),
-            Self::WriteCoils { start, values } => {
-                put(out, [*start, len(values)]);
-                out.push(byte_count(values.len().div_ceil(8)));
-                for byte in values.chunks(8) {
-                    out.push(pack(byte));
-                }
-            }
-            Self::WriteRegisters { start, values } => {
-                put(out, [*start, len(values)]);
-                out.push(byte_count(values.len().saturating_mul(2)));
-                for value in values {
-                    out.extend_from_slice(&value.to_be_bytes());
-                }
-            }
-        }
+        self.write_to(out);
         Ok(())
     }
 
-    /// Reads a request PDU, as a device does.
+    /// Reads a request PDU, as a device does. A PDU it accepts encodes to the same
+    /// bytes.
     ///
     /// # Errors
     ///
     /// [`Error::Size`], [`Error::Function`], [`Error::Count`], [`Error::Range`],
-    /// [`Error::Bytes`], or [`Error::Coil`].
+    /// [`Error::ByteCount`], [`Error::Padding`], or [`Error::Coil`].
     pub fn decode(pdu: &[u8]) -> Result<Self, Error> {
         let Some(&function) = pdu.first() else {
             return Err(Error::Size { want: 1, got: 0 });
         };
-        let request = match function {
-            1..=4 => {
-                let [start, count] = fields(pdu)?;
-                let table = match function {
-                    1 => Table::Coils,
-                    2 => Table::DiscreteInputs,
-                    3 => Table::HoldingRegisters,
-                    _ => Table::InputRegisters,
-                };
-                Self::Read {
-                    table,
-                    start,
-                    count,
-                }
-            }
-            5 => {
+        if let Some(table) = Table::of(function) {
+            let [start, count] = fields(pdu)?;
+            let request = Self::Read {
+                table,
+                start,
+                count,
+            };
+            request.size()?;
+            return Ok(request);
+        }
+        match function {
+            WRITE_COIL => {
                 let [address, value] = fields(pdu)?;
                 let value = match value {
                     ON => true,
                     0 => false,
                     other => return Err(Error::Coil(other)),
                 };
-                Self::WriteCoil { address, value }
+                Ok(Self::WriteCoil { address, value })
             }
-            6 => {
+            WRITE_REGISTER => {
                 let [address, value] = fields(pdu)?;
-                Self::WriteRegister { address, value }
+                Ok(Self::WriteRegister { address, value })
             }
-            15 | 16 => Self::decode_writes(function, pdu)?,
-            other => return Err(Error::Function(other)),
-        };
-        request.size()?;
-        Ok(request)
+            WRITE_COILS | WRITE_REGISTERS => Self::decode_writes(function, pdu),
+            other => Err(Error::Function(other)),
+        }
     }
 
     /// Reads a PDU of function 15 or 16.
@@ -166,14 +161,16 @@ impl Request {
         };
         let start = u16::from_be_bytes([*s0, *s1]);
         let count = u16::from_be_bytes([*c0, *c1]);
-        let (max, want) = if function == 15 {
-            (WRITE_BITS, usize::from(count).div_ceil(8))
+        let coils = function == WRITE_COILS;
+        let max = if coils {
+            MAX_WRITE_BITS
         } else {
-            (WRITE_REGISTERS, usize::from(count).saturating_mul(2))
+            MAX_WRITE_REGISTERS
         };
-        check(start, count, max)?;
+        check(start, usize::from(count), max)?;
+        let want = data_bytes(coils, usize::from(count));
         if usize::from(*bytes) != want {
-            return Err(Error::Bytes {
+            return Err(Error::ByteCount {
                 want,
                 got: usize::from(*bytes),
             });
@@ -184,11 +181,10 @@ impl Request {
                 got: pdu.len(),
             });
         }
-        Ok(if function == 15 {
-            let bits = Bits { bytes: data, count };
+        Ok(if coils {
             Self::WriteCoils {
                 start,
-                values: bits.iter().collect(),
+                values: Bits::new(data, count)?.iter().collect(),
             }
         } else {
             Self::WriteRegisters {
@@ -198,17 +194,18 @@ impl Request {
         })
     }
 
-    /// Reads the device's reply PDU to this request, in place.
+    /// Reads the device's reply PDU to this request, in place. The request is one
+    /// that [`Request::encode`] accepts; for another, the reply never matches.
     ///
     /// # Errors
     ///
-    /// [`Error::Size`], [`Error::Answer`], [`Error::Bytes`], or [`Error::Echo`]; and
-    /// [`Error::Count`] or [`Error::Range`] when this request is not valid.
-    pub fn decode_reply<'a>(&self, pdu: &'a [u8]) -> Result<Response<'a>, Error> {
-        self.size()?;
+    /// [`Error::Size`], [`Error::Answer`], [`Error::ByteCount`], [`Error::Padding`],
+    /// or [`Error::Echo`].
+    pub fn decode_reply<'a>(&self, pdu: &'a [u8]) -> Result<Reply<'a>, Error> {
+        let size = self.reply_size();
         let want = self.function();
         let Some((&got, body)) = pdu.split_first() else {
-            return Err(Error::Size { want: 2, got: 0 });
+            return Err(Error::Size { want: size, got: 0 });
         };
         if got == want | EXCEPTION {
             let [code] = body else {
@@ -217,7 +214,7 @@ impl Request {
                     got: pdu.len(),
                 });
             };
-            return Ok(Response::Exception(Exception::from(*code)));
+            return Ok(Reply::Exception(Exception::from(*code)));
         }
         if got != want {
             return Err(Error::Answer { want, got });
@@ -226,50 +223,45 @@ impl Request {
             Self::Read { table, count, .. } => {
                 let Some((&bytes, data)) = body.split_first() else {
                     return Err(Error::Size {
-                        want: 2,
+                        want: size,
                         got: pdu.len(),
                     });
                 };
-                let want = if table.bits() {
-                    usize::from(*count).div_ceil(8)
-                } else {
-                    usize::from(*count).saturating_mul(2)
-                };
+                let want = data_bytes(table.bits(), usize::from(*count));
                 if usize::from(bytes) != want {
-                    return Err(Error::Bytes {
+                    return Err(Error::ByteCount {
                         want,
                         got: usize::from(bytes),
                     });
                 }
                 if data.len() != want {
                     return Err(Error::Size {
-                        want: want.saturating_add(2),
+                        want: size,
                         got: pdu.len(),
                     });
                 }
                 Ok(if table.bits() {
-                    Response::Bits(Bits {
-                        bytes: data,
-                        count: *count,
-                    })
+                    Reply::Bits(Bits::new(data, *count)?)
                 } else {
-                    Response::Registers(Registers(data))
+                    Reply::Registers(Registers(data))
                 })
             }
             Self::WriteCoil { address, value } => echo(pdu, [*address, coil(*value)]),
             Self::WriteRegister { address, value } => echo(pdu, [*address, *value]),
-            Self::WriteCoils { start, values } => echo(pdu, [*start, len(values)]),
-            Self::WriteRegisters { start, values } => echo(pdu, [*start, len(values)]),
+            Self::WriteCoils { start, values } => echo(pdu, [*start, count(values)]),
+            Self::WriteRegisters { start, values } => {
+                echo(pdu, [*start, count(values)])
+            }
         }
     }
 
     fn function(&self) -> u8 {
         match self {
             Self::Read { table, .. } => table.function(),
-            Self::WriteCoil { .. } => 5,
-            Self::WriteRegister { .. } => 6,
-            Self::WriteCoils { .. } => 15,
-            Self::WriteRegisters { .. } => 16,
+            Self::WriteCoil { .. } => WRITE_COIL,
+            Self::WriteRegister { .. } => WRITE_REGISTER,
+            Self::WriteCoils { .. } => WRITE_COILS,
+            Self::WriteRegisters { .. } => WRITE_REGISTERS,
         }
     }
 
@@ -282,29 +274,63 @@ impl Request {
                 count,
             } => {
                 let max = if table.bits() {
-                    READ_BITS
+                    MAX_READ_BITS
                 } else {
-                    READ_REGISTERS
+                    MAX_READ_REGISTERS
                 };
-                check(*start, *count, max)?;
+                check(*start, usize::from(*count), max)?;
                 Ok(5)
             }
             Self::WriteCoil { .. } | Self::WriteRegister { .. } => Ok(5),
             Self::WriteCoils { start, values } => {
-                check(*start, len(values), WRITE_BITS)?;
-                Ok(values.len().div_ceil(8).saturating_add(6))
+                check(*start, values.len(), MAX_WRITE_BITS)?;
+                Ok(data_bytes(true, values.len()).saturating_add(6))
             }
             Self::WriteRegisters { start, values } => {
-                check(*start, len(values), WRITE_REGISTERS)?;
-                Ok(values.len().saturating_mul(2).saturating_add(6))
+                check(*start, values.len(), MAX_WRITE_REGISTERS)?;
+                Ok(data_bytes(false, values.len()).saturating_add(6))
             }
+        }
+    }
+
+    /// Appends the PDU of a request that [`Request::size`] accepted.
+    pub(crate) fn write_to(&self, out: &mut Vec<u8>) {
+        out.push(self.function());
+        match self {
+            Self::Read { start, count, .. } => put(out, [*start, *count]),
+            Self::WriteCoil { address, value } => put(out, [*address, coil(*value)]),
+            Self::WriteRegister { address, value } => put(out, [*address, *value]),
+            Self::WriteCoils { start, values } => {
+                put(out, [*start, count(values)]);
+                out.push(byte_count(data_bytes(true, values.len())));
+                for byte in values.chunks(8) {
+                    out.push(pack(byte));
+                }
+            }
+            Self::WriteRegisters { start, values } => {
+                put(out, [*start, count(values)]);
+                out.push(byte_count(data_bytes(false, values.len())));
+                for value in values {
+                    out.extend_from_slice(&value.to_be_bytes());
+                }
+            }
+        }
+    }
+
+    /// The length of a reply that is not an exception.
+    fn reply_size(&self) -> usize {
+        match self {
+            Self::Read { table, count, .. } => {
+                data_bytes(table.bits(), usize::from(*count)).saturating_add(2)
+            }
+            _ => 5,
         }
     }
 }
 
 /// A device's reply to a [`Request`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Response<'a> {
+pub enum Reply<'a> {
     /// The coils or discrete inputs read.
     Bits(Bits<'a>),
     /// The registers read.
@@ -323,13 +349,25 @@ pub struct Bits<'a> {
 }
 
 impl<'a> Bits<'a> {
+    /// `count` bits packed in `bytes`, whose unused high bits must be 0.
+    fn new(bytes: &'a [u8], count: u16) -> Result<Self, Error> {
+        let used = u32::from(count & 7);
+        if let Some(&last) = bytes.last()
+            && used != 0
+            && last.checked_shr(used).unwrap_or(0) != 0
+        {
+            return Err(Error::Padding(last));
+        }
+        Ok(Self { bytes, count })
+    }
+
     /// The number of bits.
     #[must_use]
     pub fn len(&self) -> usize {
         usize::from(self.count)
     }
 
-    /// Whether the reply holds no bits. A valid reply never does.
+    /// Whether the reply holds no bits. A reply to a valid request never does.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.count == 0
@@ -355,7 +393,7 @@ impl<'a> Registers<'a> {
         self.0.as_chunks::<2>().0.len()
     }
 
-    /// Whether the reply holds no registers. A valid reply never does.
+    /// Whether the reply holds no registers. A reply to a valid request never does.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -410,18 +448,28 @@ impl From<u8> for Exception {
     }
 }
 
-fn check(start: u16, count: u16, max: u16) -> Result<(), Error> {
-    if count == 0 || count > max {
+fn check(start: u16, count: usize, max: u16) -> Result<(), Error> {
+    if count == 0 || count > usize::from(max) {
         return Err(Error::Count { count, max });
     }
-    if u32::from(start).saturating_add(u32::from(count)) > 0x1_0000 {
+    if usize::from(start).saturating_add(count) > 0x1_0000 {
         return Err(Error::Range { start, count });
     }
     Ok(())
 }
 
-/// The count of `values`, or `u16::MAX` when it does not fit, which no check passes.
-fn len<T>(values: &[T]) -> u16 {
+/// The bytes that `count` bits or registers take in a PDU.
+fn data_bytes(bits: bool, count: usize) -> usize {
+    if bits {
+        count.div_ceil(8)
+    } else {
+        count.saturating_mul(2)
+    }
+}
+
+/// The count field for `values`. It saturates for a list that no check accepts,
+/// so such a request's echo never matches.
+fn count<T>(values: &[T]) -> u16 {
     u16::try_from(values.len()).unwrap_or(u16::MAX)
 }
 
@@ -459,12 +507,12 @@ fn fields(pdu: &[u8]) -> Result<[u16; 2], Error> {
     ])
 }
 
-fn echo(pdu: &[u8], want: [u16; 2]) -> Result<Response<'_>, Error> {
+fn echo(pdu: &[u8], want: [u16; 2]) -> Result<Reply<'_>, Error> {
     let got = fields(pdu)?;
     if got != want {
         return Err(Error::Echo { want, got });
     }
-    Ok(Response::Written)
+    Ok(Reply::Written)
 }
 
 #[cfg(test)]
@@ -492,8 +540,7 @@ mod tests {
     fn matches_the_read_examples_of_the_specification() {
         let coils = read(Table::Coils, 19, 19);
         assert_eq!(encoded(&coils), [0x01, 0x00, 0x13, 0x00, 0x13]);
-        let Ok(Response::Bits(bits)) =
-            coils.decode_reply(&[0x01, 0x03, 0xCD, 0x6B, 0x05])
+        let Ok(Reply::Bits(bits)) = coils.decode_reply(&[0x01, 0x03, 0xCD, 0x6B, 0x05])
         else {
             panic!("bits");
         };
@@ -503,7 +550,7 @@ mod tests {
 
         let inputs = read(Table::DiscreteInputs, 196, 22);
         assert_eq!(encoded(&inputs), [0x02, 0x00, 0xC4, 0x00, 0x16]);
-        let Ok(Response::Bits(bits)) =
+        let Ok(Reply::Bits(bits)) =
             inputs.decode_reply(&[0x02, 0x03, 0xAC, 0xDB, 0x35])
         else {
             panic!("bits");
@@ -513,7 +560,7 @@ mod tests {
         let holding = read(Table::HoldingRegisters, 107, 3);
         assert_eq!(encoded(&holding), [0x03, 0x00, 0x6B, 0x00, 0x03]);
         let reply = [0x03, 0x06, 0x02, 0x2B, 0x00, 0x00, 0x00, 0x64];
-        let Ok(Response::Registers(registers)) = holding.decode_reply(&reply) else {
+        let Ok(Reply::Registers(registers)) = holding.decode_reply(&reply) else {
             panic!("registers");
         };
         let values: Vec<u16> = registers.iter().collect();
@@ -521,8 +568,7 @@ mod tests {
 
         let input = read(Table::InputRegisters, 8, 1);
         assert_eq!(encoded(&input), [0x04, 0x00, 0x08, 0x00, 0x01]);
-        let Ok(Response::Registers(registers)) =
-            input.decode_reply(&[0x04, 0x02, 0, 10])
+        let Ok(Reply::Registers(registers)) = input.decode_reply(&[0x04, 0x02, 0, 10])
         else {
             panic!("registers");
         };
@@ -568,7 +614,7 @@ mod tests {
         for (request, pdu, reply) in writes {
             assert_eq!(encoded(&request), pdu, "{request:?}");
             assert_eq!(Request::decode(&pdu), Ok(request.clone()));
-            assert_eq!(request.decode_reply(&reply), Ok(Response::Written));
+            assert_eq!(request.decode_reply(&reply), Ok(Reply::Written));
         }
     }
 
@@ -590,7 +636,7 @@ mod tests {
         for (code, want) in codes.into_iter().zip(want) {
             assert_eq!(
                 request.decode_reply(&[0x83, code]),
-                Ok(Response::Exception(want))
+                Ok(Reply::Exception(want))
             );
         }
         assert_eq!(
@@ -653,7 +699,7 @@ mod tests {
                     values: vec![0; 70_000],
                 },
                 Error::Count {
-                    count: u16::MAX,
+                    count: 70_000,
                     max: 123,
                 },
             ),
@@ -662,8 +708,51 @@ mod tests {
             let mut out = vec![9];
             assert_eq!(request.encode(&mut out), Err(error.clone()));
             assert_eq!(out, [9], "out is unchanged");
-            assert_eq!(request.decode_reply(&[]), Err(error));
         }
+    }
+
+    #[test]
+    fn accepts_the_most_items_of_each_function() {
+        let most = [
+            read(Table::Coils, 0, 2000),
+            read(Table::InputRegisters, 0, 125),
+            Request::WriteCoils {
+                start: 0,
+                values: vec![true; 1968],
+            },
+            Request::WriteRegisters {
+                start: 0,
+                values: vec![1; 123],
+            },
+        ];
+        for request in most {
+            assert_eq!(request.encode(&mut Vec::new()), Ok(()), "{request:?}");
+        }
+    }
+
+    #[test]
+    fn says_whether_a_reply_is_empty() {
+        let none = read(Table::Coils, 0, 0);
+        let Ok(Reply::Bits(bits)) = none.decode_reply(&[0x01, 0x00]) else {
+            panic!("bits");
+        };
+        assert!(bits.is_empty());
+        let one = read(Table::Coils, 0, 1);
+        let Ok(Reply::Bits(bits)) = one.decode_reply(&[0x01, 0x01, 0x01]) else {
+            panic!("bits");
+        };
+        assert!(!bits.is_empty());
+        let none = read(Table::HoldingRegisters, 0, 0);
+        let Ok(Reply::Registers(registers)) = none.decode_reply(&[0x03, 0x00]) else {
+            panic!("registers");
+        };
+        assert!(registers.is_empty());
+        let one = read(Table::HoldingRegisters, 0, 1);
+        let reply = [0x03, 0x02, 0, 1];
+        let Ok(Reply::Registers(registers)) = one.decode_reply(&reply) else {
+            panic!("registers");
+        };
+        assert!(!registers.is_empty());
     }
 
     #[test]
@@ -689,7 +778,12 @@ mod tests {
 
     #[test]
     fn refuses_a_request_pdu_that_is_not_valid() {
-        let cases: [(&[u8], Error, &str); 9] = [
+        let cases: [(&[u8], Error, &str); 10] = [
+            (
+                &[0x0F, 0x00, 0x00, 0x00, 0x01, 0x01, 0xFF],
+                Error::Padding(0xFF),
+                "a last bit byte of 0xff whose unused bits are not 0",
+            ),
             (
                 &[],
                 Error::Size { want: 1, got: 0 },
@@ -717,7 +811,7 @@ mod tests {
             ),
             (
                 &[0x10, 0x00, 0x00, 0x00, 0x02, 0x03, 0, 0, 0],
-                Error::Bytes { want: 4, got: 3 },
+                Error::ByteCount { want: 4, got: 3 },
                 "a byte count of 3 where the item count gives 4",
             ),
             (
@@ -746,6 +840,40 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_reply_of_another_function_or_with_padding() {
+        let coils = read(Table::Coils, 0, 9);
+        let registers = read(Table::InputRegisters, 0, 2);
+        let write = Request::WriteRegister {
+            address: 7,
+            value: 1,
+        };
+        let cases: [(&Request, &[u8], Error, &str); 3] = [
+            (
+                &registers,
+                &[0x81, 0x02],
+                Error::Answer { want: 4, got: 0x81 },
+                "a reply of function 129 to a request of function 4",
+            ),
+            (
+                &coils,
+                &[0x01, 0x02, 0x00, 0x02],
+                Error::Padding(0x02),
+                "a last bit byte of 0x02 whose unused bits are not 0",
+            ),
+            (
+                &write,
+                &[],
+                Error::Size { want: 5, got: 0 },
+                "a PDU of 0 bytes where its function gives 5",
+            ),
+        ];
+        for (request, pdu, error, message) in cases {
+            assert_eq!(request.decode_reply(pdu), Err(error.clone()), "{pdu:x?}");
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[test]
     fn refuses_a_reply_that_does_not_answer_the_request() {
         let coils = read(Table::Coils, 0, 9);
         let registers = read(Table::InputRegisters, 0, 2);
@@ -763,7 +891,7 @@ mod tests {
             (
                 &coils,
                 &[0x01, 0x01, 0],
-                Error::Bytes { want: 2, got: 1 },
+                Error::ByteCount { want: 2, got: 1 },
                 "a byte count of 1 where the item count gives 2",
             ),
             (
@@ -775,14 +903,14 @@ mod tests {
             (
                 &registers,
                 &[],
-                Error::Size { want: 2, got: 0 },
-                "a PDU of 0 bytes where its function gives 2",
+                Error::Size { want: 6, got: 0 },
+                "a PDU of 0 bytes where its function gives 6",
             ),
             (
                 &registers,
                 &[0x04],
-                Error::Size { want: 2, got: 1 },
-                "a PDU of 1 bytes where its function gives 2",
+                Error::Size { want: 6, got: 1 },
+                "a PDU of 1 bytes where its function gives 6",
             ),
             (
                 &write,
@@ -807,20 +935,24 @@ mod tests {
     }
 
     fn request() -> impl Strategy<Value = Request> {
-        let table = prop_oneof![
-            Just(Table::Coils),
-            Just(Table::DiscreteInputs),
-            Just(Table::HoldingRegisters),
-            Just(Table::InputRegisters),
-        ];
+        let bits = (
+            prop_oneof![Just(Table::Coils), Just(Table::DiscreteInputs)],
+            1..=2000_u16,
+        );
+        let registers = (
+            prop_oneof![Just(Table::HoldingRegisters), Just(Table::InputRegisters)],
+            1..=125_u16,
+        );
         prop_oneof![
-            (table, 0..=u16::MAX, 1..=125_u16).prop_map(|(table, start, count)| {
-                read(
-                    table,
-                    start.min(u16::MAX.saturating_sub(count).saturating_add(1)),
-                    count,
-                )
-            }),
+            (prop_oneof![bits, registers], 0..=u16::MAX).prop_map(
+                |((table, count), start)| {
+                    read(
+                        table,
+                        start.min(u16::MAX.saturating_sub(count).saturating_add(1)),
+                        count,
+                    )
+                }
+            ),
             (any::<u16>(), any::<bool>())
                 .prop_map(|(address, value)| Request::WriteCoil { address, value }),
             (any::<u16>(), any::<u16>())
@@ -844,9 +976,11 @@ mod tests {
         }
 
         #[test]
-        fn decodes_any_bytes_without_a_panic(pdu in prop::collection::vec(any::<u8>(), 0..300)) {
+        fn encodes_what_it_decodes(
+            pdu in prop::collection::vec(any::<u8>(), 0..300),
+        ) {
             if let Ok(request) = Request::decode(&pdu) {
-                prop_assert_eq!(Request::decode(&encoded(&request)), Ok(request));
+                prop_assert_eq!(encoded(&request), pdu);
             }
         }
     }

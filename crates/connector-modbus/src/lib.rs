@@ -24,14 +24,14 @@ pub enum Error {
     },
     /// An MBAP header with a protocol other than 0 (Modbus).
     Protocol(u16),
-    /// An MBAP length outside 2 to 254.
+    /// An MBAP length field outside 2 to 254.
     Length(u16),
     /// A function code this crate does not read.
     Function(u8),
     /// A count of 0, or above the most that one PDU carries.
     Count {
         /// The count.
-        count: u16,
+        count: usize,
         /// The most for the function.
         max: u16,
     },
@@ -40,7 +40,7 @@ pub enum Error {
         /// The first address.
         start: u16,
         /// The number of items.
-        count: u16,
+        count: usize,
     },
     /// A coil value other than 0x0000 or 0xFF00.
     Coil(u16),
@@ -51,13 +51,15 @@ pub enum Error {
         /// The reply's function.
         got: u8,
     },
-    /// A byte count that is not the one the item count gives.
-    Bytes {
+    /// A byte count field that is not the one the item count gives.
+    ByteCount {
         /// The byte count the item count gives.
         want: usize,
         /// The byte count in the PDU.
         got: usize,
     },
+    /// A last bit byte whose unused high bits are not 0.
+    Padding(u8),
     /// A write reply whose echo of address and value (or count) differs.
     Echo {
         /// The address and value (or count) written.
@@ -103,8 +105,14 @@ impl fmt::Display for Error {
                     "a reply of function {got} to a request of function {want}"
                 )
             }
-            Self::Bytes { want, got } => {
+            Self::ByteCount { want, got } => {
                 write!(f, "a byte count of {got} where the item count gives {want}")
+            }
+            Self::Padding(byte) => {
+                write!(
+                    f,
+                    "a last bit byte of {byte:#04x} whose unused bits are not 0"
+                )
             }
             Self::Echo { want, got } => {
                 write!(f, "a write reply that echoes {got:?}, not {want:?}")

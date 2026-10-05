@@ -48,7 +48,8 @@ pub fn encode(
     out.extend_from_slice(&[0, 0]);
     out.extend_from_slice(&length.to_be_bytes());
     out.push(header.unit);
-    request.encode(out)
+    request.write_to(out);
+    Ok(())
 }
 
 /// Reads the first frame in `bytes`, or `None` when `bytes` holds less than one
@@ -177,5 +178,8 @@ mod tests {
         longest.resize(260, 0);
         let frame = decode(&longest).expect("valid").expect("whole");
         assert_eq!((frame.pdu.len(), frame.len), (253, 260));
+        let shortest = [0, 1, 0, 0, 0, 2, 1, 0x07];
+        let frame = decode(&shortest).expect("valid").expect("whole");
+        assert_eq!((frame.pdu, frame.len), (&[0x07][..], 8));
     }
 }
