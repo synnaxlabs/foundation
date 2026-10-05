@@ -1288,7 +1288,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Encoded samples | Index log (write-ahead ring, then segments) | `home` through `buffer.append`; `replica` through `buffer.append_at` | Complete readers (catch-up), `replica`, crash recovery | `buffer` |
+| Encoded samples | Index log (write-ahead ring, then segments) | `home` and `replica` through `buffer.append` | Complete readers (catch-up), `replica`, crash recovery | `buffer` |
 | Seq counters (live, backfill) | Memory at the home; durable through the index log | `home` | `delivery`, `wire` (prediction) | `home` |
 | Control state | Memory in `control` at the home; handoff records in the index log (truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
@@ -1894,13 +1894,13 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
-| 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`, `append_at`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
+| 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
 | 2 | `blob` | Stores content by hash and fetches it from peers (spec chunks, binaries). | `env`, `types`, `block`, `wire`, `transport` |
 | 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
 | 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
-| 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append_at`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
+| 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
 | 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home` |
 | 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |

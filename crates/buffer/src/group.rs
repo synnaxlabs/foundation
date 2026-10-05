@@ -225,6 +225,7 @@ impl Closed {
     }
 
     /// The boundary after the record.
+    #[cfg_attr(not(test), expect(dead_code, reason = "trimming moves the tail"))]
     pub(crate) fn next(&self) -> Position {
         self.next
     }

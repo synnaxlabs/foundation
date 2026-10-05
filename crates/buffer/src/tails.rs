@@ -11,11 +11,11 @@ use crate::entry::Header;
 
 /// Where one path of an index stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Tail {
+pub struct Tail {
     /// The seq of the next entry.
-    pub(crate) seq: u64,
+    pub seq: u64,
     /// The `last` of the newest entry that has one, or `None` before it.
-    pub(crate) stamp: Option<Stamp>,
+    pub stamp: Option<Stamp>,
 }
 
 /// The tails of every path the log holds, by the node's slot of the index and
