@@ -75,6 +75,10 @@ pub struct Listen {
 /// Each poll follows the rules of the [`Tcp`](super::Tcp) call of the same name, and
 /// panics on a thread other than the one of the first poll.
 ///
+/// A drop never blocks. Before `poll_close` is ready, a drop sends a reset (RST) and
+/// loses the queued bytes; `os` sets `SO_LINGER` to 0 until then. After it, a drop
+/// lets the queued bytes and the FIN go out.
+///
 /// ```
 /// fn peer(stream: &dyn env::net::tcp::Driver) -> std::net::SocketAddr {
 ///     stream.peer()

@@ -126,7 +126,10 @@ impl fmt::Debug for Net {
 
 /// A TCP stream. It may move to another thread before its first poll. The first poll
 /// binds it to the thread that polls, and a poll on any other thread then panics.
-/// Dropping it closes the stream.
+///
+/// A drop never blocks. A drop before [`Tcp::poll_close`] is ready aborts the stream:
+/// the peer gets a reset (RST), and the queued bytes are lost. To deliver every byte,
+/// wait for `poll_close` first; it sends FIN after the queued bytes.
 ///
 /// ```
 /// use std::future::poll_fn;
@@ -295,7 +298,8 @@ impl Listener {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] when the OS cannot accept.
+    /// [`Error::Io`] when the OS cannot accept one stream, for example `EMFILE` or
+    /// `ECONNABORTED`. The listener stays usable.
     ///
     /// # Panics
     ///

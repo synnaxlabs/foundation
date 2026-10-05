@@ -10,6 +10,10 @@ use std::task::{Context, Poll};
 
 use super::{Ecn, Error};
 
+/// The most bytes one [`Transmit`] may carry: the largest UDP payload over IPv4.
+/// IPv6 allows 65,527, but an IPv4 peer on a dual-stack socket takes the IPv4 path.
+pub const TRANSMIT_BYTES_MAX: usize = 65_507;
+
 /// Settings for one UDP socket.
 ///
 /// ```
@@ -21,7 +25,8 @@ use super::{Ecn, Error};
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
-    /// The local address. Port 0 binds a free port.
+    /// The local address. Port 0 binds a free port. `[::]` binds one socket for IPv4
+    /// and IPv6 (`IPV6_V6ONLY` off).
     pub local: SocketAddr,
     /// The size of the OS send buffer.
     pub send_buffer_bytes: usize,
@@ -63,7 +68,7 @@ impl Sender {
     }
 
     /// The most datagrams that one [`Transmit`] may hold: the GSO segment count, or 1
-    /// without GSO. It does not change.
+    /// without GSO. It does not change. The bytes stay within [`TRANSMIT_BYTES_MAX`].
     ///
     /// ```
     /// fn max(sender: &env::net::udp::Sender) -> usize {
@@ -81,11 +86,13 @@ impl Sender {
     /// # Errors
     ///
     /// [`Error::Unreachable`] when no route reaches the destination, and
-    /// [`Error::Io`] for other failures.
+    /// [`Error::Io`] for other failures. An error affects only this transmit, and the
+    /// socket stays usable.
     ///
     /// # Panics
     ///
-    /// When `transmit` holds more datagrams than [`Sender::batch_max`].
+    /// When `transmit` holds more datagrams than [`Sender::batch_max`], or more bytes
+    /// than [`TRANSMIT_BYTES_MAX`].
     ///
     /// ```
     /// use std::task::{Context, Poll};
@@ -105,9 +112,13 @@ impl Sender {
         cx: &mut Context<'_>,
         transmit: &Transmit<'_>,
     ) -> Poll<Result<(), Error>> {
+        let len = transmit.contents.len();
+        assert!(
+            len <= TRANSMIT_BYTES_MAX,
+            "a transmit of {len} bytes is over the max of {TRANSMIT_BYTES_MAX} bytes"
+        );
         if let Some(segment) = transmit.segment {
             let max = self.batch_max().get();
-            let len = transmit.contents.len();
             assert!(
                 segment
                     .get()
@@ -190,7 +201,8 @@ impl Receiver {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] when the OS cannot receive.
+    /// [`Error::Io`] when the socket is broken. The driver absorbs the errors of one
+    /// datagram, such as `WSAECONNRESET` after an ICMP port unreachable.
     ///
     /// # Panics
     ///
@@ -238,7 +250,8 @@ impl fmt::Debug for Receiver {
 
 /// One send: one datagram, or a batch of datagrams to one destination. Each datagram
 /// travels alone: the network may lose, delay, or reorder any one of them, and the
-/// receiver may get them in other batches.
+/// receiver may get them in other batches. On a socket bound to `[::]`, `destination`
+/// and `source` may be IPv4.
 ///
 /// ```
 /// fn batch(contents: &[u8]) -> env::net::udp::Transmit<'_> {
@@ -267,7 +280,8 @@ pub struct Transmit<'a> {
 }
 
 /// What one received batch holds: `len` bytes in datagrams of `stride` bytes (the last
-/// may be shorter), all from `source`.
+/// may be shorter), all from `source`. On a socket bound to `[::]`, an IPv4 address
+/// in it is still `V4`, never `::ffff:a.b.c.d`.
 ///
 /// ```
 /// let mut meta = [env::net::udp::Meta::default(); 32];
@@ -302,6 +316,10 @@ impl Default for Meta {
 /// What `os` and `sim` implement to run one UDP socket's [`Sender`] and
 /// [`Receiver`]. Only they implement it.
 ///
+/// On a socket bound to `[::]`, it gives each IPv4 address in a [`Meta`] as `V4`
+/// (`os` unmaps `::ffff:a.b.c.d`), and sends a [`Transmit`] with an IPv4
+/// `destination` and `source`. The `os` and `sim` tests each need one case for this.
+///
 /// ```
 /// fn local(socket: &dyn env::net::udp::Driver) -> std::net::SocketAddr {
 ///     socket.local()
@@ -318,17 +336,18 @@ pub trait Driver: Send + Sync {
     /// The most datagrams one buffer receives. It does not change.
     fn recv_batch_max(&self) -> NonZeroUsize;
 
-    /// Sends `transmit`, with the rules of [`Sender::poll_send`]. Threads call it at
-    /// the same time, and a pending call wakes its own `cx`, whatever other threads
-    /// wait.
+    /// Sends `transmit`, with the rules of [`Sender::poll_send`]. An error affects
+    /// only this transmit. Threads call it at the same time, and a pending call wakes
+    /// its own `cx`, whatever other threads wait.
     fn poll_send(
         &self,
         cx: &mut Context<'_>,
         transmit: &Transmit<'_>,
     ) -> Poll<Result<(), Error>>;
 
-    /// Receives, with the rules of [`Receiver::poll_recv`]. It panics on a thread
-    /// other than the one of the first call.
+    /// Receives, with the rules of [`Receiver::poll_recv`]. It absorbs the errors of
+    /// one datagram and gives an error only when the socket is broken. It panics on a
+    /// thread other than the one of the first call.
     fn poll_recv(
         &self,
         cx: &mut Context<'_>,
@@ -491,10 +510,20 @@ mod tests {
         }
 
         #[test]
-        fn sends_one_datagram_of_any_size_without_a_segment() {
+        fn sends_one_datagram_of_the_byte_max_without_a_segment() {
             let (sender, _, _) = bind();
-            let contents = [0; 9_000];
+            let contents = vec![0; TRANSMIT_BYTES_MAX];
             assert_eq!(send(&sender, &transmit(&contents, 0)), Poll::Ready(Ok(())));
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "a transmit of 65508 bytes is over the max of 65507 bytes"
+        )]
+        fn panics_above_the_byte_max() {
+            let (sender, _, _) = bind();
+            let contents = vec![0; TRANSMIT_BYTES_MAX + 1];
+            drop(send(&sender, &transmit(&contents, 0)));
         }
 
         #[test]

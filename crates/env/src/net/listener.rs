@@ -20,8 +20,9 @@ pub trait Driver: Send {
     fn local(&self) -> SocketAddr;
 
     /// Accepts the next stream, with the rules of
-    /// [`Listener::poll_accept`](super::Listener::poll_accept). The stream has the
-    /// options of [`tcp::Listen::options`], and no thread yet.
+    /// [`Listener::poll_accept`](super::Listener::poll_accept). An error leaves the
+    /// listener usable. The stream has the options of [`tcp::Listen::options`], and no
+    /// thread yet.
     fn poll_accept(
         &mut self,
         cx: &mut Context<'_>,
