@@ -206,6 +206,21 @@ fn slews_toward_an_estimate_near_ahead() {
 }
 
 #[test]
+fn slews_at_500_ppm_however_often_sources_push() {
+    let (mut sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    let source = clock.add();
+    let _ = clock.push(source, measure(&node, Span::ZERO, Span::ZERO));
+    for _ in 0..10_000 {
+        let _ = clock.push(source, measure(&node, us(400), Span::ZERO));
+        sim.run_for(us(1)).expect("the run ends");
+    }
+    // 10 ms at 500 ppm moves 5 us toward the estimate.
+    let served = read(&node, &reader).expect("synced").offset();
+    assert_eq!(served, us(5), "mesh time stalled at {served}");
+}
+
+#[test]
 fn a_remove_follows_the_sources_left_then_holds_over_with_none() {
     let (_sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
