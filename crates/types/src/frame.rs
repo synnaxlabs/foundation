@@ -61,7 +61,7 @@ impl Path {
 /// that path, and checks a resend against both paths first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Label {
-    /// New data for this path.
+    /// Data the writer has not sent before, for this path.
     Path(Path),
     /// A live frame that the writer sends again after a reconnect, with its original
     /// boundaries. It lands on one path or on none.
@@ -261,7 +261,7 @@ impl Draft {
         put(&mut ranges[n], 8, &range.seq.to_le_bytes());
     }
 
-    /// The finished frame, on `path`.
+    /// The finished frame on `path`, the path whose seq its ranges count on.
     #[must_use]
     pub fn freeze(mut self, path: Path) -> Frame {
         self.0[at::PATH] = path.byte();
@@ -280,7 +280,7 @@ impl Frame {
         key_set::Key::new(u32::from_le_bytes(get(&self.0, at::KEY_SET)))
     }
 
-    /// The frame's write path.
+    /// The path whose seq the frame's ranges count on.
     #[must_use]
     pub fn path(&self) -> Path {
         Path::from_byte(self.0[at::PATH])
@@ -489,7 +489,7 @@ mod tests {
         dirty.fill(0xff);
         drop(dirty);
         let series = [(0, 3), (2, 2)];
-        let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
+        let mut draft = Draft::new(&pool, &set, Form::Encoded, &series).unwrap();
         draft.series(0).unwrap().copy_from_slice(&[0xaa; 3]);
         draft.series(2).unwrap().copy_from_slice(&[1, 2]);
         draft.set_range(0, Range { seq: 7, count: 2 });
@@ -498,7 +498,7 @@ mod tests {
         for n in [3_u32, 1, 2] {
             expected.extend(n.to_le_bytes());
         }
-        expected.extend([0, 1, 0, 0]);
+        expected.extend([1, 1, 0, 0]);
         for n in [0_u32, 2] {
             expected.extend(n.to_le_bytes());
         }

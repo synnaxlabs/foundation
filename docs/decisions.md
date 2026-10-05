@@ -269,18 +269,19 @@ How to read this record:
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
 - **B7** A frame applies whole or not at all, per index. A writer never resends on the
   live path. After a reconnect, it resends each unconfirmed live frame, with its
-  original boundaries, labeled `resend`. `resend` is a frame label, not a third path:
+  original boundaries, labeled `resend`. `resend` is a write label, not a third path:
   the home checks a resend frame by timestamp against both paths of the index, and it
-  lands on one of them or on none. When every sample exists with the same values, the
-  frame is a repeat, and the home drops and confirms it. When no sample exists and the
-  frame starts after the newest live stamp, it never landed, and the home applies it
-  to the live path. When no sample exists and the frame fits A6, it applies as
-  backfill. Anything else is an error: some samples stored and some not, a stored
-  timestamp with other values, a frame that fits neither path, or a range below the
-  buffer's floor. Live and backfill frames pay no check. Values are compared decoded,
-  not as bytes. Writers assign no numbers: a resend comes in a new session, and the
-  writer never learned them. The person decided on 2026-10-05: "By timestamp + same
-  values" (#148), then "A `resend` label" (#168).
+  lands on one of them or on none. The home sets the frame's path when it freezes the
+  frame, after the check, so a resend frame carries the path it landed on. When every
+  sample exists with the same values, the frame is a repeat, and the home drops and
+  confirms it. When no sample exists and the frame starts after the newest live stamp,
+  it never landed, and the home applies it to the live path. When no sample exists and
+  the frame fits A6, it applies as backfill. Anything else is an error: some samples
+  stored and some not, a stored timestamp with other values, a frame that fits neither
+  path, or a range below the buffer's floor. Live and backfill frames pay no check.
+  Values are compared decoded, not as bytes. Writers assign no numbers: a resend comes
+  in a new session, and the writer never learned them. The person decided on 2026-10-05:
+  "By timestamp + same values" (#148), then "A `resend` label" (#168).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -399,8 +400,7 @@ How to read this record:
 - **FRAME LAYOUT (refines M3, X8)** `types::frame`, little-endian, offsets from the
   start of the payload. A 16-byte header: key set key, range count, and descriptor count
   (each u32), then form and path (each u8), then zeros. The path is live 0 or backfill
-  1, the path whose seq the ranges count on (A8). The home writes it when it freezes
-  the frame, after the B7 check, so a resend frame carries the path it landed on.
+  1, the path whose seq the ranges count on (A8).
   Then `{ group: u32, count: u32, seq: u64 }` for each present group, sorted by group,
   then `{ entry: u32, end: u32 }` for each present series, sorted by entry, then the
   series. `end` counts from the start of the series bytes. Each series starts at the
@@ -1175,7 +1175,7 @@ Storage classes used in the table:
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
 | Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
-| Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one in its header | The home, when it freezes the frame, from the write's label (B7) | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
+| Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one in its header | Whoever freezes the frame: the home on a write, from its label after the B7 check; a decoder or catch-up, from the path the frame came with | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Label (a path or resend) | A value, `frame::Label` (B7), on each write: the `hub` writer call and the wire write message. Not in the frame block | The writer | `hub`, `wire`, `home` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
 | Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (meaning) |
@@ -1242,7 +1242,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, path, form), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
+| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
 | View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |
