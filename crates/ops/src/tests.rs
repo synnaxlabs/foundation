@@ -78,8 +78,8 @@ fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
     let tools = tools();
     let tools = tools["tools"].as_array().expect("tools is a list");
     let docs = operation::docs();
-    // One more for `mcp`, which is not an operation.
-    assert_eq!(command.get_subcommands().count(), TABLE.len() + 1);
+    // Two more for `mcp` and `help`, which are not operations.
+    assert_eq!(command.get_subcommands().count(), TABLE.len() + 2);
     assert_eq!(tools.len(), TABLE.len());
     let inputs = operation::inputs();
     let outputs = operation::outputs();
@@ -248,38 +248,124 @@ fn a_text_error_writes_control_characters_as_escapes() {
              fix: Use `version`, the closest name\n"
         )
     );
-    assert_eq!(
-        cli(&["\u{1b}[2Jowned"]).stderr,
-        "error[ops.unknown-operation]: no operation is named `\\u{1b}[2Jowned`\n\
-         fix: Use a name from `foundation docs`\n"
-    );
+    for (name, escaped) in [
+        ("\u{1b}[2J", r"\u{1b}[2J"),
+        ("a\rb", r"a\rb"),
+        ("\u{9b}2J", r"\u{9b}2J"),
+        ("a\u{202e}b", r"a\u{202e}b"),
+        ("a\u{2028}b", r"a\u{2028}b"),
+        ("a\\nb", r"a\\nb"),
+        ("\"é'", "\"é'"),
+    ] {
+        assert_eq!(
+            cli(&[name]).stderr,
+            format!(
+                "error[ops.unknown-operation]: no operation is named `{escaped}`\n\
+                 fix: Use a name from `foundation docs`\n"
+            )
+        );
+    }
 }
 
 #[test]
 fn a_json_error_keeps_the_callers_text() {
     let exit = cli(&["\u{1b}x", "--json"]);
     let error: Value = serde_json::from_str(&exit.stderr).expect("json");
-    assert_eq!(error["message"], "no operation is named `\u{1b}x`");
+    assert_eq!(
+        error,
+        json!({
+            "code": "ops.unknown-operation",
+            "message": "no operation is named `\u{1b}x`",
+            "fix": "Use a name from `foundation docs`",
+        })
+    );
 }
 
 #[test]
 fn help_with_the_json_flag_is_json() {
     let text = cli(&["--help"]).stdout;
-    for args in [["--json", "help"], ["--json", "--help"]] {
+    for args in [
+        ["--json", "help"],
+        ["help", "--json"],
+        ["--json", "--help"],
+        ["--help", "--json"],
+    ] {
         let exit = cli(&args);
         assert_eq!((exit.status, exit.stderr.as_str()), (0, ""));
         let help: Value = serde_json::from_str(&exit.stdout).expect("json");
-        assert_eq!(help, json!({ "help": text }));
+        assert_eq!(help, json!({ "help": text }), "{args:?}");
     }
 }
 
 #[test]
+fn help_for_a_command_matches_its_help_flag() {
+    for name in ["version", "mcp"] {
+        let exit = cli(&["help", name]);
+        assert_eq!(exit, cli(&[name, "--help"]), "{name}");
+        assert!(
+            exit.stdout.contains(&format!("Usage: foundation {name}")),
+            "{}",
+            exit.stdout
+        );
+    }
+    let exit = cli(&["help", "version", "--json"]);
+    let help: Value = serde_json::from_str(&exit.stdout).expect("json");
+    assert_eq!(help, json!({ "help": cli(&["version", "--help"]).stdout }));
+}
+
+#[test]
+fn help_for_a_name_that_is_not_a_command_is_unknown() {
+    assert_eq!(
+        cli(&["help", "versoin"]),
+        failed(
+            "error[ops.unknown-operation]: no operation is named `versoin`\n\
+             fix: Use `version`, the closest name\n"
+        )
+    );
+    assert_eq!(
+        cli(&["help", "help"]),
+        failed(
+            "error[ops.unknown-operation]: no operation is named `help`\n\
+             fix: Use a name from `foundation docs`\n"
+        )
+    );
+}
+
+#[test]
 fn a_json_flag_with_a_value_gives_its_error_as_json() {
-    let exit = cli(&["version", "--json=true"]);
-    assert_eq!((exit.status, exit.stdout.as_str()), (2, ""));
-    let error: Value = serde_json::from_str(&exit.stderr).expect("json");
-    assert_eq!(error["code"], "ops.argument");
-    assert_eq!(cli(&["version", "--jsonx"]).stderr.lines().count(), 2);
+    use std::os::unix::ffi::OsStringExt;
+    for value in [
+        OsString::from("--json=true"),
+        OsString::from_vec(b"--json=\xff".to_vec()),
+    ] {
+        let args = [
+            OsString::from("foundation"),
+            "version".into(),
+            value.clone(),
+        ];
+        let mut stderr = Vec::new();
+        let status = crate::cli(args, io::empty(), io::sink(), &mut stderr);
+        let error: Value = serde_json::from_slice(&stderr).expect("json");
+        assert_eq!(
+            (status, error),
+            (
+                2,
+                json!({
+                    "code": "ops.argument",
+                    "message": "unexpected value for an argument found: `--json`",
+                    "fix": "Match the arguments to the operation in `foundation docs`",
+                })
+            ),
+            "{value:?}"
+        );
+    }
+    assert_eq!(
+        cli(&["version", "--jsonx"]),
+        failed(
+            "error[ops.argument]: unexpected argument found: `--jsonx`\n\
+             fix: Match the arguments to the operation in `foundation docs`\n"
+        )
+    );
 }
 
 #[test]

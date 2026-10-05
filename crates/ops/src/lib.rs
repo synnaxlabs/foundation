@@ -4,7 +4,7 @@
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 mod error;
 mod mcp;
@@ -19,8 +19,9 @@ use operation::Parsed;
 /// the exit status: 0 on success, 1 when a stream fails, and 2 for a bad argument or
 /// an unknown operation.
 ///
-/// An operation writes its output to `output`. An error goes to `errors` with its code
-/// and fix, as JSON with `--json`. `foundation mcp` answers each line of `input` with
+/// An operation or help writes its output to `output`, and an error goes to `errors`
+/// with its code and fix. With `--json`, each is one line of JSON, and help is
+/// `{"help": "<text>"}`. `foundation mcp` answers each line of `input` with
 /// at most one line on `output`, flushed, until `input` ends. A line longer than 1 MiB
 /// gets an Invalid Request error. A closed `output` ends the run with no error,
 /// because its reader has left.
@@ -35,36 +36,28 @@ pub fn cli(
     let json = args
         .iter()
         .take_while(|arg| *arg != "--")
-        .filter_map(|arg| arg.to_str())
-        .any(|arg| arg == "--json" || arg.starts_with("--json="));
+        .map(|arg| arg.as_encoded_bytes())
+        .any(|arg| arg == b"--json" || arg.starts_with(b"--json="));
+    let render = |value: Value, text: String| {
+        if json { format!("{value}\n") } else { text }
+    };
     let done = operation::parse(&args)
         .map_err(Stop::Failed)
         .and_then(|parsed| match parsed {
             Parsed::Run(request) => {
                 let response = request.run();
-                let text = if json {
-                    format!("{}\n", response.json())
-                } else {
-                    response.text()
-                };
-                write(&mut output, &text)
+                write(&mut output, &render(response.json(), response.text()))
             }
-            Parsed::Help(text) if json => {
-                write(&mut output, &format!("{}\n", json!({ "help": text })))
+            Parsed::Help(text) => {
+                write(&mut output, &render(json!({ "help": text }), text.clone()))
             }
-            Parsed::Help(text) => write(&mut output, &text),
             Parsed::Mcp => mcp::serve(input, &mut output),
         });
     let error = match done {
         Ok(()) | Err(Stop::Closed) => return 0,
         Err(Stop::Failed(error)) => error,
     };
-    let text = if json {
-        format!("{}\n", error.json())
-    } else {
-        error.text()
-    };
-    match errors.write_all(text.as_bytes()) {
+    match errors.write_all(render(error.json(), error.text()).as_bytes()) {
         // With `errors` closed too, the status is the only report left.
         Ok(()) | Err(_) => error.status(),
     }
