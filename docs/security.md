@@ -118,9 +118,11 @@ state on `main`.
   placement. Not built (`spec`).
 - `raft` does not check the sender of a request, by decision: the caller
   authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
-  built (`mesh`). `raft` trusts each field of a message. Open: #232. A leased leader
-  takes a `PreVote` at its next term from any sender as a removed node that lacks
-  the commit of its leave, and replicates its log to it (RAFT VOTERS).
+  built (`mesh`). `raft` checks each index a message names, and the order of an
+  append's entries, before it acts; an entry above the message's term is still
+  written (#232, open). A node that a change removed and that missed its release
+  can win an election once no voter has a lease, and lead until it commits the
+  leave (#483).
 - `raft` counts a reply only from a voter. But it takes a higher term from any
   sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
   #352 (a reply from a node that is not a voter makes the leader step down; one
@@ -148,9 +150,8 @@ state on `main`.
   encoding (`document`). Both readers bound nesting at 64 levels.
   `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
   `config_hcl_read`, `config_hcl_update`, `config_hcl_write`,
-  `document_encoding`. Open: #446 (`update` puts a new block after a kept block
-  it must come before; the `config_hcl_update` target finds it, so its long runs
-  wait on the fix).
+  `document_encoding`. Fixed: #446 (`update` put a new block after a kept block
+  it must come before); the `block_before_kept` inputs hold it.
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -249,6 +250,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
+| `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
@@ -257,6 +259,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 | `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
+| `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
