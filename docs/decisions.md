@@ -618,7 +618,10 @@ How to read this record:
   number and one unit with no space (`200GiB`), and a decimal fraction only when it
   gives whole bytes (`1.5GiB`). Its type lives in `types` beside `time::Span`, and the
   `document` reader is an adapter over it. The person decided on 2026-10-05 ("A yes I
-  approve", #479).
+  approve", #479). The units are `B`, `KiB`, `MiB`, `GiB`, and `TiB`, with exact case:
+  `GB` and `Gb` are errors, because they mean other sizes. Input takes no sign. Output
+  uses the largest unit that divides the size, with no fraction: `1.5GiB` is written
+  `1536MiB`, and zero is `0B` (#505).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -922,9 +925,9 @@ How to read this record:
   heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
   log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
   be past the log of a node that is behind. An `Append` with an entry whose term is
-  above the message's term is `Error::TermBehindLog`: no leader sends one, and a
-  follower that wrote it could not restart. The conformance oracle changed to match; the
-  person decided on 2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  above the message's term is `Error::TermBehindLog`: no leader sends one, so the
+  sender is faulty. The conformance oracle changed to match; the person decided on
+  2026-10-05 ("a is fine", #232). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1208,6 +1211,19 @@ How to read this record:
   hand-kept list of the 23; own tables generated from HCL's Unicode version; and
   `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
   `ID_Start` and `ID_Continue`.
+- **HCL REFERENCES (2026-10-05)** The reader reads a reference part by part, as HCL
+  reads a traversal: identifiers joined by `.`, with spaces around each `.` and new
+  lines inside `[` and `(`. A first part `true`, `false`, or `null` is a value, so
+  `true.x` is an index. After a `.`, a number is an index (`site_a.1` is `Form::Index`),
+  `*` is a splat, and any other token is a syntax error. A name with a segment that
+  starts with a digit or `-` (`plc.40001`) gets its own HCL form, such as
+  `plc["40001"]`, which HCL accepts (#536). Until then `write` refuses it. Lost: A3
+  segments that start with a letter or `_`, which shrinks the name model to fit one file
+  format. The person decided on 2026-10-05 ("a is fine"), #519. The coordinator ruled on
+  #363 that a file writes a reserved name (`site_a.@changes`) as a string; #536 decides
+  which reader turns that string into a name. Lost: a new `Expected` variant for a name
+  after `.`, a public change when the error already names what may come at the `.`.
+  #363.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -1626,6 +1642,16 @@ How to read this record:
   and releases build the same code. A binary fails on an older CPU. Without the flags,
   the `crc32c` kernels ran 2x slower (#140). The person decided on 2026-10-05 ("Raise
   the minimum").
+- **LOCAL PATCHES (2026-10-05)** A dependency that we patch lives in this repository as
+  an unchanged copy of its release in `patches/<crate>/`, outside the workspace, with
+  `[patch.crates-io]` in the root `Cargo.toml`. One PR adds the copy alone; a second
+  PR makes our change on it, with its tests, so the change is reviewed here. For each
+  new release that we take, the copy is replaced and our change made again. Lost: a
+  fork in `synnaxlabs` patched by git URL (each build depends on a second repository,
+  and the change is reviewed outside this one); for the first patch, a workaround in
+  `transport` that never stops a stream (the peer sends the rest of the stream, and a
+  cancel no longer reaches the sender, against STREAM WIRE). The person decided on
+  2026-10-05 ("Ok I guess we need to do #2"), #620.
 
 ### 1.16 Retired entries
 
@@ -2339,7 +2365,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
