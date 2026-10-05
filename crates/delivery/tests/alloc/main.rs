@@ -1,10 +1,11 @@
-//! A put and a take make no heap allocation after the first put, and none after a later
-//! open. This binary has no test harness: the count covers each thread, and a harness
-//! allocates on its own thread at any time.
+//! For latest sessions, a put and a take make no heap allocation after the first put,
+//! and none after a later open. For complete sessions, a queue, a release, and a take
+//! make none once each session got a frame. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use delivery::{Key, Readers};
+use delivery::{Key, Position, Reader, Readers, Start};
 use types::channel;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{Draft, Form, Frame, Path};
@@ -33,7 +34,12 @@ fn main() {
             .expect("the pool holds the frame")
             .freeze(Path::Live)
     };
-    let mut readers = Readers::new();
+    latest(&frame);
+    complete(&frame);
+}
+
+fn latest(frame: &impl Fn() -> Frame) {
+    let mut readers = Readers::new(0);
     let open =
         |readers: &mut Readers| readers.open_latest(None, Stamp::from_nanos(0)).key;
     let mut keys: Vec<_> = (0..SESSIONS).map(|_| open(&mut readers)).collect();
@@ -65,9 +71,72 @@ fn main() {
     );
 }
 
+fn complete(frame: &impl Fn() -> Frame) {
+    let mut readers = Readers::new(0);
+    let open = |readers: &mut Readers, live: u64| {
+        let start = Start::At(Position {
+            live,
+            backfill: None,
+        });
+        let key = readers.open(Reader::Unnamed, start).key;
+        readers.grant(key, u64::MAX);
+        key
+    };
+    let mut keys: Vec<_> = (0..SESSIONS).map(|_| open(&mut readers, 0)).collect();
+    let mut seq = 0;
+    assert_eq!(
+        flow(&mut readers, &keys, frame, &mut seq),
+        SESSIONS,
+        "the first release wakes all"
+    );
+    let (delivered, allocations) = ALLOCATOR.count(|| {
+        (0..4)
+            .map(|_| flow(&mut readers, &keys, frame, &mut seq))
+            .sum::<usize>()
+    });
+    assert_eq!(allocations, 0, "the live path allocated");
+    assert_eq!(
+        delivered,
+        12 * SESSIONS,
+        "each round takes two frames from and wakes every session"
+    );
+
+    keys.push(open(&mut readers, seq));
+    let (delivered, allocations) = ALLOCATOR.count(|| {
+        (0..2)
+            .map(|_| flow(&mut readers, &keys, frame, &mut seq))
+            .sum::<usize>()
+    });
+    assert_eq!(allocations, 0, "the live path allocated after an open");
+    assert_eq!(
+        delivered,
+        6 * SESSIONS + 4,
+        "two rounds wake every session and take from the new one once"
+    );
+}
+
+/// Takes each session's frames, then queues and releases two frames from `seq`.
+/// Returns the frames taken plus the sessions woken.
+fn flow(
+    readers: &mut Readers,
+    keys: &[Key],
+    frame: &impl Fn() -> Frame,
+    seq: &mut u64,
+) -> usize {
+    let taken: usize = keys
+        .iter()
+        .map(|&key| std::iter::from_fn(|| readers.take(key)).count())
+        .sum();
+    for _ in 0..2 {
+        readers.queue(&frame(), *seq..*seq + 1);
+        *seq += 1;
+    }
+    taken + readers.release(*seq).len()
+}
+
 /// Takes each session's frame, then puts two frames. Returns the frames taken plus the
 /// sessions woken.
-fn round(readers: &mut Readers, keys: &[Key], frame: impl Fn() -> Frame) -> usize {
+fn round(readers: &mut Readers, keys: &[Key], frame: &impl Fn() -> Frame) -> usize {
     let taken: usize = keys
         .iter()
         .map(|&key| usize::from(readers.take(key).is_some()))

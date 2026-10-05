@@ -1,3 +1,7 @@
+use std::collections::BTreeSet;
+
+use types::node;
+
 use crate::{Error, Position, Term, Voters};
 
 /// One entry of the replicated log.
@@ -25,7 +29,7 @@ pub enum Data {
 // never decrease. Three indexes trail the end: `committed` is what a quorum holds,
 // `applied` is the last entry given to the caller to apply, and `stable` is the
 // last entry given to the caller to write. `voters` is the index of the last
-// configuration entry, or 0 with none.
+// configuration entry, or 0 for `base`, the configuration before the entries.
 #[derive(Debug)]
 pub(crate) struct Log {
     entries: Vec<Entry>,
@@ -33,10 +37,16 @@ pub(crate) struct Log {
     applied: u64,
     stable: u64,
     voters: u64,
+    base: Voters,
 }
 
 impl Log {
-    pub(crate) fn new(entries: Vec<Entry>, applied: u64) -> Result<Self, Error> {
+    pub(crate) fn new(
+        base: Voters,
+        entries: Vec<Entry>,
+        applied: u64,
+    ) -> Result<Self, Error> {
+        base.check()?;
         let before = check(&entries, Position::default())?;
         if applied > before.index {
             return Err(Error::AppliedPastLog {
@@ -46,6 +56,7 @@ impl Log {
         }
         Ok(Self {
             voters: last_voters(&entries),
+            base,
             entries,
             committed: applied,
             applied,
@@ -63,12 +74,43 @@ impl Log {
         self.committed
     }
 
-    // The last configuration in the log and its position, or `None` with no
-    // configuration entry.
-    pub(crate) fn voters(&self) -> Option<(Position, &Voters)> {
-        let at = usize::try_from(self.voters.checked_sub(1)?).ok()?;
-        let entry = self.entries.get(at)?;
-        voters_in(entry).map(|voters| (entry.at, voters))
+    // The configuration in force and where it is: the last configuration entry, or
+    // `base` at the zero position.
+    pub(crate) fn voters(&self) -> (Position, &Voters) {
+        let Some(at) = self.voters.checked_sub(1) else {
+            return (Position::default(), &self.base);
+        };
+        let entry = &self.entries[usize::try_from(at).expect("invariant: index fits")];
+        let voters =
+            voters_in(entry).expect("invariant: `voters` names a configuration");
+        (entry.at, voters)
+    }
+
+    // Whether the configuration in force is committed.
+    pub(crate) fn settled(&self) -> bool {
+        self.voters().0.index <= self.committed
+    }
+
+    // The configuration before `index`: `base` with no configuration entry before.
+    fn voters_before(&self, index: u64) -> &Voters {
+        let end = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
+        let end = end.min(self.entries.len());
+        self.entries[..end]
+            .iter()
+            .rev()
+            .find_map(voters_in)
+            .unwrap_or(&self.base)
+    }
+
+    // Every node in the configuration in force and, while that configuration is
+    // uncommitted, in the one before it.
+    pub(crate) fn nodes(&self) -> BTreeSet<node::Key> {
+        let (at, voters) = self.voters();
+        let before = (!self.settled())
+            .then(|| self.voters_before(at.index).peers())
+            .into_iter()
+            .flatten();
+        voters.peers().chain(before).collect()
     }
 
     // The position at `index`: the zero position for 0, `None` past the end.
@@ -80,11 +122,20 @@ impl Log {
         self.entries.get(at).map(|entry| entry.at)
     }
 
-    // Up to `max` entries from `index`, cloned for a message.
-    pub(crate) fn slice(&self, index: u64, max: usize) -> Vec<Entry> {
-        let from = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
+    // The index of the first entry of `term` or of a later term: one past the end
+    // with none.
+    pub(crate) fn first_of(&self, term: Term) -> u64 {
+        let before = self.entries.partition_point(|entry| entry.at.term < term);
+        u64::try_from(before).map_or(u64::MAX, |before| before.saturating_add(1))
+    }
+
+    // Up to `max` entries from index `from` through index `end`, cloned for a
+    // message. Empty when `from` is past `end` or past the log.
+    pub(crate) fn slice(&self, from: u64, end: u64, max: usize) -> Vec<Entry> {
+        let offset = |index: u64| usize::try_from(index).unwrap_or(usize::MAX);
+        let end = offset(end).min(self.entries.len());
         self.entries
-            .get(from..)
+            .get(offset(from.saturating_sub(1))..end)
             .unwrap_or_default()
             .iter()
             .take(max)
@@ -156,16 +207,14 @@ impl Log {
 
     // The entries no `Ready` has given to write yet.
     pub(crate) fn take_unstable(&mut self) -> Vec<Entry> {
-        let entries = self.slice(self.stable + 1, usize::MAX);
+        let entries = self.slice(self.stable + 1, u64::MAX, usize::MAX);
         self.stable = self.last().index;
         entries
     }
 
     // The committed entries no `Ready` has given to apply yet.
     pub(crate) fn take_committed(&mut self) -> Vec<Entry> {
-        let count =
-            usize::try_from(self.committed - self.applied).unwrap_or(usize::MAX);
-        let entries = self.slice(self.applied + 1, count);
+        let entries = self.slice(self.applied + 1, self.committed, usize::MAX);
         self.applied = self.committed;
         entries
     }
@@ -237,7 +286,7 @@ mod tests {
             .zip(1..)
             .map(|(&term, index)| entry(term, index))
             .collect();
-        Log::new(entries, 0).unwrap()
+        Log::new(Voters::default(), entries, 0).unwrap()
     }
 
     fn terms(log: &Log) -> Vec<u64> {
@@ -250,7 +299,7 @@ mod tests {
 
     #[test]
     fn an_empty_log_ends_at_the_zero_position() {
-        let mut log = Log::new(vec![], 0).unwrap();
+        let mut log = Log::new(Voters::default(), vec![], 0).unwrap();
         assert_eq!(log.last(), Position::default());
         assert_eq!(log.at(0), Some(Position::default()));
         assert_eq!(log.at(1), None);
@@ -268,7 +317,7 @@ mod tests {
 
     #[test]
     fn rejects_entries_that_do_not_start_at_one() {
-        let err = Log::new(vec![entry(1, 2)], 0).unwrap_err();
+        let err = Log::new(Voters::default(), vec![entry(1, 2)], 0).unwrap_err();
         assert_eq!(err, out_of_order(&entry(1, 2), Position::default()));
         assert_eq!(
             err.to_string(),
@@ -278,15 +327,17 @@ mod tests {
 
     #[test]
     fn rejects_a_gap_and_a_term_that_goes_back() {
-        let err = Log::new(vec![entry(1, 1), entry(1, 3)], 0).unwrap_err();
+        let err =
+            Log::new(Voters::default(), vec![entry(1, 1), entry(1, 3)], 0).unwrap_err();
         assert_eq!(err, out_of_order(&entry(1, 3), entry(1, 1).at));
-        let err = Log::new(vec![entry(2, 1), entry(1, 2)], 0).unwrap_err();
+        let err =
+            Log::new(Voters::default(), vec![entry(2, 1), entry(1, 2)], 0).unwrap_err();
         assert_eq!(err, out_of_order(&entry(1, 2), entry(2, 1).at));
     }
 
     #[test]
     fn rejects_an_entry_in_term_zero() {
-        let err = Log::new(vec![entry(0, 1)], 0).unwrap_err();
+        let err = Log::new(Voters::default(), vec![entry(0, 1)], 0).unwrap_err();
         assert_eq!(err, out_of_order(&entry(0, 1), Position::default()));
         assert_eq!(
             err.to_string(),
@@ -296,7 +347,7 @@ mod tests {
 
     #[test]
     fn rejects_an_applied_index_past_the_log() {
-        let err = Log::new(vec![entry(1, 1)], 2).unwrap_err();
+        let err = Log::new(Voters::default(), vec![entry(1, 1)], 2).unwrap_err();
         assert_eq!(
             err,
             Error::AppliedPastLog {
@@ -313,7 +364,7 @@ mod tests {
     #[test]
     fn the_entries_from_disk_are_stable_and_committed_up_to_applied() {
         let entries = vec![entry(1, 1), entry(1, 2), entry(3, 3)];
-        let mut log = Log::new(entries, 2).unwrap();
+        let mut log = Log::new(Voters::default(), entries, 2).unwrap();
         assert_eq!(log.committed(), 2);
         assert_eq!(log.take_unstable(), vec![]);
         assert_eq!(log.take_committed(), vec![]);
@@ -323,7 +374,7 @@ mod tests {
 
     fn voters(id: u128) -> Voters {
         Voters {
-            incoming: [types::node::Key::from_u128(id)].into_iter().collect(),
+            incoming: [node::Key::from_u128(id)].into_iter().collect(),
             ..Voters::default()
         }
     }
@@ -338,27 +389,58 @@ mod tests {
     #[test]
     fn holds_the_last_configuration_it_wrote() {
         let mut log = log(&[1]);
-        assert_eq!(log.voters(), None);
+        assert_eq!(log.voters(), (Position::default(), &Voters::default()));
         log.push(Term(1), Data::Voters(voters(1)));
         log.push(Term(1), Data::Voters(voters(2)));
         log.push(Term(1), Data::Bytes(vec![9]));
-        assert_eq!(log.voters(), Some((position(1, 3), &voters(2))));
-        let log = Log::new(vec![entry(1, 1), config(1, 2, 3)], 0).unwrap();
-        assert_eq!(log.voters(), Some((position(1, 2), &voters(3))));
+        assert_eq!(log.voters(), (position(1, 3), &voters(2)));
+        let log = Log::new(voters(9), vec![entry(1, 1), config(1, 2, 3)], 0).unwrap();
+        assert_eq!(log.voters(), (position(1, 2), &voters(3)));
+        let log = Log::new(voters(9), vec![entry(1, 1)], 0).unwrap();
+        assert_eq!(log.voters(), (Position::default(), &voters(9)));
+    }
+
+    #[test]
+    fn gives_the_last_configuration_before_an_index() {
+        let entries = vec![config(1, 1, 1), entry(1, 2), config(1, 3, 2), entry(1, 4)];
+        let log = Log::new(voters(9), entries, 0).unwrap();
+        let before: Vec<&Voters> = (0..=6).map(|i| log.voters_before(i)).collect();
+        let (base, one, two) = (&voters(9), &voters(1), &voters(2));
+        assert_eq!(before, [base, base, one, one, two, two, two]);
+    }
+
+    #[test]
+    fn the_nodes_are_the_voters_in_force_and_until_committed_the_ones_before() {
+        let keys = |ids: &[u128]| -> BTreeSet<node::Key> {
+            ids.iter().map(|&id| node::Key::from_u128(id)).collect()
+        };
+        let log = Log::new(voters(1), vec![], 0).unwrap();
+        assert_eq!(log.nodes(), keys(&[1]));
+        let entries = vec![config(1, 1, 2), entry(1, 2), config(1, 3, 3)];
+        let log = Log::new(voters(1), entries, 0).unwrap();
+        assert_eq!(log.nodes(), keys(&[2, 3]));
+        let log = Log::new(voters(1), vec![config(1, 1, 2)], 0).unwrap();
+        assert_eq!(log.nodes(), keys(&[1, 2]));
+        let log = Log::new(voters(1), vec![config(1, 1, 2)], 1).unwrap();
+        assert_eq!(log.nodes(), keys(&[2]));
     }
 
     #[test]
     fn an_append_puts_in_force_the_last_configuration_it_leaves_in_the_log() {
-        let mut log =
-            Log::new(vec![entry(1, 1), config(1, 2, 1), config(1, 3, 2)], 0).unwrap();
+        let mut log = Log::new(
+            Voters::default(),
+            vec![entry(1, 1), config(1, 2, 1), config(1, 3, 2)],
+            0,
+        )
+        .unwrap();
         assert_eq!(log.append(position(1, 3), vec![entry(2, 4)]), Ok(4));
-        assert_eq!(log.voters(), Some((position(1, 3), &voters(2))));
+        assert_eq!(log.voters(), (position(1, 3), &voters(2)));
         assert_eq!(log.append(position(1, 2), vec![entry(3, 3)]), Ok(3));
-        assert_eq!(log.voters(), Some((position(1, 2), &voters(1))));
+        assert_eq!(log.voters(), (position(1, 2), &voters(1)));
         assert_eq!(log.append(position(3, 3), vec![config(3, 4, 4)]), Ok(4));
-        assert_eq!(log.voters(), Some((position(3, 4), &voters(4))));
+        assert_eq!(log.voters(), (position(3, 4), &voters(4)));
         assert_eq!(log.append(position(1, 1), vec![entry(4, 2)]), Ok(2));
-        assert_eq!(log.voters(), None);
+        assert_eq!(log.voters(), (Position::default(), &Voters::default()));
     }
 
     #[test]
@@ -453,10 +535,20 @@ mod tests {
     }
 
     #[test]
-    fn gives_entries_from_an_index_up_to_a_limit() {
+    fn gives_the_first_index_of_a_term_or_of_a_later_one() {
+        let log = log(&[1, 1, 3, 3]);
+        let first: Vec<u64> = (0..=4).map(|term| log.first_of(Term(term))).collect();
+        assert_eq!(first, vec![1, 1, 3, 3, 5]);
+    }
+
+    #[test]
+    fn gives_entries_from_an_index_through_an_end_up_to_a_limit() {
         let log = log(&[1, 1, 2, 2]);
-        assert_eq!(log.slice(2, 2), vec![entry(1, 2), entry(2, 3)]);
-        assert_eq!(log.slice(4, 10), vec![entry(2, 4)]);
-        assert_eq!(log.slice(5, 10), vec![]);
+        assert_eq!(log.slice(2, 4, 2), vec![entry(1, 2), entry(2, 3)]);
+        assert_eq!(log.slice(4, u64::MAX, 10), vec![entry(2, 4)]);
+        assert_eq!(log.slice(5, u64::MAX, 10), vec![]);
+        assert_eq!(log.slice(2, 3, 10), vec![entry(1, 2), entry(2, 3)]);
+        assert_eq!(log.slice(3, 2, 10), vec![]);
+        assert_eq!(log.slice(4, 2, 10), vec![]);
     }
 }

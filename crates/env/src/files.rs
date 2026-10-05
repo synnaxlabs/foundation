@@ -15,6 +15,10 @@ use block::{Block, Unique};
 /// ```
 pub type Request<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
 
+/// The length of a sector in bytes: the unit that the crash rule of [`File::write_at`]
+/// keeps or loses whole. Each sector starts at a multiple of `SECTOR` in its file.
+pub const SECTOR: usize = 512;
+
 /// The files under one data directory. Paths are relative to it: a call panics on an
 /// absolute path or a `..` segment. The handle cannot leave the thread that made it,
 /// so each shard has its own. Clones use the same directory.
@@ -56,6 +60,9 @@ impl Files {
     ///
     /// - [`Error::NotFound`] when the file is not there and `mode` is not
     ///   [`Mode::Create`].
+    /// - [`Error::Busy`] when `mode` is not [`Mode::Read`] and another handle holds
+    ///   the file with [`Mode::Write`] or [`Mode::Create`]. A handle holds it until it
+    ///   drops and its calls end, in this process or another.
     /// - [`Error::Length`] when [`Mode::Create`] finds a file of another length.
     /// - [`Error::Full`] when the disk has no room for a new file.
     /// - [`Error::Io`] for other failures.
@@ -225,11 +232,13 @@ impl fmt::Debug for Files {
 pub enum Mode {
     /// Reads a file that is there.
     Read,
-    /// Reads and writes a file that is there.
+    /// Reads and writes a file that is there. One handle at a time writes a file; see
+    /// [`Files::open`].
     Write,
     /// Reads and writes a file. When it is not there, makes it with `len` bytes,
     /// allocated and zeroed, and makes the allocation durable before the open ends. A
-    /// file that is there keeps its bytes and must have `len` bytes.
+    /// file that is there keeps its bytes and must have `len` bytes. One handle at a
+    /// time writes a file; see [`Files::open`].
     Create {
         /// The length of the file.
         len: u64,
@@ -284,9 +293,9 @@ impl File {
 
     /// Writes `parts` back to back at `offset`, as one vectored write. A read after
     /// the write ends sees the bytes. They are not durable until a later
-    /// [`File::sync`] ends. A crash before then keeps any subset of the 512-byte
-    /// sectors of the write, independently of other writes not yet synced and of
-    /// their order.
+    /// [`File::sync`] ends. A crash before then keeps any subset of the
+    /// [sectors](SECTOR) of the write, independently of other writes not yet synced
+    /// and of their order.
     ///
     /// The future may be dropped before it ends. The driver keeps a clone of each
     /// part until the write ends, so the drop is sound, but the bytes may then be
@@ -463,6 +472,11 @@ pub enum Error {
         /// The path of the file.
         path: PathBuf,
     },
+    /// Another handle holds the file with [`Mode::Write`] or [`Mode::Create`].
+    Busy {
+        /// The path of the file.
+        path: PathBuf,
+    },
     /// [`Mode::Create`] found a file of another length.
     Length {
         /// The path of the file.
@@ -495,6 +509,11 @@ impl fmt::Display for Error {
             Self::Poisoned { path } => write!(
                 f,
                 "a sync of file {} failed or was dropped; reopen it and recover",
+                path.display()
+            ),
+            Self::Busy { path } => write!(
+                f,
+                "file {} is open for writing in another handle",
                 path.display()
             ),
             Self::Length {
@@ -579,7 +598,9 @@ pub trait Driver {
     /// Opens the file at `path`. [`Mode::Create`] makes a missing file with `len`
     /// zeroed bytes, and opens a file that is there as it is. It makes the allocation
     /// durable before it ends (`os`: `fallocate`, then `fsync` the file), so a
-    /// `sync_dir` alone makes the file whole.
+    /// `sync_dir` alone makes the file whole. A write open of a file that a write
+    /// handle holds gives [`Error::Busy`] before any other check or change of the
+    /// file.
     fn open<'a>(
         &'a self,
         path: &'a Path,
@@ -1107,6 +1128,17 @@ mod tests {
             assert_eq!(
                 e.to_string(),
                 "file ring/0 has 512 bytes, but 4096 bytes were expected"
+            );
+        }
+
+        #[test]
+        fn says_another_handle_writes_the_file() {
+            let e = Error::Busy {
+                path: "ring/0".into(),
+            };
+            assert_eq!(
+                e.to_string(),
+                "file ring/0 is open for writing in another handle"
             );
         }
 

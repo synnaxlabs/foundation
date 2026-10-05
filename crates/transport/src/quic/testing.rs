@@ -107,6 +107,11 @@ impl Shard {
         block.copy_from_slice(bytes);
         block.freeze()
     }
+
+    /// The bytes of [`Shard::pool`] that blocks hold or keep for the next alloc.
+    pub(super) fn committed(&self) -> usize {
+        self.pool.committed()
+    }
 }
 
 /// Runs `test` on one shard of a sim run made from `value`, and gives its result.

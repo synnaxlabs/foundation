@@ -45,6 +45,8 @@ pub(crate) struct Endpoint {
     pool: Rc<Pool>,
     /// The largest message a receiver takes.
     message_bytes_max: usize,
+    /// The most bytes in flight on a connection in each direction.
+    window_bytes: usize,
     /// Indexed by noq-proto's handle.
     connections: Vec<Option<Connection>>,
     /// The connections made so far.
@@ -90,8 +92,15 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `config.idle` is not positive. `Transport::new` refuses it first.
+    /// When `config.idle` is not positive, or `config.window_bytes` is below
+    /// `config.message_bytes_max`. `Transport::new` refuses both first.
     pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
+        assert!(
+            config.window_bytes >= config.message_bytes_max.get(),
+            "a window of {} bytes is below the largest message, {} bytes",
+            config.window_bytes,
+            config.message_bytes_max
+        );
         let (settings, endpoint) = Settings::new(config, shard);
         Self {
             epoch: config.clock.epoch(),
@@ -100,6 +109,7 @@ impl Endpoint {
             datagrams_max,
             pool: Rc::clone(&config.pool),
             message_bytes_max: config.message_bytes_max.get(),
+            window_bytes: config.window_bytes,
             connections: Vec::new(),
             serial: 0,
             ready: VecDeque::new(),
@@ -129,7 +139,9 @@ impl Endpoint {
             .unwrap_or_else(|error| {
                 panic!("a dial fails only on its address: {error}")
             });
-        let key = self.insert(handle, |key| Connection::dialed(key, inner, peer));
+        let key = self.insert(handle, |key, streams| {
+            Connection::dialed(key, inner, peer, streams)
+        });
         self.drive(handle, now);
         key
     }
@@ -276,13 +288,20 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `sender` holds part of a message, or after [`Endpoint::finish`].
+    /// When `sender` holds part of a message, after [`Endpoint::finish`], or when
+    /// `message` is over the largest message (this side's own until the hello).
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
+        assert!(
+            message.len() <= self.message_bytes_max,
+            "a message of {} bytes is over the largest message, {} bytes",
+            message.len(),
+            self.message_bytes_max
+        );
         sender.load(message);
         self.flush(now, sender)
     }
@@ -300,8 +319,8 @@ impl Endpoint {
         sender: &mut Sender,
     ) -> Result<Poll<()>, Error> {
         let key = sender.key().connection;
-        self.streams(now, key, Poll::Pending, |streams, inner, _| {
-            streams.flush(inner, sender)
+        self.streams(now, key, Poll::Pending, |streams, inner, _, events| {
+            streams.flush(inner, sender, events)
         })
     }
 
@@ -324,7 +343,7 @@ impl Endpoint {
     ) -> Result<(), Error> {
         sender.end();
         let stream = sender.key();
-        self.streams(now, stream.connection, (), |streams, inner, _| {
+        self.streams(now, stream.connection, (), |streams, inner, _, _| {
             streams.finish(inner, stream.id)
         })
     }
@@ -349,9 +368,42 @@ impl Endpoint {
             return ended;
         }
         let key = receiver.key().connection;
-        self.streams(now, key, Poll::Pending, |_, inner, pool| {
-            stream::read(inner, receiver, pool)
+        self.streams(now, key, Poll::Pending, |streams, inner, pool, events| {
+            streams.read(inner, receiver, pool, events)
         })
+    }
+
+    /// Resets `sender`'s stream with `code`. The peer's next read gives
+    /// [`Error::Reset`], and the messages it has not read drop, unless it acknowledged
+    /// all of the stream. The send budget of the message in hand comes back now, and
+    /// the stream's blocks go back to the pool at the latest when the peer
+    /// acknowledges the reset. A stream this side opened that resets before its first
+    /// message never reaches the peer, and the [`Receiver`] of a two-way one gets
+    /// [`Error::Reset`] with code 0. Does nothing when the connection ended.
+    pub(crate) fn reset(&mut self, now: Monotonic, sender: Sender, code: Code) {
+        let key = sender.key().connection;
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        let Connection { inner, streams, .. } = connection;
+        streams.reset(inner, sender, code, &mut self.events);
+        self.drive(key.handle, self.instant(now));
+    }
+
+    /// Stops `receiver`'s stream with `code`. The messages not read yet drop, and the
+    /// peer's next write gives [`Error::Stopped`]. The message in the reader drops, and
+    /// its receive budget comes back. Sends nothing after a read of the end. Does
+    /// nothing when the connection ended.
+    pub(crate) fn stop(&mut self, now: Monotonic, receiver: Receiver, code: Code) {
+        let key = receiver.key().connection;
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        let Connection { inner, streams, .. } = connection;
+        streams.stop(inner, receiver, code, &mut self.events);
+        self.drive(key.handle, self.instant(now));
     }
 
     /// The next event, in the order they happened.
@@ -379,10 +431,10 @@ impl Endpoint {
         })
     }
 
-    /// Runs `call` on the streams of `key`'s connection with the pool, and drives
-    /// the connection. A fault of the peer's that `call` finds closes the
-    /// connection: the caller gets it from [`Event::Closed`], and this gives
-    /// `ended`, as it does when the connection ended before.
+    /// Runs `call` on the streams of `key`'s connection with the pool and the event
+    /// queue, and drives the connection. A fault of the peer's that `call` finds
+    /// closes the connection: the caller gets it from [`Event::Closed`], and this
+    /// gives `ended`, as it does when the connection ended before.
     fn streams<T>(
         &mut self,
         now: Monotonic,
@@ -392,6 +444,7 @@ impl Endpoint {
             &mut Streams,
             &mut noq_proto::Connection,
             &Pool,
+            &mut VecDeque<Event>,
         ) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let now = self.instant(now);
@@ -400,7 +453,7 @@ impl Endpoint {
             return Ok(ended);
         };
         let Connection { inner, streams, .. } = connection;
-        let result = match call(streams, inner, &self.pool) {
+        let result = match call(streams, inner, &self.pool, &mut self.events) {
             Err(Error::Broken { reason }) => {
                 self.events.push_back(connection.fault(now, reason));
                 Ok(ended)
@@ -414,7 +467,7 @@ impl Endpoint {
     fn insert(
         &mut self,
         handle: ConnectionHandle,
-        connection: impl FnOnce(connection::Key) -> Connection,
+        connection: impl FnOnce(connection::Key, Streams) -> Connection,
     ) -> connection::Key {
         let key = connection::Key {
             handle,
@@ -429,7 +482,8 @@ impl Endpoint {
             entry.is_none(),
             "invariant: noq-proto reuses a drained handle"
         );
-        *entry = Some(connection(key));
+        let streams = Streams::new(self.window_bytes, self.message_bytes_max);
+        *entry = Some(connection(key, streams));
         key
     }
 
@@ -458,7 +512,9 @@ impl Endpoint {
             Some(DatagramEvent::NewConnection(incoming)) => {
                 match self.inner.accept(incoming, now, &mut reply, None) {
                     Ok((handle, inner)) => {
-                        self.insert(handle, |key| Connection::accepted(key, inner));
+                        self.insert(handle, |key, streams| {
+                            Connection::accepted(key, inner, streams)
+                        });
                         self.drive(handle, now);
                         None
                     }
