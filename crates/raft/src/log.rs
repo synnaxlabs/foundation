@@ -46,6 +46,7 @@ impl Log {
         entries: Vec<Entry>,
         applied: u64,
     ) -> Result<Self, Error> {
+        base.check()?;
         let before = check(&entries, Position::default())?;
         if applied > before.index {
             return Err(Error::AppliedPastLog {
@@ -76,16 +77,22 @@ impl Log {
     // The configuration in force and where it is: the last configuration entry, or
     // `base` at the zero position.
     pub(crate) fn voters(&self) -> (Position, &Voters) {
-        let entry = usize::try_from(self.voters.wrapping_sub(1))
-            .ok()
-            .and_then(|at| self.entries.get(at));
-        entry
-            .and_then(|entry| voters_in(entry).map(|voters| (entry.at, voters)))
-            .unwrap_or((Position::default(), &self.base))
+        let Some(at) = self.voters.checked_sub(1) else {
+            return (Position::default(), &self.base);
+        };
+        let entry = &self.entries[usize::try_from(at).expect("invariant: index fits")];
+        let voters =
+            voters_in(entry).expect("invariant: `voters` names a configuration");
+        (entry.at, voters)
+    }
+
+    // Whether the configuration in force is committed.
+    pub(crate) fn settled(&self) -> bool {
+        self.voters().0.index <= self.committed
     }
 
     // The configuration before `index`: `base` with no configuration entry before.
-    pub(crate) fn voters_before(&self, index: u64) -> &Voters {
+    fn voters_before(&self, index: u64) -> &Voters {
         let end = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
         let end = end.min(self.entries.len());
         self.entries[..end]
@@ -95,12 +102,11 @@ impl Log {
             .unwrap_or(&self.base)
     }
 
-    // The nodes this log's holder talks to: the voters in force and, until their
-    // configuration is committed, the voters of the configuration before them. A
-    // committed configuration released the nodes it removed.
-    pub(crate) fn peers(&self) -> BTreeSet<node::Key> {
+    // Every node in the configuration in force and, while that configuration is
+    // uncommitted, in the one before it.
+    pub(crate) fn nodes(&self) -> BTreeSet<node::Key> {
         let (at, voters) = self.voters();
-        let before = (at.index > self.committed)
+        let before = (!self.settled())
             .then(|| self.voters_before(at.index).peers())
             .into_iter()
             .flatten();
@@ -404,19 +410,19 @@ mod tests {
     }
 
     #[test]
-    fn the_peers_are_the_voters_in_force_and_the_voters_before_them() {
+    fn the_nodes_are_the_voters_in_force_and_until_committed_the_ones_before() {
         let keys = |ids: &[u128]| -> BTreeSet<node::Key> {
             ids.iter().map(|&id| node::Key::from_u128(id)).collect()
         };
         let log = Log::new(voters(1), vec![], 0).unwrap();
-        assert_eq!(log.peers(), keys(&[1]));
+        assert_eq!(log.nodes(), keys(&[1]));
         let entries = vec![config(1, 1, 2), entry(1, 2), config(1, 3, 3)];
         let log = Log::new(voters(1), entries, 0).unwrap();
-        assert_eq!(log.peers(), keys(&[2, 3]));
+        assert_eq!(log.nodes(), keys(&[2, 3]));
         let log = Log::new(voters(1), vec![config(1, 1, 2)], 0).unwrap();
-        assert_eq!(log.peers(), keys(&[1, 2]));
+        assert_eq!(log.nodes(), keys(&[1, 2]));
         let log = Log::new(voters(1), vec![config(1, 1, 2)], 1).unwrap();
-        assert_eq!(log.peers(), keys(&[2]));
+        assert_eq!(log.nodes(), keys(&[2]));
     }
 
     #[test]

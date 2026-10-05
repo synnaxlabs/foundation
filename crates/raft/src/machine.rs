@@ -124,13 +124,12 @@ impl Raft {
                 heartbeat: heartbeat_ticks,
             });
         }
-        voters.check()?;
         let log = Log::new(voters, entries, applied)?;
         let last = log.last();
         let (in_force, voters) = log.voters();
         let voters = voters.clone();
         let peers = log
-            .peers()
+            .nodes()
             .into_iter()
             .map(|key| (key, Peer::new(last.index)))
             .collect();
@@ -250,8 +249,8 @@ impl Raft {
         if voters.is_empty() {
             return Err(Error::NoVoters);
         }
-        let (at, _) = self.log.voters();
-        if at.index > self.log.committed() {
+        if !self.log.settled() {
+            let (at, _) = self.log.voters();
             return Err(Error::ChangePending { at });
         }
         let joint = self.voters.enter(voters);
@@ -467,7 +466,7 @@ impl Raft {
     // Releases the nodes a committed change removed: they leave the peers. A leader
     // keeps one until it holds all it gets, and sends it the commit as it goes.
     fn release_removed(&mut self) {
-        if !self.settled() {
+        if !self.log.settled() {
             return;
         }
         let end = self.removed_end();
@@ -555,7 +554,7 @@ impl Raft {
         }
         self.release_removed();
         self.replicate();
-        if self.settled() && !self.voters.incoming.contains(&self.key) {
+        if self.log.settled() && !self.voters.incoming.contains(&self.key) {
             self.become_follower(self.term, None);
         }
         true
@@ -581,18 +580,12 @@ impl Raft {
     // Writes the entry that leaves a joint phase, once the joint configuration is
     // committed. `Start.voters` is committed by definition.
     fn leave(&mut self) {
-        if !self.voters.joint() || !self.settled() {
+        if !self.voters.joint() || !self.log.settled() {
             return;
         }
         let voters = self.voters.leave();
         self.log.push(self.term, Data::Voters(voters));
         self.sync_voters();
-    }
-
-    // Whether the configuration in force is committed.
-    fn settled(&self) -> bool {
-        let (at, _) = self.log.voters();
-        at.index <= self.log.committed()
     }
 
     // Puts the log's configuration in force. The peers become its voters and the
@@ -607,7 +600,7 @@ impl Raft {
         self.in_force = at;
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
-        let keep = self.log.peers();
+        let keep = self.log.nodes();
         self.peers.retain(|key, _| keep.contains(key));
         for key in keep {
             let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
@@ -873,7 +866,7 @@ impl Raft {
     // truncated, and a removed leader whose leave is not committed must be able to
     // win the election that commits it.
     fn promotable(&self) -> bool {
-        self.voters.contains(self.key) || !self.settled()
+        self.voters.contains(self.key) || !self.log.settled()
     }
 
     fn peer(&self, key: node::Key) -> &Peer {
