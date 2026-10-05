@@ -1,0 +1,1000 @@
+//! Files under one data directory.
+
+use std::cell::Cell;
+use std::fmt;
+use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
+use std::rc::Rc;
+
+use block::{Block, Unique};
+
+/// One driver call in flight, as the handle awaits it.
+///
+/// ```
+/// let done: env::files::Request<'_, u64> = Box::pin(async { Ok(4_096) });
+/// ```
+pub type Request<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
+
+/// The files under one data directory. Paths are relative to it: a call panics on an
+/// absolute path or a `..` segment. The handle cannot leave the thread that made it,
+/// so each shard has its own. Clones use the same directory.
+///
+/// ```
+/// use std::path::Path;
+///
+/// use env::files::{Error, Mode};
+///
+/// async fn ring(files: &env::files::Files) -> Result<env::files::File, Error> {
+///     let mode = Mode::Create { len: 1 << 26 };
+///     let file = files.open(Path::new("ring/0"), mode).await?;
+///     files.sync_dir(Path::new("ring")).await?;
+///     Ok(file)
+/// }
+/// ```
+#[derive(Clone)]
+pub struct Files(Rc<dyn Driver>);
+
+impl Files {
+    /// Wraps a driver from `os` or `sim`.
+    ///
+    /// ```
+    /// fn wrap(driver: impl env::files::Driver + 'static) -> env::files::Files {
+    ///     env::files::Files::new(driver)
+    /// }
+    /// ```
+    pub fn new(driver: impl Driver + 'static) -> Self {
+        Self(Rc::new(driver))
+    }
+
+    /// Opens the file at `path`. A file that [`Mode::Create`] makes is not durable
+    /// until [`Files::sync_dir`] on its directory ends.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotFound`] when the file is not there and `mode` is not
+    ///   [`Mode::Create`].
+    /// - [`Error::Length`] when [`Mode::Create`] finds a file of another length.
+    /// - [`Error::Full`] when the disk has no room for a new file.
+    /// - [`Error::Io`] for other failures.
+    ///
+    /// # Panics
+    ///
+    /// When `path` is absolute or has a `..` segment.
+    ///
+    /// ```
+    /// use std::path::Path;
+    ///
+    /// async fn segment(files: &env::files::Files) -> Option<env::files::File> {
+    ///     files.open(Path::new("segments/7"), env::files::Mode::Read).await.ok()
+    /// }
+    /// ```
+    pub async fn open(&self, path: &Path, mode: Mode) -> Result<File, Error> {
+        check(path);
+        let descriptor = self.0.open(path, mode).await?;
+        if let Mode::Create { len } = mode
+            && descriptor.len() != len
+        {
+            return Err(Error::Length {
+                path: path.to_path_buf(),
+                expected: len,
+                found: descriptor.len(),
+            });
+        }
+        Ok(File {
+            descriptor,
+            path: path.to_path_buf(),
+            mode,
+            poisoned: Cell::new(false),
+        })
+    }
+
+    /// The names of the entries in `dir`, sorted.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] when `dir` is not there, and [`Error::Io`] for other
+    /// failures.
+    ///
+    /// # Panics
+    ///
+    /// When `dir` is absolute or has a `..` segment.
+    ///
+    /// ```
+    /// use std::path::{Path, PathBuf};
+    ///
+    /// async fn segments(files: &env::files::Files) -> Vec<PathBuf> {
+    ///     files.list(Path::new("segments")).await.unwrap_or_default()
+    /// }
+    /// ```
+    pub async fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, Error> {
+        check(dir);
+        let mut names = self.0.list(dir).await?;
+        names.sort_unstable();
+        Ok(names)
+    }
+
+    /// Removes the file at `path`. The removal is not durable until
+    /// [`Files::sync_dir`] on its directory ends.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] when the file is not there, and [`Error::Io`] for other
+    /// failures.
+    ///
+    /// # Panics
+    ///
+    /// When `path` is absolute or has a `..` segment.
+    ///
+    /// ```
+    /// use std::path::Path;
+    ///
+    /// async fn evict(files: &env::files::Files) -> Result<(), env::files::Error> {
+    ///     files.remove(Path::new("segments/7")).await?;
+    ///     files.sync_dir(Path::new("segments")).await
+    /// }
+    /// ```
+    pub async fn remove(&self, path: &Path) -> Result<(), Error> {
+        check(path);
+        self.0.remove(path).await
+    }
+
+    /// Makes the files created and removed in `dir` durable. An empty path is the
+    /// data directory.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotFound`] when `dir` is not there, and [`Error::Io`] for other
+    /// failures.
+    ///
+    /// # Panics
+    ///
+    /// When `dir` is absolute or has a `..` segment.
+    ///
+    /// ```
+    /// use std::path::Path;
+    ///
+    /// async fn commit(files: &env::files::Files) -> Result<(), env::files::Error> {
+    ///     files.sync_dir(Path::new("segments")).await
+    /// }
+    /// ```
+    pub async fn sync_dir(&self, dir: &Path) -> Result<(), Error> {
+        check(dir);
+        self.0.sync_dir(dir).await
+    }
+
+    /// The bytes free on the disk of the data directory.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] when the OS cannot tell.
+    ///
+    /// ```
+    /// async fn room(files: &env::files::Files) -> Result<u64, env::files::Error> {
+    ///     files.free().await
+    /// }
+    /// ```
+    pub async fn free(&self) -> Result<u64, Error> {
+        self.0.free().await
+    }
+}
+
+impl fmt::Debug for Files {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Files").finish_non_exhaustive()
+    }
+}
+
+/// How [`Files::open`] opens a file.
+///
+/// ```
+/// let mode = env::files::Mode::Create { len: 1 << 26 };
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Reads a file that is there.
+    Read,
+    /// Reads and writes a file that is there.
+    Write,
+    /// Reads and writes a file. When it is not there, makes it with `len` bytes,
+    /// allocated and zeroed. A file that is there keeps its bytes and must have `len`
+    /// bytes.
+    Create {
+        /// The length of the file.
+        len: u64,
+    },
+}
+
+/// One open file. Its length does not change, and every read and write stays inside
+/// it. A failed or dropped [`File::sync`] poisons the file: every later call fails
+/// with [`Error::Poisoned`], because a second sync can report success for lost data.
+/// Reopen the file and recover.
+///
+/// Dropping it closes the file without a wait, after the calls of dropped futures
+/// end.
+///
+/// ```
+/// async fn commit(
+///     file: &env::files::File,
+///     offset: u64,
+///     record: &[block::Block],
+/// ) -> Result<(), env::files::Error> {
+///     file.write_at(offset, record).await?;
+///     file.sync().await
+/// }
+/// ```
+pub struct File {
+    descriptor: Box<dyn Descriptor>,
+    path: PathBuf,
+    mode: Mode,
+    poisoned: Cell<bool>,
+}
+
+impl File {
+    /// The length of the file in bytes.
+    ///
+    /// ```
+    /// fn len(file: &env::files::File) -> u64 {
+    ///     file.len()
+    /// }
+    /// ```
+    #[must_use]
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "an empty file has no use, so nothing asks"
+    )]
+    pub fn len(&self) -> u64 {
+        self.descriptor.len()
+    }
+
+    /// Writes `parts` back to back at `offset`, as one vectored write. The bytes are
+    /// not durable until a later [`File::sync`] ends. A crash before then may keep
+    /// all of them, none, or a part cut at a 512-byte sector boundary.
+    ///
+    /// The future may be dropped before it ends. The driver keeps a clone of each
+    /// part until the write ends, so the drop is sound, but the bytes may then be
+    /// written, partly written, or not written, the same as after a crash. Rewrite
+    /// and sync that range before it is read as data.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Poisoned`] after a failed or dropped sync.
+    /// - [`Error::Full`] when the disk has no room for the bytes.
+    /// - [`Error::Io`] for other failures.
+    ///
+    /// # Panics
+    ///
+    /// When the file was opened with [`Mode::Read`], or when the write ends past
+    /// [`File::len`].
+    ///
+    /// ```
+    /// async fn put(
+    ///     file: &env::files::File,
+    ///     parts: &[block::Block],
+    /// ) -> Result<(), env::files::Error> {
+    ///     file.write_at(4_096, parts).await
+    /// }
+    /// ```
+    pub async fn write_at(&self, offset: u64, parts: &[Block]) -> Result<(), Error> {
+        assert!(
+            self.mode != Mode::Read,
+            "write to {}, which was opened to read",
+            self.path.display()
+        );
+        let len = parts.iter().map(|part| part.len()).sum();
+        self.check_range("write", offset, len);
+        self.check_poison()?;
+        self.descriptor.write_at(offset, parts).await
+    }
+
+    /// Fills `into` with the bytes from `offset`, and gives it back.
+    ///
+    /// The future may be dropped before it ends. The driver keeps `into` until the
+    /// read ends, so the drop is sound.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Poisoned`] after a failed or dropped sync, and [`Error::Io`] for other
+    /// failures. `into` returns to its pool.
+    ///
+    /// # Panics
+    ///
+    /// When the read ends past [`File::len`].
+    ///
+    /// ```
+    /// async fn get(
+    ///     file: &env::files::File,
+    ///     into: block::Unique,
+    /// ) -> Result<block::Unique, env::files::Error> {
+    ///     file.read_at(0, into).await
+    /// }
+    /// ```
+    pub async fn read_at(&self, offset: u64, into: Unique) -> Result<Unique, Error> {
+        self.check_range("read", offset, into.len());
+        self.check_poison()?;
+        self.descriptor.read_at(offset, into).await
+    }
+
+    /// Makes every write that ended before this call durable. It flushes the disk's
+    /// cache too.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Poisoned`] after a failed or dropped sync, and [`Error::Io`] when the
+    /// sync fails. Both poison the file, and so does a drop of the future before it
+    /// ends.
+    ///
+    /// ```
+    /// async fn commit(file: &env::files::File) -> Result<(), env::files::Error> {
+    ///     file.sync().await
+    /// }
+    /// ```
+    pub async fn sync(&self) -> Result<(), Error> {
+        self.check_poison()?;
+        let mut unfinished = Unfinished(Some(&self.poisoned));
+        let result = self.descriptor.sync().await;
+        unfinished.0 = None;
+        if result.is_err() {
+            self.poisoned.set(true);
+        }
+        result
+    }
+
+    fn check_poison(&self) -> Result<(), Error> {
+        if self.poisoned.get() {
+            return Err(Error::Poisoned {
+                path: self.path.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn check_range(&self, operation: &str, offset: u64, len: usize) {
+        let file_len = self.len();
+        let end = u64::try_from(len)
+            .ok()
+            .and_then(|len| offset.checked_add(len));
+        assert!(
+            end.is_some_and(|end| end <= file_len),
+            "{operation} of {len} bytes at {offset} ends past the end of {} \
+             ({file_len} bytes)",
+            self.path.display()
+        );
+    }
+}
+
+impl fmt::Debug for File {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("File")
+            .field("path", &self.path)
+            .field("mode", &self.mode)
+            .field("poisoned", &self.poisoned.get())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Poisons the file when a sync future drops before it ends.
+struct Unfinished<'a>(Option<&'a Cell<bool>>);
+
+impl Drop for Unfinished<'_> {
+    fn drop(&mut self) {
+        if let Some(poisoned) = self.0 {
+            poisoned.set(true);
+        }
+    }
+}
+
+/// Panics on a path that leaves the data directory.
+fn check(path: &Path) {
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => panic!(
+                "path {} is absolute; paths are relative to the data directory",
+                path.display()
+            ),
+            Component::ParentDir => panic!(
+                "path {} has a `..` segment; paths stay inside the data directory",
+                path.display()
+            ),
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+}
+
+/// Why a file call failed. Paths are relative to the data directory.
+///
+/// ```
+/// use std::path::PathBuf;
+///
+/// let e = env::files::Error::NotFound { path: PathBuf::from("ring/0") };
+/// assert_eq!(e.to_string(), "path ring/0 is not there");
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The file or directory is not there.
+    NotFound {
+        /// The path of the call.
+        path: PathBuf,
+    },
+    /// The disk has no room.
+    Full {
+        /// The path of the call.
+        path: PathBuf,
+    },
+    /// A sync of this file failed or was dropped earlier. Reopen it and recover.
+    Poisoned {
+        /// The path of the file.
+        path: PathBuf,
+    },
+    /// [`Mode::Create`] found a file of another length.
+    Length {
+        /// The path of the file.
+        path: PathBuf,
+        /// The length that the call asked for.
+        expected: u64,
+        /// The length of the file.
+        found: u64,
+    },
+    /// The OS or the simulation reported another failure.
+    Io {
+        /// The path of the call. It is empty for [`Files::free`].
+        path: PathBuf,
+        /// The call that failed.
+        operation: Operation,
+        /// The OS error code.
+        code: i32,
+    },
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound { path } => {
+                write!(f, "path {} is not there", path.display())
+            }
+            Self::Full { path } => {
+                write!(f, "no room on the disk for {}", path.display())
+            }
+            Self::Poisoned { path } => write!(
+                f,
+                "a sync of file {} failed or was dropped; reopen it and recover",
+                path.display()
+            ),
+            Self::Length {
+                path,
+                expected,
+                found,
+            } => write!(
+                f,
+                "file {} has {found} bytes, but {expected} bytes were expected",
+                path.display()
+            ),
+            Self::Io {
+                path,
+                operation,
+                code,
+            } => write!(
+                f,
+                "{operation} of {} failed with OS error {code}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// The call that an [`Error::Io`] comes from.
+///
+/// ```
+/// assert_eq!(env::files::Operation::SyncDir.to_string(), "sync_dir");
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    /// [`Files::open`].
+    Open,
+    /// [`Files::list`].
+    List,
+    /// [`Files::remove`].
+    Remove,
+    /// [`Files::sync_dir`].
+    SyncDir,
+    /// [`Files::free`].
+    Free,
+    /// [`File::write_at`].
+    WriteAt,
+    /// [`File::read_at`].
+    ReadAt,
+    /// [`File::sync`].
+    Sync,
+}
+
+impl fmt::Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Open => "open",
+            Self::List => "list",
+            Self::Remove => "remove",
+            Self::SyncDir => "sync_dir",
+            Self::Free => "free",
+            Self::WriteAt => "write_at",
+            Self::ReadAt => "read_at",
+            Self::Sync => "sync",
+        })
+    }
+}
+
+/// What `os` and `sim` implement to run [`Files`]. Only they implement it.
+///
+/// Paths reach it checked and relative to the data directory. It opens, creates, and
+/// removes files with the rules of the [`Files`] calls; [`Files`] sorts and checks
+/// what it returns.
+///
+/// ```
+/// fn wrap(driver: impl env::files::Driver + 'static) -> env::files::Files {
+///     env::files::Files::new(driver)
+/// }
+/// ```
+pub trait Driver {
+    /// Opens the file at `path`. [`Mode::Create`] makes a missing file with `len`
+    /// zeroed bytes, and opens a file that is there as it is.
+    fn open<'a>(
+        &'a self,
+        path: &'a Path,
+        mode: Mode,
+    ) -> Request<'a, Box<dyn Descriptor>>;
+
+    /// The names of the entries in `dir`, in any order.
+    fn list<'a>(&'a self, dir: &'a Path) -> Request<'a, Vec<PathBuf>>;
+
+    /// Removes the file at `path`.
+    fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()>;
+
+    /// Makes the creates and removes in `dir` durable.
+    fn sync_dir<'a>(&'a self, dir: &'a Path) -> Request<'a, ()>;
+
+    /// The bytes free on the disk of the data directory.
+    fn free(&self) -> Request<'_, u64>;
+}
+
+/// One open file as a driver holds it, run through a [`File`]. Only `os` and `sim`
+/// implement it.
+///
+/// A [`Request`] may be dropped before it ends. The descriptor then keeps the blocks
+/// of the call (a clone of each [`Block`], or the [`Unique`]) until the call ends.
+/// Dropping the descriptor closes the file without a wait, after its calls end.
+///
+/// ```
+/// fn len(descriptor: &dyn env::files::Descriptor) -> u64 {
+///     descriptor.len()
+/// }
+/// ```
+#[expect(
+    clippy::len_without_is_empty,
+    reason = "an empty file has no use, so nothing asks"
+)]
+pub trait Descriptor {
+    /// The length of the file in bytes. It does not change.
+    fn len(&self) -> u64;
+
+    /// Writes `parts` back to back at `offset`, which [`File`] has checked.
+    fn write_at<'a>(&'a self, offset: u64, parts: &'a [Block]) -> Request<'a, ()>;
+
+    /// Fills `into` from `offset`, which [`File`] has checked.
+    fn read_at(&self, offset: u64, into: Unique) -> Request<'_, Unique>;
+
+    /// Makes the writes that ended before the call durable.
+    fn sync(&self) -> Request<'_, ()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::task::{Context, Poll, Waker};
+
+    use super::*;
+
+    /// Answers every call at once. Files have `len` bytes, and syncs give `sync`.
+    struct Fixed {
+        len: u64,
+        sync: Result<(), Error>,
+        names: Vec<PathBuf>,
+        calls: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Fixed {
+        fn files(len: u64) -> (Files, Rc<RefCell<Vec<String>>>) {
+            Self::with_sync(len, Ok(()))
+        }
+
+        fn with_sync(
+            len: u64,
+            sync: Result<(), Error>,
+        ) -> (Files, Rc<RefCell<Vec<String>>>) {
+            let calls = Rc::default();
+            let driver = Self {
+                len,
+                sync,
+                names: vec!["b".into(), "c".into(), "a".into()],
+                calls: Rc::clone(&calls),
+            };
+            (Files::new(driver), calls)
+        }
+
+        fn record(&self, call: String) {
+            self.calls.borrow_mut().push(call);
+        }
+    }
+
+    impl Driver for Fixed {
+        fn open<'a>(
+            &'a self,
+            path: &'a Path,
+            mode: Mode,
+        ) -> Request<'a, Box<dyn Descriptor>> {
+            self.record(format!("open {} {mode:?}", path.display()));
+            let descriptor: Box<dyn Descriptor> = Box::new(Fixed {
+                len: self.len,
+                sync: self.sync.clone(),
+                names: Vec::new(),
+                calls: Rc::clone(&self.calls),
+            });
+            Box::pin(async { Ok(descriptor) })
+        }
+
+        fn list<'a>(&'a self, dir: &'a Path) -> Request<'a, Vec<PathBuf>> {
+            self.record(format!("list {}", dir.display()));
+            Box::pin(async { Ok(self.names.clone()) })
+        }
+
+        fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
+            self.record(format!("remove {}", path.display()));
+            Box::pin(async { Ok(()) })
+        }
+
+        fn sync_dir<'a>(&'a self, dir: &'a Path) -> Request<'a, ()> {
+            self.record(format!("sync_dir {}", dir.display()));
+            Box::pin(async { Ok(()) })
+        }
+
+        fn free(&self) -> Request<'_, u64> {
+            Box::pin(async { Ok(7) })
+        }
+    }
+
+    impl Descriptor for Fixed {
+        fn len(&self) -> u64 {
+            self.len
+        }
+
+        fn write_at<'a>(&'a self, offset: u64, parts: &'a [Block]) -> Request<'a, ()> {
+            self.record(format!("write_at {offset} {}", parts.len()));
+            Box::pin(async { Ok(()) })
+        }
+
+        fn read_at(&self, _: u64, into: Unique) -> Request<'_, Unique> {
+            Box::pin(async { Ok(into) })
+        }
+
+        fn sync(&self) -> Request<'_, ()> {
+            self.record("sync".into());
+            Box::pin(async { self.sync.clone() })
+        }
+    }
+
+    /// Never ends a sync.
+    struct Stuck;
+
+    impl Descriptor for Stuck {
+        fn len(&self) -> u64 {
+            0
+        }
+
+        fn write_at<'a>(&'a self, _: u64, _: &'a [Block]) -> Request<'a, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn read_at(&self, _: u64, into: Unique) -> Request<'_, Unique> {
+            Box::pin(async { Ok(into) })
+        }
+
+        fn sync(&self) -> Request<'_, ()> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn ready<T>(future: impl Future<Output = T>) -> T {
+        let mut future = std::pin::pin!(future);
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("the future is pending"),
+        }
+    }
+
+    fn open(files: &Files, mode: Mode) -> File {
+        ready(files.open(Path::new("ring/0"), mode)).expect("the driver opens")
+    }
+
+    fn io(operation: Operation) -> Error {
+        Error::Io {
+            path: "ring/0".into(),
+            operation,
+            code: 5,
+        }
+    }
+
+    mod paths {
+        use super::*;
+
+        #[test]
+        #[should_panic(
+            expected = "path /ring/0 is absolute; paths are relative to the data \
+                        directory"
+        )]
+        fn open_panics_on_an_absolute_path() {
+            let (files, _) = Fixed::files(0);
+            drop(ready(files.open(Path::new("/ring/0"), Mode::Read)));
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "path ring/../../etc has a `..` segment; paths stay inside the \
+                        data directory"
+        )]
+        fn open_panics_on_a_parent_segment() {
+            let (files, _) = Fixed::files(0);
+            drop(ready(files.open(Path::new("ring/../../etc"), Mode::Read)));
+        }
+
+        #[test]
+        #[should_panic(expected = "path /segments is absolute")]
+        fn list_panics_on_an_absolute_path() {
+            let (files, _) = Fixed::files(0);
+            drop(ready(files.list(Path::new("/segments"))));
+        }
+
+        #[test]
+        #[should_panic(expected = "path ../7 has a `..` segment")]
+        fn remove_panics_on_a_parent_segment() {
+            let (files, _) = Fixed::files(0);
+            drop(ready(files.remove(Path::new("../7"))));
+        }
+
+        #[test]
+        #[should_panic(expected = "path /segments is absolute")]
+        fn sync_dir_panics_on_an_absolute_path() {
+            let (files, _) = Fixed::files(0);
+            drop(ready(files.sync_dir(Path::new("/segments"))));
+        }
+
+        #[test]
+        fn passes_relative_paths_to_the_driver() {
+            let (files, calls) = Fixed::files(8);
+            open(&files, Mode::Write);
+            ready(files.list(Path::new(""))).expect("the driver lists");
+            ready(files.remove(Path::new("./segments/7"))).expect("the driver removes");
+            ready(files.sync_dir(Path::new("segments"))).expect("the driver syncs");
+            assert_eq!(
+                *calls.borrow(),
+                [
+                    "open ring/0 Write",
+                    "list ",
+                    "remove ./segments/7",
+                    "sync_dir segments"
+                ]
+            );
+        }
+    }
+
+    mod open {
+        use super::*;
+
+        #[test]
+        fn creates_a_file_of_the_asked_length() {
+            let (files, _) = Fixed::files(4_096);
+            assert_eq!(open(&files, Mode::Create { len: 4_096 }).len(), 4_096);
+        }
+
+        #[test]
+        fn fails_when_create_finds_another_length() {
+            let (files, _) = Fixed::files(512);
+            let e = ready(files.open(Path::new("ring/0"), Mode::Create { len: 4_096 }))
+                .expect_err("the lengths differ");
+            assert_eq!(
+                e,
+                Error::Length {
+                    path: "ring/0".into(),
+                    expected: 4_096,
+                    found: 512,
+                }
+            );
+        }
+
+        #[test]
+        fn opens_a_file_of_any_length_to_write() {
+            let (files, _) = Fixed::files(512);
+            assert_eq!(open(&files, Mode::Write).len(), 512);
+        }
+    }
+
+    mod list {
+        use super::*;
+
+        #[test]
+        fn sorts_the_names() {
+            let (files, _) = Fixed::files(0);
+            let names =
+                ready(files.list(Path::new("segments"))).expect("the driver lists");
+            assert_eq!(names, [Path::new("a"), Path::new("b"), Path::new("c")]);
+        }
+    }
+
+    mod write_at {
+        use super::*;
+
+        #[test]
+        fn forwards_a_write_inside_the_file() {
+            let (files, calls) = Fixed::files(8);
+            let file = open(&files, Mode::Write);
+            ready(file.write_at(8, &[])).expect("the driver writes");
+            assert_eq!(
+                calls.borrow().last().map(String::as_str),
+                Some("write_at 8 0")
+            );
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "write of 0 bytes at 9 ends past the end of ring/0 (8 bytes)"
+        )]
+        fn panics_past_the_end() {
+            let (files, _) = Fixed::files(8);
+            let file = open(&files, Mode::Write);
+            drop(ready(file.write_at(9, &[])));
+        }
+
+        #[test]
+        #[should_panic(expected = "write to ring/0, which was opened to read")]
+        fn panics_on_a_file_opened_to_read() {
+            let (files, _) = Fixed::files(8);
+            let file = open(&files, Mode::Read);
+            drop(ready(file.write_at(0, &[])));
+        }
+    }
+
+    mod sync {
+        use super::*;
+
+        #[test]
+        fn leaves_the_file_usable_after_a_success() {
+            let (files, calls) = Fixed::files(8);
+            let file = open(&files, Mode::Write);
+            ready(file.sync()).expect("the sync succeeds");
+            ready(file.sync()).expect("the sync succeeds");
+            assert_eq!(calls.borrow()[1..], ["sync", "sync"]);
+        }
+
+        #[test]
+        fn poisons_the_file_when_it_fails() {
+            let (files, calls) = Fixed::with_sync(8, Err(io(Operation::Sync)));
+            let file = open(&files, Mode::Write);
+            assert_eq!(ready(file.sync()), Err(io(Operation::Sync)));
+            let poisoned = Err(Error::Poisoned {
+                path: "ring/0".into(),
+            });
+            assert_eq!(ready(file.sync()), poisoned);
+            assert_eq!(ready(file.write_at(0, &[])), poisoned);
+            assert_eq!(
+                calls.borrow()[1..],
+                ["sync"],
+                "a poisoned call reached the driver"
+            );
+        }
+
+        #[test]
+        fn poisons_the_file_when_dropped_before_it_ends() {
+            let file = File {
+                descriptor: Box::new(Stuck),
+                path: "ring/0".into(),
+                mode: Mode::Write,
+                poisoned: Cell::new(false),
+            };
+            let mut sync = Box::pin(file.sync());
+            let poll = sync.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            assert_eq!(poll, Poll::Pending);
+            drop(sync);
+            assert_eq!(
+                ready(file.write_at(0, &[])),
+                Err(Error::Poisoned {
+                    path: "ring/0".into()
+                })
+            );
+        }
+    }
+
+    mod check_range {
+        use super::*;
+
+        fn file(len: u64) -> File {
+            File {
+                descriptor: Box::new(Fixed {
+                    len,
+                    sync: Ok(()),
+                    names: Vec::new(),
+                    calls: Rc::default(),
+                }),
+                path: "ring/0".into(),
+                mode: Mode::Write,
+                poisoned: Cell::new(false),
+            }
+        }
+
+        #[test]
+        fn accepts_a_range_that_ends_at_the_end() {
+            file(4_096).check_range("read", 4_000, 96);
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "read of 97 bytes at 4000 ends past the end of ring/0 \
+                        (4096 bytes)"
+        )]
+        fn panics_on_a_range_one_byte_too_long() {
+            file(4_096).check_range("read", 4_000, 97);
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "read of 2 bytes at 18446744073709551615 ends past the end"
+        )]
+        fn panics_when_the_end_overflows() {
+            file(u64::MAX).check_range("read", u64::MAX, 2);
+        }
+    }
+
+    mod error {
+        use super::*;
+
+        #[test]
+        fn names_the_path_when_the_disk_is_full() {
+            let e = Error::Full {
+                path: "segments/7".into(),
+            };
+            assert_eq!(e.to_string(), "no room on the disk for segments/7");
+        }
+
+        #[test]
+        fn tells_how_to_recover_from_poison() {
+            let e = Error::Poisoned {
+                path: "ring/0".into(),
+            };
+            assert_eq!(
+                e.to_string(),
+                "a sync of file ring/0 failed or was dropped; reopen it and recover"
+            );
+        }
+
+        #[test]
+        fn names_both_lengths() {
+            let e = Error::Length {
+                path: "ring/0".into(),
+                expected: 4_096,
+                found: 512,
+            };
+            assert_eq!(
+                e.to_string(),
+                "file ring/0 has 512 bytes, but 4096 bytes were expected"
+            );
+        }
+
+        #[test]
+        fn names_the_operation_and_the_code() {
+            assert_eq!(
+                io(Operation::WriteAt).to_string(),
+                "write_at of ring/0 failed with OS error 5"
+            );
+        }
+    }
+}
