@@ -115,6 +115,9 @@ git -C ~/Desktop/synnaxlabs/foundation worktree add \
 A builder makes a branch per issue inside its worktree. Never work in another session's
 worktree.
 
+Never share `CARGO_TARGET_DIR` between worktrees. Cargo gives a path crate the same hash
+in each, so a stale build of another worktree's code can pass or fail a gate.
+
 ## Issues
 
 Every task is a GitHub issue. An issue states its goal, the crates it owns, the tests
