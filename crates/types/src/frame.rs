@@ -1087,16 +1087,14 @@ mod tests {
 
     #[test]
     fn finds_an_index_that_is_not_just_before_its_data() {
-        let mut interner = interner();
-        interner.slots().assign(key(1));
-        interner.slots().assign(key(3));
-        let set = interner.intern(&[
+        // Key n has slot n, so both indexes sort before both data channels.
+        let set = interner().intern(&[
             Group {
                 index: key(1),
-                data: &[(key(2), F64)],
+                data: &[(key(3), F64)],
             },
             Group {
-                index: key(3),
+                index: key(2),
                 data: &[(key(4), F64)],
             },
         ]);
