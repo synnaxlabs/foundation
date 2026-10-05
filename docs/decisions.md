@@ -312,6 +312,20 @@ How to read this record:
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
   same estimator serves device clocks in the connector library.
+- **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about the node's monotonic
+  clock: its offset is mesh time minus the monotonic reading at `at`, and its error is
+  a half-width from 0 to 36500 days. Device clocks use the oscillator fit, whose issue
+  sets its input. A bound grows by the drift bound times the time from `at`, in both
+  directions. The drift bound is at most 10%; `Drift::UNDISCIPLINED` is 200 ppm. A
+  measured oscillator rate goes into `Drift` later, as an additive change. Each source
+  keeps its last 8 measurements and offers the one with the smallest bound now. This
+  reads R6 TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange
+  loses to a fresh slower one. `combine` takes one `Filter` per source and returns the
+  hull of the offsets inside the most bounds (Marzullo). It fails when no offset is
+  inside more than half of them. This reads C6's "follows the smallest measured
+  bound": when sources agree, the result is never wider than the narrowest. The
+  result holds the true offset when the bounds that hold it are a majority and every
+  other bound misses them. Decided by the `time` builder (#49).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -1516,8 +1530,8 @@ Parameters and later choices, recorded and not asked:
   grace, standby send point (after sync or on receipt), SSD rule for Pi homes.
 - Consensus and spec: Raft timeouts, prolly chunk size (~4 KiB) and chunker quality,
   root GC depth (last N roots).
-- Time: exchange period, source discovery period, drift rate for bound widening, stamp
-  limits near 1970 and far future (A5).
+- Time: exchange period, source discovery period, drift rate for bound widening
+  (starts at 200 ppm, ESTIMATE COMBINE), stamp limits near 1970 and far future (A5).
 - Transport: default carrier per traffic class (QUIC vs TLS over TCP, measured on
   Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection.
 - Compression and reduction defaults; retention defaults; disk budget defaults.
