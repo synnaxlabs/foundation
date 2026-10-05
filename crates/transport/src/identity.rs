@@ -34,8 +34,7 @@ impl Identity {
     /// ```
     #[must_use]
     pub fn public(&self) -> PublicKey {
-        let _ = self.private_key;
-        todo!("#54")
+        crate::tls::public(&self.private_key)
     }
 }
 
