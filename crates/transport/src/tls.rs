@@ -176,7 +176,8 @@ fn issue(key: &[u8], sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
 ///
 /// # Panics
 ///
-/// When the certificate carries no node key, which the verifiers refuse.
+/// When the chain is not one certificate that carries a node key, which the
+/// verifiers refuse.
 #[expect(
     clippy::unwrap_in_result,
     reason = "another key here is a verifier defect, not a peer error"
@@ -197,13 +198,13 @@ pub(crate) fn peer(
     })
 }
 
-/// The node key that a chain carries. A node's chain is `end_entity` alone, so any
-/// `intermediates` refuse it.
+/// The node key that a chain carries. Refuses a chain that is not one certificate of
+/// at most the template's size, so a peer cannot make the node hold more.
 fn key(
     end_entity: &CertificateDer<'_>,
     intermediates: &[CertificateDer<'_>],
 ) -> Result<PublicKey, rustls::Error> {
-    if !intermediates.is_empty() {
+    if !intermediates.is_empty() || end_entity.len() > CERTIFICATE_BYTES {
         return Err(CertificateError::ApplicationVerificationFailure.into());
     }
     let parsed = ParsedCertificate::try_from(end_entity)?;
@@ -442,11 +443,39 @@ mod tests {
         ))
     }
 
-    /// TLS that presents `tls`'s certificate, then 54 kB of junk certificates.
+    /// TLS that presents `tls`'s certificate twice.
     fn chained(tls: &Tls) -> Tls {
-        let mut chain = certified(tls).cert.clone();
-        chain.extend((0..6).map(|_| CertificateDer::from(vec![0xa5; 9_000])));
+        let chain = [certified(tls).cert.clone(), certified(tls).cert.clone()].concat();
         Tls::with(CertifiedKey::new(chain, Arc::clone(&certified(tls).key)))
+    }
+
+    /// TLS with one self-signed certificate for `private_key`, like the template but
+    /// with a subject name of `subject_bytes` junk bytes.
+    fn padded(private_key: &PrivateKey, subject_bytes: usize) -> Tls {
+        fn seq(content: &[u8]) -> Vec<u8> {
+            let len = u16::try_from(content.len()).expect("under 64 KiB");
+            [&[0x30, 0x82], len.to_be_bytes().as_slice(), content].concat()
+        }
+        let pair =
+            Ed25519KeyPair::from_seed_unchecked(&private_key.0).expect("32 bytes");
+        let subject = seq(&vec![0xa5; subject_bytes]);
+        // `TBS` without its header.
+        let tbs = seq(&[
+            &TBS[3..],
+            ED25519,
+            NAME,
+            VALIDITY,
+            &subject,
+            SPKI,
+            pair.public_key().as_ref(),
+        ]
+        .concat());
+        let signature = pair.sign(&tbs);
+        let der = seq(&[&tbs[..], ED25519, SIGNATURE, signature.as_ref()].concat());
+        Tls::with(CertifiedKey::new(
+            vec![der.into()],
+            Arc::clone(&certified(&Tls::new(private_key)).key),
+        ))
     }
 
     /// TLS with an ECDSA P-256 certificate, that signs with ECDSA whatever schemes
@@ -639,6 +668,28 @@ mod tests {
         }
 
         #[test]
+        fn when_client_certificate_is_padded_the_server_refuses() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let peers =
+                handshake(padded(&a, 60_000).client(public(&b)), Tls::new(&b).server());
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_server_certificate_is_padded_the_client_refuses() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let peers =
+                handshake(Tls::new(&a).client(public(&b)), padded(&b, 60_000).server());
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
         fn when_client_key_is_ecdsa_the_server_refuses() {
             let b = PrivateKey([2; 32]);
             let peers = handshake(ecdsa().client(public(&b)), Tls::new(&b).server());
@@ -792,6 +843,16 @@ mod tests {
                 .expect("the certificate has an Ed25519 key");
             // 1.3.101.112 (Ed25519) becomes 1.3.101.110 (X25519).
             der[at + 8] = 0x6e;
+            assert_eq!(
+                key(&CertificateDer::from(der), &[]),
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn refuses_a_certificate_over_the_template_size() {
+            let mut der = certificate(&Tls::new(&PrivateKey([1; 32]))).to_vec();
+            der.push(0);
             assert_eq!(
                 key(&CertificateDer::from(der), &[]),
                 Err(CertificateError::ApplicationVerificationFailure.into())

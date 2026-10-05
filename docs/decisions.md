@@ -654,23 +654,22 @@ How to read this record:
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
   the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
-  issuer are not checked. A peer's chain is that one certificate: a longer chain is
-  refused, so a peer cannot make the node hold more certificates for a session
-  (#299). A node sends its certificate when it dials; an SDK client sends none and
-  pins the node key the same way. ALPN is `foundation/1`, and a new
-  session protocol gets a new name. A session that agrees no ALPN, or another name,
-  ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
-  ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
-  dialing node offers them in that order, and the client's order decides, so nodes
-  agree AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between
-  nodes and "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so
-  an SDK may offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
-  reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS).
-  Decided by `network` in #54; the ALPN check, suites, and groups in #108. A key of
-  small order is not a node key: a signature for it passes with no private key, so
-  every Ed25519 check refuses it (BQ12). `types::node::PublicKey` refuses such a key
-  when it is built, so no check site needs its own test. The person decided on
-  2026-10-05 ("Yeah that's fine"), #227, #277.
+  issuer are not checked. A peer's chain is one certificate of at most the template's
+  219 bytes; any other chain is refused, so a peer cannot make the node hold more for a
+  session (#299). A node sends its certificate when it dials; an SDK client sends none
+  and pins the node key the same way. ALPN is `foundation/1`, and a new session protocol
+  gets a new name. A session that agrees no ALPN, or another name, ends on every
+  carrier. The suites are AES-128-GCM, AES-256-GCM, and ChaCha20-Poly1305; the groups
+  are X25519MLKEM768, X25519, P-256, and P-384. A dialing node offers them in that
+  order, and the client's order decides, so nodes agree AES-128-GCM and X25519MLKEM768.
+  The person chose "AES-128-GCM" first between nodes and "Hybrid first" on 2026-10-05. A
+  node accepts any one suite and group, so an SDK may offer only one. Resumption and
+  0-RTT are off, so rustls gets a fixed time and never reads the OS clock. Randomness
+  inside TLS comes from aws-lc (TLS RANDOMNESS). Decided by `network` in #54; the ALPN
+  check, suites, and groups in #108. A key of small order is not a node key: a signature
+  for it passes with no private key, so every Ed25519 check refuses it (BQ12).
+  `types::node::PublicKey` refuses such a key when it is built, so no check site needs
+  its own test. The person decided on 2026-10-05 ("Yeah that's fine"), #227, #277.
 
 ### 1.8 Consensus, regions, and the spec
 
