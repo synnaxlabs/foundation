@@ -7,5 +7,15 @@ publish.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+proptest = { workspace = true }
+
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
+
+[[test]]
+name = "alloc"
+harness = false
+
 [lints]
 workspace = true

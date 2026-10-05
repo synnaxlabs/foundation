@@ -3,7 +3,9 @@
 //! A leaf (level 0) entry is a key and a value. An entry of a higher level is the
 //! last key of a child chunk and the child's hash. A length is a LEB128 `u32`.
 
-use super::{Error, Hash};
+use types::digest::Digest;
+
+use super::Error;
 
 /// One entry of a chunk. `payload` is a value in a leaf and a child hash above.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,23 +15,23 @@ pub(super) struct Entry<'a> {
 }
 
 impl Entry<'_> {
-    pub(super) fn child(&self) -> Hash {
+    pub(super) fn child(&self) -> Digest {
         let bytes = self.payload.try_into();
-        Hash(bytes.expect("invariant: an entry above a leaf holds a 32-byte hash"))
+        Digest(bytes.expect("invariant: an entry above a leaf holds a 32-byte hash"))
     }
 }
 
 /// A chunk that was read and checked.
 #[derive(Debug)]
 pub(super) struct Node<'a> {
-    pub hash: Hash,
+    pub hash: Digest,
     pub level: u8,
     pub entries: Vec<Entry<'a>>,
 }
 
 impl<'a> Node<'a> {
     /// Reads the chunk `bytes`, whose hash is `hash`.
-    pub(super) fn read(hash: Hash, bytes: &'a [u8]) -> Result<Self, Error> {
+    pub(super) fn read(hash: Digest, bytes: &'a [u8]) -> Result<Self, Error> {
         let corrupt = Error::Corrupt(hash);
         let (&level, mut rest) = bytes.split_first().ok_or(corrupt)?;
         let mut entries = Vec::new();
@@ -123,7 +125,7 @@ mod tests {
     fn reads_the_leaf_entries_it_wrote() {
         let long = vec![7_u8; 300];
         let bytes = chunk(0, &[(b"", b"x"), (b"a", b""), (b"b.c", &long)]);
-        let node = Node::read(Hash::of(&bytes), &bytes).unwrap();
+        let node = Node::read(Digest::of(&bytes), &bytes).unwrap();
         assert_eq!(node.level, 0);
         let entries: Vec<_> = node.entries.iter().map(|e| (e.key, e.payload)).collect();
         assert_eq!(
@@ -135,9 +137,9 @@ mod tests {
 
     #[test]
     fn reads_the_child_hashes_it_wrote() {
-        let child = Hash::of(b"child");
+        let child = Digest::of(b"child");
         let bytes = chunk(2, &[(b"site_a.pt_9", &child.0)]);
-        let node = Node::read(Hash::of(&bytes), &bytes).unwrap();
+        let node = Node::read(Digest::of(&bytes), &bytes).unwrap();
         assert_eq!((node.level, node.entries.len()), (2, 1));
         assert_eq!(node.entries[0].child(), child);
     }
@@ -145,7 +147,7 @@ mod tests {
     #[test]
     fn rejects_bytes_that_are_not_a_chunk() {
         let whole = chunk(0, &[(b"key", b"value")]);
-        let short_hash = chunk(1, &[(b"key", &[0; 31])]);
+        let short_digest = chunk(1, &[(b"key", &[0; 31])]);
         let cases: [&[u8]; 11] = [
             b"",
             &[1],
@@ -158,11 +160,11 @@ mod tests {
             &[0, 0x80, 0x80, 0x80, 0x80, 0x10, 0],
             &whole[..whole.len() - 1],
             &whole[..2],
-            &short_hash,
+            &short_digest,
             &[0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
         ];
         for bytes in cases {
-            let hash = Hash::of(bytes);
+            let hash = Digest::of(bytes);
             let err = Node::read(hash, bytes).unwrap_err();
             assert_eq!(err, Error::Corrupt(hash), "{bytes:?}");
         }

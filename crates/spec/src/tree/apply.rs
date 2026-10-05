@@ -4,7 +4,9 @@ use types::name::Name;
 
 use super::chunk::Node;
 use super::chunker::{SCALE, Writer};
-use super::{Chunks, Error, Hash, empty};
+use types::digest::Digest;
+
+use super::{Chunks, Error, empty};
 
 /// One change to a tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,10 +21,10 @@ pub enum Change {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Update {
     /// The root hash of the changed tree.
-    pub root: Hash,
+    pub root: Digest,
     /// The hash of each chunk that is in the changed tree and not in the tree
     /// before, in hash order. The chunks are now in the [`Chunks`].
-    pub chunks: Vec<Hash>,
+    pub chunks: Vec<Digest>,
 }
 
 /// Changes the tree at `root`, and adds the chunks that it makes to `chunks`. The
@@ -39,20 +41,36 @@ pub struct Update {
 /// If a value is 4 GiB or larger.
 pub fn apply(
     chunks: &mut Chunks,
-    root: Hash,
+    root: Digest,
     changes: impl IntoIterator<Item = Change>,
 ) -> Result<Update, Error> {
     apply_at(chunks, SCALE, root, changes)
 }
 
 // A put or a delete of the entry with a key, at one level. The payload is a value
-// for a leaf and a child hash above.
+// for a leaf and a child digest above.
 type Edit<P> = (Vec<u8>, Option<P>);
+
+trait Payload {
+    fn bytes(&self) -> &[u8];
+}
+
+impl Payload for Vec<u8> {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl Payload for Digest {
+    fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 pub(super) fn apply_at(
     chunks: &mut Chunks,
     scale: u32,
-    root: Hash,
+    root: Digest,
     changes: impl IntoIterator<Item = Change>,
 ) -> Result<Update, Error> {
     let mut edits = BTreeMap::new();
@@ -97,7 +115,7 @@ pub(super) fn apply_at(
         }
         tops = BTreeMap::new();
         for (key, bytes) in writer.finish() {
-            let hash = Hash::of(&bytes);
+            let hash = Digest::of(&bytes);
             fresh.insert(hash, bytes);
             tops.insert(key, hash);
         }
@@ -113,9 +131,9 @@ pub(super) fn apply_at(
 // and removes from `fresh` each chunk that it passes.
 fn canonical(
     chunks: &Chunks,
-    fresh: &mut BTreeMap<Hash, Vec<u8>>,
-    top: Hash,
-) -> Result<Hash, Error> {
+    fresh: &mut BTreeMap<Digest, Vec<u8>>,
+    top: Digest,
+) -> Result<Digest, Error> {
     let mut root = top;
     let mut passed = Vec::new();
     loop {
@@ -143,19 +161,19 @@ fn canonical(
 
 // Applies `edits` (in key order) to the chunks of `level`. Puts each chunk that it
 // makes into `fresh`, and returns the edits for the level above.
-fn rewrite<P: AsRef<[u8]>>(
+fn rewrite<P: Payload>(
     chunks: &Chunks,
     scale: u32,
-    root: Hash,
+    root: Digest,
     level: u8,
     mut edits: &[Edit<P>],
-    fresh: &mut BTreeMap<Hash, Vec<u8>>,
-) -> Result<Vec<Edit<Hash>>, Error> {
+    fresh: &mut BTreeMap<Digest, Vec<u8>>,
+) -> Result<Vec<Edit<Digest>>, Error> {
     let mut up = BTreeMap::new();
     while let Some((first, _)) = edits.first() {
         let mut cursor = Cursor::seek(chunks, root, level, first)?;
         let mut writer = Writer::new(scale, level);
-        let mut old: BTreeMap<&[u8], Hash> = BTreeMap::new();
+        let mut old: BTreeMap<&[u8], Digest> = BTreeMap::new();
         loop {
             for entry in &cursor.node.entries {
                 let mut replaced = false;
@@ -164,7 +182,7 @@ fn rewrite<P: AsRef<[u8]>>(
                 {
                     replaced = key.as_slice() == entry.key;
                     if let Some(payload) = payload {
-                        writer.push(key, payload.as_ref());
+                        writer.push(key, payload.bytes());
                     }
                     edits = rest;
                 }
@@ -179,7 +197,7 @@ fn rewrite<P: AsRef<[u8]>>(
             if !cursor.advance()? {
                 for (key, payload) in std::mem::take(&mut edits) {
                     if let Some(payload) = payload {
-                        writer.push(key, payload.as_ref());
+                        writer.push(key, payload.bytes());
                     }
                 }
                 break;
@@ -191,7 +209,7 @@ fn rewrite<P: AsRef<[u8]>>(
             }
         }
         for (key, bytes) in writer.finish() {
-            let hash = Hash::of(&bytes);
+            let hash = Digest::of(&bytes);
             if old.get(key.as_slice()) == Some(&hash) {
                 up.remove(&key);
             } else {
@@ -215,7 +233,7 @@ impl<'a> Cursor<'a> {
     // Finds the chunk of `level` that holds `key`, or would hold it.
     pub(super) fn seek(
         chunks: &'a Chunks,
-        root: Hash,
+        root: Digest,
         level: u8,
         key: &[u8],
     ) -> Result<Self, Error> {

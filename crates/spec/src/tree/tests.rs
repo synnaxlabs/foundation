@@ -18,12 +18,12 @@ type Pair = (Name, Option<Vec<u8>>, Option<Vec<u8>>);
 
 // Some names are longer than a chunk at the small scale.
 fn name(id: u16) -> Name {
-    let long = if id.is_multiple_of(41) { 300 } else { 0 };
+    let long = if id.is_multiple_of(41) { 230 } else { 0 };
     let name = format!("site_{}.pt_{id}{}", id % 7, "x".repeat(long));
     name.parse().unwrap()
 }
 
-fn step(chunks: &mut Chunks, scale: u32, root: Hash, steps: &[Step]) -> Update {
+fn step(chunks: &mut Chunks, scale: u32, root: Digest, steps: &[Step]) -> Update {
     let changes = steps.iter().map(|(id, value)| match value {
         Some(value) => Change::Set(name(*id), value.clone()),
         None => Change::Delete(name(*id)),
@@ -31,17 +31,17 @@ fn step(chunks: &mut Chunks, scale: u32, root: Hash, steps: &[Step]) -> Update {
     apply_at(chunks, scale, root, changes).unwrap()
 }
 
-fn build(chunks: &mut Chunks, scale: u32, model: &Model) -> Hash {
+fn build(chunks: &mut Chunks, scale: u32, model: &Model) -> Digest {
     let changes: Vec<_> = model.iter().map(|(id, v)| (*id, Some(v.clone()))).collect();
     step(chunks, scale, empty(), &changes).root
 }
 
-fn hashes(update: &Update) -> BTreeSet<Hash> {
+fn hashes(update: &Update) -> BTreeSet<Digest> {
     update.chunks.iter().copied().collect()
 }
 
 // Each chunk of the tree at `root`, without the chunk of the empty tree.
-fn reachable(chunks: &Chunks, root: Hash) -> BTreeSet<Hash> {
+fn reachable(chunks: &Chunks, root: Digest) -> BTreeSet<Digest> {
     let mut found = BTreeSet::new();
     let mut level = vec![chunks.node(root).unwrap()];
     while let Some(first) = level.first() {
@@ -55,7 +55,7 @@ fn reachable(chunks: &Chunks, root: Hash) -> BTreeSet<Hash> {
     found
 }
 
-fn height(chunks: &Chunks, root: Hash) -> usize {
+fn height(chunks: &Chunks, root: Digest) -> usize {
     usize::from(chunks.node(root).unwrap().level) + 1
 }
 
@@ -199,7 +199,7 @@ fn a_missing_chunk_is_named() {
     assert_eq!(apply(&mut none, root, []), Err(Error::Missing(root)));
     assert_eq!(diff(&none, root, empty()), Err(Error::Missing(root)));
     assert_eq!(
-        Error::Missing(Hash([0x1f; 32])).to_string(),
+        Error::Missing(Digest([0x1f; 32])).to_string(),
         format!("chunk {} is not here", "1f".repeat(32)),
     );
 }
@@ -248,7 +248,7 @@ fn a_missing_chunk_after_the_change_is_named() {
 }
 
 // Builds a chunk from parts, as a peer with a fault can.
-fn raw(chunks: &mut Chunks, level: u8, entries: &[(&str, &[u8])]) -> Hash {
+fn raw(chunks: &mut Chunks, level: u8, entries: &[(&str, &[u8])]) -> Digest {
     let mut bytes = vec![level];
     for (key, payload) in entries {
         chunk::write(&mut bytes, level, key.as_bytes(), payload);
@@ -286,27 +286,23 @@ fn a_child_with_another_last_key_is_named() {
     assert_eq!(diff(&chunks, empty(), root), Err(Error::Corrupt(shared)));
 }
 
+// A chunk at the small scale is shorter than the longest name, so this covers the
+// rule that a chunk above the leaves holds two entries.
 #[test]
 fn a_name_longer_than_a_chunk_fits_in_the_tree() {
-    let long: Name = "a".repeat(3 * 4096).parse().unwrap();
-    let changes = [
-        Change::Set(long.clone(), vec![1]),
-        Change::Set(name(1), vec![2]),
-    ];
+    let long: Name = "a".repeat(255).parse().unwrap();
     let mut chunks = Chunks::default();
-    let root = apply(&mut chunks, empty(), changes).unwrap().root;
-    assert_eq!(get(&chunks, root, &long), Ok(Some(&[1][..])));
-    assert_eq!(get(&chunks, root, &name(1)), Ok(Some(&[2][..])));
-
-    let mut chunks = Chunks::default();
-    let update = plant(&mut chunks);
+    let model: Model = (0..500).map(|id| (id, vec![1; 20])).collect();
+    let root = build(&mut chunks, SMALL, &model);
     let change = [Change::Set(long.clone(), vec![1])];
-    let root = apply(&mut chunks, update.root, change.clone())
-        .unwrap()
-        .root;
-    let all = (0..50_000).map(set).chain(change);
-    let whole = apply(&mut Chunks::default(), empty(), all).unwrap().root;
-    assert_eq!(root, whole);
+    let update = apply_at(&mut chunks, SMALL, root, change.clone()).unwrap();
+    assert_eq!(get(&chunks, update.root, &long), Ok(Some(&[1][..])));
+    assert_eq!(get(&chunks, update.root, &name(1)), Ok(Some(&[1; 20][..])));
+
+    let steps: Vec<Step> = model.into_iter().map(|(id, v)| (id, Some(v))).collect();
+    let mut whole = Chunks::default();
+    let first = apply_at(&mut whole, SMALL, empty(), change).unwrap().root;
+    assert_eq!(update.root, step(&mut whole, SMALL, first, &steps).root);
 }
 
 #[test]
@@ -320,7 +316,7 @@ fn bytes_that_are_not_a_chunk_are_named() {
     let root = chunks.insert(vec![0, 1, b'!', 0]);
     assert_eq!(diff(&chunks, empty(), root), Err(Error::Corrupt(root)));
     assert_eq!(
-        Error::Corrupt(Hash([0x1f; 32])).to_string(),
+        Error::Corrupt(Digest([0x1f; 32])).to_string(),
         format!("chunk {} is not a chunk of a spec tree", "1f".repeat(32)),
     );
 }
@@ -397,7 +393,7 @@ proptest! {
             let update = step(&mut chunks, SMALL, root, batch);
             let old = reachable(&chunks, root);
             let new = reachable(&chunks, update.root);
-            let made: BTreeSet<Hash> = new.difference(&old).copied().collect();
+            let made: BTreeSet<Digest> = new.difference(&old).copied().collect();
             prop_assert_eq!(hashes(&update), made);
             let diff = diff(&chunks, root, update.root).unwrap();
             prop_assert_eq!(&diff.chunks, &update.chunks);
@@ -435,7 +431,7 @@ proptest! {
         prop_assert_eq!(pairs(&diff), changed(&old, &new));
         let old_chunks = reachable(&chunks, old_root);
         let new_chunks = reachable(&chunks, new_root);
-        let made: Vec<Hash> = new_chunks.difference(&old_chunks).copied().collect();
+        let made: Vec<Digest> = new_chunks.difference(&old_chunks).copied().collect();
         prop_assert_eq!(diff.chunks, made);
     }
 }

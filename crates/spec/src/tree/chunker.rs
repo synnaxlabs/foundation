@@ -3,6 +3,8 @@
 use super::chunk;
 
 /// The scale of the chunk size distribution, in bytes.
+use types::digest::Digest;
+
 pub(super) const SCALE: u32 = 4096;
 
 // A larger scale takes the powers in `boundary` out of range.
@@ -31,10 +33,11 @@ fn boundary(scale: u32, level: u8, key: &[u8], start: usize, end: usize) -> bool
     if end >= 4 * scale {
         return true;
     }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&[level]).update(key);
-    let hash = hasher.finalize();
-    let (draw, _) = hash.as_bytes().split_at(8);
+    let mut keyed = Vec::with_capacity(key.len() + 1);
+    keyed.push(level);
+    keyed.extend_from_slice(key);
+    let digest = Digest::of(&keyed);
+    let (draw, _) = digest.0.split_at(8);
     let draw = u64::from_le_bytes(draw.try_into().expect("invariant: split at 8"));
     // draw / 2^64 < (end^4 - start^4) / scale^4
     u128::from(draw) * scale.pow(4) < (end.pow(4) - start.pow(4)) << 64

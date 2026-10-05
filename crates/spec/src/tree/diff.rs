@@ -3,7 +3,9 @@ use std::collections::BTreeSet;
 use types::name::Name;
 
 use super::chunk::{Entry, Node};
-use super::{Chunks, Error, Hash};
+use types::digest::Digest;
+
+use super::{Chunks, Error};
 
 /// The result of [`diff`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -13,7 +15,7 @@ pub struct Diff<'a> {
     pub changes: Vec<Changed<'a>>,
     /// The hash of each chunk that is in the new tree and not in the old tree, in
     /// hash order.
-    pub chunks: Vec<Hash>,
+    pub chunks: Vec<Digest>,
 }
 
 /// An entry that differs between two trees.
@@ -34,7 +36,7 @@ pub struct Changed<'a> {
 ///
 /// [`Error::Missing`] if one of those chunks is not in `chunks`. [`Error::Corrupt`]
 /// if one of them does not fit in a tree, or has a key that is not a name.
-pub fn diff(chunks: &Chunks, old: Hash, new: Hash) -> Result<Diff<'_>, Error> {
+pub fn diff(chunks: &Chunks, old: Digest, new: Digest) -> Result<Diff<'_>, Error> {
     let mut diff = Diff::default();
     if old == new {
         return Ok(diff);
@@ -45,8 +47,8 @@ pub fn diff(chunks: &Chunks, old: Hash, new: Hash) -> Result<Diff<'_>, Error> {
         let old_level = olds.first().map_or(0, |node| node.level);
         let new_level = news.first().map_or(0, |node| node.level);
         if old_level == new_level {
-            let same: BTreeSet<Hash> = olds.iter().map(|node| node.hash).collect();
-            let same: BTreeSet<Hash> = news
+            let same: BTreeSet<Digest> = olds.iter().map(|node| node.hash).collect();
+            let same: BTreeSet<Digest> = news
                 .iter()
                 .map(|node| node.hash)
                 .filter(|hash| same.contains(hash))
@@ -117,7 +119,7 @@ pub(super) fn children<'a>(
 
 fn entries<'a, 'b>(
     nodes: &'b [Node<'a>],
-) -> impl Iterator<Item = (Hash, Entry<'a>)> + 'b {
+) -> impl Iterator<Item = (Digest, Entry<'a>)> + 'b {
     nodes
         .iter()
         .flat_map(|node| node.entries.iter().map(|&entry| (node.hash, entry)))

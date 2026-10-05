@@ -1,8 +1,8 @@
 //! The prolly tree that holds the spec of one region: entries in name order, cut into
-//! chunks at boundaries that the content decides, each chunk addressed by its hash.
+//! chunks at boundaries that the content decides, each chunk addressed by its digest.
 //!
 //! The tree is a function of its entries. The same entries give the same chunks and
-//! the same root hash, in any order of changes. A change rewrites only the chunks
+//! the same root digest, in any order of changes. A change rewrites only the chunks
 //! near it and their parents.
 //!
 //! The tree does no I/O. The caller keeps the chunk bytes, puts the chunks that an
@@ -19,25 +19,24 @@ mod apply;
 mod chunk;
 mod chunker;
 mod diff;
-mod hash;
 
 use std::collections::BTreeMap;
 use std::fmt;
 
+use types::digest::Digest;
 use types::name::Name;
 
 use chunk::{Entry, Node};
 
 pub use apply::{Change, Update, apply};
 pub use diff::{Changed, Diff, diff};
-pub use hash::Hash;
 
 const EMPTY: &[u8] = &[0];
 
-/// The root hash of the tree with no entries. A [`Chunks`] does not need its chunk.
+/// The root digest of the tree with no entries. A [`Chunks`] does not need its chunk.
 #[must_use]
-pub fn empty() -> Hash {
-    Hash::of(EMPTY)
+pub fn empty() -> Digest {
+    Digest::of(EMPTY)
 }
 
 /// A tree operation that cannot finish.
@@ -45,9 +44,9 @@ pub fn empty() -> Hash {
 pub enum Error {
     /// The operation needs a chunk that the [`Chunks`] does not hold. Add the chunk
     /// and run the operation again. Each run names one chunk.
-    Missing(Hash),
-    /// The bytes with this hash are not a chunk that fits at its place in a tree.
-    Corrupt(Hash),
+    Missing(Digest),
+    /// The bytes with this digest are not a chunk that fits at its place in a tree.
+    Corrupt(Digest),
 }
 
 impl fmt::Display for Error {
@@ -63,25 +62,25 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The chunks that tree operations can read, by hash.
+/// The chunks that tree operations can read, by digest.
 #[derive(Clone, Debug, Default)]
-pub struct Chunks(BTreeMap<Hash, Vec<u8>>);
+pub struct Chunks(BTreeMap<Digest, Vec<u8>>);
 
 impl Chunks {
-    /// Adds a chunk and returns its hash.
-    pub fn insert(&mut self, bytes: Vec<u8>) -> Hash {
-        let hash = Hash::of(&bytes);
+    /// Adds a chunk and returns its digest.
+    pub fn insert(&mut self, bytes: Vec<u8>) -> Digest {
+        let hash = Digest::of(&bytes);
         self.0.insert(hash, bytes);
         hash
     }
 
     /// Returns the bytes of a chunk.
     #[must_use]
-    pub fn get(&self, hash: Hash) -> Option<&[u8]> {
+    pub fn get(&self, hash: Digest) -> Option<&[u8]> {
         self.0.get(&hash).map(Vec::as_slice)
     }
 
-    fn node(&self, hash: Hash) -> Result<Node<'_>, Error> {
+    fn node(&self, hash: Digest) -> Result<Node<'_>, Error> {
         let bytes = match self.0.get(&hash) {
             Some(bytes) => bytes,
             None if hash == empty() => EMPTY,
@@ -111,7 +110,7 @@ impl Chunks {
 /// [`Error::Corrupt`] if a chunk on that path does not fit in a tree.
 pub fn get<'a>(
     chunks: &'a Chunks,
-    root: Hash,
+    root: Digest,
     name: &Name,
 ) -> Result<Option<&'a [u8]>, Error> {
     let key = name.as_str().as_bytes();
