@@ -243,6 +243,14 @@ How to read this record:
   (natural order), RLE; timestamps add stride; floats raw, ALP, fdelta, RLE; `max` mode
   adds pco. No zstd and no ALP_rd. Policy: `compression { select, mode = auto, raw, or
   max }`, default `auto`. The validator is the top fuzz target.
+- **CODEC FORMAT V1 (#4)** A vector is a tag byte, a bit width byte, header fields,
+  zeros to a multiple of the sample width, then a body padded the same way. Tags: 0
+  raw; 1 FFOR (reference); 2 delta (first, base); 3 RLE (`u16` run count, then the
+  values, then `u16` lengths). FFOR and delta residuals are modulo the sample width,
+  packed least significant bit first. Raw and RLE have width 0. Integers, `Stamp`, and
+  `Span` use all four tags; other scalars use raw. The validator checks tags, widths,
+  lengths, and run sums, not padding. `max_len` (raw plus one raw header per vector)
+  sizes the output, and the encoder makes one pass.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
