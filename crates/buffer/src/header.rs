@@ -1,6 +1,6 @@
 //! The ring header: what the ring knows about itself between opens. Two blocks at
-//! the start of the ring hold the last two checkpoints, so a torn write of one
-//! leaves the other whole.
+//! the start of the ring hold the last two checkpoints, so a fault that no crash
+//! makes (a bad sector, a stray write) in one leaves the other.
 //!
 //! ```text
 //! [magic: 8][version: u16][area: u64][body_max: u32][tail offset: u64]
@@ -10,8 +10,8 @@
 //! Integers are little-endian. The CRC is at offset 42 and covers the rest of the
 //! first 512-byte sector, so a checkpoint is in one sector, which a crash keeps
 //! whole or old. A later version may put fields after the CRC in that sector and
-//! this version still reads the block and reports its version. Nothing reads the
-//! bytes past the sector.
+//! this version still reads the block and reports its version. A decode does not
+//! read the bytes past the sector.
 
 #![deny(
     clippy::indexing_slicing,
@@ -26,7 +26,7 @@ use crate::wal::{Layout, Position, Unaligned, Unfit};
 const MAGIC: [u8; 8] = *b"FNDNRING";
 const VERSION: u16 = 1;
 /// The place of the CRC: right after the fields.
-const CRC: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
+const CRC_AT: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
 /// A disk sector, which a crash keeps whole or old. The CRC covers the first one.
 const SECTOR: usize = 512;
 
@@ -118,7 +118,7 @@ impl Header {
             rest = after;
         }
         let crc = crc(&block).to_le_bytes();
-        let (_, rest) = block.split_at_mut(CRC);
+        let (_, rest) = block.split_at_mut(CRC_AT);
         let (slot, _) = rest
             .split_first_chunk_mut::<4>()
             .expect("invariant: the CRC is in the block");
@@ -175,7 +175,7 @@ fn later(seq: u64, than: u64) -> bool {
 /// The CRC of the first sector of `block`, less the four bytes that hold it.
 fn crc(block: &[u8; ALIGN]) -> u32 {
     let (sector, _) = block.split_at(SECTOR);
-    let (fields, rest) = sector.split_at(CRC);
+    let (fields, rest) = sector.split_at(CRC_AT);
     let (_, after) = rest.split_at(4);
     crc32c::append(crc32c::append(0, fields), after)
 }
@@ -193,7 +193,7 @@ struct Fields {
 
 impl Fields {
     fn read(block: &[u8; ALIGN]) -> Option<Self> {
-        let (fields, rest) = block.split_at(CRC);
+        let (fields, rest) = block.split_at(CRC_AT);
         let (stored, _) = rest.split_first_chunk::<4>()?;
         if crc(block) != u32::from_le_bytes(*stored) {
             return None;
@@ -247,7 +247,7 @@ mod tests {
     /// Puts the CRC of the block after its fields.
     fn seal(block: &mut [u8; ALIGN]) {
         let crc = crc(block).to_le_bytes();
-        block[CRC..CRC + 4].copy_from_slice(&crc);
+        block[CRC_AT..CRC_AT + 4].copy_from_slice(&crc);
     }
 
     fn any_header() -> impl Strategy<Value = Header> {
@@ -273,10 +273,10 @@ mod tests {
         expected.extend((2 * 4096u64).to_le_bytes());
         expected.extend(0x0102_0304u32.to_le_bytes());
         expected.extend(7u64.to_le_bytes());
-        assert_eq!(&block[..CRC], &expected[..]);
-        assert_eq!(CRC, 42);
-        assert_eq!(block[CRC..CRC + 4], [0xAF, 0xFD, 0x89, 0xEE]);
-        assert!(block[CRC + 4..].iter().all(|byte| *byte == 0));
+        assert_eq!(&block[..CRC_AT], &expected[..]);
+        assert_eq!(CRC_AT, 42);
+        assert_eq!(block[CRC_AT..CRC_AT + 4], [0xAF, 0xFD, 0x89, 0xEE]);
+        assert!(block[CRC_AT + 4..].iter().all(|byte| *byte == 0));
     }
 
     /// A crash keeps a sector whole or old, so a checkpoint in one sector is never
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn tells_a_damaged_ring_from_no_ring() {
         let mut block = header(8 * 4096, 4087, 0, 1, 0).encode();
-        block[CRC] ^= 1;
+        block[CRC_AT] ^= 1;
         assert_eq!(Header::decode(&block, &[0; ALIGN]), Err(Error::Damaged));
         assert_eq!(Header::decode(&[0; ALIGN], &block), Err(Error::Damaged));
     }
@@ -344,7 +344,7 @@ mod tests {
     fn refuses_a_version_it_does_not_read() {
         let mut block = header(8 * 4096, 4087, 0, 1, 3).encode();
         block[8..10].copy_from_slice(&2u16.to_le_bytes());
-        block[CRC + 4..CRC + 12].copy_from_slice(&u64::MAX.to_le_bytes());
+        block[CRC_AT + 4..CRC_AT + 12].copy_from_slice(&u64::MAX.to_le_bytes());
         seal(&mut block);
         let older = header(8 * 4096, 4087, 0, 1, 2).encode();
         assert_eq!(Header::decode(&block, &older), Err(Error::Version(2)));
