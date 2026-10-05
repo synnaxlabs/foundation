@@ -190,7 +190,7 @@ impl Draft {
         series: &[(usize, usize)],
     ) -> Result<Self, Error> {
         let (groups, len) = measure(set, series)?;
-        let start = HEAD + RANGE * groups + DESCRIPTOR * series.len();
+        let start = body_start(groups, series.len());
         let mut block = pool.alloc(start.saturating_add(len))?;
         let head = &mut block[..HEAD];
         head.fill(0);
@@ -332,6 +332,17 @@ impl Frame {
     pub fn charge(&self) -> u64 {
         to_u64(block::footprint(self.0.len()))
     }
+
+    /// The series bytes of every present entry, as one view that shares the frame's
+    /// block, from the first series to the end. The end of each series in the
+    /// descriptors is an offset into this view. Copies nothing. Until it drops, the
+    /// view keeps the whole block in use: [`Frame::charge`] bytes of the pool, not its
+    /// length.
+    #[must_use]
+    pub fn body(&self) -> block::Block {
+        let (ranges, series) = counts(&self.0);
+        self.0.clone().skip(body_start(ranges, series))
+    }
 }
 
 /// The present groups of a frame of `series`, and the bytes of its series with the
@@ -360,8 +371,8 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
 /// A frame's ranges, its descriptors, and its series bytes.
 fn split(bytes: &[u8]) -> (&[[u8; RANGE]], &[[u8; DESCRIPTOR]], &[u8]) {
     let (ranges, series) = counts(bytes);
-    let (ranges, rest) = bytes[HEAD..].split_at(RANGE * ranges);
-    let (descriptors, body) = rest.split_at(DESCRIPTOR * series);
+    let (head, body) = bytes.split_at(body_start(ranges, series));
+    let (ranges, descriptors) = head[HEAD..].split_at(RANGE * ranges);
     (ranges.as_chunks().0, descriptors.as_chunks().0, body)
 }
 
@@ -369,13 +380,19 @@ fn split_mut(
     bytes: &mut [u8],
 ) -> (&mut [[u8; RANGE]], &mut [[u8; DESCRIPTOR]], &mut [u8]) {
     let (ranges, series) = counts(bytes);
-    let (ranges, rest) = bytes[HEAD..].split_at_mut(RANGE * ranges);
-    let (descriptors, body) = rest.split_at_mut(DESCRIPTOR * series);
+    let (head, body) = bytes.split_at_mut(body_start(ranges, series));
+    let (ranges, descriptors) = head[HEAD..].split_at_mut(RANGE * ranges);
     (
         ranges.as_chunks_mut().0,
         descriptors.as_chunks_mut().0,
         body,
     )
+}
+
+/// Where the series bytes start in a frame of `ranges` ranges and `series`
+/// descriptors.
+const fn body_start(ranges: usize, series: usize) -> usize {
+    HEAD + RANGE * ranges + DESCRIPTOR * series
 }
 
 /// The counts of ranges and descriptors in a frame's header.
@@ -588,6 +605,43 @@ mod tests {
             assert_eq!(frame.charge(), charge, "{series:?}");
             assert_eq!(frame.charge(), taken, "{series:?}");
         }
+    }
+
+    #[test]
+    fn views_the_series_bytes() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        let series = [(0, 3), (1, 0), (2, 9)];
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
+        draft.series(0).unwrap().fill(1);
+        draft.series(2).unwrap().fill(2);
+        let frame = draft.freeze(Path::Live);
+        let expected = [[1, 1, 1, 0, 0, 0, 0, 0].as_slice(), &[2; 9]].concat();
+        assert_eq!(&*frame.body(), expected.as_slice());
+        let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
+        assert!(empty.freeze(Path::Live).body().is_empty());
+    }
+
+    #[test]
+    fn gives_the_block_back_when_the_frame_and_view_drop() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        let series = [(0, 3), (1, 0), (2, 9)];
+        let frame = Draft::new(&pool, &set, Form::Raw, &series)
+            .unwrap()
+            .freeze(Path::Live);
+        let committed = pool.committed();
+        let len = frame.0.len();
+        let body = frame.body();
+        drop(frame);
+        drop(body);
+        let again = pool.alloc(len).unwrap();
+        assert_eq!(
+            pool.committed(),
+            committed,
+            "the pool reuses the frame's block"
+        );
+        drop(again);
     }
 
     #[test]
@@ -882,6 +936,12 @@ mod tests {
             .iter()
             .map(|(entry, bytes)| (entry, bytes.to_vec()))
             .collect();
+        let mut body = Vec::new();
+        for (_, bytes) in &written {
+            body.resize(body.len().next_multiple_of(SERIES_ALIGN), 0);
+            body.extend(bytes);
+        }
+        prop_assert_eq!(&*frame.body(), body.as_slice());
         prop_assert_eq!(read, written);
         Ok(())
     }

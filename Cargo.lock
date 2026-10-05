@@ -288,6 +288,13 @@ dependencies = [
 [[package]]
 name = "connector"
 version = "0.0.0"
+dependencies = [
+ "counting",
+ "env",
+ "proptest",
+ "sim",
+ "types",
+]
 
 [[package]]
 name = "constant_time_eq"
@@ -730,6 +737,11 @@ dependencies = [
 [[package]]
 name = "node"
 version = "0.0.0"
+dependencies = [
+ "env",
+ "loom",
+ "sim",
+]
 
 [[package]]
 name = "noq"
@@ -1249,6 +1261,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "sim"
 version = "0.0.0"
 dependencies = [
+ "block",
  "env",
  "proptest",
  "types",
