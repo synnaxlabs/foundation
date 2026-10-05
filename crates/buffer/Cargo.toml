@@ -6,9 +6,20 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+crc32c = { workspace = true }
+
+[features]
+# Entry points for the benchmark and the allocation test. Not a contract.
+bench = []
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+divan = { workspace = true }
 proptest = { workspace = true }
+
+[[bench]]
+name = "ring"
+harness = false
+required-features = ["bench"]

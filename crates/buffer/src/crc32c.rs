@@ -1,29 +1,4 @@
-//! CRC32C (Castagnoli).
-
-/// The Castagnoli polynomial, bit-reflected.
-const POLY: u32 = 0x82F6_3B78;
-
-const TABLE: [u32; 256] = table();
-
-const fn table() -> [u32; 256] {
-    let mut table = [0; 256];
-    let mut byte = 0u32;
-    while byte < 256 {
-        let mut crc = byte;
-        let mut bit = 0;
-        while bit < 8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ POLY
-            } else {
-                crc >> 1
-            };
-            bit += 1;
-        }
-        table[byte as usize] = crc;
-        byte += 1;
-    }
-    table
-}
+//! CRC32C (Castagnoli), with the hardware instruction where the CPU has one.
 
 /// A running CRC32C over the bytes given so far.
 #[derive(Clone, Copy, Debug)]
@@ -31,23 +6,20 @@ pub(crate) struct Crc32c(u32);
 
 impl Crc32c {
     pub(crate) const fn new() -> Self {
-        Self(!0)
+        Self(0)
     }
 
     /// Continues from the `finish` value of earlier bytes.
     pub(crate) const fn resume(crc: u32) -> Self {
-        Self(!crc)
+        Self(crc)
     }
 
     pub(crate) fn update(&mut self, bytes: &[u8]) {
-        self.0 = bytes.iter().fold(self.0, |crc, &byte| {
-            let [low, ..] = crc.to_le_bytes();
-            TABLE[usize::from(low ^ byte)] ^ (crc >> 8)
-        });
+        self.0 = crc32c::crc32c_append(self.0, bytes);
     }
 
     pub(crate) const fn finish(self) -> u32 {
-        !self.0
+        self.0
     }
 }
 
