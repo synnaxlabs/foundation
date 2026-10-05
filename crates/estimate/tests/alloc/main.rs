@@ -17,11 +17,11 @@ fn main() {
         "the allocator counts"
     );
 
-    let estimate = |offset| Measurement::new(Monotonic(0), offset, Span::MICROSECOND);
-    let first = estimate(Span::ZERO).expect("valid");
-    let target = estimate(Span::MILLISECOND).expect("valid");
+    let estimate = |offset, error| Measurement::new(Monotonic(0), offset, error);
+    let first = estimate(Span::ZERO, Span::MILLISECOND).expect("valid");
+    let target = estimate(Span::MILLISECOND, Span::MICROSECOND).expect("valid");
     let (m, allocations) = ALLOCATOR.count(|| {
-        let slew = Slew::new(first).toward(Monotonic(0), target);
+        let slew = Slew::new(first).toward(Monotonic(0), Drift::UNDISCIPLINED, target);
         slew.at(Monotonic(1_000_000_000), Drift::UNDISCIPLINED)
     });
     assert_eq!(allocations, 0, "the hot path allocated");

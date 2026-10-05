@@ -5,19 +5,24 @@ use crate::{Drift, Measurement};
 /// The fastest the served offset moves, in parts per million of local time.
 const RATE_PPM: u64 = 500;
 
-/// Mesh time that moves toward a target estimate at no more than 500 ppm, so it never
-/// goes back. Mesh time at a local reading is the reading plus the offset served
-/// there. The part of the target not yet applied goes into the error, so the estimate
-/// holds the true offset while the slew runs. Every value is valid.
+/// Mesh time that moves toward a target estimate at no more than 500 ppm, or steps
+/// forward to it when mesh time is surely behind. It never goes back. Mesh time at a
+/// local reading is the reading plus the offset served there. The part of the target
+/// not yet applied goes into the error, so the estimate holds the true offset while
+/// the slew runs. Every value is valid.
 ///
 /// ```
 /// use estimate::{Drift, Measurement, Slew};
 /// use types::time::{Monotonic, Span};
 ///
 /// let second = Monotonic(1_000_000_000);
-/// let exact = |offset| Measurement::new(second, offset, Span::ZERO).expect("valid");
-/// let slew = Slew::new(exact(Span::ZERO)).toward(second, exact(Span::MILLISECOND));
-/// let m = slew.at(Monotonic(2_000_000_000), Drift::from_ppb(0).expect("valid"));
+/// let estimate = |offset, error| {
+///     Measurement::new(second, offset, error).expect("valid")
+/// };
+/// let still = Drift::from_ppb(0).expect("valid");
+/// let first = Slew::new(estimate(Span::ZERO, Span::MILLISECOND));
+/// let slew = first.toward(second, still, estimate(Span::MILLISECOND, Span::ZERO));
+/// let m = slew.at(Monotonic(2_000_000_000), still);
 /// let half = Span::from_nanos(500_000);
 /// assert_eq!((m.offset(), m.error()), (half, half));
 /// ```
@@ -32,7 +37,7 @@ pub struct Slew {
 }
 
 impl Slew {
-    /// Serves `target` at once: the one step, at startup.
+    /// Serves `target` at once, at startup.
     #[must_use]
     pub const fn new(target: Measurement) -> Self {
         let (start, from) = (target.at(), target.offset());
@@ -43,12 +48,20 @@ impl Slew {
         }
     }
 
-    /// Moves toward `target` from the offset served at `now`. Mesh time from the result
-    /// at or after `now` is never earlier than mesh time from `self` at or before
-    /// `now`.
+    /// Moves toward `target` from the offset served at `now`, for a local clock that
+    /// drifts from mesh time by at most `drift`. When every offset `target` allows at
+    /// `now` is above every offset `self` allows there, mesh time is behind, and the
+    /// result steps to `target` at once. Mesh time from the result at or after `now`
+    /// is never earlier than mesh time from `self` at or before `now`.
     #[must_use]
-    pub fn toward(self, now: Monotonic, target: Measurement) -> Self {
-        let from = Span::from_nanos(self.served(now));
+    pub fn toward(self, now: Monotonic, drift: Drift, target: Measurement) -> Self {
+        let (earliest, _) = target.bounds_at(now, drift);
+        let (_, latest) = self.bounds(now, drift);
+        let from = if earliest > latest {
+            target.offset()
+        } else {
+            Span::from_nanos(self.served(now))
+        };
         Self {
             start: now,
             from,
@@ -62,10 +75,17 @@ impl Slew {
     /// `target` does.
     #[must_use]
     pub fn at(self, now: Monotonic, drift: Drift) -> Measurement {
+        let (low, high) = self.bounds(now, drift);
+        Measurement::between(now, low, high)
+    }
+
+    /// The lowest and highest offset of the estimate at `now`, in nanoseconds, with
+    /// no stop at 36500 days.
+    fn bounds(self, now: Monotonic, drift: Drift) -> (i128, i128) {
         let served = i128::from(self.served(now));
-        let gap = (i128::from(self.target.offset().nanos()) - served).abs();
-        let half = i128::from(self.target.error_at(now, drift).nanos()) + gap;
-        Measurement::between(now, served - half, served + half)
+        let (low, high) = self.target.bounds_at(now, drift);
+        let half = (high - served).max(served - low);
+        (served - half, served + half)
     }
 
     /// The offset served at `now`, in nanoseconds: between `from` and the target's.
@@ -94,17 +114,34 @@ mod tests {
         Measurement::new(Monotonic(at), offset, error).expect("valid")
     }
 
+    fn drift(ppb: u32) -> Drift {
+        Drift::from_ppb(ppb).expect("valid")
+    }
+
     /// The estimate at `now` as `(offset, error)`, with `ppb` of drift.
     fn check(slew: Slew, now: u64, ppb: u32) -> (i64, i64) {
-        let m = slew.at(Monotonic(now), Drift::from_ppb(ppb).expect("valid"));
+        let m = slew.at(Monotonic(now), drift(ppb));
         assert_eq!(m.at(), Monotonic(now), "the estimate is at the reading");
         (m.offset().nanos(), m.error().nanos())
+    }
+
+    /// Offset zero, known within a second, so that a target within a second slews.
+    fn unsure() -> Slew {
+        Slew::new(estimate(0, 0, 1_000_000_000))
     }
 
     /// A slew at offset zero until one second, then toward `offset` with no error.
     fn from_zero(offset: i64) -> Slew {
         let now = Monotonic(SECOND_NS);
-        Slew::new(estimate(0, 0, 0)).toward(now, estimate(SECOND_NS, offset, 0))
+        unsure().toward(now, drift(0), estimate(SECOND_NS, offset, 0))
+    }
+
+    /// A slew at offset zero, known within 100 ns at zero, then at one second toward
+    /// `offset` with an error of 10 ns, with `ppb` of drift.
+    fn near_zero(offset: i64, ppb: u32) -> Slew {
+        let now = Monotonic(SECOND_NS);
+        let target = estimate(SECOND_NS, offset, 10);
+        Slew::new(estimate(0, 0, 100)).toward(now, drift(ppb), target)
     }
 
     mod known_slews {
@@ -120,8 +157,7 @@ mod tests {
 
         #[test]
         fn keeps_mesh_time_when_the_target_changes() {
-            let before = Slew::new(estimate(0, 0, 0));
-            assert_eq!(check(before, SECOND_NS, 0), (0, 0));
+            assert_eq!(check(unsure(), SECOND_NS, 0), (0, 1_000_000_000));
             let after = from_zero(1_000_000);
             assert_eq!(check(after, SECOND_NS, 0), (0, 1_000_000));
             let start = (after.start, after.from);
@@ -131,7 +167,7 @@ mod tests {
         #[test]
         fn continues_from_the_offset_served_mid_slew() {
             let now = Monotonic(2 * SECOND_NS);
-            let slew = from_zero(1_000_000).toward(now, estimate(0, 0, 0));
+            let slew = from_zero(1_000_000).toward(now, drift(0), estimate(0, 0, 0));
             assert_eq!(slew.from, Span::from_nanos(500_000));
             assert_eq!(check(slew, 2 * SECOND_NS, 0), (500_000, 500_000));
         }
@@ -165,9 +201,48 @@ mod tests {
         fn adds_the_part_not_applied_to_the_drifted_error() {
             let now = Monotonic(SECOND_NS);
             let target = estimate(SECOND_NS, 1_000_000, 10);
-            let slew = Slew::new(estimate(0, 0, 0)).toward(now, target);
+            let slew = unsure().toward(now, drift(0), target);
             let error = 500_000 + 10 + 1_000;
             assert_eq!(check(slew, 2 * SECOND_NS, 1_000), (500_000, error));
+        }
+
+        #[test]
+        fn steps_to_an_estimate_wholly_ahead() {
+            let slew = near_zero(111, 0);
+            let start = (slew.start, slew.from);
+            assert_eq!(start, (Monotonic(SECOND_NS), Span::from_nanos(111)));
+            assert_eq!(check(slew, SECOND_NS, 0), (111, 10));
+        }
+
+        #[test]
+        fn slews_toward_an_estimate_that_overlaps() {
+            assert_eq!(near_zero(110, 0).from, Span::ZERO);
+            assert_eq!(check(near_zero(110, 0), SECOND_NS, 0), (0, 120));
+        }
+
+        #[test]
+        fn counts_drift_before_it_steps() {
+            assert_eq!(near_zero(120, 10).from, Span::ZERO);
+            assert_eq!(near_zero(121, 10).from, Span::from_nanos(121));
+        }
+
+        #[test]
+        fn never_steps_back() {
+            let slew = near_zero(-1_000, 0);
+            assert_eq!(slew.from, Span::ZERO);
+            assert_eq!(check(slew, SECOND_NS, 0), (0, 1_010));
+        }
+
+        #[test]
+        fn steps_only_past_the_whole_served_estimate() {
+            let now = 2 * SECOND_NS;
+            let back = from_zero(-1_000_000);
+            assert_eq!(check(back, now, 0), (-500_000, 500_000));
+            let next = |offset| {
+                back.toward(Monotonic(now), drift(0), estimate(now, offset, 10))
+            };
+            assert_eq!(next(10).from, Span::from_nanos(-500_000));
+            assert_eq!(next(11).from, Span::from_nanos(11));
         }
 
         #[test]
@@ -254,12 +329,33 @@ mod tests {
                 ppb in 0..=100_000_000_u32,
             ) {
                 let drift = Drift::from_ppb(ppb).expect("valid");
-                let next = s.toward(Monotonic(switch), target);
+                let next = s.toward(Monotonic(switch), drift, target);
                 let before = mesh(s, early, drift);
                 prop_assert!(before <= mesh(s, late, drift));
                 prop_assert!(before <= mesh(next, late, drift));
                 let at_switch = |slew: Slew| mesh(slew, switch, drift);
-                prop_assert_eq!(at_switch(s), at_switch(next));
+                prop_assert!(at_switch(s) <= at_switch(next));
+            }
+
+            #[test]
+            fn steps_only_to_a_target_wholly_ahead(
+                s in slew(),
+                switch in 0..TIME_NS,
+                target in target(),
+                ppb in 0..=100_000_000_u32,
+            ) {
+                let now = Monotonic(switch);
+                let drift = Drift::from_ppb(ppb).expect("valid");
+                let edges = |m: Measurement| {
+                    let offset = i128::from(m.offset().nanos());
+                    let error = i128::from(m.error_at(now, drift).nanos());
+                    (offset - error, offset + error)
+                };
+                let served = s.at(now, drift);
+                let ahead = edges(target).0 > edges(served).1;
+                let expected = if ahead { target.offset() } else { served.offset() };
+                let next = s.toward(now, drift, target);
+                prop_assert_eq!(next.at(now, drift).offset(), expected);
             }
 
             #[test]
@@ -305,7 +401,7 @@ mod tests {
                 let target = estimate(at, offset, error);
                 let (start, from) = (Monotonic(start), Span::from_nanos(from));
                 let s = Slew { start, from, target };
-                let next = s.toward(Monotonic(now[0]), target);
+                let next = s.toward(Monotonic(now[0]), drift, target);
                 for slew in [s, next] {
                     let m = slew.at(Monotonic(now[1]), drift);
                     prop_assert_eq!(m.at(), Monotonic(now[1]));

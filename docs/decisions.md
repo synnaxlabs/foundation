@@ -551,14 +551,19 @@ How to read this record:
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The
   part not yet applied goes into the error, so a slew of 1 s takes 2000 s and its
-  error says so. Only the first estimate steps. A clock in holdover keeps its slew.
-  Cost: after a stale first estimate (a Pi 4 with no real-time clock, or a Windows OS
-  clock alone under OS CLOCK BOUND), a correction of 1 h takes 83 days and one of 1
-  day about 5.5 years, with a true error the whole time. Lost: a frequency loop (a
-  PLL, as in ntpd), because R6 bounds drift with an error that grows and a PLL can
-  overshoot; the slew private in `clock`, because it is decision logic in layer 2; a
-  forward step whenever an estimate is ahead, because a majority of falsetickers
-  could push mesh time into the future. Decided by the `time` builder (#202).
+  error says so. Mesh time steps forward to an estimate when the estimate's whole
+  interval is ahead of mesh time's whole interval: the estimate's earliest true time
+  is later than mesh time's latest true time. That proves mesh time is behind. Mesh
+  time never steps back. A clock in holdover keeps its slew. Cost: mesh time that is
+  ahead, or behind with an interval that overlaps the estimate, still slews. After a
+  stale first estimate that is ahead, or a Windows OS clock alone under OS CLOCK
+  BOUND (its error is unknown, so each estimate overlaps it), a correction of 1 h
+  takes 83 days and one of 1 day about 5.5 years, with a true error the whole time. A
+  majority of falsetickers wholly ahead steps mesh time into the future, and it does
+  not come back. That is outside the fault model. Lost: a frequency loop (a PLL, as
+  in ntpd), because R6 bounds drift with an error that grows and a PLL can overshoot;
+  the slew private in `clock`, because it is decision logic in layer 2. The person
+  decided on 2026-10-05 ("Ok 225 mesh slew approved"), with the forward step.
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and

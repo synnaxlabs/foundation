@@ -10,10 +10,10 @@ fn main() {
 
 #[divan::bench]
 fn at_mid_slew(bencher: Bencher<'_, '_>) {
-    let estimate = |offset| Measurement::new(Monotonic(0), offset, Span::MICROSECOND);
-    let first = estimate(Span::ZERO).expect("valid");
-    let target = estimate(Span::SECOND).expect("valid");
-    let slew = Slew::new(first).toward(Monotonic(0), target);
+    let estimate = |offset, error| Measurement::new(Monotonic(0), offset, error);
+    let first = estimate(Span::ZERO, Span::SECOND).expect("valid");
+    let target = estimate(Span::SECOND, Span::MICROSECOND).expect("valid");
+    let slew = Slew::new(first).toward(Monotonic(0), Drift::UNDISCIPLINED, target);
     let mut now = 1_000_000_000;
     bencher.bench_local(|| {
         now += 1_000;
