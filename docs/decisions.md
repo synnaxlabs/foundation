@@ -980,8 +980,10 @@ How to read this record:
   header with a torn body, are the end of the log. Anything else, or a record after a
   torn one, is `Error::Corrupt`, and the node does not start. Open zeroes the bytes
   after the end, so a torn record leaves nothing that a later open reads as a header.
-  One check over the whole record lost: a damaged length then reads as a torn end, and
-  the log drops the good records after it. Nothing trims the log until snapshots (#253).
+  Then it syncs the end file, the directory, and its parent, because `raft` acts on
+  what open gives and a crash can leave any of them with no sync. One check over the
+  whole record lost: a damaged length then reads as a torn end, and the log drops the
+  good records after it. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque

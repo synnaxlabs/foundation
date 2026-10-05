@@ -135,8 +135,9 @@ pub(crate) struct Log {
 
 impl Log {
     /// Opens the log in `dir`, and makes `dir` and an empty log when it has none. The
-    /// parent of `dir` must be there. Returns the log and what it holds. A torn record
-    /// at the end, which a crash leaves, is dropped.
+    /// parent of `dir` must be there. Returns the log and what it holds, which is
+    /// durable when the call returns. A torn record at the end, which a crash leaves,
+    /// is dropped.
     ///
     /// # Errors
     ///
@@ -154,9 +155,6 @@ impl Log {
             Ok(names) => names,
             Err(files::Error::NotFound { .. }) => {
                 files.create_dir(&dir).await?;
-                files
-                    .sync_dir(dir.parent().unwrap_or(Path::new("")))
-                    .await?;
                 Vec::new()
             }
             Err(error) => return Err(error.into()),
@@ -172,15 +170,12 @@ impl Log {
         let number = wide(scan.segment);
         if scan.spare {
             files.remove(&path(&dir, number.saturating_add(1))).await?;
-            files.sync_dir(&dir).await?;
         }
         let file = if let Some(file) = open.into_iter().nth(scan.segment) {
             file
         } else {
             let mode = Mode::Create { len: SEGMENT };
-            let file = files.open(&path(&dir, 0), mode).await?;
-            files.sync_dir(&dir).await?;
-            file
+            files.open(&path(&dir, 0), mode).await?
         };
         let tail = segments
             .get(scan.segment)
@@ -188,6 +183,13 @@ impl Log {
         if tail.is_some_and(|tail| tail.iter().any(|&byte| byte != 0)) {
             zero(&file, wide(scan.offset), &pool).await?;
         }
+        // A crash before this open can leave the last record, a file, or `dir` with
+        // no sync.
+        file.sync().await?;
+        files.sync_dir(&dir).await?;
+        files
+            .sync_dir(dir.parent().unwrap_or(Path::new("")))
+            .await?;
         let log = Self {
             files,
             dir,
@@ -307,7 +309,7 @@ async fn read(file: &File, pool: &Pool) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-// Writes zeros from `from` to the end of `file`, durably.
+// Writes zeros from `from` to the end of `file`.
 async fn zero(file: &File, from: u64, pool: &Pool) -> Result<(), Error> {
     let chunk = chunk(pool);
     let mut offset = from;
@@ -318,7 +320,6 @@ async fn zero(file: &File, from: u64, pool: &Pool) -> Result<(), Error> {
         file.write_at(offset, &[block.freeze()]).await?;
         offset = offset.saturating_add(wide(len));
     }
-    file.sync().await?;
     Ok(())
 }
 
@@ -769,6 +770,64 @@ mod tests {
 
     /// The true time between the cuts of two seeds in a row.
     const CUT_STEP: i64 = 12_500;
+
+    // `raft` acts on what open gives, so a power cut after open must keep it.
+    #[test]
+    fn a_power_cut_after_an_open_keeps_what_the_open_gave() {
+        let mut lost = Vec::new();
+        for seed in 0..64 {
+            let (mut sim, node) = sim(seed);
+            let own = node.clone();
+            let handle = node.shards().start(shard("before"), move |_| async move {
+                let (mut log, _) = open(&own).await.unwrap();
+                for index in 1..=8 {
+                    let hard = hard(index, Some(1));
+                    log.write(Some(hard), &[bytes(index, 100)]).await.unwrap();
+                }
+                pending::<()>().await;
+            });
+            drop(handle.unwrap());
+            sim.run_for(Span::from_nanos(CUT_STEP * i64::try_from(seed).unwrap()))
+                .unwrap();
+            sim.crash(&node, Crash::Process);
+            let opened = stored(&mut sim, &node).unwrap();
+            sim.crash(&node, Crash::Power);
+            let kept = stored(&mut sim, &node).unwrap();
+            if kept != opened {
+                lost.push((seed, opened.hard, kept.hard));
+            }
+        }
+        assert_eq!(lost, [], "(seed, hard that open gave, hard after a cut)");
+    }
+
+    // A failed open leaves the directory or `log-0` with no durable entry.
+    #[test]
+    fn a_write_after_a_failed_open_survives_a_power_cut() {
+        for dir in ["", DIR] {
+            let (mut sim, node) = sim(0);
+            let error = on(&mut sim, &node, move |node| async move {
+                node.fail_file(Path::new(dir), Operation::SyncDir);
+                let error = open(&node).await.unwrap_err();
+                let (mut log, _) = open(&node).await.unwrap();
+                log.write(Some(hard(1, None)), &[bytes(1, 10)])
+                    .await
+                    .unwrap();
+                error
+            });
+            let expected = files::Error::Io {
+                path: dir.into(),
+                operation: Operation::SyncDir,
+                code: 5,
+            };
+            assert_eq!(error, Error::Files(expected));
+            sim.crash(&node, Crash::Power);
+            let expected = Stored {
+                hard: hard(1, None),
+                entries: vec![bytes(1, 10)],
+            };
+            assert_eq!(stored(&mut sim, &node), Ok(expected), "{dir:?}");
+        }
+    }
 
     fn file(name: &str) -> PathBuf {
         Path::new(DIR).join(name)
