@@ -8,6 +8,10 @@ use types::name::Name;
 
 use crate::Value;
 
+mod sealed;
+
+pub use sealed::{Sealed, Stale};
+
 /// A place that holds secret values.
 pub trait Store {
     /// Reads the value of `name`, the secret's full name in the tree, such as

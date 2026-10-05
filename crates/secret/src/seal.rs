@@ -2,8 +2,8 @@
 //!
 //! The scheme is HPKE base mode with DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and
 //! ChaCha20-Poly1305. A sealed value is the 32-byte encapsulated key, then the
-//! ciphertext and its 16-byte tag. The secret's full name is the associated data, so
-//! a sealed value copied to another name does not open.
+//! ciphertext and its 16-byte tag. The associated data is the secret's version and full
+//! name, so a sealed value copied to another name or version does not open.
 
 use std::fmt;
 
@@ -24,15 +24,21 @@ const KEM_SUITE: &[u8] = b"KEM\x00\x20";
 const HPKE_SUITE: &[u8] = b"HPKE\x00\x20\x00\x01\x00\x03";
 
 /// Seals `value` to the node that holds the private half of `to`, bound to the
-/// secret's full `name`. Returns 48 bytes more than the value. Draws 32 bytes from
-/// `entropy`.
+/// secret's full `name` and its `version`. Returns 48 bytes more than the value. Draws
+/// 32 bytes from `entropy`.
 ///
 /// # Panics
 ///
 /// Never: any 32 bytes are an X25519 private key, and a [`SealKey`] is never of
 /// small order.
 #[must_use]
-pub fn seal(to: &SealKey, name: &Name, value: &Value, entropy: &Entropy) -> Vec<u8> {
+pub fn seal(
+    to: &SealKey,
+    name: &Name,
+    version: u64,
+    value: &Value,
+    entropy: &Entropy,
+) -> Vec<u8> {
     let mut bytes = Zeroizing::new([0; 32]);
     entropy.fill(bytes.as_mut_slice());
     let ephemeral = PrivateKey::from_private_key(&X25519, bytes.as_slice())
@@ -41,7 +47,7 @@ pub fn seal(to: &SealKey, name: &Name, value: &Value, entropy: &Entropy) -> Vec<
         &ephemeral,
         &to.to_bytes(),
         INFO,
-        name.as_str().as_bytes(),
+        &aad(name, version),
         value.expose(),
     )
     .expect("invariant: a seal key is never of small order")
@@ -91,15 +97,20 @@ impl Opener {
         SealKey::new(bytes).expect("invariant: X25519 maps no key to small order")
     }
 
-    /// Opens `sealed` for the secret `name`.
+    /// Opens `sealed` for the secret `name` at `version`.
     ///
     /// # Errors
     ///
-    /// [`Error::Refused`] when `sealed` was sealed to another key or another name, or
-    /// was changed or cut.
-    pub fn open(&self, name: &Name, sealed: &[u8]) -> Result<Value, Error> {
+    /// [`Error::Refused`] when `sealed` was sealed to another key, name, or version,
+    /// or was changed or cut.
+    pub fn open(
+        &self,
+        name: &Name,
+        version: u64,
+        sealed: &[u8],
+    ) -> Result<Value, Error> {
         let public = self.public().to_bytes();
-        open_with(&self.key(), &public, INFO, name.as_str().as_bytes(), sealed)
+        open_with(&self.key(), &public, INFO, &aad(name, version), sealed)
             .map(Value::new)
     }
 
@@ -118,7 +129,7 @@ impl fmt::Debug for Opener {
 /// Why a sealed value did not open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The value was sealed to another key or another name, or was changed.
+    /// The value was sealed to another key, name, or version, or was changed.
     Refused,
 }
 
@@ -127,13 +138,18 @@ impl fmt::Display for Error {
         match self {
             Self::Refused => f.write_str(
                 "the sealed value does not open with this node's seal key for this \
-                 name. Set the secret again so it is sealed to this node",
+                 name and version. Set the secret again so it is sealed to this node",
             ),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// The version, 8 bytes big-endian, then the name.
+fn aad(name: &Name, version: u64) -> Vec<u8> {
+    [&version.to_be_bytes()[..], name.as_str().as_bytes()].concat()
+}
 
 /// Seals with a given ephemeral key. `None` when `to` is of small order.
 fn seal_with(
@@ -333,8 +349,8 @@ mod tests {
     fn names_the_refusal() {
         assert_eq!(
             Error::Refused.to_string(),
-            "the sealed value does not open with this node's seal key for this name. \
-             Set the secret again so it is sealed to this node"
+            "the sealed value does not open with this node's seal key for this name \
+             and version. Set the secret again so it is sealed to this node"
         );
     }
 
@@ -344,9 +360,9 @@ mod tests {
             let opener = Opener::generate(&entropy(draw));
             let token = name("site.secrets.token");
             let plain = Value::new(value.clone());
-            let sealed = seal(&opener.public(), &token, &plain, &entropy(!draw));
+            let sealed = seal(&opener.public(), &token, 1, &plain, &entropy(!draw));
             prop_assert_eq!(sealed.len(), value.len() + 48);
-            let opened = opener.open(&token, &sealed).unwrap();
+            let opened = opener.open(&token, 1, &sealed).unwrap();
             prop_assert_eq!(opened.expose(), &value[..]);
         }
 
@@ -355,29 +371,34 @@ mod tests {
             let opener = Opener::generate(&entropy(3));
             let token = name("site.secrets.token");
             let plain = Value::new(value);
-            let sealed = seal(&opener.public(), &token, &plain, &entropy(4));
+            let sealed = seal(&opener.public(), &token, 1, &plain, &entropy(4));
             let mut flipped = sealed.clone();
             flipped[at % sealed.len()] ^= 1 << bit;
-            prop_assert_eq!(opener.open(&token, &flipped).unwrap_err(), Error::Refused);
+            prop_assert_eq!(opener.open(&token, 1, &flipped).unwrap_err(), Error::Refused);
             let cut = &sealed[..at % sealed.len()];
-            prop_assert_eq!(opener.open(&token, cut).unwrap_err(), Error::Refused);
+            prop_assert_eq!(opener.open(&token, 1, cut).unwrap_err(), Error::Refused);
         }
     }
 
     #[test]
-    fn refuses_another_key_or_another_name() {
+    fn refuses_another_key_name_or_version() {
         let opener = Opener::generate(&entropy(5));
         let token = name("site.secrets.token");
         let sealed = seal(
             &opener.public(),
             &token,
+            2,
             &Value::new(b"t".to_vec()),
             &entropy(6),
         );
         let other = Opener::generate(&entropy(9));
-        assert_eq!(other.open(&token, &sealed).unwrap_err(), Error::Refused);
+        assert_eq!(other.open(&token, 2, &sealed).unwrap_err(), Error::Refused);
         let key = name("site.secrets.key");
-        assert_eq!(opener.open(&key, &sealed).unwrap_err(), Error::Refused);
+        assert_eq!(opener.open(&key, 2, &sealed).unwrap_err(), Error::Refused);
+        for version in [1, 3, u64::MAX] {
+            let refused = opener.open(&token, version, &sealed).unwrap_err();
+            assert_eq!(refused, Error::Refused, "version {version}");
+        }
     }
 
     #[test]

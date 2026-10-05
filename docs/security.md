@@ -186,7 +186,17 @@ state on `main`.
   The built-in store seals each value to the X25519 seal key of each node that may
   use it (BQ16, S8). The other adapters (an environment variable or a file, and the
   external stores) do not. An external adapter authenticates with the node key, and
-  may cache values sealed to it, which delays revocation. Not built (`secret`).
+  may cache values sealed to it, which delays revocation.
+- Sealing is HPKE base mode, so it does not prove who sealed. The signed record
+  does: the caller seals and signs the `secret set` request with the `secret`
+  action, and every node checks that record as it checks a spec change (BQ12). So a
+  lying voter cannot write a ciphertext record. Not built (`mesh`). A node of the
+  secret's placement re-seals on a key rotation (BQ16), so it can also re-seal a
+  different value. Accepted: it already holds the value.
+- Each sealed value has a version per name, bound into the associated data, so a
+  writer cannot give an old value a new version. `secret::store::Sealed` refuses a
+  value or a delete older than the newest it holds. After a restart it relies on the
+  version order of region state.
 - A join ticket is a secret (BQ11a).
 - Rule for every crate: no secret value in a log, a status channel, an error, or
   plan output.
