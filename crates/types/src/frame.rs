@@ -781,7 +781,8 @@ mod tests {
     fn reads_the_header_and_absent_parts() {
         let set = two_groups();
         let pool = pool(1 << 16);
-        let draft = Draft::new(&pool, &set, Form::Raw, &[(0, 8)]).unwrap();
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &[(0, 8)]).unwrap();
+        assert_eq!(draft.series_mut(usize::MAX), None, "an entry past u32");
         let frame = draft.freeze(Path::Backfill);
         assert_eq!(frame.key_set(), set.key());
         assert_eq!(frame.path(), Path::Backfill);
