@@ -16,8 +16,6 @@ description:
    - `architecture`: layers, dependency direction, naming, principles. Always.
    - `performance`: when the PR touches `block`, `codec`, `wire`, `delivery`,
      `buffer`, `home`, `hub`, `transport`, or any code a frame passes through.
-   - `breaker`: always. Its only output is a test that fails against the PR, or
-     nothing. Run it with `model: "fable"` for layer 1 and layer 2 crates.
    - A second `reviewer` for each oracle weakening the PR flags, told to argue for
      fixing the code instead.
    - Run reviewers with `model: "fable"` when the PR touches `raft`, `mesh`, `block`,

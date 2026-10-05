@@ -886,29 +886,6 @@ How to read this record:
   `clippy::error_impl_error` are rejected: an enum lets a test pin the variant, and
   backtrace capture costs time on hot paths. Decided by the advisor under the quality
   delegation.
-- **FACTORY HOST (2026-10-05)** The person approved one AWS c7i.16xlarge (64 vCPU, 128
-  GiB, about 69 USD a day) for builder sessions: "that 480 a week is fine. let's only
-  allocate a day at a time in budget". It is outside the test budget. The advisor
-  launched it; the coordinator owns it from then on. Each boot stops it after 24 hours.
-  Each day, at least two hours before the stop, the coordinator asks the person to renew
-  one more day. On a yes it runs `sudo shutdown -c; sudo shutdown -h +1440` on the host
-  and posts the day on the ledger (#163). Without a yes, the host stops. The person's
-  laptop keeps the first nine builders, the coordinator, and the advisor.
-- **REMOTE CONTROL (2026-10-05)** Sessions on the laptop and on the factory host
-  message each other through Remote Control ("remote control is fine"). Every session
-  name is unique across both machines. There is one coordinator. If Remote Control
-  fails, the fallback is one `inbox:<name>` GitHub issue per session, not a new
-  socket.
-- **QUALITY SESSIONS (2026-10-05)** The person approved `verify` and `red-team` and
-  asked for `audit` and `ux`. These four own no product crate: `verify` (the MVP
-  acceptance tests, written before the pieces land, and the chaos lab), `red-team`
-  (attacks merged code, security and vulnerabilities included), `audit` (architecture
-  boundaries, software practices, and performance across merged code), and `ux` (the end
-  user's experience: CLI, files, errors, plan output, MCP, docs). Each finding is an
-  issue; `verify` and `red-team` findings come with a failing test.
-- **BREAKER REVIEW (2026-10-05)** Every PR gets a third reviewer, the `breaker`, whose
-  only output is a test that fails against the PR, or nothing. It runs on Fable for
-  layer 1 and layer 2 crates.
 
 ### 1.14 Testing
 
@@ -1822,32 +1799,7 @@ Parameters and later choices, recorded and not asked:
 - A plugin system (D5).
 - Copy-on-write mesh branching, the reason the word "branch" is reserved (VOCABULARY).
 
-### 5.5 MVP
-
-Decided with the person on 2026-10-05. The MVP is an edge-to-cloud mesh that survives
-a bad link:
-
-- Two or more nodes (an edge node and a cloud node), joined by ticket, in one region,
-  with Raft for the spec and membership.
-- Inbound connectors, each with commands back to the device: OPC UA client, Modbus
-  TCP and RTU, and NI DAQmx. Outbound: InfluxDB. The person cut LabJack, MQTT with
-  Sparkplug B, and Kafka from the MVP ("eliminate 3 of those").
-- Store-and-forward: a link pulled for an hour loses nothing, or records every gap.
-- A time error bound on every sample.
-- Command authority and audit (D2).
-- The mesh as code: `plan` and `apply` from HCL, operated through the JSON CLI and MCP.
-- Robust means: simulation-tested, fuzzed, and chaos-tested on real AWS links.
-
-Out of the MVP: standby failover (`replica`), more than one region, the calculation
-engine, and performance work past the P1 targets.
-
-**Test budget (2026-10-05).** The person approved 1000 USD for AWS testing: a nightly
-chaos lab (about 2 USD a day), a spot simulation swarm of four c7i.8xlarge for four
-hours (about 9 USD), a nightly P1 benchmark on a c7i.metal-24xl (about 4 USD), and
-benchmarks for hot-path PRs (about 10 USD). Hard cap: 40 USD a day. Every launch goes
-in the ledger (#15) with its cap and an automatic shutdown first.
-
-### 5.6 First phase
+### 5.5 First phase
 
 The first wave builds the riskiest pieces in parallel: `block` and `ring` (`memory`),
 `types`, `codec`, and `wire` (`data-path`), `raft` and `spec` (`consensus`), and
