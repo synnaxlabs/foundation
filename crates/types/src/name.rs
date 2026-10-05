@@ -139,16 +139,31 @@ impl Pattern {
     }
 
     /// Reads `body`, reporting errors against `input`, the text the user wrote.
+    ///
+    /// Each run of wildcards becomes its `*`s and then at most one `**`, so patterns
+    /// that match the same names are equal and have the same specificity.
     fn read(input: &str, body: &str) -> Result<Self, Error> {
-        let segments = split(body)?
-            .map(|segment| match segment {
-                "*" => Ok(Segment::One),
-                "**" => Ok(Segment::Any),
-                _ => check_literal(input, segment)
-                    .map(|()| Segment::Literal(segment.into())),
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(Self { segments })
+        let mut segments = Vec::new();
+        for segment in split(body)? {
+            let next = match segment {
+                "*" => Segment::One,
+                "**" => Segment::Any,
+                _ => {
+                    check_literal(input, segment)?;
+                    Segment::Literal(segment.into())
+                }
+            };
+            match (segments.last(), &next) {
+                (Some(Segment::Any), Segment::Any) => {}
+                (Some(Segment::Any), Segment::One) => {
+                    segments.insert(segments.len() - 1, next);
+                }
+                _ => segments.push(next),
+            }
+        }
+        Ok(Self {
+            segments: segments.into(),
+        })
     }
 }
 
@@ -164,7 +179,8 @@ impl FromStr for Pattern {
 ///
 /// Patterns compare by more literal segments, then fewer `**`, then more `*`: `a.b`
 /// is greater than `a.*`, which is greater than `a.*.**`, `a.**`, and `**` in turn.
-/// Two different patterns may be equal, such as `a.*` and `*.a`.
+/// A run of wildcards counts as its `*`s and one `**`, so `a.**.*.**` counts as
+/// `a.*.**`. Two different patterns may be equal, such as `a.*` and `*.a`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Specificity {
     literals: usize,
@@ -192,6 +208,12 @@ impl Selector {
         let mut exclude = Vec::new();
         for text in patterns {
             match text.strip_prefix('!') {
+                Some("") => {
+                    return Err(Error::Segment {
+                        input: text.into(),
+                        segment: String::new(),
+                    });
+                }
                 Some(body) => exclude.push(Pattern::read(text, body)?),
                 None => include.push(Pattern::read(text, text)?),
             }
@@ -255,7 +277,7 @@ pub enum Error {
         /// The segment that is not valid.
         segment: String,
     },
-    /// A wildcard appears in a name, or `**` is part of a longer segment.
+    /// A wildcard appears in a name, or is part of a longer segment in a pattern.
     Wildcard {
         /// The whole text.
         input: String,
@@ -324,7 +346,6 @@ mod tests {
         #[test]
         fn is_case_sensitive() {
             assert_ne!(name("site.pt"), name("Site.pt"));
-            assert!(name("site.pt").as_str().eq_ignore_ascii_case("Site.PT"));
         }
 
         #[test]
@@ -464,6 +485,24 @@ mod tests {
             assert!(!pattern("Site.*").matches(&name("site.pt")));
         }
 
+        proptest! {
+            #[test]
+            fn matches_like_the_definition(p in patterns(), n in names()) {
+                let matched = pattern(&p.join(".")).matches(&name(&n.join(".")));
+                prop_assert_eq!(matched, reference(&p, &n));
+            }
+
+            #[test]
+            fn a_name_matches_itself_with_any_segment_wildcarded(
+                n in names(),
+                wild in wildcards(),
+            ) {
+                let p: Vec<_> =
+                    n.iter().zip(&wild).map(|(s, w)| w.unwrap_or(s)).collect();
+                prop_assert!(pattern(&p.join(".")).matches(&name(&n.join("."))));
+            }
+        }
+
         mod specificity {
             use super::*;
 
@@ -472,8 +511,58 @@ mod tests {
                 let order = ["**", "a.**", "a.*.**", "a.*", "a.*.*", "a.b"];
                 let specificities: Vec<_> =
                     order.iter().map(|p| pattern(p).specificity()).collect();
-                for pair in specificities.windows(2) {
-                    assert!(pair[0] < pair[1], "{order:?} is not increasing");
+                assert!(
+                    specificities.is_sorted_by(|a, b| a < b),
+                    "{order:?} is not increasing"
+                );
+            }
+
+            #[test]
+            fn ranks_literals_above_fewer_any() {
+                assert!(
+                    pattern("a.b.**").specificity() > pattern("a.*.*").specificity()
+                );
+            }
+
+            #[test]
+            fn ranks_fewer_any_above_more_one() {
+                assert!(
+                    pattern("**.a").specificity() > pattern("*.**.a.**").specificity()
+                );
+            }
+
+            #[test]
+            fn counts_a_wildcard_run_as_its_ones_and_one_any() {
+                for (written, reduced) in [
+                    ("site.**.**", "site.**"),
+                    ("site.**.*.**", "site.*.**"),
+                    ("**.*", "*.**"),
+                    ("a.*.**.*.b", "a.*.*.**.b"),
+                ] {
+                    assert_eq!(pattern(written), pattern(reduced), "{written}");
+                    assert_eq!(
+                        pattern(written).specificity(),
+                        pattern(reduced).specificity(),
+                        "{written}"
+                    );
+                }
+                assert!(
+                    pattern("site.**.**").specificity()
+                        > pattern("**.site.**").specificity()
+                );
+            }
+
+            proptest! {
+                #[test]
+                fn the_exact_pattern_is_the_most_specific_match(
+                    p in patterns(),
+                    n in names(),
+                ) {
+                    let exact = pattern(&n.join("."));
+                    let other = pattern(&p.join("."));
+                    if other != exact && other.matches(&name(&n.join("."))) {
+                        prop_assert!(other.specificity() < exact.specificity());
+                    }
                 }
             }
 
@@ -493,7 +582,7 @@ mod tests {
 
         #[test]
         fn returns_the_most_specific_include() {
-            let s = Selector::new(["**", "site.*", "site.pt"]).unwrap();
+            let s = Selector::new(["site.pt", "**", "site.*"]).unwrap();
             assert_eq!(
                 s.matches(&name("site.pt")),
                 Some(pattern("site.pt").specificity())
@@ -527,7 +616,7 @@ mod tests {
                 Err(segment_error("!b..c", ""))
             );
             assert_eq!(Selector::new(["a", "!b*"]), Err(wildcard_error("!b*")));
-            assert_eq!(Selector::new(["a", "!"]), Err(Error::Empty));
+            assert_eq!(Selector::new(["a", "!"]), Err(segment_error("!", "")));
         }
     }
 
@@ -556,31 +645,5 @@ mod tests {
     fn wildcards() -> impl Strategy<Value = Vec<Option<&'static str>>> {
         let choice = prop::sample::select(vec![None, Some("*"), Some("**")]);
         prop::collection::vec(choice, 7)
-    }
-
-    proptest! {
-        #[test]
-        fn matches_like_the_definition(p in patterns(), n in names()) {
-            let matched = pattern(&p.join(".")).matches(&name(&n.join(".")));
-            prop_assert_eq!(matched, reference(&p, &n));
-        }
-
-        #[test]
-        fn a_name_matches_itself_with_any_segment_wildcarded(
-            n in names(),
-            wild in wildcards(),
-        ) {
-            let p: Vec<_> = n.iter().zip(&wild).map(|(s, w)| w.unwrap_or(s)).collect();
-            prop_assert!(pattern(&p.join(".")).matches(&name(&n.join("."))));
-        }
-
-        #[test]
-        fn the_exact_pattern_is_the_most_specific_match(p in patterns(), n in names()) {
-            let exact = pattern(&n.join("."));
-            let other = pattern(&p.join("."));
-            if other != exact && other.matches(&name(&n.join("."))) {
-                prop_assert!(other.specificity() < exact.specificity());
-            }
-        }
     }
 }
