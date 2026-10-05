@@ -235,6 +235,8 @@ pub(crate) enum Step<'a> {
     Data(&'a [u8]),
     /// A wrap or restart record. The cursor moved; ask for the next window.
     Moved,
+    /// The record is longer than the bytes given; ask for the window again.
+    More,
     /// The chain ends here: this is the head of the ring.
     End,
 }
@@ -252,11 +254,17 @@ pub(crate) struct Invalid {
 /// [`window`](Self::window) from the area, give them to [`next`](Self::next), and
 /// stop at [`Step::End`]. Then [`writer`](Self::writer) continues the ring. It
 /// ends within one lap of the area on any bytes.
+///
+/// The window is one block, or the size of the record that starts there once its
+/// header is read. A walk reads at most twice the live bytes, plus the largest
+/// record once for a torn record at the end.
 #[derive(Debug)]
 pub(crate) struct Cursor {
     layout: Layout,
     tail: u64,
     at: Position,
+    /// Bytes the window asks for, within the bounds of the ring.
+    want: u64,
     ended: bool,
 }
 
@@ -268,11 +276,22 @@ impl Cursor {
             layout,
             tail: tail.offset,
             at: tail,
+            want: block(),
             ended: false,
         }
     }
 
     pub(crate) fn window(&self) -> Window {
+        let Window { place, len } = self.bound();
+        Window {
+            place,
+            len: len.min(self.want),
+        }
+    }
+
+    /// The largest window at the head: the largest record, the rest of the area,
+    /// or the rest of one lap.
+    fn bound(&self) -> Window {
         let area = self.layout.area;
         let place = self.at.offset % area;
         let unread = area - (self.at.offset - self.tail);
@@ -297,6 +316,15 @@ impl Cursor {
             "invariant: got {} bytes for a window of {len} at {place}",
             bytes.len()
         );
+        let bound = self.bound().len;
+        if let Some(size) = record::size(bytes).map(to_u64)
+            && size > len
+            && size <= bound
+        {
+            self.want = size;
+            return Ok(Step::More);
+        }
+        self.want = block();
         let Some(record) = record::read(bytes, self.at.chain) else {
             self.ended = true;
             return Ok(Step::End);
@@ -388,19 +416,27 @@ mod tests {
         Position::new(blocks * 4096, chain).expect("a block count is aligned")
     }
 
-    /// Walks the area with the real cursor to the end of the chain.
+    /// Walks the area with the real cursor to the end of the chain. Checks that it
+    /// asks for at most twice the live bytes and one largest record.
     fn walk(area: &[u8], tail: Position) -> Result<(Vec<Vec<u8>>, Cursor), Invalid> {
         let mut cursor = Cursor::new(layout(), tail);
         let mut data = Vec::new();
-        for _ in 0..=2 * BLOCKS {
+        let mut asked = 0;
+        for _ in 0..=3 * BLOCKS {
             let Window { place, len } = cursor.window();
+            asked += len;
             match cursor.next(&area[index(place)..index(place + len)])? {
                 Step::Data(body) => data.push(body.to_vec()),
-                Step::Moved => {}
-                Step::End => return Ok((data, cursor)),
+                Step::Moved | Step::More => {}
+                Step::End => {
+                    let live = cursor.at.offset - tail.offset;
+                    let most = 2 * live + to_u64(BODY_MAX + HEADER_LEN + ALIGN);
+                    assert!(asked <= most, "asked {asked} for {live} live bytes");
+                    return Ok((data, cursor));
+                }
             }
         }
-        panic!("the cursor did not end within two steps per block");
+        panic!("the cursor did not end within three steps per block");
     }
 
     /// A live record of the model: the boundary before it and its data body.
@@ -835,9 +871,57 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "got 4096 bytes for a window of 16384 at 0")]
+        #[should_panic(expected = "got 8192 bytes for a window of 4096 at 0")]
         fn panics_on_bytes_that_are_not_the_window() {
-            let _step = Cursor::new(layout(), START).next(&[0; ALIGN]);
+            let _step = Cursor::new(layout(), START).next(&[0; 2 * ALIGN]);
+        }
+
+        #[test]
+        fn asks_for_one_block_then_the_size_of_the_record() {
+            let mut ring = Ring::new();
+            ring.append(&[7; 2 * ALIGN]).expect("the ring has room");
+            let mut cursor = Cursor::new(layout(), START);
+            let one = Window {
+                place: 0,
+                len: 4096,
+            };
+            assert_eq!(cursor.window(), one);
+            assert_eq!(cursor.next(&ring.area[..ALIGN]), Ok(Step::Moved));
+            let next = Window {
+                place: 4096,
+                len: 4096,
+            };
+            assert_eq!(cursor.window(), next);
+            assert_eq!(cursor.next(&ring.area[ALIGN..2 * ALIGN]), Ok(Step::More));
+            let whole = Window {
+                place: 4096,
+                len: 3 * 4096,
+            };
+            assert_eq!(cursor.window(), whole);
+            let step = cursor.next(&ring.area[ALIGN..4 * ALIGN]);
+            assert_eq!(step, Ok(Step::Data(&[7; 2 * ALIGN])));
+            assert_eq!(cursor.window().len, 4096);
+        }
+
+        /// A header that claims a size past the largest window, the end of the
+        /// area, or one lap is no record, so the cursor does not read for it.
+        #[test]
+        fn ends_at_a_header_that_claims_too_much() {
+            let mut area = vec![0; index(AREA)];
+            let kind = Kind::Data.byte();
+            put(&mut area, 0, START.chain, kind, &[1; 4 * ALIGN]);
+            let mut cursor = Cursor::new(layout(), START);
+            assert_eq!(cursor.next(&area[..ALIGN]), Ok(Step::End));
+            let last = at(BLOCKS - 1, 5);
+            let (header, _) = record::header(5, Kind::Data, &[&[1; ALIGN]]);
+            area[7 * ALIGN..7 * ALIGN + HEADER_LEN].copy_from_slice(&header);
+            let mut cursor = Cursor::new(layout(), last);
+            assert_eq!(cursor.next(&area[7 * ALIGN..]), Ok(Step::End));
+            assert_eq!(cursor.window().len, 4096);
+            let mut cursor = Cursor::new(layout(), at(0, 5));
+            cursor.at = last;
+            assert_eq!(cursor.window().len, 4096);
+            assert_eq!(cursor.next(&area[7 * ALIGN..]), Ok(Step::End));
         }
 
         proptest! {

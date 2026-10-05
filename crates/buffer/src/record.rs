@@ -103,6 +103,20 @@ pub(crate) fn header(
     ([l0, l1, l2, l3, c0, c1, c2, c3, kind], crc)
 }
 
+/// The size that the record at `bytes[0]` claims, before its CRC is checked, or
+/// `None` when the bytes hold no header, the kind is zero, or the size overflows.
+pub(crate) fn size(bytes: &[u8]) -> Option<usize> {
+    let (head, _) = bytes.split_first_chunk::<HEADER_LEN>()?;
+    let [l0, l1, l2, l3, _, _, _, _, kind] = *head;
+    if kind == 0 {
+        return None;
+    }
+    let len = usize::try_from(u32::from_le_bytes([l0, l1, l2, l3])).ok()?;
+    HEADER_LEN
+        .checked_add(len)
+        .and_then(|size| size.checked_next_multiple_of(ALIGN))
+}
+
 /// Reads the record at `bytes[0]` and checks that it follows `chain`. `bytes` starts
 /// at an [`ALIGN`] boundary of the ring. A record that runs past them is not read.
 ///
@@ -217,6 +231,23 @@ mod tests {
 
     mod read {
         use super::*;
+
+        #[test]
+        fn claims_the_padded_size_without_the_crc() {
+            let (mut image, _) = data(1, &[7; 5000]);
+            assert_eq!(size(&image), Some(8192));
+            image[4] ^= 1;
+            assert_eq!(size(&image), Some(8192));
+            image[8] = 0;
+            assert_eq!(size(&image), None);
+            assert_eq!(size(&image[..8]), None);
+            let mut huge = [0; HEADER_LEN];
+            huge[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+            huge[8] = 1;
+            let expected = (usize::try_from(u32::MAX).ok())
+                .and_then(|len| (HEADER_LEN + len).checked_next_multiple_of(ALIGN));
+            assert_eq!(size(&huge), expected);
+        }
 
         #[test]
         fn reads_no_record_from_a_zeroed_block() {
