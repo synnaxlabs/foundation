@@ -344,10 +344,10 @@ impl Files {
     }
 
     /// Crashes `node` by `crash` at true time `at`, whose calls in flight have all
-    /// dropped. Each call ends now: after a `Process` crash each takes effect, and
-    /// after a `Power` crash only each write does, and the disk keeps what is
-    /// durable. Hashes each end into `digest`. Returns the blocks of the calls, for
-    /// the caller to drop after it releases the lock.
+    /// dropped. Each call ends now, in the order of its end time: after a `Process`
+    /// crash each takes effect, and after a `Power` crash only each write does, and
+    /// the disk keeps what is durable. Hashes each end into `digest`. Returns the
+    /// blocks of the calls, for the caller to drop after it releases the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
@@ -356,13 +356,14 @@ impl Files {
         digest: &mut DefaultHasher,
     ) -> Vec<Held> {
         let flights = &self.flights;
-        self.queue.retain(|(_, key)| flights[key].node != node);
-        let (cut, flights) = mem::take(&mut self.flights)
+        let (cut, queue): (BTreeSet<_>, _) = mem::take(&mut self.queue)
             .into_iter()
-            .partition(|(_, flight)| flight.node == node);
-        self.flights = flights;
+            .partition(|(_, key)| flights[key].node == node);
+        self.queue = queue;
         let mut orphans = Vec::new();
-        for (key, flight) in cut {
+        for (_, key) in cut {
+            let flight = (self.flights.remove(&key))
+                .expect("invariant: a queued call is in flight");
             let kind = mem::discriminant(&flight.call);
             let applied =
                 crash == Crash::Process || matches!(flight.call, Call::Write { .. });
