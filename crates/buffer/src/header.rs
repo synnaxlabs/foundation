@@ -28,14 +28,15 @@ const VERSION: u16 = 1;
 /// The place of the CRC: right after the fields.
 const CRC: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
 /// A disk sector, which a crash keeps whole or old. The CRC covers the first one.
-pub(crate) const SECTOR: usize = 512;
+const SECTOR: usize = 512;
 
 /// Why neither header block can be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
     /// No block has the magic: the file is not a ring.
     Missing,
-    /// Both blocks have the magic and a wrong CRC: the ring is lost.
+    /// Both blocks have the magic and a wrong CRC, which no crash leaves: the ring
+    /// is lost.
     Damaged,
     /// A whole block has a format version this build does not read.
     Version(u16),

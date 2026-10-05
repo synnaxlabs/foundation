@@ -745,24 +745,64 @@ fn a_file_with_no_header_is_missing() {
     });
 }
 
-/// The first write of the header goes to both blocks in one write. A crash keeps
-/// any set of its sectors, and a checkpoint is in the first sector of its block,
-/// so each block is whole or zero. One whole block opens the ring; none opens it
-/// as new.
+/// Bytes past the first sector of a header block still make the file not a ring.
 #[test]
-fn a_ring_whose_first_header_write_was_torn_opens() {
+fn a_file_with_bytes_past_the_first_sector_of_a_header_block_is_missing() {
+    run(11, Memory::default(), |shard| async move {
+        shard.zeroed(AREA_START + AREA).await;
+        shard.memory.put(RING, SECTOR, b"not a ring");
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Err(Error::Missing));
+    });
+}
+
+/// A checkpoint is in the first sector of its block, so a crash leaves each block
+/// whole or zero. One whole block opens the ring with what it holds, and the open
+/// leaves that block as it is.
+#[test]
+fn a_ring_with_one_zero_header_block_opens_from_the_other() {
     let block = to_usize(BLOCK);
-    for lost in [vec![0], vec![block], vec![0, block]] {
+    for (lost, kept) in [(0, block), (block, 0)] {
         run(102, Memory::default(), move |shard| async move {
             let ring = layout(AREA, BODY_MAX);
-            drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
-            for place in &lost {
-                shard.memory.put(RING, *place, &[0; SECTOR]);
-            }
-            let opened = shard.open(ring, &mut Slots::new()).await;
-            assert_eq!(opened.map(|buffer| buffer.layout()), Ok(ring), "{lost:?}");
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens");
+            let a = slots.assign(key(1));
+            buffer
+                .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            drop(buffer);
+            shard.memory.put(RING, lost, &[0; SECTOR]);
+            let before = shard.memory.bytes(RING);
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens again");
+            let a = slots.assign(key(1));
+            assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)), "{lost}");
+            let after = shard.memory.bytes(RING);
+            assert_eq!(after[kept..kept + block], before[kept..kept + block]);
         });
     }
+}
+
+/// The first write of the header goes to both blocks in one write. A crash that
+/// keeps neither first sector leaves two zero blocks, and the ring opens as new:
+/// both blocks get the same first checkpoint.
+#[test]
+fn a_ring_whose_first_header_write_was_lost_opens_as_new() {
+    run(102, Memory::default(), |shard| async move {
+        let block = to_usize(BLOCK);
+        let ring = layout(AREA, BODY_MAX);
+        drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
+        for place in [0, block] {
+            shard.memory.put(RING, place, &[0; SECTOR]);
+        }
+        let opened = shard.open(ring, &mut Slots::new()).await;
+        assert_eq!(opened.map(|buffer| buffer.layout()), Ok(ring));
+        let bytes = shard.memory.bytes(RING);
+        assert_eq!(&bytes[..8], b"FNDNRING");
+        assert_eq!(bytes[..block], bytes[block..2 * block]);
+    });
 }
 
 /// Starts a shard named `name` on `node` to run `main`.

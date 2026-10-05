@@ -390,9 +390,12 @@ How to read this record:
   and a crash keeps it whole or old. The magic, the version, and the place of the
   CRC are the same in every version, and a later version puts its fields after the
   CRC in the same sector, so an older build reads a newer block and reports its
-  version. Bytes past the first sector are not read. Two blocks at the
+  version. A decode does not read bytes past the first sector. Two zero blocks
+  are a ring made and not yet written; a zero first sector with other bytes in the
+  block is not a ring. Two blocks at the
   start of the ring hold the last two checkpoints: checkpoint `n` goes to block `n
-  mod 2`. Open takes the whole block whose `seq` comes after the other's, wrapped
+  mod 2`. A crash in the first write can keep only block 1; the ring then has one
+  copy of the checkpoint until checkpoint 2. Open takes the whole block whose `seq` comes after the other's, wrapped
   as the writer wraps it (on a tie, the first); one torn block leaves the other. No
   block with the magic: not a ring. Both with the magic and a wrong CRC: the ring is
   lost. The header with a new tail is durable

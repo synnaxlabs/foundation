@@ -25,7 +25,7 @@ use types::time::Span;
 
 use crate::entry::{self, Entry};
 use crate::group::{Closed, Group, META_LEN, Rejected, Sealed};
-use crate::header::{self, Header, SECTOR};
+use crate::header::{self, Header};
 use crate::record::{self, ALIGN, AREA_START};
 use crate::tails::{self, Tail, Tails};
 use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
@@ -438,8 +438,8 @@ fn random(entropy: &Entropy) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
-/// Reads the newer checkpoint. Two blocks whose first sectors are zero are a ring
-/// made and not yet written: the first checkpoint goes to both blocks.
+/// Reads the newer checkpoint. Two zero blocks are a ring made and not yet
+/// written: the first checkpoint goes to both blocks.
 async fn read_header(
     file: &File,
     pool: &Pool,
@@ -461,8 +461,7 @@ async fn read_header(
     let second = rest
         .first_chunk::<ALIGN>()
         .expect("invariant: the read gave two blocks");
-    let written = |block: &[u8; ALIGN]| block[..SECTOR].iter().any(|&byte| byte != 0);
-    if written(first) || written(second) {
+    if blocks.iter().any(|&byte| byte != 0) {
         let header = Header::decode(first, second)?;
         if found != header.layout.file_len() {
             return Err(length(header.layout));
