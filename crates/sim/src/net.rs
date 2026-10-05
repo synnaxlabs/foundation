@@ -28,6 +28,9 @@ const NOT_AVAILABLE: i32 = 99;
 const V4_HEADERS: usize = 28;
 /// The IPv6 and UDP header bytes of a datagram.
 const V6_HEADERS: usize = 48;
+/// The bytes of a receive queue that a datagram takes past its length. Linux also
+/// charges each datagram for its buffer (`truesize`), about this much for a small one.
+const CHARGE: usize = 768;
 /// The batch maxes that each socket draws from, for sends and for receives.
 const BATCH_MAXES: [usize; 3] = [1, 8, 64];
 
@@ -96,15 +99,22 @@ struct Datagram {
     contents: Vec<u8>,
 }
 
+impl Datagram {
+    /// The bytes of a receive queue that it takes.
+    fn charge(&self) -> usize {
+        self.contents.len() + CHARGE
+    }
+}
+
 /// A bound UDP socket and its receive queue.
 struct Binding {
     node: usize,
     local: SocketAddr,
     recv_batch_max: NonZeroUsize,
-    /// The most bytes in `queue`.
+    /// The most bytes that `queue` takes.
     capacity: usize,
     queue: VecDeque<Datagram>,
-    /// The bytes in `queue`.
+    /// The bytes that `queue` takes.
     queued: usize,
     /// The waker of the last receive that found the queue empty.
     waker: Option<Waker>,
@@ -130,7 +140,7 @@ impl Binding {
         let first = (self.queue.pop_front()).expect("invariant: the caller checks");
         let stride = first.contents.len().min(buffer.len());
         buffer[..stride].copy_from_slice(&first.contents[..stride]);
-        self.queued -= first.contents.len();
+        self.queued -= first.charge();
         let mut meta = Meta {
             source: first.source,
             destination: Some(first.destination.ip()),
@@ -153,7 +163,7 @@ impl Binding {
             }
             buffer[meta.len..meta.len + len].copy_from_slice(&next.contents);
             (meta.len, count, ended) = (meta.len + len, count + 1, len < stride);
-            self.queued -= len;
+            self.queued -= next.charge();
             self.queue.pop_front();
         }
         meta
@@ -264,9 +274,10 @@ impl Network {
     ) -> Result<(), Error> {
         let binding = &self.bindings[&key];
         let from = binding.node;
-        let source = source(from, binding.local, transmit)?;
-        let destination = transmit.destination;
-        let to = node(destination.ip());
+        let ip = transmit.destination.ip().to_canonical();
+        let destination = SocketAddr::new(ip, transmit.destination.port());
+        let source = source(from, binding.local, destination, transmit.source)?;
+        let to = node(ip);
         let link =
             *(to.and_then(|to| self.links.get(&(from, to)))).unwrap_or(&self.default);
         let contents = transmit.contents;
@@ -353,13 +364,13 @@ impl Network {
             }
             let datagram = flight.remove();
             let (source, destination) = (datagram.source, datagram.destination);
-            let len = datagram.contents.len();
+            let (len, charge) = (datagram.contents.len(), datagram.charge());
             let binding = (self.bindings.values_mut())
                 .find(|binding| binding.receives(destination))
-                .filter(|binding| binding.queued + len <= binding.capacity);
+                .filter(|binding| binding.queued + charge <= binding.capacity);
             let fate = match binding {
                 Some(binding) => {
-                    binding.queued += len;
+                    binding.queued += charge;
                     binding.queue.push_back(datagram);
                     wakers.extend(binding.waker.take());
                     Fate::Queued
@@ -404,26 +415,26 @@ pub(crate) fn under(draw: u32, chance: f64) -> bool {
     f64::from(draw) < chance * 2f64.powi(32)
 }
 
-/// The source address of the datagrams of `transmit` from a socket of `node` bound
-/// to `local`.
+/// The source address of datagrams to `remote` from a socket of `node` bound to
+/// `local`, which asks to send from `ip`.
 ///
 /// # Errors
 ///
-/// [`Error::Unreachable`] when the socket's family cannot reach the destination,
-/// and [`Error::Io`] when `transmit.source` is not an address of the socket.
+/// [`Error::Unreachable`] when the socket's family cannot reach `remote`, and
+/// [`Error::Io`] when `ip` is not an address of the socket.
 fn source(
     node: usize,
     local: SocketAddr,
-    transmit: &Transmit<'_>,
+    remote: SocketAddr,
+    ip: Option<IpAddr>,
 ) -> Result<SocketAddr, Error> {
-    let remote = transmit.destination;
     let any = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
     if local.ip() != any && local.is_ipv4() != remote.is_ipv4() {
         return Err(Error::Unreachable { remote });
     }
     let [v4, v6] = addresses(node);
     let own = if remote.is_ipv4() { v4 } else { v6 };
-    let ip = transmit.source.unwrap_or(own);
+    let ip = ip.unwrap_or(own);
     if ip != own {
         return Err(Error::Io {
             code: NOT_AVAILABLE,

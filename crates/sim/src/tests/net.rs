@@ -38,11 +38,12 @@ fn at(node: &node::Node, port: u16) -> SocketAddr {
     SocketAddr::new(node.addresses()[0], port)
 }
 
+/// A socket of `node` on `local`, whose receive queue holds 10,000 small datagrams.
 fn bind(node: &node::Node, local: SocketAddr) -> Result<(Sender, Receiver), Net> {
     node.net().udp(&Udp {
         local,
         send_buffer_bytes: 1 << 20,
-        recv_buffer_bytes: 1 << 20,
+        recv_buffer_bytes: 1 << 24,
     })
 }
 
@@ -341,13 +342,33 @@ fn queue(node: &node::Node, port: u16, bytes: usize) -> (Sender, Receiver) {
 fn a_full_receive_queue_drops_datagrams() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (sender, _a) = udp(&a, 4433);
-    let (_b, receiver) = queue(&b, 4433, 10);
+    let (_b, receiver) = queue(&b, 4433, 2 * (4 + 768) + 1);
     let _send = send(&a, sender, at(&b, 4433), vec![vec![7; 4]; 4]);
     sim.run_for(Span::SECOND).unwrap();
     let log = Log::default();
     let _receive = receive(&b, receiver, &log);
     sim.run_for(Span::SECOND).unwrap();
     assert_eq!(datagrams(&log), [vec![7; 4], vec![7; 4]]);
+}
+
+/// The count of empty datagrams that a socket of `b` with a receive queue of `bytes`
+/// holds after `a` sends it three.
+fn empty(bytes: usize) -> usize {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = queue(&b, 4433, bytes);
+    let _send = send(&a, sender, at(&b, 4433), vec![Vec::new(); 3]);
+    sim.run_for(Span::SECOND).unwrap();
+    let log = Log::default();
+    let _receive = receive(&b, receiver, &log);
+    sim.run_for(Span::SECOND).unwrap();
+    log.lock().unwrap().len()
+}
+
+#[test]
+fn each_datagram_takes_768_bytes_of_the_receive_queue_past_its_length() {
+    let held = [0, 767, 768, 2 * 768 - 1, 2 * 768].map(empty);
+    assert_eq!(held, [0, 0, 1, 1, 2]);
 }
 
 /// A seed under which the first socket that `b` binds receives `batch` datagrams
@@ -451,7 +472,7 @@ fn a_receive_joins_only_datagrams_of_one_ecn() {
 fn a_receive_frees_its_bytes_in_the_queue() {
     let (mut sim, a, b) = pair(batched(64), link::Config::default());
     let (sender, _a) = udp(&a, 4433);
-    let (_b, receiver) = queue(&b, 4433, 8);
+    let (_b, receiver) = queue(&b, 4433, 2 * (4 + 768));
     let log = Log::default();
     let _receive = receive(&b, receiver, &log);
     let _first = send(&a, sender.clone(), at(&b, 4433), vec![vec![1; 4]; 2]);
@@ -524,6 +545,46 @@ fn a_socket_on_the_unspecified_v6_address_receives_v4() {
     let meta = log[0].1;
     assert_eq!(meta.source, at(&a, 4433));
     assert_eq!(meta.destination, Some(b.addresses()[0]));
+}
+
+#[test]
+fn a_send_to_a_mapped_ipv4_address_goes_to_the_ipv4_address() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let log = Log::default();
+    let any = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 4433);
+    let (sender, _a) = bind(&a, any).unwrap();
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let mapped = SocketAddr::new(
+        IpAddr::V6(Ipv4Addr::new(10, 0, 0, 2).to_ipv6_mapped()),
+        4433,
+    );
+    let _send = send(&a, sender, mapped, vec![b"v4".to_vec()]);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(arrivals(&log), [(at(&a, 4433), b"v4".to_vec())]);
+}
+
+#[test]
+fn a_socket_on_a_v6_address_cannot_reach_a_mapped_ipv4_address() {
+    let (mut sim, a, _b) = pair(0, link::Config::default());
+    let (mut sender, _a) = bind(&a, SocketAddr::new(a.addresses()[1], 4433)).unwrap();
+    let mapped = SocketAddr::new(
+        IpAddr::V6(Ipv4Addr::new(10, 0, 0, 2).to_ipv6_mapped()),
+        4433,
+    );
+    let result = Arc::new(Mutex::new(None));
+    let log = Arc::clone(&result);
+    let _send = a.shards().start(shard("send"), move |_| async move {
+        let transmit = transmit(mapped, b"v4");
+        let sent = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
+        *log.lock().unwrap() = Some(sent);
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    let remote = SocketAddr::from(([10, 0, 0, 2], 4433));
+    assert_eq!(
+        *result.lock().unwrap(),
+        Some(Err(Net::Unreachable { remote }))
+    );
 }
 
 /// The source and bytes of each batch in `log`.

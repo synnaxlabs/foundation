@@ -80,12 +80,14 @@ impl Node {
     /// - A bind or a send from an address that is not the node's gives `Error::Io`
     ///   with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free port from
     ///   49152.
-    /// - A send to the other family than the socket's gives `Error::Unreachable`.
+    /// - A send to `::ffff:a.b.c.d` goes to `a.b.c.d`. A send to the other family
+    ///   than the socket's gives `Error::Unreachable`.
     /// - Each socket draws its send and receive batch maxes from 1, 8, and 64.
     /// - A datagram is lost when it is over the link's
     ///   [`mtu`](crate::link::Config::mtu), when nothing is bound at its
     ///   destination, or when it would fill the receive queue past
-    ///   `recv_buffer_bytes`. The send buffer never fills.
+    ///   `recv_buffer_bytes`, in which each datagram takes its length plus 768
+    ///   bytes. The send buffer never fills.
     /// - A socket half panics when it polls outside the node's threads.
     #[must_use]
     pub fn net(&self) -> env::net::Net {
