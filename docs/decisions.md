@@ -1405,7 +1405,12 @@ How to read this record:
   `xtask globals` check allows only this case. The static also holds the state of
   `Allocator::freed_holding` (#349): a phase with a count of the frees that scan, the
   caller's needle while a call runs, and a found count, because Rust has no other way
-  to see a freed block.
+  to see a freed block. `freed_holding` is the one exception to "Safe code is sound
+  for every input": the person said "#481 I approve A" on 2026-10-05. A freed block
+  can hold bytes the program never wrote, such as padding or the spare capacity of a
+  `Vec`. Rust defines no read of such a byte on any target, so no sound read exists,
+  and Miri stops at one. This is a patch. The long-term fix is a freeze read (Rust RFC
+  3605); when Rust has one, `freed_holding` uses it and the exception goes.
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
