@@ -886,12 +886,14 @@ How to read this record:
   `clippy::error_impl_error` are rejected: an enum lets a test pin the variant, and
   backtrace capture costs time on hot paths. Decided by the advisor under the quality
   delegation.
-- **FACTORY HOST (2026-10-05)** The person approved one AWS c7i.16xlarge (64 vCPU,
-  128 GiB, about 69 USD a day) for builder sessions: "that 480 a week is fine. let's
-  only allocate a day at a time in budget". It stops 24 hours after each boot unless
-  the person renews it, and each day is a line in its ledger issue. It is outside the
-  test budget. The person's laptop keeps the first nine builders, the coordinator, and
-  the advisor.
+- **FACTORY HOST (2026-10-05)** The person approved one AWS c7i.16xlarge (64 vCPU, 128
+  GiB, about 69 USD a day) for builder sessions: "that 480 a week is fine. let's only
+  allocate a day at a time in budget". It is outside the test budget. The advisor
+  launched it; the coordinator owns it from then on. Each boot stops it after 24 hours.
+  Each day, at least two hours before the stop, the coordinator asks the person to renew
+  one more day. On a yes it runs `sudo shutdown -c; sudo shutdown -h +1440` on the host
+  and posts the day on the ledger (#163). Without a yes, the host stops. The person's
+  laptop keeps the first nine builders, the coordinator, and the advisor.
 - **REMOTE CONTROL (2026-10-05)** Sessions on the laptop and on the factory host
   message each other through Remote Control ("remote control is fine"). Every session
   name is unique across both machines. There is one coordinator. If Remote Control
