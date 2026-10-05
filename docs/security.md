@@ -62,14 +62,8 @@ state on `main`.
   the node hold memory or do work out of proportion to the bytes it sent.
 - A message on a stream is a length and then bytes. The length is the peer's choice,
   up to `message_bytes_max`.
-- A key of small order needs no private key. `types::node::PublicKey::new` refuses
-  each one, so every check site gets the check from the type.
-- Each shard signs stateless resets with one key for the node. So the router must
-  hand a datagram only to the shard that owns its connection ID, by the first byte
-  (#77). If not, a shard signs a valid reset for a live connection of another shard.
-- Open: #228 (length prefixes hold and fragment the shard's pool), #298 (junk from
-  one address stops every stateless reset; a small datagram of an unknown version
-  gets a reply), #299 (a peer makes the node hold junk certificates for a session).
+- Open: #227 (a key of small order needs no private key), #228 (length prefixes hold
+  and fragment the shard's pool).
 - Not decided: a limit on handshakes before admission. Each one costs the node a key
   exchange and one signature, and one signature check more when the peer sends a
   certificate.
@@ -103,8 +97,6 @@ state on `main`.
 - `raft` checks that the sender of a reply is a voter. It does not check the sender
   of a request (`PreVote`, `Vote`, `Heartbeat`, `Append`), and it trusts each field of
   a message. Open: #232, which also asks who proves that a sender is in the group.
-- `estimate` combines the bounds of time sources. Open: #344 (one lying source of
-  three puts a small bound inside the honest overlap, and the estimate follows it).
 - The `clock`, `replica`, and `blob` protocols are not built. To attack when they
   land: a time source that reports a small bound to steer the clocks that follow it
   (R6), and a binary that a peer serves under a hash it does not match (C9d).
@@ -115,9 +107,6 @@ state on `main`.
   encoding (`document`). Both readers bound nesting at 64 levels.
   `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
   `config_hcl_read`, `config_hcl_write`, `document_encoding`.
-- A person reviews a spec file before `apply`. Text that shows one thing and reads
-  as another defeats that review. Open questions: #301 (a lone `\r` in a comment,
-  bidirectional controls, keys compared by bytes).
 - Config names secrets and never holds their values (K4).
 
 ### Disk to `buffer`
@@ -125,9 +114,8 @@ state on `main`.
 - The disk can tear, cut, flip, or zero bytes, and can hold records from an older lap
   of the ring. A chained CRC32C finds these. It does not stop a local user who writes
   the file: the CRC is not a secret, and a header block has no tie to its ring.
-- The engine is not built (#161). #234 and #300 are robustness defects of this
-  boundary: they need a writer of the file, so they do not have the `security`
-  label.
+- The engine is not built (#161). #234 is a robustness defect of this boundary: it
+  needs a writer of the file, so it does not have the `security` label.
 
 ### Device to connector
 
@@ -171,9 +159,11 @@ state on `main`.
 ## Fuzz targets
 
 The rule is one target for each decoder of outside input
-(`docs/claude/testing.md`). Inputs are in `oracles/fuzz/<target>/`. The CI job is #252.
+(`docs/claude/testing.md`). An encoder or a writer also gets a target when a
+decoder must read its output back (`codec_encoder`, `config_hcl_write`). Inputs are
+in `oracles/fuzz/<target>/`. The CI job is #252.
 
-| Target | Reads | Checks besides "no panic" |
+| Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode` | Both give one result |

@@ -1,4 +1,4 @@
 a = <<EOT
-line ${x} %{y}
+line $${x} %%{y}
 	tab
 EOT
