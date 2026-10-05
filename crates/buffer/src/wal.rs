@@ -743,11 +743,9 @@ mod tests {
             let len = u32::try_from(body.len()).expect("a short body");
             header[..4].copy_from_slice(&len.to_le_bytes());
             header[8] = kind;
-            let mut crc = crate::crc32c::Crc32c::resume(chain);
-            crc.update(&header[..4]);
-            crc.update(&[kind]);
-            crc.update(body);
-            let crc = crc.finish();
+            let crc = [&header[..4], &[kind], body]
+                .into_iter()
+                .fold(chain, crate::crc32c::append);
             header[4..8].copy_from_slice(&crc.to_le_bytes());
             let at = block * ALIGN;
             area[at..at + HEADER_LEN].copy_from_slice(&header);

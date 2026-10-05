@@ -36,7 +36,8 @@ queue. You do not build crates.
    finding is fixed or answered, and the surface matches the decisions. Then add
    `ready`. Each loop, tell the person about every new `ready` PR, one line each:
    number, title, and anything they must look at. Spot-check one builder-labeled PR
-   per loop and remove `ready` if it skipped a gate.
+   per loop and remove `ready` if it skipped a gate. Merge a routine PR that the person
+   has not merged 30 minutes after `ready` (`docs/coordination.md`), and tell them.
 4. **After merges.** Close finished issues. Tell builders who depend on the change.
 5. **Daily.** Run `/crew` once a day and file its findings as issues.
 6. **Decisions.** Every decision the person makes goes into `docs/decisions.md` the

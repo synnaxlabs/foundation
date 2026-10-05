@@ -22,6 +22,7 @@ use std::str;
 
 use types::name;
 
+use crate::diagnostic::{Code, Diagnostic};
 use crate::value::{Call, Float, Kind, Value};
 use crate::{Attribute, Block, Document, Label, Map, Span};
 
@@ -83,12 +84,22 @@ pub struct TooDeep {
     pub span: Option<Span>,
 }
 
+impl From<&TooDeep> for Diagnostic {
+    fn from(error: &TooDeep) -> Self {
+        Self::new(
+            TOO_DEEP,
+            error.span,
+            format!("the document nests deeper than {DEPTH_MAX} levels"),
+            "Make it flatter".into(),
+        )
+    }
+}
+
+const TOO_DEEP: Code = Code::new("document.too-deep");
+
 impl fmt::Display for TooDeep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "the document nests deeper than {DEPTH_MAX} levels. Make it flatter"
-        )
+        fmt::Display::fmt(&Diagnostic::from(self), f)
     }
 }
 
@@ -484,6 +495,21 @@ mod tests {
 
         #[test]
         fn too_deep_names_the_fix() {
+            let at = Position {
+                offset: 3,
+                line: 1,
+                column: 2,
+            };
+            let span = Span::new(Source(4), at, at);
+            assert_eq!(
+                Diagnostic::from(&TooDeep { span }),
+                Diagnostic::new(
+                    Code::new("document.too-deep"),
+                    span,
+                    "the document nests deeper than 64 levels".into(),
+                    "Make it flatter".into(),
+                )
+            );
             assert_eq!(
                 TooDeep { span: None }.to_string(),
                 "the document nests deeper than 64 levels. Make it flatter"

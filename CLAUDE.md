@@ -199,4 +199,5 @@ default, template, and system instruction.
 - Commit and push only on your own branch, in your own worktree.
 - Never force-push a commit that someone else may have pulled.
 - Never stash. Never `git checkout` or `git reset` over files you did not change.
-- A person merges every PR.
+- A person merges every PR, except the routine PRs that `docs/coordination.md` lets
+  the coordinator merge.

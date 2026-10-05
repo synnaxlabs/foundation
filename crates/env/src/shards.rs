@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::tasks::{Task, Tasks};
-use crate::threads::{Error, Handle};
+use crate::thread::{Error, Handle};
 
 /// A shard's main function as a driver receives it.
 ///
@@ -18,7 +18,7 @@ pub type Main = Box<dyn FnOnce(Tasks) -> Task + Send>;
 /// Clones start shards in the same place.
 ///
 /// ```
-/// use env::threads::{Error, Handle};
+/// use env::thread::{Error, Handle};
 ///
 /// fn start_all(shards: &env::shards::Shards) -> Result<Vec<Handle>, Error> {
 ///     (0..shards.cores().get())
@@ -72,7 +72,7 @@ impl Shards {
     /// - [`Error::Pin`] when the thread cannot pin to `config.core`.
     ///
     /// ```
-    /// use env::threads::{Error, Handle};
+    /// use env::thread::{Error, Handle};
     ///
     /// fn start(shards: &env::shards::Shards) -> Result<Handle, Error> {
     ///     let config = env::shards::Config { name: "shard-1".into(), core: None };

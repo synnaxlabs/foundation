@@ -418,7 +418,9 @@ How to read this record:
 - **TIME ADAPTERS** Neutral model `Measurement { at: local monotonic, offset, error }`.
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
-  same estimator serves device clocks in the connector library.
+  same estimator serves device clocks in the connector library. Amended by ESTIMATE FIT:
+  a device clock gives `Overlap` readings with a low edge, a high edge, or both, not
+  `Measurement`s.
 - **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about one local clock (the node's
   monotonic clock, or a device's sample clock in nanoseconds, #84): its offset is mesh
   time minus the local reading at `at`, and its error is a half-width from 0 to 36500
@@ -431,7 +433,7 @@ How to read this record:
   half of them. This reads C6's "follows the smallest measured bound": when sources
   agree, the result is never wider than the narrowest. The result holds the true offset
   when the bounds that hold it are a majority and every other bound misses them. Decided
-  by the `time` builder (#49). A device's measurements go to the oscillator fit
+  by the `time` builder (#49). A device's readings go to the oscillator fit
   (`Overlap`), never to `combine`. Node sources keep `Filter`, not `Overlap`: a network
   exchange puts the true offset at about the same place in each bracket, so an overlap
   gains little, and a broken drift bound would stay wrong for the life of an overlap,
@@ -451,25 +453,27 @@ How to read this record:
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
   trips; input rejects an end before the start.
-- **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock.
-  It keeps the offsets that every measurement of that clock allows, each widened by
-  drift, so it holds only the measurement with the highest low edge and the one with
-  the lowest high edge. Measurements come in local time order. An older one returns
-  `Backwards` (the device restarted), and one that shares no offset returns `Disjoint`
-  (the clock jumped, or it drifts faster than its bound). Neither changes the overlap,
-  and the caller starts a new one with a gap. Each measurement holds true mesh time,
-  with the node's own error in its bound, so the drift covers only the device
-  oscillator. The drift is fixed for the life of an overlap, because a smaller drift
-  would need measurements that it dropped. This reads r6 Q5's lower-envelope fit with
-  the rate bounded by `Drift`, not fitted. A line fit of offset and rate lost: it is
-  honest only if the rate stays constant, and no datasheet bounds oscillator wander. A
-  measured rate needs a signed rate in the model, not a smaller `Drift`. A device
-  adapter must give each measurement a two-sided bound. The return time of a read
-  bounds its last sample only from above. The lower bound comes from a device counter
-  read between two mesh stamps, or from a latency that the hardware guarantees: one
-  read over a stated latency gives a low edge above the truth, and the overlap keeps it.
-  Decided by the `time` builder; the person accepted it on 2026-10-05 ('#1 is fine').
-  Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper bounds).
+- **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
+  keeps the offsets that every reading of that clock allows, each widened by drift, so
+  it holds only the reading with the highest low edge and the one with the lowest high
+  edge. Readings come in local time order. An older one returns `Backwards` (the device
+  restarted), and one that shares no offset returns `Disjoint` (the clock jumped, or it
+  drifts faster than its bound). Neither changes the overlap, and the caller starts a
+  new one with a gap. Each reading holds true mesh time, with the node's own error in
+  its bound, so the drift covers only the device oscillator. The drift is fixed for the
+  life of an overlap, because a smaller drift would need readings that it dropped. This
+  reads r6 Q5's lower-envelope fit with the rate bounded by `Drift`, not fitted. A line
+  fit of offset and rate lost: it is honest only if the rate stays constant, and no
+  datasheet bounds oscillator wander. A measured rate needs a signed rate in the model,
+  not a smaller `Drift`. A reading gives a low edge, a high edge, or both, at one device
+  time. A read return bounds the newest sample the host knows only from above. A low
+  edge comes from a mesh stamp before the device acts (a start command or a request),
+  from a device counter read between two mesh stamps, or from a latency that the
+  hardware guarantees. The overlap gives a bound only when it has both a low edge and a
+  high edge (`Open` before that). Decided by the `time` builder; the person accepted it
+  on 2026-10-05 ('#1 is fine'). The person accepted one-sided readings on 2026-10-05
+  ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper
+  bounds).
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
   a reader gets no mesh time. After it, when `combine` fails (no majority, a bound too
   wide, or no sources after a remove), the clock holds over: it keeps its last estimate
@@ -516,8 +520,8 @@ How to read this record:
 - **PROTOCOL HEADER (#75)** The header of STREAM DISPATCH is 3 bytes: the wire
   version (`u16`, little-endian), then the protocol number (`u8`): clock 1, mesh 2,
   replica 3, blob 4, hub 5. On a stream, the header is the whole first message, so
-  later messages carry no prefix. A datagram starts with it; its handler reads from
-  `wire::header::LEN` until `block` has a view that skips a prefix (#110). The
+  later messages carry no prefix. A datagram starts with it; its handler calls
+  `Block::skip(wire::header::LEN)` on the rest (BLOCK VIEW). The
   version covers every message on that stream, encoded series included: each wire
   version fixes one codec version (wire 1 carries codec 1). The version comes first
   and is checked first, so a later version can change what follows it. A node reads
@@ -576,9 +580,15 @@ How to read this record:
   the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
   issuer are not checked. A node sends its certificate when it dials; an SDK client
   sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
-  session protocol gets a new name. Resumption and 0-RTT are off, so rustls gets a
-  fixed time and never reads the OS clock. Randomness inside TLS comes from aws-lc
-  (TLS RANDOMNESS). Decided by `network` in #54.
+  session protocol gets a new name. A session that agrees no ALPN, or another name,
+  ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
+  ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
+  dialing node offers them in that order, and the client's order decides, so nodes
+  agree AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between
+  nodes and "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so
+  an SDK may offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
+  reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS).
+  Decided by `network` in #54; the ALPN check, suites, and groups in #108.
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -759,6 +769,27 @@ How to read this record:
   integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
+- **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
+  Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
+  span, a message, a fix, and notes (other places that explain it). The span is `None`
+  only for a Document with no spans; a problem with a whole file has an empty span at
+  the start of the file. The message and the fix have no final period, and each
+  producer's tests pin both. A code is `<producer>.<problem>`: each part is lower-case
+  ASCII letters and digits, starts with a letter, and may join words with single `-`
+  (`hcl.syntax`, `document.duplicate-key`). The producer is a name it owns: the syntax
+  of a front end, a core crate, or a kind. No two producers share a name. A producer
+  declares each code as a `const` item, so a bad code fails the build. A code never
+  changes between releases. Each producer maps its own errors with `From<&Error>`
+  beside them, so `config`, `ops`, and `node` never match a producer's variants.
+  `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new` breaks
+  no producer. No severity field: the warnings in K2 and R13-10 belong to plan output.
+  `ops` operation error codes use `Code` too, so the grammar has one home. A code
+  crosses the wire as text, and no reader makes a `Code` from it. Lost: a `Diagnose`
+  trait behind `Box<dyn>` (not `Clone`, and a fix is optional); number codes (a
+  central registry, and unreadable); one span only (the first producer has two
+  places). Codes go into `oracles/conformance/document/` at the first stable release;
+  the person decided on 2026-10-05 ("At the first release"). Decided by the `config`
+  builder; approved by the coordinator (#137).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -866,7 +897,12 @@ How to read this record:
   starts the daily run.
 - **C9c** Oracles are enforced by visibility. A script writes an oracle section at the
   top of each PR summary and flags weakening. Each flagged change gets its own
-  adversarial reviewer. A person merges every PR. Supersedes: T2 enforcement level.
+  adversarial reviewer. A person merges every PR, except routine PRs (MERGE RULE).
+  Supersedes: T2 enforcement level.
+- **MERGE RULE (2026-10-05)** The coordinator merges a routine PR that the person has
+  not merged 30 minutes after `ready`, and then tells the person; `docs/coordination.md`
+  defines routine. It lets builders go on while the person is away. The person decided
+  on 2026-10-05 ("Yes, that narrow set").
 - **AGENT REQUIREMENT** Every task must be easy to do with agents. C7 carries it.
 - **R16-1 (2026-10-04)** Release builds keep integer overflow checks
   (`overflow-checks = true`), so R9-D10 holds in release too. An intended wrap uses
@@ -936,6 +972,7 @@ How to read this record:
   `threads::Threads`: dedicated threads for blocking code. Each runs one future, and it
   waits for an event only by awaiting a future, so simulation controls every wait. A
   lint denies the std blocking waits (`park`, `Condvar`, `Barrier`, `mpsc` receive).
+  `thread::Handle` and `thread::Error`, which `Shards` and `Threads` both return (#129).
   When a shard's main future completes, the shard drops its other tasks. A panic in any
   task ends its shard, and its `Handle::join` returns `Error::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
@@ -959,6 +996,12 @@ How to read this record:
   implements it over `std::alloc` for tests, Miri, and `sim`. `block` makes no OS
   call. `reclaim` takes back returned blocks on each loop turn; `purge` gives idle
   pages back on a timer that the shard owns (#2).
+- **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
+  starts `count` bytes later, with no copy and no count change. `Block` is
+  `{ header, start: u32, len: u32 }`, 16 bytes, so a pool has at most 26 size classes
+  and the largest block holds 2 GiB; a budget above that gives more blocks, not larger
+  ones. `slice(&self, range)` lost: it clones the count for every view, and nothing
+  needs a range yet. Decided by `memory`.
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
@@ -984,6 +1027,12 @@ How to read this record:
 - **BQ18** The desired version is in the spec. Nodes report versions with lease
   renewals. A rollout lock upgrades one node at a time. Finalize when all report.
   Multi-region scope: 5.1.
+- **CPU BASELINE (2026-10-05)** Builds assume x86-64-v2 on x86-64 (every CPU since
+  2009) and the CRC instruction on aarch64 Linux (Raspberry Pi 3 and later, Graviton;
+  Apple chips have it already). `.cargo/config.toml` sets both, so tests, benchmarks,
+  and releases build the same code. A binary fails on an older CPU. Without the flags,
+  the `crc32c` kernels ran 2x slower (#140). The person decided on 2026-10-05 ("Raise
+  the minimum").
 
 ### 1.16 Retired entries
 
@@ -1127,6 +1176,7 @@ Storage classes used in the table:
 | Subscription | The selector of a reader session, kept live in `hub` against `mesh` watches | The reader | `hub` | `hub` |
 | Effective settings | Memory: a per-node cache of `spec::resolve` results | `mesh` | `home`, `transport`, `clock`, supervisor | `mesh` |
 | Document | Memory: made by a front end from files, or by SDK code | Front ends | `config`, kinds | `document` (X21) |
+| Diagnostic | Memory: made from a producer's error | Front ends, kinds, `document` | `config`, `ops` (text, `--json`, MCP) | `document` (DIAGNOSTICS) |
 | Selector | A value inside policies, readers, connectors, and access | Files, sessions | Every matcher | `types` (one matcher) |
 | Plan | A JSON artifact with stable change kinds | `ops plan` | `ops apply` (commits exactly it) | `config`, `ops` |
 
@@ -1705,7 +1755,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags |
-| 4 | `config-hcl` | Reads and writes HCL files as Documents and keeps formatting. | `document` |
+| 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
 | 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
