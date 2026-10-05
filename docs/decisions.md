@@ -172,13 +172,13 @@ How to read this record:
   blocks are 64-byte aligned; R9-D4 variable-length series are `ends[n]` then data;
   R9-D5 `types` is byte layout only and meaning lives in the spec; R9-D6 `time::Span`
   value and `duration` keyword; R9-D7 JSON uses RFC 3339 UTC with 9 fraction digits,
-  span unit strings, and keys as UUID strings, and never appears on the data path;
-  R9-D8 exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal
-  overflow and checked math for outside values; R9-D13 `types` modules are time,
-  sample, series, frame, channel, node, quality, name, hash (R16-7), and authority
-  (#57: `access`, `spec`, `wire`, and `control` all use it); R9-D14 checks
-  run once, at the home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block`
-  module (by SRP PASS).
+  span unit strings, and keys as UUID strings, and never appears on the data path; R9-D8
+  exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal overflow
+  and checked math for outside values; R9-D13 `types` modules are time, sample, series,
+  frame, channel, node, quality, name, hash (R16-7), authority (#57: `access`, `spec`,
+  `wire`, and `control` all use it), and digest (the BLAKE3 address of spec chunks and
+  blobs, which `spec`, `blob`, `wire`, and `mesh` share); R9-D14 checks run once, at the
+  home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block` module (by SRP PASS).
 - **MODEL MAP (current)** Data channel -> index, -> quality (optional), -> data type,
   -> unit. Index -> error channel (optional), -> control channel (optional). Type ->
   other types; types never point at channels. Policies -> names through selectors;
@@ -363,6 +363,25 @@ How to read this record:
   core. The diode carrier is UDP, Noise K, RaptorQ, seq, and codec keyframes: best
   effort with recorded gaps; commands, Raft, and clock exchange cannot cross it.
 - **A4 (wire part)** Each connection swaps keys for short numbers.
+- **STREAM DISPATCH (2026-10-04)** `transport` is blind to protocols. The first
+  message of each stream, and each datagram, starts with a header from `wire` that
+  names the protocol (`clock`, `mesh`, `replica`, `blob`, `hub`). `node` holds the
+  table from protocol to handler and runs one accept loop per session. A protocol
+  that the table does not know comes from a peer, so the loop resets that stream with
+  a code and goes on. Decided by the coordinator (network's review of #53).
+- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
+  however many shards it runs, so each site's firewall needs one known port per
+  conduit. Each QUIC connection belongs to one shard, and every connection ID a node
+  issues encodes that shard. A receive loop on one shard reads the UDP socket in
+  batches and hands each batch to the owning shard over the C2 ring; every shard
+  sends on the same socket. The TCP listener accepts and moves each stream to its
+  shard. `env::net` therefore splits a UDP socket into a receive half with one owner
+  and a send half that any shard may use, and `sim` models the split. Rejected: a
+  port per shard (a port range in every firewall), kernel reuse-port hashing (routes
+  by address, breaks on NAT rebinding), and one shard doing all network work. If the
+  receive loop saturates on Linux, add a reuse-port group steered by the same
+  connection ID. Decided by the design session under the architecture delegation
+  (#53).
 - **TLS RANDOMNESS (2026-10-04)** All randomness inside TLS (key shares, client
   random, nonces) comes from aws-lc, not from `env`. rustls holds its random source
   as a `&'static` value, and aws-lc makes X25519 key shares with its own randomness,

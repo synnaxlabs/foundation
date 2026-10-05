@@ -12,7 +12,7 @@ approval; pin the version you build against there.
 
 | Crate | Used by | Why | License | Version | Approved |
 | --- | --- | --- | --- | --- | --- |
-| `blake3` | `spec`, `blob` | Hashes of spec chunks and blobs (R4 SETTLED, r7 area 7) | CC0-1.0 or Apache-2.0 | 1.8.7 | 2026-10-04 |
+| `blake3` | `types` (`types::digest`, for `spec` and `blob`) | Hashes of spec chunks and blobs (R4 SETTLED, r7 area 7) | CC0-1.0 or Apache-2.0 | 1.8.7 | 2026-10-04 |
 | `rustix` | `os` | Reserve, commit, and purge pool pages; OS calls behind `env` | Apache-2.0 with LLVM exception, Apache-2.0, or MIT | 1.1.5 | 2026-10-04 |
 | `tokio` | `os`, `transport`, `hub`, `node`, benchmarks | One `LocalRuntime` per shard (C2) | MIT | 1.53.2 | 2026-10-04 |
 | `rustls` | `transport` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
