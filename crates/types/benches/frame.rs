@@ -1,6 +1,6 @@
 //! The time to build a frame (header, ranges, and descriptors, but not the series
-//! bytes), to fill and read every series in order, and to look each one up, for a dense
-//! frame and for frames of 100,000 channels.
+//! bytes), to fill and read every series in order, to look each one up, and to give its
+//! charge, for a dense frame and for frames of 100,000 channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -169,4 +169,12 @@ fn lookup(bencher: Bencher<'_, '_>, case: &Case) {
             .map(<[u8]>::len)
             .sum::<usize>()
     });
+}
+
+/// Gives the frame's credit charge.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    bencher.bench_local(|| black_box(&frame).charge());
 }
