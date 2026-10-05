@@ -74,4 +74,28 @@ fn main() {
     // One block of each of the four classes: a dropped block serves the next alloc.
     let committed = 128 + 192 + 1088 + 4160;
     assert_eq!(pool.committed(), committed, "blocks are used again");
+
+    let config = Config { budget: 2 * 4160 };
+    let heap = Heap::new(config.reservation());
+    let pool = Pool::new(config, heap);
+    let large = [pool.alloc(4096), pool.alloc(4096)].map(|block| block.expect("room"));
+    drop(large);
+    let allocations = count(|| {
+        for _ in 0..64 {
+            drop(pool.alloc(1).expect("a freed large block gives its budget"));
+        }
+    });
+    assert_eq!(allocations, 0, "the pressure path allocated");
+    assert_eq!(pool.committed(), 128, "the idle large size gave its budget");
+
+    let allocations = count(|| {
+        assert_eq!(
+            pool.purge(),
+            0,
+            "the small size returned a block this interval"
+        );
+        assert_eq!(pool.purge(), 128, "the small size stayed idle");
+    });
+    assert_eq!(allocations, 0, "the purge path allocated");
+    assert_eq!(pool.committed(), 0, "each idle size gave its pages back");
 }

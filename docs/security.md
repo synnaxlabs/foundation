@@ -62,8 +62,18 @@ state on `main`.
   the node hold memory or do work out of proportion to the bytes it sent.
 - A message on a stream is a length and then bytes. The length is the peer's choice,
   up to `message_bytes_max`.
-- Open: #227 (a key of small order needs no private key), #228 (length prefixes hold
-  and fragment the shard's pool).
+- A key of small order needs no private key. `types::node::PublicKey::new` refuses
+  each one, so each check that takes a `PublicKey` has it (NODE KEY TLS). Landed in
+  `types`; the TLS check uses it.
+- Each shard signs stateless resets with one key for the node, and a connection ID
+  names its shard in the first byte (ONE PORT PER NODE). A shard that gets a
+  datagram with a short header for a connection of another shard signs a valid
+  reset for it. The router is not built. #77 asks that it hands such a datagram
+  only to the shard that the first byte names, and drops one that names no shard.
+- Open: #228 (a length prefix holds a whole block of the shard's pool before a body
+  byte arrives), #298 (datagrams that are not valid, from one address, stop every
+  stateless reset; a small datagram of an unknown version gets a reply), #299 (a
+  peer makes the node hold certificates that are not valid for a session).
 - Not decided: a limit on handshakes before admission. Each one costs the node a key
   exchange and one signature, and one signature check more when the peer sends a
   certificate.
@@ -85,7 +95,18 @@ state on `main`.
 - To attack when it lands: a replayed hello, a hello for another gateway, a session
   open with no fresh signature, a forwarding node that swaps the subject, a command
   after its deadline or replayed after an outage, and any read or write path that does
-  not reach `access`.
+  not reach `access`, and a subject key of small order (the check must take
+  `PublicKey`).
+
+### Agent host and CLI to `ops`
+
+- Caller to `ops`: the CLI and the MCP surface have only `version` and `docs`
+  today. #353: `call` accepts a list as arguments, but the schema says `object`; a
+  text error prints the caller's text raw, so a new line forges a `fix:` line. It
+  does not have the `security` label while no operation takes real arguments.
+- Mesh to agent, to attack when `ops` gets real operations: text from a spec file
+  or a peer that reaches a tool description or a tool result, as an instruction to
+  the agent.
 
 ### Node to node
 
@@ -94,12 +115,29 @@ state on `main`.
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`).
-- `raft` checks that the sender of a reply is a voter. It does not check the sender
-  of a request (`PreVote`, `Vote`, `Heartbeat`, `Append`), and it trusts each field of
-  a message. Open: #232, which also asks who proves that a sender is in the group.
+- `raft` does not check the sender of a request, by decision: the caller
+  authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
+  built (`mesh`). `raft` trusts each field of a message. Open: #232.
+- `raft` counts a reply only from a voter. But it takes a higher term from any
+  sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
+  #352 (a reply from a node that is not a voter makes the leader step down; one
+  message with term `u64::MAX` stops the group for good, because each node writes
+  that term to disk and none can campaign). #352 asks to change RAFT SURFACE for
+  replies.
+- The joint quorum math of `raft::Voters` held against a direct count (the run is
+  in #352). Voters do not change through the log yet (#193); attack that when it
+  lands.
 - The `clock`, `replica`, and `blob` protocols are not built. To attack when they
-  land: a time source that reports a small bound to steer the clocks that follow it
-  (R6), and a binary that a peer serves under a hash it does not match (C9d).
+  land: who may be a time source, and a binary that a peer serves under a hash it
+  does not match (C9d).
+
+### Time source to `estimate`
+
+- `estimate` combines one bound per source and does not know what a source is
+  (ESTIMATE COMBINE). The result holds the truth only when every bound outside the
+  majority misses it. Open, needs a decision on ESTIMATE COMBINE: #344 (one lying
+  source of three puts a small bound inside the honest overlap, and the estimate
+  follows it). This is the attack of R6.
 
 ### Files to the spec
 
@@ -107,6 +145,11 @@ state on `main`.
   encoding (`document`). Both readers bound nesting at 64 levels.
   `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
   `config_hcl_read`, `config_hcl_write`, `document_encoding`.
+- A person or an agent reviews the files and the plan before `apply` (K3). Text
+  that shows one thing and reads as another defeats that review. Questions for a
+  decision, with no `security` label yet: #360 (a lone `\r` in a comment,
+  bidirectional controls in the reader and in written text, keys compared by
+  bytes, a heredoc that closes on its marker followed by U+00A0).
 - Config names secrets and never holds their values (K4).
 
 ### Disk to `buffer`
@@ -114,8 +157,12 @@ state on `main`.
 - The disk can tear, cut, flip, or zero bytes, and can hold records from an older lap
   of the ring. A chained CRC32C finds these. It does not stop a local user who writes
   the file: the CRC is not a secret, and a header block has no tie to its ring.
-- The engine is not built (#161). #234 is a robustness defect of this boundary: it
-  needs a writer of the file, so it does not have the `security` label.
+- The engine landed (#161): `Buffer::open` reads the header blocks and walks the
+  ring. #234 and #300 are robustness defects of this boundary, with fixes in
+  review (#356, #348). They do not have the `security` label: each needs a writer
+  of the file, or, for the small body of #300, a `Layout` from the node's own
+  config (a new ring with a body of 4 to 54 bytes stops the node at its first
+  `append`).
 
 ### Device to connector
 
@@ -171,6 +218,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
+| `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
 | `types_stamp` | `Stamp` | Printed text reads back to the same value |
@@ -179,6 +227,6 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), the `buffer` records (#161), `raft` messages (their encoding is in
-`mesh`), `spec` tree chunks (#64), `types::time::Rate`, and each connector's
-protocol parser.
+and `tls` (#55), the `buffer` header blocks and records (#361), `raft` messages
+(their encoding is in `mesh`), `spec` tree chunks (#64), `types::time::Rate`, and
+each connector's protocol parser.

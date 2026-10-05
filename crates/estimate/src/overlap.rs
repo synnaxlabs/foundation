@@ -1,9 +1,12 @@
+//! What every reading of one device clock allows.
+
 use std::cmp::{self, Reverse};
+use std::fmt;
 
 use types::time::{Monotonic, Span};
 
 use crate::drift::PER_NANO;
-use crate::{Drift, Error, Measurement};
+use crate::{Drift, Measurement};
 
 /// The offsets that every reading of one clock allows. Each reading, widened by drift,
 /// holds the true offset, so the true offset lies where they all overlap. A read return
@@ -11,17 +14,18 @@ use crate::{Drift, Error, Measurement};
 /// below, so readings that are open on one side still give a narrow overlap.
 ///
 /// ```
-/// use estimate::{Drift, Error, Overlap};
+/// use estimate::Drift;
+/// use estimate::overlap::Overlap;
 /// use types::time::{Monotonic, Span};
 ///
 /// let ns = Span::from_nanos;
 /// let mut overlap = Overlap::new(Drift::UNDISCIPLINED);
 /// overlap.push_low(Monotonic(0), ns(4))?;
-/// assert_eq!(overlap.at(Monotonic(0)), Err(Error::Open));
+/// assert_eq!(overlap.at(Monotonic(0)), None);
 /// overlap.push_high(Monotonic(0), ns(14))?;
-/// let now = overlap.at(Monotonic(0))?;
-/// assert_eq!((now.offset(), now.error()), (ns(9), ns(5)));
-/// # Ok::<(), estimate::Error>(())
+/// let now = overlap.at(Monotonic(0)).map(|m| (m.offset(), m.error()));
+/// assert_eq!(now, Some((ns(9), ns(5))));
+/// # Ok::<(), estimate::overlap::Error>(())
 /// ```
 #[derive(Clone, Debug)]
 pub struct Overlap {
@@ -97,35 +101,30 @@ impl Overlap {
     /// The overlap at `now`, earlier or later than the readings. From the newest
     /// reading on, it is the overlap of all of them. Earlier, it can be wider.
     ///
-    /// # Errors
-    ///
-    /// - [`Error::Open`] when no reading gave a low edge, or none gave a high edge.
-    /// - [`Error::Bound`] when the readings, before drift, allow an error of more
-    ///   than 36500 days.
-    pub fn at(&self, now: Monotonic) -> Result<Measurement, Error> {
+    /// `None` when the readings do not bound the offset to 36500 days: no reading gave
+    /// a low edge, none gave a high edge, or the edges allow more before drift.
+    #[must_use]
+    pub fn at(&self, now: Monotonic) -> Option<Measurement> {
         let (low, high) = self.edges(|r| r.at)?;
         // Edges read at different times can cross.
-        Measurement::checked_between(now, low, high.max(low))?;
+        if !Measurement::fits(low, high.max(low)) {
+            return None;
+        }
         let (low, high) = self.edges(|_| now)?;
-        Ok(Measurement::between(now, low, high))
+        Some(Measurement::between(now, low, high))
     }
 
     /// The highest low edge and the lowest high edge, each widened to `when` the
-    /// reading gives and rounded outward to whole nanoseconds.
-    fn edges(
-        &self,
-        when: impl Fn(Reading) -> Monotonic,
-    ) -> Result<(i128, i128), Error> {
+    /// reading gives and rounded outward to whole nanoseconds, or `None` when a side
+    /// has no edge.
+    fn edges(&self, when: impl Fn(Reading) -> Monotonic) -> Option<(i128, i128)> {
         let edges = [self.low, self.high]
             .into_iter()
             .flatten()
             .map(|r| r.edges_at(when(r), self.drift));
-        let low = edges.clone().filter_map(|(low, _)| low).max();
-        let high = edges.filter_map(|(_, high)| high).min();
-        let (Some(low), Some(high)) = (low, high) else {
-            return Err(Error::Open);
-        };
-        Ok((low.div_euclid(PER_NANO), -(-high).div_euclid(PER_NANO)))
+        let low = edges.clone().filter_map(|(low, _)| low).max()?;
+        let high = edges.filter_map(|(_, high)| high).min()?;
+        Some((low.div_euclid(PER_NANO), -(-high).div_euclid(PER_NANO)))
     }
 
     fn narrow(&mut self, reading: Reading) -> Result<(), Error> {
@@ -174,12 +173,42 @@ impl Reading {
     }
 }
 
+/// Why an [`Overlap`] refused a reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The reading is older than the newest one in the overlap.
+    Backwards {
+        /// The local time of the reading.
+        at: Monotonic,
+        /// The local time of the newest reading in the overlap.
+        newest: Monotonic,
+    },
+    /// The reading shares no offset with the overlap.
+    Disjoint,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Backwards { at, newest } => write!(
+                f,
+                "reading at {}ns is older than the newest at {}ns",
+                at.0, newest.0
+            ),
+            Self::Disjoint => f.write_str("reading shares no offset with the overlap"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
 #[cfg(test)]
 mod tests {
     use types::time::{Monotonic, Span};
 
+    use super::{Error, Overlap};
     use crate::measurement::MAX_ERROR;
-    use crate::{Drift, Error, Measurement, Overlap};
+    use crate::{Drift, Measurement};
 
     const SECOND_NS: u64 = 1_000_000_000;
 
@@ -226,7 +255,7 @@ mod tests {
     }
 
     fn overlap(ppb: u32, pushes: &[Push]) -> Result<Overlap, Error> {
-        let mut overlap = Overlap::new(Drift::from_ppb(ppb)?);
+        let mut overlap = Overlap::new(Drift::from_ppb(ppb).expect("valid"));
         for &reading in pushes {
             reading.push(&mut overlap)?;
         }
@@ -238,8 +267,8 @@ mod tests {
     }
 
     /// The overlap of `pushes` at `now` as `(offset, error)`, with `ppb` of drift.
-    fn check(ppb: u32, pushes: &[Push], now: u64) -> Result<(i64, i64), Error> {
-        overlap(ppb, pushes)?.at(Monotonic(now)).map(pair)
+    fn check(ppb: u32, pushes: &[Push], now: u64) -> Result<Option<(i64, i64)>, Error> {
+        Ok(overlap(ppb, pushes)?.at(Monotonic(now)).map(pair))
     }
 
     mod at_one_time {
@@ -247,45 +276,45 @@ mod tests {
 
         #[test]
         fn gives_one_reading_as_it_is() {
-            assert_eq!(check(0, &[m(5, 7, 3)], 5), Ok((7, 3)));
+            assert_eq!(check(0, &[m(5, 7, 3)], 5), Ok(Some((7, 3))));
         }
 
         #[test]
         fn gives_the_intersection() {
-            assert_eq!(check(0, &[m(0, 5, 5), m(0, 13, 5)], 0), Ok((9, 1)));
+            assert_eq!(check(0, &[m(0, 5, 5), m(0, 13, 5)], 0), Ok(Some((9, 1))));
         }
 
         #[test]
         fn rounds_an_odd_width_outward() {
-            assert_eq!(check(0, &[m(0, 5, 5), m(0, 12, 5)], 0), Ok((8, 2)));
-            assert_eq!(check(0, &[m(0, -5, 5), m(0, -12, 5)], 0), Ok((-9, 2)));
+            assert_eq!(check(0, &[m(0, 5, 5), m(0, 12, 5)], 0), Ok(Some((8, 2))));
+            assert_eq!(check(0, &[m(0, -5, 5), m(0, -12, 5)], 0), Ok(Some((-9, 2))));
         }
 
         #[test]
         fn accepts_bounds_that_only_touch() {
-            assert_eq!(check(0, &[m(0, 0, 5), m(0, 10, 5)], 0), Ok((5, 0)));
+            assert_eq!(check(0, &[m(0, 0, 5), m(0, 10, 5)], 0), Ok(Some((5, 0))));
         }
 
         #[test]
         fn narrows_only_the_top_with_a_high_edge() {
             let pushes = [m(0, 0, 10), Push::High(0, 4)];
-            assert_eq!(check(0, &pushes, 0), Ok((-3, 7)));
+            assert_eq!(check(0, &pushes, 0), Ok(Some((-3, 7))));
             let wider = [m(0, 0, 10), Push::High(0, 12)];
-            assert_eq!(check(0, &wider, 0), Ok((0, 10)));
+            assert_eq!(check(0, &wider, 0), Ok(Some((0, 10))));
         }
 
         #[test]
         fn narrows_only_the_bottom_with_a_low_edge() {
             let pushes = [m(0, 0, 10), Push::Low(0, -4)];
-            assert_eq!(check(0, &pushes, 0), Ok((3, 7)));
+            assert_eq!(check(0, &pushes, 0), Ok(Some((3, 7))));
             let wider = [m(0, 0, 10), Push::Low(0, -12)];
-            assert_eq!(check(0, &wider, 0), Ok((0, 10)));
+            assert_eq!(check(0, &wider, 0), Ok(Some((0, 10))));
         }
 
         #[test]
         fn joins_a_low_edge_and_a_high_edge() {
             let pushes = [Push::Low(0, 4), Push::High(0, 14)];
-            assert_eq!(check(0, &pushes, 0), Ok((9, 5)));
+            assert_eq!(check(0, &pushes, 0), Ok(Some((9, 5))));
         }
     }
 
@@ -295,24 +324,31 @@ mod tests {
         #[test]
         fn widens_each_to_the_later_time() {
             let pushes = [m(0, 0, 0), m(SECOND_NS, 1_500, 1_000)];
-            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok((750, 250)));
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((750, 250))));
         }
 
         #[test]
         fn widens_each_from_its_own_time() {
             let pushes = [m(0, 0, 0), m(SECOND_NS, 1_500, 1_000)];
-            assert_eq!(check(1_000, &pushes, 2 * SECOND_NS), Ok((750, 1_250)));
-            assert_eq!(check(1_000, &pushes, SECOND_NS / 2), Ok((250, 250)));
-            assert_eq!(check(1_000, &pushes, 0), Ok((0, 0)));
+            assert_eq!(check(1_000, &pushes, 2 * SECOND_NS), Ok(Some((750, 1_250))));
+            assert_eq!(check(1_000, &pushes, SECOND_NS / 2), Ok(Some((250, 250))));
+            assert_eq!(check(1_000, &pushes, 0), Ok(Some((0, 0))));
         }
 
         #[test]
         fn keeps_an_old_precise_edge_until_drift_widens_it() {
             let precise = m(0, 0, 0);
             let soon = [precise, m(SECOND_NS, 0, 2_000)];
-            assert_eq!(check(1_000, &soon, SECOND_NS), Ok((0, 1_000)));
+            assert_eq!(check(1_000, &soon, SECOND_NS), Ok(Some((0, 1_000))));
             let later = [precise, m(10 * SECOND_NS, 0, 2_000)];
-            assert_eq!(check(1_000, &later, 10 * SECOND_NS), Ok((0, 2_000)));
+            assert_eq!(check(1_000, &later, 10 * SECOND_NS), Ok(Some((0, 2_000))));
+        }
+
+        #[test]
+        fn checks_the_width_before_drift() {
+            let widest = MAX_ERROR.nanos();
+            let pushes = [Push::Low(0, -widest), Push::High(SECOND_NS, widest)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((-500, widest))));
         }
 
         #[test]
@@ -323,7 +359,7 @@ mod tests {
                     m(SECOND_NS, -sign * 2_000, 2_500),
                 );
                 let pushes = [m(0, 0, 1_000), tied, other];
-                assert_eq!(check(1_000, &pushes, 0), Ok((0, 1_000)));
+                assert_eq!(check(1_000, &pushes, 0), Ok(Some((0, 1_000))));
             }
         }
 
@@ -336,7 +372,7 @@ mod tests {
                     m(near, sign * 10, 10),
                     m(near, -sign * 5, 15),
                 ];
-                assert_eq!(check(1, &pushes, near), Ok((sign * 5, 5)));
+                assert_eq!(check(1, &pushes, near), Ok(Some((sign * 5, 5))));
             }
         }
 
@@ -344,56 +380,56 @@ mod tests {
         fn bounds_a_sample_between_a_start_and_a_read() {
             let start = Push::Low(0, 0);
             let read = [start, Push::High(2 * SECOND_NS, 4_000)];
-            assert_eq!(check(1_000, &read, SECOND_NS), Ok((2_000, 3_000)));
+            assert_eq!(check(1_000, &read, SECOND_NS), Ok(Some((2_000, 3_000))));
             let later = [read[0], read[1], Push::High(3 * SECOND_NS, 2_000)];
-            assert_eq!(check(1_000, &later, SECOND_NS), Ok((1_500, 2_500)));
+            assert_eq!(check(1_000, &later, SECOND_NS), Ok(Some((1_500, 2_500))));
         }
 
         #[test]
         fn keeps_the_other_edge_of_each_kept_reading() {
             let pushes = [m(0, 0, 100), Push::High(10 * SECOND_NS, 9_000)];
-            assert_eq!(check(1_000, &pushes, 0), Ok((0, 100)));
+            assert_eq!(check(1_000, &pushes, 0), Ok(Some((0, 100))));
         }
 
         #[test]
         fn stops_the_error_at_36500_days() {
             let widest = MAX_ERROR.nanos();
-            assert_eq!(check(1, &[m(0, 0, widest)], SECOND_NS), Ok((0, widest)));
+            assert_eq!(
+                check(1, &[m(0, 0, widest)], SECOND_NS),
+                Ok(Some((0, widest)))
+            );
         }
 
         #[test]
         fn moves_a_center_past_a_span_inside_it() {
             let (min, max) = (i64::MIN, i64::MAX);
             let low = [Push::Low(0, min), Push::High(SECOND_NS, min)];
-            assert_eq!(check(1_000, &low, SECOND_NS), Ok((min, 1_000)));
+            assert_eq!(check(1_000, &low, SECOND_NS), Ok(Some((min, 1_000))));
             let high = [Push::High(0, max), Push::Low(SECOND_NS, max)];
-            assert_eq!(check(1_000, &high, SECOND_NS), Ok((max, 1_000)));
+            assert_eq!(check(1_000, &high, SECOND_NS), Ok(Some((max, 1_000))));
         }
 
         #[test]
-        fn fails_when_the_readings_allow_more_than_36500_days() {
+        fn is_none_when_the_readings_allow_more_than_36500_days() {
             let widest = MAX_ERROR.nanos();
             let edge = [Push::Low(0, -widest), Push::High(0, widest)];
-            assert_eq!(check(0, &edge, 0), Ok((0, widest)));
+            assert_eq!(check(0, &edge, 0), Ok(Some((0, widest))));
             let past = [Push::Low(0, -widest - 1), Push::High(0, widest + 1)];
-            let error = Span::from_nanos(widest + 1);
-            assert_eq!(check(0, &past, 0), Err(Error::Bound { error }));
+            assert_eq!(check(0, &past, 0), Ok(None));
             let one_sided = [Push::Low(0, i64::MIN), Push::High(0, 0)];
-            let error = Span::from_nanos(1 << 62);
-            assert_eq!(check(0, &one_sided, 0), Err(Error::Bound { error }));
+            assert_eq!(check(0, &one_sided, 0), Ok(None));
         }
 
         #[test]
-        fn fails_with_the_largest_span_for_a_wider_error() {
-            let error = Span::from_nanos(i64::MAX);
+        fn is_none_for_an_error_wider_than_a_span() {
             let all = [Push::Both(0, i64::MIN, i64::MAX)];
-            assert_eq!(check(0, &all, 0), Err(Error::Bound { error }));
+            assert_eq!(check(0, &all, 0), Ok(None));
         }
 
         #[test]
         fn takes_edges_that_cross_before_drift() {
             let pushes = [Push::Low(0, 10), Push::High(SECOND_NS, 5)];
-            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok((-493, 498)));
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((-493, 498))));
         }
     }
 
@@ -401,24 +437,20 @@ mod tests {
         use super::*;
 
         #[test]
-        fn fails_with_no_reading() {
-            assert_eq!(check(0, &[], 0), Err(Error::Open));
-            assert_eq!(
-                Error::Open.to_string(),
-                "overlap has no low edge or no high edge"
-            );
+        fn is_none_with_no_reading() {
+            assert_eq!(check(0, &[], 0), Ok(None));
         }
 
         #[test]
-        fn fails_with_only_low_edges() {
+        fn is_none_with_only_low_edges() {
             let pushes = [Push::Low(0, 4), Push::Low(5, 6)];
-            assert_eq!(check(0, &pushes, 5), Err(Error::Open));
+            assert_eq!(check(0, &pushes, 5), Ok(None));
         }
 
         #[test]
-        fn fails_with_only_high_edges() {
+        fn is_none_with_only_high_edges() {
             let pushes = [Push::High(0, 4), Push::High(5, 6)];
-            assert_eq!(check(0, &pushes, 5), Err(Error::Open));
+            assert_eq!(check(0, &pushes, 5), Ok(None));
         }
     }
 
@@ -430,7 +462,7 @@ mod tests {
             let mut overlap = overlap(0, &[m(0, 0, 5)]).expect("valid");
             assert_eq!(m(10, 11, 5).push(&mut overlap), Err(Error::Disjoint));
             assert_eq!(m(5, 4, 5).push(&mut overlap), Ok(()));
-            assert_eq!(overlap.at(Monotonic(5)).map(pair), Ok((2, 3)));
+            assert_eq!(overlap.at(Monotonic(5)).map(pair), Some((2, 3)));
             assert_eq!(
                 Error::Disjoint.to_string(),
                 "reading shares no offset with the overlap"
@@ -442,7 +474,7 @@ mod tests {
             let jump = [m(0, 0, 0), m(SECOND_NS, 1_001, 0)];
             assert_eq!(check(1_000, &jump, SECOND_NS), Err(Error::Disjoint));
             let most = [m(0, 0, 0), m(SECOND_NS, 1_000, 0)];
-            assert_eq!(check(1_000, &most, SECOND_NS), Ok((1_000, 0)));
+            assert_eq!(check(1_000, &most, SECOND_NS), Ok(Some((1_000, 0))));
         }
 
         #[test]
@@ -455,7 +487,7 @@ mod tests {
             let gap = [m(0, 0, 0), Push::Low(999_999_999, 1)];
             assert_eq!(check(1, &gap, 0), Err(Error::Disjoint));
             let touch = [m(0, 0, 0), Push::Low(SECOND_NS, 1)];
-            assert_eq!(check(1, &touch, SECOND_NS), Ok((1, 0)));
+            assert_eq!(check(1, &touch, SECOND_NS), Ok(Some((1, 0))));
         }
 
         #[test]
@@ -463,7 +495,7 @@ mod tests {
             let mut overlap = overlap(0, &[]).expect("valid");
             let crossed = Push::Both(0, 5, 4);
             assert_eq!(crossed.push(&mut overlap), Err(Error::Disjoint));
-            assert_eq!(overlap.at(Monotonic(0)), Err(Error::Open));
+            assert_eq!(overlap.at(Monotonic(0)), None);
         }
 
         #[test]
@@ -472,7 +504,7 @@ mod tests {
             let below = Push::High(0, 4);
             assert_eq!(below.push(&mut overlap), Err(Error::Disjoint));
             assert_eq!(Push::High(0, 5).push(&mut overlap), Ok(()));
-            assert_eq!(overlap.at(Monotonic(0)).map(pair), Ok((5, 0)));
+            assert_eq!(overlap.at(Monotonic(0)).map(pair), Some((5, 0)));
         }
     }
 
@@ -490,7 +522,7 @@ mod tests {
         fn fails_and_keeps_the_overlap() {
             let mut overlap = overlap(0, &[m(10, 0, 5)]).expect("valid");
             assert_eq!(m(9, 0, 5).push(&mut overlap), Err(backwards(9, 10)));
-            assert_eq!(overlap.at(Monotonic(10)).map(pair), Ok((0, 5)));
+            assert_eq!(overlap.at(Monotonic(10)).map(pair), Some((0, 5)));
             assert_eq!(
                 backwards(9, 10).to_string(),
                 "reading at 9ns is older than the newest at 10ns"
@@ -502,7 +534,7 @@ mod tests {
             let mut overlap = overlap(0, &[Push::Low(10, 0)]).expect("valid");
             let late = Push::High(9, 5);
             assert_eq!(late.push(&mut overlap), Err(backwards(9, 10)));
-            assert_eq!(overlap.at(Monotonic(10)), Err(Error::Open));
+            assert_eq!(overlap.at(Monotonic(10)), None);
         }
 
         #[test]
@@ -618,7 +650,7 @@ mod tests {
                     let truth = w.truth(t);
                     prop_assert!(w.holds_truth_at(now, t), "{now:?} misses {truth}");
                 } else {
-                    prop_assert_eq!(now, Err(Error::Open));
+                    prop_assert_eq!(now, None);
                 }
             }
 
@@ -643,9 +675,9 @@ mod tests {
                 }
                 let all = match (low, high) {
                     (Some(low), Some(high)) => {
-                        Ok(Measurement::between(Monotonic(now), low, high))
+                        Some(Measurement::between(Monotonic(now), low, high))
                     }
-                    _ => Err(Error::Open),
+                    _ => None,
                 };
                 prop_assert_eq!(w.overlap(&readings).at(Monotonic(now)), all);
             }
@@ -663,25 +695,14 @@ mod tests {
                 for reading in readings {
                     match reading.push(&mut overlap) {
                         Ok(()) | Err(Error::Disjoint) => {}
-                        Err(e @ (Error::Backwards { .. } | Error::Bound { .. }
-                            | Error::Drift { .. } | Error::NoSources
-                            | Error::NoMajority { .. } | Error::Open
-                            | Error::Crossed)) => {
+                        Err(e @ Error::Backwards { .. }) => {
                             prop_assert!(false, "unexpected {e}");
                         }
                     }
                 }
-                match overlap.at(Monotonic(now)) {
-                    Ok(m) => {
-                        prop_assert_eq!(m.at(), Monotonic(now));
-                        prop_assert!(m.error() <= MAX_ERROR);
-                    }
-                    Err(Error::Bound { .. } | Error::Open) => {}
-                    Err(e @ (Error::Backwards { .. } | Error::Disjoint
-                        | Error::Drift { .. } | Error::NoSources
-                        | Error::NoMajority { .. } | Error::Crossed)) => {
-                        prop_assert!(false, "unexpected {e}");
-                    }
+                if let Some(m) = overlap.at(Monotonic(now)) {
+                    prop_assert_eq!(m.at(), Monotonic(now));
+                    prop_assert!(m.error() <= MAX_ERROR);
                 }
             }
         }

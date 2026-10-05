@@ -12,12 +12,12 @@ const CAPACITY: usize = 8;
 /// use estimate::{Drift, Filter, Measurement};
 /// use types::time::{Monotonic, Span};
 ///
+/// let m = |at, error| Measurement::new(Monotonic(at), Span::ZERO, error);
 /// let mut filter = Filter::default();
-/// filter.push(Measurement::new(Monotonic(0), Span::ZERO, Span::SECOND)?);
-/// filter.push(Measurement::new(Monotonic(1), Span::ZERO, Span::MILLISECOND)?);
+/// filter.push(m(0, Span::SECOND).expect("at most 36500 days"));
+/// filter.push(m(1, Span::MILLISECOND).expect("at most 36500 days"));
 /// let best = filter.best(Monotonic(2), Drift::UNDISCIPLINED);
 /// assert_eq!(best.map(|m| m.error()), Some(Span::MILLISECOND));
-/// # Ok::<(), estimate::Error>(())
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct Filter {

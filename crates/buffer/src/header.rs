@@ -23,6 +23,7 @@ use crate::wal::{Layout, Position, Unaligned, Unfit};
 
 const MAGIC: [u8; 8] = *b"FNDNRING";
 const VERSION: u16 = 1;
+#[cfg(test)]
 const FIELDS: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
 const CRC: usize = ALIGN - 4;
 
@@ -80,6 +81,7 @@ impl Header {
     }
 
     /// The checkpoint after this one, with the tail moved to `tail`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "trimming moves the tail"))]
     pub(crate) fn next(self, tail: Position) -> Self {
         Self {
             tail,
@@ -90,6 +92,7 @@ impl Header {
 
     /// The byte offset in the ring file of the block that holds this checkpoint:
     /// the two checkpoints alternate between the first two blocks.
+    #[cfg_attr(not(test), expect(dead_code, reason = "trimming moves the tail"))]
     pub(crate) fn place(&self) -> u64 {
         if self.seq.is_multiple_of(2) { 0 } else { BLOCK }
     }
@@ -118,8 +121,9 @@ impl Header {
         block
     }
 
-    /// Reads the newer whole one of the two header blocks. A new ring has the same
-    /// block in both places; on a tie, the first.
+    /// Reads the newer whole one of the two header blocks: the one whose seq comes
+    /// after the other's, wrapped as [`Self::next`] wraps it. A new ring has the
+    /// same block in both places; on a tie, the first.
     ///
     /// # Errors
     ///
@@ -138,7 +142,7 @@ impl Header {
             if fields.version != VERSION {
                 return Err(Error::Version(fields.version));
             }
-            if newer.is_none_or(|newer: Fields| fields.seq > newer.seq) {
+            if newer.is_none_or(|newer: Fields| later(fields.seq, newer.seq)) {
                 newer = Some(fields);
             }
         }
@@ -155,6 +159,12 @@ impl Header {
             seq: fields.seq,
         })
     }
+}
+
+/// Whether checkpoint `seq` comes after `than`. The two blocks hold consecutive
+/// checkpoints, so the sign of the wrapped difference orders them.
+fn later(seq: u64, than: u64) -> bool {
+    seq.wrapping_sub(than).cast_signed() > 0
 }
 
 /// The fields of one block whose magic and CRC are right.
@@ -201,6 +211,8 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    use crate::entry::table_len;
+
     fn layout(area: u64, body_max: usize) -> Layout {
         Layout::new(area, body_max).expect("the test sizes make a ring")
     }
@@ -227,7 +239,7 @@ mod tests {
         (1..64u64, 0..64u64, any::<u32>(), any::<u64>()).prop_flat_map(
             |(blocks, tail, chain, seq)| {
                 let most = usize::try_from(blocks * 4096).expect("a small size") - 9;
-                (4..=most).prop_map(move |body_max| {
+                (table_len(1)..=most).prop_map(move |body_max| {
                     header((2 * blocks - 1) * 4096, body_max, tail * 4096, chain, seq)
                 })
             },
@@ -316,11 +328,12 @@ mod tests {
         let unaligned = Error::Unaligned(Unaligned { offset: 4097 });
         let part = (8 * 4096u64 + 1).to_le_bytes();
         let off = 4097u64.to_le_bytes();
+        let small = u32::try_from(table_len(1) - 1).expect("a small size");
         let cases: [(&str, Patch<'_>, Error); 4] = [
             (
-                "a body of 3 bytes",
-                &[(18, &3u32.to_le_bytes())],
-                unfit(8 * 4096, 3),
+                "a body under one entry table",
+                &[(18, &small.to_le_bytes())],
+                unfit(8 * 4096, table_len(1) - 1),
             ),
             (
                 "an area of a part block",
@@ -344,18 +357,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reads_the_next_checkpoint_from_either_block() {
+        let old = header(8 * 4096, 4087, 0, 1, 4);
+        let new = old.next(Position::new(4096, 2).expect("aligned"));
+        assert_eq!((old.place(), new.place()), (0, 4096));
+        assert_eq!(Header::decode(&old.encode(), &new.encode()), Ok(new));
+        assert_eq!(Header::decode(&new.encode(), &old.encode()), Ok(new));
+    }
+
+    #[test]
+    fn reads_the_checkpoint_after_the_last_seq() {
+        let old = header(8 * 4096, 4087, 4096, 3, u64::MAX);
+        let new = old.next(Position::new(8192, 4).expect("aligned"));
+        assert_eq!((old.place(), new.place()), (4096, 0));
+        assert_eq!(Header::decode(&old.encode(), &new.encode()), Ok(new));
+        assert_eq!(Header::decode(&new.encode(), &old.encode()), Ok(new));
+    }
+
     proptest! {
+        /// The newer block is from 1 to `2^63 - 1` checkpoints after the older,
+        /// and most often the next one.
         #[test]
         fn reads_the_newer_valid_block(
-            newer in any_header(),
             older in any_header(),
+            tail in 0..64u64,
+            apart in prop_oneof![1..4u64, 1..(1u64 << 63)],
             swap in any::<bool>(),
         ) {
-            prop_assume!(newer.seq != older.seq);
-            let (newer, older) = if newer.seq > older.seq {
-                (newer, older)
-            } else {
-                (older, newer)
+            let newer = Header {
+                tail: Position::new(tail * 4096, older.tail.chain())
+                    .expect("aligned"),
+                seq: older.seq.wrapping_add(apart),
+                ..older
             };
             let (a, b) = (newer.encode(), older.encode());
             let (first, second) = if swap { (&b, &a) } else { (&a, &b) };
