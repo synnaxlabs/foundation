@@ -21,12 +21,14 @@ lessons. Never copy Synnax code into this repo.
   crate before you write code.
 - `docs/coordination.md` -> roles, issues, PRs, messages between sessions, and how an
   interface changes.
+- `docs/claude/design.md` -> the design philosophy (Ousterhout): complexity, deep
+  modules, the principles, and the red flags. Read it before you design a surface.
 - `docs/claude/rust.md` -> Rust rules for this repo.
 - `docs/claude/performance.md` -> the performance rulebook. Every change on a hot path
   answers its six questions in the PR.
 - `docs/claude/testing.md` -> test layers, deterministic simulation, and oracles.
 - `docs/claude/lessons.md` -> architecture lessons, with the evidence for each.
-- `docs/research/` -> the studies behind the decisions (r1 to r15). Cite them. Do not
+- `docs/research/` -> the studies behind the decisions (r1 to r17). Cite them. Do not
   re-run a study without a reason.
 - `docs/history/interview-log.md` -> the design interview in order, with the person's
   words. Read it to learn why; `docs/decisions.md` wins where they differ.
@@ -61,6 +63,17 @@ GitHub issue.
    raised benchmark baseline, no deleted fuzz input. Each PR lists its oracle changes.
 
 ## Architectural principles
+
+Full design philosophy: `docs/claude/design.md`. The goal is a great design that also
+works, never only code that passes its tests.
+
+- **Pull complexity downward.** A module handles its own complexity. Compute or default
+  a value before you add a parameter for it.
+- **Define errors out of existence** before you add an error: give the case semantics
+  the normal path covers, when a caller wants that result.
+- **Design it twice.** Sketch two very different options for every public surface.
+- **Different layer, different abstraction.** A layer that does not change what its
+  caller works with is a smell.
 
 Dependencies are explicit, injected inputs, never reached for from the environment.
 
