@@ -263,6 +263,12 @@ impl Draft {
         })
     }
 
+    /// Each present entry and its series bytes, in entry order.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
+        let (_, descriptors, body) = split(&self.0);
+        series(body, ends(descriptors))
+    }
+
     /// The key set the draft's entries number into.
     #[must_use]
     pub fn key_set(&self) -> key_set::Key {
@@ -1238,6 +1244,16 @@ mod tests {
             ranges.push(range);
         }
         ranges.push(None);
+        let written: Vec<(usize, Vec<u8>)> = series
+            .iter()
+            .map(|&(entry, len)| (entry, pattern(entry, len)))
+            .collect();
+        let mut drafted = Vec::new();
+        for (entry, bytes) in draft.iter() {
+            prop_assert!(draft.range(set.entries()[entry].group).is_some());
+            drafted.push((entry, bytes.to_vec()));
+        }
+        prop_assert_eq!(&drafted, &written);
         let frame = draft.freeze(case.path);
 
         prop_assert_eq!(frame.key_set(), set.key());
@@ -1247,10 +1263,6 @@ mod tests {
         for (group, range) in (0_u32..).zip(ranges) {
             prop_assert_eq!(frame.range(group), range);
         }
-        let written: Vec<(usize, Vec<u8>)> = series
-            .iter()
-            .map(|&(entry, len)| (entry, pattern(entry, len)))
-            .collect();
         for entry in 0..=entries {
             let expected = written.iter().find(|(e, _)| *e == entry);
             let read = frame.series(entry);
