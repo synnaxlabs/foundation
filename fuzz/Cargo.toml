@@ -97,6 +97,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "types_byte_size"
+path = "fuzz_targets/types_byte_size.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "secret_sealed"
 path = "fuzz_targets/secret_sealed.rs"
 test = false
