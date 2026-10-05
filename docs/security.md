@@ -239,7 +239,7 @@ The rule is one target for each decoder of outside input
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
-| `config_hcl_update` | `config_hcl::update` | Its text reads as the document; no change keeps each byte |
+| `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
