@@ -814,7 +814,13 @@ mod tests {
 
     #[test]
     fn writes_new_lines_with_the_margin_of_their_body() {
-        assert_eq!(updated("  a = 1\n", "a = 1\nb = 2"), "  a = 1\n  b = 2\n");
+        assert_eq!(
+            updated(
+                "  a = 1\n  b {\n    x = 1\n  }\n",
+                "a = 1\nc = 2\nb {\nx = 1\n}\nd {}"
+            ),
+            "  a = 1\n  c = 2\n  b {\n    x = 1\n  }\n\n  d {}\n"
+        );
         let text = "b {\n    x = 1\n\n    c {\n        y = 1\n    }\n}\n\n\td {\n\t}\n";
         assert_eq!(
             updated(
