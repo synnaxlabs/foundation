@@ -358,6 +358,30 @@ fn the_first_append_after_an_idle_span_commits_after_one_commit() {
 }
 
 #[test]
+fn a_busy_buffer_keeps_one_deadline_per_commit() {
+    run(42, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let tenths = |count: i64| Span::from_nanos(COMMIT.nanos() / 10 * count);
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(2));
+        buffer
+            .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &[])])
+            .expect("queues");
+        shard.clock.sleep(tenths(11)).await;
+        buffer
+            .append(&[entry(1, a, Path::Live, 1, 1, Some(2), &[])])
+            .expect("queues during the first sync");
+        shard.clock.sleep(tenths(12)).await;
+        assert_eq!(shard.memory.syncs(), 3, "two deadlines, one commit apart");
+        assert_eq!(buffer.durable(a, Path::Live), tail(2, Some(2)));
+    });
+}
+
+#[test]
 fn a_dropped_idle_buffer_ends_its_task_at_once() {
     let memory = Memory::default();
     run(23, memory.clone(), |shard| async move {

@@ -534,8 +534,11 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span) {
         if ended {
             return;
         }
-        sleep.reset(clock.now() + commit);
+        if sleep.deadline() < clock.now() {
+            sleep.reset(clock.now() + commit);
+        }
         (&mut sleep).await;
+        sleep.reset(clock.now() + commit);
         {
             let mut state = shared.state.borrow_mut();
             if state.closed {
