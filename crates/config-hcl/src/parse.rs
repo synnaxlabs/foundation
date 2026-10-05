@@ -22,6 +22,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut parser = Parser {
         tokens,
         token,
+        newlines_skipped: false,
         errors: Vec::new(),
         len: text.len(),
     };
@@ -41,7 +42,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
 pub(crate) enum Ends {
     /// A `,` or a new line, as in a body or an object.
     Line,
-    /// A `,`, as in a list or a call, where new lines do not end an item.
+    /// A `,`, as in a list or a call.
     Comma,
     /// Only the close bracket, as in a `for` expression.
     Close,
@@ -51,6 +52,9 @@ struct Parser<'a> {
     tokens: Tokens<'a>,
     /// The next token, not yet taken.
     token: Token<'a>,
+    /// Inside `[` or `(`, where HCL skips new lines, so `take` never returns one.
+    /// Only [`Parser::level`] sets it.
+    newlines_skipped: bool,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
     /// The length of the text in bytes. Each token but the last has one or more, so
@@ -107,25 +111,23 @@ impl<'a> Parser<'a> {
 
     fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
         let labels = self.labels()?;
-        let depth = enter(depth).ok_or(Error::TooDeep { span: keyword.span })?;
-        self.take()?;
-        let body = if self.token.kind == lex::Kind::Newline {
-            let body = self.body(depth)?;
-            if self.token.kind != lex::Kind::CloseBrace {
-                return Err(self.syntax(Expected::Item));
+        let (body, span) = self.level(keyword.span, depth, |parser, depth| {
+            if parser.token.kind != lex::Kind::Newline {
+                return parser.one_line(depth);
             }
-            body
-        } else {
-            self.one_line(depth)?
-        };
-        let end = self.take()?.span;
+            let body = parser.body(depth)?;
+            if parser.token.kind != lex::Kind::CloseBrace {
+                return Err(parser.syntax(Expected::Item));
+            }
+            Ok(body)
+        })?;
         self.end_line()?;
         Ok(Block {
             keyword: keyword.text.into(),
             keyword_span: Some(keyword.span),
             labels,
             body,
-            span: Some(join(keyword.span, end)),
+            span: Some(span),
         })
     }
 
@@ -184,9 +186,6 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let value = self.term(depth)?;
-        if ends == Ends::Comma {
-            self.skip_newlines()?;
-        }
         if let Some(form) = self.trailing_form() {
             self.refuse(form, ends)?;
             return Ok(None);
@@ -196,8 +195,11 @@ impl<'a> Parser<'a> {
 
     /// Reads a value that starts with no HCL form.
     fn term(&mut self, depth: usize) -> Result<Option<Value>, Error> {
-        if self.token.kind == lex::Kind::End {
-            return Err(self.syntax(Expected::Value));
+        match self.token.kind {
+            lex::Kind::End => return Err(self.syntax(Expected::Value)),
+            lex::Kind::OpenBracket => return self.list(depth).map(Some),
+            lex::Kind::OpenBrace => return self.object(depth).map(Some),
+            _ => {}
         }
         let token = self.take()?;
         let kind = match token.kind {
@@ -212,8 +214,6 @@ impl<'a> Parser<'a> {
             lex::Kind::String(text) | lex::Kind::Heredoc(text) => {
                 value::Kind::String(text)
             }
-            lex::Kind::OpenBracket => return self.list(&token, depth).map(Some),
-            lex::Kind::OpenBrace => return self.object(&token, depth).map(Some),
             _ => {
                 return Err(Error::Syntax {
                     span: token.span,
@@ -260,10 +260,10 @@ impl<'a> Parser<'a> {
 
     /// Refuses a `for` expression at the start of a list or an object.
     fn refuse_for(&mut self) -> Result<(), Error> {
-        self.skip_newlines()?;
-        if self.token.kind == lex::Kind::Identifier
-            && self.token.text == "for"
-            && self.after().kind == lex::Kind::Identifier
+        if matches!(
+            self.token.kind,
+            lex::Kind::Identifier | lex::Kind::Reference
+        ) && opens_for(self.token.text)
         {
             self.refuse(Form::For, Ends::Close)?;
         }
@@ -291,8 +291,9 @@ impl<'a> Parser<'a> {
                     Some(outer) => depth = outer,
                     None => return Ok(()),
                 },
-                lex::Kind::Comma if depth == 0 && ends != Ends::Close => return Ok(()),
-                lex::Kind::Newline if depth == 0 && ends == Ends::Line => {
+                lex::Kind::Comma | lex::Kind::Newline
+                    if depth == 0 && ends != Ends::Close =>
+                {
                     return Ok(());
                 }
                 _ => {}
@@ -367,40 +368,71 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn list(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
-        self.refuse_for()?;
-        let (items, close) =
-            self.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)?;
+    fn list(&mut self, depth: usize) -> Result<Value, Error> {
+        let (items, span) = self.level(self.token.span, depth, |parser, depth| {
+            parser.refuse_for()?;
+            parser.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)
+        })?;
         Ok(Value {
             kind: value::Kind::List(items),
-            span: Some(join(open.span, close.span)),
+            span: Some(span),
         })
     }
 
-    fn object(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
-        let mut attributes = Vec::new();
-        let close = self.entries(&mut attributes, depth);
-        let map = self.map(attributes);
+    fn object(&mut self, depth: usize) -> Result<Value, Error> {
+        let (map, span) = self.level(self.token.span, depth, |parser, depth| {
+            let mut attributes = Vec::new();
+            let entries = parser.entries(&mut attributes, depth);
+            let map = parser.map(attributes);
+            entries.map(|()| map)
+        })?;
         Ok(Value {
             kind: value::Kind::Map(map),
-            span: Some(join(open.span, close?.span)),
+            span: Some(span),
         })
     }
 
-    /// Reads the entries of an object after its `{`, and returns the `}`.
+    /// Reads one level of nesting that starts at `start`, the keyword, function name,
+    /// or open bracket before the open bracket: takes the open bracket, reads the
+    /// inside with `inner` at the depth inside, and takes the close. Inside `[` or `(`,
+    /// `take` skips new lines. Returns what `inner` read and the span from `start` to
+    /// the close, or [`Error::TooDeep`] at `start` when the level is past
+    /// [`DEPTH_MAX`].
+    fn level<T>(
+        &mut self,
+        start: Span,
+        depth: usize,
+        inner: impl FnOnce(&mut Self, usize) -> Result<T, Error>,
+    ) -> Result<(T, Span), Error> {
+        let depth = enter(depth).ok_or(Error::TooDeep { span: start })?;
+        let skipped = match self.token.kind {
+            lex::Kind::OpenBracket | lex::Kind::OpenParenthesis => true,
+            lex::Kind::OpenBrace => false,
+            ref kind => unreachable!("invariant: {kind:?} opens nothing"),
+        };
+        // The mode changes before each bracket is taken, because `take` reads the
+        // token after it.
+        let outer = std::mem::replace(&mut self.newlines_skipped, skipped);
+        self.take()?;
+        let inside = inner(self, depth)?;
+        self.newlines_skipped = outer;
+        let close = self.take()?;
+        Ok((inside, join(start, close.span)))
+    }
+
+    /// Reads the entries of an object after its `{`, and leaves the `}`.
     fn entries(
         &mut self,
         attributes: &mut Vec<Attribute>,
         depth: usize,
-    ) -> Result<Token<'a>, Error> {
+    ) -> Result<(), Error> {
+        self.skip_newlines()?;
         self.refuse_for()?;
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
             self.skip_newlines()?;
             match self.token.kind {
-                lex::Kind::CloseBrace => return self.take(),
+                lex::Kind::CloseBrace => return Ok(()),
                 _ => {
                     if let Some(form) = self.leading_form() {
                         self.refuse(form, Ends::Line)?;
@@ -425,7 +457,7 @@ impl<'a> Parser<'a> {
                 lex::Kind::Comma | lex::Kind::Newline => {
                     self.take()?;
                 }
-                lex::Kind::CloseBrace => return self.take(),
+                lex::Kind::CloseBrace => return Ok(()),
                 _ => return Err(self.syntax(Expected::ObjectEnd)),
             }
         }
@@ -465,43 +497,39 @@ impl<'a> Parser<'a> {
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep {
-            span: function.span,
+        let (arguments, span) = self.level(function.span, depth, |parser, depth| {
+            parser.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)
         })?;
-        self.take()?;
-        let (arguments, close) =
-            self.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)?;
         Ok(Value {
             kind: value::Kind::Call(Call {
                 function: function.text.into(),
                 function_span: Some(function.span),
                 arguments,
             }),
-            span: Some(join(function.span, close.span)),
+            span: Some(span),
         })
     }
 
-    /// Reads values split by `,` up to `close`, and returns them and the `close`
-    /// token. Any other token after a value is `expected`.
+    /// Reads values split by `,` up to `close`, and leaves the `close`. Any other
+    /// token after a value is `expected`.
     fn values(
         &mut self,
         close: &lex::Kind,
         expected: Expected,
         depth: usize,
-    ) -> Result<(Vec<Value>, Token<'a>), Error> {
+    ) -> Result<Vec<Value>, Error> {
         let mut values = Vec::new();
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
-            self.skip_newlines()?;
             if self.token.kind == *close {
-                return Ok((values, self.take()?));
+                return Ok(values);
             }
             values.extend(self.value(depth, Ends::Comma)?);
             match &self.token.kind {
                 lex::Kind::Comma => {
                     self.take()?;
                 }
-                kind if kind == close => return Ok((values, self.take()?)),
+                kind if kind == close => return Ok(values),
                 _ => return Err(self.syntax(expected)),
             }
         }
@@ -554,7 +582,11 @@ impl<'a> Parser<'a> {
             "invariant: no rule takes the end, at {:?}",
             self.token.span
         );
-        let next = self.tokens.next();
+        let next = if self.newlines_skipped {
+            self.tokens.next_past_lines()
+        } else {
+            self.tokens.next()
+        };
         Ok(std::mem::replace(&mut self.token, next))
     }
 
@@ -579,6 +611,13 @@ impl<'a> Parser<'a> {
 pub(crate) enum Literal {
     Bool(bool),
     Null,
+}
+
+/// Reports whether HCL reads `word` after `[` or `{` as the start of a `for`
+/// expression. The lexer reads `for.x` as one word, and HCL decides on its first
+/// part.
+pub(crate) fn opens_for(word: &str) -> bool {
+    word.split('.').next() == Some("for")
 }
 
 /// The value that `word` reads as by itself, or `None` for a reference.
@@ -937,12 +976,40 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn reads_for_as_a_word_when_no_identifier_follows() {
-            let expected = attributes(vec![
-                ("a", value::Kind::List(vec![value(reference("for"))])),
-                ("b", value::Kind::Map(map(vec![("for", integer(1))]))),
+        fn reads_for_as_a_word_after_the_start_of_a_list_or_an_object() {
+            let text = "a = [1, for]\nb = { k = 1, for = 2 }\nc = for(1)\nd = f(for)\n\
+                        e = [\"for\"]\nf = { \"for\" = 1 }\ng = [for-x]\nfor = 1\n\
+                        h { for = 1 }\n";
+            let call = |function: &str, argument: value::Kind| {
+                value::Kind::Call(Call {
+                    function: function.into(),
+                    function_span: None,
+                    arguments: vec![value(argument)],
+                })
+            };
+            let list = |kind| value::Kind::List(vec![value(kind)]);
+            let mut expected = attributes(vec![
+                (
+                    "a",
+                    value::Kind::List(vec![value(integer(1)), value(reference("for"))]),
+                ),
+                (
+                    "b",
+                    value::Kind::Map(map(vec![("k", integer(1)), ("for", integer(2))])),
+                ),
+                ("c", call("for", integer(1))),
+                ("d", call("f", reference("for"))),
+                ("e", list(string("for"))),
+                ("f", value::Kind::Map(map(vec![("for", integer(1))]))),
+                ("g", list(reference("for-x"))),
+                ("for", integer(1)),
             ]);
-            assert_eq!(ok("a = [for]\nb = { for = 1 }\n"), expected);
+            expected.blocks.push(block(
+                "h",
+                &[],
+                attributes(vec![("for", integer(1))]),
+            ));
+            assert_eq!(ok(text), expected);
         }
 
         #[test]
@@ -989,6 +1056,41 @@ c = "°C # not a comment"
                 ("b", call("null", Vec::new())),
             ]);
             assert_eq!(ok("a = true(1)\nb = null()\n"), expected);
+        }
+
+        #[test]
+        fn reads_past_new_lines_inside_brackets_as_hcl_does() {
+            let list = |items: Vec<value::Kind>| {
+                value::Kind::List(items.into_iter().map(value).collect())
+            };
+            let f = |argument| {
+                value::Kind::Call(Call {
+                    function: "f".into(),
+                    function_span: None,
+                    arguments: vec![value(argument)],
+                })
+            };
+            let cases = [
+                ("a = [-\n5]\n", list(vec![integer(-5)])),
+                ("a = [-\n\n5]\n", list(vec![integer(-5)])),
+                ("a = [-\n# c\n5]\n", list(vec![integer(-5)])),
+                ("a = f(-\n5)\n", f(integer(-5))),
+                ("a = [f\n(1)]\n", list(vec![f(integer(1))])),
+                (
+                    "a = { k = [-\n5] }\n",
+                    value::Kind::Map(map(vec![("k", list(vec![integer(-5)]))])),
+                ),
+                (
+                    "a = [{ k = 1 }\n, 2]\n",
+                    list(vec![
+                        value::Kind::Map(map(vec![("k", integer(1))])),
+                        integer(2),
+                    ]),
+                ),
+            ];
+            for (text, expected) in cases {
+                assert_eq!(ok(text), attributes(vec![("a", expected)]), "{text:?}");
+            }
         }
     }
 
@@ -1472,6 +1574,7 @@ c = "°C # not a comment"
             check(r#"s = "\u12""#, &[escape(5, 9)]);
             check(r#"s = "\U00110000""#, &[escape(5, 15)]);
             check("s = \"\\\n\"", &[escape(5, 6)]);
+            check("s = \"\\\r\n\"", &[escape(5, 6)]);
         }
 
         #[test]
@@ -1514,6 +1617,13 @@ c = "°C # not a comment"
                 ("a = b ? 1 : 2\n", on(6, 7), Form::Conditional),
                 ("a = [for x in y : x]\n", on(5, 8), Form::For),
                 ("a = { for k, v in m : k => v }\n", on(6, 9), Form::For),
+                ("a = [for]\n", on(5, 8), Form::For),
+                ("a = [for, 1]\n", on(5, 8), Form::For),
+                ("a = [for(1)]\n", on(5, 8), Form::For),
+                ("a = [for.x]\n", on(5, 10), Form::For),
+                ("a = { for = 1 }\n", on(6, 9), Form::For),
+                ("a = { for : 1 }\n", on(6, 9), Form::For),
+                ("a = { for.x = 1 }\n", on(6, 11), Form::For),
                 (
                     "a = [\n  for x in y : x\n]\n",
                     span(at(8, 1, 2), at(11, 1, 5)),
@@ -1576,6 +1686,12 @@ c = "°C # not a comment"
                 ),
                 ("a = [for\n  x in y : x]\n", on(5, 8), Form::For),
                 ("a = { for\n  k, v in m : k => v }\n", on(6, 9), Form::For),
+                ("a = [for\n]\n", on(5, 8), Form::For),
+                (
+                    "a = {\nfor = 1 }\n",
+                    span(at(6, 1, 0), at(9, 1, 3)),
+                    Form::For,
+                ),
                 (
                     "a = {\n  for k, v in m : k => v\n}\n",
                     span(at(8, 1, 2), at(11, 1, 5)),
@@ -1633,10 +1749,9 @@ c = "°C # not a comment"
         fn refuses_a_string_that_does_not_end() {
             let quote = &needs("`\"` to end the string");
             check("s = \"abc", &[(syntax(on(4, 8), Expected::Quote), quote)]);
-            check(
-                "s = \"ab\nc\"\n",
-                &[(syntax(on(4, 7), Expected::Quote), quote)],
-            );
+            for text in ["s = \"ab\nc\"\n", "s = \"ab\r\nc\"\r\n"] {
+                check(text, &[(syntax(on(4, 7), Expected::Quote), quote)]);
+            }
         }
 
         #[test]
@@ -1654,12 +1769,18 @@ c = "°C # not a comment"
         fn names_what_the_grammar_needs() {
             let cases = [
                 ("a = \n", span(at(4, 0, 4), at(5, 1, 0)), Expected::Value),
+                (
+                    "a = # c\r\n",
+                    span(at(7, 0, 7), at(9, 1, 0)),
+                    Expected::Value,
+                ),
                 ("a = $\n", on(4, 5), Expected::Value),
                 ("a =", on(3, 3), Expected::Value),
                 ("a = [", on(5, 5), Expected::Value),
                 ("a = ?\n", on(4, 5), Expected::Value),
                 ("a = .5\n", on(4, 5), Expected::Value),
                 ("a = -\n7\n", on(4, 5), Expected::Value),
+                ("a = [{ k = -\n7 }]\n", on(11, 12), Expected::Value),
                 ("a = 1\rb = 2\n", on(5, 6), Expected::Newline),
                 ("a = 1ex\n", on(5, 7), Expected::Newline),
                 ("a = 1 b = 2\n", on(6, 7), Expected::Newline),

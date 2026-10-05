@@ -32,6 +32,18 @@ impl Measurement {
         Some(Self { at, offset, error })
     }
 
+    /// A measurement whose error is unknown: 36500 days. In
+    /// [`combine`](crate::combine::combine) it votes only when no source has a known
+    /// bound.
+    #[must_use]
+    pub const fn unknown(at: Monotonic, offset: Span) -> Self {
+        Self {
+            at,
+            offset,
+            error: MAX_ERROR,
+        }
+    }
+
     /// The local time of the measurement.
     #[must_use]
     pub const fn at(self) -> Monotonic {
@@ -187,6 +199,19 @@ mod tests {
         fn takes_zero_and_36500_days() {
             assert_eq!(at(0, Span::ZERO).error(), Span::ZERO);
             assert_eq!(at(0, MAX_ERROR).error(), MAX_ERROR);
+        }
+    }
+
+    mod unknown {
+        use super::*;
+
+        #[test]
+        fn has_the_widest_error_that_new_takes() {
+            let m = Measurement::unknown(Monotonic(5), Span::SECOND);
+            assert_eq!((m.at(), m.offset()), (Monotonic(5), Span::SECOND));
+            let wider = Span::from_nanos(m.error().nanos() + 1);
+            assert_eq!(Measurement::new(m.at(), m.offset(), m.error()), Some(m));
+            assert_eq!(Measurement::new(m.at(), m.offset(), wider), None);
         }
     }
 

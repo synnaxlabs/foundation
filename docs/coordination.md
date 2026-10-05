@@ -72,15 +72,14 @@ Most of the cost is context size per turn, so keep each context small:
 | `memory` | Fable | `block`, `ring` |
 | `data-path` | Opus | `types`, `codec`, `wire` |
 | `consensus` | Fable | `raft`, `spec`, then `mesh`, `blob` |
-| `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark |
-| `write-path` | Opus | `control`, `delivery`, then `home` |
+| `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark, then two nodes in `sim` (`node`, #462) |
+| `write-path` | Opus | `control`, `delivery`, `home`, then `hub` (#462) |
 | `storage` | Fable | `buffer`, then `replica` |
 | `time` | Opus | `estimate`, then `clock` |
 | `config` | Opus | `document`, `config-hcl`, then `config` |
 | `network` | Opus | `transport` |
 | `advisor` | Opus | Answers design questions; writes no code here |
 | **Factory host** | | |
-| `hub` | Fable | `hub`; starts after `home`'s write path and `mesh`'s snapshot and watch |
 | `connector` | Opus | `connector` (the kind contract, supervisor, `ctx`, components) |
 | `access` | Opus | `secret`, then `access` after `spec` (#43) |
 | `ops` | Opus | `node` first as a walking skeleton for `verify`, then `ops` |
@@ -162,6 +161,20 @@ in each, so a stale build of another worktree's code can pass or fail a gate.
 Delete a scratch copy of the repo, with its `target`, when its job ends: a review copy,
 a breaker worktree, or a cargo-mutants copy. Each takes 1 to 9 GiB. On 2026-10-05 stale
 copies filled the disk, and Bash failed in every local session.
+
+## Heavy runs on the laptop
+
+The laptop sessions share 16 cores. A benchmark, a stress loop, or a local
+`cargo mutants` run takes one lock, so only one runs at a time. Run it in the
+background, because it waits for the lock:
+
+```sh
+lockf -k ~/.cache/foundation-heavy.lock <command>
+```
+
+A benchmark starts only when `uptime` shows a load under 8, and its PR names the load.
+Builds and the PR gates do not take the lock. On 2026-10-05 the load reached 170, and a
+stress run and two benchmarks gave results that no one could use.
 
 ## Issues
 
