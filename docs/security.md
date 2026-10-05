@@ -73,11 +73,13 @@ state on `main`.
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
   byte arrives), #298 (datagrams that are not valid, from one address, stop every
-  stateless reset; a small datagram of an unknown version gets a reply), #299 (a
-  peer makes the node hold certificates that are not valid for a session).
+  stateless reset; a small datagram of an unknown version gets a reply).
+- Fixed: #299 (a peer made the node hold certificates that are not valid for a
+  session). A chain is one certificate of at most 1 KiB.
 - Not decided: a limit on handshakes before admission. Each one costs the node a key
   exchange and one signature, and one signature check more when the peer sends a
-  certificate.
+  certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
+  timeout (#563).
 
 ### `transport` to protocols
 
@@ -118,11 +120,11 @@ state on `main`.
   placement. Not built (`spec`).
 - `raft` does not check the sender of a request, by decision: the caller
   authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
-  built (`mesh`). `raft` checks each index a message names, and the order of an
-  append's entries, before it acts; an entry above the message's term is still
-  written (#232, open). A node that a change removed and that missed its release
-  can win an election once no voter has a lease, and lead until it commits the
-  leave (#483).
+  built (`mesh`). Before it acts, `raft` checks the index a heartbeat or an append
+  answer names, the order of an append's entries, and that no entry is above the
+  append's term. A node that a change removed and that missed its release can win
+  an election once no voter has a lease, and lead until it commits the leave
+  (#483).
 - `raft` counts a reply only from a voter. But it takes a higher term from any
   sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
   #352 (a reply from a node that is not a voter makes the leader step down; one
@@ -178,8 +180,12 @@ state on `main`.
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
 - Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
-  reported durable or cannot open). Fixed: #393 (two CRC-valid fields stopped the
-  node at open); the `area` and `below_tail` inputs hold both.
+  reported durable or cannot open), #553 (a power cut after the first open loses
+  the new ring: its directory is not synced in its parent), #566 (a write of a dead
+  process can land on a ring that a new process opened), #572 (`append` takes a
+  record over the pool's largest block, and then each open fails). Fixed: #393 (two
+  CRC-valid fields stopped the node at open); the `area` and `below_tail` inputs
+  hold both.
 
 ### Device to connector
 

@@ -19,7 +19,10 @@ impl Node {
     /// Outside a thread that the sim started, and on a thread of another node.
     fn submit(&self, path: &Path, call: Call, held: Option<Held>) -> Wait {
         self.running("a file call");
-        let key = lock(&self.shared).submit(self.node, path, call, held);
+        let mut state = lock(&self.shared);
+        let now = state.now();
+        let key = state.files().submit(now, self.node, path, call, held);
+        drop(state);
         Wait {
             node: self.clone(),
             key,

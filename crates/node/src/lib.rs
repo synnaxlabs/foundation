@@ -70,14 +70,14 @@ impl Node {
     ///
     /// # Errors
     ///
-    /// [`Error::Thread`] with the first failure: a shard that could not start or
-    /// pin, else the first shard by core that panicked. Any failed shard stops the
-    /// node.
+    /// The first failure: [`Error::Start`] for a shard that could not start or pin,
+    /// else [`Error::Panicked`] for the first shard by core that panicked. Any
+    /// failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
-        let mut first = self.failed.map(Error::Thread);
+        let mut first = self.failed.map(Error::Start);
         for handle in self.handles {
             if let Err(e) = handle.join() {
-                first.get_or_insert(Error::Thread(e));
+                first.get_or_insert(Error::Panicked(e));
             }
         }
         first.map_or(Ok(()), Err)
@@ -87,14 +87,17 @@ impl Node {
 /// Why a node failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// A shard failed to start, or panicked.
-    Thread(env::thread::Error),
+    /// A shard could not start or pin.
+    Start(env::thread::Error),
+    /// A shard panicked.
+    Panicked(env::thread::Panicked),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Thread(e) => write!(f, "{e}"),
+            Self::Start(e) => write!(f, "{e}"),
+            Self::Panicked(e) => write!(f, "{e}"),
         }
     }
 }
