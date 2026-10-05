@@ -2,8 +2,7 @@ use types::time::{Monotonic, Span};
 
 use crate::{Drift, Error};
 
-/// The widest error bound. With the largest drift over the longest time, a widened
-/// bound still fits in a [`Span`].
+/// The widest error bound, which means the offset is unknown. A wider bound stops here.
 pub(crate) const MAX_ERROR: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
 
 /// What one time source says about a local clock, a node's or a device's: at local
@@ -49,18 +48,18 @@ impl Measurement {
     }
 
     /// How far the true offset can be from [`Measurement::offset`] at
-    /// [`Measurement::at`]: from zero to 36500 days.
+    /// [`Measurement::at`]: from zero to 36500 days, where 36500 days means unknown.
     #[must_use]
     pub const fn error(self) -> Span {
         self.error
     }
 
     /// The error bound at `now`, earlier or later than `at`: `error` plus what `drift`
-    /// can add between them.
+    /// can add between them, up to 36500 days.
     #[must_use]
     pub fn error_at(self, now: Monotonic, drift: Drift) -> Span {
         let growth = drift.over(now.0.abs_diff(self.at.0));
-        Span::from_nanos(self.error.nanos() + growth)
+        capped(i128::from(self.error.nanos()) + i128::from(growth))
     }
 
     /// The lowest and highest true offset at `now`, in nanoseconds.
@@ -71,16 +70,23 @@ impl Measurement {
     }
 
     /// The measurement at `at` that covers every offset from `low` to `high`, with its
-    /// offset and error saturated to a span.
+    /// offset saturated to a span and its error capped at 36500 days.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`Error::Bound`] when the error is more than 36500 days.
-    pub(crate) fn between(at: Monotonic, low: i128, high: i128) -> Result<Self, Error> {
+    /// When `low` is above `high`.
+    pub(crate) fn between(at: Monotonic, low: i128, high: i128) -> Self {
         let offset = saturated((low + high).div_euclid(2));
         let center = i128::from(offset.nanos());
-        Self::new(at, offset, saturated((high - center).max(center - low)))
+        let error = capped((high - center).max(center - low));
+        Self { at, offset, error }
     }
+}
+
+/// `nanos` as an error bound: 36500 days when it is wider.
+fn capped(nanos: i128) -> Span {
+    assert!(nanos >= 0, "invariant: error bound {nanos}ns is negative");
+    saturated(nanos.min(MAX_ERROR.nanos().into()))
 }
 
 /// `nanos` as a span, or the nearest span when it is past a span's range.
@@ -158,10 +164,62 @@ mod tests {
         }
 
         #[test]
-        fn fits_at_the_widest_error_drift_and_time() {
+        fn stops_at_36500_days() {
+            let under = |ns| at(0, Span::from_nanos(MAX_ERROR.nanos() - ns));
+            let error = |m: Measurement, now| m.error_at(Monotonic(now), drift(1_000));
+            let below = Span::from_nanos(MAX_ERROR.nanos() - 1);
+            assert_eq!(error(under(1_001), SECOND_NS), below);
+            assert_eq!(error(under(1_000), SECOND_NS), MAX_ERROR);
+            assert_eq!(error(under(1_000), 2 * SECOND_NS), MAX_ERROR);
+        }
+
+        #[test]
+        fn stops_at_the_widest_error_drift_and_time() {
             let error =
                 at(0, MAX_ERROR).error_at(Monotonic(u64::MAX), drift(100_000_000));
-            assert_eq!(error, Span::from_nanos(4_998_274_407_370_955_162));
+            assert_eq!(error, MAX_ERROR);
+        }
+    }
+
+    mod between {
+        use super::*;
+
+        #[test]
+        fn stops_the_error_at_36500_days() {
+            let widest = i128::from(MAX_ERROR.nanos());
+            let m = Measurement::between(Monotonic(3), -widest - 1, widest + 1);
+            assert_eq!(
+                (m.at(), m.offset(), m.error()),
+                (Monotonic(3), Span::ZERO, MAX_ERROR)
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "invariant: error bound -1ns is negative")]
+        fn panics_when_low_is_above_high() {
+            let _ = Measurement::between(Monotonic(0), 2, 0);
+        }
+    }
+
+    mod properties {
+        use proptest::prelude::*;
+
+        use super::*;
+        use crate::world::any_measurements;
+
+        proptest! {
+            #[test]
+            fn error_at_is_at_most_36500_days(
+                measurements in any_measurements(i64::MAX, MAX_ERROR.nanos()),
+                now in any::<u64>(),
+                ppb in 0..=100_000_000_u32,
+            ) {
+                let drift = Drift::from_ppb(ppb).expect("valid");
+                for m in measurements {
+                    let error = m.error_at(Monotonic(now), drift);
+                    prop_assert!(m.error() <= error && error <= MAX_ERROR);
+                }
+            }
         }
     }
 }

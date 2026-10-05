@@ -15,12 +15,22 @@ mod entry;
     not(test),
     expect(dead_code, reason = "the ring engine is the first user")
 )]
+mod group;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the ring engine is the first user")
+)]
 mod header;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the ring engine is the first user")
 )]
 mod record;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the ring engine is the first user")
+)]
+mod tails;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the ring engine is the first user")

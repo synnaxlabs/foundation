@@ -43,10 +43,9 @@ impl Exchange {
     ///
     /// # Errors
     ///
-    /// - [`Error::Crossed`] when the exchange allows no offset: an interval is
-    ///   inverted, the other clock goes back, the local clock drifts more than
-    ///   `drift`, or `sent` is after `returned`.
-    /// - [`Error::Bound`] when the error is more than 36500 days.
+    /// [`Error::Crossed`] when the exchange allows no offset: an interval is inverted,
+    /// the other clock goes back, the local clock drifts more than `drift`, or `sent`
+    /// is after `returned`.
     pub fn measure(self, drift: Drift) -> Result<Measurement, Error> {
         let (received, answered) = (self.received, self.answered);
         let inverted = |i: Interval| i.earliest > i.latest;
@@ -65,13 +64,13 @@ impl Exchange {
         if low > high {
             return Err(Error::Crossed);
         }
-        Measurement::between(self.returned, low, high)
+        Ok(Measurement::between(self.returned, low, high))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use types::time::{Interval, Monotonic, Span, Stamp};
+    use types::time::{Interval, Monotonic, Stamp};
 
     use crate::measurement::MAX_ERROR;
     use crate::{Drift, Error, Exchange};
@@ -149,21 +148,16 @@ mod tests {
         }
 
         #[test]
-        fn fails_when_the_error_passes_36500_days() {
+        fn stops_the_error_at_36500_days() {
             let widest = MAX_ERROR.nanos();
             let interval = peer(-widest - 1, widest + 1);
-            let error = Span::from_nanos(widest + 1);
-            assert_eq!(
-                check(0, 0, interval, interval, 0),
-                Err(Error::Bound { error })
-            );
+            assert_eq!(check(0, 0, interval, interval, 0), Ok((0, widest)));
         }
 
         #[test]
-        fn saturates_an_error_wider_than_a_span() {
-            let widest = peer(i64::MIN, i64::MAX);
-            let error = Span::from_nanos(i64::MAX);
-            assert_eq!(check(0, 0, widest, widest, 0), Err(Error::Bound { error }));
+        fn stops_an_error_wider_than_a_span_at_36500_days() {
+            let all = peer(i64::MIN, i64::MAX);
+            assert_eq!(check(0, 0, all, all, 0), Ok((-1, MAX_ERROR.nanos())));
         }
     }
 
@@ -266,10 +260,13 @@ mod tests {
                     returned: Monotonic(local[1]),
                 };
                 match exchange.measure(Drift::from_ppb(ppb).expect("valid")) {
-                    Ok(m) => prop_assert_eq!(m.at(), Monotonic(local[1])),
-                    Err(Error::Crossed | Error::Bound { .. }) => {}
-                    Err(e @ (Error::Backwards { .. } | Error::Disjoint
-                        | Error::Drift { .. } | Error::NoSources
+                    Ok(m) => {
+                        prop_assert_eq!(m.at(), Monotonic(local[1]));
+                        prop_assert!(m.error() <= MAX_ERROR);
+                    }
+                    Err(Error::Crossed) => {}
+                    Err(e @ (Error::Backwards { .. } | Error::Bound { .. }
+                        | Error::Disjoint | Error::Drift { .. } | Error::NoSources
                         | Error::NoMajority { .. } | Error::Open)) => {
                         prop_assert!(false, "unexpected {e}");
                     }

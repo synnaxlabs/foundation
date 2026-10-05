@@ -1,5 +1,7 @@
 //! Tests of a simulated run through the `env` handles that production code gets.
 
+mod net;
+
 use std::collections::BTreeSet;
 use std::future::pending;
 use std::pin::Pin;
@@ -44,6 +46,7 @@ fn sim(seed: u64) -> Sim {
     Sim::new(Config {
         seed,
         steps_max: 10_000,
+        ..Config::default()
     })
 }
 
@@ -211,8 +214,11 @@ fn each_node_reads_its_own_wall_clock() {
         ..node::Config::default()
     });
     sim.run_for(Span::SECOND).unwrap();
-    assert_eq!(a.wall().now(), node::Config::default().wall + Span::SECOND);
-    assert_eq!(b.wall().now(), Stamp::from_nanos(-7) + Span::SECOND);
+    assert_eq!(
+        a.wall().now().time,
+        node::Config::default().wall + Span::SECOND
+    );
+    assert_eq!(b.wall().now().time, Stamp::from_nanos(-7) + Span::SECOND);
 }
 
 fn bytes(seed: u64) -> ([u8; 16], [u8; 16]) {
@@ -304,6 +310,7 @@ fn a_run_stops_past_the_step_limit() {
     let mut sim = Sim::new(Config {
         seed: 0,
         steps_max: 100,
+        ..Config::default()
     });
     let node = sim.node(node::Config::default());
     let _handle = node.shards().start(shard("shard-0"), |_| async {
@@ -414,7 +421,7 @@ fn a_sleep_on_the_clock_of_another_node_panics() {
         sim.run(),
         Err(Error::Panicked {
             thread: "b-0".into(),
-            message: "a clock of node 0 sleeps on a thread of node 1".into(),
+            message: "a sleep of node 0 runs on a thread of node 1".into(),
             seed: 0,
         })
     );
@@ -533,6 +540,15 @@ fn a_run_with_no_threads_ends_at_once() {
 }
 
 #[test]
+fn the_digest_holds_each_poll() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let _idle = node.shards().start(shard("idle"), |_| async {}).unwrap();
+    sim.run().unwrap();
+    assert_ne!(sim.digest(), Sim::new(Config::default()).digest());
+}
+
+#[test]
 fn dropping_the_sim_drops_waiting_tasks_and_unstarted_threads() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
@@ -570,7 +586,9 @@ fn debug_names_the_config_and_the_node() {
     let node = sim.node(node::Config::default());
     assert_eq!(
         format!("{sim:?}"),
-        "Sim { config: Config { seed: 0, steps_max: 10000 }, .. }"
+        "Sim { config: Config { seed: 0, steps_max: 10000, link: Config { \
+         delay: Span(250000), jitter: Span(0), loss: 0.0, duplication: 0.0, \
+         mtu: 1500 } }, .. }"
     );
     assert_eq!(format!("{node:?}"), "Node(0)");
 }
@@ -720,7 +738,7 @@ fn the_clocks_read_up_to_the_end_of_true_time() {
     let mut sim = sim(0);
     let node = ending(&mut sim);
     sim.run_for(Span::SECOND).unwrap();
-    assert_eq!(node.wall().now(), Stamp::from_nanos(i64::MAX));
+    assert_eq!(node.wall().now().time, Stamp::from_nanos(i64::MAX));
     let start = node::Config::default().monotonic;
     assert_eq!(node.clock().now(), start + Span::SECOND);
 }
@@ -746,7 +764,7 @@ fn a_node_added_later_reads_its_config_now() {
     let config = node::Config::default();
     let node = sim.node(config);
     assert_eq!(node.clock().now(), config.monotonic);
-    assert_eq!(node.wall().now(), config.wall);
+    assert_eq!(node.wall().now().time, config.wall);
     sim.run_for(Span::SECOND).unwrap();
     assert_eq!(node.clock().now(), config.monotonic + Span::SECOND);
 }
@@ -808,14 +826,14 @@ fn a_wall_step_moves_only_the_wall_of_its_node() {
     let b = sim.node(node::Config::default());
     let config = node::Config::default();
     a.step_wall(Span::HOUR);
-    assert_eq!(a.wall().now(), config.wall + Span::HOUR);
+    assert_eq!(a.wall().now().time, config.wall + Span::HOUR);
     assert_eq!(a.clock().now(), config.monotonic);
-    assert_eq!(b.wall().now(), config.wall);
+    assert_eq!(b.wall().now().time, config.wall);
     a.step_wall(Span::from_nanos(-Span::DAY.nanos()));
     sim.run_for(Span::SECOND).unwrap();
     let wall = config.wall + Span::HOUR - Span::DAY + Span::SECOND;
-    assert_eq!(a.wall().now(), wall);
-    assert_eq!(b.wall().now(), config.wall + Span::SECOND);
+    assert_eq!(a.wall().now().time, wall);
+    assert_eq!(b.wall().now().time, config.wall + Span::SECOND);
 }
 
 #[test]
@@ -824,6 +842,114 @@ fn a_wall_step_out_of_range_panics() {
     let mut sim = sim(0);
     let node = ending(&mut sim);
     node.step_wall(Span::from_nanos(2 * Span::SECOND.nanos()));
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn each_node_reads_its_own_wall_error() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config {
+        wall_error: None,
+        ..node::Config::default()
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    let config = node::Config::default();
+    let reading = env::wall::Reading {
+        time: config.wall + Span::SECOND,
+        error: Some(millis(10)),
+    };
+    assert_eq!(a.wall().now(), reading);
+    assert_eq!(
+        b.wall().now(),
+        env::wall::Reading {
+            error: None,
+            ..reading
+        }
+    );
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_error_change_applies_to_the_next_reading_of_its_node() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config::default());
+    let wall = a.wall();
+    a.set_wall_error(Some(Span::SECOND));
+    let config = node::Config::default();
+    let reading = env::wall::Reading {
+        time: config.wall,
+        error: Some(Span::SECOND),
+    };
+    assert_eq!(wall.now(), reading);
+    assert_eq!(b.wall().now().error, config.wall_error);
+    a.set_wall_error(None);
+    assert_eq!(
+        wall.now(),
+        env::wall::Reading {
+            error: None,
+            ..reading
+        }
+    );
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_step_keeps_the_error() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    node.set_wall_error(Some(Span::ZERO));
+    node.step_wall(Span::HOUR);
+    let reading = env::wall::Reading {
+        time: node::Config::default().wall + Span::HOUR,
+        error: Some(Span::ZERO),
+    };
+    assert_eq!(node.wall().now(), reading);
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_error_change_does_not_move_the_wall() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    sim.run_for(Span::SECOND).unwrap();
+    node.set_wall_error(Some(Span::SECOND));
+    sim.run_for(Span::SECOND).unwrap();
+    let config = node::Config::default();
+    let two = Span::from_nanos(2 * Span::SECOND.nanos());
+    assert_eq!(node.wall().now().time, config.wall + two);
+    assert_eq!(node.clock().now(), config.monotonic + two);
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_bad_wall_error_reaches_the_reading() {
+    let mut sim = sim(0);
+    let negative = Some(Span::from_nanos(-1));
+    let a = sim.node(node::Config {
+        wall_error: negative,
+        ..node::Config::default()
+    });
+    let b = sim.node(node::Config::default());
+    b.set_wall_error(negative);
+    assert_eq!(a.wall().now().error, negative);
+    assert_eq!(b.wall().now().error, negative);
 }
 
 #[test]
@@ -939,7 +1065,7 @@ fn a_wall_step_in_a_run_ends_it_at_the_new_end_of_true_time() {
     });
     sim.run_for(millis(900)).unwrap();
     handle.unwrap().join().unwrap();
-    assert_eq!(node.wall().now(), Stamp::from_nanos(i64::MAX));
+    assert_eq!(node.wall().now().time, Stamp::from_nanos(i64::MAX));
     let start = node::Config::default().monotonic;
     assert_eq!(node.clock().now(), start + millis(500));
 }

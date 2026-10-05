@@ -1,12 +1,13 @@
 //! One simulated node and its settings.
 
 use std::fmt;
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 
 use types::time::{Monotonic, Span, Stamp};
 
-use crate::drivers;
 use crate::state::lock;
+use crate::{drivers, net};
 
 /// One simulated node: the `env` handles that its code gets. Clones refer to the same
 /// node.
@@ -26,7 +27,7 @@ impl Node {
         env::clock::Clock::new(self.0.clone())
     }
 
-    /// The node's wall clock.
+    /// The node's wall clock. Each reading has the node's current wall error.
     #[must_use]
     pub fn wall(&self) -> env::wall::Wall {
         env::wall::Wall::new(self.0.clone())
@@ -51,6 +52,36 @@ impl Node {
         env::threads::Threads::new(self.0.clone())
     }
 
+    /// The node's network, on its [`Node::addresses`]. UDP only: `connect` and
+    /// `listen` panic.
+    ///
+    /// - A bind or a send from an address that is not the node's gives `Error::Io`
+    ///   with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free port from
+    ///   49152.
+    /// - A send to the other family than the socket's gives `Error::Unreachable`.
+    /// - Each socket draws its send and receive batch maxes from 1, 8, and 64.
+    /// - A datagram is lost when it is over the link's
+    ///   [`mtu`](crate::link::Config::mtu), when nothing is bound at its
+    ///   destination, or when it would fill the receive queue past
+    ///   `recv_buffer_bytes`. The send buffer never fills.
+    /// - A socket half panics when it polls outside the node's threads.
+    #[must_use]
+    pub fn net(&self) -> env::net::Net {
+        env::net::Net::new(self.0.clone())
+    }
+
+    /// The node's IPv4 and IPv6 addresses, in that order: node `k`, from 0 in the
+    /// order of [`Sim::node`](crate::Sim::node), has `10.0.0.0` and `fd00::`, each
+    /// plus `k + 1`.
+    ///
+    /// # Panics
+    ///
+    /// For the 16,777,215th node and after: `10.0.0.0/8` has no host for them.
+    #[must_use]
+    pub fn addresses(&self) -> [IpAddr; 2] {
+        net::addresses(self.0.node)
+    }
+
     /// Steps the wall clock by `span`, forward or back, as when NTP or an operator
     /// sets it. The monotonic clock does not move. A step can move the end of true
     /// time (see [`Sim::run_for`](crate::Sim::run_for)).
@@ -67,10 +98,17 @@ impl Node {
         );
     }
 
+    /// Sets the error bound of the node's next wall readings, as when the time daemon
+    /// updates it. The wall does not move.
+    pub fn set_wall_error(&self, error: Option<Span>) {
+        lock(&self.0.shared).set_wall_error(self.0.node, error);
+    }
+
     /// Runs nothing on the node for `span` of true time while its clocks move, as in
-    /// a VM pause; a negative span is zero. Each wake in the pause, from a timer or
-    /// from another node, polls its task when the pause ends. A pause that overlaps
-    /// another ends at the later end, and one past the end of true time never ends.
+    /// a VM pause or a machine suspend; a negative span is zero. Each wake in the
+    /// pause, from a timer or from another node, polls its task when the pause ends.
+    /// A pause that overlaps another ends at the later end, and one past the end of
+    /// true time never ends.
     pub fn pause(&self, span: Span) {
         lock(&self.0.shared).pause(self.0.node, span);
     }
@@ -98,15 +136,20 @@ pub struct Config {
     pub monotonic: Monotonic,
     /// The wall time when the node is added.
     pub wall: Stamp,
+    /// The error bound that the OS gives with each wall reading, or `None` when it
+    /// gives none.
+    pub wall_error: Option<Span>,
 }
 
 impl Default for Config {
-    /// Four cores, one hour after boot, at 2026-01-01T00:00:00Z.
+    /// Four cores, one hour after boot, at 2026-01-01T00:00:00Z, with a wall error
+    /// of 10 ms.
     fn default() -> Self {
         Self {
             cores: NonZeroUsize::new(4).expect("four is not zero"),
             monotonic: Monotonic::default() + Span::HOUR,
             wall: Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos()),
+            wall_error: Some(Span::from_nanos(10 * Span::MILLISECOND.nanos())),
         }
     }
 }

@@ -126,6 +126,7 @@ dependencies = [
 name = "buffer"
 version = "0.0.0"
 dependencies = [
+ "block",
  "crc32c",
  "proptest",
  "types",

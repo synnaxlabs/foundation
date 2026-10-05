@@ -6,7 +6,7 @@
 
 use types::channel::Slot;
 use types::frame::key_set::{Group, Interner};
-use types::frame::{Draft, Form, Path, Range};
+use types::frame::{Draft, Form, Label, Range};
 use types::sample::{Scalar, Type};
 
 #[global_allocator]
@@ -36,7 +36,7 @@ fn main() {
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let series = [(0, 16), (2, 16)];
     let (sum, allocations) = ALLOCATOR.count(|| {
-        let mut draft = Draft::new(&pool, &set, Path::Live, Form::Raw, &series)
+        let mut draft = Draft::new(&pool, &set, Label::Resend, Form::Raw, &series)
             .expect("the pool holds the frame");
         for (entry, bytes) in draft.iter_mut() {
             bytes.fill(u8::try_from(entry).expect("entries are small"));
@@ -46,7 +46,7 @@ fn main() {
         let frame = draft.freeze();
         let copy = frame.clone();
         assert_eq!(frame.key_set(), set.key(), "the frame names its key set");
-        assert_eq!(frame.path(), Path::Live, "the frame keeps its path");
+        assert_eq!(frame.label(), Label::Resend, "the frame keeps its label");
         assert_eq!(frame.form(), Form::Raw, "the frame keeps its form");
         assert_eq!(frame.series(1), None, "entry 1 is absent");
         assert_eq!(frame.range(1), None, "group 1 is absent");
