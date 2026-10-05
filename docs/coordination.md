@@ -102,8 +102,11 @@ The factory host runs on a second Claude account, so `SendMessage` and Remote Co
 cannot reach its sessions. Each host session has an open issue titled
 `inbox:<name>`, and the coordinator has `inbox:coordinator`. A message is one comment
 on the receiver's inbox. A host session reads its inbox once per loop run and
-writes to `inbox:coordinator`. The coordinator relays between laptop and host
-sessions. Records still go into issues, PRs, and docs first.
+writes to `inbox:coordinator`. While idle, a host session runs one background Monitor
+that reads its inbox's comment count every 60 seconds and reports only when the count
+grows, so a message wakes it in about a minute. The person decided on 2026-10-05
+("Yeah that's fine"). The coordinator relays between laptop and host sessions. Records
+still go into issues, PRs, and docs first.
 
 Two first surfaces have a named reviewer besides the coordinator: `consensus` reviews
 `document`, because `spec` uses it; `simulation` reviews `transport`, because `sim`
