@@ -395,8 +395,10 @@ How to read this record:
   before the writer releases the space, so the header's tail is at or before the
   writer's tail and the records between are whole. The layout comes from the header
   at open; configuration sets it at create, and a changed `body_max` takes effect at
-  the next create. The open reports the effective layout, callers bound a commit by
-  it, and the node shows it in status. A new ring has the same block at `seq` 0 in
+  the next create. The open reports the effective layout, and the node shows it in
+  status. `append` refuses a batch that no one record holds (over 1023 entries or
+  parts, or a body over `body_max`) with `Large`, and never splits a batch over
+  records. A new ring has the same block at `seq` 0 in
   both places, with the tail at offset 0 and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
