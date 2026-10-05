@@ -40,7 +40,7 @@ pub struct Config {
     /// The replay value: the same seed and the same calls give the same run.
     pub seed: u64,
     /// The most steps in one call to [`Sim::run`] or [`Sim::run_for`]. A step polls
-    /// one task or moves true time to the next timer.
+    /// one task, or moves true time to the next timer or to the end of a pause.
     pub steps_max: u64,
 }
 
@@ -113,11 +113,11 @@ impl Sim {
     /// # Errors
     ///
     /// - [`Error::Panicked`] when a task panics. The run stops there, and the
-    ///   thread's [`env::threads::Handle::join`] returns
-    ///   [`env::threads::Error::Panicked`].
+    ///   thread's [`env::thread::Handle::join`] returns
+    ///   [`env::thread::Error::Panicked`].
     /// - [`Error::Steps`] past [`Config::steps_max`] steps.
-    /// - [`Error::Stuck`] when threads remain but no task is ready and no timer
-    ///   waits.
+    /// - [`Error::Stuck`] when threads remain but nothing can run again: no task is
+    ///   ready on a node that runs, and no timer or pause ends before true time.
     pub fn run(&mut self) -> Result<(), Error> {
         self.drive(None)
     }
@@ -127,7 +127,8 @@ impl Sim {
     ///
     /// True time ends where the first clock of a node can count no further: the
     /// monotonic clock at `u64::MAX` nanoseconds, or the wall clock in 2262. A timer
-    /// past that end never fires.
+    /// past that end fires only if a wall step moves the end past it. A wall step in
+    /// the run can bring the end nearer; the run then stops there.
     ///
     /// # Errors
     ///
@@ -158,8 +159,8 @@ impl Sim {
             })?;
             match next {
                 Next::Poll => self.step()?,
-                Next::Fire(due) => {
-                    let wakers = lock(&self.shared).advance(due);
+                Next::Advance(at) => {
+                    let wakers = lock(&self.shared).advance(at);
                     wakers.into_iter().for_each(Waker::wake);
                 }
             }
@@ -185,7 +186,7 @@ impl Sim {
         lock(&self.shared).release();
         let Err(payload) = run else { return Ok(()) };
         let name = lock(&self.shared).name(thread);
-        let panicked = env::threads::Error::Panicked { name: name.clone() };
+        let panicked = env::thread::Error::Panicked { name: name.clone() };
         let tasks = lock(&self.shared).end(thread, Err(panicked));
         self.drop_futures(&tasks);
         Err(Error::Panicked {

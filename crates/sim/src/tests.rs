@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use crate::{Config, Error, Sim, node};
-use env::threads::Error as Thread;
+use env::thread;
 use proptest::prelude::*;
 use types::time::{Monotonic, Span, Stamp};
 
@@ -265,7 +265,7 @@ fn a_panic_ends_the_run_and_its_thread() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "shard-0".into()
         })
     );
@@ -292,7 +292,7 @@ fn a_panic_in_a_spawned_task_ends_its_shard() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "shard-0".into()
         })
     );
@@ -350,7 +350,7 @@ fn a_shard_cannot_pin_past_the_node_cores() {
     };
     assert_eq!(
         node.shards().start(config, |_| async {}).unwrap_err(),
-        Thread::Pin {
+        thread::Error::Pin {
             name: "shard-4".into(),
             core: 4
         }
@@ -371,17 +371,17 @@ fn a_thread_name_with_a_nul_byte_starts() {
     let shard = node
         .shards()
         .start(shard("a\0b"), |_| async { panic!("shard") });
-    let thread = node.threads().start("c\0d", || async {});
+    let handle = node.threads().start("c\0d", || async {});
     let e = sim.run().unwrap_err();
     assert!(matches!(e, Error::Panicked { thread, .. } if thread == "a\0b"));
     assert_eq!(
         shard.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "a\0b".into()
         })
     );
     sim.run().unwrap();
-    thread.unwrap().join().unwrap();
+    handle.unwrap().join().unwrap();
 }
 
 #[test]
@@ -680,7 +680,7 @@ fn a_panic_in_the_drop_of_a_task_ends_the_run_and_its_thread() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "shard-0".into()
         })
     );
@@ -791,4 +791,227 @@ fn a_timer_wakes_its_task_only_when_due() {
     a.unwrap().join().unwrap();
     b.unwrap().join().unwrap();
     assert_eq!(polls.load(Ordering::Relaxed), 2);
+}
+
+fn millis(n: i64) -> Span {
+    Span::from_nanos(n * Span::MILLISECOND.nanos())
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_step_moves_only_the_wall_of_its_node() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config::default());
+    let config = node::Config::default();
+    a.step_wall(Span::HOUR);
+    assert_eq!(a.wall().now(), config.wall + Span::HOUR);
+    assert_eq!(a.clock().now(), config.monotonic);
+    assert_eq!(b.wall().now(), config.wall);
+    a.step_wall(Span::from_nanos(-Span::DAY.nanos()));
+    sim.run_for(Span::SECOND).unwrap();
+    let wall = config.wall + Span::HOUR - Span::DAY + Span::SECOND;
+    assert_eq!(a.wall().now(), wall);
+    assert_eq!(b.wall().now(), config.wall + Span::SECOND);
+}
+
+#[test]
+#[should_panic(expected = "step_wall(2s) moves the wall of node 0 out of range")]
+fn a_wall_step_out_of_range_panics() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    node.step_wall(Span::from_nanos(2 * Span::SECOND.nanos()));
+}
+
+#[test]
+fn a_timer_past_the_end_after_a_wall_step_waits() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    let clock = node.clock();
+    let _handle = node.shards().start(shard("shard-0"), move |_| async move {
+        clock.sleep(millis(750)).await;
+    });
+    sim.run_for(Span::ZERO).unwrap();
+    node.step_wall(millis(500));
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
+}
+
+/// Starts a shard on `node` that sleeps for `span`, then logs its name and the time.
+fn log_after(
+    node: &node::Node,
+    name: &'static str,
+    span: Span,
+    log: &Arc<Mutex<Vec<(&'static str, Monotonic)>>>,
+) -> env::thread::Handle {
+    let clock = node.clock();
+    let log = Arc::clone(log);
+    let handle = node.shards().start(shard(name), move |_| async move {
+        clock.sleep(span).await;
+        log.lock().unwrap().push((name, clock.now()));
+    });
+    handle.unwrap()
+}
+
+#[test]
+fn a_paused_node_runs_nothing_until_the_pause_ends() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config::default());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    a.pause(Span::SECOND);
+    let handles = [
+        log_after(&a, "a", Span::ZERO, &log),
+        log_after(&b, "b", millis(500), &log),
+    ];
+    sim.run().unwrap();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let start = node::Config::default().monotonic;
+    let log = log.lock().unwrap().clone();
+    assert_eq!(
+        log,
+        [("b", start + millis(500)), ("a", start + Span::SECOND)]
+    );
+}
+
+#[test]
+fn a_timer_that_falls_due_in_a_pause_fires_when_it_ends() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let handle = log_after(&node, "a", millis(250), &log);
+    sim.run_for(Span::ZERO).unwrap();
+    node.pause(Span::SECOND);
+    sim.run_for(millis(999)).unwrap();
+    assert_eq!(log.lock().unwrap().clone(), []);
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let start = node::Config::default().monotonic;
+    assert_eq!(log.lock().unwrap().clone(), [("a", start + Span::SECOND)]);
+}
+
+#[test]
+fn overlapping_pauses_end_at_the_later_end() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    node.pause(Span::from_nanos(2 * Span::SECOND.nanos()));
+    node.pause(Span::SECOND);
+    node.pause(Span::from_nanos(-1));
+    let handle = log_after(&node, "a", Span::ZERO, &log);
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let start = node::Config::default().monotonic;
+    let end = start + Span::from_nanos(2 * Span::SECOND.nanos());
+    assert_eq!(log.lock().unwrap().clone(), [("a", end)]);
+}
+
+#[test]
+fn a_run_ends_without_waiting_for_a_pause_with_nothing_ready() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    node.pause(Span::SECOND);
+    sim.run().unwrap();
+    assert_eq!(node.clock().now(), node::Config::default().monotonic);
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_step_in_a_run_ends_it_at_the_new_end_of_true_time() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    let stepper = node.clone();
+    let handle = node.shards().start(shard("shard-0"), move |_| async move {
+        stepper.step_wall(millis(500));
+    });
+    sim.run_for(millis(900)).unwrap();
+    handle.unwrap().join().unwrap();
+    assert_eq!(node.wall().now(), Stamp::from_nanos(i64::MAX));
+    let start = node::Config::default().monotonic;
+    assert_eq!(node.clock().now(), start + millis(500));
+}
+
+#[test]
+fn a_pause_past_the_end_of_true_time_never_ends() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    node.pause(Span::from_nanos(2 * Span::SECOND.nanos()));
+    let _handle = node.shards().start(shard("shard-0"), |_| async {});
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
+}
+
+#[test]
+fn a_wall_step_back_lets_a_waiting_timer_fire() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let handle = log_after(&node, "a", millis(750), &log);
+    sim.run_for(Span::ZERO).unwrap();
+    node.step_wall(millis(500));
+    sim.run_for(millis(500)).unwrap();
+    node.step_wall(millis(-500));
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let start = node::Config::default().monotonic;
+    assert_eq!(log.lock().unwrap().clone(), [("a", start + millis(750))]);
+}
+
+#[test]
+fn a_node_added_later_holds_back_a_timer_past_its_end() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let _handle =
+        log_after(&node, "a", Span::from_nanos(2 * Span::SECOND.nanos()), &log);
+    sim.run_for(Span::ZERO).unwrap();
+    let _ending = ending(&mut sim);
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["a".into()],
+            seed: 0,
+        })
+    );
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(log.lock().unwrap().clone(), []);
+}
+
+#[test]
+fn a_pause_past_the_range_of_true_time_never_ends() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        monotonic: Monotonic(0),
+        wall: Stamp::from_nanos(i64::MIN),
+        ..node::Config::default()
+    });
+    sim.run_for(Span::from_nanos(i64::MAX)).unwrap();
+    sim.run_for(Span::from_nanos(i64::MAX)).unwrap();
+    node.pause(Span::from_nanos(i64::MAX));
+    let _handle = node.shards().start(shard("shard-0"), |_| async {});
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
 }

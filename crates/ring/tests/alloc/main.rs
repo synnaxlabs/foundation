@@ -1,6 +1,8 @@
 //! The hot path makes no heap allocation. This binary has no test harness: the count
 //! covers each thread, and a harness allocates on its own thread at any time.
 
+#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
+
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
