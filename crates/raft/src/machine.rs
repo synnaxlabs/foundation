@@ -668,8 +668,9 @@ impl Raft {
         }
     }
 
-    // Steps down for a message of a higher term that `check` passed. Returns whether
-    // the message still needs its normal handling.
+    // Steps down for a message of a higher term that `check` passed, except a PreVote
+    // or its grant. Returns false, so the message is dropped, only for a PreVote or
+    // Vote of a higher term while this node has a lease.
     fn meet(&mut self, from: node::Key, term: Term, body: &Body) -> bool {
         if term > self.term {
             match body {
@@ -947,10 +948,7 @@ mod tests {
 
     fn entries(positions: &[(u64, u64)]) -> Vec<Entry> {
         let entry = |&(term, index)| Entry {
-            at: Position {
-                term: Term(term),
-                index,
-            },
+            at: position(term, index),
             data: Data::Empty,
         };
         positions.iter().map(entry).collect()
@@ -1091,10 +1089,6 @@ mod tests {
                 ..start(&[1], at_term(1))
             };
             let err = Raft::new(CONFIG, start).unwrap_err();
-            let position = |term, index| Position {
-                term: Term(term),
-                index,
-            };
             let out_of_order = Error::EntryOutOfOrder {
                 at: position(1, 3),
                 before: position(1, 1),
@@ -1367,6 +1361,10 @@ mod tests {
                     term: Term(1),
                     from: key(2)
                 }
+            );
+            assert_eq!(
+                err.to_string(),
+                "node 00000000000000000000000000000002 also claims to lead term 1"
             );
             assert_eq!((raft.role(), raft.leader()), (Role::Leader, Some(key(1))));
             assert_eq!(sent(&mut raft), []);
@@ -2201,10 +2199,7 @@ mod tests {
 
         fn config(term: u64, index: u64, voters: Voters) -> Entry {
             Entry {
-                at: Position {
-                    term: Term(term),
-                    index,
-                },
+                at: position(term, index),
                 data: Data::Voters(voters),
             }
         }
@@ -2373,10 +2368,7 @@ mod tests {
 
         fn config(term: u64, index: u64, voters: Voters) -> Entry {
             Entry {
-                at: Position {
-                    term: Term(term),
-                    index,
-                },
+                at: position(term, index),
                 data: Data::Voters(voters),
             }
         }
@@ -2917,10 +2909,7 @@ mod tests {
             };
             let start = Start {
                 entries: vec![Entry {
-                    at: Position {
-                        term: Term(1),
-                        index: 1,
-                    },
+                    at: position(1, 1),
                     data: Data::Voters(joint.clone()),
                 }],
                 ..start(outgoing, at_term(1))

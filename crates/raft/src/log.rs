@@ -156,9 +156,9 @@ impl Log {
         at
     }
 
-    // Appends the leader's entries after `prev` as a follower. `Raft::check` ran
-    // first: the entries follow `prev`. Entries already in the log stay; the first
-    // entry that differs replaces it and all after it. Returns the index of the last
+    // Appends the leader's entries after `prev` as a follower. `entries` passed
+    // `check(&entries, prev)`. Entries already in the log stay; the first entry that
+    // differs replaces it and all after it. Returns the index of the last
     // entry the leader sent, or the commit index when `prev` is below it, or an error
     // with the follower's hint for the next `prev`: its last index, or the index
     // before a `prev` it does not have.
