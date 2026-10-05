@@ -1,4 +1,4 @@
-//! An oracle in two files, with one more test that runs only under loom.
+//! An oracle in two files, with one more test that fails under loom.
 
 mod common;
 
@@ -9,4 +9,6 @@ fn passes() {
 
 #[cfg(loom)]
 #[test]
-fn passes_under_loom() {}
+fn fails_under_loom() {
+    panic!("expected: the xtask tests check that this loom test fails");
+}

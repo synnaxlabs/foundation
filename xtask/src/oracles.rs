@@ -7,7 +7,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::{field, files};
+use crate::{build, field, files};
 
 /// A test target whose root file is under `oracles/`.
 #[derive(Debug, PartialEq, Eq)]
@@ -36,7 +36,7 @@ fn problems(root: &Path) -> Result<Vec<String>, String> {
     let (targets, mut problems) = targets(&metadata, &oracles)?;
     let mut compiled = BTreeSet::new();
     for (target, exe) in build(root, &targets)? {
-        compiled.extend(sources(&workspace, &exe)?);
+        compiled.extend(build::sources(&workspace, &exe)?);
         if tests(&exe)? == 0 {
             problems.push(format!(
                 "oracle test target `{}` of `{}` runs no tests. An oracle must run at \
@@ -106,30 +106,13 @@ fn build<'a>(
     for target in targets {
         cargo.args(["-p", &target.package, "--test", &target.name]);
     }
-    let output = cargo.output().map_err(|e| format!("cargo test: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "cannot build the oracle test targets:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
     let mut built = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let message: Value =
-            serde_json::from_str(line).map_err(|e| format!("cargo test: {e}"))?;
-        if field::text(&message, "reason")? != "compiler-artifact" {
-            continue;
-        }
-        let id = field::text(&message, "package_id")?;
-        let name = field::text(&message["target"], "name")?;
-        let test = field::list(&message["target"], "kind")?
-            .iter()
-            .any(|k| k == "test");
+    for exe in build::executables(&mut cargo)? {
         if let Some(target) = targets
             .iter()
-            .find(|t| test && t.package_id == id && t.name == name)
+            .find(|t| t.package_id == exe.package_id && t.name == exe.target)
         {
-            built.push((target, PathBuf::from(field::text(&message, "executable")?)));
+            built.push((target, exe.path));
         }
     }
     if built.len() != targets.len() {
@@ -140,20 +123,6 @@ fn build<'a>(
         ));
     }
     Ok(built)
-}
-
-/// The source files that rustc read to build `exe`, from the dep-info file beside
-/// it. Rustc writes paths relative to `workspace`.
-fn sources(workspace: &Path, exe: &Path) -> Result<Vec<PathBuf>, String> {
-    let info = exe.with_extension("d");
-    let text = std::fs::read_to_string(&info)
-        .map_err(|e| format!("{}: {e}", info.display()))?;
-    Ok(text
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .filter_map(|line| line.strip_suffix(':'))
-        .map(|path| files::normalize(&workspace.join(path.replace("\\ ", " "))))
-        .collect())
 }
 
 /// Counts the tests that `exe` runs: those it lists less those it ignores.

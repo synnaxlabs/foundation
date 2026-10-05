@@ -68,11 +68,11 @@ again once to prove that the failure replays (r16 59).
   dependency approval in `docs/dependencies.md` first (r16 51, 52).
 - **Wake protocols and lock-free code** get loom for small models and shuttle (PCT)
   for larger ones. Only `ring` gates std types behind `cfg(loom)`. Code with `unsafe`
-  runs under Miri (r16 61). `cargo xtask loom` runs `cargo test --release --tests`
-  with `--cfg loom` and `LOOM_MAX_PREEMPTIONS=3` on each crate whose source or oracles
-  name `loom` in a `cfg`. `cargo xtask shuttle` does the same with `--cfg shuttle`.
-  `cargo xtask miri` runs Miri on each crate whose source names `unsafe_code`, and
-  fails when such a crate runs no tests.
+  runs under Miri (r16 61). `cargo xtask loom` builds the tests in release mode with
+  `--cfg loom`. Then it runs, with `LOOM_MAX_PREEMPTIONS=3`, each test target that
+  compiles a file that names `loom` in a `cfg`, oracles included. `cargo xtask
+  shuttle` does the same with `--cfg shuttle`. `cargo xtask miri` runs Miri on each
+  crate whose source names `unsafe_code`, and fails when such a crate runs no tests.
 - **Hot paths** run under a counting allocator that fails on any allocation.
 - **Unit tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject
   and condition with nested modules. Name each test as the behavior it checks, with

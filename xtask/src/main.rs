@@ -2,6 +2,7 @@
 
 #![expect(clippy::print_stderr, reason = "xtask reports to the terminal")]
 
+mod build;
 mod cfg;
 mod field;
 mod files;
