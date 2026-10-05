@@ -150,9 +150,8 @@ state on `main`.
   encoding (`document`). Both readers bound nesting at 64 levels.
   `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
   `config_hcl_read`, `config_hcl_update`, `config_hcl_write`,
-  `document_encoding`. Open: #446 (`update` puts a new block after a kept block
-  it must come before; the `config_hcl_update` target finds it, so its long runs
-  wait on the fix).
+  `document_encoding`. Fixed: #446 (`update` put a new block after a kept block
+  it must come before); the `block_before_kept` inputs hold it.
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
