@@ -15,7 +15,7 @@ use crate::stream::{Incoming, Receiver, Sender};
 /// Clones share the session, and so do its streams and datagram halves. When the
 /// last of them drops, the session closes with `Code(0)` once the peer has every
 /// finished stream, or after [`Config::idle`](crate::Config::idle). The session also
-/// ends when either side closes it, or when any carrier under it fails.
+/// ends when either side closes it, or when its carrier fails.
 ///
 /// ```
 /// use block::Block;
@@ -63,7 +63,8 @@ impl Session {
     }
 
     /// Opens a stream in both directions. It waits while the peer allows no more
-    /// streams. The peer sees the stream at its first message or finish.
+    /// streams; dropping the future before it completes opens nothing. The peer sees
+    /// the stream at its first message or finish.
     ///
     /// # Errors
     ///
@@ -83,7 +84,8 @@ impl Session {
     }
 
     /// Opens a stream that only this node sends on. It waits while the peer allows no
-    /// more streams. The peer sees the stream at its first message or finish.
+    /// more streams; dropping the future before it completes opens nothing. The peer
+    /// sees the stream at its first message or finish.
     ///
     /// # Errors
     ///
@@ -101,8 +103,9 @@ impl Session {
         todo!("#68")
     }
 
-    /// Waits for the next stream the peer opened. Every clone shares one queue, and
-    /// each stream goes to one caller, so one dispatcher per session should take them.
+    /// Waits for the next stream the peer opened, highest class first. Every clone
+    /// shares one queue, and each stream goes to one caller, so one dispatcher per
+    /// session should take them.
     ///
     /// # Errors
     ///

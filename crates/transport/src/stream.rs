@@ -11,6 +11,7 @@ use crate::error::Error;
 
 /// The sending half of a stream. Dropping it without [`finish`](Self::finish) resets
 /// the stream with `Code(0)`, so the peer never reads a cut-off stream as complete.
+/// Dropping it after `finish` lets delivery go on.
 ///
 /// ```
 /// use block::Block;
@@ -53,6 +54,10 @@ impl Sender {
     /// [`Error::Stopped`] when the peer stopped reading, or the error that ended the
     /// session.
     ///
+    /// # Panics
+    ///
+    /// When called after [`finish`](Self::finish).
+    ///
     /// ```
     /// use transport::{Error, stream::Sender};
     ///
@@ -66,7 +71,8 @@ impl Sender {
     }
 
     /// Ends the stream after the messages already sent. The peer's
-    /// [`Receiver::recv`] returns `None` after the last one.
+    /// [`Receiver::recv`] returns `None` after the last one. The sender stays, so
+    /// [`reset`](Self::reset) can still cancel what the peer does not have yet.
     ///
     /// # Errors
     ///
@@ -74,16 +80,19 @@ impl Sender {
     /// session.
     ///
     /// ```
-    /// fn done(sender: transport::stream::Sender) -> Result<(), transport::Error> {
+    /// use transport::{Error, stream::Sender};
+    ///
+    /// fn done(sender: &mut Sender) -> Result<(), Error> {
     ///     sender.finish()
     /// }
     /// ```
-    pub fn finish(self) -> Result<(), Error> {
+    pub fn finish(&mut self) -> Result<(), Error> {
         todo!("#68")
     }
 
-    /// Cancels the stream: messages not yet delivered drop, and the peer sees
-    /// [`Error::Reset`] with `code`.
+    /// Cancels the stream: messages the peer does not have yet drop, and the peer
+    /// sees [`Error::Reset`] with `code`. After [`finish`](Self::finish), it does
+    /// nothing once the peer has every message.
     ///
     /// ```
     /// fn cancel(sender: transport::stream::Sender) {
@@ -97,7 +106,7 @@ impl Sender {
 }
 
 /// The receiving half of a stream. Dropping it before the end stops the stream with
-/// `Code(0)`.
+/// `Code(0)`; dropping it after the end sends nothing.
 ///
 /// ```
 /// use transport::{Error, stream::Receiver};
