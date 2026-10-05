@@ -9,7 +9,7 @@ use block::{Block, Pool, Unique};
 use types::channel::Slot;
 
 use crate::entry::{self, Entry, Header};
-use crate::record::{self, Kind};
+use crate::record;
 use crate::wal::{Full, Plan, Writer};
 
 /// The most entries one record holds, and the most parts: with the header block,
@@ -181,7 +181,7 @@ impl Group {
             group: self,
             plan,
             meta,
-            wrap: plan.wrap.is_some().then_some(wrap),
+            wrap,
             start,
         }
     }
@@ -195,8 +195,9 @@ pub(crate) struct Closed {
     group: Group,
     plan: Plan,
     meta: Unique,
-    /// The block for the wrap header, when the record wraps.
-    wrap: Option<Unique>,
+    /// The block for the wrap header. It goes back to the pool when the record
+    /// does not wrap.
+    wrap: Unique,
     /// Where the record header starts in `meta`.
     start: usize,
 }
@@ -209,18 +210,17 @@ impl Closed {
             mut group,
             plan,
             mut meta,
-            wrap,
+            mut wrap,
             start,
         } = self;
         let (_, tail) = meta.split_at_mut(start);
         let (header, table) = tail.split_at_mut(record::HEADER_LEN);
         let parts = group.writes.iter().map(|part| &**part);
         let body = iter::once(&*table).chain(parts);
-        let (sealed, next) = plan.seal(chain, Kind::Data, body);
+        let (sealed, next) = plan.seal(chain, body);
         header.copy_from_slice(&sealed.record.header);
         group.writes.insert(0, meta.freeze().skip(start));
         let wrap = sealed.wrap.map(|write| {
-            let mut wrap = wrap.expect("invariant: a record that wraps has a block");
             let start =
                 wrap.len()
                     .checked_sub(record::HEADER_LEN)
@@ -381,7 +381,7 @@ mod tests {
         let step = cursor.next(&bytes[index(place)..index(place + len)]);
         assert_eq!(step, Ok(Step::End));
         let (writer, _) = cursor
-            .writer(opened.tail.offset())
+            .writer(opened.tail.offset(), 1)
             .expect("the ring is empty");
         let entry = entry(header(1, Path::Live, 0), &[]);
         let pushed = Group::default().push(&pool(1 << 20), &writer, &[entry]);
@@ -410,10 +410,8 @@ mod tests {
             let Window { place, len } = cursor.window();
             let step = cursor.next(&bytes[index(place)..index(place + len)]);
             assert_eq!(step, Ok(Step::End), "a zeroed area ends at once");
-            let (writer, plan) = cursor.writer(0).expect("the ring is empty");
+            let (writer, sealed) = cursor.writer(0, 1).expect("the ring is empty");
             let body = 1u32.to_le_bytes();
-            let (sealed, _) =
-                plan.seal(cursor.end().chain(), Kind::Restart, [&body[..]]);
             let mut area = Self {
                 bytes,
                 writer,

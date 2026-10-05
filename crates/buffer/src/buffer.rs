@@ -26,7 +26,7 @@ use types::time::Span;
 use crate::entry::{self, Entry};
 use crate::group::{Closed, Group, META_LEN, Rejected, Sealed};
 use crate::header::{self, AREA_START, Header};
-use crate::record::{self, ALIGN, Kind};
+use crate::record::{self, ALIGN};
 use crate::tails::{Tail, Tails};
 use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 
@@ -301,10 +301,8 @@ impl Buffer {
             }
         }
         let chain = random(&entropy);
-        let (writer, plan) = cursor.writer(header.tail.offset())?;
-        let body = chain.to_le_bytes();
-        let (sealed, _) = plan.seal(cursor.end().chain(), Kind::Restart, [&body[..]]);
-        write_restart(&file, &pool, sealed, &body).await?;
+        let (writer, sealed) = cursor.writer(header.tail.offset(), chain)?;
+        write_restart(&file, &pool, sealed, chain).await?;
         let shared = Rc::new(Shared {
             file,
             pool,
@@ -485,13 +483,13 @@ async fn write_restart(
     file: &File,
     pool: &Pool,
     sealed: wal::Sealed,
-    chain: &[u8; 4],
+    chain: u32,
 ) -> Result<(), Error> {
     assert!(
         sealed.wrap.is_none(),
         "invariant: a restart record is one block and never wraps"
     );
-    let block = small_record(pool, &sealed.record.header, chain)?;
+    let block = small_record(pool, &sealed.record.header, &chain.to_le_bytes())?;
     file.write_at(AREA_START + sealed.record.place, slice::from_ref(&block))
         .await?;
     Ok(())
