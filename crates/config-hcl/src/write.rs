@@ -92,15 +92,19 @@ pub(crate) struct Writer<'a> {
     margin: &'a str,
     /// The column where the first line starts.
     start: usize,
+    /// The text goes in a file whose lines end in `\r\n`. A heredoc there keeps a
+    /// `\r` in its value, so each string is quoted.
+    crlf: bool,
 }
 
 impl<'a> Writer<'a> {
     /// A writer for text that goes at column `start` of a line that starts with
-    /// `margin`.
-    pub(crate) fn new(margin: &'a str, start: usize) -> Self {
+    /// `margin`, in a file whose lines end in `\r\n` when `crlf`.
+    pub(crate) fn new(margin: &'a str, start: usize, crlf: bool) -> Self {
         Self {
             margin,
             start,
+            crlf,
             ..Self::default()
         }
     }
@@ -181,7 +185,10 @@ impl<'a> Writer<'a> {
         let Some(items) = Items::of(&value.kind) else {
             return self.line(value, ends);
         };
-        let mut line = Self::default();
+        let mut line = Self {
+            crlf: self.crlf,
+            ..Self::default()
+        };
         line.line(value, ends);
         let comma = usize::from(ends == Ends::Comma);
         let width = self
@@ -241,7 +248,9 @@ impl<'a> Writer<'a> {
                 return write!(self.out, "{:?}", float.get())
                     .expect("invariant: a String takes any text");
             }
-            Kind::String(text) if ends == Ends::Line && whole_lines(text) => {
+            Kind::String(text)
+                if ends == Ends::Line && !self.crlf && whole_lines(text) =>
+            {
                 return heredoc(&mut self.out, text);
             }
             Kind::String(text) => return quoted(&mut self.out, text),
