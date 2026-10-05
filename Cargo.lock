@@ -155,6 +155,7 @@ dependencies = [
 name = "codec"
 version = "0.0.0"
 dependencies = [
+ "divan",
  "proptest",
  "types",
 ]
@@ -172,6 +173,11 @@ version = "0.0.0"
 [[package]]
 name = "config-hcl"
 version = "0.0.0"
+dependencies = [
+ "document",
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "connector"

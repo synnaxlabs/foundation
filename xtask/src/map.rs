@@ -193,7 +193,7 @@ pub(crate) const CRATES: &[Crate] = &[
     Crate {
         name: "config-hcl",
         layer: 4,
-        deps: Deps::Only(&["document"]),
+        deps: Deps::Only(&["types", "document"]),
     },
     Crate {
         name: "config",

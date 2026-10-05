@@ -69,6 +69,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Layers
         run: cargo xtask layers
+      - name: Globals
+        run: cargo xtask globals
       - name: Oracles
         run: cargo xtask oracles
       - name: Test
