@@ -429,7 +429,14 @@ How to read this record:
   that falls behind is served from disk. When the pool is full, a live write records a
   gap and backfill waits. The current value of B4 pins one block per index that had a
   live frame, with no reader open and no cap. A smaller copy is a 5.3 tunable. The
-  person decided on 2026-10-05: "Accept it" (#139).
+  person decided on 2026-10-05: "Accept it" (#139). The budget counts what stays
+  resident. A purge of a block smaller than a page gives no page back, so it frees no
+  budget. When every carved block of a size class is free, the pool gives back the
+  class's whole carved range and its budget; at most two partial pages per class stay
+  resident, and `Config::budget` states that slack. A class that a reader keeps partly
+  in use keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
+  fine"), #2, #270. Purges per block that give back every page they credit (design P)
+  wait in a follow-up issue.
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
