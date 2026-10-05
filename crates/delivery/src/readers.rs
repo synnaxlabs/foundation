@@ -518,6 +518,12 @@ mod tests {
         }
 
         #[test]
+        fn moves_one_path_alone() {
+            let (mut readers, key) = opened(both(0, 2));
+            assert_eq!(readers.ack(key, both(5, 2)), Ok(()));
+        }
+
+        #[test]
         fn rejects_a_move_back() {
             let (mut readers, key) = opened(live(0));
             readers.ack(key, live(5)).expect("forward");
