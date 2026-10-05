@@ -37,7 +37,7 @@ pub(super) struct Entry<'a> {
 }
 
 impl Entry<'_> {
-    pub fn child(&self) -> Hash {
+    pub(super) fn child(&self) -> Hash {
         let bytes = self.payload.try_into();
         Hash(bytes.expect("invariant: an entry above a leaf holds a 32-byte hash"))
     }
@@ -53,7 +53,7 @@ pub(super) struct Node<'a> {
 
 impl<'a> Node<'a> {
     /// Reads the chunk `bytes`, whose hash is `hash`.
-    pub fn read(hash: Hash, bytes: &'a [u8]) -> Result<Self, Error> {
+    pub(super) fn read(hash: Hash, bytes: &'a [u8]) -> Result<Self, Error> {
         let corrupt = Error::Corrupt(hash);
         let (&level, mut rest) = bytes.split_first().ok_or(corrupt)?;
         let mut entries = Vec::new();
@@ -79,7 +79,7 @@ impl<'a> Node<'a> {
         })
     }
 
-    pub fn last_key(&self) -> Option<&'a [u8]> {
+    pub(super) fn last_key(&self) -> Option<&'a [u8]> {
         self.entries.last().map(|entry| entry.key)
     }
 }
@@ -141,7 +141,10 @@ mod tests {
         let node = Node::read(Hash::of(&bytes), &bytes).unwrap();
         assert_eq!(node.level, 0);
         let entries: Vec<_> = node.entries.iter().map(|e| (e.key, e.payload)).collect();
-        assert_eq!(entries, [(&b"a"[..], &b""[..]), (b"b.c", &long), (b"", b"x")]);
+        assert_eq!(
+            entries,
+            [(&b"a"[..], &b""[..]), (b"b.c", &long), (b"", b"x")]
+        );
         assert_eq!(node.last_key(), Some(&b""[..]));
     }
 

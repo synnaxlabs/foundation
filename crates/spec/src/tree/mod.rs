@@ -44,7 +44,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Missing(hash) => write!(f, "chunk {hash} is not here"),
-            Self::Corrupt(hash) => write!(f, "chunk {hash} is not a chunk of a spec tree"),
+            Self::Corrupt(hash) => {
+                write!(f, "chunk {hash} is not a chunk of a spec tree")
+            }
         }
     }
 }
@@ -136,7 +138,8 @@ fn apply_at(
         .collect();
     let mut edits: Vec<Edit> = edits.into_iter().collect();
     let mut fresh = BTreeMap::new();
-    let mut level = chunks.node(root)?.level;
+    let top = chunks.node(root)?;
+    let mut level = top.level;
     for level in 0..=level {
         edits = rewrite(chunks, scale, root, level, &edits, &mut fresh)?;
         if edits.is_empty() {
@@ -144,24 +147,31 @@ fn apply_at(
             return Ok(Update { root, chunks });
         }
     }
-    let mut tops: Vec<(Vec<u8>, Hash)> = edits
-        .into_iter()
-        .filter_map(|(key, hash)| Some((key, as_hash(&hash?))))
-        .collect();
+    // The chunks of the top level: the old root, changed by the last edits.
+    let mut tops = BTreeMap::new();
+    if let Some(key) = top.last_key() {
+        tops.insert(key.to_vec(), root);
+    }
+    for (key, hash) in edits {
+        match hash {
+            Some(hash) => tops.insert(key, as_hash(&hash)),
+            None => tops.remove(&key),
+        };
+    }
     while tops.len() > 1 {
         level += 1;
         let mut writer = Writer::new(scale, level);
         for (key, hash) in &tops {
             writer.push(key, &hash.0);
         }
-        tops = Vec::new();
+        tops = BTreeMap::new();
         for (key, bytes) in writer.finish() {
             let hash = Hash::of(&bytes);
             fresh.insert(hash, bytes);
-            tops.push((key, hash));
+            tops.insert(key, hash);
         }
     }
-    let mut root = tops.pop().map_or_else(empty, |(_, hash)| hash);
+    let mut root = tops.into_values().next().unwrap_or_else(empty);
     // A chunk with one child is not a root: its child is.
     loop {
         let node = match fresh.get(&root) {
@@ -172,8 +182,9 @@ fn apply_at(
         if node.level == 0 {
             break;
         }
+        let child = only.child();
         fresh.remove(&root);
-        root = only.child();
+        root = child;
     }
     let chunks = fresh.into_values().collect();
     Ok(Update { root, chunks })
@@ -256,7 +267,12 @@ struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     // Finds the chunk of `level` that holds `key`, or would hold it.
-    fn seek(chunks: &'a Chunks, root: Hash, level: u8, key: &[u8]) -> Result<Self, Error> {
+    fn seek(
+        chunks: &'a Chunks,
+        root: Hash,
+        level: u8,
+        key: &[u8],
+    ) -> Result<Self, Error> {
         let mut path = Vec::new();
         let mut node = chunks.node(root)?;
         while node.level > level {
@@ -374,12 +390,17 @@ pub fn diff(chunks: &Chunks, old: Hash, new: Hash) -> Result<Diff, Error> {
     Ok(diff)
 }
 
-fn children<'a>(chunks: &'a Chunks, nodes: &[Node<'a>]) -> Result<Vec<Node<'a>>, Error> {
+fn children<'a>(
+    chunks: &'a Chunks,
+    nodes: &[Node<'a>],
+) -> Result<Vec<Node<'a>>, Error> {
     let entries = nodes.iter().flat_map(|node| &node.entries);
     entries.map(|entry| chunks.node(entry.child())).collect()
 }
 
-fn entries<'a, 'b>(nodes: &'b [Node<'a>]) -> impl Iterator<Item = (Hash, Entry<'a>)> + 'b {
+fn entries<'a, 'b>(
+    nodes: &'b [Node<'a>],
+) -> impl Iterator<Item = (Hash, Entry<'a>)> + 'b {
     nodes
         .iter()
         .flat_map(|node| node.entries.iter().map(|&entry| (node.hash, entry)))

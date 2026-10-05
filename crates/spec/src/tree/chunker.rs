@@ -14,6 +14,7 @@ pub(super) const SCALE: u32 = 4096;
 fn boundary(scale: u32, level: u8, key: &[u8], start: usize, end: usize) -> bool {
     let scale = u128::from(scale);
     let (start, end) = (start as u128, end as u128);
+    // Keeps the powers below in range for an entry of any size.
     if end >= 4 * scale {
         return true;
     }
@@ -40,7 +41,7 @@ pub(super) struct Writer {
 
 impl Writer {
     /// `scale` must be at most 8192, so that the boundary rule cannot overflow.
-    pub fn new(scale: u32, level: u8) -> Self {
+    pub(super) fn new(scale: u32, level: u8) -> Self {
         Self {
             scale,
             level,
@@ -50,7 +51,7 @@ impl Writer {
         }
     }
 
-    pub fn push(&mut self, key: &[u8], payload: &[u8]) {
+    pub(super) fn push(&mut self, key: &[u8], payload: &[u8]) {
         let start = self.chunk.len() - 1;
         chunk::write(&mut self.chunk, self.level, key, payload);
         let end = self.chunk.len() - 1;
@@ -62,11 +63,11 @@ impl Writer {
     }
 
     /// Reports whether the last entry ended a chunk, or no entry was pushed.
-    pub fn at_boundary(&self) -> bool {
+    pub(super) fn at_boundary(&self) -> bool {
         self.chunk.len() == 1
     }
 
-    pub fn finish(mut self) -> Vec<Chunk> {
+    pub(super) fn finish(mut self) -> Vec<Chunk> {
         if !self.at_boundary() {
             self.cut();
         }
@@ -76,5 +77,49 @@ impl Writer {
     fn cut(&mut self) {
         let chunk = std::mem::replace(&mut self.chunk, vec![self.level]);
         self.done.push((self.last.clone(), chunk));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chunk_ends_at_four_times_the_scale() {
+        let keys = || (0..1000_u32).map(u32::to_le_bytes);
+        for key in keys() {
+            assert!(boundary(SCALE, 0, &key, 16_383, 16_384), "{key:?}");
+            assert!(boundary(SCALE, 0, &key, 16_383, 1 << 30), "{key:?}");
+        }
+        let cut = keys().filter(|key| boundary(SCALE, 0, key, 16_382, 16_383));
+        assert!(cut.count() < 500);
+    }
+
+    #[test]
+    fn a_writer_cuts_where_the_boundaries_are() {
+        let mut writer = Writer::new(64, 1);
+        assert!(writer.at_boundary());
+        let mut ends = Vec::new();
+        let mut start = 0;
+        for id in 0..200_u8 {
+            writer.push(&[id], &[0; 32]);
+            let end = start + 34;
+            start = if boundary(64, 1, &[id], start, end) {
+                ends.push(vec![id]);
+                0
+            } else {
+                end
+            };
+            assert_eq!(writer.at_boundary(), start == 0, "{id}");
+        }
+        if start != 0 {
+            ends.push(vec![199]);
+        }
+        let chunks = writer.finish();
+        let lasts: Vec<_> = chunks.iter().map(|(last, _)| last.clone()).collect();
+        assert_eq!(lasts, ends);
+        assert!(chunks.len() > 20);
+        let size: usize = chunks.iter().map(|(_, bytes)| bytes.len() - 1).sum();
+        assert_eq!(size, 200 * 34);
     }
 }

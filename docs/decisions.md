@@ -356,6 +356,20 @@ How to read this record:
   not in its own voter list votes and follows, but never campaigns. `step` does not
   check that a sender is a voter (a voter can learn late that a peer joined), so the
   caller authenticates the sender and decides which nodes may send.
+- **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
+  name in byte order, so the names under one prefix are one range. A value is opaque
+  bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
+  an entry above is the last key of a child and its BLAKE3 hash. A chunk ends after an
+  entry when a draw from the BLAKE3 hash of the level and the key is below
+  `(end^4 - start^4) / 4096^4`, where `start` and `end` are the entry's byte offsets
+  in the chunk (Weibull hazard, shape 4), or when the chunk reaches 16 KiB. The rule
+  uses integers only. A chunk with one child is never a root, so the tree is a
+  function of its entries. The empty tree has the root `tree::empty()` and no stored
+  chunk. The tree does no I/O: the caller fills a `tree::Chunks`, and `get`, `apply`,
+  and `diff` return `Error::Missing(hash)` for a chunk that is not there, so the
+  caller fetches it and runs the operation again. `apply` takes a batch of changes
+  and returns the new root and the new chunks. To change the chunk format or the
+  boundary rule changes every root hash.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
