@@ -1564,7 +1564,10 @@ How to read this record:
   are usable from the start: they hold the pool's header, so `Pool::new` makes no
   commit that can fail. A purged page stops counting against the memory the system
   can commit. On Linux with strict overcommit, `madvise` and `mprotect` keep that
-  charge, so `os` purges with a `MAP_FIXED` remap (#475).
+  charge, so `os` purges with a `MAP_FIXED` remap (#475). `block::testing::{Scarce,
+  Switch}`, behind the `sim` feature, is heap memory whose commits a test makes
+  refuse, so a crate above `block` tests a refused commit through its production
+  path (#591).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

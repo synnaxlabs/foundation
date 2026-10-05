@@ -11,6 +11,8 @@
 
 mod memory;
 mod sync;
+#[cfg(any(test, feature = "sim"))]
+pub mod testing;
 
 use std::cell::Cell;
 use std::fmt;
@@ -754,10 +756,10 @@ impl std::error::Error for Error {}
 /// Pools over heap memory for the tests and the models.
 #[cfg(test)]
 mod fixture {
-    use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::testing::{Scarce, Switch};
 
     /// A call a pool made on its memory.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -769,22 +771,9 @@ mod fixture {
     /// What a pool did with its memory.
     pub(crate) struct Watch {
         pub(crate) drops: AtomicUsize,
-        /// Bytes the system can hold committed after the header. A purge gives
-        /// its bytes back to the system. Zero refuses each commit.
-        pub(crate) limit: AtomicUsize,
-        charged: Mutex<BTreeSet<usize>>,
+        /// Makes the memory refuse commits.
+        pub(crate) switch: Switch,
         calls: Mutex<Vec<Call>>,
-    }
-
-    impl Default for Watch {
-        fn default() -> Self {
-            Self {
-                drops: AtomicUsize::new(0),
-                limit: AtomicUsize::new(usize::MAX),
-                charged: Mutex::default(),
-                calls: Mutex::default(),
-            }
-        }
     }
 
     impl Watch {
@@ -796,55 +785,32 @@ mod fixture {
         fn record(&self, call: Call) {
             self.calls.lock().expect("no test panicked").push(call);
         }
-
-        /// Charges the bytes to the system. False when they go over `limit`.
-        fn charge(&self, offset: usize, len: usize) -> bool {
-            let mut charged = self.charged.lock().expect("no test panicked");
-            let mut next = charged.clone();
-            next.extend(offset / ALIGN..(offset + len).div_ceil(ALIGN));
-            let fits = next.len().saturating_mul(ALIGN) <= self.limit.load(Relaxed);
-            if fits {
-                *charged = next;
-            }
-            fits
-        }
-
-        fn discharge(&self, offset: usize, len: usize) {
-            let mut charged = self.charged.lock().expect("no test panicked");
-            for unit in offset.div_ceil(ALIGN)..(offset + len) / ALIGN {
-                charged.remove(&unit);
-            }
-        }
     }
 
-    /// Heap memory that records its calls and counts its drops.
+    /// Memory that records its calls and counts its drops.
     pub(crate) struct Watched {
-        heap: Heap,
+        memory: Scarce,
         watch: Arc<Watch>,
     }
 
-    // SAFETY: each method is the one of `Heap`, or a `commit` that refuses.
+    // SAFETY: each method is the one of `Scarce`.
     unsafe impl Memory for Watched {
         fn base(&self) -> NonNull<u8> {
-            self.heap.base()
+            self.memory.base()
         }
 
         fn len(&self) -> usize {
-            self.heap.len()
+            self.memory.len()
         }
 
         fn commit(&self, offset: usize, len: usize) -> Result<(), Refused> {
             self.watch.record(Call::Commit { offset, len });
-            if !self.watch.charge(offset, len) {
-                return Err(Refused);
-            }
-            self.heap.commit(offset, len)
+            self.memory.commit(offset, len)
         }
 
         fn purge(&self, offset: usize, len: usize) {
             self.watch.record(Call::Purge { offset, len });
-            self.watch.discharge(offset, len);
-            self.heap.purge(offset, len);
+            self.memory.purge(offset, len);
         }
     }
 
@@ -933,9 +899,14 @@ mod fixture {
 
     pub(crate) fn create_watched_pool(budget: usize) -> (Pool, Arc<Watch>) {
         let config = Config { budget };
-        let watch = Arc::new(Watch::default());
+        let (memory, switch) = Scarce::new(config.reservation());
+        let watch = Arc::new(Watch {
+            drops: AtomicUsize::new(0),
+            switch,
+            calls: Mutex::default(),
+        });
         let memory = Watched {
-            heap: Heap::new(config.reservation()),
+            memory,
             watch: Arc::clone(&watch),
         };
         (Pool::new(config, memory), watch)
@@ -1194,7 +1165,7 @@ mod tests {
         #[test]
         fn fails_while_the_system_refuses_memory() {
             let (pool, watch) = create_watched_pool(256);
-            watch.limit.store(0, Relaxed);
+            watch.switch.set(true);
             let error = pool.alloc(10).expect_err("the system refuses memory");
             assert_eq!(error, refused(10));
             assert_eq!(
@@ -1202,7 +1173,7 @@ mod tests {
                 "the system refused memory for a block of 10 bytes"
             );
             assert_eq!(pool.committed(), 0);
-            watch.limit.store(usize::MAX, Relaxed);
+            watch.switch.set(false);
             let block = pool.alloc(10).expect("the system has memory again");
             assert_eq!(block.len(), 10);
             assert_eq!(pool.committed(), 128);
@@ -1273,11 +1244,11 @@ mod tests {
             let (pool, watch) = create_watched_pool(256);
             drop(pool.alloc(64).expect("the budget has room"));
             pool.reclaim();
-            watch.limit.store(0, Relaxed);
+            watch.switch.set(true);
             let error = pool.alloc(128).expect_err("the system refuses memory");
             assert_eq!(error, refused(128));
             assert_eq!(pool.committed(), 0, "the idle class went back first");
-            watch.limit.store(usize::MAX, Relaxed);
+            watch.switch.set(false);
             let block = pool.alloc(128).expect("the system has memory again");
             assert_eq!(pool.committed(), 192);
             let carve = Commit {
@@ -1307,7 +1278,7 @@ mod tests {
         fn gives_back_only_what_it_carved_after_a_refusal() {
             let (pool, watch) = create_watched_pool(256);
             let held = pool.alloc(64).expect("the budget has room");
-            watch.limit.store(0, Relaxed);
+            watch.switch.set(true);
             let error = pool.alloc(64).expect_err("the system refuses memory");
             assert_eq!(error, refused(64));
             drop(held);
@@ -1328,7 +1299,7 @@ mod tests {
         fn serves_from_its_idle_pages_when_the_system_has_no_more() {
             for budget in [1024, 4096] {
                 let (pool, watch) = create_watched_pool(budget);
-                watch.limit.store(1024, Relaxed);
+                watch.switch.limit(1024);
                 let small: Vec<_> = (0..8)
                     .map(|_| pool.alloc(64).expect("the system has memory"))
                     .collect();
@@ -1344,7 +1315,7 @@ mod tests {
         #[test]
         fn gives_back_the_size_above_first_when_the_system_refuses() {
             let (pool, watch) = create_watched_pool(4096);
-            watch.limit.store(384, Relaxed);
+            watch.switch.limit(384);
             drop(pool.alloc(64).expect("the system has memory"));
             drop(pool.alloc(192).expect("the system has memory"));
             pool.reclaim();
@@ -1375,7 +1346,7 @@ mod tests {
             drop(pool.alloc(64).expect("the budget has room"));
             drop(pool.alloc(128).expect("the budget has room"));
             pool.reclaim();
-            watch.limit.store(0, Relaxed);
+            watch.switch.set(true);
             let error = pool.alloc(192).expect_err("the system refuses memory");
             assert_eq!(error, refused(192));
             assert_eq!(pool.committed(), 0, "each idle size went back");
@@ -1683,8 +1654,7 @@ mod tests {
                 let mut lent = 0;
                 let steps = steps.into_iter().zip(refusals).zip(1_u8..);
                 for (((len, dropped), refusing), fill) in steps {
-                    let limit = if refusing { 0 } else { usize::MAX };
-                    watch.limit.store(limit, Relaxed);
+                    watch.switch.set(refusing);
                     let calls = watch.calls().len();
                     match pool.alloc(len) {
                         Ok(mut block) => {
