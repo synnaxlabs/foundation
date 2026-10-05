@@ -38,15 +38,6 @@ pub(crate) struct Record<'a> {
     pub(crate) crc: u32,
 }
 
-/// Why the next record of the chain does not start at an offset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Stop {
-    /// The space was never written, or the ring file ends here.
-    End,
-    /// The length or the CRC is wrong: a torn write, damaged bytes, or another chain.
-    Corrupt,
-}
-
 /// Makes the header of the record that follows `chain` for a payload given in parts,
 /// and returns it with the chain value of the next record. The writer puts the
 /// header, then the parts in order, at an [`ALIGN`] boundary.
@@ -76,44 +67,36 @@ pub(crate) fn header(chain: u32, payload: &[&[u8]]) -> ([u8; HEADER_LEN], u32) {
 /// Reads the record at `bytes[0]` and checks that it follows `chain`. `bytes` runs
 /// from an [`ALIGN`] boundary to the end of the ring file.
 ///
-/// # Errors
-///
-/// A [`Stop`] when no such record starts here. Each one ends the log at recovery.
+/// Returns `None` when the chain ends here: the space was never written, the write
+/// was torn, the bytes are damaged, or they belong to another chain.
 ///
 /// # Panics
 ///
 /// When the length of `bytes` is not a multiple of [`ALIGN`].
-pub(crate) fn read(bytes: &[u8], chain: u32) -> Result<Record<'_>, Stop> {
+pub(crate) fn read(bytes: &[u8], chain: u32) -> Option<Record<'_>> {
     assert!(
         bytes.len().is_multiple_of(ALIGN),
         "invariant: {} bytes of ring are not a multiple of {ALIGN}",
         bytes.len()
     );
-    let Some((head, body)) = bytes.split_first_chunk::<HEADER_LEN>() else {
-        return Err(Stop::End);
-    };
-    if *head == [0; HEADER_LEN] {
-        return Err(Stop::End);
-    }
+    let (head, body) = bytes.split_first_chunk::<HEADER_LEN>()?;
     let [l0, l1, l2, l3, c0, c1, c2, c3] = *head;
     let len = [l0, l1, l2, l3];
     let payload = usize::try_from(u32::from_le_bytes(len))
         .ok()
         .filter(|&len| len != 0)
-        .and_then(|len| body.get(..len))
-        .ok_or(Stop::Corrupt)?;
+        .and_then(|len| body.get(..len))?;
     let mut crc = Crc32c::resume(chain);
     crc.update(&len);
     crc.update(payload);
     let crc = crc.finish();
     if crc != u32::from_le_bytes([c0, c1, c2, c3]) {
-        return Err(Stop::Corrupt);
+        return None;
     }
     let size = HEADER_LEN
         .checked_add(payload.len())
-        .and_then(|size| size.checked_next_multiple_of(ALIGN))
-        .expect("invariant: a payload inside aligned bytes pads inside them");
-    Ok(Record { payload, size, crc })
+        .and_then(|size| size.checked_next_multiple_of(ALIGN))?;
+    Some(Record { payload, size, crc })
 }
 
 #[cfg(test)]
@@ -175,13 +158,13 @@ mod tests {
         use super::*;
 
         #[test]
-        fn stops_at_the_end_on_a_zeroed_block() {
-            assert_eq!(read(&[0; ALIGN], 0), Err(Stop::End));
+        fn reads_no_record_from_a_zeroed_block() {
+            assert_eq!(read(&[0; ALIGN], 0), None);
         }
 
         #[test]
-        fn stops_at_the_end_of_the_ring_file() {
-            assert_eq!(read(&[], 1), Err(Stop::End));
+        fn reads_no_record_at_the_end_of_the_ring_file() {
+            assert_eq!(read(&[], 1), None);
         }
 
         #[test]
@@ -191,12 +174,12 @@ mod tests {
         }
 
         #[test]
-        fn reports_a_zero_length_with_its_right_crc_as_corrupt() {
+        fn rejects_a_zero_length_with_its_right_crc() {
             let mut crc = Crc32c::resume(1);
             crc.update(&[0; 4]);
             let mut image = vec![0; ALIGN];
             image[4..8].copy_from_slice(&crc.finish().to_le_bytes());
-            assert_eq!(read(&image, 1), Err(Stop::Corrupt));
+            assert_eq!(read(&image, 1), None);
         }
 
         #[test]
@@ -205,7 +188,7 @@ mod tests {
             for (len, size) in cases {
                 let (image, _) = image(1, &[&vec![0xA5; len]], 0);
                 assert_eq!(image.len(), size, "payload of {len} bytes");
-                assert_eq!(read(&image, 1).map(|record| record.size), Ok(size));
+                assert_eq!(read(&image, 1).map(|record| record.size), Some(size));
             }
         }
 
@@ -216,7 +199,7 @@ mod tests {
             let first = read(&ring, 4).expect("the first record is whole");
             assert_eq!((first.payload, first.crc), (&b"first"[..], crc));
             let second = read(&ring[first.size..], first.crc).map(|r| r.payload);
-            assert_eq!(second, Ok(&b"second"[..]));
+            assert_eq!(second, Some(&b"second"[..]));
         }
 
         /// The log was cut at a damaged record and written again from there. The
@@ -227,8 +210,8 @@ mod tests {
             ring.extend(image(crc, &[b"old four"], 0).0);
             let (new, crc) = image(4, &[b"new three"], 0);
             ring[..ALIGN].copy_from_slice(&new);
-            assert_eq!(read(&ring, 4).map(|r| r.payload), Ok(&b"new three"[..]));
-            assert_eq!(read(&ring[ALIGN..], crc), Err(Stop::Corrupt));
+            assert_eq!(read(&ring, 4).map(|r| r.payload), Some(&b"new three"[..]));
+            assert_eq!(read(&ring[ALIGN..], crc), None);
         }
 
         /// A payload from an earlier chain holds the image of a whole record, and
@@ -242,9 +225,9 @@ mod tests {
             ring[..ALIGN].copy_from_slice(&new);
             assert_eq!(
                 read(&ring[ALIGN..], 4).map(|r| r.payload),
-                Ok(&b"forged"[..])
+                Some(&b"forged"[..])
             );
-            assert_eq!(read(&ring[ALIGN..], crc), Err(Stop::Corrupt));
+            assert_eq!(read(&ring[ALIGN..], crc), None);
         }
 
         proptest! {
@@ -263,22 +246,22 @@ mod tests {
                 prop_assert!(size >= HEADER_LEN + payload.len());
                 prop_assert!(size < HEADER_LEN + payload.len() + ALIGN);
                 let expected = Record { payload: &payload, size, crc };
-                prop_assert_eq!(read(&ring, chain), Ok(expected));
+                prop_assert_eq!(read(&ring, chain), Some(expected));
             }
 
             #[test]
-            fn reports_another_chain_as_corrupt(
+            fn rejects_another_chain(
                 chain in any::<u32>(),
                 other in any::<u32>(),
                 parts in parts(),
             ) {
                 prop_assume!(chain != other);
                 let (image, _) = image(chain, &slices(&parts), 0);
-                prop_assert_eq!(read(&image, other), Err(Stop::Corrupt));
+                prop_assert_eq!(read(&image, other), None);
             }
 
             #[test]
-            fn reports_one_flipped_bit_as_corrupt(
+            fn rejects_one_flipped_bit(
                 chain in any::<u32>(),
                 parts in parts(),
                 at in any::<prop::sample::Index>(),
@@ -289,18 +272,18 @@ mod tests {
                 // A longer record may run into this one's padding; make it differ.
                 image.extend([0xFF; ALIGN]);
                 image[at.index(written)] ^= 1 << bit;
-                prop_assert_eq!(read(&image, chain), Err(Stop::Corrupt));
+                prop_assert_eq!(read(&image, chain), None);
             }
 
             #[test]
-            fn reports_a_record_cut_at_a_boundary_as_corrupt(
+            fn rejects_a_record_cut_at_a_boundary(
                 chain in any::<u32>(),
                 payload in prop::collection::vec(any::<u8>(), ALIGN..3 * ALIGN),
                 at in any::<prop::sample::Index>(),
             ) {
                 let (image, _) = image(chain, &[&payload], 0);
                 let kept = (1 + at.index(image.len() / ALIGN - 1)) * ALIGN;
-                prop_assert_eq!(read(&image[..kept], chain), Err(Stop::Corrupt));
+                prop_assert_eq!(read(&image[..kept], chain), None);
             }
 
             #[test]
@@ -311,7 +294,7 @@ mod tests {
             ) {
                 let mut bytes = len.to_le_bytes().to_vec();
                 bytes.extend(rest);
-                if let Ok(record) = read(&bytes, chain) {
+                if let Some(record) = read(&bytes, chain) {
                     prop_assert!(record.size <= bytes.len());
                     prop_assert_eq!(record.size % ALIGN, 0);
                 }
