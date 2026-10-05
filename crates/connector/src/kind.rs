@@ -97,6 +97,7 @@ impl std::error::Error for Error {
 }
 
 /// One run's capabilities.
+#[derive(Debug)]
 pub struct Context<C> {
     name: Name,
     config: C,
@@ -151,16 +152,6 @@ impl<C> Context<C> {
     #[must_use]
     pub fn rng(&self) -> Rng {
         self.entropy.rng()
-    }
-}
-
-impl<C: fmt::Debug> fmt::Debug for Context<C> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Context")
-            .field("name", &self.name)
-            .field("config", &self.config)
-            .field("cancel", &self.cancel)
-            .finish_non_exhaustive()
     }
 }
 
@@ -393,6 +384,12 @@ mod tests {
         let table = table().with("other", Counter);
         let expected = unknown("modbus", "[\"counter\", \"other\"]");
         assert_eq!(table.check("modbus", &config(1)), Err(vec![expected]));
+    }
+
+    #[test]
+    fn shows_the_names_of_its_kinds() {
+        let table = table().with("other", Counter);
+        assert_eq!(format!("{table:?}"), r#"{"counter", "other"}"#);
     }
 
     #[test]
