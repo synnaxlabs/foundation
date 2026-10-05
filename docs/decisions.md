@@ -500,7 +500,11 @@ How to read this record:
   its pages until the purge after idle. A class that a reader keeps partly in use
   keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
-  wait in a follow-up issue.
+  wait in a follow-up issue. When the system refuses to commit pages, the allocation
+  fails with `Error::Refused`, a separate error from a full pool (the person on
+  2026-10-05: "I approve the separate error"). The carve counts do not change, the
+  sizes the pool gave back to make room stay given back, and a later allocation may
+  succeed (#475).
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
@@ -1486,7 +1490,11 @@ How to read this record:
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
   implements it over `std::alloc` for tests, Miri, and `sim`. `block` makes no OS
   call. `reclaim` takes back returned blocks on each loop turn; `purge` gives idle
-  pages back on a timer that the shard owns (#2).
+  pages back on a timer that the shard owns (#2). The first 64 bytes of a `Memory`
+  are usable from the start: they hold the pool's header, so `Pool::new` makes no
+  commit that can fail. A purged page stops counting against the memory the system
+  can commit. On Linux with strict overcommit, `madvise` and `mprotect` keep that
+  charge, so `os` purges with a `MAP_FIXED` remap (#475).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
