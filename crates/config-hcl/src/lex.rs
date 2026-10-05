@@ -149,7 +149,7 @@ impl<'a> Tokens<'a> {
                 Kind::Number
             }
             c if identifier_start(c) => {
-                self.identifier();
+                self.eat_while(identifier_part);
                 Kind::Identifier
             }
             _ => Kind::Other,
@@ -311,12 +311,6 @@ impl<'a> Tokens<'a> {
             }
         }
         self.skip_bytes(len);
-    }
-
-    /// Moves past the rest of an identifier after its first character.
-    fn identifier(&mut self) {
-        let len = self.rest.find(|c| !identifier_part(c));
-        self.skip_bytes(len.unwrap_or(self.rest.len()));
     }
 
     /// Reads a quoted string after its opening quote at `start`.

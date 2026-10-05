@@ -4,6 +4,8 @@ use document::value::{Call, Float, Kind, Value};
 use document::{Attribute, Block, Document, Label, Map};
 use proptest::prelude::*;
 
+use crate::parse;
+
 fn identifier() -> impl Strategy<Value = String> {
     prop_oneof![
         4 => "[a-z_éü][a-z0-9_\u{301}éü-]{0,6}",
@@ -21,16 +23,14 @@ fn text() -> impl Strategy<Value = String> {
 }
 
 fn name() -> impl Strategy<Value = Kind> {
-    let name = "[a-z_][a-z0-9_-]{0,4}(\\.[a-z_][a-z0-9_-]{0,4}){0,2}"
-        .prop_filter("HCL reads a keyword as a value", |name| {
-            !matches!(name.split('.').next(), Some("true" | "false" | "null"))
-        });
     prop_oneof![
-        4 => name,
+        4 => "[a-z_][a-z0-9_-]{0,4}(\\.[a-z_][a-z0-9_-]{0,4}){0,2}",
         1 => Just("for".to_owned()),
         1 => Just("for.x".to_owned()),
     ]
-    .prop_map(|name| Kind::Reference(name.parse().unwrap()))
+    .prop_map(|name| name.parse().unwrap())
+    .prop_filter("HCL reads the name as a reference", parse::reference)
+    .prop_map(Kind::Reference)
 }
 
 fn value() -> impl Strategy<Value = Value> {
@@ -50,7 +50,9 @@ fn value() -> impl Strategy<Value = Value> {
             prop::collection::vec(inner.clone(), 0..4)
                 .prop_filter("HCL reads `[for` as a for expression", |items| {
                     !items.first().is_some_and(|item| match &item.kind {
-                        Kind::Reference(name) => name.segments().next() == Some("for"),
+                        Kind::Reference(name) => {
+                            name.segments().next().is_some_and(parse::opens_for)
+                        }
                         Kind::Call(call) => &*call.function == "for",
                         _ => false,
                     })

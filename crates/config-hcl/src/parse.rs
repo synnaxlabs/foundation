@@ -203,7 +203,7 @@ impl<'a> Parser<'a> {
         }
         let token = self.take()?;
         let kind = match token.kind {
-            lex::Kind::Identifier => return self.word(&token, depth),
+            lex::Kind::Identifier => return self.identifier(&token, depth),
             lex::Kind::Number => return Ok(self.number(&token, None)),
             lex::Kind::Minus if self.token.kind == lex::Kind::Number => {
                 let digits = self.take()?;
@@ -229,7 +229,7 @@ impl<'a> Parser<'a> {
     fn leading_form(&self) -> Option<Form> {
         match self.token.kind {
             lex::Kind::Operator | lex::Kind::Star => Some(Form::Operator),
-            lex::Kind::Minus if self.after().kind != lex::Kind::Number => {
+            lex::Kind::Minus if self.second_past_lines().kind != lex::Kind::Number => {
                 Some(Form::Operator)
             }
             lex::Kind::OpenParenthesis => Some(Form::Parentheses),
@@ -245,11 +245,20 @@ impl<'a> Parser<'a> {
             }
             lex::Kind::Question => Some(Form::Conditional),
             lex::Kind::OpenBracket | lex::Kind::Dot
-                if self.after().kind == lex::Kind::Star =>
+                if self.second_past_lines().kind == lex::Kind::Star =>
             {
                 Some(Form::Splat)
             }
-            lex::Kind::OpenBracket | lex::Kind::Dot => Some(Form::Index),
+            lex::Kind::OpenBracket => Some(Form::Index),
+            // HCL reads a number after `.` as an index, and refuses any other token.
+            lex::Kind::Dot
+                if matches!(
+                    self.second().kind,
+                    lex::Kind::Identifier | lex::Kind::Number
+                ) =>
+            {
+                Some(Form::Index)
+            }
             lex::Kind::DoubleColon => Some(Form::Namespace),
             lex::Kind::Ellipsis => Some(Form::Expansion),
             _ => None,
@@ -297,28 +306,33 @@ impl<'a> Parser<'a> {
         unreachable!("invariant: each pass takes a token")
     }
 
-    fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
+    /// Reads the value that starts with `first`: a call, a literal, or a reference.
+    fn identifier(
+        &mut self,
+        first: &Token<'a>,
+        depth: usize,
+    ) -> Result<Option<Value>, Error> {
         if self.token.kind == lex::Kind::OpenParenthesis {
-            return self.call(word, depth).map(Some);
+            return self.call(first, depth).map(Some);
         }
         if self.token.kind == lex::Kind::DoubleColon {
             // A namespace, not a name: `value` refuses its form.
             return Ok(None);
         }
-        let kind = match literal(word.text) {
+        let kind = match literal(first.text) {
             Some(Literal::Bool(b)) => value::Kind::Bool(b),
             Some(Literal::Null) => {
                 self.errors.push(Error::Form {
-                    span: word.span,
+                    span: first.span,
                     form: Form::Null,
                 });
                 return Ok(None);
             }
-            None => return self.reference(word),
+            None => return self.reference(first),
         };
         Ok(Some(Value {
             kind,
-            span: Some(word.span),
+            span: Some(first.span),
         }))
     }
 
@@ -604,7 +618,7 @@ impl<'a> Parser<'a> {
     }
 
     /// The first token after the next one that is not a new line.
-    fn after(&self) -> Token<'a> {
+    fn second_past_lines(&self) -> Token<'a> {
         self.tokens.clone().next_past_lines()
     }
 
@@ -629,21 +643,31 @@ fn next<'a>(tokens: &mut Tokens<'a>, newlines_skipped: bool) -> Token<'a> {
     }
 }
 
-/// A word that reads as a value, not as a reference.
+/// An identifier that reads as a value, not as a reference.
 pub(crate) enum Literal {
     Bool(bool),
     Null,
 }
 
-/// Reports whether HCL reads `word` after `[` or `{` as the start of a `for`
-/// expression: whether its first part is `for`.
-pub(crate) fn opens_for(word: &str) -> bool {
-    word.split('.').next() == Some("for")
+/// Reports whether HCL reads `identifier` after `[` or `{` as the start of a `for`
+/// expression.
+pub(crate) fn opens_for(identifier: &str) -> bool {
+    identifier == "for"
 }
 
-/// The value that `word` reads as by itself, or `None` for a reference.
-pub(crate) fn literal(word: &str) -> Option<Literal> {
-    match word {
+/// Reports whether HCL reads `name`, as written, as one reference: each segment is an
+/// identifier, and the first is not a literal.
+pub(crate) fn reference(name: &Name) -> bool {
+    let mut segments = name.segments();
+    segments
+        .next()
+        .is_some_and(|first| literal(first).is_none())
+        && name.segments().all(lex::identifier)
+}
+
+/// The value that `identifier` reads as by itself, or `None` for a reference.
+pub(crate) fn literal(identifier: &str) -> Option<Literal> {
+    match identifier {
         "true" => Some(Literal::Bool(true)),
         "false" => Some(Literal::Bool(false)),
         "null" => Some(Literal::Null),
@@ -892,6 +916,9 @@ c = "°C # not a comment"
                 let value = document.attributes.iter().next().unwrap().value.clone();
                 match value.kind {
                     value::Kind::List(items) => items.into_iter().next().unwrap(),
+                    value::Kind::Call(call) => {
+                        call.arguments.into_iter().next().unwrap()
+                    }
                     _ => value,
                 }
             };
@@ -900,6 +927,7 @@ c = "°C # not a comment"
                 ("a = [x\n.b]\n", span(at(5, 0, 5), at(9, 1, 2))),
                 ("a = [x.\nb]\n", span(at(5, 0, 5), at(9, 1, 1))),
                 ("a = [x\n# c\n.\n\nb]\n", span(at(5, 0, 5), at(15, 4, 1))),
+                ("a = f(x.\nb)\n", span(at(6, 0, 6), at(10, 1, 1))),
             ];
             for (text, span) in cases {
                 let value = first(ok(text));
@@ -1717,11 +1745,7 @@ c = "°C # not a comment"
                 ("a = site_a.1\n", on(10, 11), Form::Index),
                 ("a = b.1-2\n", on(5, 6), Form::Index),
                 ("a = b.0c\n", on(5, 6), Form::Index),
-                ("a = b.-c\n", on(5, 6), Form::Index),
                 ("a = [kf1.5true]\n", on(8, 9), Form::Index),
-                ("a = b.c.@d\n", on(7, 8), Form::Index),
-                ("a = b.\n", on(5, 6), Form::Index),
-                ("a = b..c\n", on(5, 6), Form::Index),
                 ("a = b.c[0]\n", on(7, 8), Form::Index),
                 ("a = b.c.*\n", on(7, 8), Form::Splat),
             ];
@@ -1884,6 +1908,13 @@ c = "°C # not a comment"
                 ("a.b = 1\n", on(1, 2), Expected::AttributeOrBlock),
                 ("@a = 1\n", on(0, 1), Expected::Item),
                 ("a = @system.x\n", on(4, 5), Expected::Value),
+                ("a = b.\n", on(5, 6), Expected::Newline),
+                ("a = x.\nb = 1\n", on(5, 6), Expected::Newline),
+                ("a = true.\n", on(8, 9), Expected::Newline),
+                ("a = b..c\n", on(5, 6), Expected::Newline),
+                ("a = b.-c\n", on(5, 6), Expected::Newline),
+                ("a = b.c.@d\n", on(7, 8), Expected::Newline),
+                ("a = [b.]\n", on(6, 7), Expected::ListEnd),
                 (
                     "a = x\n.b\n",
                     span(at(6, 1, 0), at(7, 1, 1)),

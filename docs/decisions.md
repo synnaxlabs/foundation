@@ -1094,10 +1094,13 @@ How to read this record:
 - **HCL REFERENCES (2026-10-05)** The reader reads a reference part by part, as HCL
   reads a traversal: identifiers joined by `.`, with spaces around each `.` and new
   lines inside `[` and `(`. A first part `true`, `false`, or `null` is a value, so
-  `true.x` is an index. A `.` that no identifier follows, as in `b.0` or
-  `site_a.@changes`, is refused as `Form::Index`. So a name with a reserved `@` part
-  has no HCL reference form, and `write` refuses it. Lost: a new `Expected` variant for
-  a bad part, a public change for no new fix. #363.
+  `true.x` is an index. After a `.`, a number is an index (`site_a.1` is `Form::Index`),
+  `*` is a splat, and any other token is a syntax error. So a name with a segment that
+  starts with a digit, `-`, or `@` (`plc.40001`, `site_a.@changes`) has no HCL reference
+  form, and `write` refuses it. The coordinator ruled on #363 that a file writes a
+  reserved name as a string. Which reader turns that string into a name is open (5.1).
+  Lost: a new `Expected` variant for a name after `.`, a public change when the error
+  already names what may come at the `.`. #363.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -2248,6 +2251,9 @@ Parameters and later choices, recorded and not asked:
 10. A13: bounded lists.
 11. D3: license, free tier, monetization.
 12. D5: a plugin system.
+13. A3 and HCL REFERENCES: a name with a segment that starts with a digit, `-`, or `@`
+    has no HCL reference form. Needs the person: a defined HCL form that reads into a
+    `Reference`, or A3 segments that start with a letter or `_`.
 
 ### 5.2 Settled under a delegation
 

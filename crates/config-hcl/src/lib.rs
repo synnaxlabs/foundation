@@ -205,7 +205,8 @@ pub enum Form {
     /// A `for` expression, such as `[for x in xs : x]`. HCL reads a list or an object
     /// that starts with the word `for` as one, such as `[for]` or `{ for = 1 }`.
     For,
-    /// An index or an attribute access after a value, such as `a[0]` or `f().b`.
+    /// An index or an attribute access after a value, such as `a[0]`, `a.0`, or
+    /// `f().b`.
     Index,
     /// A splat, such as `a[*].b` or `a.*.b`.
     Splat,
@@ -295,8 +296,9 @@ pub enum Unwritable {
     Keyword,
     /// A function name that is not an identifier.
     Function,
-    /// A name that HCL does not read as a reference, such as `true`, `null`, `7a`, or
-    /// `-a`.
+    /// A name that HCL does not read as a reference: a segment does not start with a
+    /// letter or `_`, or the first segment is `true`, `false`, or `null`, such as
+    /// `a.7b`, `site_a.@changes`, or `true.x`.
     Reference,
     /// A list whose first item starts with the word `for`, such as the reference `for`
     /// or `for.x`, or the call `for(1)`. HCL reads `[for` as a `for` expression.
@@ -327,8 +329,8 @@ impl Unwritable {
             Self::Reference => (
                 UNWRITABLE_REFERENCE,
                 "the name does not read as a reference in HCL",
-                "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, \
-                 or `null`",
+                "Start each segment with a letter or `_`, and do not make `true`, \
+                 `false`, or `null` the first segment",
             ),
             Self::For => (
                 UNWRITABLE_FOR,
@@ -659,8 +661,8 @@ mod tests {
             Unwritable::Reference,
             "hcl.unwritable-reference",
             "the name does not read as a reference in HCL",
-            "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, or \
-             `null`",
+            "Start each segment with a letter or `_`, and do not make `true`, \
+             `false`, or `null` the first segment",
         ),
         (
             Unwritable::For,

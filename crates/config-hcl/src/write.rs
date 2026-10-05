@@ -5,7 +5,7 @@ use document::value::{Call, Kind, Value};
 use document::{Attribute, Block, Document, Map, Span};
 
 use crate::lex;
-use crate::parse::{Ends, literal, opens_for};
+use crate::parse::{Ends, opens_for, reference};
 use crate::{Error, Unwritable};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
@@ -246,9 +246,7 @@ impl<'a> Writer<'a> {
             }
             Kind::String(text) => return quoted(&mut self.out, text),
             Kind::Reference(name) => {
-                // HCL reads a keyword as a value, even before a `.`.
-                let first = name.segments().next().and_then(literal);
-                if first.is_some() || !name.segments().all(lex::identifier) {
+                if !reference(name) {
                     self.refuse(value.span, Unwritable::Reference);
                 }
                 return self.out.push_str(name.as_str());
@@ -313,7 +311,9 @@ impl<'a> Writer<'a> {
     /// after `[` as the start of a `for` expression.
     fn refuse_for(&mut self, item: &Value) {
         let span = match &item.kind {
-            Kind::Reference(name) if opens_for(name.as_str()) => item.span,
+            Kind::Reference(name) if name.segments().next().is_some_and(opens_for) => {
+                item.span
+            }
             // A call such as `for.x(1)` is refused for its function.
             Kind::Call(call) if &*call.function == "for" => call.function_span,
             Kind::Reference(_)
@@ -423,6 +423,7 @@ mod tests {
     use document::value::Float;
     use document::{Label, Position, Source};
     use proptest::prelude::*;
+    use types::name::Name;
 
     use super::*;
     use crate::arbitrary::document;
@@ -507,11 +508,33 @@ mod tests {
         text
     }
 
+    /// Any name, with segments that start with a digit, `-`, or `@`, and a first
+    /// segment that may be a literal.
+    fn any_name() -> impl Strategy<Value = Name> {
+        "(true|null|@?[a-z0-9_-]{1,3})(\\.@?[a-z0-9_-]{1,3}){0,2}"
+            .prop_map(|name| name.parse().unwrap())
+    }
+
     proptest! {
         #[test]
         fn reads_what_it_writes(document in document()) {
             let text = write(&document).unwrap();
             prop_assert_eq!(read(Source(0), &text), Ok(document), "{}", text);
+        }
+
+        #[test]
+        fn writes_a_name_exactly_when_it_reads_back(name in any_name()) {
+            let document = attributes(vec![("a", Kind::Reference(name.clone()))]);
+            let text = format!("a = {name}\n");
+            let expected = if read(Source(0), &text).as_ref() == Ok(&document) {
+                Ok(text)
+            } else {
+                Err(vec![Error::Unwritable {
+                    span: None,
+                    part: Unwritable::Reference,
+                }])
+            };
+            prop_assert_eq!(write(&document), expected);
         }
     }
 
