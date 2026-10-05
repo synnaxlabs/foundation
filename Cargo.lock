@@ -200,6 +200,11 @@ dependencies = [
 [[package]]
 name = "delivery"
 version = "0.0.0"
+dependencies = [
+ "divan",
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "divan"
