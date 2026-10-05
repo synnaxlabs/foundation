@@ -81,13 +81,13 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreachable { peer, attempts } => {
-                write!(f, "no address reached peer {}", Hex(peer))?;
+                write!(f, "no address reached peer {peer}")?;
                 attempts.iter().try_for_each(|(address, error)| {
                     write!(f, "; {address:?}: {error}")
                 })
             }
             Self::Authentication { expected } => {
-                write!(f, "the peer did not prove key {}", Hex(expected))
+                write!(f, "the peer did not prove key {expected}")
             }
             Self::Closed { code } => {
                 write!(f, "this node closed the session ({})", code.0)
@@ -125,15 +125,6 @@ impl std::error::Error for Error {
 impl From<block::Error> for Error {
     fn from(error: block::Error) -> Self {
         Self::Pool(error)
-    }
-}
-
-/// Writes a key as 64 lowercase hex digits.
-struct Hex<'a>(&'a PublicKey);
-
-impl fmt::Display for Hex<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
     }
 }
 

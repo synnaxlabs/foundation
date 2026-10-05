@@ -20,7 +20,7 @@ use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName,
     ServerConfig, SignatureScheme,
 };
-use types::node::PublicKey;
+use types::node::{PrivateKey, PublicKey};
 
 use crate::session::Peer;
 
@@ -55,17 +55,6 @@ const _: () = assert!(
     "the certificate header holds its length"
 );
 
-/// The public key of an Ed25519 private key.
-pub(crate) fn public(private_key: &[u8; 32]) -> PublicKey {
-    let key = pair(private_key).public_key().as_ref().try_into();
-    PublicKey(key.expect("invariant: an Ed25519 public key has 32 bytes"))
-}
-
-fn pair(private_key: &[u8; 32]) -> Ed25519KeyPair {
-    Ed25519KeyPair::from_seed_unchecked(private_key)
-        .expect("invariant: any 32 bytes are an Ed25519 private key")
-}
-
 /// The node's certificate and private key, made once per transport.
 pub(crate) struct Credentials {
     certificate: CertificateDer<'static>,
@@ -75,20 +64,22 @@ pub(crate) struct Credentials {
 impl Credentials {
     /// Makes a self-signed certificate for the node key. The same key always gives
     /// the same bytes.
-    pub(crate) fn new(private_key: &[u8; 32]) -> Self {
+    pub(crate) fn new(private_key: &PrivateKey) -> Self {
+        let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
+            .expect("invariant: any 32 bytes are an Ed25519 private key");
+        let key = pair.public_key().as_ref();
         let mut tbs = Vec::with_capacity(TBS_BYTES);
-        let key = public(private_key).0;
-        for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, &key] {
+        for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, key] {
             tbs.extend_from_slice(part);
         }
-        let signature = pair(private_key).sign(&tbs);
+        let signature = pair.sign(&tbs);
         let mut certificate = Vec::with_capacity(CERTIFICATE_BYTES);
         for part in [CERTIFICATE, &tbs, ED25519, SIGNATURE, signature.as_ref()] {
             certificate.extend_from_slice(part);
         }
         Self {
             certificate: certificate.into(),
-            private_key: [PKCS8, private_key].concat().into(),
+            private_key: [PKCS8, &private_key.0].concat().into(),
         }
     }
 
@@ -283,6 +274,13 @@ mod tests {
 
     use super::*;
 
+    /// The public key, derived apart from the certificate template.
+    fn public(private_key: &PrivateKey) -> PublicKey {
+        let pair =
+            Ed25519KeyPair::from_seed_unchecked(&private_key.0).expect("32 bytes");
+        PublicKey(pair.public_key().as_ref().try_into().expect("32 bytes"))
+    }
+
     /// Moves every pending TLS record from `from` to `to`.
     fn pass(from: &mut Connection, to: &mut Connection) {
         let mut wire = Vec::new();
@@ -365,7 +363,7 @@ mod tests {
 
         #[test]
         fn when_key_matches_both_sides_see_the_other_node() {
-            let (a, b) = ([1; 32], [2; 32]);
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let peers = handshake(
                 client(&Credentials::new(&a), public(&b)),
                 server(&Credentials::new(&b)),
@@ -375,7 +373,11 @@ mod tests {
 
         #[test]
         fn when_key_differs_the_client_refuses() {
-            let (a, b, c) = ([1; 32], [2; 32], [3; 32]);
+            let (a, b, c) = (
+                PrivateKey([1; 32]),
+                PrivateKey([2; 32]),
+                PrivateKey([3; 32]),
+            );
             let peers = handshake(
                 client(&Credentials::new(&a), public(&c)),
                 server(&Credentials::new(&b)),
@@ -388,14 +390,14 @@ mod tests {
 
         #[test]
         fn when_client_has_no_certificate_the_server_sees_a_client() {
-            let b = [2; 32];
+            let b = PrivateKey([2; 32]);
             let peers = handshake(anonymous(public(&b)), server(&Credentials::new(&b)));
             assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Client)));
         }
 
         #[test]
         fn when_repeated_it_does_not_resume() {
-            let (a, b) = ([1; 32], [2; 32]);
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let client = client(&Credentials::new(&a), public(&b));
             let server = server(&Credentials::new(&b));
             for _ in 0..2 {
@@ -406,7 +408,11 @@ mod tests {
 
         #[test]
         fn when_certificate_is_borrowed_the_signature_fails() {
-            let (a, thief, victim) = ([1; 32], [2; 32], [3; 32]);
+            let (a, thief, victim) = (
+                PrivateKey([1; 32]),
+                PrivateKey([2; 32]),
+                PrivateKey([3; 32]),
+            );
             let peers = handshake(
                 client(&Credentials::new(&a), public(&victim)),
                 borrowing(&Credentials::new(&victim), &Credentials::new(&thief)),
@@ -420,7 +426,7 @@ mod tests {
 
         #[test]
         fn refuses_a_key_that_is_not_ed25519() {
-            let mut der = Credentials::new(&[1; 32]).certificate.to_vec();
+            let mut der = Credentials::new(&PrivateKey([1; 32])).certificate.to_vec();
             let at = der
                 .windows(SPKI.len())
                 .position(|window| window == SPKI)
@@ -447,7 +453,8 @@ mod tests {
 
         proptest! {
             #[test]
-            fn carries_the_public_key(private_key: [u8; 32]) {
+            fn carries_the_public_key(bytes: [u8; 32]) {
+                let private_key = PrivateKey(bytes);
                 let credentials = Credentials::new(&private_key);
                 prop_assert_eq!(key(&credentials.certificate), Ok(public(&private_key)));
             }
@@ -455,8 +462,8 @@ mod tests {
 
         #[test]
         fn is_the_same_for_the_same_key() {
-            let first = Credentials::new(&[1; 32]).certificate;
-            let second = Credentials::new(&[1; 32]).certificate;
+            let first = Credentials::new(&PrivateKey([1; 32])).certificate;
+            let second = Credentials::new(&PrivateKey([1; 32])).certificate;
             assert_eq!(first, second);
         }
     }
