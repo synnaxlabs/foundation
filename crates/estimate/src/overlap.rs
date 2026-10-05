@@ -384,9 +384,9 @@ mod tests {
         }
 
         #[test]
-        fn saturates_an_error_wider_than_a_span() {
-            let all = [Push::Both(0, i64::MIN, i64::MAX)];
+        fn fails_with_the_largest_span_for_a_wider_error() {
             let error = Span::from_nanos(i64::MAX);
+            let all = [Push::Both(0, i64::MIN, i64::MAX)];
             assert_eq!(check(0, &all, 0), Err(Error::Bound { error }));
         }
 
