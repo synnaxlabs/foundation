@@ -331,11 +331,13 @@ impl Vector<'_> {
                     .0
                     .iter()
                     .zip(lengths.as_chunks::<2>().0);
+                // `read` checks that the lengths sum to the samples in `out`.
+                let mut rest = samples.into_slice();
                 for (value, len) in runs {
                     let len = usize::from(u16::from_le_bytes(*len));
-                    for sample in samples.by_ref().take(len) {
-                        *sample = *value;
-                    }
+                    let (run, after) = mem::take(&mut rest).split_at_mut(len);
+                    run.fill(*value);
+                    rest = after;
                 }
             }
         }
