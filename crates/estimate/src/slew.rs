@@ -62,9 +62,9 @@ impl Slew {
     /// 500 us below the earliest offset `target` allows at `now`, the result steps to
     /// that earliest offset at once. The target's error counts with its full growth,
     /// past 36500 days. Mesh time from the result at or after `now` is never earlier
-    /// than mesh time from `self` at or before `now`. The local time slewed since the
-    /// served offset last moved carries over, so calling it often does not slow the
-    /// slew.
+    /// than mesh time from `self` at or before `now`. When it does not step, the result
+    /// keeps the readings of `self` where the served offset can move, 2 us apart, so
+    /// calling it often does not slow the slew.
     #[must_use]
     #[expect(
         clippy::missing_panics_doc,
@@ -81,8 +81,7 @@ impl Slew {
             });
             (now, earliest)
         } else {
-            let slewed = now.0.saturating_sub(self.start.0) % TICK_NS;
-            (Monotonic(now.0 - slewed), served)
+            (self.ticks(now).1, served)
         };
         Self {
             start,
@@ -112,13 +111,20 @@ impl Slew {
 
     /// The offset served at `now`, in nanoseconds: between `from` and the target's.
     fn served(self, now: Monotonic) -> i64 {
-        let moved = now.0.saturating_sub(self.start.0) / TICK_NS;
+        let (moved, _) = self.ticks(now);
         let (from, to) = (self.from.nanos(), self.target.offset().nanos());
         if from <= to {
             from.saturating_add_unsigned(moved).min(to)
         } else {
             from.saturating_sub_unsigned(moved).max(to)
         }
+    }
+
+    /// The whole ticks from `start` to `now`, and the reading where the last one ends:
+    /// `start` with none, or `now` before `start`.
+    fn ticks(self, now: Monotonic) -> (u64, Monotonic) {
+        let elapsed = now.0.saturating_sub(self.start.0);
+        (elapsed / TICK_NS, Monotonic(now.0 - elapsed % TICK_NS))
     }
 }
 
@@ -211,7 +217,7 @@ mod tests {
         }
 
         #[test]
-        fn keeps_the_slew_since_the_offset_last_moved() {
+        fn keeps_the_grid_of_the_old_slew() {
             let target = estimate(SECOND_NS, 500_000, 0);
             let again = |at| from_zero(500_000).toward(Monotonic(at), drift(0), target);
             let late = again(SECOND_NS + 1_999);
@@ -254,6 +260,16 @@ mod tests {
             assert_eq!(start, (Monotonic(SECOND_NS), Span::from_nanos(999_990)));
             assert_eq!(check(slew, SECOND_NS, 0), (999_990, 20));
             assert_eq!(check(slew, SECOND_NS + 20_000, 0), (1_000_000, 10));
+        }
+
+        #[test]
+        fn starts_a_step_at_now() {
+            let now = SECOND_NS + 1_999;
+            let slew = Slew::new(estimate(0, 0, 100));
+            let next =
+                slew.toward(Monotonic(now), drift(0), estimate(now, 1_000_000, 10));
+            assert_eq!(next.start, Monotonic(now));
+            assert_eq!(check(next, now + 1, 0).0, 999_990);
         }
 
         /// A node with no real-time clock starts an hour behind, with a bound wide
@@ -482,14 +498,19 @@ mod tests {
                 prop_assert!(moved <= i128::from((late - early).div_ceil(2_000)));
             }
 
+            /// The target's offset is held to the step edge, so `toward` slews.
             #[test]
             fn moves_at_most_500_ppm_across_a_retarget(
                 (s, [early, switch, late], drift, target) in retarget(),
             ) {
+                let now = Monotonic(switch);
+                let served = s.at(now, drift).offset().nanos();
+                let error = target.error_at(now, drift).nanos();
+                let edge = served + STEP_GAP.nanos() + error;
+                let offset = Span::from_nanos(target.offset().nanos().min(edge));
+                let target = Measurement::new(target.at(), offset, target.error());
+                let next = s.toward(now, drift, target.expect("valid"));
                 let served = |slew: Slew, t| mesh(slew, t, drift) - i128::from(t);
-                let next = s.toward(Monotonic(switch), drift, target);
-                let stepped = next.from != s.at(Monotonic(switch), drift).offset();
-                prop_assume!(!stepped, "a step");
                 let moved = (served(next, late) - served(s, early)).abs();
                 prop_assert!(moved <= i128::from((late - early).div_ceil(2_000)));
             }
