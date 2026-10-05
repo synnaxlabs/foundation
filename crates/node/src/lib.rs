@@ -4,10 +4,10 @@
 
 mod stop;
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests;
 
 use std::fmt;
-use std::sync::Arc;
 
 use env::thread::Handle;
 
@@ -24,7 +24,7 @@ pub struct Config {
 /// A running node. Call [`Node::stop`] to end it, then [`Node::join`].
 #[derive(Debug)]
 pub struct Node {
-    stop: Arc<Stop>,
+    stop: Stop,
     handles: Vec<Handle>,
     failed: Option<env::thread::Error>,
 }
@@ -36,9 +36,9 @@ impl Node {
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start(config: Config) -> Self {
         let Config { shards } = config;
-        let stop = Arc::new(Stop::default());
+        let stop = Stop::default();
         let mut node = Self {
-            stop: Arc::clone(&stop),
+            stop: stop.clone(),
             handles: Vec::new(),
             failed: None,
         };
@@ -51,7 +51,7 @@ impl Node {
             match shards.start(shard, move |_tasks| guard) {
                 Ok(handle) => node.handles.push(handle),
                 Err(e) => {
-                    stop.set();
+                    // The driver dropped `main` and its guard, which stopped the node.
                     node.failed = Some(e);
                     break;
                 }
@@ -99,10 +99,4 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Thread(e) => e.source(),
-        }
-    }
-}
+impl std::error::Error for Error {}
