@@ -5,7 +5,8 @@ use crate::{Drift, Measurement};
 const CAPACITY: usize = 8;
 
 /// The last 8 measurements of one source. It answers with the one whose bound is the
-/// smallest now, which drops the exchanges that queueing delayed.
+/// smallest now, so a precise measurement wins until drift makes it wider than a
+/// newer one.
 ///
 /// ```
 /// use estimate::{Drift, Filter, Measurement};
@@ -14,7 +15,7 @@ const CAPACITY: usize = 8;
 /// let mut filter = Filter::default();
 /// filter.push(Measurement::new(Monotonic(0), Span::ZERO, Span::SECOND)?);
 /// filter.push(Measurement::new(Monotonic(1), Span::ZERO, Span::MILLISECOND)?);
-/// let best = filter.best(Monotonic(2), Drift::default());
+/// let best = filter.best(Monotonic(2), Drift::UNDISCIPLINED);
 /// assert_eq!(best.map(|m| m.error()), Some(Span::MILLISECOND));
 /// # Ok::<(), estimate::Error>(())
 /// ```
@@ -58,9 +59,14 @@ mod tests {
         Measurement::new(Monotonic(at), Span::from_nanos(offset), error).expect("valid")
     }
 
+    fn no_drift() -> Drift {
+        Drift::from_ppb(0).expect("valid")
+    }
+
     #[test]
     fn has_no_best_when_empty() {
-        assert_eq!(Filter::default().best(Monotonic(0), Drift::default()), None);
+        let best = Filter::default().best(Monotonic(0), Drift::UNDISCIPLINED);
+        assert_eq!(best, None);
     }
 
     #[test]
@@ -70,7 +76,7 @@ mod tests {
         for at in 1..=8 {
             filter.push(measurement(at, 0, Span::SECOND));
         }
-        let best = filter.best(Monotonic(8), Drift::from_ppb(0));
+        let best = filter.best(Monotonic(8), no_drift());
         assert_eq!(best.map(Measurement::error), Some(Span::SECOND));
     }
 
@@ -81,7 +87,7 @@ mod tests {
             filter.push(measurement(at, 0, Span::SECOND));
         }
         filter.push(measurement(7, 0, Span::NANOSECOND));
-        let best = filter.best(Monotonic(7), Drift::from_ppb(0));
+        let best = filter.best(Monotonic(7), no_drift());
         assert_eq!(best.map(Measurement::error), Some(Span::NANOSECOND));
     }
 
@@ -92,8 +98,8 @@ mod tests {
         filter.push(measurement(10 * SECOND_NS, 2, Span::MILLISECOND));
         let now = Monotonic(10 * SECOND_NS);
         let offset = |drift| filter.best(now, drift).map(|m| m.offset().nanos());
-        assert_eq!(offset(Drift::default()), Some(2));
-        assert_eq!(offset(Drift::from_ppb(0)), Some(1));
+        assert_eq!(offset(Drift::UNDISCIPLINED), Some(2));
+        assert_eq!(offset(no_drift()), Some(1));
     }
 
     #[test]
@@ -102,7 +108,7 @@ mod tests {
         for offset in 0..12 {
             filter.push(measurement(0, offset, Span::SECOND));
         }
-        let best = filter.best(Monotonic(0), Drift::default());
+        let best = filter.best(Monotonic(0), Drift::UNDISCIPLINED);
         assert_eq!(best.map(|m| m.offset().nanos()), Some(11));
     }
 }

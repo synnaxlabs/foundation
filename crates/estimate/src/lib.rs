@@ -30,10 +30,15 @@ pub use measurement::Measurement;
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// A measurement's error bound is negative.
-    NegativeBound {
+    /// An error bound is negative or more than 36500 days.
+    Bound {
         /// The error bound.
         error: Span,
+    },
+    /// A drift rate is more than 10%.
+    Drift {
+        /// The rate in parts per billion.
+        ppb: u32,
     },
     /// There are no measurements to combine.
     NoSources,
@@ -49,8 +54,13 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NegativeBound { error } => {
-                write!(f, "error bound {error} is negative")
+            Self::Bound { error } => write!(
+                f,
+                "error bound {error} is not between 0s and {}",
+                measurement::MAX_ERROR
+            ),
+            Self::Drift { ppb } => {
+                write!(f, "drift {ppb} ppb is more than 100000000 ppb (10%)")
             }
             Self::NoSources => f.write_str("no time sources to combine"),
             Self::NoMajority { sources, agreeing } => write!(

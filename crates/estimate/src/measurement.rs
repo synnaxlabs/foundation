@@ -2,8 +2,12 @@ use types::time::{Monotonic, Span};
 
 use crate::{Drift, Error};
 
-/// What one time source says at one moment: at local monotonic time `at`, mesh time
-/// minus local monotonic time is within `error` of `offset`.
+/// The widest error bound. With the largest drift over the longest time, a widened
+/// bound still fits in a [`Span`].
+pub(crate) const MAX_ERROR: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
+
+/// What one time source says about this node's monotonic clock: at monotonic time
+/// `at`, mesh time minus monotonic time is within `error` of `offset`.
 ///
 /// ```
 /// use types::time::{Monotonic, Span};
@@ -24,53 +28,46 @@ impl Measurement {
     ///
     /// # Errors
     ///
-    /// [`Error::NegativeBound`] when `error` is negative.
+    /// [`Error::Bound`] when `error` is negative or more than 36500 days.
     pub const fn new(at: Monotonic, offset: Span, error: Span) -> Result<Self, Error> {
-        if error.nanos() < 0 {
-            return Err(Error::NegativeBound { error });
+        if error.nanos() < 0 || error.nanos() > MAX_ERROR.nanos() {
+            return Err(Error::Bound { error });
         }
         Ok(Self { at, offset, error })
     }
 
-    /// The local monotonic time of the measurement.
+    /// The monotonic time of the measurement.
     #[must_use]
     pub const fn at(self) -> Monotonic {
         self.at
     }
 
-    /// Mesh time minus local monotonic time.
+    /// Mesh time minus monotonic time.
     #[must_use]
     pub const fn offset(self) -> Span {
         self.offset
     }
 
     /// How far the true offset can be from [`Measurement::offset`] at
-    /// [`Measurement::at`]. It is never negative.
+    /// [`Measurement::at`]: from zero to 36500 days.
     #[must_use]
     pub const fn error(self) -> Span {
         self.error
     }
 
     /// The error bound at `now`, earlier or later than `at`: `error` plus what `drift`
-    /// can add between them. It saturates at the largest span.
+    /// can add between them.
     #[must_use]
     pub fn error_at(self, now: Monotonic, drift: Drift) -> Span {
-        let error = self.widened(now, drift);
-        Span::from_nanos(i64::try_from(error).unwrap_or(i64::MAX))
+        let growth = drift.over(now.0.abs_diff(self.at.0));
+        Span::from_nanos(self.error.nanos() + growth)
     }
 
     /// The lowest and highest true offset at `now`, in nanoseconds.
     pub(crate) fn bounds_at(self, now: Monotonic, drift: Drift) -> (i128, i128) {
-        let error = i128::try_from(self.widened(now, drift))
-            .expect("invariant: an i64 plus a u64 times a u32 fits in i128");
+        let error = i128::from(self.error_at(now, drift).nanos());
         let offset = i128::from(self.offset.nanos());
         (offset - error, offset + error)
-    }
-
-    fn widened(self, now: Monotonic, drift: Drift) -> u128 {
-        let error = u128::try_from(self.error.nanos())
-            .expect("invariant: Measurement::new rejects a negative error");
-        error + drift.over(now.0.abs_diff(self.at.0))
     }
 }
 
@@ -78,6 +75,7 @@ impl Measurement {
 mod tests {
     use types::time::{Monotonic, Span};
 
+    use super::MAX_ERROR;
     use crate::{Drift, Error, Measurement};
 
     fn at(ns: u64, error: Span) -> Measurement {
@@ -91,54 +89,61 @@ mod tests {
         fn rejects_a_negative_error() {
             let error = Span::from_nanos(-1);
             let err = Measurement::new(Monotonic(0), Span::ZERO, error);
-            assert_eq!(err, Err(Error::NegativeBound { error }));
+            assert_eq!(err, Err(Error::Bound { error }));
             assert_eq!(
-                Error::NegativeBound { error }.to_string(),
-                "error bound -1ns is negative"
+                Error::Bound { error }.to_string(),
+                "error bound -1ns is not between 0s and 36500d"
             );
         }
 
         #[test]
-        fn takes_a_zero_error() {
+        fn rejects_an_error_over_36500_days() {
+            let error = Span::from_nanos(MAX_ERROR.nanos() + 1);
+            let err = Measurement::new(Monotonic(0), Span::ZERO, error);
+            assert_eq!(err, Err(Error::Bound { error }));
+        }
+
+        #[test]
+        fn takes_zero_and_36500_days() {
             assert_eq!(at(0, Span::ZERO).error(), Span::ZERO);
+            assert_eq!(at(0, MAX_ERROR).error(), MAX_ERROR);
         }
     }
 
     mod error_at {
         use super::*;
 
-        const DRIFT: Drift = Drift::from_ppb(100_000);
         const SECOND_NS: u64 = 1_000_000_000;
+
+        fn drift(ppb: u32) -> Drift {
+            Drift::from_ppb(ppb).expect("valid")
+        }
 
         #[test]
         fn is_the_error_at_the_measurement() {
             let m = at(5, Span::MICROSECOND);
-            assert_eq!(m.error_at(Monotonic(5), DRIFT), Span::MICROSECOND);
+            assert_eq!(m.error_at(Monotonic(5), drift(100_000)), Span::MICROSECOND);
         }
 
         #[test]
         fn grows_with_drift_after_the_measurement() {
             let m = at(0, Span::MICROSECOND);
-            assert_eq!(
-                m.error_at(Monotonic(SECOND_NS), DRIFT),
-                Span::from_nanos(101_000)
-            );
+            let error = m.error_at(Monotonic(SECOND_NS), drift(100_000));
+            assert_eq!(error, Span::from_nanos(101_000));
         }
 
         #[test]
         fn grows_with_drift_before_the_measurement() {
             let m = at(SECOND_NS, Span::MICROSECOND);
-            assert_eq!(m.error_at(Monotonic(0), DRIFT), Span::from_nanos(101_000));
+            let error = m.error_at(Monotonic(0), drift(100_000));
+            assert_eq!(error, Span::from_nanos(101_000));
         }
 
         #[test]
-        fn saturates_at_the_largest_span() {
-            let m = at(0, Span::from_nanos(i64::MAX));
-            let most = Drift::from_ppb(u32::MAX);
-            assert_eq!(
-                m.error_at(Monotonic(u64::MAX), most),
-                Span::from_nanos(i64::MAX)
-            );
+        fn fits_at_the_widest_error_drift_and_time() {
+            let error =
+                at(0, MAX_ERROR).error_at(Monotonic(u64::MAX), drift(100_000_000));
+            assert_eq!(error, Span::from_nanos(4_998_274_407_370_955_162));
         }
     }
 }
