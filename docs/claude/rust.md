@@ -52,6 +52,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   and `env::wall::Wall::now` outside `clock`. Only `os` implements the `env` seams and
   calls the OS clock, files, sockets, randomness, and threads. Only `node` reads
   arguments and exits. Each such call carries one `#[expect]`.
+- `clippy.toml` also forbids the rustls calls that read the OS clock, a key log file,
+  or the process-wide provider. Only `transport::tls` builds rustls configs, with
+  `builder_with_details`, its own provider, and a fixed time.
 - A crate's `[lints]` table cannot add to the workspace set, so stricter lints go at
   the top of `lib.rs` as `#![deny(...)]` (r16 63):
   - Decoders of outside input (`codec`, `wire`, `document`, `config-hcl`, and each
