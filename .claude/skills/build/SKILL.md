@@ -27,10 +27,12 @@ You own a set of crates. Your session name is your owner label (`owner:<name>`).
 1. Branch from `origin/main`: `git switch -c <name>/<issue>-<short-name>
    origin/main`.
 2. **Plan, then audit it.** Write the approach and the exact public surface change on
-   the issue. Run `/eb-review` on the plan and post the revised plan.
-3. **Tests first.** Write the behavior from the issue and its decisions section as
-   failing tests. Add property tests for codecs and pure logic, and simulation tests
-   for anything with I/O.
+   the issue, with the doc comment of each new public item and a second, very
+   different design that lost (`docs/claude/design.md`). Run `/eb-review` on the plan
+   and post the revised plan.
+3. **Tests after design, before code.** Write the behavior of the whole abstraction
+   from the issue and its decisions section as failing tests. Add property tests for
+   codecs and pure logic, and simulation tests for anything with I/O.
 4. Implement until the tests pass. Keep the PR to a few hundred lines. When it grows
    past that or a second idea appears, stop and split.
 5. Run the gates locally:

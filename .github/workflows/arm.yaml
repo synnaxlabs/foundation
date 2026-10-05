@@ -1,0 +1,25 @@
+name: ARM
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add cargo to the path
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Test
+        run: cargo test --workspace
+      - name: Model tests
+        run: cargo test -p ring --lib --release
+        env:
+          RUSTFLAGS: --cfg loom
+          CARGO_TARGET_DIR: target/loom
