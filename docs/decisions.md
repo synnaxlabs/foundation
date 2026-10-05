@@ -835,14 +835,14 @@ How to read this record:
   drops it and adds its samples and stamps to one pending gap for each index. When the
   stream can take a message again, `hub` sends the pending gap first, and the home
   records it and warns. The writer gets the same answer as for a frame the home
-  dropped, and never resends it (B7). Backfill waits. This needs a send that does not
-  wait and gives the message back; `network` sets it in #68. `block` gets no wake when
-  a block returns until simulation shows that the resume latency matters; then
-  `memory` proposes one wake, which home backfill shares. Until then, home backfill
-  also retries on a timer. Rejected: each caller retries (each caller writes the same
-  timer, and the pool's states leak into `hub`), and the stream ends (memory pressure
-  becomes stream churn and lost messages, and `Command` streams drop first). Decided
-  by the advisor under the delivery and wire internals delegation.
+  dropped, and never resends it (B7). Backfill waits. The live send is
+  `stream::Sender::try_send` (#597). `block` gets no wake when a block returns until
+  simulation shows that the resume latency matters; then `memory` proposes one wake,
+  which home backfill shares. Until then, home backfill also retries on a timer.
+  Rejected: each caller retries (each caller writes the same timer, and the pool's
+  states leak into `hub`), and the stream ends (memory pressure becomes stream churn and
+  lost messages, and `Command` streams drop first). Decided by the advisor under the
+  delivery and wire internals delegation.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
