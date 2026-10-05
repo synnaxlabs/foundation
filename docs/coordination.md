@@ -11,14 +11,15 @@ together. When this file and a message disagree, this file wins.
 
 - the interface skeleton: the public surface of every crate;
 - `docs/decisions.md`;
-- the issue board: it turns RFC phases into issues and assigns them;
+- the issue board: it assigns crates to builders and checks that no two open issues
+  own one crate;
 - the merge queue: it checks each PR's gates and asks the person to merge.
 
 The coordinator does not build crates.
 
 **Builders** (sessions named for their area, such as `data-path`) each own a set of
-crates. A builder takes issues for its crates, writes code and tests, opens PRs, and
-runs adversarial review on them.
+crates. A builder files and takes issues for its crates from `docs/decisions.md`,
+writes code and tests, opens PRs, and runs adversarial review on them.
 
 **The advisor** (session `advisor`) is the design session that ran the interview. It
 answers "why did we decide this" questions. It does not write code in this repo.
@@ -29,9 +30,9 @@ review. The coordinator runs the daily quality pass with `/crew`.
 ## Models
 
 - **Fable 5.1** where a subtle mistake is expensive and hard to find later: the
-  `memory` and `consensus` builders, and reviewers for `raft`, `mesh`, `block`,
-  `ring`, lock-free code, and wake protocols. Start those sessions with
-  `--model fable`.
+  `memory`, `consensus`, and `storage` builders, and reviewers for `raft`, `mesh`,
+  `block`, `ring`, `buffer`, crash recovery, lock-free code, and wake protocols. Start
+  those sessions with `--model fable`.
 - **Opus 5.5** for the coordinator, the other builders, and other reviewers.
 - **Sonnet 5.5** for mechanical work: format runs, renames, regenerated code,
   CI-only fixes, and the `code-quality` and `drift` crew agents. A builder hands a
@@ -55,10 +56,22 @@ Most of the cost is context size per turn, so keep each context small:
 | --- | --- | --- |
 | `coordinator` | Opus | Interfaces, `docs/decisions.md`, issues, merge queue |
 | `memory` | Fable | `block`, `ring` |
-| `data-path` | Opus | `types`, `codec`, `wire`, then `document` |
+| `data-path` | Opus | `types`, `codec`, `wire` |
 | `consensus` | Fable | `raft`, `spec`, then `mesh`, `blob` |
-| `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark, then `transport` |
+| `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark |
+| `write-path` | Opus | `control`, `delivery`, then `home` |
+| `storage` | Fable | `buffer`, then `replica` |
+| `time` | Opus | `estimate`, then `clock` |
+| `config` | Opus | `document`, `config-hcl`, then `config` |
+| `network` | Opus | `transport` |
 | `advisor` | Opus | Answers design questions; writes no code here |
+
+Not owned yet: `access` (after `spec`), `hub`, `secret`, `connector` and each
+`connector-<kind>` (after the `hub` and `connector` surfaces), `ops`, and `node`.
+
+Two first surfaces have a named reviewer besides the coordinator: `consensus` reviews
+`document`, because `spec` uses it; `simulation` reviews `transport`, because `sim`
+simulates it.
 
 The coordinator updates this table when sessions or ownership change.
 
@@ -116,7 +129,9 @@ Labels:
 - `blocked` -> waiting on another issue, linked in the body.
 - `ready` -> a PR that passed its gates and review, waiting for the person.
 
-No two open tasks own the same crate.
+Each builder files the issues for its own crates from `docs/decisions.md` and the RFC
+phases, with the `owner:` and `crate:` labels. The coordinator files only issues that
+cross crates or owners. No two open tasks own the same crate.
 
 ## Pull requests
 
