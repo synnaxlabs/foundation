@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use block::{Block, Pool};
-use env::files::{Error, File, Mode, Operation, SECTOR};
+use env::files::{Error, File, Mode, Operation};
 use env::tasks::Tasks;
 use env::thread::Handle;
 use types::time::Span;
@@ -80,10 +80,10 @@ pub(super) fn io(path: &str, operation: Operation, code: i32) -> Error {
     }
 }
 
-/// The first byte of each sector of `bytes`, after a check that each sector
+/// The first byte of each 512-byte sector of `bytes`, after a check that each sector
 /// holds one value.
 pub(super) fn sectors(bytes: &[u8]) -> Vec<u8> {
-    (bytes.chunks(SECTOR))
+    (bytes.chunks(512))
         .map(|sector| {
             assert!(
                 sector.iter().all(|&byte| byte == sector[0]),

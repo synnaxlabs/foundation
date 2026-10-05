@@ -15,9 +15,8 @@ use block::{Block, Unique};
 /// ```
 pub type Request<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
 
-/// The bytes of a sector. A crash keeps each sector of a write that is not yet
-/// durable whole, with its bytes from before the write or after it, never a mix.
-/// Each sector starts at a multiple of `SECTOR` in its file.
+/// The length of a sector in bytes: the unit that the crash rule of [`File::write_at`]
+/// keeps or loses whole. Each sector starts at a multiple of `SECTOR` in its file.
 pub const SECTOR: usize = 512;
 
 /// The files under one data directory. Paths are relative to it: a call panics on an

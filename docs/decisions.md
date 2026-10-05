@@ -1459,6 +1459,10 @@ How to read this record:
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
   session under the architecture delegation.
+- **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
+  a crash keeps or loses whole in a write that is not yet durable. It is a constant,
+  so that a store format asserts against it when it compiles. A length read from the
+  device at run time lost (#569).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended. A `Power` crash keeps, for each 512-byte
