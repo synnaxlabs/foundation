@@ -237,7 +237,7 @@ impl Draft {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut [u8])> {
         let (_, descriptors, mut body) = split_mut(&mut self.0);
         let mut offset = 0_usize;
-        checked(body.len(), ends(descriptors)).map(move |(entry, start, end)| {
+        spans(ends(descriptors)).map(move |(entry, start, end)| {
             let (_, rest) = mem::take(&mut body).split_at_mut(start - offset);
             let (series, rest) = rest.split_at_mut(end - start);
             (body, offset) = (rest, end);
@@ -357,7 +357,18 @@ pub fn series<T>(
     body: &[u8],
     ends: impl IntoIterator<Item = (T, usize)>,
 ) -> impl Iterator<Item = (T, &[u8])> {
-    checked(body.len(), ends).map(|(tag, start, end)| (tag, &body[start..end]))
+    let (mut spans, mut last) = (spans(ends), 0);
+    iter::from_fn(move || {
+        let Some((tag, start, end)) = spans.next() else {
+            last_fits(last, body.len()).unwrap_or_else(|error| panic!("{error}"));
+            return None;
+        };
+        last = end;
+        match cut(body, start, end) {
+            Ok(series) => Some((tag, series)),
+            Err(error) => panic!("{error}"),
+        }
+    })
 }
 
 /// Checks that `ends` fit `body`, so that [`series`] reads them without a panic.
@@ -369,7 +380,12 @@ pub fn check<T>(
     body: &[u8],
     ends: impl IntoIterator<Item = (T, usize)>,
 ) -> Result<(), BadEnd> {
-    spans(body.len(), ends).try_for_each(|span| span.map(drop))
+    let mut last = 0;
+    for (_, start, end) in spans(ends) {
+        cut(body, start, end)?;
+        last = end;
+    }
+    last_fits(last, body.len())
 }
 
 /// Why [`check`] refused the ends of a body of series.
@@ -427,39 +443,37 @@ fn ends(descriptors: &[[u8; DESCRIPTOR]]) -> impl Iterator<Item = (usize, usize)
         .map(|descriptor| (to_usize(lead(descriptor)), end_of(*descriptor)))
 }
 
-/// The tag, start, and end of each series in `len` bytes of series, from `ends`.
-///
-/// # Panics
-///
-/// The iterator panics where [`check`] refuses.
-fn checked<T>(
-    len: usize,
+/// The tag, start, and end of each series in a frame's series bytes, from the tag and
+/// end of each.
+fn spans<T>(
     ends: impl IntoIterator<Item = (T, usize)>,
 ) -> impl Iterator<Item = (T, usize, usize)> {
-    spans(len, ends).map(|span| span.unwrap_or_else(|error| panic!("{error}")))
-}
-
-/// The tag, start, and end of each series in `len` bytes of series, from `ends`, up to
-/// the first end that does not fit. Once `ends` stops, it checks that the last end is
-/// `len`.
-fn spans<T>(
-    len: usize,
-    ends: impl IntoIterator<Item = (T, usize)>,
-) -> impl Iterator<Item = Result<(T, usize, usize), BadEnd>> {
-    let (mut ends, mut last) = (ends.into_iter(), 0_usize);
-    iter::from_fn(move || {
-        let Some((tag, end)) = ends.next() else {
-            return (last != len).then_some(Err(BadEnd::Short { last, len }));
-        };
+    let mut last = 0_usize;
+    ends.into_iter().map(move |(tag, end)| {
         let start = last.next_multiple_of(SERIES_ALIGN);
         last = end;
-        Some(if end > len {
-            Err(BadEnd::Past { end, len })
-        } else if end < start {
-            Err(BadEnd::Before { end, start })
+        (tag, start, end)
+    })
+}
+
+/// Checks that `last`, the last end, is the end of `len` bytes of series.
+fn last_fits(last: usize, len: usize) -> Result<(), BadEnd> {
+    if last == len {
+        Ok(())
+    } else {
+        Err(BadEnd::Short { last, len })
+    }
+}
+
+/// The series from `start` to `end` in `body`, or why it does not fit.
+fn cut(body: &[u8], start: usize, end: usize) -> Result<&[u8], BadEnd> {
+    body.get(start..end).ok_or_else(|| {
+        let len = body.len();
+        if end > len {
+            BadEnd::Past { end, len }
         } else {
-            Ok((tag, start, end))
-        })
+            BadEnd::Before { end, start }
+        }
     })
 }
 
