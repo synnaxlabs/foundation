@@ -64,7 +64,7 @@ impl Shards {
     ///
     /// When the future that `main` returns completes, the shard drops its other tasks
     /// and the thread ends. A panic in any of its tasks ends the shard, and
-    /// [`Handle::join`] returns [`Error::Panicked`].
+    /// [`Handle::join`] returns [`Panicked`](crate::thread::Panicked).
     ///
     /// # Errors
     ///
@@ -171,7 +171,8 @@ mod tests {
             core,
         };
         let shards = Shards::new(Cores(cores));
-        shards.start(config, |_| async {}).and_then(Handle::join)
+        let started = shards.start(config, |_| async {});
+        started.map(|handle| handle.join().expect("a shard of Cores ends at once"))
     }
 
     #[test]

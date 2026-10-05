@@ -19,7 +19,7 @@ use std::fmt;
 /// env::thread::Handle::new(|| Ok(()));
 /// ```
 #[must_use = "a dropped Handle leaves its thread running"]
-pub struct Handle(Box<dyn FnOnce() -> Result<(), Error> + Send>);
+pub struct Handle(Box<dyn FnOnce() -> Result<(), Panicked> + Send>);
 
 impl Handle {
     /// Wraps the way a [`shards::Driver`](crate::shards::Driver) or a
@@ -29,7 +29,7 @@ impl Handle {
     /// let handle = env::thread::Handle::new(|| Ok(()));
     /// assert_eq!(handle.join(), Ok(()));
     /// ```
-    pub fn new(join: impl FnOnce() -> Result<(), Error> + Send + 'static) -> Self {
+    pub fn new(join: impl FnOnce() -> Result<(), Panicked> + Send + 'static) -> Self {
         Self(Box::new(join))
     }
 
@@ -38,14 +38,14 @@ impl Handle {
     ///
     /// # Errors
     ///
-    /// [`Error::Panicked`] when the thread or one of its tasks panicked.
+    /// [`Panicked`] when the thread or one of its tasks panicked.
     ///
     /// ```
-    /// fn wait(handle: env::thread::Handle) -> Result<(), env::thread::Error> {
+    /// fn wait(handle: env::thread::Handle) -> Result<(), env::thread::Panicked> {
     ///     handle.join()
     /// }
     /// ```
-    pub fn join(self) -> Result<(), Error> {
+    pub fn join(self) -> Result<(), Panicked> {
         (self.0)()
     }
 }
@@ -56,11 +56,11 @@ impl fmt::Debug for Handle {
     }
 }
 
-/// Why a thread failed.
+/// Why a thread could not start.
 ///
 /// ```
-/// let e = env::thread::Error::Panicked { name: "shard-0".into() };
-/// assert_eq!(e.to_string(), "thread shard-0 panicked");
+/// let e = env::thread::Error::Pin { name: "shard-0".into(), core: 0 };
+/// assert_eq!(e.to_string(), "cannot pin thread shard-0 to core 0");
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -78,11 +78,6 @@ pub enum Error {
         /// The core it asked for.
         core: usize,
     },
-    /// The thread or one of its tasks panicked.
-    Panicked {
-        /// The thread's name.
-        name: String,
-    },
 }
 
 impl fmt::Display for Error {
@@ -94,12 +89,31 @@ impl fmt::Display for Error {
             Self::Pin { name, core } => {
                 write!(f, "cannot pin thread {name} to core {core}")
             }
-            Self::Panicked { name } => write!(f, "thread {name} panicked"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// Why a thread failed after it started: the thread or one of its tasks panicked.
+///
+/// ```
+/// let e = env::thread::Panicked { name: "shard-0".into() };
+/// assert_eq!(e.to_string(), "thread shard-0 panicked");
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Panicked {
+    /// The thread's name.
+    pub name: String,
+}
+
+impl fmt::Display for Panicked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "thread {} panicked", self.name)
+    }
+}
+
+impl std::error::Error for Panicked {}
 
 #[cfg(test)]
 mod tests {
@@ -110,7 +124,7 @@ mod tests {
 
         #[test]
         fn join_returns_the_outcome_of_the_driver() {
-            let panicked = Error::Panicked {
+            let panicked = Panicked {
                 name: "shard-0".into(),
             };
             let outcome = panicked.clone();
@@ -145,10 +159,14 @@ mod tests {
             };
             assert_eq!(e.to_string(), "cannot pin thread shard-3 to core 3");
         }
+    }
+
+    mod panicked {
+        use super::*;
 
         #[test]
-        fn names_the_thread_that_panicked() {
-            let e = Error::Panicked {
+        fn names_the_thread() {
+            let e = Panicked {
                 name: "shard-3".into(),
             };
             assert_eq!(e.to_string(), "thread shard-3 panicked");

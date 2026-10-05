@@ -14,7 +14,7 @@ use env::net::udp::{self, Meta, Transmit};
 use env::rng::Rng;
 use env::shards::Main;
 use env::tasks::Task;
-use env::thread::Error;
+use env::thread::Panicked;
 use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
@@ -95,7 +95,7 @@ struct Thread {
 #[derive(Clone)]
 pub(crate) enum Outcome {
     /// Its first task completed, or a task panicked.
-    Done(Result<(), Error>),
+    Done(Result<(), Panicked>),
     /// A crash of its node ended it.
     Crashed,
 }
