@@ -23,24 +23,3 @@ pub enum Class {
     /// The lowest, for bulk that waits for spare capacity.
     CatchUp,
 }
-
-impl Class {
-    /// Every class, by [`Class::byte`].
-    pub(crate) const ALL: [Self; 4] =
-        [Self::Command, Self::Latest, Self::Complete, Self::CatchUp];
-
-    /// The byte that starts a stream of this class on the wire.
-    pub(crate) fn byte(self) -> u8 {
-        match self {
-            Self::Command => 0,
-            Self::Latest => 1,
-            Self::Complete => 2,
-            Self::CatchUp => 3,
-        }
-    }
-
-    /// The class whose streams start with `byte`, if any.
-    pub(crate) fn from_byte(byte: u8) -> Option<Self> {
-        Self::ALL.get(usize::from(byte)).copied()
-    }
-}

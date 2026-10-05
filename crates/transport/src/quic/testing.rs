@@ -78,7 +78,7 @@ pub(super) struct Shard {
     entropy: Entropy,
     tasks: Tasks,
     /// The pool of each config.
-    pub(super) pool: Rc<Pool>,
+    pool: Rc<Pool>,
 }
 
 impl Shard {

@@ -24,7 +24,7 @@ use types::time::Monotonic;
 
 use self::connection::Connection;
 use self::settings::Settings;
-use self::stream::{Incoming, Receiver, Sender};
+use self::stream::{Incoming, Receiver, Sender, Streams};
 use crate::{Class, Code, Config, Error, Peer};
 
 /// The server name a dial sends. The verifiers check the node key, not the name.
@@ -79,7 +79,7 @@ pub(crate) enum Event {
     /// caller no longer holds or has not accepted yet.
     Readable { stream: stream::Key },
     /// `stream` may take more, or the peer stopped it. It can repeat, and it can
-    /// name a stream the caller no longer holds.
+    /// name a stream the caller no longer holds or has not accepted yet.
     Writable { stream: stream::Key },
 }
 
@@ -233,7 +233,7 @@ impl Endpoint {
     /// Opens a stream of `class` that goes both ways. `None` before
     /// [`Event::Connected`], when the peer allows no more streams now
     /// ([`Event::Available`] follows), or when the connection ended. The peer sees
-    /// the stream at its first message or at its finish.
+    /// the stream at its first message.
     pub(crate) fn open(
         &mut self,
         now: Monotonic,
@@ -242,7 +242,7 @@ impl Endpoint {
     ) -> Option<(Sender, Receiver)> {
         let stream = self.start(now, key, Dir::Bi)?;
         let receiver = Receiver::new(stream, self.message_bytes_max);
-        Some((Sender::new(stream, Some(class)), receiver))
+        Some((Sender::new(stream, class), receiver))
     }
 
     /// As [`Endpoint::open`], for a stream that only this side sends on.
@@ -253,7 +253,7 @@ impl Endpoint {
         class: Class,
     ) -> Option<Sender> {
         let stream = self.start(now, key, Dir::Uni)?;
-        Some(Sender::new(stream, Some(class)))
+        Some(Sender::new(stream, class))
     }
 
     /// The next stream the peer opened on `key`'s connection, highest class first.
@@ -283,7 +283,7 @@ impl Endpoint {
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
-        sender.load(message)?;
+        sender.load(message);
         self.flush(now, sender)
     }
 
@@ -300,13 +300,15 @@ impl Endpoint {
         sender: &mut Sender,
     ) -> Result<Poll<()>, Error> {
         let key = sender.key().connection;
-        self.call(now, key, Poll::Pending, |connection, _| {
-            stream::flush(&mut connection.inner, sender)
+        self.streams(now, key, Poll::Pending, |streams, inner, _| {
+            streams.flush(inner, sender)
         })
     }
 
     /// Ends the stream after the messages written to it. They arrive after the
-    /// caller drops `sender`. Does nothing when the connection ended.
+    /// caller drops `sender`. A stream this side opened that ends before its first
+    /// message never reaches the peer, and the [`Receiver`] of a two-way one gets
+    /// [`Error::Reset`] with code 0. Does nothing when the connection ended.
     ///
     /// # Errors
     ///
@@ -320,11 +322,10 @@ impl Endpoint {
         now: Monotonic,
         sender: &mut Sender,
     ) -> Result<(), Error> {
-        let class = sender.end()?;
+        sender.end();
         let stream = sender.key();
-        self.call(now, stream.connection, (), |connection, _| {
-            let Connection { inner, streams, .. } = connection;
-            streams.finish(inner, stream.quic, class)
+        self.streams(now, stream.connection, (), |streams, inner, _| {
+            streams.finish(inner, stream.id)
         })
     }
 
@@ -348,8 +349,8 @@ impl Endpoint {
             return ended;
         }
         let key = receiver.key().connection;
-        self.call(now, key, Poll::Pending, |connection, pool| {
-            stream::read(&mut connection.inner, receiver, pool)
+        self.streams(now, key, Poll::Pending, |_, inner, pool| {
+            stream::read(inner, receiver, pool)
         })
     }
 
@@ -370,33 +371,38 @@ impl Endpoint {
         dir: Dir,
     ) -> Option<stream::Key> {
         let connection = find(&mut self.connections, key).filter(|c| c.live())?;
-        let quic = connection.inner.streams().open(dir);
+        let id = connection.streams.open(&mut connection.inner, dir);
         self.drive(key.handle, self.instant(now));
         Some(stream::Key {
             connection: key,
-            quic: quic?,
+            id: id?,
         })
     }
 
-    /// Runs `call` on the connection of `key` with the pool, and drives it. A fault
-    /// of the peer's that `call` finds closes the connection: the caller gets it from
-    /// [`Event::Closed`], and this gives `ended`, as it does when the connection
-    /// ended before.
-    fn call<T>(
+    /// Runs `call` on the streams of `key`'s connection with the pool, and drives
+    /// the connection. A fault of the peer's that `call` finds closes the
+    /// connection: the caller gets it from [`Event::Closed`], and this gives
+    /// `ended`, as it does when the connection ended before.
+    fn streams<T>(
         &mut self,
         now: Monotonic,
         key: connection::Key,
         ended: T,
-        call: impl FnOnce(&mut Connection, &Pool) -> Result<T, Error>,
+        call: impl FnOnce(
+            &mut Streams,
+            &mut noq_proto::Connection,
+            &Pool,
+        ) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let now = self.instant(now);
         let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
         else {
             return Ok(ended);
         };
-        let result = match call(connection, &self.pool) {
+        let Connection { inner, streams, .. } = connection;
+        let result = match call(streams, inner, &self.pool) {
             Err(Error::Broken { reason }) => {
-                self.events.extend(connection.fault(now, reason));
+                self.events.push_back(connection.fault(now, reason));
                 Ok(ended)
             }
             result => result,

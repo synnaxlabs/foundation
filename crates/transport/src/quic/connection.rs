@@ -12,7 +12,7 @@ use rustls::pki_types::CertificateDer;
 use types::node::PublicKey;
 
 use super::Event;
-use super::stream::Streams;
+use super::stream::{Fault, Streams};
 use crate::{Code, Error, Peer, tls};
 
 /// Names one connection of an [`Endpoint`](super::Endpoint). No other connection of
@@ -117,9 +117,6 @@ impl Connection {
                 self.state = State::Open;
                 let peer = self.peer();
                 events.push_back(Event::Connected { key, peer });
-                if self.streams.queued() {
-                    events.push_back(Event::Incoming { key });
-                }
             }
             noq_proto::Event::ConnectionLost { reason } => {
                 let expected = match mem::replace(&mut self.state, State::Ended) {
@@ -131,17 +128,16 @@ impl Connection {
                 events.push_back(Event::Closed { key, error });
             }
             noq_proto::Event::Stream(event) if self.live() => {
+                assert!(
+                    matches!(self.state, State::Open),
+                    "invariant: noq-proto gives stream events only after it connects"
+                );
+                // A stream event repeats once for each frame, so the same one in a
+                // row merges.
                 match self.streams.event(&mut self.inner, key, &event) {
-                    Ok(event) if matches!(self.state, State::Open) => {
-                        events.extend(event);
-                    }
-                    Ok(_) => {}
-                    Err(Error::Broken { reason }) => {
-                        events.extend(self.fault(now, reason));
-                    }
-                    Err(error) => panic!(
-                        "invariant: a stream event fails only on a fault: {error}"
-                    ),
+                    Ok(Some(event)) if events.back() == Some(&event) => {}
+                    Ok(event) => events.extend(event),
+                    Err(Fault(reason)) => events.push_back(self.fault(now, reason)),
                 }
             }
             noq_proto::Event::HandshakeDataReady
@@ -159,22 +155,23 @@ impl Connection {
         !matches!(self.state, State::Ended)
     }
 
-    /// Closes the connection on a fault of the peer's, with code 2^32 and `reason`.
-    /// Gives its [`Event::Closed`] with [`Error::Broken`] when the caller has the key.
+    /// Closes the connection on a fault of the peer's, with code 2^32 and `reason`,
+    /// and gives its [`Event::Closed`] with [`Error::Broken`].
     ///
     /// # Panics
     ///
-    /// When the connection ended.
-    pub(super) fn fault(&mut self, now: Instant, reason: String) -> Option<Event> {
+    /// When the connection is not open.
+    pub(super) fn fault(&mut self, now: Instant, reason: String) -> Event {
+        let state = mem::replace(&mut self.state, State::Ended);
+        assert!(
+            matches!(state, State::Open),
+            "invariant: a fault is found on an open connection"
+        );
         let code = VarInt::from_u64(1 << 32).expect("invariant: 2^32 is a varint");
         self.inner.close(now, code, Bytes::from(reason.clone()));
-        match mem::replace(&mut self.state, State::Ended) {
-            State::Dialing { .. } | State::Open => Some(Event::Closed {
-                key: self.key,
-                error: Error::Broken { reason },
-            }),
-            State::Accepting => None,
-            State::Ended => panic!("invariant: a fault is found before the end"),
+        Event::Closed {
+            key: self.key,
+            error: Error::Broken { reason },
         }
     }
 

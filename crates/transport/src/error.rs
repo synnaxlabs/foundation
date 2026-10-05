@@ -59,8 +59,10 @@ pub enum Error {
         /// The largest size allowed.
         bytes_max: usize,
     },
-    /// The connection ended with no close from either side: a reset, a protocol
-    /// violation, or a failed TLS check.
+    /// The connection ended on a fault: a protocol violation, a failed TLS check, or
+    /// a reset. A node that finds a violation of the stream protocol closes the
+    /// connection with application code 2^32 and the reason, and both sides get
+    /// this.
     Broken {
         /// What broke, for people to read.
         reason: String,

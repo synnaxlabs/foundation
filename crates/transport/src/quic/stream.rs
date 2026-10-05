@@ -9,7 +9,8 @@ use std::task::Poll;
 use block::{Block, Pool};
 use bytes::Bytes;
 use noq_proto::{
-    Dir, FinishError, ReadError, SendStream, StreamEvent, StreamId, VarInt, WriteError,
+    ClosedStream, Dir, FinishError, ReadError, StreamEvent, StreamId, VarInt,
+    WriteError,
 };
 
 use super::{Event, connection};
@@ -20,7 +21,7 @@ use crate::{Class, Code, Error};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Key {
     pub(super) connection: connection::Key,
-    pub(super) quic: StreamId,
+    pub(super) id: StreamId,
 }
 
 /// The sending half of a stream. The caller gives it to each write call. Dropping it
@@ -28,17 +29,15 @@ pub(crate) struct Key {
 #[derive(Debug)]
 pub(crate) struct Sender {
     key: Key,
-    /// The class, until a message or the finish carries its byte.
-    class: Option<Class>,
-    /// The class byte and length prefix of the message in hand.
+    /// The stream needs no class byte: it has one, or it is a reply.
+    started: bool,
+    /// The class byte, then the length prefix of the message in hand.
     header: [u8; 9],
     /// The bytes of `header` that the stream has not taken.
     unsent: Range<usize>,
     /// The bytes of the message in hand that the stream has not taken.
     body: Bytes,
     finished: bool,
-    /// The code that the peer stopped the stream with.
-    stopped: Option<Code>,
 }
 
 /// The receiving half of a stream. The caller gives it to each read. Dropping it does
@@ -73,9 +72,14 @@ pub(super) struct Streams {
     /// Streams the peer opened that the caller has not accepted, by class byte,
     /// oldest first.
     incoming: [VecDeque<StreamId>; 4],
-    /// Empty streams that this side finished before the stream took the class byte.
-    finishing: Vec<(StreamId, Class)>,
+    /// Each stream that this side sends on and has not finished, with the code the
+    /// peer stopped it with.
+    senders: Vec<(StreamId, Option<Code>)>,
 }
+
+/// A fault of the peer's that closes the connection, with the reason.
+#[derive(Debug)]
+pub(super) struct Fault(pub(super) String);
 
 /// A message body that the stream holds until the peer acknowledges it.
 struct Body(Block);
@@ -87,17 +91,26 @@ impl AsRef<[u8]> for Body {
 }
 
 impl Sender {
-    /// A sender for `key` that starts the stream with `class`'s byte, or with no class
-    /// byte when `class` is `None`.
-    pub(super) fn new(key: Key, class: Option<Class>) -> Self {
+    /// A sender for `key` that starts the stream with `class`'s byte.
+    pub(super) fn new(key: Key, class: Class) -> Self {
+        let mut header = [0; 9];
+        header[0] = byte(class);
+        Self {
+            started: false,
+            header,
+            ..Self::reply(key)
+        }
+    }
+
+    /// A sender for the reply half of `key`, a stream the peer opened.
+    fn reply(key: Key) -> Self {
         Self {
             key,
-            class,
+            started: true,
             header: [0; 9],
             unsent: 0..0,
             body: Bytes::new(),
             finished: false,
-            stopped: None,
         }
     }
 
@@ -108,44 +121,27 @@ impl Sender {
 
     /// Takes `message` as the message in hand, after its header.
     ///
-    /// # Errors
-    ///
-    /// [`Error::Stopped`] when the peer stopped the stream.
-    ///
     /// # Panics
     ///
-    /// When the sender holds part of a message, or after `finish`.
-    pub(super) fn load(&mut self, message: Block) -> Result<(), Error> {
+    /// When the sender holds part of a message, or after `end`.
+    pub(super) fn load(&mut self, message: Block) {
         self.check();
-        if let Some(code) = self.stopped {
-            return Err(Error::Stopped { code });
-        }
-        let class = self.class.take().map(Class::byte);
         let prefix = Prefix::new(message.len());
-        let start = usize::from(class.is_none());
-        self.header[0] = class.unwrap_or(0);
+        let start = usize::from(self.started);
+        self.started = true;
         self.header[1..=prefix.len()].copy_from_slice(&prefix);
         self.unsent = start..prefix.len() + 1;
         self.body = Bytes::from_owner(Body(message));
-        Ok(())
     }
 
-    /// Marks the stream finished, and gives the class whose byte it still needs.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Stopped`] when the peer stopped the stream.
+    /// Marks the stream finished.
     ///
     /// # Panics
     ///
-    /// When the sender holds part of a message, or after `finish`.
-    pub(super) fn end(&mut self) -> Result<Option<Class>, Error> {
+    /// When the sender holds part of a message, or after `end`.
+    pub(super) fn end(&mut self) {
         self.check();
         self.finished = true;
-        match self.stopped {
-            Some(code) => Err(Error::Stopped { code }),
-            None => Ok(self.class.take()),
-        }
     }
 
     fn check(&self) {
@@ -184,25 +180,28 @@ impl Receiver {
 
 impl Streams {
     /// What `event` of `inner`, the connection of `key`, means to the caller, if
-    /// anything.
+    /// anything. A stream that the peer stops resets here with the stop's code.
     ///
     /// # Errors
     ///
-    /// [`Error::Broken`] when the peer broke the stream protocol.
+    /// [`Fault`] when the peer broke the stream protocol.
     pub(super) fn event(
         &mut self,
         inner: &mut noq_proto::Connection,
         key: connection::Key,
         event: &StreamEvent,
-    ) -> Result<Option<Event>, Error> {
-        let stream = |quic| Key {
+    ) -> Result<Option<Event>, Fault> {
+        let stream = |id| Key {
             connection: key,
-            quic,
+            id,
         };
         match *event {
             StreamEvent::Opened { dir } => {
                 let mut queued = false;
                 while let Some(id) = inner.streams().accept(dir) {
+                    if dir == Dir::Bi {
+                        self.senders.push((id, None));
+                    }
                     queued |= self.classify(inner, id)?;
                 }
                 Ok(queued.then_some(Event::Incoming { key }))
@@ -215,80 +214,135 @@ impl Streams {
                 self.unclassified.swap_remove(at);
                 Ok(self.classify(inner, id)?.then_some(Event::Incoming { key }))
             }
-            StreamEvent::Writable { id } | StreamEvent::Stopped { id, .. } => {
-                let Some(at) =
-                    self.finishing.iter().position(|&(other, _)| other == id)
-                else {
-                    return Ok(Some(Event::Writable { stream: stream(id) }));
+            StreamEvent::Writable { id } => {
+                Ok(Some(Event::Writable { stream: stream(id) }))
+            }
+            StreamEvent::Stopped { id, error_code } => {
+                let Some(code) = code(error_code) else {
+                    return Err(Fault(format!(
+                        "a stop code over 32 bits: {error_code}"
+                    )));
                 };
-                let (_, class) = self.finishing.swap_remove(at);
-                match self.finish(inner, id, Some(class)) {
-                    Err(error @ Error::Broken { .. }) => Err(error),
-                    _ => Ok(None),
-                }
+                reset(inner, id, code);
+                let sender = self.senders.iter_mut().find(|(other, _)| *other == id);
+                Ok(sender.map(|(_, stopped)| {
+                    *stopped = Some(code);
+                    Event::Writable { stream: stream(id) }
+                }))
             }
             StreamEvent::Available { .. } => Ok(Some(Event::Available { key })),
             StreamEvent::Finished { .. } => Ok(None),
         }
     }
 
+    /// Opens a stream of `inner` in `dir`. `None` when the peer allows no more now.
+    pub(super) fn open(
+        &mut self,
+        inner: &mut noq_proto::Connection,
+        dir: Dir,
+    ) -> Option<StreamId> {
+        let id = inner.streams().open(dir)?;
+        self.senders.push((id, None));
+        Some(id)
+    }
+
     /// The next stream the peer opened, highest class first.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a stream is queued only under a class byte"
+    )]
     pub(super) fn accept(
         &mut self,
         connection: connection::Key,
         bytes_max: usize,
     ) -> Option<Incoming> {
-        let (class, quic) = Class::ALL
-            .into_iter()
+        let (byte, id) = (0u8..)
             .zip(&mut self.incoming)
-            .find_map(|(class, queue)| Some((class, queue.pop_front()?)))?;
-        let key = Key { connection, quic };
+            .find_map(|(byte, queue)| Some((byte, queue.pop_front()?)))?;
+        let key = Key { connection, id };
         Some(Incoming {
-            class,
+            class: class(byte).expect("invariant: a queued stream has a class byte"),
             receiver: Receiver::new(key, bytes_max),
-            sender: (quic.dir() == Dir::Bi).then(|| Sender::new(key, None)),
+            sender: (id.dir() == Dir::Bi).then(|| Sender::reply(key)),
         })
     }
 
-    /// Whether a stream waits for [`Streams::accept`].
-    pub(super) fn queued(&self) -> bool {
-        self.incoming.iter().any(|queue| !queue.is_empty())
-    }
-
-    /// Ends stream `id` of `inner` after what it holds. With `class`, the stream is
-    /// empty and its class byte goes first, now or at the stream's next event.
+    /// Writes what `sender` holds to `inner`. `Ready` when the stream took all of it.
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`] when the peer stopped the stream, and [`Error::Broken`] when
-    /// it did so with a code over 32 bits.
+    /// [`Error::Stopped`] when the peer stopped the stream. The sender drops what it
+    /// holds.
+    pub(super) fn flush(
+        &self,
+        inner: &mut noq_proto::Connection,
+        sender: &mut Sender,
+    ) -> Result<Poll<()>, Error> {
+        let id = sender.key.id;
+        let mut send = inner.send_stream(id);
+        loop {
+            let written = if !sender.unsent.is_empty() {
+                let unsent = &sender.header[sender.unsent.clone()];
+                send.write(unsent).map(|bytes| sender.unsent.start += bytes)
+            } else if !sender.body.is_empty() {
+                let mut chunks = slice::from_mut(&mut sender.body);
+                send.write_chunks(&mut chunks).map(drop)
+            } else {
+                return Ok(Poll::Ready(()));
+            };
+            // A reset stream gives `Blocked` while the connection's window is shut.
+            let blocked = match written {
+                Ok(()) => continue,
+                Err(WriteError::Blocked) => true,
+                Err(WriteError::ClosedStream) => false,
+                Err(WriteError::Stopped(_)) => panic!("{STOPPED}"),
+            };
+            return match (self.stopped(id), blocked) {
+                (Some(code), _) => {
+                    (sender.unsent, sender.body) = (0..0, Bytes::new());
+                    Err(Error::Stopped { code })
+                }
+                (None, true) => Ok(Poll::Pending),
+                (None, false) => panic!("{OPEN}"),
+            };
+        }
+    }
+
+    /// Ends stream `id` of `inner` after what it holds.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Stopped`] when the peer stopped the stream.
+    ///
+    /// # Panics
+    ///
+    /// When this side does not send on `id`, or finished it before.
     pub(super) fn finish(
         &mut self,
         inner: &mut noq_proto::Connection,
         id: StreamId,
-        class: Option<Class>,
     ) -> Result<(), Error> {
-        let mut send = inner.send_stream(id);
-        if let Some(class) = class {
-            match send.write(&[class.byte()]) {
-                Ok(_) => {}
-                Err(WriteError::Blocked) => {
-                    self.finishing.push((id, class));
-                    return Ok(());
-                }
-                Err(WriteError::Stopped(code)) => return Err(stopped(&mut send, code)),
-                Err(WriteError::ClosedStream) => panic!("{OPEN}"),
-            }
+        let Some(at) = self.senders.iter().position(|&(other, _)| other == id) else {
+            panic!("invariant: a sender finishes once");
+        };
+        if let (_, Some(code)) = self.senders.swap_remove(at) {
+            return Err(Error::Stopped { code });
         }
-        match send.finish() {
+        match inner.send_stream(id).finish() {
             Ok(()) => Ok(()),
-            Err(FinishError::Stopped(code)) => Err(stopped(&mut send, code)),
+            Err(FinishError::Stopped(_)) => panic!("{STOPPED}"),
             Err(FinishError::ClosedStream) => panic!("{OPEN}"),
         }
     }
 
+    /// The code the peer stopped stream `id` with, if this side sends on it.
+    fn stopped(&self, id: StreamId) -> Option<Code> {
+        self.senders.iter().find(|&&(other, _)| other == id)?.1
+    }
+
     /// Reads the class byte of new stream `id`. Returns whether the stream is now
-    /// queued for [`Streams::accept`]. A stream reset before its class byte drops.
+    /// queued for [`Streams::accept`]. A stream that ends or resets before its class
+    /// byte drops, and the reply half of a two-way one resets with code 0.
     #[expect(
         clippy::unwrap_in_result,
         reason = "a stream noq-proto just gave is open and gives no empty chunk"
@@ -297,7 +351,7 @@ impl Streams {
         &mut self,
         inner: &mut noq_proto::Connection,
         id: StreamId,
-    ) -> Result<bool, Error> {
+    ) -> Result<bool, Fault> {
         let next = inner
             .recv_stream(id)
             .read(true)
@@ -309,63 +363,33 @@ impl Streams {
                     .bytes
                     .first()
                     .expect("invariant: chunks are not empty");
-                if Class::from_byte(byte).is_none() {
-                    return Err(broken(format!("a stream of class {byte}")));
+                if class(byte).is_none() {
+                    return Err(Fault(format!("a stream of class {byte}")));
                 }
                 self.incoming[usize::from(byte)].push_back(id);
                 Ok(true)
             }
-            Ok(None) => Err(broken("a stream ended before its class".to_owned())),
             Err(ReadError::Blocked) => {
                 self.unclassified.push(id);
                 Ok(false)
             }
-            Err(ReadError::Reset(_)) => Ok(false),
-        }
-    }
-}
-
-const OPEN: &str = "invariant: a sender's stream is open until it finishes";
-
-/// Writes what `sender` holds to `inner`. `Ready` when the stream took all of it.
-///
-/// # Errors
-///
-/// [`Error::Stopped`] when the peer stopped the stream, and [`Error::Broken`] when it
-/// did so with a code over 32 bits.
-pub(super) fn flush(
-    inner: &mut noq_proto::Connection,
-    sender: &mut Sender,
-) -> Result<Poll<()>, Error> {
-    if let Some(code) = sender.stopped {
-        return Err(Error::Stopped { code });
-    }
-    let mut send = inner.send_stream(sender.key.quic);
-    loop {
-        let written = if !sender.unsent.is_empty() {
-            let unsent = &sender.header[sender.unsent.clone()];
-            send.write(unsent).map(|bytes| sender.unsent.start += bytes)
-        } else if !sender.body.is_empty() {
-            let mut chunks = slice::from_mut(&mut sender.body);
-            send.write_chunks(&mut chunks).map(drop)
-        } else {
-            return Ok(Poll::Ready(()));
-        };
-        match written {
-            Ok(()) => {}
-            Err(WriteError::Blocked) => return Ok(Poll::Pending),
-            Err(WriteError::Stopped(code)) => {
-                (sender.unsent, sender.body) = (0..0, Bytes::new());
-                let error = stopped(&mut send, code);
-                if let Error::Stopped { code } = error {
-                    sender.stopped = Some(code);
-                }
-                return Err(error);
+            Err(ReadError::Reset(error)) if code(error).is_none() => {
+                Err(Fault(format!("a reset code over 32 bits: {error}")))
             }
-            Err(WriteError::ClosedStream) => panic!("{OPEN}"),
+            Ok(None) | Err(ReadError::Reset(_)) => {
+                if id.dir() == Dir::Bi {
+                    reset(inner, id, Code(0));
+                    self.senders.retain(|&(other, _)| other != id);
+                }
+                Ok(false)
+            }
         }
     }
 }
+
+/// The endpoint resets each stream at the peer's stop, before the caller's next call.
+const STOPPED: &str = "invariant: a stream resets at the peer's stop";
+const OPEN: &str = "invariant: only a stop resets a sender's stream";
 
 /// Reads the next whole message of `receiver`'s stream from `inner` into a block from
 /// `pool`. `Ready(None)` at the end.
@@ -384,16 +408,18 @@ pub(super) fn read(
     receiver: &mut Receiver,
     pool: &Pool,
 ) -> Result<Poll<Option<Block>>, Error> {
-    let mut recv = inner.recv_stream(receiver.key.quic);
+    let mut recv = inner.recv_stream(receiver.key.id);
     let mut chunks = recv
         .read(true)
         .expect("invariant: a receiver's stream is open until it ends");
     let result = receiver.reader.read(pool, |max| match chunks.next(max) {
         Ok(chunk) => Ok(Poll::Ready(chunk.map(|chunk| chunk.bytes))),
         Err(ReadError::Blocked) => Ok(Poll::Pending),
-        Err(ReadError::Reset(code)) => Err(match u32::try_from(code.into_inner()) {
-            Ok(code) => Error::Reset { code: Code(code) },
-            Err(_) => broken(format!("a reset code over 32 bits: {code}")),
+        Err(ReadError::Reset(error)) => Err(match code(error) {
+            Some(code) => Error::Reset { code },
+            None => Error::Broken {
+                reason: format!("a reset code over 32 bits: {error}"),
+            },
         }),
     });
     receiver.end = match result {
@@ -404,19 +430,39 @@ pub(super) fn read(
     result
 }
 
-/// Resets a stream that the peer stopped with `code`, with the same code, and gives
-/// the error for it.
-fn stopped(send: &mut SendStream<'_>, code: VarInt) -> Error {
-    let Ok(code) = u32::try_from(code.into_inner()) else {
-        return broken(format!("a stop code over 32 bits: {code}"));
-    };
-    send.reset(VarInt::from_u32(code))
-        .expect("invariant: a stopped stream is open");
-    Error::Stopped { code: Code(code) }
+/// The byte that starts a stream of `class` on the wire. The byte order is the order
+/// in which [`Streams::accept`] gives streams.
+fn byte(class: Class) -> u8 {
+    match class {
+        Class::Command => 0,
+        Class::Latest => 1,
+        Class::Complete => 2,
+        Class::CatchUp => 3,
+    }
 }
 
-fn broken(reason: String) -> Error {
-    Error::Broken { reason }
+/// The class whose streams start with `byte`, if any.
+fn class(byte: u8) -> Option<Class> {
+    match byte {
+        0 => Some(Class::Command),
+        1 => Some(Class::Latest),
+        2 => Some(Class::Complete),
+        3 => Some(Class::CatchUp),
+        _ => None,
+    }
+}
+
+/// `code` as a [`Code`], if it fits in 32 bits.
+fn code(code: VarInt) -> Option<Code> {
+    u32::try_from(code.into_inner()).ok().map(Code)
+}
+
+/// Resets stream `id` of `inner` with `code`. Does nothing when this side reset it
+/// before, or the peer has all of it.
+fn reset(inner: &mut noq_proto::Connection, id: StreamId, code: Code) {
+    match inner.send_stream(id).reset(VarInt::from_u32(code.0)) {
+        Ok(()) | Err(ClosedStream { .. }) => {}
+    }
 }
 
 #[cfg(test)]
@@ -555,6 +601,20 @@ mod tests {
             error: Error::Broken { reason },
         };
         assert_eq!(events(told).last(), Some(&&closed));
+    }
+
+    #[test]
+    fn class_bytes_map_back_to_their_class() {
+        let classes = [
+            Class::Command,
+            Class::Latest,
+            Class::Complete,
+            Class::CatchUp,
+        ];
+        for class in classes {
+            assert_eq!(super::class(byte(class)), Some(class));
+        }
+        assert_eq!(super::class(4), None);
     }
 
     #[test]
@@ -766,6 +826,33 @@ mod tests {
     }
 
     #[test]
+    fn that_get_several_datagrams_at_once_are_readable_once() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Command);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.server);
+            let now = pair.now();
+            drain(&mut pair.server, now, &mut incoming.receiver);
+            let seen = pair.server.events.len();
+            let message = shard.block(&[1; 4_000]);
+            write(&mut pair.client, now, &mut sender, &[message]);
+            pair.run(RUN);
+            let readable = Event::Readable {
+                stream: incoming.receiver.key(),
+            };
+            let events = &pair.server.events[seen..];
+            let count = events.iter().filter(|(_, event)| *event == readable);
+            assert_eq!(count.count(), 1, "{events:?}");
+            let now = pair.now();
+            let read = drain(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, (vec![vec![1; 4_000]], false));
+        });
+    }
+
+    #[test]
     fn with_a_full_pool_fail_the_read_until_a_block_frees() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
@@ -820,6 +907,7 @@ mod tests {
             let over = pair.client.endpoint.open_sender(now, key, Class::Command);
             assert!(over.is_none(), "{over:?}");
             for sender in &mut senders {
+                write(&mut pair.client, now, sender, &[shard.block(b"a")]);
                 pair.client.endpoint.finish(now, sender).expect("finished");
             }
             pair.run(RUN);
@@ -828,7 +916,7 @@ mod tests {
                 let now = pair.now();
                 assert_eq!(
                     drain(&mut pair.server, now, &mut incoming.receiver),
-                    (vec![], true)
+                    (vec![b"a".to_vec()], true)
                 );
             }
             pair.run(RUN);
@@ -851,73 +939,73 @@ mod tests {
     }
 
     #[test]
-    fn that_are_empty_arrive_with_their_class_and_end() {
+    fn that_end_before_their_first_message_never_reach_the_peer() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            let mut sender = open_sender(&mut pair, Class::Latest);
-            let now = pair.now();
+            let (now, key) = (pair.now(), key(&pair.client));
+            let opened = pair.client.endpoint.open(now, key, Class::Command);
+            let (mut sender, mut receiver) = opened.expect("a stream");
             pair.client
                 .endpoint
                 .finish(now, &mut sender)
                 .expect("finished");
             pair.run(RUN);
-            let mut incoming = accept(&mut pair.server);
-            assert_eq!(incoming.class, Class::Latest);
-            let now = pair.now();
-            assert_eq!(
-                drain(&mut pair.server, now, &mut incoming.receiver),
-                (vec![], true)
+            assert_eq!(pair.server.events.len(), 1, "{:?}", pair.server.events);
+            assert!(
+                pair.server
+                    .endpoint
+                    .accept(self::key(&pair.server))
+                    .is_none()
             );
-            let again = next(&mut pair.server, now, &mut incoming.receiver);
-            assert_eq!(again, Ok(Poll::Ready(None)));
+            let now = pair.now();
+            let read = next(&mut pair.client, now, &mut receiver);
+            assert_eq!(read, Err(Error::Reset { code: Code(0) }));
         });
     }
 
+    /// Opens [`testing::STREAMS_MAX`] raw streams in `dir` on the client, and ends
+    /// each before its class byte: with a reset of `code`, or else with a finish.
+    fn end_before_the_class_byte(pair: &mut Pair, dir: Dir, code: Option<VarInt>) {
+        for _ in 0..testing::STREAMS_MAX {
+            let id = raw(&mut pair.client, dir, &[], code.is_none());
+            if let Some(code) = code {
+                let reset = pair.client.connection().send_stream(id).reset(code);
+                reset.expect("reset");
+            }
+        }
+        pair.run(RUN);
+    }
+
     #[test]
-    fn that_are_empty_go_out_when_the_window_opens_after_the_sender_drops() {
+    fn that_end_before_the_class_byte_drop_and_free_their_slot() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            let mut bulk = open_sender(&mut pair, Class::CatchUp);
-            fill(&mut pair, shard, &mut bulk);
-            let now = pair.now();
-            let mut empty = open_sender(&mut pair, Class::Command);
-            pair.client
-                .endpoint
-                .finish(now, &mut empty)
-                .expect("finished");
-            drop(empty);
-            pair.run(RUN);
-            let mut incoming = accept(&mut pair.server);
-            assert_eq!(incoming.class, Class::CatchUp);
-            let server = key(&pair.server);
-            assert!(pair.server.endpoint.accept(server).is_none());
-            let now = pair.now();
-            drain(&mut pair.server, now, &mut incoming.receiver);
-            pair.run(RUN);
-            let mut incoming = accept(&mut pair.server);
-            assert_eq!(incoming.class, Class::Command);
-            let now = pair.now();
-            assert_eq!(
-                drain(&mut pair.server, now, &mut incoming.receiver),
-                (vec![], true)
-            );
+            for dir in [Dir::Uni, Dir::Bi] {
+                for code in [None, Some(VarInt::from_u32(7))] {
+                    end_before_the_class_byte(&mut pair, dir, code);
+                    let open =
+                        pair.server.connection().streams().remote_open_streams(dir);
+                    assert_eq!(open, 0, "{dir:?} {code:?}");
+                }
+            }
+            let events = events(&pair.server);
+            let quiet = events.iter().all(|event| {
+                matches!(event, Event::Connected { .. } | Event::Readable { .. })
+            });
+            assert!(quiet, "{events:?}");
+            assert!(pair.server.endpoint.accept(key(&pair.server)).is_none());
         });
     }
 
     #[test]
-    fn reset_before_the_class_byte_drop_with_no_event() {
+    fn reset_before_the_class_byte_with_a_code_over_32_bits_break_the_connection() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let id = raw(&mut pair.client, Dir::Uni, &[], false);
-            let reset = pair
-                .client
-                .connection()
-                .send_stream(id)
-                .reset(VarInt::from_u32(7));
+            let code = VarInt::from_u64(1 << 32).expect("a varint");
+            let reset = pair.client.connection().send_stream(id).reset(code);
             reset.expect("reset");
-            pair.run(RUN);
-            assert_eq!(pair.server.events.len(), 1, "{:?}", pair.server.events);
-            assert!(pair.server.endpoint.accept(key(&pair.server)).is_none());
+            assert_broken(&mut pair, true, "a reset code over 32 bits: 4294967296");
         });
     }
 
@@ -966,8 +1054,8 @@ mod tests {
         let now = pair.now();
         write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
         pair.run(RUN);
-        let quic = accept(&mut pair.server).receiver.key().quic;
-        let stopped = pair.server.connection().recv_stream(quic).stop(code);
+        let id = accept(&mut pair.server).receiver.key().id;
+        let stopped = pair.server.connection().recv_stream(id).stop(code);
         stopped.expect("stopped");
         pair.run(RUN);
         sender
@@ -996,17 +1084,64 @@ mod tests {
     }
 
     #[test]
-    fn stopped_with_a_code_over_32_bits_break_the_connection() {
+    fn stopped_while_the_connection_window_is_shut_fail_the_write() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            let code = VarInt::from_u64(1 << 32).expect("a varint");
-            let mut sender = stop(&mut pair, shard, code);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            let mut bulk = open_sender(&mut pair, Class::CatchUp);
+            fill(&mut pair, shard, &mut bulk);
+            pair.run(RUN);
+            let id = accept(&mut pair.server).receiver.key().id;
+            let stopped = pair.server.connection().recv_stream(id).stop(7u32.into());
+            stopped.expect("stopped");
+            pair.run(DELAY + DELAY / 2);
             let now = pair.now();
             let written =
                 pair.client
                     .endpoint
                     .write(now, &mut sender, shard.block(b"b"));
-            assert_eq!(written, Ok(Poll::Pending));
+            assert_eq!(written, Err(Error::Stopped { code: Code(7) }));
+        });
+    }
+
+    #[test]
+    fn stopped_by_the_peer_reset_at_once() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let now = pair.now();
+            let _senders: Vec<Sender> = (0..testing::STREAMS_MAX)
+                .map(|_| {
+                    let mut sender = open_sender(&mut pair, Class::Complete);
+                    write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+                    sender
+                })
+                .collect();
+            pair.run(RUN);
+            let server = key(&pair.server);
+            while let Some(incoming) = pair.server.endpoint.accept(server) {
+                let id = incoming.receiver.key().id;
+                let stopped =
+                    pair.server.connection().recv_stream(id).stop(7u32.into());
+                stopped.expect("stopped");
+            }
+            pair.run(RUN);
+            let open = pair
+                .server
+                .connection()
+                .streams()
+                .remote_open_streams(Dir::Uni);
+            assert_eq!(open, 0);
+        });
+    }
+
+    #[test]
+    fn stopped_with_a_code_over_32_bits_break_the_connection() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let code = VarInt::from_u64(1 << 32).expect("a varint");
+            stop(&mut pair, shard, code);
             assert_broken(&mut pair, false, "a stop code over 32 bits: 4294967296");
         });
     }
@@ -1021,11 +1156,17 @@ mod tests {
     }
 
     #[test]
-    fn that_end_before_the_class_byte_break_the_connection() {
+    fn with_faults_on_two_streams_at_once_close_once() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            raw(&mut pair.client, Dir::Uni, &[], true);
-            assert_broken(&mut pair, true, "a stream ended before its class");
+            raw(&mut pair.client, Dir::Uni, &[4], false);
+            raw(&mut pair.client, Dir::Bi, &[4], false);
+            assert_broken(&mut pair, true, "a stream of class 4");
+            let events = events(&pair.server);
+            let closed = events
+                .iter()
+                .filter(|event| matches!(event, Event::Closed { .. }));
+            assert_eq!(closed.count(), 1, "{events:?}");
         });
     }
 
