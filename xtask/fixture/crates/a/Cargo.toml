@@ -1,0 +1,13 @@
+[package]
+name = "a"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[test]]
+name = "conformance"
+path = "../../oracles/a/main.rs"
+
+[[test]]
+name = "ignored"
+path = "../../oracles/ignored.rs"
