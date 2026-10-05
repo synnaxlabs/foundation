@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::select;
 
-/// Runs `cargo test --release --tests` with `--cfg <name>` and
+/// Runs `cargo test --release --tests --no-fail-fast` with `--cfg <name>` and
 /// `LOOM_MAX_PREEMPTIONS=3` on each workspace crate whose source names `name` in a
 /// `cfg`. It passes when no crate does. It prints the test output when the tests end.
 pub(crate) fn test(root: &Path, name: &str) -> Result<(), Vec<String>> {
@@ -21,7 +21,7 @@ pub(crate) fn test(root: &Path, name: &str) -> Result<(), Vec<String>> {
     // caller sets either one.
     cargo
         .current_dir(root)
-        .args(["test", "--release", "--tests"])
+        .args(["test", "--release", "--tests", "--no-fail-fast"])
         .env("CARGO_ENCODED_RUSTFLAGS", format!("--cfg\u{1f}{name}"))
         .env("LOOM_MAX_PREEMPTIONS", "3");
     for package in &packages {
