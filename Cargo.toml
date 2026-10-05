@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 blake3 = "1.8.7"
+divan = "0.1.21"
 loom = { version = "0.7.2", features = ["futures"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 

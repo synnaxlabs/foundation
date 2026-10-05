@@ -206,6 +206,12 @@ Sessions message each other with `SendMessage`, by name. Find names with
 Comment on each open issue you own: what is done, the next step, and open questions. A
 new session starts from that comment.
 
+## Outside projects
+
+Never open an issue, PR, or comment on a project outside `synnaxlabs`. It publishes
+from the person's account. Fix a dependency with a local patch
+(`docs/dependencies.md`).
+
 ## Escalate to the person when
 
 - a change touches a locked decision, a contract, or an oracle;

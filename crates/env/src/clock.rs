@@ -4,6 +4,7 @@ use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use types::time::{Monotonic, Span};
 
@@ -44,6 +45,22 @@ impl Clock {
     #[must_use]
     pub fn now(&self) -> Monotonic {
         self.0.now()
+    }
+
+    /// The std [`Instant`] at `Monotonic(0)`, for sans-I/O libraries that take a std
+    /// [`Instant`]. Only differences between instants mean anything. Never compare
+    /// one with a real `Instant::now`: under `sim` the two clocks are not related.
+    ///
+    /// ```
+    /// use std::time::{Duration, Instant};
+    ///
+    /// fn now(clock: &env::clock::Clock) -> Instant {
+    ///     clock.epoch() + Duration::from_nanos(clock.now().0)
+    /// }
+    /// ```
+    #[must_use]
+    pub fn epoch(&self) -> Instant {
+        self.0.epoch()
     }
 
     /// Returns a future that completes at `deadline` or later, never before. A
@@ -102,6 +119,9 @@ impl fmt::Debug for Clock {
 pub trait Driver: Send + Sync {
     /// Reads the clock. Reads on any thread never go backwards.
     fn now(&self) -> Monotonic;
+
+    /// The std [`Instant`] at `Monotonic(0)`. It never changes.
+    fn epoch(&self) -> Instant;
 
     /// Makes a timer bound to the executor of the calling thread.
     ///
@@ -208,12 +228,17 @@ mod tests {
     /// Reads a fixed time. Its timers never complete and record each deadline.
     struct Fixed {
         now: Monotonic,
+        epoch: Instant,
         polls: Polls,
     }
 
     impl Driver for Fixed {
         fn now(&self) -> Monotonic {
             self.now
+        }
+
+        fn epoch(&self) -> Instant {
+            self.epoch
         }
 
         fn timer(&self) -> Pin<Box<dyn Timer>> {
@@ -239,8 +264,11 @@ mod tests {
 
     fn clock_at(now: u64) -> (Clock, Polls) {
         let polls = Polls::default();
+        #[expect(clippy::disallowed_methods, reason = "a test needs one instant")]
+        let epoch = Instant::now();
         let driver = Fixed {
             now: Monotonic(now),
+            epoch,
             polls: Arc::clone(&polls),
         };
         (Clock::new(driver), polls)
@@ -253,6 +281,22 @@ mod tests {
             Poll::Pending,
             "timer completed"
         );
+    }
+
+    mod epoch {
+        use super::*;
+
+        #[test]
+        fn is_the_drivers_instant() {
+            #[expect(clippy::disallowed_methods, reason = "a test needs one instant")]
+            let epoch = Instant::now() + std::time::Duration::from_secs(7);
+            let clock = Clock::new(Fixed {
+                now: Monotonic(100),
+                epoch,
+                polls: Polls::default(),
+            });
+            assert_eq!(clock.epoch(), epoch);
+        }
     }
 
     mod sleep {
