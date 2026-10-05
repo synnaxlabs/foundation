@@ -25,7 +25,7 @@ use types::node::{PrivateKey, PublicKey};
 use crate::session::Peer;
 
 /// The protocol both sides offer in ALPN. A new session protocol gets a new name.
-pub(crate) const ALPN: &[u8] = b"foundation/1";
+const ALPN: &[u8] = b"foundation/1";
 
 /// Ed25519 (1.3.101.112) as an `AlgorithmIdentifier`.
 const ED25519: &[u8] = b"\x30\x05\x06\x03\x2b\x65\x70";
@@ -137,9 +137,9 @@ impl Tls {
     }
 }
 
-/// aws-lc with its TLS 1.3 suites and groups in a fixed order, so a rustls feature
-/// that another crate turns on cannot change them. Nodes agree the cheapest:
-/// AES-128-GCM where the CPU has AES instructions, and X25519.
+/// aws-lc's TLS 1.3 suites and groups in a fixed order, so no rustls feature changes
+/// them. The dialer's order decides, so nodes agree AES-128-GCM and X25519 on every
+/// CPU. A FIPS build must drop `ChaCha20`.
 fn provider() -> CryptoProvider {
     use rustls::crypto::aws_lc_rs::{cipher_suite, default_provider, kx_group};
     CryptoProvider {
@@ -312,13 +312,14 @@ mod tests {
     };
     use proptest::prelude::*;
     use rustls::client::ResolvesClientCert;
-    use rustls::crypto::aws_lc_rs::default_provider;
+    use rustls::crypto::SupportedKxGroup;
     use rustls::crypto::aws_lc_rs::sign::any_ecdsa_type;
+    use rustls::crypto::aws_lc_rs::{cipher_suite, default_provider, kx_group};
     use rustls::pki_types::PrivateKeyDer;
     use rustls::sign::{Signer, SigningKey};
     use rustls::{
         CertificateError, CipherSuite, ClientConnection, Connection, HandshakeKind,
-        NamedGroup, ServerConnection, SignatureAlgorithm,
+        NamedGroup, ServerConnection, SignatureAlgorithm, SupportedCipherSuite,
     };
 
     use super::*;
@@ -448,6 +449,7 @@ mod tests {
         for part in [&tbs[..], ED25519, SIGNATURE, &[0; 64]] {
             der.extend_from_slice(part);
         }
+        assert_eq!(der.len(), 4 + 0x107);
         let key = any_ecdsa_type(&PrivateKeyDer::Sec1(sec1.into())).expect("ECDSA");
         Tls::with(CertifiedKey::new(vec![der.into()], Arc::new(Ecdsa(key))))
     }
@@ -571,20 +573,50 @@ mod tests {
             );
         }
 
+        /// The suites of NODE KEY TLS, in the order a node offers them.
+        fn suites() -> [SupportedCipherSuite; 3] {
+            [
+                cipher_suite::TLS13_AES_128_GCM_SHA256,
+                cipher_suite::TLS13_AES_256_GCM_SHA384,
+                cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            ]
+        }
+
+        /// The groups of NODE KEY TLS, in the order a node offers them.
+        fn groups() -> [&'static dyn SupportedKxGroup; 4] {
+            [
+                kx_group::X25519,
+                kx_group::SECP256R1,
+                kx_group::SECP384R1,
+                kx_group::X25519MLKEM768,
+            ]
+        }
+
+        #[test]
+        fn when_a_node_dials_it_offers_the_suites_and_groups_in_order() {
+            let provider = provider();
+            let ids = |suites: &[SupportedCipherSuite]| {
+                suites
+                    .iter()
+                    .map(SupportedCipherSuite::suite)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(ids(&provider.cipher_suites), ids(&suites()));
+            let names = |groups: &[&dyn SupportedKxGroup]| {
+                groups.iter().map(|group| group.name()).collect::<Vec<_>>()
+            };
+            assert_eq!(names(&provider.kx_groups), names(&groups()));
+        }
+
         #[test]
         fn when_an_sdk_offers_one_suite_and_group_the_server_agrees() {
             let b = PrivateKey([2; 32]);
             let server = Tls::new(&b).server();
-            let all = default_provider();
-            let suites = all
-                .cipher_suites
-                .iter()
-                .filter(|suite| suite.tls13().is_some());
-            for suite in suites {
-                for group in &all.kx_groups {
+            for suite in suites() {
+                for group in groups() {
                     let provider = CryptoProvider {
-                        cipher_suites: vec![*suite],
-                        kx_groups: vec![*group],
+                        cipher_suites: vec![suite],
+                        kx_groups: vec![group],
                         ..default_provider()
                     };
                     let client = anonymous(provider, public(&b));
