@@ -9,14 +9,21 @@ exclude_re = [
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
-  # `len < ALIGN` and `len <= ALIGN` pick the same payload at `len == ALIGN`.
-  'crates/block/src/lib\.rs:.*replace < with <= in class_of',
+  # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
+  # `(ALIGN << 0) * 5`.
+  'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
   # Stubs that panic until #68 fills them; #68 removes this line.
   'crates/transport/src/(datagram|session|stream)\.rs:',
   # `Vec::leak(Vec::new())` is the same empty slice as `&[]`.
   'crates/transport/src/tls\.rs:.*root_hint_subjects.*Vec::leak',
+  # The boundary draw is a 64-bit hash against a multiple of 2^64. Equality needs a
+  # draw that is an exact multiple of 2^16, so no input tells `<` from `<=`.
+  'crates/spec/src/tree/chunker\.rs:.*replace < with <= in boundary',
   # Ticks are unique, so no sector is written at the tick that a write started.
   'crates/sim/src/disk\.rs:.*replace > with >= in File::write',
   # The coin is fair: either side gives the same set of outcomes.
   'crates/sim/src/disk\.rs:.*replace == with != in File::write',
+  # The bits never overlap: no function code has bit 7 set, and a shifted byte has
+  # bit 0 clear. So `|` and `^` give the same result.
+  'crates/connector-modbus/src/pdu\.rs:.*replace \| with \^ in (Request::decode_reply|pack)',
 ]

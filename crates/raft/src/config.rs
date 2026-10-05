@@ -22,8 +22,8 @@ pub struct Start {
     /// The stored term and vote.
     pub hard: Hard,
     /// The configuration before `entries`: the last `Voters` entry in them replaces
-    /// it. A node that is not a voter never starts an election, but it still votes
-    /// and follows.
+    /// it. A node that is not a voter never starts an election while its
+    /// configuration is committed, but it still votes and follows.
     pub voters: Voters,
     /// The log on disk, from index 1, in order.
     pub entries: Vec<Entry>,

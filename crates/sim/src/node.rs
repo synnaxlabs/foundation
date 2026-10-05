@@ -80,12 +80,15 @@ impl Node {
     /// - A bind or a send from an address that is not the node's gives `Error::Io`
     ///   with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free port from
     ///   49152.
-    /// - A send to the other family than the socket's gives `Error::Unreachable`.
+    /// - A socket on IPv6 takes `::ffff:a.b.c.d` as `a.b.c.d`, in the destination and
+    ///   the source of a send. A send to the other family than the socket's gives
+    ///   `Error::Unreachable` with the destination as given.
     /// - Each socket draws its send and receive batch maxes from 1, 8, and 64.
     /// - A datagram is lost when it is over the link's
     ///   [`mtu`](crate::link::Config::mtu), when nothing is bound at its
-    ///   destination, or when it would fill the receive queue past
-    ///   `recv_buffer_bytes`. The send buffer never fills.
+    ///   destination, or when its receive queue takes more than `recv_buffer_bytes`,
+    ///   in which each datagram takes its length plus 768 bytes. The send buffer
+    ///   never fills.
     /// - A socket half panics when it polls outside the node's threads.
     #[must_use]
     pub fn net(&self) -> env::net::Net {
@@ -96,8 +99,9 @@ impl Node {
     ///
     /// - Each call takes up to 100 us of true time and takes effect when it ends.
     ///   A file call panics outside the node's threads.
-    /// - A directory takes 4 KiB, and a file its length, until it is removed and no
-    ///   descriptor or call in flight uses it.
+    /// - A directory takes 4 KiB. A file takes its length until it is removed, a
+    ///   `sync_dir` makes the removal durable, and no descriptor or call in flight
+    ///   uses it.
     /// - Where calls in flight at the same time overlap, each 512-byte sector of a
     ///   read gives the old bytes or the bytes of one of the writes, and each sector
     ///   keeps the bytes of one write. A write whose future dropped still ends, with
@@ -111,8 +115,11 @@ impl Node {
     }
 
     /// Makes the next call of `operation` on `path` on the node fail with
-    /// `Error::Io` and code 5 (`EIO`). The call does not touch the disk. Faults on
-    /// one path and operation fire in turn, one per call.
+    /// `Error::Io` and code 5 (`EIO`). Faults on one path and operation fire in
+    /// turn, one per call. The call does not touch the disk, except a sync: each
+    /// sector keeps its durable bytes or the bytes of one write that the sync
+    /// covers. These bytes are then durable, and a read sees them unless a later
+    /// write covers the sector.
     ///
     /// # Panics
     ///
@@ -157,7 +164,8 @@ impl Node {
     }
 
     /// Sets the error bound of the node's next wall readings, as when the time daemon
-    /// updates it. The wall does not move.
+    /// updates it. The wall does not move. A negative bound makes the driver broken,
+    /// as in [`Config::wall_error`].
     pub fn set_wall_error(&self, error: Option<Span>) {
         lock(&self.0.shared).set_wall_error(self.0.node, error);
     }
@@ -195,7 +203,8 @@ pub struct Config {
     /// The wall time when the node is added.
     pub wall: Stamp,
     /// The error bound that the OS gives with each wall reading, or `None` when it
-    /// gives none.
+    /// gives none. A negative bound makes the driver broken, as a test of what meets
+    /// one.
     pub wall_error: Option<Span>,
     /// The bytes of the node's disk.
     pub disk_bytes: u64,

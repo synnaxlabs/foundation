@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::lab::{Lab, Protocol};
 
 #[test]
-#[ignore = "waits on #338"]
+#[ignore = "waits on #432"]
 fn a_subject_without_authority_cannot_command_and_the_audit_records_who_did() {
     let mut lab = Lab::new(1);
     let edge = lab.start("edge");

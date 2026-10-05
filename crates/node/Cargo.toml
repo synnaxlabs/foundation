@@ -5,8 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "foundation"
+path = "src/main.rs"
+
 [dependencies]
 env = { path = "../env" }
+ops = { path = "../ops" }
 
 [dev-dependencies]
 sim = { path = "../sim" }

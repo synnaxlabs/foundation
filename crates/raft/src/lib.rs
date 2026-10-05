@@ -73,14 +73,29 @@ pub enum Error {
     /// The incoming voter set of `Start.voters` is empty while the outgoing set is
     /// not.
     EmptyIncoming,
-    /// A configuration entry has an empty incoming voter set.
+    /// A configuration has an empty incoming voter set.
     NoVoters,
+    /// A configuration change is in progress: the configuration entry at `at` is not
+    /// committed yet.
+    ChangePending {
+        /// The position of the last configuration entry in the log.
+        at: Position,
+    },
     /// The stored term is lower than the term of the last log entry.
     TermBehindLog {
         /// The stored term.
         term: Term,
         /// The last log position.
         last: Position,
+    },
+    /// A message names a log index past this node's last entry. A leader names only
+    /// entries the follower holds, and a follower answers only for entries the
+    /// leader sent, so the sender is faulty.
+    IndexPastLog {
+        /// The index the message names.
+        index: u64,
+        /// The last log index.
+        last: u64,
     },
     /// A log entry does not follow the one before it: its index is not the next
     /// index, or its term is lower or zero.
@@ -137,13 +152,21 @@ impl fmt::Display for Error {
                 )
             }
             Self::NoVoters => {
-                write!(f, "a configuration entry has an empty incoming voter set")
+                write!(f, "a configuration has an empty incoming voter set")
             }
+            Self::ChangePending { at } => write!(
+                f,
+                "a configuration change at index {} in term {} is pending",
+                at.index, at.term
+            ),
             Self::TermBehindLog { term, last } => write!(
                 f,
                 "stored term {term} is lower than term {} of the last log entry",
                 last.term
             ),
+            Self::IndexPastLog { index, last } => {
+                write!(f, "index {index} is past the last log index {last}")
+            }
             Self::EntryOutOfOrder { at, before } => write!(
                 f,
                 "log entry at index {} in term {} does not follow index {} in term {}",

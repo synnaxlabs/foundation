@@ -247,17 +247,20 @@ impl Files {
             dropped,
             ..
         } = flight;
-        let segments = disk::segments(&path);
         let disk = &mut self.disks[node];
         let result = match &call {
+            Call::Sync { inode } if failed => {
+                disk.file(*inode).tear(key, &mut self.rng);
+                Err(Cause::Code(IO))
+            }
             _ if failed => Err(Cause::Code(IO)),
             Call::Open(mode) => disk
-                .open(key, &segments, *mode)
+                .open(key, &path, *mode)
                 .map(|(inode, len)| Done::Open { inode, len }),
-            Call::List => disk.list(&segments).map(Done::Names),
-            Call::CreateDir => disk.create_dir(key, &segments).map(|()| Done::Unit),
-            Call::Remove => disk.remove(&segments).map(|()| Done::Unit),
-            Call::SyncDir => disk.dir(&segments).map(|_| Done::Unit),
+            Call::List => disk.list(&path).map(Done::Names),
+            Call::CreateDir => disk.create_dir(key, &path).map(|()| Done::Unit),
+            Call::Remove => disk.remove(&path).map(|()| Done::Unit),
+            Call::SyncDir => disk.sync_dir(&path).map(|()| Done::Unit),
             Call::Free => Ok(Done::Free(disk.free())),
             Call::Write {
                 inode,
@@ -275,7 +278,10 @@ impl Files {
                 let bytes = file.read(range, &before, &writes, &mut self.rng);
                 Ok(Done::Read(bytes))
             }
-            Call::Sync { .. } => Ok(Done::Unit),
+            Call::Sync { inode } => {
+                disk.file(*inode).sync(key);
+                Ok(Done::Unit)
+            }
         };
         if let Some(inode) = call.inode() {
             disk.release(inode);
@@ -325,6 +331,42 @@ impl Files {
             self.disks[node].release(inode);
         }
         (None, ended.held)
+    }
+
+    /// Cuts the power of `node` at true time `at`, whose calls in flight have all
+    /// dropped: each write ends now as a dropped write, the other calls have no
+    /// effect, and the disk keeps what is durable. Hashes each end into `digest`.
+    /// Returns the blocks of the calls, for the caller to drop after it releases the
+    /// lock.
+    pub(crate) fn cut_power(
+        &mut self,
+        node: usize,
+        at: Monotonic,
+        digest: &mut DefaultHasher,
+    ) -> Vec<Held> {
+        let flights = &self.flights;
+        self.queue.retain(|(_, key)| flights[key].node != node);
+        let (cut, flights) = mem::take(&mut self.flights)
+            .into_iter()
+            .partition(|(_, flight)| flight.node == node);
+        self.flights = flights;
+        let mut orphans = Vec::new();
+        for (key, flight) in cut {
+            let kind = mem::discriminant(&flight.call);
+            let (ok, held) = if let Call::Write { .. } = flight.call {
+                let ended = self.apply(key, flight);
+                (ended.result.is_ok(), ended.held)
+            } else {
+                if let Some(inode) = flight.call.inode() {
+                    self.disks[node].release(inode);
+                }
+                (false, flight.held)
+            };
+            (at, key, kind, ok).hash(digest);
+            orphans.extend(held);
+        }
+        self.disks[node].cut_power(&mut self.rng);
+        orphans
     }
 
     /// Closes a descriptor of file `inode` of `node`.

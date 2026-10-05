@@ -10,7 +10,7 @@ use types::channel::Slot;
 
 use crate::entry::{self, Entry, Header};
 use crate::record;
-use crate::wal::{Full, Position, Writer};
+use crate::wal::{Full, Plan, Writer};
 
 /// The most entries one record holds, and the most parts: with the header block,
 /// one record is one vectored write within `IOV_MAX`.
@@ -24,9 +24,9 @@ const _: () = assert!(META_LEN <= 1 << 16, "the table fits one 64 KiB block");
 
 /// The entries of one group commit, in append order. The first push takes the block
 /// for the record header and the table and the block for a wrap header, so that
-/// [`close`](Self::close) allocates nothing. [`Closed::clear`] gives the group back
-/// with its capacity, so groups that alternate between the handle and the commit
-/// task make no heap allocation per commit.
+/// [`close`](Self::close) and [`Closed::seal`] allocate nothing. [`Sealed::clear`]
+/// gives the group back with its capacity, so groups that alternate between the
+/// handle and the commit task make no heap allocation per commit.
 #[derive(Debug, Default)]
 pub(crate) struct Group {
     headers: Vec<Header>,
@@ -143,19 +143,19 @@ impl Group {
         Ok(())
     }
 
-    /// Plans the record with `writer` and writes its header and the entry table at
-    /// the end of the group's block, in front of the parts.
+    /// Places the record with `writer` and writes the entry table at the end of the
+    /// group's block, in front of the parts. [`Closed::seal`] makes the headers.
     ///
     /// # Panics
     ///
     /// When the group is empty.
     pub(crate) fn close(mut self, writer: &mut Writer) -> Closed {
-        let (Some(mut meta), Some(mut wrap)) = (self.meta.take(), self.wrap.take())
-        else {
+        let (Some(mut meta), Some(wrap)) = (self.meta.take(), self.wrap.take()) else {
             panic!("invariant: an empty group has no record");
         };
+        let table = entry::table_len(self.headers.len());
         let used = record::HEADER_LEN
-            .checked_add(entry::table_len(self.headers.len()))
+            .checked_add(table)
             .expect("invariant: a table fits in memory");
         let start = meta.len().checked_sub(used).unwrap_or_else(|| {
             panic!(
@@ -165,21 +165,62 @@ impl Group {
             )
         });
         let (_, tail) = meta.split_at_mut(start);
-        let (header, table) = tail.split_at_mut(record::HEADER_LEN);
+        let (_, table) = tail.split_at_mut(record::HEADER_LEN);
         entry::write_table(&self.headers, table);
-        let parts = self.writes.iter().map(|part| &**part);
-        let plan = writer
-            .append(iter::once(&*table).chain(parts))
-            .unwrap_or_else(|full| {
-                panic!(
-                    "invariant: a closed group needs {} bytes of the ring, {} are \
-                     free",
-                    full.needed, full.free
-                )
-            });
-        header.copy_from_slice(&plan.record.header);
-        self.writes.insert(0, meta.freeze().skip(start));
-        let wrap = plan.wrap.map(|write| {
+        let body = table
+            .len()
+            .checked_add(self.bytes)
+            .expect("invariant: a body fits in usize");
+        let plan = writer.append(body).unwrap_or_else(|full| {
+            panic!(
+                "invariant: a closed group needs {} bytes of the ring, {} are free",
+                full.needed, full.free
+            )
+        });
+        Closed {
+            group: self,
+            plan,
+            meta,
+            wrap,
+            start,
+        }
+    }
+}
+
+/// A group whose record has its place in the ring and its table in the meta
+/// block. [`seal`](Self::seal) makes the headers once the chain value before the
+/// record is known.
+#[derive(Debug)]
+pub(crate) struct Closed {
+    group: Group,
+    plan: Plan,
+    meta: Unique,
+    /// The block for the wrap header. It goes back to the pool when the record
+    /// does not wrap.
+    wrap: Unique,
+    /// Where the record header starts in `meta`.
+    start: usize,
+}
+
+impl Closed {
+    /// Makes the record's headers from `chain`, the chain value of the record before
+    /// it, and returns the chain value after the record.
+    pub(crate) fn seal(self, chain: u32) -> (Sealed, u32) {
+        let Self {
+            mut group,
+            plan,
+            mut meta,
+            mut wrap,
+            start,
+        } = self;
+        let (_, tail) = meta.split_at_mut(start);
+        let (header, table) = tail.split_at_mut(record::HEADER_LEN);
+        let parts = group.writes.iter().map(|part| &**part);
+        let body = iter::once(&*table).chain(parts);
+        let (sealed, next) = plan.seal(chain, body);
+        header.copy_from_slice(&sealed.record.header);
+        group.writes.insert(0, meta.freeze().skip(start));
+        let wrap = sealed.wrap.map(|write| {
             let start =
                 wrap.len()
                     .checked_sub(record::HEADER_LEN)
@@ -193,26 +234,27 @@ impl Group {
             header.copy_from_slice(&write.header);
             (write.place, wrap.freeze().skip(start))
         });
-        Closed {
-            group: self,
-            place: plan.record.place,
+        let sealed = Sealed {
+            group,
+            place: plan.place,
             next: plan.next,
             wrap,
-        }
+        };
+        (sealed, next)
     }
 }
 
-/// A group whose record is planned: each of its [`writes`](Self::writes) goes at
+/// A group whose record is complete: each of its [`writes`](Self::writes) goes at
 /// its place in the area.
 #[derive(Debug)]
-pub(crate) struct Closed {
+pub(crate) struct Sealed {
     group: Group,
     place: u64,
-    next: Position,
+    next: u64,
     wrap: Option<(u64, Block)>,
 }
 
-impl Closed {
+impl Sealed {
     /// The writes that put the record in the ring, in order: the wrap record when
     /// the record wraps, then the record's header, table, and entries back to back.
     pub(crate) fn writes(&self) -> impl Iterator<Item = (u64, &[Block])> {
@@ -224,9 +266,9 @@ impl Closed {
             .chain(iter::once((self.place, &*self.group.writes)))
     }
 
-    /// The boundary after the record.
+    /// The offset after the record.
     #[cfg_attr(not(test), expect(dead_code, reason = "trimming moves the tail"))]
-    pub(crate) fn next(&self) -> Position {
+    pub(crate) fn next(&self) -> u64 {
         self.next
     }
 
@@ -264,7 +306,7 @@ mod tests {
 
     use crate::entry::table_len;
     use crate::record::HEADER_LEN;
-    use crate::wal::{Cursor, Layout, Plan, Step, Window};
+    use crate::wal::{self, Cursor, Layout, Position, Step, Window};
 
     const BLOCKS: u64 = 32;
     const AREA: u64 = BLOCKS * 4096;
@@ -326,11 +368,32 @@ mod tests {
         usize::try_from(value).expect("an offset in the test area fits in usize")
     }
 
+    /// The smallest body a header can open holds one entry of no bytes.
+    #[test]
+    fn a_ring_that_a_header_opens_holds_one_entry() {
+        use crate::header;
+        let small = Layout::new(AREA, table_len(1)).expect("the sizes make a ring");
+        let block = header::Header::new(small, CHAIN).encode();
+        let opened = header::Header::decode(&block, &[0; 4096]).expect("a whole block");
+        let bytes = vec![0; index(AREA)];
+        let mut cursor = Cursor::new(opened.layout, opened.tail);
+        let Window { place, len } = cursor.window();
+        let step = cursor.next(&bytes[index(place)..index(place + len)]);
+        assert_eq!(step, Ok(Step::End));
+        let (writer, _) = cursor
+            .writer(opened.tail.offset(), 1)
+            .expect("the ring is empty");
+        let entry = entry(header(1, Path::Live, 0), &[]);
+        let pushed = Group::default().push(&pool(1 << 20), &writer, &[entry]);
+        assert_eq!(pushed, Ok(()));
+    }
+
     /// An area in memory and the writer that continues it, as a ring just made and
-    /// opened: it holds one restart record.
+    /// opened: it holds one restart record. `chain` is the chain value at the head.
     struct Area {
         bytes: Vec<u8>,
         writer: Writer,
+        chain: u32,
         pool: Pool,
         layout: Layout,
     }
@@ -347,25 +410,31 @@ mod tests {
             let Window { place, len } = cursor.window();
             let step = cursor.next(&bytes[index(place)..index(place + len)]);
             assert_eq!(step, Ok(Step::End), "a zeroed area ends at once");
-            let (writer, plan) = cursor.writer(start(), 1).expect("the ring is empty");
+            let (writer, sealed) = cursor.writer(0, 1).expect("the ring is empty");
+            let body = 1u32.to_le_bytes();
             let mut area = Self {
                 bytes,
                 writer,
+                chain: 1,
                 pool: pool(1 << 22),
                 layout,
             };
-            area.write(&plan, [1u32.to_le_bytes().as_slice()]);
+            area.write(&sealed, [&body[..]]);
             area
         }
 
-        /// Writes the plan's records, with `body` as the record's body.
-        fn write<'a>(&mut self, plan: &Plan, body: impl IntoIterator<Item = &'a [u8]>) {
-            if let Some(wrap) = plan.wrap {
+        /// Writes a sealed record, with `body` as the record's body.
+        fn write<'a>(
+            &mut self,
+            sealed: &wal::Sealed,
+            body: impl IntoIterator<Item = &'a [u8]>,
+        ) {
+            if let Some(wrap) = sealed.wrap {
                 let at = index(wrap.place);
                 self.bytes[at..at + HEADER_LEN].copy_from_slice(&wrap.header);
             }
-            let mut at = index(plan.record.place);
-            self.bytes[at..at + HEADER_LEN].copy_from_slice(&plan.record.header);
+            let mut at = index(sealed.record.place);
+            self.bytes[at..at + HEADER_LEN].copy_from_slice(&sealed.record.header);
             at += HEADER_LEN;
             for part in body {
                 self.bytes[at..at + part.len()].copy_from_slice(part);
@@ -373,10 +442,17 @@ mod tests {
             }
         }
 
-        /// Writes a closed group's records as the commit task does: each write's
-        /// blocks back to back at its place.
-        fn commit(&mut self, closed: &Closed) {
-            for (place, blocks) in closed.writes() {
+        /// Seals and writes a closed group's record as the commit task does: each
+        /// write's blocks back to back at its place.
+        fn commit(&mut self, closed: Closed) -> Sealed {
+            let (sealed, chain) = closed.seal(self.chain);
+            self.chain = chain;
+            self.put(&sealed);
+            sealed
+        }
+
+        fn put(&mut self, sealed: &Sealed) {
+            for (place, blocks) in sealed.writes() {
                 let mut at = index(place);
                 for part in blocks {
                     self.bytes[at..at + part.len()].copy_from_slice(part);
@@ -484,11 +560,11 @@ mod tests {
                     slots.push(slot(next.index));
                 }
                 let closed = group.close(&mut area.writer);
+                let sealed = area.commit(closed);
                 let headers: Vec<Header> = stored.iter().map(|(header, _)| *header).collect();
-                prop_assert_eq!(closed.headers(), headers.as_slice());
-                prop_assert_eq!(closed.slots(), slots.as_slice());
-                area.commit(&closed);
-                group = closed.clear();
+                prop_assert_eq!(sealed.headers(), headers.as_slice());
+                prop_assert_eq!(sealed.slots(), slots.as_slice());
+                group = sealed.clear();
                 prop_assert!(group.is_empty());
                 expected.push(stored);
             }
@@ -523,8 +599,8 @@ mod tests {
         };
         area.push(&mut group, first, &parts[..1]);
         area.push(&mut group, second, &parts[1..]);
-        let closed = group.close(&mut area.writer);
-        let writes: Vec<(u64, Vec<&[u8]>)> = closed
+        let (sealed, _) = group.close(&mut area.writer).seal(area.chain);
+        let writes: Vec<(u64, Vec<&[u8]>)> = sealed
             .writes()
             .map(|(place, blocks)| (place, blocks.iter().map(|part| &**part).collect()))
             .collect();
@@ -536,8 +612,45 @@ mod tests {
         meta.resize(HEADER_LEN + table_len(2), 0);
         entry::write_table(&[first, second], &mut meta[HEADER_LEN..]);
         assert_eq!(parts, &[meta.as_slice(), b"abc", b"de"]);
-        assert_eq!(closed.headers(), [first, second]);
-        assert_eq!(closed.slots(), [slot(1), slot(2)]);
+        assert_eq!(sealed.headers(), [first, second]);
+        assert_eq!(sealed.slots(), [slot(1), slot(2)]);
+    }
+
+    /// Two groups closed before either is sealed read back when the second is
+    /// sealed from the chain value after the first, and not when it is sealed from
+    /// the value before the first.
+    #[test]
+    fn seal_chains_each_record_from_the_one_before() {
+        let close_two = |area: &mut Area| {
+            let mut first = Group::default();
+            let mut second = Group::default();
+            let a = block(&area.pool, b"a");
+            let b = block(&area.pool, b"b");
+            area.push(&mut first, header(1, Path::Live, 0), &[a]);
+            area.push(&mut second, header(2, Path::Live, 0), &[b]);
+            (
+                first.close(&mut area.writer),
+                second.close(&mut area.writer),
+            )
+        };
+        let mut right = Area::new();
+        let (first, second) = close_two(&mut right);
+        let (a, chain) = first.seal(right.chain);
+        let (b, _) = second.seal(chain);
+        right.put(&a);
+        right.put(&b);
+        assert_eq!(right.walk().len(), 2);
+        let mut wrong = Area::new();
+        let (first, second) = close_two(&mut wrong);
+        let (a, _) = first.seal(wrong.chain);
+        let (b, _) = second.seal(wrong.chain);
+        wrong.put(&a);
+        wrong.put(&b);
+        assert_eq!(
+            wrong.walk().len(),
+            1,
+            "the second is sealed from the wrong chain"
+        );
     }
 
     /// Ten records of three blocks follow the restart block, so a record of two
@@ -552,19 +665,20 @@ mod tests {
             let part = block(&area.pool, &vec![7; BODY_MAX - table_len(1)]);
             area.push(&mut group, header(1, Path::Live, 2 * first), &[part]);
             let closed = group.close(&mut area.writer);
-            area.commit(&closed);
+            let sealed = area.commit(closed);
             if first == 0 {
-                tail = closed.next();
+                tail = Position::new(sealed.next(), area.chain).expect("aligned");
             }
-            group = closed.clear();
+            group = sealed.clear();
         }
-        assert_eq!(area.writer.head().offset(), 31 * 4096);
+        assert_eq!(area.writer.head(), 31 * 4096);
         assert_eq!(tail.offset(), 4 * 4096);
-        area.writer.release(tail);
+        area.writer.release(tail.offset());
         let part = block(&area.pool, &[7; 4096]);
         area.push(&mut group, header(1, Path::Live, 100), &[part]);
         let closed = group.close(&mut area.writer);
-        let writes: Vec<(u64, usize)> = closed
+        let sealed = area.commit(closed);
+        let writes: Vec<(u64, usize)> = sealed
             .writes()
             .map(|(place, blocks)| (place, blocks.len()))
             .collect();
@@ -573,7 +687,6 @@ mod tests {
             [(31 * 4096, 1), (0, 2)],
             "the wrap, then the record"
         );
-        area.commit(&closed);
         let bodies = area.walk_from(tail);
         assert_eq!(bodies.len(), 10);
         assert_eq!(bodies[9].len(), table_len(1) + 4096);
@@ -659,8 +772,7 @@ mod tests {
             match pushed {
                 Ok(()) => {
                     let closed = group.close(&mut area.writer);
-                    area.commit(&closed);
-                    group = closed.clear();
+                    group = area.commit(closed).clear();
                 }
                 Err(rejected) => break rejected,
             }
@@ -680,9 +792,10 @@ mod tests {
     #[test]
     fn a_first_entry_the_pool_has_no_block_for_changes_nothing() {
         let mut area = Area::new();
-        area.pool = pool(1 << 17);
+        let budget = 2 * block::footprint(META_LEN) - 1;
+        area.pool = pool(budget);
         let _held = area.pool.alloc(META_LEN).expect("the first block fits");
-        let available = (1 << 17) - area.pool.committed();
+        let available = budget - area.pool.committed();
         let mut group = Group::default();
         let rejected = group.push(
             &area.pool,
@@ -707,6 +820,7 @@ mod tests {
         }
         let lent = area.pool.committed();
         let closed = group.close(&mut area.writer);
+        let sealed = area.commit(closed);
         let capacity = |group: &Group| {
             (
                 group.headers.capacity(),
@@ -714,8 +828,8 @@ mod tests {
                 group.writes.capacity(),
             )
         };
-        let before = capacity(&closed.group);
-        let group = closed.clear();
+        let before = capacity(&sealed.group);
+        let group = sealed.clear();
         assert!(group.is_empty());
         assert_eq!(group.body_len_with(0, 0), table_len(0));
         assert_eq!(capacity(&group), before);
@@ -808,11 +922,9 @@ mod tests {
             let part = block(&area.pool, &vec![7; BODY_MAX - table_len(1)]);
             area.push(&mut group, header(1, Path::Live, 2 * first), &[part]);
             let closed = group.close(&mut area.writer);
-            area.commit(&closed);
-            group = closed.clear();
+            group = area.commit(closed).clear();
         }
-        area.writer
-            .release(Position::new(4096, CHAIN).expect("aligned"));
+        area.writer.release(4096);
         let big = block(&area.pool, &[7; 4000]);
         area.push(&mut group, header(1, Path::Live, 20), &[big]);
         let small = block(&area.pool, &[7; 100]);
@@ -824,11 +936,10 @@ mod tests {
         assert_eq!(rejected, Err(Rejected::Record));
         assert_eq!(group.headers.len(), 1);
         let closed = group.close(&mut area.writer);
-        area.commit(&closed);
-        group = closed.clear();
+        group = area.commit(closed).clear();
         assert_eq!(group.push(&area.pool, &area.writer, &batch), Ok(()));
-        let closed = group.close(&mut area.writer);
-        let places: Vec<u64> = closed.writes().map(|(place, _)| place).collect();
+        let (sealed, _) = group.close(&mut area.writer).seal(area.chain);
+        let places: Vec<u64> = sealed.writes().map(|(place, _)| place).collect();
         assert_eq!(places, [0], "the record wraps to the first block");
     }
 
@@ -846,7 +957,7 @@ mod tests {
     #[test]
     fn a_first_entry_the_pool_has_no_wrap_block_for_changes_nothing() {
         let mut area = Area::new();
-        area.pool = pool(65_664);
+        area.pool = pool(block::footprint(META_LEN) + 64);
         let mut group = Group::default();
         let rejected = group.push(
             &area.pool,
@@ -861,7 +972,7 @@ mod tests {
         assert!(group.is_empty());
         assert!(group.meta.is_none(), "the meta block goes back");
         area.pool.reclaim();
-        assert_eq!(area.pool.committed(), 65_600);
+        assert_eq!(area.pool.committed(), block::footprint(META_LEN));
     }
 
     #[test]

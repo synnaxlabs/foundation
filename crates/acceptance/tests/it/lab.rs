@@ -33,6 +33,10 @@ struct Member {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Node(usize);
 
+/// A live reader on one channel, opened with [`Lab::reader`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Reader;
+
 /// A join ticket. It is a secret, never written to a file.
 #[derive(Debug)]
 pub(crate) struct Ticket;
@@ -122,6 +126,33 @@ impl Lab {
         todo!("waits on #342")
     }
 
+    /// Makes `nodes` the members of one mesh, without a ticket.
+    pub(crate) fn mesh(&mut self, _nodes: &[Node]) {
+        todo!("waits on #462")
+    }
+
+    /// Creates the `f64` channel `channel`, whose home is `home`.
+    pub(crate) fn channel(&mut self, _home: Node, _channel: &str) {
+        todo!("waits on #462")
+    }
+
+    /// Opens a live reader on `channel` at `node`. It gets the samples written from
+    /// now on.
+    pub(crate) fn reader(&mut self, _node: Node, _channel: &str) -> Reader {
+        todo!("waits on #462")
+    }
+
+    /// Writes `values` to `channel` on `node`, one each millisecond, as the
+    /// simulation runs.
+    pub(crate) fn send(&mut self, _node: Node, _channel: &str, _values: &[f64]) {
+        todo!("waits on #462")
+    }
+
+    /// Every sample that `reader` got, in the order it got them.
+    pub(crate) fn received(&self, _reader: Reader) -> Vec<Sample> {
+        todo!("waits on #462")
+    }
+
     /// Creates a single-use join ticket on `admin`.
     pub(crate) fn ticket(&mut self, _admin: Node) -> Ticket {
         todo!("waits on #336")
@@ -160,17 +191,17 @@ impl Lab {
         _node: Node,
         _hcl: &str,
     ) -> (String, Vec<String>) {
-        todo!("waits on #307")
+        todo!("waits on #337")
     }
 
     /// Runs the MCP `apply` tool on `node` with a plan from [`Lab::mcp_plan`].
     pub(crate) fn mcp_apply(&mut self, _node: Node, _plan: &str) {
-        todo!("waits on #307")
+        todo!("waits on #337")
     }
 
     /// Attaches a simulated device to `node` at `address`.
     pub(crate) fn device(&mut self, _node: Node, _protocol: Protocol, _address: &str) {
-        todo!("waits on #338")
+        todo!("waits on #432, #434, #435, #436")
     }
 
     /// Attaches a simulated Influx store to `node` at `address`.
@@ -180,12 +211,12 @@ impl Lab {
 
     /// The value of `point` on the device at `address`.
     pub(crate) fn point(&self, _address: &str, _point: &str) -> f64 {
-        todo!("waits on #338")
+        todo!("waits on #432, #434, #435, #436")
     }
 
     /// Sets the value of `point` on the device at `address`.
     pub(crate) fn set_point(&mut self, _address: &str, _point: &str, _value: f64) {
-        todo!("waits on #338")
+        todo!("waits on #432, #434, #435, #436")
     }
 
     /// Writes `count` samples to `channel` on `node` at `rate` samples per second,
@@ -265,7 +296,8 @@ impl Lab {
         self.link(a, b, self.link);
     }
 
-    fn link(&mut self, a: Node, b: Node, config: sim::link::Config) {
+    /// Sets every link between `a` and `b` to `config`.
+    pub(crate) fn link(&mut self, a: Node, b: Node, config: sim::link::Config) {
         let (a, b) = (&self.members[a.0].host, &self.members[b.0].host);
         self.sim.link(a, b, config);
         self.sim.link(b, a, config);
@@ -281,6 +313,12 @@ impl Lab {
         if let Err(e) = self.sim.run_for(Span::from_nanos(nanos)) {
             panic!("{e}");
         }
+    }
+
+    /// A hash of every scheduling choice and datagram so far. One key gives one
+    /// digest.
+    pub(crate) fn digest(&self) -> u64 {
+        self.sim.digest()
     }
 
     /// Stops every node and runs the simulation until each has ended.

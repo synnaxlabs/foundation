@@ -28,6 +28,12 @@ mod at {
     pub(super) const SERIES: usize = 8;
     pub(super) const FORM: usize = 12;
     pub(super) const PATH: usize = 13;
+
+    /// Offsets of a range's fields after its group, which is at 0.
+    pub(super) mod range {
+        pub(in crate::frame) const COUNT: usize = 4;
+        pub(in crate::frame) const SEQ: usize = 8;
+    }
 }
 
 /// One of an index's two write paths, each with its own seq. Backfill is late data
@@ -102,6 +108,18 @@ pub struct Range {
     pub seq: u64,
     /// How many samples each series of the group holds.
     pub count: u32,
+}
+
+impl Range {
+    /// The range of `group` in the frame `bytes`, or `None` when it is absent.
+    fn find(bytes: &[u8], group: u32) -> Option<Self> {
+        let (ranges, ..) = split(bytes);
+        let range = &ranges[search(ranges, group)?];
+        Some(Self {
+            seq: u64::from_le_bytes(get(range, at::range::SEQ)),
+            count: u32::from_le_bytes(get(range, at::range::COUNT)),
+        })
+    }
 }
 
 /// Why [`Draft::new`] refused a frame.
@@ -205,7 +223,7 @@ impl Draft {
             .filter(|&entry| set.index(entry) == entry);
         for (range, index) in ranges.iter_mut().zip(indexes) {
             put(range, 0, &set.entries()[index].group.to_le_bytes());
-            range[4..].fill(0);
+            range[at::range::COUNT..].fill(0);
         }
         for &(entry, _) in series {
             if search(ranges, set.entries()[entry].group).is_none() {
@@ -245,18 +263,54 @@ impl Draft {
         })
     }
 
-    /// Sets the samples of group `group`.
+    /// The key set the draft's entries number into.
+    #[must_use]
+    pub fn key_set(&self) -> key_set::Key {
+        key_set::Key::new(u32::from_le_bytes(get(&self.0, at::KEY_SET)))
+    }
+
+    /// How the draft's series hold their samples.
+    #[must_use]
+    pub fn form(&self) -> Form {
+        Form::from_byte(self.0[at::FORM])
+    }
+
+    /// The samples of group `group`, or `None` when its index is absent. Time is
+    /// logarithmic in the number of present groups.
+    #[must_use]
+    pub fn range(&self, group: u32) -> Option<Range> {
+        Range::find(&self.0, group)
+    }
+
+    /// Sets how many samples each series of group `group` holds.
     ///
     /// # Panics
     ///
     /// If `group` is absent from the frame.
-    pub fn set_range(&mut self, group: u32, range: Range) {
+    pub fn set_count(&mut self, group: u32, count: u32) {
+        put(
+            self.record_mut(group),
+            at::range::COUNT,
+            &count.to_le_bytes(),
+        );
+    }
+
+    /// Sets the seq of the first sample of group `group`, on the path the frame
+    /// freezes on.
+    ///
+    /// # Panics
+    ///
+    /// If `group` is absent from the frame.
+    pub fn set_seq(&mut self, group: u32, seq: u64) {
+        put(self.record_mut(group), at::range::SEQ, &seq.to_le_bytes());
+    }
+
+    fn record_mut(&mut self, group: u32) -> &mut [u8; RANGE] {
         let (ranges, ..) = split_mut(&mut self.0);
         let Some(n) = search(ranges, group) else {
             panic!("group {group} is absent from the frame");
         };
-        put(&mut ranges[n], 4, &range.count.to_le_bytes());
-        put(&mut ranges[n], 8, &range.seq.to_le_bytes());
+        &mut ranges[n]
     }
 
     /// The finished frame on `path`, the path whose seq its ranges count on.
@@ -294,12 +348,7 @@ impl Frame {
     /// logarithmic in the number of present groups.
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
-        let (ranges, ..) = split(&self.0);
-        let range = &ranges[search(ranges, group)?];
-        Some(Range {
-            seq: u64::from_le_bytes(get(range, 8)),
-            count: u32::from_le_bytes(get(range, 4)),
-        })
+        Range::find(&self.0, group)
     }
 
     /// The series bytes of `entry`, or `None` when it is absent. Time is logarithmic
@@ -587,7 +636,7 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
-    use crate::channel::Slot;
+    use crate::channel;
     use crate::sample::{Scalar, Type};
     use key_set::{Group, Interner};
     use proptest::collection::vec;
@@ -596,8 +645,17 @@ mod tests {
     const F64: Type = Type::Scalar(Scalar::F64);
     const U8: Type = Type::Scalar(Scalar::U8);
 
-    fn slot(n: u32) -> Slot {
-        Slot::new(n)
+    fn key(n: u32) -> channel::Key {
+        channel::Key::from_u128(u128::from(n))
+    }
+
+    /// An interner where key `n` has slot `n`, for each `n` below 1000.
+    fn interner() -> Interner {
+        let mut interner = Interner::new();
+        for n in 0..1000 {
+            interner.slots().assign(key(n));
+        }
+        interner
     }
 
     fn pool(budget: usize) -> block::Pool {
@@ -606,41 +664,41 @@ mod tests {
         block::Pool::new(config, memory)
     }
 
-    /// One group: index slot 1 (entry 0), then slots 2 and 3 (entries 1 and 2).
+    /// One group: index key 1 (entry 0), then keys 2 and 3 (entries 1 and 2).
     fn one_group(interner: &mut Interner) -> std::sync::Arc<KeySet> {
         interner.intern(&[Group {
-            index: slot(1),
-            data: &[(slot(2), F64), (slot(3), U8)],
+            index: key(1),
+            data: &[(key(2), F64), (key(3), U8)],
         }])
     }
 
-    /// Two groups: index slot 1 with slot 2, and index slot 3 with slot 4.
+    /// Two groups: index key 1 with key 2, and index key 3 with key 4.
     fn two_groups() -> std::sync::Arc<KeySet> {
-        Interner::new().intern(&[
+        interner().intern(&[
             Group {
-                index: slot(1),
-                data: &[(slot(2), F64)],
+                index: key(1),
+                data: &[(key(2), F64)],
             },
             Group {
-                index: slot(3),
-                data: &[(slot(4), F64)],
+                index: key(3),
+                data: &[(key(4), F64)],
             },
         ])
     }
 
     /// The error of a draft of `series` over [`one_group`].
     fn refusal(series: &[(usize, usize)]) -> Error {
-        let set = one_group(&mut Interner::new());
+        let set = one_group(&mut interner());
         let result = Draft::new(&pool(1 << 16), &set, Form::Raw, series);
         result.unwrap_err()
     }
 
     #[test]
     fn lays_out_a_frame_byte_for_byte() {
-        let mut interner = Interner::new();
+        let mut interner = interner();
         for n in 10..13 {
             interner.intern(&[Group {
-                index: slot(n),
+                index: key(n),
                 data: &[],
             }]);
         }
@@ -653,7 +711,8 @@ mod tests {
         let mut draft = Draft::new(&pool, &set, Form::Encoded, &series).unwrap();
         draft.series(0).unwrap().copy_from_slice(&[0xaa; 3]);
         draft.series(2).unwrap().copy_from_slice(&[1, 2]);
-        draft.set_range(0, Range { seq: 7, count: 2 });
+        draft.set_count(0, 2);
+        draft.set_seq(0, 7);
         let frame = draft.freeze(Path::Backfill);
         let mut expected = Vec::new();
         for n in [3_u32, 1, 2] {
@@ -694,6 +753,25 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_header_of_a_draft() {
+        let mut interner = interner();
+        // A key wider than one byte, and unlike the counts in the header.
+        for n in 0..256 {
+            interner.intern(&[Group {
+                index: key(1000 + n),
+                data: &[],
+            }]);
+        }
+        let set = one_group(&mut interner);
+        assert_eq!(set.key().get(), 256);
+        let pool = pool(1 << 16);
+        let draft = Draft::new(&pool, &set, Form::Encoded, &[(0, 8)]).unwrap();
+        assert_eq!(draft.key_set(), set.key());
+        assert_eq!(draft.form(), Form::Encoded);
+        assert_eq!(draft.freeze(Path::Live).key_set(), set.key());
+    }
+
+    #[test]
     fn reads_the_header_and_absent_parts() {
         let set = two_groups();
         let pool = pool(1 << 16);
@@ -725,7 +803,7 @@ mod tests {
             (&[(0, 0), (2, 0)], 128),
             (&[(0, 24)], 128),
             (&[(0, 25)], 192),
-            (&[(0, 89)], 320),
+            (&[(0, 89)], 256),
             (&[(0, 8), (1, 8), (2, 4000)], 4160),
         ];
         for (series, charge) in cases {
@@ -866,11 +944,11 @@ mod tests {
     fn finds_ranges_and_series_among_many() {
         let groups: Vec<Group<'_>> = (0..130)
             .map(|n| Group {
-                index: slot(n),
+                index: key(n),
                 data: &[],
             })
             .collect();
-        let set = Interner::new().intern(&groups);
+        let set = interner().intern(&groups);
         let pool = pool(1 << 16);
         let series = [(0, 8), (64, 8), (129, 8)];
         let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
@@ -880,7 +958,8 @@ mod tests {
                 .unwrap()
                 .fill(u8::try_from(seq).unwrap());
             let group = u32::try_from(entry).unwrap();
-            draft.set_range(group, Range { seq, count: 1 });
+            draft.set_count(group, 1);
+            draft.set_seq(group, seq);
         }
         let frame = draft.freeze(Path::Live);
         assert_eq!(frame.range(64), Some(Range { seq: 2, count: 1 }));
@@ -893,7 +972,7 @@ mod tests {
     #[test]
     fn returns_the_pool_error() {
         let pool = pool(512);
-        let set = one_group(&mut Interner::new());
+        let set = one_group(&mut interner());
         let result = Draft::new(&pool, &set, Form::Raw, &[(0, 1000)]);
         let error = result.unwrap_err();
         let cause = block::Error::TooLarge {
@@ -913,8 +992,8 @@ mod tests {
 
     #[test]
     fn returns_the_pool_error_past_u32_max_bytes() {
-        let set = Interner::new().intern(&[Group {
-            index: slot(1),
+        let set = interner().intern(&[Group {
+            index: key(1),
             data: &[],
         }]);
         let pool = pool(1 << 16);
@@ -989,12 +1068,40 @@ mod tests {
     }
 
     #[test]
+    fn sets_count_and_seq_apart() {
+        let pool = pool(1 << 16);
+        let series = [(0, 8), (2, 8)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        assert_eq!(draft.range(0), Some(Range::default()));
+        draft.set_count(0, 5);
+        assert_eq!(draft.range(0), Some(Range { seq: 0, count: 5 }));
+        draft.set_seq(0, 9);
+        assert_eq!(draft.range(0), Some(Range { seq: 9, count: 5 }));
+        draft.set_seq(1, 4);
+        draft.set_count(1, 3);
+        draft.set_count(0, 6);
+        assert_eq!(draft.range(2), None);
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.range(0), Some(Range { seq: 9, count: 6 }));
+        assert_eq!(frame.range(1), Some(Range { seq: 4, count: 3 }));
+    }
+
+    #[test]
     #[should_panic(expected = "group 1 is absent from the frame")]
-    fn refuses_a_range_for_an_absent_group() {
+    fn refuses_a_count_for_an_absent_group() {
         let pool = pool(1 << 16);
         let series = [(0, 1)];
         let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
-        draft.set_range(1, Range::default());
+        draft.set_count(1, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "group 1 is absent from the frame")]
+    fn refuses_a_seq_for_an_absent_group() {
+        let pool = pool(1 << 16);
+        let series = [(0, 1)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        draft.set_seq(1, 1);
     }
 
     #[derive(Clone, Debug)]
@@ -1007,7 +1114,8 @@ mod tests {
         present: Vec<bool>,
         /// Each entry's series length, by entry position.
         lens: Vec<usize>,
-        ranges: Vec<(u64, u32)>,
+        /// Each group's seq and count, and whether the seq is set first.
+        ranges: Vec<(u64, u32, bool)>,
         path: Path,
         form: Form,
         /// Whether the draft is filled through `iter_mut` or by entry.
@@ -1024,7 +1132,7 @@ mod tests {
                     vec(any::<bool>(), n),
                     vec(any::<bool>(), n * 41),
                     vec(0_usize..40, n * 41),
-                    vec(any::<(u64, u32)>(), n),
+                    vec(any::<(u64, u32, bool)>(), n),
                     prop_oneof![Just(Path::Live), Just(Path::Backfill)],
                     prop_oneof![Just(Form::Raw), Just(Form::Encoded)],
                     any::<bool>(),
@@ -1052,22 +1160,22 @@ mod tests {
 
     /// The key set of `case` and the series of its frame.
     fn shape(case: &Case) -> (std::sync::Arc<KeySet>, Vec<(usize, usize)>) {
-        let data: Vec<Vec<(Slot, Type)>> = (0..case.data.len())
+        let data: Vec<Vec<(channel::Key, Type)>> = (0..case.data.len())
             .map(|g| {
                 let base = u32::try_from(g * 100).unwrap();
                 let count = u32::try_from(case.data[g]).unwrap();
-                (0..count).map(|j| (slot(base + 2 * j + 1), F64)).collect()
+                (0..count).map(|j| (key(base + 2 * j + 1), F64)).collect()
             })
             .collect();
         let groups: Vec<Group<'_>> = data
             .iter()
             .enumerate()
             .map(|(g, data)| Group {
-                index: slot(u32::try_from(g * 100 + 40).unwrap()),
+                index: key(u32::try_from(g * 100 + 40).unwrap()),
                 data,
             })
             .collect();
-        let set = Interner::new().intern(&groups);
+        let set = interner().intern(&groups);
         let series = (0..set.entries().len())
             .filter(|&entry| {
                 let group = usize::try_from(set.entries()[entry].group).unwrap();
@@ -1120,15 +1228,22 @@ mod tests {
         let mut draft = Draft::new(&pool, &set, case.form, &series)
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
         let taken = to_u64(pool.committed() - before);
+        prop_assert_eq!(draft.key_set(), set.key());
+        prop_assert_eq!(draft.form(), case.form);
         fill(&mut draft, &series, entries, case.in_order)?;
         let mut ranges = Vec::new();
-        for ((group, &(seq, count)), &present) in
+        for ((group, &(seq, count, seq_first)), &present) in
             (0_u32..).zip(&case.ranges).zip(&case.groups)
         {
             let range = present.then_some(Range { seq, count });
-            if let Some(range) = range {
-                draft.set_range(group, range);
+            if present && seq_first {
+                draft.set_seq(group, seq);
+                draft.set_count(group, count);
+            } else if present {
+                draft.set_count(group, count);
+                draft.set_seq(group, seq);
             }
+            prop_assert_eq!(draft.range(group), range);
             ranges.push(range);
         }
         ranges.push(None);

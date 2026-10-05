@@ -1,14 +1,18 @@
 use std::fmt::Write as _;
 
+use document::encoding::{self, TooDeep};
 use document::value::{Call, Kind, Value};
-use document::{Block, Document, Map, Span};
+use document::{Attribute, Block, Document, Map, Span};
 
 use crate::lex;
-use crate::parse::{Ends, enter, literal};
+use crate::parse::{Ends, literal, opens_for};
 use crate::{Error, Unwritable};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
 const WIDTH: usize = 88;
+
+/// What each level of a body or a value goes in by.
+pub(crate) const INDENT: &str = "  ";
 
 /// Writes `document` as HCL text that [`read`](crate::read) reads as an equal
 /// Document.
@@ -25,15 +29,18 @@ const WIDTH: usize = 88;
 /// # Errors
 ///
 /// Returns [`Error::Unwritable`] for each part that HCL text cannot hold, in
-/// Document order.
+/// Document order. A Document nested deeper than [`encoding::DEPTH_MAX`] gives only
+/// [`Unwritable::Depth`], at the first level past the limit.
 pub fn write(document: &Document) -> Result<String, Vec<Error>> {
-    let mut writer = Writer::default();
-    writer.body(document, 0, 0);
-    if writer.errors.is_empty() {
-        Ok(writer.out)
-    } else {
-        Err(writer.errors)
+    if let Err(TooDeep { span }) = encoding::check(document) {
+        return Err(vec![Error::Unwritable {
+            span,
+            part: Unwritable::Depth,
+        }]);
     }
+    let mut writer = Writer::default();
+    writer.body(document.attributes.iter(), &document.blocks, 0, false);
+    writer.finish()
 }
 
 /// A value with items.
@@ -75,35 +82,74 @@ impl<'a> Items<'a> {
     }
 }
 
+/// Recurses once per level, so it runs only on a Document that [`encoding::check`]
+/// accepts.
 #[derive(Default)]
-struct Writer {
+pub(crate) struct Writer<'a> {
     out: String,
     errors: Vec<Error>,
+    /// What each line starts with, before its indent.
+    margin: &'a str,
+    /// The column where the first line starts.
+    start: usize,
 }
 
-impl Writer {
-    /// Writes the attributes and blocks of a body, `indent` levels in.
-    fn body(&mut self, document: &Document, depth: usize, indent: usize) {
-        for attribute in document.attributes.iter() {
+impl<'a> Writer<'a> {
+    /// A writer for text that goes at column `start` of a line that starts with
+    /// `margin`.
+    pub(crate) fn new(margin: &'a str, start: usize) -> Self {
+        Self {
+            margin,
+            start,
+            ..Self::default()
+        }
+    }
+
+    /// The text written, or each part that HCL text cannot hold.
+    pub(crate) fn finish(self) -> Result<String, Vec<Error>> {
+        if self.errors.is_empty() {
+            Ok(self.out)
+        } else {
+            Err(self.errors)
+        }
+    }
+
+    /// Writes each attribute on its own lines, then each block after a blank line,
+    /// `indent` levels in. `preceded` tells that an item of the body is before them,
+    /// so the first block gets a blank line too.
+    pub(crate) fn body<'d>(
+        &mut self,
+        attributes: impl IntoIterator<Item = &'d Attribute>,
+        blocks: impl IntoIterator<Item = &'d Block>,
+        indent: usize,
+        preceded: bool,
+    ) {
+        let mut written = preceded;
+        for attribute in attributes {
             self.pad(indent);
             if lex::word(&attribute.key) != Some(lex::Kind::Identifier) {
                 self.refuse(attribute.key_span, Unwritable::Key);
             }
             self.out.push_str(&attribute.key);
             self.out.push_str(" = ");
-            self.value(&attribute.value, depth, indent, Ends::Line);
+            self.value(&attribute.value, indent, Ends::Line);
             self.out.push('\n');
+            written = true;
         }
-        for (i, block) in document.blocks.iter().enumerate() {
-            if i > 0 || document.attributes.iter().len() > 0 {
-                self.out.push('\n');
+        for block in blocks {
+            if written {
+                self.gap();
             }
-            self.block(block, depth, indent);
+            self.pad(indent);
+            self.block(block, indent);
+            self.out.push('\n');
+            written = true;
         }
     }
 
-    fn block(&mut self, block: &Block, depth: usize, indent: usize) {
-        self.pad(indent);
+    /// Writes a block from its keyword to its `}`, with its inner lines `indent`
+    /// levels in.
+    pub(crate) fn block(&mut self, block: &Block, indent: usize) {
         if lex::word(&block.keyword) != Some(lex::Kind::Identifier) {
             self.refuse(block.keyword_span, Unwritable::Keyword);
         }
@@ -112,28 +158,31 @@ impl Writer {
             self.out.push(' ');
             quoted(&mut self.out, &label.text);
         }
-        let Some(depth) = enter(depth) else {
-            return self.refuse(block.span, Unwritable::Depth);
-        };
         if block.body == Document::default() {
-            self.out.push_str(" {}\n");
+            self.out.push_str(" {}");
             return;
         }
         self.out.push_str(" {\n");
-        self.body(&block.body, depth, indent.saturating_add(1));
+        let body = &block.body;
+        self.body(
+            body.attributes.iter(),
+            &body.blocks,
+            indent.saturating_add(1),
+            false,
+        );
         self.pad(indent);
-        self.out.push_str("}\n");
+        self.out.push('}');
     }
 
     /// Writes a value on one line when the line fits, and otherwise with each item on
     /// its own line. A line with a heredoc in it is more than one line, so it does not
     /// fit.
-    fn value(&mut self, value: &Value, depth: usize, indent: usize, ends: Ends) {
+    pub(crate) fn value(&mut self, value: &Value, indent: usize, ends: Ends) {
         let Some(items) = Items::of(&value.kind) else {
-            return self.line(value, depth, ends);
+            return self.line(value, ends);
         };
         let mut line = Self::default();
-        line.line(value, depth, ends);
+        line.line(value, ends);
         let comma = usize::from(ends == Ends::Comma);
         let width = self
             .column()
@@ -144,21 +193,18 @@ impl Writer {
             self.errors.append(&mut line.errors);
             return;
         }
-        let Some(depth) = enter(depth) else {
-            return self.refuse(value.span, Unwritable::Depth);
-        };
         let inner = indent.saturating_add(1);
         self.open(items);
         match items {
-            Items::List(values) => self.items(values, depth, inner),
-            Items::Call(call) => self.items(&call.arguments, depth, inner),
+            Items::List(values) => self.items(values, inner),
+            Items::Call(call) => self.items(&call.arguments, inner),
             Items::Map(map) => {
                 for attribute in map.iter() {
                     self.out.push('\n');
                     self.pad(inner);
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.value(&attribute.value, depth, inner, Ends::Line);
+                    self.value(&attribute.value, inner, Ends::Line);
                 }
             }
         }
@@ -170,17 +216,17 @@ impl Writer {
     }
 
     /// Writes each item on its own line, `indent` levels in, with a `,` after it.
-    fn items(&mut self, values: &[Value], depth: usize, indent: usize) {
+    fn items(&mut self, values: &[Value], indent: usize) {
         for item in values {
             self.out.push('\n');
             self.pad(indent);
-            self.value(item, depth, indent, Ends::Comma);
+            self.value(item, indent, Ends::Comma);
             self.out.push(',');
         }
     }
 
     /// Writes a value on one line, except a heredoc.
-    fn line(&mut self, value: &Value, depth: usize, ends: Ends) {
+    fn line(&mut self, value: &Value, ends: Ends) {
         let items = match &value.kind {
             Kind::Bool(b) => {
                 return self.out.push_str(if *b { "true" } else { "false" });
@@ -210,19 +256,16 @@ impl Writer {
             Kind::Call(call) => Items::Call(call),
             Kind::Map(map) => Items::Map(map),
         };
-        let Some(depth) = enter(depth) else {
-            return self.refuse(value.span, Unwritable::Depth);
-        };
         self.open(items);
         match items {
-            Items::List(values) => self.line_items(values, depth),
-            Items::Call(call) => self.line_items(&call.arguments, depth),
+            Items::List(values) => self.line_items(values),
+            Items::Call(call) => self.line_items(&call.arguments),
             Items::Map(map) => {
                 for (i, attribute) in map.iter().enumerate() {
                     self.out.push_str(if i == 0 { " " } else { ", " });
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.line(&attribute.value, depth, Ends::Line);
+                    self.line(&attribute.value, Ends::Line);
                 }
                 if items.len() > 0 {
                     self.out.push(' ');
@@ -232,19 +275,24 @@ impl Writer {
         self.out.push(items.close());
     }
 
-    fn line_items(&mut self, values: &[Value], depth: usize) {
+    fn line_items(&mut self, values: &[Value]) {
         for (i, item) in values.iter().enumerate() {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            self.line(item, depth, Ends::Comma);
+            self.line(item, Ends::Comma);
         }
     }
 
     /// Writes what comes before the items: `[`, the function and `(`, or `{`.
     fn open(&mut self, items: Items<'_>) {
         match items {
-            Items::List(_) => self.out.push('['),
+            Items::List(values) => {
+                if let Some(first) = values.first() {
+                    self.refuse_for(first);
+                }
+                self.out.push('[');
+            }
             Items::Call(call) => {
                 if lex::word(&call.function) != Some(lex::Kind::Identifier) {
                     self.refuse(call.function_span, Unwritable::Function);
@@ -260,25 +308,50 @@ impl Writer {
         self.errors.push(Error::Unwritable { span, part });
     }
 
+    /// Refuses the first item of a list at its first word when HCL reads that word
+    /// after `[` as the start of a `for` expression.
+    fn refuse_for(&mut self, item: &Value) {
+        let span = match &item.kind {
+            Kind::Reference(name) if opens_for(name.as_str()) => item.span,
+            // A call such as `for.x(1)` is refused for its function.
+            Kind::Call(call) if &*call.function == "for" => call.function_span,
+            Kind::Reference(_)
+            | Kind::Call(_)
+            | Kind::Bool(_)
+            | Kind::Integer(_)
+            | Kind::Float(_)
+            | Kind::String(_)
+            | Kind::List(_)
+            | Kind::Map(_) => return,
+        };
+        self.refuse(span, Unwritable::For);
+    }
+
+    /// Writes the blank line between an item and a block after it.
+    pub(crate) fn gap(&mut self) {
+        self.out.push('\n');
+    }
+
     fn pad(&mut self, indent: usize) {
+        self.out.push_str(self.margin);
         for _ in 0..indent {
-            self.out.push_str("  ");
+            self.out.push_str(INDENT);
         }
     }
 
-    /// The characters on the last line so far.
+    /// The column after the last character so far.
     fn column(&self) -> usize {
-        self.out
-            .rsplit('\n')
-            .next()
-            .map_or(0, |line| line.chars().count())
+        match self.out.rsplit_once('\n') {
+            Some((_, line)) => line.chars().count(),
+            None => self.start.saturating_add(self.out.chars().count()),
+        }
     }
 }
 
 /// Writes a map key: bare when it is an identifier, and quoted when not. `for` is
 /// quoted, because HCL reads `{ for` as a `for` expression.
 fn key(out: &mut String, key: &str) {
-    if lex::word(key) == Some(lex::Kind::Identifier) && key != "for" {
+    if lex::word(key) == Some(lex::Kind::Identifier) && !opens_for(key) {
         out.push_str(key);
     } else {
         quoted(out, key);
@@ -347,7 +420,7 @@ fn opens_template(c: char, next: Option<&char>) -> bool {
 #[cfg(test)]
 mod tests {
     use document::value::Float;
-    use document::{Attribute, Label, Position, Source};
+    use document::{Label, Position, Source};
     use proptest::prelude::*;
 
     use super::*;
@@ -507,7 +580,7 @@ mod tests {
             ("zero", float(-0.0)),
             ("string", string("\"q\" \\ ${a} %{b} $c\t\r\u{1}é")),
             ("reference", reference("@a.7b")),
-            ("words", list(vec![reference("for"), reference("a-b")])),
+            ("words", list(vec![reference("a-b"), reference("for")])),
             (
                 "map",
                 Kind::Map(map(vec![
@@ -515,6 +588,8 @@ mod tests {
                     ("for", Kind::Integer(2)),
                     ("a b", Kind::Integer(3)),
                     ("7", Kind::Integer(4)),
+                    ("été", Kind::Integer(5)),
+                    ("a\u{200b}", Kind::Integer(6)),
                 ])),
             ),
             (
@@ -522,6 +597,7 @@ mod tests {
                 call("true", vec![Kind::Integer(1), list(Vec::new())]),
             ),
             ("empty", call("f", vec![Kind::Map(Map::default())])),
+            ("température", call("é", Vec::new())),
         ]);
         assert_eq!(
             written(&document),
@@ -530,12 +606,14 @@ mod tests {
              empty = f({})\n\
              integer = -170141183460469231731687303715884105728\n\
              large = 1e300\n\
-             map = { \"7\" = 4, \"a b\" = 3, \"for\" = 2, x = 1 }\n\
+             map = { \"7\" = 4, \"a b\" = 3, \"a\u{200b}\" = 6, \"for\" = 2, x = 1, \
+             été = 5 }\n\
              one = 1.0\n\
              reference = @a.7b\n\
              small = -1e-7\n\
              string = \"\\\"q\\\" \\\\ $${a} %%{b} $c\\t\\r\\u0001é\"\n\
-             words = [for, a-b]\n\
+             température = é()\n\
+             words = [a-b, for]\n\
              zero = 0.0\n"
         );
     }
@@ -702,6 +780,72 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_list_that_starts_with_for_as_the_reader_does() {
+        let item = |kind, span| Value {
+            kind,
+            span: Some(span),
+        };
+        let long = string(&"x".repeat(90));
+        let for_call = Kind::Call(Call {
+            function: "for".into(),
+            function_span: Some(on(5, 8)),
+            arguments: vec![value(Kind::Integer(1))],
+        });
+        let cases = [
+            (vec![item(reference("for"), on(5, 8))], on(5, 8)),
+            (
+                vec![item(reference("for.x"), on(5, 10)), value(Kind::Integer(1))],
+                on(5, 10),
+            ),
+            (vec![item(for_call, on(5, 11))], on(5, 8)),
+            (
+                vec![item(reference("for"), on(5, 8)), value(long)],
+                on(5, 8),
+            ),
+            (
+                vec![value(Kind::List(vec![item(reference("for"), on(6, 9))]))],
+                on(6, 9),
+            ),
+        ];
+        for (items, span) in cases {
+            let document = attributes(vec![("a", Kind::List(items))]);
+            let error = Error::Unwritable {
+                span: Some(span),
+                part: Unwritable::For,
+            };
+            assert_eq!(write(&document), Err(vec![error]), "{document:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_list_that_starts_with_the_call_for_x_once_for_its_function() {
+        let document = attributes(vec![("a", list(vec![call("for.x", Vec::new())]))]);
+        let error = Error::Unwritable {
+            span: None,
+            part: Unwritable::Function,
+        };
+        assert_eq!(write(&document), Err(vec![error]));
+    }
+
+    #[test]
+    fn writes_for_where_hcl_reads_it_as_a_word() {
+        let document = attributes(vec![
+            ("a", reference("for")),
+            ("b", call("f", vec![reference("for")])),
+            ("c", Kind::Map(map(vec![("k", reference("for"))]))),
+            (
+                "d",
+                list(vec![list(vec![Kind::Integer(1)]), reference("for")]),
+            ),
+            ("e", list(vec![reference("for-x")])),
+        ]);
+        assert_eq!(
+            written(&document),
+            "a = for\nb = f(for)\nc = { k = for }\nd = [[1], for]\ne = [for-x]\n"
+        );
+    }
+
+    #[test]
     fn refuses_nesting_past_the_limit_as_the_reader_does() {
         let deep = Value {
             kind: list(Vec::new()),
@@ -797,5 +941,101 @@ mod tests {
             blocks: vec![blocks],
         };
         assert_eq!(write(&document), refused(on(3, 4)));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Level {
+        Block,
+        List,
+        Map,
+        Call,
+    }
+
+    /// Nests `levels` levels of `level` as one block or under the attribute `a`, with
+    /// level `i` from the outside at `on(i, i + 1)`.
+    fn nested(level: Level, levels: u32) -> Document {
+        let mut document = Document::default();
+        let mut inner = None;
+        for i in (0..levels).rev() {
+            let span = Some(on(i, i.checked_add(1).unwrap()));
+            let items = Option::take(&mut inner).into_iter();
+            let kind = match level {
+                Level::Block => {
+                    let block = Block {
+                        span,
+                        ..block("b", &[], document)
+                    };
+                    document = Document {
+                        attributes: Map::default(),
+                        blocks: vec![block],
+                    };
+                    continue;
+                }
+                Level::List => Kind::List(items.collect()),
+                Level::Map => Kind::Map(
+                    Map::new(
+                        items
+                            .map(|value| Attribute {
+                                key: "a".into(),
+                                key_span: None,
+                                value,
+                            })
+                            .collect(),
+                    )
+                    .unwrap(),
+                ),
+                Level::Call => Kind::Call(Call {
+                    function: "f".into(),
+                    function_span: None,
+                    arguments: items.collect(),
+                }),
+            };
+            inner = Some(Value { kind, span });
+        }
+        if let Some(value) = inner {
+            document.attributes = Map::new(vec![Attribute {
+                key: "a".into(),
+                key_span: None,
+                value,
+            }])
+            .unwrap();
+        }
+        document
+    }
+
+    #[test]
+    fn gives_only_the_depth_error_past_the_limit() {
+        let document = Document {
+            blocks: vec![block("my block", &[], Document::default())],
+            ..nested(Level::List, 65)
+        };
+        assert_eq!(
+            write(&document),
+            Err(vec![Error::Unwritable {
+                span: Some(on(64, 65)),
+                part: Unwritable::Depth,
+            }])
+        );
+    }
+
+    #[test]
+    fn checks_the_depth_before_it_recurses() {
+        for level in [Level::Block, Level::List, Level::Map, Level::Call] {
+            let document = nested(level, 100_000);
+            let written = write(&document);
+            #[expect(
+                clippy::mem_forget,
+                reason = "a plain drop recurses once per level"
+            )]
+            std::mem::forget(document);
+            assert_eq!(
+                written,
+                Err(vec![Error::Unwritable {
+                    span: Some(on(64, 65)),
+                    part: Unwritable::Depth,
+                }]),
+                "{level:?}"
+            );
+        }
     }
 }

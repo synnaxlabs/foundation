@@ -1,8 +1,9 @@
 //! A cell of words that one shard replaces and every shard reads with no lock.
 //!
 //! A sequence number is odd during an update. A reader that sees an odd number, or a
-//! number that changed while it read, reads again. So a read never returns a torn
-//! value, and a read that returns the old value saw no part of the update.
+//! number that changed while it read, reads again. So the reader's closure never
+//! gets a torn value, and a read that returns the old value saw no part of the
+//! update.
 
 use std::array;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
@@ -89,10 +90,10 @@ pub struct Reader<const N: usize> {
 }
 
 impl<const N: usize> Reader<N> {
-    /// Runs `f` on the newest value and returns its result. While an update is in
-    /// progress, it waits, and when an update overlaps `f`, `f` runs again on the new
-    /// value. So `f` must have no effect other than its result. Only the last result
-    /// comes out.
+    /// Runs `f` on the newest value, never a torn one, and returns its result. While
+    /// an update is in progress, it waits, and when an update overlaps `f`, `f` runs
+    /// again on the new value. So `f` must have no effect other than its result. Only
+    /// the last result comes out.
     ///
     /// A read that returns the old value took a clock reading in `f` no later than
     /// the update that replaced it took one in its `f`, when `f` orders its clock read
@@ -106,8 +107,13 @@ impl<const N: usize> Reader<N> {
                 before = self.shared.seq.load(Acquire);
             }
             let value = array::from_fn(|index| self.shared.words[index].load(Relaxed));
-            let result = f(value);
             fence(Acquire);
+            if self.shared.seq.load(Relaxed) != before {
+                continue;
+            }
+            let result = f(value);
+            // The check after `f` keeps only the clock order: an `f` that orders its
+            // clock read must not return a value an update replaced.
             if self.shared.seq.load(Relaxed) == before {
                 return result;
             }
@@ -254,6 +260,18 @@ mod model {
             let [first, second] = reads.join().unwrap();
             assert_eq!(first, second, "torn");
             assert_eq!(reader.read(|value| value), [1, 1]);
+        });
+    }
+
+    #[test]
+    fn never_runs_the_closure_on_a_torn_value() {
+        bounded(|| {
+            let (mut writer, reader) = new([0, 0]);
+            let reads = thread::spawn(move || {
+                reader.read(|[first, second]| assert_eq!(first, second, "torn"));
+            });
+            writer.update(|_| [1, 1]);
+            reads.join().unwrap();
         });
     }
 

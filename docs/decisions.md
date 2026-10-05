@@ -256,13 +256,15 @@ How to read this record:
   refused one; frames from catch-up spend credit too. A frame costs its charge,
   `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
   `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
-  just past a class costs about twice its length, and a frame with only empty series
-  still costs its headers. The charge depends only on the frame's length, so the home
-  and the `hub` compute the same charge for the same frame. A remote complete reader
-  gets only the series of its view (M2): the home sends a frame of those series, and
-  both ends charge that frame. The person chose this on 2026-10-05 ("B is approved ...
-  send only partial frames"), #267. The charge is part of the wire contract: a change to
-  `block`'s header or size classes needs a new wire version (C9d). The window counts
+  costs its length plus the header and at most 64 bytes or a quarter of its length
+  more, and a frame with only empty series still costs its headers. The charge depends
+  only on the frame's length, so the home and the `hub` compute the same charge for
+  the same frame. A remote complete reader gets only the series of its view (M2): the
+  home sends a frame of those series, and both ends charge that frame. The person
+  chose this on 2026-10-05 ("B is approved ... send only partial frames"), #267. The
+  charge is part of the wire contract: a change to `block`'s header or size classes
+  needs a new wire version (C9d). The classes changed to four per doubling under wire
+  version 1 (#188), because no release carries that version. The window counts
   charges, not wire bytes. Per-connection framing in `wire` (X35) pins no pool memory
   and does not count. Credits apply only to complete delivery, which is reliable: a lost
   frame would leak credit. The `hub` raises the limit only after it releases a frame,
@@ -296,16 +298,15 @@ How to read this record:
   never landed, and the home applies it to the live path. When no sample exists and the
   data fits A6, it applies as backfill. Anything else is an error: some samples stored
   and some not, a stored timestamp with other values, data that fits neither path, or a
-  range below the buffer's floor. When the indexes of one resend land on different
-  paths, the home splits it into frames of one path each and drops the repeats. It
-  confirms the resend when every part has landed or was dropped. Only a mixed resend
-  pays this copy; `home` measures it when it builds the split. Live and backfill frames
-  pay no check. Values are compared decoded, not as bytes. Writers assign no numbers: a
-  resend comes in a new session, and the writer never learned them. The person decided
-  on 2026-10-05: "By timestamp + same values" (#148), then "A `resend` label" (#168),
-  then the split, a resend of every unconfirmed frame, and no session path: "as long as
-  you've evaluated the performance costs of your decision against correctness then I'm
-  ok with this" (#243).
+  range below the buffer's floor. The home checks a resend per index frame (INDEX
+  FRAMES): each one lands on one path or is dropped as a repeat, with no second split.
+  It confirms the resend when every index frame has landed or was dropped. Live and
+  backfill frames pay no check. Values are compared decoded, not as bytes. Writers
+  assign no numbers: a resend comes in a new session, and the writer never learned
+  them. The person decided on 2026-10-05: "By timestamp + same values" (#148), then "A
+  `resend` label" (#168), then the split, a resend of every unconfirmed frame, and no
+  session path: "as long as you've evaluated the performance costs of your decision
+  against correctness then I'm ok with this" (#243).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -343,9 +344,14 @@ How to read this record:
   M3 Max, about 1.9% of a core at 100M samples/s. FastLanes order can come later as a
   new tag. Raw and RLE have bit width 0. Integers, `Stamp`, and `Span` use all four
   tags; other scalars use raw. Timestamp stride (BQ4) comes later as a new tag. The
-  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len`
-  (raw plus one raw header per vector) sizes the output, and the encoder makes one
-  pass. `codec/src/vector.rs` is the full spec.
+  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len` of
+  the raw length (raw plus one raw header per vector) sizes the output, and the
+  encoder makes one pass. `codec/src/vector.rs` is the full spec. `codec` is the one
+  place that checks a series against its count (#359): `encode` refuses raw values
+  that do not hold `count` samples, and `validate` refuses encoded bytes that do not
+  parse as `count` samples. The bytes do not carry the count, so a wrong count passes
+  when the vectors also parse at it: a vector with bit width 0 holds any count up to
+  1024.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
@@ -361,7 +367,8 @@ How to read this record:
   Offsets count bytes since the ring was made and never wrap; the place in the area
   is the offset modulo the area length. The area is at least twice the largest record
   less one block, so an empty ring takes any record. A ring whose head reaches the
-  end of the offsets is full for good. A body is at most `u32::MAX` bytes.
+  end of the offsets is full for good. A body is at most `u32::MAX` bytes and at
+  least the table of one entry.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
@@ -372,23 +379,61 @@ How to read this record:
   unknown path or presence byte, or bytes after the last entry is a wrong shape.
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
-  open. The restart record needs one free block: an open of a full ring first moves
-  records at the tail to a segment.
+  open, and so does an entry whose `first` is below the tail of its path or whose
+  `first + len` passes `u64::MAX`. The restart record needs one free block: an open
+  of a full ring first moves records at the tail to a segment.
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][zero padding][crc32c: u32]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is the last four bytes and covers the rest.
   The magic, the version, and the place of the CRC are the same in every version, so
   an older build reads a newer block and reports its version. Two blocks at the
   start of the ring hold the last two checkpoints: checkpoint `n` goes to block `n
-  mod 2`. Open takes the whole block with the higher `seq` (on a tie, the first);
-  one torn block leaves the other. No block with the magic: not a ring. Both with
-  the magic and a wrong CRC: the ring is lost. The header with a new tail is durable
+  mod 2`. Open takes the whole block whose `seq` comes after the other's, wrapped
+  as the writer wraps it (on a tie, the first); one torn block leaves the other. No
+  block with the magic: not a ring. Both with the magic and a wrong CRC: the ring is
+  lost. The header with a new tail is durable
   before the writer releases the space, so the header's tail is at or before the
   writer's tail and the records between are whole. The layout comes from the header
   at open; configuration sets it at create, and a changed `body_max` takes effect at
   the next create. The open reports the effective layout, callers bound a commit by
   it, and the node shows it in status. A new ring has the same block at `seq` 0 in
   both places, with the tail at offset 0 and a random chain value.
+- **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
+  write: the writer's key set with only that group present, its range, and its
+  encoded series. The home stores it, keeps it as the index's newest frame, and later
+  gives it to readers. B7, the log, the seq, and reader positions are per index. A
+  write with more than one present group pays one copy of its series into the index
+  frames. Decided by the `write-path` builder; approved by the coordinator (#191).
+- **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
+  `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
+  of the index frame in entry order, then the frame's encoded series bytes,
+  little-endian. `end` is as in FRAME LAYOUT. Kinds: scalar 0, array 1, list 2, string
+  3, bytes 4. `n` is the array length or the list maximum, else 0. `element` is the
+  scalar (bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7, u64 8, f32 9, f64 10,
+  stamp 11, span 12, uuid 13), else 0. The type is the writer's type, so a reader
+  decodes with it after an `apply` changes the channel's type (A15). The header is one
+  pool block and the series bytes are a view of the frame's block, so a write copies
+  no series byte. A slot or key set number is never stored. The layout is part of the
+  disk format version (C9d), as in FRAME LAYOUT. Copy mode checks each stored body
+  once where remote records enter (X43), and the read after it panics on a bad body.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
+- **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
+  (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
+  `len` 0, and `first` at the live tail. It records a handoff after the gate input
+  that gave it and before the next input or frame. Its bytes are empty when no writer
+  holds control, else `[authority: u8]` then the holder's subject as UTF-8; the entry
+  length gives the subject's length. A restart or a failover starts the gate from the
+  last record (X18): `Gate::recover` with its holder, or `Gate::new` when it names
+  none. Trimming must keep the last record of each index (#406). Until it does,
+  retention can remove that record, and a holder that held control for longer than
+  the retention gets no grace after a restart. The layout is part of the disk format
+  version (C9d). Copy mode checks each record once where remote records enter (X43),
+  and the read after it panics on a bad record.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
+- **ENTRY TAGS (#191)** Each entry of an index log has a tag (S4) that says what its
+  bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
+  record takes the next free value here. The buffer does not read the tag.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -405,8 +450,8 @@ How to read this record:
   Raspberry Pi 4 with 1 GB: idle under 50 MB, start under 1 s. A regression over 5% on
   the dedicated machine blocks a merge.
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
-  (slots plus types, R9-D1). Frames point at the key set id. Supersedes: S1 frame
-  struct.
+  (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
+  frame struct. Approved by the coordinator (#390).
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
   home routes by key set.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
@@ -477,7 +522,8 @@ How to read this record:
   with drift, slew only. Sources are read directly: mesh peers, GPS, PPS with NMEA, the
   NIC hardware clock (kept by ptp4l), and the OS daemon. No PTP client in v1. Device
   clock fitting (DAQmx, LabJack) is a connector-library component that writes residual
-  error to the index's error channel.
+  error to the index's error channel. Amended by MESH SLEW: mesh time also steps
+  forward when it is more than 500 us behind every offset an estimate allows.
 - **TIME ADAPTERS** Neutral model `Measurement { at: local monotonic, offset, error }`.
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
@@ -493,25 +539,43 @@ How to read this record:
   TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
   fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
   offsets inside the most bounds (Marzullo). It fails when no offset is inside more than
-  half of them. This reads C6's "follows the smallest measured bound": when sources
-  agree, the result is never wider than the narrowest. The result holds the true offset
-  when the bounds that hold it are a majority and every other bound misses them. Decided
-  by the `time` builder (#49). A device's readings go to the oscillator fit
-  (`Overlap`), never to `combine`. Node sources keep `Filter`, not `Overlap`: a network
-  exchange puts the true offset at about the same place in each bracket, so an overlap
-  gains little, and a broken drift bound would stay wrong for the life of an overlap,
-  not for 8 exchanges. Decided by the coordinator (#84). An error that grows past 36500
-  days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
-  time as OS CLOCK BOUND says. An error over 36500 days fails only in a new measurement:
-  `Measurement::new` gives `None`. The person decided on 2026-10-05 ("Ok that's fine"),
-  #225. `combine` uses each bound with its full growth, so a bound that grew to
-  "unknown" never cuts a known one. An exchange with an error over 36500 days fails with
-  `Bound`, and an overlap whose readings allow one before drift gives `None`: a stopped
-  bound stored as a measurement could miss the true offset. Decided by the `time`
-  builder (#258). Each function returns only the errors it can give: one `Error` per
-  module (`exchange`, `overlap`, `combine`), and `Option` where a caller does the same
-  for each cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the
-  coordinator (#272).
+  half of the bounds that vote. This reads C6's "follows the smallest measured bound":
+  when sources agree, the result is never wider than the narrowest. The result holds the
+  true offset when the bounds that hold it are a majority of the bounds that vote, and
+  every other bound that votes misses them. Decided by the `time` builder (#49). Each
+  source votes: a source with no measurement agrees with no offset, and it votes beside
+  the known bounds, or beside the unknown bounds when no bound is known. So before its
+  first estimate a clock waits until more than half of its sources agree, and one
+  source that answers first cannot set mesh time. The person decided on 2026-10-05
+  ("clock question si approved at whatever path you think"), #488. A device's readings
+  go to the oscillator fit (`Overlap`), never to `combine`. Node
+  sources keep `Filter`, not `Overlap`: a network exchange puts the true offset at about
+  the same place in each bracket, so an overlap gains little, and a broken drift bound
+  would stay wrong for the life of an overlap, not for 8 exchanges. Decided by the
+  coordinator (#84). An error that grows past 36500 days stops at 36500 days ("unknown")
+  and never fails, so a lone Windows node gets OS time as OS CLOCK BOUND says. An error
+  over 36500 days fails only in a new measurement: `Measurement::new` gives `None`. The
+  person decided on 2026-10-05 ("Ok that's fine"), #225. In an `Interval` from
+  `Measurement::interval`, "unknown" is a half-width of 36500 days, and the true time
+  can be outside it. Decided by the `time` builder (#142). `combine` uses each bound
+  with its full growth, so an "unknown" bound never cuts another. A bound of 36500 days
+  at `now`, given or grown by drift, votes only when no bound is known. A vote for it
+  lost: it turned a peer split into a wide estimate that no peer gave. The person chose
+  this (OS CLOCK BOUND); counting a grown bound is from the `time` builder, approved by
+  the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
+  Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
+  showed this case before the person chose. When only unknown bounds vote, the estimate
+  is unknown too, at the center of the offsets inside the most of them. Approved by the
+  coordinator (#437). `Measurement::unknown(at, offset)` gives
+  the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
+  bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
+  (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
+  whose readings allow one before drift gives `None`: a stopped bound stored as a
+  measurement could miss the true offset. Decided by the `time` builder (#258). Each
+  function returns only the errors it can give: one `Error` per module (`exchange`,
+  `overlap`, `combine`), and `Option` where a caller does the same for each cause
+  (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the coordinator
+  (#272).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -526,7 +590,11 @@ How to read this record:
   with nine fraction digits; input needs an offset, takes up to nine fraction digits,
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
-  trips; input rejects an end before the start.
+  trips; input rejects an end before the start. A byte size follows the span rules: one
+  number and one unit with no space (`200GiB`), and a decimal fraction only when it
+  gives whole bytes (`1.5GiB`). Its type lives in `types` beside `time::Span`, and the
+  `document` reader is an adapter over it. The person decided on 2026-10-05 ("A yes I
+  approve", #479).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -554,14 +622,42 @@ How to read this record:
   by drift. It never follows the largest group or one side of a tie.
   `push` returns the holdover and its cause, and `node` publishes it. The next majority
   ends the holdover. Decided by the `time` builder (#142).
+- **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
+  estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
+  not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
+  so. When the offset served at `now` is more than 500 us (1 s of slew) below the
+  earliest offset the new estimate allows at `now`, mesh time steps forward to that
+  earliest offset. In every other case it slews. Mesh time never steps back. A clock in
+  holdover keeps its slew. Cost: mesh time that is ahead still slews. After a stale
+  first estimate that is ahead, or for an estimate with an unknown error (a Windows OS
+  clock alone under OS CLOCK BOUND, whose earliest offset is 36500 days back), a
+  correction of 1 h takes 83 days and one of 1 day about 5.5 years, with a true error
+  the whole time. A majority of falsetickers more than 500 us ahead steps mesh time into
+  the future, and it does not come back. That is outside the fault model. Lost: a
+  frequency loop (a PLL, as in ntpd), because R6 bounds drift with an error that grows
+  and a PLL can overshoot; the slew private in `clock`, because it is decision logic in
+  layer 2; a step only when the estimate's whole interval is ahead of mesh time's,
+  because when both bounds hold the intervals overlap and it never fires. Amends R6 TIME
+  LOCKED ("slew only") and r6 Q3 item 6 ("Step forward only at startup"). The person
+  decided on 2026-10-05 ("Ok 225 mesh slew approved"), with the forward step. The person
+  changed the forward step on 2026-10-05 ("I think (b)"), because the first rule never
+  fires when both bounds hold.
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
-  `clock` reads that as the largest error, 36500 days: a node alone still gets OS
-  time, with an error that says "unknown", and in a mesh the reading adds a vote but
-  does not move the estimate. A fixed invented error lost: a wrong value gives a bound
-  that is not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
-  'unknown'"), #144. The split between `env::wall` and `clock` is from #172.
+  `clock` reads that as `Measurement::unknown` (36500 days): a node alone still gets OS
+  time, with an error that says "unknown", and beside a known bound the reading does not
+  vote (ESTIMATE COMBINE). A fixed invented error lost: a wrong value gives a bound that
+  is not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
+  'unknown'"), #144. The split between `env::wall` and `clock` is from #172. When known
+  peers split, `combine` fails, so the clock is unsynced before its first estimate and
+  holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
+  source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
+  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` adds
+  the OS bound to the error of its own read, so the error is never less than the OS
+  bound. An error over 36500 days reads as unknown, the same as no bound (the
+  coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
+  lint denies it elsewhere (BQ20).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
@@ -650,6 +746,18 @@ How to read this record:
   is a node key or a `Client` (an SDK, proved by its signed hello above). Callers admit
   peers, dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on
   SIM NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
+- **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
+  class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
+  `CatchUp`. The byte goes with the first message, so a stream reaches the peer with
+  its first message. A stream that ends or resets before its class byte drops: the
+  peer never accepts it, and resets the reply half of a two-way stream with code 0.
+  Each message is a QUIC varint length, then that many bytes, at most
+  `message_bytes_max`. A node accepts the waiting streams highest class first. A node
+  resets a stream with the stop's code when the stop arrives. A peer breaks the
+  protocol when it sends another class byte, ends a stream inside a message, sends a
+  message over the limit, or resets or stops a stream with a code over 32 bits. The
+  node then closes the connection with application code 2^32 and the reason as text,
+  and the caller gets `Error::Broken`. Proposed by `network` in #55.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -694,7 +802,8 @@ How to read this record:
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
   enters only through `tick`: a node draws its election timeout on the first tick
   after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
-  its own voter list votes and follows, but never campaigns. `step` does not check
+  its own voter list votes and follows, but never campaigns while that configuration
+  is committed. `step` does not check
   that a sender is a voter (a voter can learn late that a peer joined), so the caller
   authenticates the sender and decides which nodes may send.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
@@ -702,14 +811,20 @@ How to read this record:
   empty entry of its term first, so it can commit what came before. It replicates with
   `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
   (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
-  (its hint for the next `prev`). A malformed `Append` (entries that do not follow
-  `prev`) is `Error::EntryOutOfOrder`. `Body::Heartbeat { commit }` carries the commit
-  index, capped at what that follower is known to hold. A leader commits an index only
-  when a quorum holds it and its entry is of the leader's own term. A follower commits
-  no further than the last entry the leader sent it. `Ready.committed` gives each entry
-  once, after it is written. Batch size (64 entries) and the number of appends in flight
-  per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
-  `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
+  (its hint for the next `prev`). `step` checks every index a message names, and the
+  order of an append's entries, against the log before it changes state: entries that
+  do not follow `prev` are `Error::EntryOutOfOrder`, and an index past the log is
+  `Error::IndexPastLog`. An `Append` with an entry whose term is above the message's
+  term is `Error::TermBehindLog`: no leader sends one, and a follower that wrote it
+  could not restart. The conformance oracle changed to match; the person decided on
+  2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
+  is known to hold. A leader commits an index only when a quorum holds it and its
+  entry is of the leader's own term. A follower commits no further than the last
+  entry the leader sent it. `Ready.committed` gives each entry once, after it is
+  written. Batch size (64 entries) and the number of appends in flight per follower
+  (8) are constants, not `Config` fields: nothing measured asks for a knob. `Message`
+  and `Body` are `Clone`, not `Copy`, because an append carries entries.
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
@@ -724,7 +839,55 @@ How to read this record:
   its log from the time it writes it; `Start.voters` is the configuration before
   `Start.entries`. A `Voters` entry with an empty `incoming` set, in `Start.entries`
   or in an `Append`, is `Error::NoVoters`: a group with no voter can never commit or
-  elect.
+  elect. A leader changes the voters with `Raft::propose_voters(set)`: it writes the
+  joint configuration (`incoming` the new set, `outgoing` the current one) and, when
+  that entry commits, the leave (`incoming` alone). One change at a time: while the
+  last configuration entry is not committed, a proposal is `Error::ChangePending`.
+  A node the change removed stays a peer of the leader, and keeps getting appends, until
+  it holds the committed leave: then the leader sends it the commit in a heartbeat and
+  releases it, so the node learns it is out and never campaigns. A removed node that
+  answered nothing over a whole quorum check period is released at that check instead.
+  A follower releases the removed nodes when the leave commits. A removed node that
+  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
+  only from a voter of the newest configuration in this node's log, and a node whose
+  committed configuration lacks the sender answers `removed`. The removed node takes
+  that answer only from a voter of its own region, and stops its `raft` group for that
+  region. `raft` sends nothing to a node outside its configuration; until `mesh` sends
+  the answer, such a node campaigns with no effect. Readmit in `raft` (#414) lost: it
+  sent the log to a sender that `raft` cannot check. The person decided on 2026-10-05
+  ("Ok B is fine", #193). A leader outside the committed final set sends the commit
+  and steps down. A node outside an uncommitted
+  configuration still campaigns: the entry may be truncated, and a removed leader that
+  lost its lead before the leave reached a peer is the only node that can win the
+  election that commits it.
+- **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
+  name in byte order, so the descendants of one name are one range. A value is opaque
+  bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
+  an entry above is the last key of a child and its BLAKE3 hash. A chunk ends after an
+  entry when a draw from the BLAKE3 hash of the level and the key is below
+  `(end^4 - start^4) / 4096^4`, where `start` and `end` are the entry's byte offsets
+  in the chunk (Weibull hazard, shape 4), or when the chunk reaches 16 KiB. A chunk
+  above the leaves holds at least two entries, unless it is the last of its level, so
+  a key of any size fits. The rule uses integers only. A chunk with one child is
+  never a root, so the tree is a function of its entries. The empty tree has the root
+  `tree::empty()` and no stored chunk. Chunks come from peers, so a reader checks
+  each chunk that it reads: keys in order, each length in its shortest form, and a
+  child at the level below with the last key that its parent gives. A chunk that
+  fails gives `Error::Corrupt(hash)`. A reader does not check the boundaries, and
+  only `diff` checks that a leaf key is a name, so "a function of its entries" holds
+  for trees that `apply` made. The tree does no I/O: the caller fills a
+  `tree::Chunks`, and `get`, `apply`, and `diff` return `Error::Missing(hash)` for a
+  chunk that is not there, so the caller fetches it and runs the operation again.
+  Each run names one chunk, because a change record lists the chunks that it made
+  and a caller fetches those first. `apply` takes a batch of `tree::Change` values,
+  adds the new chunks to the `Chunks`, and returns the new root and their hashes.
+  `diff` returns each changed entry with its old and new value, and the chunks that
+  only the new tree has. A read of all entries below one name is a later function
+  of `spec::tree`; it replaces the `spec::Tree::region` of X12. A chunk has no
+  maximum size: one value is in one chunk, and the limit on a value belongs to the
+  code that encodes definitions. A chunk's address is a `types::digest::Digest`, the
+  same type that `wire` and `blob` carry. To change the chunk format or the boundary
+  rule changes every root digest.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -818,6 +981,23 @@ How to read this record:
   (time only from samples and ctx), and outputs on the calculation's own index.
   Supersedes: r3 single-expression language, r3 first-input index, r8 JSON Schema
   check in `config`.
+- **KIND TABLE** `kind::Kind` is typed: an associated `Config` and `impl Future`
+  methods. `kind::Table` erases it inside `connector` with a private trait that takes
+  the `Document` and parses again, so callers see one concrete type with no `Any` and
+  no downcast. An unknown kind is the diagnostic `connector.unknown-kind`, since the
+  name comes from a file. A run or a discovery fails with one of three classes:
+  `Config` (stop until the spec changes), `Device`, and `Retry` (restart with
+  backoff). Decided by the `connector` builder in the plan on #338, after
+  `/eb-review`; approved by the coordinator (#338).
+- **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
+  run before the last one returned, and none after a cancel. Each run gets a child of
+  the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
+  (1 s first, 60 s cap, constants). The waits start again from 1 s after a run that
+  lasted at least 60 s. `Ok` from `run` ends the connector.
+  `Config` returns to the caller, which starts a new supervisor when the spec
+  changes (R12-4). Restart errors reach the connector's status in #420. Decided by the
+  `connector` builder in the plan on #338, after `/eb-review`; approved by the
+  coordinator (#338), with the reset after a long run approved on #338 later.
 - **BQ15** A set of devices that the driver acquires as one unit is one connector.
   Otherwise, separate connectors and indexes, never two writers.
 - **R7 starting points** OPC UA: open62541 compiled in, with our own crypto plugin on
@@ -837,11 +1017,26 @@ How to read this record:
   component.
 - **DEATH RECORDS** When a writer session ends without closing, the home writes a
   "source lost" quality sample. A clean close writes nothing. Scope: X19.
-- **R12 catalog (proposal, partly adopted)** Components (cancel, pace, clock stamping,
-  retry, endpoint, link, drive, thread, queue, cycle, status, run, out, calc align) and
-  compositions (polled, clocked, pushed, cyclic, out, calc). The kind's `&self` holds
-  process-lifetime parts that `node` injects; `ctx` holds one run's capabilities.
-  Group-based parts need revision (X5).
+- **R12 catalog (proposal, partly adopted)** Components (cancel, pace (see PACE),
+  clock stamping, retry, endpoint, link, drive, thread, queue, cycle, status, run, out,
+  calc align) and compositions (polled, clocked, pushed, cyclic, out, calc). The
+  kind's `&self` holds process-lifetime parts that `node` injects; `ctx` holds one
+  run's capabilities. Group-based parts need revision (X5).
+- **ENDPOINT REGISTRY** `endpoint::Registry<K, S, T>` keeps at most one open
+  endpoint per key on a node. `acquire(key, settings, open)` shares the open endpoint,
+  or calls `open` when none is open. Opens and closes of one key run one at a time;
+  other keys do not wait. Unequal settings on an open key give `Error::Config`
+  (`connector.endpoint-settings`). The endpoint closes when the last `Lease` drops.
+  `node` makes one registry per kind that needs it. A FIFO lock (`endpoint::Shared`)
+  composes as `T` later. A `Lease` is not `Clone`, and the close runs after the
+  registry's lock is released. Decided by the `connector` builder in the plan on #422,
+  after `/eb-review`; approved by the coordinator (#422).
+- **PACE (2026-10-05)** `pace::Timer` ticks on a grid of deadlines at `start + n /
+  rate`, from a `types::time::Rate`, and skips and counts the ticks a stall missed.
+  It has one async `tick(&cancel::Token)`, with no blocking wait and no sleep, hybrid,
+  or spin mode: precision belongs to the clock driver in `os` (#379). Decided by the
+  `connector` builder in the plan on #237, after `/eb-review`; approved by the
+  coordinator (#237). Supersedes: r12 A.3 `pace` modes and blocking wait.
 
 ### 1.11 Config as code
 
@@ -883,6 +1078,36 @@ How to read this record:
   does (Unicode `XID_Start` and `XID_Continue`, through `unicode-ident`), so
   `température = 1` reads. A new error for each such identifier lost: a valid HCL file
   would fail. The person decided on 2026-10-05 ("go with yes"), with low priority, #263.
+  A reference outside ASCII is still an `Error::Name`, because names are ASCII (A3).
+  Measured against HCL v2.25.0, two differences remain. HCL reads the 23 compatibility
+  characters in `ID_Start` but not in `XID_Start` (U+037A, U+0E33, and others). The
+  reader refuses them at the start of an identifier, and 19 of them after it. The
+  reader follows the Unicode version of `unicode-ident` in `Cargo.lock`, which can be
+  newer than HCL's, so it accepts characters that HCL does not know yet. Lost: a
+  hand-kept list of the 23; own tables generated from HCL's Unicode version; and
+  `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
+  `ID_Start` and `ID_Continue`.
+- **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
+  the verdict of a pinned HCL version: accepted or refused. A test checks that `read`
+  accepts exactly the accepted texts, and that the output of `write` for each is
+  accepted too. A small Go program next to the texts makes the verdicts and records
+  the HCL version. A person runs it by hand when the texts change; CI does not run it
+  and needs no Go. It is the only Go code in the repo. The person decided on
+  2026-10-05 ("Yeah that's fine", #460).
+- **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
+  a new Document. Each attribute and block that keeps its value and its place keeps its
+  bytes, comments, and blank lines. A changed value and a changed block on one line
+  are written again, without the comments in them. A removed item is cut with the
+  comment lines directly above it, up to a blank line. A new attribute goes after the
+  kept attribute before it in key order, and a new block after the kept block before
+  it. The k-th block of a keyword and labels pairs with the k-th new one, and the
+  longest run of pairs in the same order stays, so a moved block is cut and written
+  again. New text takes the file's line end. Lost: an edit list by span, which puts
+  the diff on each caller; returning edits, which each caller must apply; a lossless
+  syntax tree with comments as trivia, which needs a second tree type in the reader;
+  writing the whole file with comments attached to items, which loses the layout; and
+  moving the bytes of a moved block, which a caller that changes the Document it read
+  never needs. Decided by the `config` builder; approved by the coordinator (#249).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -921,8 +1146,18 @@ How to read this record:
   connectors, policies, and access. Most specific pattern wins; equal specificity is a
   plan error; `explain` shows each effective value and its source. A rename can move a
   channel under other policies, and `plan` shows it. Current policy kinds: retention,
-  placement, transmission, compression, reduction, time, access, and secret store.
-  Targets and combination rules: X25, X26. Specificity: SPECIFICITY (#3).
+  placement, transmission, compression, reduction, time, access, secret store, and node
+  settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
+  SPECIFICITY (#3).
+- **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
+  that selects node names: `node_settings { select = "site-a/*" disk = "200GiB" }`.
+  A node that no policy selects computes a default from its free disk and memory at
+  start, so a mesh with no policy works. Before it reads the spec, a node uses the last
+  budget it applied, which it keeps in its data directory; the first start uses the
+  default. The data directory is node-local: a start argument of `foundation`, with a
+  default, because the spec is stored in it. Node-local config for the budgets lost:
+  `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
+  decided on 2026-10-05 ("Yeah mesh node"), #342.
 
 ### 1.12 Access, identity, and secrets
 
@@ -953,7 +1188,10 @@ How to read this record:
   as written there (session opens signed, a key list per subject in OpenSSH format,
   `apply` signs the plan hash, every node checks every change record, audit records
   the subject and the forwarding node, MCP runs beside the agent, the caller seals
-  secret values, no end-to-end frame integrity in v1).
+  secret values, no end-to-end frame integrity in v1). A secret write is a
+  `mesh.changes` record, so every node checks its subject signature and the `secret`
+  action on the name against the spec. Applies r15 decisions 4, 5, and 9; approved by
+  the coordinator (#409).
 
 ### 1.13 Operations, agents, and the factory
 
@@ -1148,6 +1386,16 @@ How to read this record:
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
   session under the architecture delegation.
+- **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
+  between runs; a test restarts the node with new threads on the same disk. A `Process`
+  crash keeps each file call that ended. A `Power` crash keeps, for each 512-byte
+  sector, its durable bytes or the bytes of any one write since then, a write in flight
+  too. A `sync` makes durable the writes that ended before it started. A failed `sync`
+  makes each sector keep its durable bytes or those of one such write, at random. A
+  `sync_dir` makes durable the entries at its end. A removed file takes space until the
+  removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
+  thread that a crash ended panics, because no process joins its own threads after it
+  dies. Built by `simulation` in #114.
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
@@ -1156,10 +1404,12 @@ How to read this record:
   pages back on a timer that the shard owns (#2).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
-  `{ header, start: u32, len: u32 }`, 16 bytes, so a pool has at most 26 size classes
-  and the largest block holds 2 GiB; a budget above that gives more blocks, not larger
-  ones. `slice(&self, range)` lost: it clones the count for every view, and nothing
-  needs a range yet. Decided by `memory`.
+  `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
+  budget above that gives more blocks, not larger ones. A pool has at most 96 size
+  classes, four per doubling, so a payload is at most 64 bytes or a quarter above its
+  length (#188; 26 power-of-two classes wasted up to 100%). `slice(&self, range)`
+  lost: it clones the count for every view, and nothing needs a range yet. Decided
+  by `memory`.
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
@@ -1184,7 +1434,10 @@ How to read this record:
   is an ordinary operation, rolling one node at a time; nodes fetch the signed binary by
   hash from a nearby peer. Each wire and disk format has one integer version; a node
   reads its own and the previous one; new formats turn on only after every node runs the
-  release. Compatibility is owed only to stable releases.
+  release. Compatibility is owed only to stable releases. Until the first stable
+  release, each wire and disk format stays at version 1, and a breaking change does not
+  add a version. The person decided on 2026-10-05 ("keep version 1. we should only make
+  breaking changes until we release v1"), #374.
 - **BQ18** The desired version is in the spec. Nodes report versions with lease
   renewals. A rollout lock upgrades one node at a time. Finalize when all report.
   Multi-region scope: 5.1.
@@ -1210,6 +1463,7 @@ How to read this record:
 | A18 quality side array | S13, BQ13 |
 | A20 channel retention, quality codes on acks | S12, S13 |
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
+| r12 A.3 `pace` modes (sleep, hybrid, spin) and blocking wait | PACE |
 | B3 one cumulative position per index | READER RULES |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
@@ -1258,10 +1512,10 @@ Storage classes used in the table:
 | Channel | Files, then Spec as `spec::Channel { key, name, kind }`. Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
 | Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
-| `channel::Key` | Spec (name to key map), wire setup, disk footers. Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
+| `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
-| Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
+| Key set | Memory, one per writer session: sorted slots, with each entry's key and type | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
 | Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one in its header | Whoever freezes the frame: the home on a write, from its label after the B7 check; a decoder or catch-up, from the path the frame came with | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Label (a path or resend) | A value, `frame::Label` (B7), on each write: the `hub` writer call and the wire write message. The only source of a write's path; none means live. Not in the frame block | The writer | `hub`, `wire`, `home` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
@@ -1298,7 +1552,7 @@ Storage classes used in the table:
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
 | Seq blocks | Region state of the home node's region | The home, through lease renewals | A new home after promotion | `mesh` |
 | Index history (re-index) | Region state: spans and seals. The spec keeps only the current index. Which region: X39 | The old home proposes the seal; voters seal at lease end if it is down | `hub` joins spans for readers | `mesh` |
-| Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40) | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it with `secret::seal` | `mesh` (record), `secret` (seal and open) |
+| Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40), with a version per name in the associated data. Every node takes a write or a delete only at the newest version plus one, and a re-seal only at the newest version, from and to nodes of the secret's placement. A delete is a version with no value. The newest version of a name is never compacted away, also after the spec removes the secret | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it in `secret::store::Sealed`, which refuses a value that does not open at its version | `mesh` (record), `secret` (seal and open) |
 | Join ticket record | Region state: options and use count. The ticket itself is a secret, never in files | Admin through `ops` | Voters at join | `mesh`, `ops` |
 | Delegation record | The parent region's spec: `{ prefix, epoch, initial voters }` | Parent voters | Nodes (epoch fencing) | `mesh` |
 | Spec pointer | Region state: `{ version, root hash }` | `apply` (compare-and-swap) | Every node that follows the region | `mesh` |
@@ -1310,9 +1564,9 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Encoded samples | Index log (write-ahead ring, then segments) | `home` and `replica` through `buffer.append` | Complete readers (catch-up), `replica`, crash recovery | `buffer` |
+| Encoded samples | Index log (write-ahead ring, then segments), as stored bodies (STORED BODY) | `home` and `replica` through `buffer.append` | Complete readers (catch-up), `replica`, crash recovery | `buffer`, `home` (stored body) |
 | Seq counters (live, backfill) | Memory at the home; durable through the index log | `home` | `delivery`, `wire` (prediction) | `home` |
-| Control state | Memory in `control` at the home; handoff records in the index log (truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
+| Control state | Memory in `control` at the home; handoff records in the index log (HANDOFF RECORD; truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
 | Reader positions | Truth: `delivery` state at the home, written as index log records and copied by `replica`. A connected reader's `hub` keeps its own position. Status channels publish copies | `delivery`; `replica` copies; `node` publishes | `home` after failover; `hub` on resume | `delivery`, `buffer`, `replica` |
 | Holds and floors | `delivery` (hold per reader and index); floor = lowest held position per path, handed to `buffer.set_floor`, which also applies retention | `delivery` | `buffer` | `delivery`, `buffer` |
@@ -1330,7 +1584,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
+| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder; `home` (INDEX FRAMES) | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
 | View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |
@@ -1359,7 +1613,7 @@ Storage classes used in the table:
 | Mesh clock state | Memory per node; published as `<node>.clock.offset` and `.clock.error` | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
 | Operation table | Binary | The build | CLI, MCP, embedded docs | `ops` |
 | Node key material | Node-local disk | `node` at join | `transport`, `node` | `node` |
-| Per-node settings (disk budget, pool budget, data directory) | Open (5.1) | | `buffer`, `block` | Open |
+| Per-node settings (disk budget, pool budget, data directory) | Budgets: a policy in the spec; data directory: a start argument (NODE SETTINGS) | `apply`; whoever starts the node | `buffer`, `block` | `node` |
 | SDK guide, JSON schemas for editors | Generated from kinds and the operation table | `ops`, `init` | Agents, editors | `ops` |
 
 ---
@@ -1794,11 +2048,12 @@ but `home` (below `hub`) routes by key set and writes companion samples, so a
 `hub`-owned table would point upward.
 Resolution (memory delegation): both tables are layer-1 data structures, the slot table
 (`types::channel::Slots`) and the interner (`types::frame::key_set::Interner`). `node`
-constructs one of each per node and injects them into `hub` and `home`. Interning
-happens at session open; each shard reads a snapshot. `buffer` keys its in-memory
-tails, floors, and read cursors by slot, and keeps the key on disk. `Buffer::open`
-takes the slot table and assigns a slot to each index it recovers; `node` opens
-every buffer before it opens sessions (#219, 2026-10-05).
+constructs one interner per node, which owns the slot table, and passes that table to
+`Buffer::open`. `node` injects the interner into `hub` and `home`. Interning happens
+at session open; each shard reads a snapshot. `buffer` keys its in-memory tails,
+floors, and read cursors by slot, and keeps the key on disk. `Buffer::open` assigns a
+slot to each index it recovers; `node` opens every buffer before it opens sessions
+(#219, 2026-10-05). Approved by the coordinator on PR #449.
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
@@ -1907,7 +2162,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
-| 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits. | `types` |
+| 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits, and slews mesh time. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
 | 1 | `delivery` | Keeps each reader's state per index: positions, credits, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
@@ -1958,18 +2213,16 @@ Parameters and later choices, recorded and not asked:
 
 4. Struct template storage: whether the spec stores templates and instance records for
    SDK code generation and `export`.
-5. Per-node settings (disk budget, pool budget, data directory): node-local config or a
-   policy that selects node names.
-6. The transmission policy target: links, indexes, or both (B6).
-7. Upgrades across regions: which region holds the desired version and the format
+5. The transmission policy target: links, indexes, or both (B6).
+6. Upgrades across regions: which region holds the desired version and the format
    flag, and how finalization waits for every region (BQ18, C9d).
-8. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
+7. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
    path.
-9. A20: whether a channel may carry a default max age.
-10. A3: partial-segment wildcards.
-11. A13: bounded lists.
-12. D3: license, free tier, monetization.
-13. D5: a plugin system.
+8. A20: whether a channel may carry a default max age.
+9. A3: partial-segment wildcards.
+10. A13: bounded lists.
+11. D3: license, free tier, monetization.
+12. D5: a plugin system.
 
 ### 5.2 Settled under a delegation
 
@@ -2076,3 +2329,12 @@ The first wave builds the riskiest pieces in parallel: `block` and `ring` (`memo
 (`simulation`). The second wave adds `control`, `delivery`, `access`, then `buffer`,
 `home`, and `replica` for a single-node write path measured against P1, then
 `transport`, `mesh`, `clock`, and `hub`.
+
+**FIRST SLICE (2026-10-05)** Before more features, one thin slice runs end to end: two
+nodes in `sim` on the real `transport`, a writer on node A writes one channel, its home
+stores it, and a reader on node B gets the same values in the same order. It goes
+through a minimal `mesh` (the members and the home of one index, no snapshots) and a
+minimal `hub` (one writer and one reader session). Access, config files, and failover
+wait until its acceptance scenario passes. The plan and owners are on #462. The person
+decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
+the system is solid.

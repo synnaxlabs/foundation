@@ -321,6 +321,14 @@ impl TimeProvider for Epoch {
     }
 }
 
+/// The public key of `private_key`, derived apart from the certificate template.
+#[cfg(test)]
+pub(crate) fn public(private_key: &PrivateKey) -> PublicKey {
+    let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0).expect("32 bytes");
+    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
+        .expect("aws-lc makes no key of small order")
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv6Addr};
@@ -341,14 +349,6 @@ mod tests {
     };
 
     use super::*;
-
-    /// The public key, derived apart from the certificate template.
-    fn public(private_key: &PrivateKey) -> PublicKey {
-        let pair =
-            Ed25519KeyPair::from_seed_unchecked(&private_key.0).expect("32 bytes");
-        PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-            .expect("aws-lc makes no key of small order")
-    }
 
     /// Moves every pending TLS record from `from` to `to`, and has `to` process
     /// each part as it reads it, because its read buffer is smaller than a flight.

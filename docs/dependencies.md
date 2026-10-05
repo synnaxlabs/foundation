@@ -18,12 +18,13 @@ approval; pin the version you build against there.
 | `rustls` | `transport`, `bench/carrier` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
 | `aws-lc-rs` | `transport`, signing, `secret` (sealing) | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
-| `crc32c` | `buffer` | Hardware CRC32C for write-ahead records (S4, r2 Q4, #48) | Apache-2.0 or MIT | 0.6.8 | 2026-10-04 |
+| `crc32c` | `buffer`, the `buffer_open` fuzz target | Hardware CRC32C for write-ahead records (S4, r2 Q4, #48) | Apache-2.0 or MIT | 0.6.8 | 2026-10-04 |
 | `bytes` | `transport` | The buffer type of `noq-proto`'s stream and datagram calls (#55) | MIT | 1.12.1 | 2026-10-04 |
 | `clap` | `ops` | The command line, generated from the operation table (C7, r7 area 8) | MIT or Apache-2.0 | 4.6.7 | 2026-10-05 |
 | `schemars` | `ops` | JSON Schemas of operation inputs for MCP tools (C7, r7 area 8) | MIT | 1.2.2 | 2026-10-05 |
 | `serde` | `ops` | Typed operation input and output for `--json` and MCP | MIT or Apache-2.0 | 1.0.229 | 2026-10-05 |
 | `serde_json` | `ops` | JSON for `--json` and MCP | MIT or Apache-2.0 | 1.0.151 | 2026-10-05 |
+| `unicode-ident` | `config-hcl` | Identifiers outside ASCII, as HCL reads them (HCL IDENTIFIERS, #263) | (MIT or Apache-2.0) and Unicode-3.0 | 1.0.26 | 2026-10-05 |
 | `zeroize` | `secret` | Overwrite a secret value when it drops; a plain write may be optimized away, and a volatile write needs `unsafe` (#230) | Apache-2.0 or MIT | 1.9.0 | 2026-10-05 |
 
 One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`

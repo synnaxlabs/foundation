@@ -4,6 +4,7 @@ use std::fmt;
 
 use types::time::Monotonic;
 
+use crate::measurement::MAX_ERROR;
 use crate::{Drift, Filter, Measurement};
 
 /// Combines the best measurement of each source into one estimate at `now`.
@@ -12,13 +13,19 @@ use crate::{Drift, Filter, Measurement};
 /// bounds (Marzullo's intersection). The estimate covers all of them, so a tie between
 /// groups that disagree gives a wide bound, not a guess. When all sources agree, the
 /// bound is not wider than the narrowest one. The estimate holds the true offset when
-/// the bounds that hold it are a majority and every other bound misses them all. A
-/// falseticker that overlaps some of them can move it, as in NTP.
+/// the bounds that hold it are a majority of the bounds that vote, and every other
+/// bound that votes misses them all. A falseticker that overlaps some of them can move
+/// it, as in NTP.
+///
+/// A bound of 36500 days at `now` is unknown. It votes only when no bound is known, so
+/// it never turns a split into an estimate. An estimate from unknown bounds alone is
+/// unknown too.
 ///
 /// # Errors
 ///
 /// - [`Error::NoSources`] when no filter holds a measurement.
-/// - [`Error::NoMajority`] when no offset is inside more than half of the bounds.
+/// - [`Error::NoMajority`] when no offset is inside more than half of the bounds that
+///   vote.
 ///
 /// ```
 /// use estimate::combine::combine;
@@ -43,11 +50,18 @@ pub fn combine<'a>(
     drift: Drift,
     sources: impl IntoIterator<Item = &'a Filter>,
 ) -> Result<Measurement, Error> {
-    let mut edges = Vec::new();
+    let (mut known, mut unknown) = (Vec::new(), Vec::new());
     for m in sources.into_iter().filter_map(|s| s.best(now, drift)) {
+        let edges = if m.error_at(now, drift) < MAX_ERROR {
+            &mut known
+        } else {
+            &mut unknown
+        };
         let (low, high) = m.bounds_at(now, drift);
         edges.extend([(low, Edge::Low), (high, Edge::High)]);
     }
+    let unknown_only = known.is_empty();
+    let mut edges = if unknown_only { unknown } else { known };
     let sources = edges.len() / 2;
     if sources == 0 {
         return Err(Error::NoSources);
@@ -59,7 +73,12 @@ pub fn combine<'a>(
     if 2 * agreeing <= sources {
         return Err(Error::NoMajority { sources, agreeing });
     }
-    Ok(Measurement::between(now, low, high))
+    let estimate = Measurement::between(now, low, high);
+    Ok(if unknown_only {
+        Measurement::unknown(now, estimate.offset())
+    } else {
+        estimate
+    })
 }
 
 /// Why [`combine`] gave no estimate.
@@ -67,9 +86,9 @@ pub fn combine<'a>(
 pub enum Error {
     /// No filter holds a measurement.
     NoSources,
-    /// No offset is inside the bounds of more than half of the sources.
+    /// No offset is inside the bounds of more than half of the sources that vote.
     NoMajority {
-        /// The number of sources.
+        /// The number of sources that vote.
         sources: usize,
         /// The most sources whose bounds share an offset.
         agreeing: usize,
@@ -289,24 +308,112 @@ mod tests {
         }
     }
 
-    #[test]
-    fn stops_the_bound_at_36500_days() {
-        let sources = filters(&[source(0, MAX_ERROR.nanos())]);
-        let m = combine(Monotonic(1_000_000_000), drift(1_000), &sources);
-        let m = m.expect("an unknown source still gives an estimate");
-        assert_eq!((m.offset(), m.error()), (Span::ZERO, MAX_ERROR));
-    }
+    mod when_a_bound_is_unknown {
+        use super::*;
+        use crate::exchange::{self, Exchange};
 
-    /// The old bound grows past 36500 days to hold the true offset of 36500 days and
-    /// 1 ns, so it must not cut the new bound.
-    #[test]
-    fn keeps_a_bound_grown_past_36500_days() {
-        let widest = MAX_ERROR.nanos();
-        let now = Monotonic(1_000_000_000);
-        let new = Measurement::new(now, Span::from_nanos(widest), Span::from_nanos(1));
-        let sources = filters(&[source(0, widest - 500), new.expect("valid")]);
-        let m = combine(now, drift(1_000), &sources).expect("both hold the truth");
-        assert_eq!((m.offset().nanos(), m.error().nanos()), (widest, 1));
+        fn unknown(offset: i64) -> Measurement {
+            Measurement::unknown(Monotonic(0), Span::from_nanos(offset))
+        }
+
+        #[test]
+        fn leaves_a_split_without_a_majority() {
+            let sources = [source(0, 1_000), source(10_000_000_000, 1_000), unknown(0)];
+            let split = Error::NoMajority {
+                sources: 2,
+                agreeing: 1,
+            };
+            assert_eq!(check(&sources), Err(split));
+        }
+
+        #[test]
+        fn starts_at_exactly_36500_days() {
+            let os = source(0, MAX_ERROR.nanos() - 1);
+            let sources = [source(0, 1_000), source(10_000_000_000, 1_000), os];
+            assert_eq!(check(&sources), Ok((5_000_000_000, 5_000_001_000)));
+        }
+
+        /// Two unknown bounds hold the true offset of zero, and the known bound misses
+        /// both.
+        #[test]
+        fn loses_to_a_known_bound_even_as_a_majority() {
+            let widest = MAX_ERROR.nanos();
+            let liar = source(widest + widest / 2, 1);
+            let sources = [source(0, widest), source(0, widest), liar];
+            assert_eq!(check(&sources), Ok((widest + widest / 2, 1)));
+        }
+
+        /// The old bound grows to 36500 days at `now`, so the known bound it misses
+        /// wins.
+        #[test]
+        fn drops_a_bound_grown_to_36500_days() {
+            let widest = MAX_ERROR.nanos();
+            let now = Monotonic(1_000_000_000);
+            let offset = Span::from_nanos(widest + 1_000);
+            let known = Measurement::new(now, offset, Span::from_nanos(1));
+            let sources = filters(&[source(0, widest - 500), known.expect("valid")]);
+            let m = combine(now, drift(1_000), &sources).expect("one known source");
+            assert_eq!((m.offset(), m.error().nanos()), (offset, 1));
+        }
+
+        #[test]
+        fn gives_an_estimate_with_no_known_bound() {
+            let sources = filters(&[source(0, MAX_ERROR.nanos())]);
+            let now = Monotonic(1_000_000_000);
+            let m = combine(now, drift(1_000), &sources);
+            let m = m.expect("an unknown source still gives an estimate");
+            assert_eq!(
+                (m.at(), m.offset(), m.error()),
+                (now, Span::ZERO, MAX_ERROR)
+            );
+        }
+
+        /// The old bound grows past 36500 days to hold the true offset of 36500 days
+        /// and 1 ns, so it must not cut the new bound.
+        #[test]
+        fn keeps_a_bound_grown_past_36500_days() {
+            let widest = MAX_ERROR.nanos();
+            let now = Monotonic(1_000_000_000);
+            let new = Measurement::new(now, Span::from_nanos(widest), MAX_ERROR);
+            let sources = filters(&[source(0, widest - 500), new.expect("valid")]);
+            let m = combine(now, drift(1_000), &sources).expect("both hold the truth");
+            let half = widest / 2 + 250;
+            assert_eq!((m.offset().nanos(), m.error().nanos()), (half, widest));
+        }
+
+        #[test]
+        fn gives_an_unknown_estimate_from_unknown_bounds_alone() {
+            let sources = [unknown(0), unknown(Span::SECOND.nanos())];
+            let widest = MAX_ERROR.nanos();
+            assert_eq!(check(&sources), Ok((500_000_000, widest)));
+        }
+
+        /// The bounds share only the offsets from 36500 days minus 2 ns to 36500 days.
+        #[test]
+        fn gives_an_unknown_estimate_where_unknown_bounds_barely_meet() {
+            let widest = MAX_ERROR.nanos();
+            let sources = [unknown(0), unknown(2 * widest - 2)];
+            assert_eq!(check(&sources), Ok((widest - 1, widest)));
+        }
+
+        /// A peer that reads the estimate at both ends of an exchange gets no known
+        /// bound, so it cannot vote with it.
+        #[test]
+        fn gives_a_peer_no_known_bound() {
+            let sources = filters(&[unknown(0), unknown(Span::SECOND.nanos())]);
+            let m = combine(Monotonic(0), drift(0), &sources).expect("bounds meet");
+            let exchange = Exchange {
+                sent: Monotonic(0),
+                received: m.interval(),
+                answered: m.interval(),
+                returned: Monotonic(10),
+            };
+            let error = Span::from_nanos(MAX_ERROR.nanos() + 5);
+            assert_eq!(
+                exchange.measure(drift(0)),
+                Err(exchange::Error::Bound { error })
+            );
+        }
     }
 
     mod properties {
@@ -377,6 +484,19 @@ mod tests {
             })
         }
 
+        /// Unknown sources that hold the true offset at their own time.
+        fn unknown_truechimers() -> impl Strategy<Value = (World, Vec<Measurement>)> {
+            world().prop_flat_map(|w| {
+                let widest = MAX_ERROR.nanos();
+                let one =
+                    (0..TIME_NS, -widest..=widest).prop_map(move |(at, slack)| {
+                        let offset = nanos(w.truth(at) + i128::from(slack));
+                        Measurement::unknown(Monotonic(at), offset)
+                    });
+                (Just(w), vec(one, 1..10))
+            })
+        }
+
         proptest! {
             #[test]
             fn holds_the_truth_when_every_source_does((w, sources) in agreeing()) {
@@ -410,6 +530,26 @@ mod tests {
                 );
             }
 
+            /// The estimate is unknown, and holds the true offset when the bounds share
+            /// no more than 36500 days on each side of their center.
+            #[test]
+            fn gives_an_unknown_estimate_that_holds_the_truth(
+                (w, sources) in unknown_truechimers()
+            ) {
+                let now = Monotonic(w.now);
+                let m = w.combine(&sources).expect("every bound holds the truth");
+                prop_assert_eq!((m.at(), m.error()), (now, MAX_ERROR));
+                let (low, high) = sources
+                    .iter()
+                    .map(|s| s.bounds_at(now, w.drift))
+                    .reduce(|(l, h), (l2, h2)| (l.max(l2), h.min(h2)))
+                    .expect("at least one source");
+                if high - low <= 2 * i128::from(MAX_ERROR.nanos()) {
+                    let truth = w.truth(w.now);
+                    prop_assert!(w.holds_truth_at(m, w.now), "{m:?} misses {truth}");
+                }
+            }
+
             #[test]
             fn ignores_input_order(
                 (sources, shuffled) in any_measurements(ERROR_NS, ERROR_NS)
@@ -420,6 +560,42 @@ mod tests {
                 let (now, drift) = (Monotonic(now), drift(ppb));
                 let given = combine(now, drift, &filters(&sources));
                 prop_assert_eq!(given, combine(now, drift, &filters(&shuffled)));
+            }
+
+            #[test]
+            fn ignores_unknown_bounds_beside_a_known_one(
+                known in any_measurements(i64::MAX, ERROR_NS),
+                unknown in vec((any::<u64>(), any::<i64>()), 1..4),
+                now in any::<u64>(),
+                ppb in 0..=1_000_000_u32,
+            ) {
+                let unknown = unknown.into_iter().map(|(at, offset)| {
+                    let offset = Span::from_nanos(offset);
+                    Measurement::new(Monotonic(at), offset, MAX_ERROR).expect("valid")
+                });
+                let all: Vec<_> = known.iter().copied().chain(unknown).collect();
+                let (now, drift) = (Monotonic(now), drift(ppb));
+                let given = combine(now, drift, &filters(&all));
+                prop_assert_eq!(given, combine(now, drift, &filters(&known)));
+            }
+
+            #[test]
+            fn gives_an_unknown_estimate_from_unknown_bounds_alone(
+                unknown in vec((any::<u64>(), any::<i64>()), 1..4),
+                now in any::<u64>(),
+                ppb in 0..=1_000_000_u32,
+            ) {
+                let unknown: Vec<_> = unknown
+                    .into_iter()
+                    .map(|(at, offset)| {
+                        Measurement::unknown(Monotonic(at), Span::from_nanos(offset))
+                    })
+                    .collect();
+                match combine(Monotonic(now), drift(ppb), &filters(&unknown)) {
+                    Ok(m) => prop_assert_eq!((m.at(), m.error()), (Monotonic(now), MAX_ERROR)),
+                    Err(Error::NoMajority { .. }) => {}
+                    Err(e @ Error::NoSources) => prop_assert!(false, "unexpected {e}"),
+                }
             }
 
             #[test]

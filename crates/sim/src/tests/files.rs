@@ -18,8 +18,8 @@ use types::time::Span;
 use super::{shard, sim};
 use crate::node;
 
-const KIB: u64 = 1 << 10;
-const MIB: u64 = 1 << 20;
+pub(super) const KIB: u64 = 1 << 10;
+pub(super) const MIB: u64 = 1 << 20;
 
 /// Runs `body` on a shard of a node with a disk of `disk_bytes`, and returns what it
 /// gives.
@@ -49,30 +49,30 @@ where
     out.lock().unwrap().take().expect("the shard gave a value")
 }
 
-fn pool() -> Pool {
+pub(super) fn pool() -> Pool {
     let config = block::Config { budget: 64 << 10 };
     let memory = block::Heap::new(config.reservation());
     Pool::new(config, memory)
 }
 
-fn block(pool: &Pool, bytes: &[u8]) -> Block {
+pub(super) fn block(pool: &Pool, bytes: &[u8]) -> Block {
     let mut unique = pool.alloc(bytes.len()).unwrap();
     unique.copy_from_slice(bytes);
     unique.freeze()
 }
 
 /// The `len` bytes of `file` at `offset`.
-async fn read(file: &File, pool: &Pool, offset: u64, len: usize) -> Vec<u8> {
+pub(super) async fn read(file: &File, pool: &Pool, offset: u64, len: usize) -> Vec<u8> {
     let into = pool.alloc(len).unwrap();
     file.read_at(offset, into).await.unwrap().to_vec()
 }
 
-async fn create(node: &node::Node, path: &str, len: u64) -> File {
+pub(super) async fn create(node: &node::Node, path: &str, len: u64) -> File {
     let mode = Mode::Create { len };
     node.files().open(Path::new(path), mode).await.unwrap()
 }
 
-fn io(path: &str, operation: Operation, code: i32) -> Error {
+pub(super) fn io(path: &str, operation: Operation, code: i32) -> Error {
     Error::Io {
         path: path.into(),
         operation,
@@ -82,7 +82,7 @@ fn io(path: &str, operation: Operation, code: i32) -> Error {
 
 /// The first byte of each 512-byte sector of `bytes`, after a check that each sector
 /// holds one value.
-fn sectors(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn sectors(bytes: &[u8]) -> Vec<u8> {
     (bytes.chunks(512))
         .map(|sector| {
             assert!(
@@ -294,6 +294,20 @@ fn free_counts_each_file_and_directory_until_its_last_handle_closes() {
     let expected = [MIB, created, created, created - 4 * KIB, created - 4 * KIB];
     assert_eq!(frees[..5], expected);
     assert_eq!(frees[5], MIB - 4 * KIB, "the last handle closed");
+}
+
+#[test]
+fn a_remove_frees_a_durable_file_only_after_sync_dir() {
+    let frees = run(0, MIB, |node, _| async move {
+        let files = node.files();
+        drop(create(&node, "f", 64 * KIB).await);
+        files.sync_dir(Path::new("")).await.unwrap();
+        files.remove(Path::new("f")).await.unwrap();
+        let removed = files.free().await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        (removed, files.free().await.unwrap())
+    });
+    assert_eq!(frees, (MIB - 64 * KIB, MIB));
 }
 
 #[test]
@@ -648,4 +662,201 @@ fn free_digest(failed: bool) -> u64 {
 fn the_digest_holds_the_result_of_each_file_call() {
     assert_eq!(free_digest(false), free_digest(false));
     assert_ne!(free_digest(false), free_digest(true));
+}
+
+/// The 512 bytes of a file after writes of 1 over bytes 0 to 100 and of 2 over bytes
+/// 200 to 300 were in flight at once and both ended with success.
+fn writes_that_share_no_byte(value: u64) -> Vec<u8> {
+    run(value, MIB, |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 512).await);
+        let pool = pool();
+        let (writer, parts) = (Rc::clone(&file), [block(&pool, &[1; 100])]);
+        tasks.spawn(async move { writer.write_at(0, &parts).await.unwrap() });
+        file.write_at(200, &[block(&pool, &[2; 100])])
+            .await
+            .unwrap();
+        node.clock().sleep(Span::MILLISECOND).await;
+        read(&file, &pool, 0, 512).await
+    })
+}
+
+#[test]
+fn writes_in_flight_that_share_no_byte_both_stay() {
+    for value in 0..64 {
+        let found = writes_that_share_no_byte(value);
+        let kept = (found[..100] == [1; 100], found[200..300] == [2; 100]);
+        assert_eq!(
+            kept,
+            (true, true),
+            "value {value}: (first kept, second kept)"
+        );
+    }
+}
+
+#[test]
+fn a_read_of_the_last_sector_of_the_largest_file_ends() {
+    let bytes = run(0, u64::MAX, |node, _| async move {
+        let file = create(&node, "a", u64::MAX).await;
+        read(&file, &pool(), u64::MAX - 1, 1).await
+    });
+    assert_eq!(bytes, vec![0]);
+}
+
+#[test]
+fn an_open_of_a_file_with_a_trailing_slash_fails() {
+    let opened = run(0, MIB, |node, _| async move {
+        drop(create(&node, "a", 1).await);
+        let opened = node.files().open(Path::new("a/"), Mode::Read).await;
+        opened.map(drop)
+    });
+    assert_eq!(opened, Err(io("a/", Operation::Open, 20)));
+}
+
+#[test]
+fn a_write_to_the_last_sector_of_the_largest_file_stays() {
+    let bytes = run(0, u64::MAX, |node, _| async move {
+        let file = create(&node, "a", u64::MAX).await;
+        let pool = pool();
+        file.write_at(u64::MAX - 1, &[block(&pool, &[7])])
+            .await
+            .unwrap();
+        read(&file, &pool, u64::MAX - 2, 2).await
+    });
+    assert_eq!(bytes, vec![0, 7]);
+}
+
+/// The values of bytes 0 to 100 and 100 to 200 of a file after writes of 1 over the
+/// first, 2 over the second, and 3 over both were in flight at once.
+fn three_writes_in_flight(value: u64) -> (u8, u8) {
+    let bytes = run(value, MIB, |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 512).await);
+        let pool = pool();
+        for (offset, len, byte) in [(0, 100, 1), (100, 100, 2)] {
+            let (writer, parts) = (Rc::clone(&file), [block(&pool, &vec![byte; len])]);
+            tasks.spawn(async move { writer.write_at(offset, &parts).await.unwrap() });
+        }
+        file.write_at(0, &[block(&pool, &[3; 200])]).await.unwrap();
+        node.clock().sleep(Span::MILLISECOND).await;
+        read(&file, &pool, 0, 200).await
+    });
+    let (first, second) = bytes.split_at(100);
+    assert!(first.iter().all(|&byte| byte == first[0]), "{first:?}");
+    assert!(second.iter().all(|&byte| byte == second[0]), "{second:?}");
+    (first[0], second[0])
+}
+
+#[test]
+fn three_writes_in_flight_leave_the_result_of_each_order() {
+    let results: BTreeSet<(u8, u8)> = (0..128).map(three_writes_in_flight).collect();
+    let orders = BTreeSet::from([(1, 2), (1, 3), (3, 2), (3, 3)]);
+    assert_eq!(results, orders);
+}
+
+#[test]
+fn a_path_with_a_trailing_slash_names_only_a_directory() {
+    let results = run(0, MIB, |node, _| async move {
+        let files = node.files();
+        drop(create(&node, "a", 1).await);
+        files.create_dir(Path::new("d")).await.unwrap();
+        let mut results = Vec::new();
+        for (path, mode) in [
+            ("a/", Mode::Write),
+            ("a/.", Mode::Read),
+            ("a//", Mode::Read),
+            ("a/", Mode::Create { len: 1 }),
+            ("b/", Mode::Create { len: 1 }),
+            ("b/", Mode::Read),
+            ("d/", Mode::Read),
+        ] {
+            results.push(files.open(Path::new(path), mode).await.map(drop));
+        }
+        for path in ["a/", "b/", "d/", "a"] {
+            results.push(files.remove(Path::new(path)).await);
+        }
+        results
+    });
+    let expected = [
+        Err(io("a/", Operation::Open, 20)),
+        Err(io("a/.", Operation::Open, 20)),
+        Err(io("a//", Operation::Open, 20)),
+        Err(io("a/", Operation::Open, 21)),
+        Err(io("b/", Operation::Open, 21)),
+        Err(Error::NotFound { path: "b/".into() }),
+        Err(io("d/", Operation::Open, 21)),
+        Err(io("a/", Operation::Remove, 20)),
+        Ok(()),
+        Err(io("d/", Operation::Remove, 21)),
+        Ok(()),
+    ];
+    assert_eq!(results, expected);
+}
+
+/// The values of bytes 0 to 100 and 100 to 200 of a file after the writes of `order`
+/// (offset, length, and value), each started when the one before it ended or, when
+/// `spawned`, at once with it.
+fn writes_in_order(value: u64, order: [(u64, usize, u8, bool); 3]) -> (u8, u8) {
+    let bytes = run(value, MIB, move |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 512).await);
+        let pool = pool();
+        for (offset, len, byte, spawned) in order {
+            let (writer, parts) = (Rc::clone(&file), [block(&pool, &vec![byte; len])]);
+            let write = async move { writer.write_at(offset, &parts).await.unwrap() };
+            if spawned {
+                tasks.spawn(write);
+            } else {
+                write.await;
+            }
+        }
+        node.clock().sleep(Span::MILLISECOND).await;
+        read(&file, &pool, 0, 200).await
+    });
+    let (first, second) = bytes.split_at(100);
+    assert!(first.iter().all(|&byte| byte == first[0]), "{first:?}");
+    assert!(second.iter().all(|&byte| byte == second[0]), "{second:?}");
+    (first[0], second[0])
+}
+
+#[test]
+fn three_writes_in_flight_over_nested_bytes_leave_the_result_of_an_order() {
+    let writes = [(0, 200, 1, true), (0, 100, 2, true), (0, 200, 3, false)];
+    let results: BTreeSet<(u8, u8)> = (0..256)
+        .map(|value| writes_in_order(value, writes))
+        .collect();
+    let orders = BTreeSet::from([(1, 1), (2, 1), (2, 3), (3, 3)]);
+    assert_eq!(results, orders);
+}
+
+#[test]
+fn a_write_in_flight_over_two_in_turn_keeps_their_order() {
+    let writes = [(0, 200, 1, true), (0, 100, 2, false), (100, 100, 3, false)];
+    let results: BTreeSet<(u8, u8)> = (0..256)
+        .map(|value| writes_in_order(value, writes))
+        .collect();
+    let orders = BTreeSet::from([(1, 1), (1, 3), (2, 3)]);
+    assert_eq!(results, orders);
+}
+
+/// The bytes of a one-sector file after writes of 1, 2, and 3, with a sync started
+/// after each of the first two and still in flight.
+fn syncs_in_flight(value: u64) -> Vec<u8> {
+    run(value, MIB, |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 512).await);
+        let pool = pool();
+        for byte in 1..=3 {
+            file.write_at(0, &[block(&pool, &[byte; 512])])
+                .await
+                .unwrap();
+            let syncer = Rc::clone(&file);
+            tasks.spawn(async move { syncer.sync().await.unwrap() });
+        }
+        node.clock().sleep(Span::MILLISECOND).await;
+        read(&file, &pool, 0, 512).await
+    })
+}
+
+#[test]
+fn syncs_in_flight_end_in_any_order() {
+    for value in 0..64 {
+        assert_eq!(syncs_in_flight(value), vec![3; 512], "value {value}");
+    }
 }

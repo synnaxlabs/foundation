@@ -64,7 +64,7 @@ impl Session {
 
     /// Opens a stream in both directions. It waits while the peer allows no more
     /// streams; dropping the future before it completes opens nothing. The peer sees
-    /// the stream at its first message or finish.
+    /// the stream at its first message.
     ///
     /// # Errors
     ///
@@ -85,7 +85,7 @@ impl Session {
 
     /// Opens a stream that only this node sends on. It waits while the peer allows no
     /// more streams; dropping the future before it completes opens nothing. The peer
-    /// sees the stream at its first message or finish.
+    /// sees the stream at its first message.
     ///
     /// # Errors
     ///

@@ -21,6 +21,8 @@ pub(crate) struct Memory {
     files: Arc<Mutex<hash::Map<PathBuf, Bytes>>>,
     syncs_fail: Arc<AtomicBool>,
     syncs: Arc<AtomicU64>,
+    /// How many descriptors are open.
+    opens: Arc<AtomicU64>,
     /// What every sync sleeps for, on a clock, before it ends.
     slow: Arc<Mutex<Option<(Clock, Span)>>>,
 }
@@ -47,6 +49,11 @@ impl Memory {
     /// How many syncs were asked for, failed ones included.
     pub(crate) fn syncs(&self) -> u64 {
         self.syncs.load(Relaxed)
+    }
+
+    /// How many descriptors are open now.
+    pub(crate) fn open_files(&self) -> u64 {
+        self.opens.load(Relaxed)
     }
 
     /// The bytes of a file.
@@ -112,11 +119,13 @@ impl Driver for Memory {
             (None, _) => Err(Error::NotFound { path: path.into() }),
         };
         let result = result.map(|bytes| {
+            self.opens.fetch_add(1, Relaxed);
             let open: Box<dyn Descriptor> = Box::new(Open {
                 bytes,
                 path: path.into(),
                 syncs_fail: Arc::clone(&self.syncs_fail),
                 syncs: Arc::clone(&self.syncs),
+                opens: Arc::clone(&self.opens),
                 slow: Arc::clone(&self.slow),
             });
             open
@@ -153,7 +162,14 @@ struct Open {
     path: PathBuf,
     syncs_fail: Arc<AtomicBool>,
     syncs: Arc<AtomicU64>,
+    opens: Arc<AtomicU64>,
     slow: Arc<Mutex<Option<(Clock, Span)>>>,
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.opens.fetch_sub(1, Relaxed);
+    }
 }
 
 impl Descriptor for Open {
