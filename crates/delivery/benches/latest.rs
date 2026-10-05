@@ -5,7 +5,7 @@ use delivery::{Key, Readers};
 use divan::Bencher;
 use types::channel::Slot;
 use types::frame::key_set::{Group, Interner};
-use types::frame::{Draft, Form, Frame, Label};
+use types::frame::{Draft, Form, Frame, Path};
 use types::time::Stamp;
 
 fn main() {
@@ -20,9 +20,9 @@ fn opened(sessions: usize) -> (Frame, Readers, Vec<Key>) {
     }]);
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
-    let frame = Draft::new(&pool, &set, Label::Live, Form::Raw, &[(0, 8)])
+    let frame = Draft::new(&pool, &set, Form::Raw, &[(0, 8)])
         .expect("the pool holds the frame")
-        .freeze();
+        .freeze(Path::Live);
     let mut readers = Readers::new();
     let keys = (0..sessions)
         .map(|_| readers.open_latest(None, Stamp::from_nanos(0)).key)
