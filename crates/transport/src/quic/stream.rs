@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::task::Poll;
-use std::{mem, slice};
+use std::{mem, slice, vec};
 
 use block::{Block, Pool};
 use bytes::Bytes;
@@ -14,7 +14,7 @@ use noq_proto::{
 };
 
 use super::{Event, connection};
-use crate::message::{self, Prefix, Reader};
+use crate::message::{Prefix, Reader};
 use crate::{Class, Code, Error};
 
 /// Names one stream of a connection of an [`Endpoint`](super::Endpoint).
@@ -100,8 +100,6 @@ struct Budget {
     /// At most the fewest bytes that a waiting claim asks for, or `usize::MAX`. The
     /// room stays below it between wakes.
     smallest: usize,
-    /// The event that tells the caller a waiting stream may go on.
-    wake: fn(Key) -> Event,
 }
 
 /// The part of a [`Budget`] that the message of one stream holds or waits for.
@@ -217,14 +215,13 @@ impl Receiver {
 }
 
 impl Budget {
-    fn new(max: usize, wake: fn(Key) -> Event) -> Self {
+    fn new(max: usize) -> Self {
         Self {
             max,
             used: 0,
             round: 1,
             waiting: Vec::new(),
             smallest: usize::MAX,
-            wake,
         }
     }
 
@@ -235,16 +232,7 @@ impl Budget {
 
     /// Charges `bytes` to `claim` when they fit. Else `stream` waits for the next
     /// wake.
-    ///
-    /// # Panics
-    ///
-    /// When `bytes` is over the budget, as they would never fit.
     fn charge(&mut self, stream: Key, bytes: usize, claim: &mut Claim) -> bool {
-        assert!(
-            bytes <= self.max,
-            "a claim of {bytes} bytes is over the budget of {}",
-            self.max
-        );
         if self.waits(claim) {
             return false;
         }
@@ -260,25 +248,23 @@ impl Budget {
     }
 
     /// Ends `claim`, the claim of `stream`: gives back its bytes, or stops its wait.
-    /// When the room then fits the smallest waiting claim, each waiting stream gets
-    /// its wake in `events`.
-    fn release(
-        &mut self,
-        stream: Key,
-        claim: &mut Claim,
-        events: &mut VecDeque<Event>,
-    ) {
+    /// Returns the streams to wake: each waiting stream when the room then fits the
+    /// smallest waiting claim, else none.
+    fn release(&mut self, stream: Key, claim: &mut Claim) -> vec::Drain<'_, Key> {
         if self.waits(claim) {
             let at = self.waiting.iter().position(|&other| other == stream);
             self.waiting
                 .swap_remove(at.expect("invariant: a waiting stream is listed"));
         }
         self.used -= mem::take(claim).bytes;
-        if self.max - self.used >= self.smallest {
+        let woken = if self.max - self.used >= self.smallest {
             self.round += 1;
             self.smallest = usize::MAX;
-            events.extend(self.waiting.drain(..).map(self.wake));
-        }
+            self.waiting.len()
+        } else {
+            0
+        };
+        self.waiting.drain(..woken)
     }
 }
 
@@ -291,10 +277,8 @@ impl Streams {
             unclassified: Vec::new(),
             incoming: Default::default(),
             senders: Vec::new(),
-            sending: Budget::new(window_bytes, |stream| Event::Writable { stream }),
-            receiving: Budget::new(window_bytes.saturating_add(bytes_max), |stream| {
-                Event::Readable { stream }
-            }),
+            sending: Budget::new(window_bytes),
+            receiving: Budget::new(window_bytes.saturating_add(bytes_max)),
         }
     }
 
@@ -388,9 +372,8 @@ impl Streams {
 
     /// Writes what `sender` holds to `inner`. `Ready` when the stream took all of it.
     /// `Pending` when the stream takes no more now, or the message has no room in the
-    /// send budget. When a message stops counting and the room fits the smallest
-    /// message that found none, each sender that found none gets [`Event::Writable`]
-    /// in `events`.
+    /// send budget. The senders that room returns to get [`Event::Writable`] in
+    /// `events`.
     ///
     /// # Errors
     ///
@@ -404,7 +387,8 @@ impl Streams {
     ) -> Result<Poll<()>, Error> {
         let flushed = self.push(inner, sender);
         if !matches!(flushed, Ok(Poll::Pending)) {
-            self.sending.release(sender.key, &mut sender.claim, events);
+            let woken = self.sending.release(sender.key, &mut sender.claim);
+            events.extend(woken.map(|stream| Event::Writable { stream }));
         }
         flushed
     }
@@ -483,9 +467,8 @@ impl Streams {
 
     /// Reads the next whole message of `receiver`'s stream from `inner` into a block
     /// from `pool`. `Ready(None)` at the end. `Pending` when no whole message is here
-    /// yet, or the next has no room in the receive budget. When a message stops
-    /// counting and the room fits the smallest message that found none, each receiver
-    /// that found none gets [`Event::Readable`] in `events`.
+    /// yet, or the next has no room in the receive budget. The receivers that room
+    /// returns to get [`Event::Readable`] in `events`.
     ///
     /// # Errors
     ///
@@ -514,13 +497,8 @@ impl Streams {
         let mut result = Ok(Poll::Pending);
         if !receiving.waits(claim) {
             let mut chunks = recv.read(true).expect(RECEIVING);
-            let alloc = |len| {
-                if !receiving.charge(*key, len, claim) {
-                    return Ok(Poll::Pending);
-                }
-                message::alloc(pool, len).map(Poll::Ready)
-            };
-            result = reader.read(alloc, |max| match chunks.next(max) {
+            let admit = |len| receiving.charge(*key, len, claim);
+            result = reader.read(pool, admit, |max| match chunks.next(max) {
                 Ok(chunk) => Ok(Poll::Ready(chunk.map(|chunk| chunk.bytes))),
                 Err(ReadError::Blocked) => Ok(Poll::Pending),
                 Err(ReadError::Reset(error)) => Err(reset_error(error)),
@@ -533,7 +511,8 @@ impl Streams {
             result = Err(reset_error(error));
         }
         if !matches!(result, Ok(Poll::Pending)) {
-            receiving.release(*key, claim, events);
+            let woken = receiving.release(*key, claim);
+            events.extend(woken.map(|stream| Event::Readable { stream }));
         }
         *end = match result {
             Ok(Poll::Ready(None)) => Some(End::Finished),
@@ -1293,21 +1272,18 @@ mod tests {
 
     #[test]
     fn a_budget_wakes_no_stream_until_the_room_fits_the_smallest_claim_that_waits() {
-        let mut budget = Budget::new(10, |stream| Event::Writable { stream });
-        let mut events = VecDeque::new();
+        let mut budget = Budget::new(10);
         let [mut a, mut b, mut c, mut d] = <[Claim; 4]>::default();
         assert!(budget.charge(stream(0), 9, &mut a));
         assert!(!budget.charge(stream(1), 2, &mut b));
-        budget.release(stream(0), &mut a, &mut events);
-        let woken: Vec<_> = events.drain(..).collect();
-        assert_eq!(woken, [Event::Writable { stream: stream(1) }]);
+        let woken: Vec<_> = budget.release(stream(0), &mut a).collect();
+        assert_eq!(woken, [stream(1)]);
         assert!(budget.charge(stream(1), 2, &mut b));
         assert!(budget.charge(stream(2), 7, &mut c));
         assert!(!budget.charge(stream(3), 5, &mut d));
-        budget.release(stream(1), &mut b, &mut events);
-        assert_eq!(events, []);
-        budget.release(stream(2), &mut c, &mut events);
-        assert_eq!(events, [Event::Writable { stream: stream(3) }]);
+        assert_eq!(budget.release(stream(1), &mut b).count(), 0);
+        let woken: Vec<_> = budget.release(stream(2), &mut c).collect();
+        assert_eq!(woken, [stream(3)]);
     }
 
     #[test]
@@ -1488,12 +1464,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a claim of 131073 bytes is over the budget of 131072")]
-    fn a_message_over_the_send_budget_panics() {
+    #[should_panic(expected = "a message of 65537 bytes is over the largest message, \
+        65536 bytes")]
+    fn a_message_over_the_largest_panics() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
             let mut sender = open_sender(&mut pair, Class::Complete);
-            let (now, message) = (pair.now(), shard.block(&vec![1; NARROW + 1]));
+            let (now, message) = (pair.now(), shard.block(&vec![1; MESSAGE_MAX + 1]));
             drop(pair.client.endpoint.write(now, &mut sender, message));
         });
     }

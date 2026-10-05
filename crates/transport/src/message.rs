@@ -94,31 +94,33 @@ impl Reader {
         }
     }
 
-    /// Reads the next whole message into a block from `alloc`. `alloc(len)` gives a
-    /// block of `len` bytes, or `Pending` when it has no room now. `source(max)`
+    /// Reads the next whole message into a block from `pool`. `admit(len)` gives
+    /// whether the next message, of `len` bytes, may take a block now. `source(max)`
     /// gives the stream's next 1 to `max` bytes, `Pending` when it has none now, or
     /// `None` when the stream has ended. The reader never asks for a byte past the
     /// current message, so later messages stay with the source.
     ///
-    /// Returns the message, `Pending` when `alloc` or the source is pending, or
-    /// `None` when the stream ended between two messages. After `Pending`, the next
-    /// call goes on where this one stopped. After an error inside a message's body,
-    /// the reader holds no block.
+    /// Returns the message, `Pending` when `admit` refuses the message or the source
+    /// has no more bytes now, or `None` when the stream ended between two messages.
+    /// After `Pending`, the next call goes on where this one stopped. After an error
+    /// inside a message's body, the reader holds no block.
     ///
     /// # Errors
     ///
     /// - [`Error::Broken`] when the peer breaks the framing: a message over
     ///   `bytes_max`, or a stream that ends inside a message. The stream cannot go on.
-    /// - The error of `alloc`. The message's bytes stay with the source, and the next
-    ///   call asks `alloc` again.
+    /// - [`Error::Pool`] when `pool` has no room for the message now. Its bytes stay
+    ///   with the source; call again when the pool has room.
     /// - The source's error.
     ///
     /// # Panics
     ///
-    /// When the source gives no bytes or more than `max`.
+    /// When the source gives no bytes or more than `max`, or when `pool` cannot hold
+    /// a message of `bytes_max` bytes.
     pub(crate) fn read<B: AsRef<[u8]>>(
         &mut self,
-        mut alloc: impl FnMut(usize) -> Result<Poll<Unique>, Error>,
+        pool: &Pool,
+        mut admit: impl FnMut(usize) -> bool,
         mut source: impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
     ) -> Result<Poll<Option<Block>>, Error> {
         loop {
@@ -159,9 +161,10 @@ impl Reader {
                             ),
                         });
                     };
-                    let Poll::Ready(block) = alloc(len)? else {
+                    if !admit(len) {
                         return Ok(Poll::Pending);
-                    };
+                    }
+                    let block = alloc(pool, len)?;
                     self.state = State::Body { block, have: 0 };
                 }
                 State::Body { block, have } => {
@@ -200,7 +203,7 @@ impl Reader {
 /// # Panics
 ///
 /// When the pool cannot hold `len` bytes.
-pub(crate) fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
+fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
     match pool.alloc(len) {
         Ok(block) => Ok(block),
         Err(block::Error::Exhausted {
@@ -304,18 +307,13 @@ mod tests {
         }
     }
 
-    /// A block source for [`Reader::read`] that takes each block from `pool`.
-    fn blocks(pool: &Pool) -> impl FnMut(usize) -> Result<Poll<Unique>, Error> {
-        |len| alloc(pool, len).map(Poll::Ready)
-    }
-
     /// One read of `reader` from `source`, with the message as bytes.
     fn read(
         reader: &mut Reader,
         pool: &Pool,
         source: &mut Source,
     ) -> Result<Poll<Option<Vec<u8>>>, Error> {
-        let read = reader.read(blocks(pool), |max| Ok(source.take(max)))?;
+        let read = reader.read(pool, |_| true, |max| Ok(source.take(max)))?;
         Ok(read.map(|block| block.map(|block| block.to_vec())))
     }
 
@@ -518,11 +516,15 @@ mod tests {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(16);
             let read = reader
-                .read::<Vec<u8>>(blocks(&pool), |_| {
-                    Err(Error::Reset {
-                        code: crate::Code(16),
-                    })
-                })
+                .read::<Vec<u8>>(
+                    &pool,
+                    |_| true,
+                    |_| {
+                        Err(Error::Reset {
+                            code: crate::Code(16),
+                        })
+                    },
+                )
                 .map(|read| read.map(|block| block.map(|block| block.to_vec())));
             assert_eq!(
                 read,
@@ -542,11 +544,15 @@ mod tests {
             source.open = true;
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
             let read = reader
-                .read::<Vec<u8>>(blocks(&pool), |_| {
-                    Err(Error::Reset {
-                        code: crate::Code(16),
-                    })
-                })
+                .read::<Vec<u8>>(
+                    &pool,
+                    |_| true,
+                    |_| {
+                        Err(Error::Reset {
+                            code: crate::Code(16),
+                        })
+                    },
+                )
                 .map(|read| read.map(|block| block.map(|block| block.to_vec())));
             assert_eq!(
                 read,
@@ -558,12 +564,12 @@ mod tests {
         }
 
         #[test]
-        fn when_alloc_is_pending_it_takes_no_body_bytes_then_goes_on() {
+        fn when_admit_refuses_it_takes_no_body_bytes_then_goes_on() {
             let pool = pool(1 << 16);
             let mut source = Source::new(encode(&[vec![4; 10]]), 64);
             let mut reader = Reader::new(16);
             let read = reader
-                .read(|_| Ok(Poll::Pending), |max| Ok(source.take(max)))
+                .read(&pool, |_| false, |max| Ok(source.take(max)))
                 .map(|read| read.map(|block| block.map(|block| block.to_vec())));
             assert_eq!(read, Ok(Poll::Pending));
             assert_eq!(source.given, 1);
@@ -578,7 +584,7 @@ mod tests {
         fn when_source_gives_no_bytes_it_panics() {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(16);
-            drop(reader.read(blocks(&pool), |_| Ok(Poll::Ready(Some([0_u8; 0])))));
+            drop(reader.read(&pool, |_| true, |_| Ok(Poll::Ready(Some([0_u8; 0])))));
         }
 
         #[test]

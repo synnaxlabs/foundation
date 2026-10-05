@@ -289,13 +289,19 @@ impl Endpoint {
     /// # Panics
     ///
     /// When `sender` holds part of a message, after [`Endpoint::finish`], or when
-    /// `message` is over the peer's window (this side's own until the hello).
+    /// `message` is over the largest message (this side's own until the hello).
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
+        assert!(
+            message.len() <= self.message_bytes_max,
+            "a message of {} bytes is over the largest message, {} bytes",
+            message.len(),
+            self.message_bytes_max
+        );
         sender.load(message);
         self.flush(now, sender)
     }
