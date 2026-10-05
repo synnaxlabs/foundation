@@ -451,20 +451,29 @@ impl Raft {
         self.send(leader, self.term, Body::HeartbeatReply);
     }
 
+    // The last index a leader sends a removed node: the leave, or the leader's first
+    // entry when that is later. An older leader can leave entries past the leave on
+    // the node, such as a configuration that makes it a voter again. All are of a
+    // lower term, so that entry replaces them.
+    fn removed_end(&self) -> u64 {
+        let leave = self.log.voters().map_or(0, |(at, _)| at.index);
+        leave.max(self.log.first_of(self.term))
+    }
+
     // Releases the nodes a committed change removed: they leave the peers. A leader
-    // keeps one until it holds the leave, and sends it the commit as it goes.
+    // keeps one until it holds all it gets, and sends it the commit as it goes.
     fn release_removed(&mut self) {
         if !self.settled() {
             return;
         }
-        let leave = self.log.voters().map_or(0, |(at, _)| at.index);
+        let end = self.removed_end();
         let leader = self.role == Role::Leader;
         let removed: Vec<node::Key> = self
             .peers
             .iter()
             .filter(|&(&key, peer)| {
                 !self.voters.contains(key)
-                    && (!leader || peer.progress.matched() >= leave)
+                    && (!leader || peer.progress.matched() >= end)
             })
             .map(|(&key, _)| key)
             .collect();
@@ -637,10 +646,10 @@ impl Raft {
 
     // Sends each follower in `range` the entries from its `next` and the commit
     // index, unless the leader waits for its reply. A node that a change removed
-    // gets entries only up to its leave.
+    // gets entries only up to `removed_end`.
     fn send_appends<R: RangeBounds<node::Key>>(&mut self, range: R) {
         let commit = self.log.committed();
-        let leave = self.log.voters().map_or(0, |(at, _)| at.index);
+        let removed_end = self.removed_end();
         for (&to, peer) in self.peers.range_mut(range) {
             if to == self.key || peer.progress.paused() {
                 continue;
@@ -653,7 +662,7 @@ impl Raft {
             let end = if self.voters.contains(to) {
                 self.log.last().index
             } else {
-                leave
+                removed_end
             };
             let entries = self.log.slice(next, end, BATCH);
             let last = entries.last().map_or(prev.index, |entry| entry.at.index);
@@ -2662,8 +2671,8 @@ mod tests {
         }
 
         // The later change ends at the voters already in force, at another index.
-        // It releases node 3, and node 4, which it removed, gets entries up to its
-        // leave at index 7.
+        // It releases node 3, and node 4, which it removed, gets entries up to the
+        // leader's first entry at index 8, not the proposal at index 9.
         #[test]
         fn a_later_change_to_the_same_voters_releases_a_removed_node() {
             let later = vec![
@@ -2672,7 +2681,7 @@ mod tests {
                 config(1, 6, voters(&[1, 2], &[1, 2, 4])),
                 config(1, 7, voters(&[1, 2], &[])),
             ];
-            assert_eq!(lead_after(later), (vec![], vec![3, 4, 5, 6, 7]));
+            assert_eq!(lead_after(later), (vec![], vec![3, 4, 5, 6, 7, 8]));
         }
 
         #[test]

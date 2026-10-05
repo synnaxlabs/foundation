@@ -87,6 +87,13 @@ impl Log {
         self.entries.get(at).map(|entry| entry.at)
     }
 
+    // The index of the first entry of `term` or of a later term: one past the end
+    // with none.
+    pub(crate) fn first_of(&self, term: Term) -> u64 {
+        let before = self.entries.partition_point(|entry| entry.at.term < term);
+        u64::try_from(before).map_or(u64::MAX, |before| before.saturating_add(1))
+    }
+
     // Up to `max` entries from index `from` through index `end`, cloned for a
     // message. Empty when `from` is past `end` or past the log.
     pub(crate) fn slice(&self, from: u64, end: u64, max: usize) -> Vec<Entry> {
@@ -467,6 +474,13 @@ mod tests {
         assert_eq!(log.append(position(1, 1), vec![entry(2, 2)]), Ok(2));
         assert_eq!(log.append(Position::default(), vec![]), Ok(2));
         assert_eq!(terms(&log), [1, 1, 2]);
+    }
+
+    #[test]
+    fn gives_the_first_index_of_a_term_or_of_a_later_one() {
+        let log = log(&[1, 1, 3, 3]);
+        let first: Vec<u64> = (0..=4).map(|term| log.first_of(Term(term))).collect();
+        assert_eq!(first, vec![1, 1, 3, 3, 5]);
     }
 
     #[test]
