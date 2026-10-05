@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use block::{Heap, Pool};
+use block::{Block, Heap, Pool};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::net::udp::Meta;
@@ -16,7 +16,7 @@ use types::node::{PrivateKey, PublicKey};
 use types::time::{Monotonic, Span};
 
 use super::settings::MTU_MIN;
-use super::{Endpoint, Event, cid, connection};
+use super::{Endpoint, Event, cid, connection, find, queue};
 use crate::Config;
 
 /// The client's address. The server's is [`SERVER`].
@@ -62,8 +62,9 @@ pub(super) fn connection(
     endpoint: &mut Endpoint,
     key: connection::Key,
 ) -> &mut noq_proto::Connection {
-    endpoint.drive(key.handle);
-    &mut endpoint.get(key).expect("a connection").inner
+    let connection = find(&mut endpoint.connections, key).expect("a connection");
+    queue(&mut endpoint.ready, connection);
+    &mut connection.inner
 }
 
 /// The time `elapsed` after the start of a run.
@@ -76,7 +77,8 @@ pub(super) struct Shard {
     clock: Clock,
     entropy: Entropy,
     tasks: Tasks,
-    pool: Rc<Pool>,
+    /// The pool of each config.
+    pub(super) pool: Rc<Pool>,
 }
 
 impl Shard {
@@ -93,6 +95,13 @@ impl Shard {
             tasks: self.tasks.clone(),
             pool: Rc::clone(&self.pool),
         }
+    }
+
+    /// A block from [`Shard::pool`] that holds `bytes`.
+    pub(super) fn block(&self, bytes: &[u8]) -> Block {
+        let mut block = self.pool.alloc(bytes.len()).expect("room");
+        block.copy_from_slice(bytes);
+        block.freeze()
     }
 }
 
