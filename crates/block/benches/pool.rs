@@ -21,8 +21,8 @@ fn alloc_free(bencher: Bencher<'_, '_>) {
     bencher.bench_local(|| drop(pool.alloc(1000).expect("the budget has room")));
 }
 
-/// Blocks of two sizes in turn, with a budget for one: each alloc purges the free
-/// block of the other size and commits its own again.
+/// Blocks of two sizes in turn, with a budget for one: each alloc gives back the
+/// range of the other size and carves its own again.
 #[divan::bench]
 fn alloc_under_pressure(bencher: Bencher<'_, '_>) {
     let pool = create_pool(block::footprint(1000));

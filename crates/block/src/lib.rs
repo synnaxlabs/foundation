@@ -39,7 +39,8 @@ const CLASSES_MAX: usize = 26;
 /// Settings for one [`Pool`].
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// The most bytes the pool may commit at once.
+    /// The most bytes the pool may commit at once. Resident memory can pass it by up
+    /// to two partial pages per size class, because a purge rounds in to page bounds.
     pub budget: usize,
 }
 
@@ -144,8 +145,8 @@ struct Class {
     /// Bytes of this class's span that are cut into blocks.
     carved: Cell<usize>,
     free: Cell<usize>,
-    /// Free blocks whose payload left the budget. Their headers stay committed.
-    purged: Cell<usize>,
+    /// Blocks that holders have, or that wait in `Region::returned`.
+    lent: Cell<usize>,
 }
 
 /// A pool of blocks owned by one shard.
@@ -155,14 +156,13 @@ struct Class {
 ///
 /// Blocks come in sizes: 64 bytes and each power of two above it up to 2 GiB, each
 /// with 64 bytes in front. A free block keeps its budget for its own size until
-/// another size needs it: `alloc` then purges the free block and takes the budget.
+/// another size needs the budget and no block of that size is in use: `alloc` then
+/// gives the pages of the whole size back and takes the budget.
 pub struct Pool {
     region: NonNull<Region>,
     budget: usize,
     span: usize,
     committed: Cell<usize>,
-    /// Blocks handed out and not yet taken back.
-    lent: Cell<usize>,
     classes: Box<[Class]>,
 }
 
@@ -207,7 +207,6 @@ impl Pool {
             budget,
             span: budget.next_multiple_of(ALIGN),
             committed: Cell::new(0),
-            lent: Cell::new(0),
             classes: (0..classes(budget)).map(|_| Class::default()).collect(),
         }
     }
@@ -249,36 +248,22 @@ impl Pool {
                     available,
                 });
             }
-            let header = if class.purged.get() == NONE {
-                let offset = HEADER + index * self.span + class.carved.get();
-                self.shared().memory.commit(offset, size);
-                class.carved.set(class.carved.get() + size);
-                // SAFETY: the block lies in the span of its class, which the budget
-                // check keeps inside the reservation.
-                let header = unsafe { self.header(offset) };
-                let fresh = Header {
-                    refs: AtomicUsize::new(1),
-                    next: AtomicUsize::new(NONE),
-                    offset,
-                    class: index,
-                    payload: Track::new(),
-                };
-                // SAFETY: the block is committed and aligned, and no holder has it.
-                unsafe { header.write(fresh) };
-                header
-            } else {
-                let offset = class.purged.get();
-                // SAFETY: a purged block keeps its header, and only the pool uses it.
-                let header = unsafe { self.header(offset) };
-                // SAFETY: as above.
-                let purged = unsafe { header.as_ref() };
-                class.purged.set(purged.next.load(Relaxed));
-                self.shared().memory.commit(offset + HEADER, size - HEADER);
-                purged.refs.store(1, Relaxed);
-                purged.payload.write();
-                header
-            };
+            let offset = HEADER + index * self.span + class.carved.get();
+            self.shared().memory.commit(offset, size);
+            class.carved.set(class.carved.get() + size);
             self.committed.set(self.committed.get() + size);
+            // SAFETY: the carved bytes of a class are at most `committed`, which the
+            // room check keeps at or below the budget, and a span is at least that.
+            let header = unsafe { self.header(offset) };
+            let fresh = Header {
+                refs: AtomicUsize::new(1),
+                next: AtomicUsize::new(NONE),
+                offset,
+                class: index,
+                payload: Track::new(),
+            };
+            // SAFETY: the block is committed and aligned, and no holder has it.
+            unsafe { header.write(fresh) };
             header
         } else {
             // SAFETY: a block on a free list has a header, and only the pool uses it.
@@ -290,7 +275,7 @@ impl Pool {
             free.payload.write();
             header
         };
-        self.lent.set(self.lent.get() + 1);
+        class.lent.set(class.lent.get() + 1);
         #[expect(
             clippy::cast_possible_truncation,
             reason = "the class check above keeps `len` at or below 2 GiB"
@@ -311,17 +296,18 @@ impl Pool {
         }
     }
 
-    /// Bytes of the budget in use: the blocks that holders have, and the free blocks
-    /// that keep their pages. A free block that `alloc` purged counts zero until it
-    /// is used again.
+    /// Bytes of the budget in use: the carved range of each size class, which holds
+    /// the blocks that holders have and the free blocks that keep their pages. A size
+    /// whose blocks are all free gives its range back when another size needs the
+    /// budget.
     #[must_use]
     pub fn committed(&self) -> usize {
         self.committed.get()
     }
 
-    /// Purges free blocks until the budget has `size` bytes of room for class `index`
-    /// or no free block is left. Returns the room. `alloc` calls it when `index` has
-    /// no free block.
+    /// Gives back the carved range of each class with no block in use until the
+    /// budget has `size` bytes of room for class `index`. Returns the room. `alloc`
+    /// calls it when `index` has no free block.
     ///
     /// The classes above `index` go first, smallest first, so one purge covers the
     /// need. Then the classes below it, largest first.
@@ -330,26 +316,27 @@ impl Pool {
         let above = index..self.classes.len();
         let below = (0..index).rev();
         for other in above.chain(below) {
+            if available >= size {
+                break;
+            }
             let class = &self.classes[other];
-            let footprint = class_footprint(other);
-            while available < size && class.free.get() != NONE {
-                let offset = class.free.get();
-                // SAFETY: a block on a free list has a header, and only the pool
-                // uses it.
-                let header = unsafe { self.header(offset) };
-                // SAFETY: as above.
-                let free = unsafe { header.as_ref() };
-                class.free.set(free.next.load(Relaxed));
+            let carved = class.carved.get();
+            if class.lent.get() == 0 && carved != 0 {
                 self.shared()
                     .memory
-                    .purge(offset + HEADER, footprint - HEADER);
-                free.next.store(class.purged.get(), Relaxed);
-                class.purged.set(offset);
-                self.committed.set(self.committed.get() - footprint);
-                available += footprint;
+                    .purge(HEADER + other * self.span, carved);
+                class.carved.set(0);
+                class.free.set(NONE);
+                self.committed.set(self.committed.get() - carved);
+                available += carved;
             }
         }
         available
+    }
+
+    /// Blocks that holders have, or that wait in `Region::returned`.
+    fn lent(&self) -> usize {
+        self.classes.iter().map(|class| class.lent.get()).sum()
     }
 
     fn shared(&self) -> &Region {
@@ -380,7 +367,7 @@ impl Pool {
             let class = &self.classes[header.class];
             header.next.store(class.free.get(), Relaxed);
             class.free.set(offset);
-            self.lent.set(self.lent.get() - 1);
+            class.lent.set(class.lent.get() - 1);
             offset = next;
         }
     }
@@ -392,7 +379,7 @@ impl fmt::Debug for Pool {
         f.debug_struct("Pool")
             .field("budget", &self.budget)
             .field("committed", &self.committed.get())
-            .field("lent", &self.lent.get())
+            .field("lent", &self.lent())
             .finish()
     }
 }
@@ -401,7 +388,7 @@ impl Drop for Pool {
     fn drop(&mut self) {
         let region = self.shared();
         self.take(region.returned.swap(CLOSED, Acquire));
-        let lent = self.lent.get();
+        let lent = self.lent();
         region.track.read();
         if region.owed.fetch_add(lent, AcqRel).wrapping_add(lent) == 0 {
             // SAFETY: the pool is gone and no holder has a block.
@@ -973,7 +960,7 @@ mod tests {
         }
     }
 
-    /// `alloc` moves the budget of free blocks between sizes when it has to.
+    /// `alloc` moves the budget of an idle size to another size when it has to.
     mod pressure {
         use super::fixture::Call::{Commit, Purge};
         use super::*;
@@ -990,7 +977,7 @@ mod tests {
         }
 
         #[test]
-        fn uses_a_purged_block_of_its_class_again() {
+        fn gives_back_the_range_of_a_class_and_carves_it_again() {
             let (pool, watch) = create_watched_pool(256);
             let first = pool.alloc(64).expect("the budget has room");
             let address = first.as_ptr();
@@ -998,7 +985,7 @@ mod tests {
             let second = pool.alloc(128).expect("the free block gives its budget");
             drop(second);
             let third = pool.alloc(64).expect("the free block gives its budget");
-            assert_eq!(third.as_ptr(), address, "the purged block comes back");
+            assert_eq!(third.as_ptr(), address, "the class starts over at its span");
             assert_eq!(pool.committed(), 128);
             assert_eq!(
                 watch.calls(),
@@ -1009,28 +996,45 @@ mod tests {
                         len: 128
                     },
                     Purge {
-                        offset: 128,
-                        len: 64
+                        offset: 64,
+                        len: 128
                     },
                     Commit {
                         offset: 320,
                         len: 192
                     },
                     Purge {
-                        offset: 384,
-                        len: 128
+                        offset: 320,
+                        len: 192
                     },
                     Commit {
-                        offset: 128,
-                        len: 64
+                        offset: 64,
+                        len: 128
                     },
                 ],
-                "a purge covers the payload and not the header"
+                "a purge covers the carved range of the class, headers included"
             );
         }
 
         #[test]
-        fn purges_only_the_room_the_alloc_needs() {
+        fn purges_nothing_when_the_room_equals_the_need() {
+            let (pool, watch) = create_watched_pool(320);
+            drop(pool.alloc(64).expect("the budget has room"));
+            pool.reclaim();
+            let block = pool.alloc(128).expect("the room is exact");
+            assert_eq!(pool.committed(), 320);
+            assert!(
+                !watch
+                    .calls()
+                    .iter()
+                    .any(|call| matches!(call, Purge { .. })),
+                "the free block keeps its pages"
+            );
+            drop(block);
+        }
+
+        #[test]
+        fn keeps_the_budget_of_a_class_with_a_block_in_use() {
             let (pool, watch) = create_watched_pool(448);
             let blocks: Vec<_> = (0..3)
                 .map(|_| pool.alloc(64).expect("the budget has room"))
@@ -1038,78 +1042,81 @@ mod tests {
             let held = blocks.into_iter().next();
             pool.reclaim();
             assert_eq!(pool.committed(), 384);
-            let large = pool
-                .alloc(128)
-                .expect("one free block makes the room exact");
-            assert_eq!(pool.committed(), 448);
-            let purges = watch
-                .calls()
-                .iter()
-                .filter(|call| matches!(call, Purge { .. }))
-                .count();
-            assert_eq!(purges, 1);
-            let calls = watch.calls().len();
-            let small = pool.alloc(64).expect("the second free block is left");
-            assert_eq!(pool.committed(), 448);
-            assert_eq!(watch.calls().len(), calls, "a free block needs no commit");
-            drop((held, large, small));
+            assert_eq!(pool.alloc(128).err(), Some(exhausted(128, 64)));
+            assert_eq!(pool.committed(), 384, "the class keeps its free blocks");
+            assert!(
+                !watch
+                    .calls()
+                    .iter()
+                    .any(|call| matches!(call, Purge { .. }))
+            );
+            drop(held);
         }
 
         #[test]
-        fn purges_the_classes_above_first_and_then_the_largest_below() {
+        fn purges_the_class_above_first() {
             let (pool, watch) = create_watched_pool(640);
-            let held = pool.alloc(64).expect("the budget has room");
+            let held = pool.alloc(128).expect("the budget has room");
             drop(pool.alloc(64).expect("the budget has room"));
             drop(pool.alloc(256).expect("the budget has room"));
             pool.reclaim();
-            assert_eq!(pool.committed(), 576);
-            let middle = pool.alloc(128).expect("the free 256-byte block gives room");
+            assert_eq!(pool.committed(), 640);
+            let second = pool.alloc(128).expect("the idle 256-byte class gives room");
+            assert_eq!(pool.committed(), 512);
+            let calls = watch.calls();
+            assert_eq!(
+                calls[calls.len() - 2..],
+                [
+                    Purge {
+                        offset: 1344,
+                        len: 320
+                    },
+                    Commit {
+                        offset: 896,
+                        len: 192
+                    },
+                ],
+                "the class above goes first, and the idle 64-byte class stays"
+            );
+            drop((held, second));
+        }
+
+        #[test]
+        fn purges_the_largest_idle_class_below_first() {
+            let (pool, watch) = create_watched_pool(576);
+            drop(pool.alloc(64).expect("the budget has room"));
+            drop(pool.alloc(128).expect("the budget has room"));
+            pool.reclaim();
+            assert_eq!(pool.committed(), 320);
+            let large = pool.alloc(256).expect("the idle 128-byte class gives room");
             assert_eq!(pool.committed(), 448);
             let calls = watch.calls();
             assert_eq!(
                 calls[calls.len() - 2..],
                 [
                     Purge {
-                        offset: 1408,
-                        len: 256
-                    },
-                    Commit {
-                        offset: 704,
+                        offset: 640,
                         len: 192
                     },
-                ],
-                "the class above goes first, and the free 64-byte block stays"
-            );
-            drop(middle);
-            let large = pool.alloc(256).expect("the free 128-byte block gives room");
-            assert_eq!(pool.committed(), 576);
-            let calls = watch.calls();
-            assert_eq!(
-                calls[calls.len() - 2..],
-                [
-                    Purge {
-                        offset: 768,
-                        len: 128
-                    },
                     Commit {
-                        offset: 1408,
-                        len: 256
+                        offset: 1216,
+                        len: 320
                     },
                 ],
-                "the largest class below goes first, and the purged block comes back"
+                "the largest idle class below goes first, and the 64-byte class stays"
             );
-            drop((held, large));
+            drop(large);
         }
 
         #[test]
-        fn fails_after_it_purged_every_free_block_of_other_classes() {
+        fn fails_after_it_took_the_budget_of_each_idle_class() {
             let pool = create_pool(384);
-            let held = pool.alloc(64).expect("the budget has room");
             drop(pool.alloc(64).expect("the budget has room"));
+            let held = pool.alloc(128).expect("the budget has room");
             pool.reclaim();
-            assert_eq!(pool.committed(), 256);
-            assert_eq!(pool.alloc(256).err(), Some(exhausted(256, 256)));
-            assert_eq!(pool.committed(), 128, "the free block gave its budget");
+            assert_eq!(pool.committed(), 320);
+            assert_eq!(pool.alloc(256).err(), Some(exhausted(256, 192)));
+            assert_eq!(pool.committed(), 192, "the idle class gave its budget");
             drop(held);
         }
 
@@ -1122,17 +1129,18 @@ mod tests {
             drop((first, second));
             let small = pool
                 .alloc(10)
-                .expect("a freed large block gives its budget");
+                .expect("the freed large blocks give their budget");
             assert_eq!(small.len(), 10);
-            assert_eq!(pool.committed(), footprint(1024) + footprint(10));
+            assert_eq!(pool.committed(), footprint(10));
         }
 
         proptest! {
             #![proptest_config(cases())]
 
-            /// Every byte of the budget that no holder has is room for a block.
+            /// Each byte of the budget that no size in use holds is room for a block,
+            /// and `committed` is the carved range of each size.
             #[test]
-            fn serves_each_alloc_that_fits_in_the_room_holders_leave(
+            fn serves_each_alloc_that_fits_in_the_room_idle_sizes_leave(
                 steps in prop::collection::vec(
                     (0_usize..=1024, prop::option::of(0_usize..8)),
                     1..24,
@@ -1143,7 +1151,6 @@ mod tests {
                 let mut blocks: Vec<(Unique, u8)> = Vec::new();
                 let mut lent = 0;
                 for ((len, dropped), fill) in steps.iter().copied().zip(1_u8..) {
-                    let room = BUDGET - lent;
                     match pool.alloc(len) {
                         Ok(mut block) => {
                             block.fill(fill);
@@ -1151,10 +1158,20 @@ mod tests {
                             blocks.push((block, fill));
                         }
                         Err(error) => {
+                            let held: usize = pool
+                                .classes
+                                .iter()
+                                .filter(|class| class.lent.get() != 0)
+                                .map(|class| class.carved.get())
+                                .sum();
+                            let room = BUDGET - held;
                             let need = footprint(len);
                             prop_assert!(need > room, "{error} with {room} room");
                         }
                     }
+                    let carved: usize =
+                        pool.classes.iter().map(|class| class.carved.get()).sum();
+                    prop_assert_eq!(pool.committed(), carved);
                     prop_assert!(pool.committed() <= BUDGET);
                     prop_assert!(pool.committed() >= lent);
                     if let Some(index) = dropped.filter(|_| !blocks.is_empty()) {

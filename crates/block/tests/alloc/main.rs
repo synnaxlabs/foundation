@@ -86,9 +86,5 @@ fn main() {
         }
     });
     assert_eq!(allocations, 0, "the pressure path allocated");
-    assert_eq!(
-        pool.committed(),
-        4160 + 128,
-        "one large block gave its budget"
-    );
+    assert_eq!(pool.committed(), 128, "the idle large size gave its budget");
 }

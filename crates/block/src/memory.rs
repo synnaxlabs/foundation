@@ -35,6 +35,7 @@ pub unsafe trait Memory: Send {
     fn commit(&self, offset: usize, len: usize);
 
     /// Lets the system take back the pages that lie fully in `len` bytes at `offset`.
+    /// A pool calls it under budget pressure, and for a range that is idle.
     fn purge(&self, offset: usize, len: usize);
 }
 
