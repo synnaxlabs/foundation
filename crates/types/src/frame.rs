@@ -199,8 +199,8 @@ impl Draft {
     ///
     /// # Errors
     ///
-    /// [`Error::Pool`] when the pool has no block that large, and the other variants
-    /// when `series` breaks a rule above.
+    /// The other variants when `series` breaks a rule above, and then [`Error::Pool`]
+    /// when the pool has no block that large.
     pub fn new(
         pool: &block::Pool,
         set: &KeySet,
@@ -224,12 +224,6 @@ impl Draft {
         for (range, index) in ranges.iter_mut().zip(indexes) {
             put(range, 0, &set.entries()[index].group.to_le_bytes());
             range[at::range::COUNT..].fill(0);
-        }
-        for &(entry, _) in series {
-            if search(ranges, set.entries()[entry].group).is_none() {
-                let index = set.index(entry);
-                return Err(Error::IndexAbsent { entry, index });
-            }
         }
         let mut end = 0_usize;
         for (descriptor, &(entry, len)) in descriptors.iter_mut().zip(series) {
@@ -551,6 +545,15 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
         bytes = bytes
             .checked_next_multiple_of(SERIES_ALIGN)
             .map_or(usize::MAX, |start| start.saturating_add(len));
+    }
+    for &(entry, _) in series {
+        let index = set.index(entry);
+        if series
+            .binary_search_by_key(&index, |&(entry, _)| entry)
+            .is_err()
+        {
+            return Err(Error::IndexAbsent { entry, index });
+        }
     }
     Ok((groups, bytes))
 }
@@ -1071,6 +1074,24 @@ mod tests {
             Draft::new(&pool(1 << 16), &two_groups(), Form::Raw, &[(0, 1), (3, 1)])
                 .unwrap_err();
         assert_eq!(error, Error::IndexAbsent { entry: 3, index: 2 });
+    }
+
+    #[test]
+    fn refuses_data_without_its_index_when_the_pool_is_full() {
+        let set = one_group(&mut interner());
+        let pool = pool(256);
+        let _held = [pool.alloc(1).unwrap(), pool.alloc(1).unwrap()];
+        let error = Draft::new(&pool, &set, Form::Raw, &[(2, 1)]).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 2, index: 0 });
+    }
+
+    #[test]
+    fn a_refused_draft_takes_no_budget() {
+        let set = one_group(&mut interner());
+        let pool = pool(1 << 16);
+        let error = Draft::new(&pool, &set, Form::Raw, &[(2, 1)]).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 2, index: 0 });
+        assert_eq!(pool.committed(), 0);
     }
 
     #[test]
