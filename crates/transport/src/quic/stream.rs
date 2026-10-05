@@ -1246,6 +1246,91 @@ mod tests {
         });
     }
 
+    /// The bytes the client sends on raw streams that the server never reads, until
+    /// the server's connection window takes no more.
+    fn unread(pair: &mut Pair) -> usize {
+        let ids: Vec<StreamId> = (0..4)
+            .map(|_| raw(&mut pair.client, Dir::Uni, &[byte(Class::Complete)], false))
+            .collect();
+        let chunk = vec![0; 1 << 14];
+        let mut total = ids.len();
+        loop {
+            let mut written = 0;
+            for &id in &ids {
+                let mut send = pair.client.connection().send_stream(id);
+                while let Ok(bytes) = send.write(&chunk) {
+                    written += bytes;
+                    if bytes < chunk.len() {
+                        break;
+                    }
+                }
+            }
+            pair.run(RUN);
+            if written == 0 {
+                return total;
+            }
+            total += written;
+        }
+    }
+
+    /// How the server ends a stream that the client reset with an unread message.
+    #[derive(Clone, Copy, Debug)]
+    enum Ending {
+        /// A read gives the reset.
+        Read,
+        /// A stop after the reset arrives.
+        StopAfter,
+        /// A stop before the client resets, in answer to it.
+        StopBefore,
+    }
+
+    /// The window the client has on the server after 8 streams, each with one unread
+    /// message, end by `ending`.
+    fn window_after(ending: Ending) -> usize {
+        testing::run(1, move |shard| {
+            let mut pair = connected(shard);
+            for _ in 0..8 {
+                let mut sender = open_sender(&mut pair, Class::Complete);
+                let now = pair.now();
+                let message = shard.block(&vec![1; MESSAGE_MAX]);
+                write(&mut pair.client, now, &mut sender, &[message]);
+                pair.run(RUN);
+                let mut incoming = accept(&mut pair.server);
+                if let Ending::StopBefore = ending {
+                    let now = pair.now();
+                    pair.server.endpoint.stop(now, incoming.receiver, Code(9));
+                    pair.run(RUN);
+                    let now = pair.now();
+                    pair.client.endpoint.reset(now, sender, Code(9));
+                    pair.run(RUN);
+                    continue;
+                }
+                let now = pair.now();
+                pair.client.endpoint.reset(now, sender, Code(9));
+                pair.run(RUN);
+                let now = pair.now();
+                if let Ending::StopAfter = ending {
+                    pair.server.endpoint.stop(now, incoming.receiver, Code(9));
+                } else {
+                    let read = next(&mut pair.server, now, &mut incoming.receiver);
+                    assert_eq!(read, Err(Error::Reset { code: Code(9) }));
+                }
+                pair.run(RUN);
+            }
+            unread(&mut pair)
+        })
+    }
+
+    #[test]
+    fn a_stop_after_the_peer_reset_gives_the_peer_no_more_window() {
+        assert_eq!(window_after(Ending::StopAfter), window_after(Ending::Read));
+    }
+
+    #[test]
+    fn a_stop_before_the_peer_reset_gives_the_peer_no_more_window() {
+        assert_eq!(window_after(Ending::StopBefore), window_after(Ending::Read));
+    }
+
     #[test]
     fn streams_that_wait_for_budget_let_the_streams_with_a_block_finish() {
         testing::run(1, |shard| {

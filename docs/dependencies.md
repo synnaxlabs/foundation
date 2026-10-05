@@ -42,7 +42,7 @@ change small, and list it here with its reason.
 
 | Crate | Release | Change | Why |
 | --- | --- | --- | --- |
-| `noq-proto` | 1.3.0 | None yet | A stream stopped before or after the peer resets it gives the peer its unread bytes of window twice (#620) |
+| `noq-proto` | 1.3.0 | `stop` after a reset, and a reset after `stop`, credit the connection window only with bytes not credited yet | A stream stopped before or after the peer resets it gave the peer its unread bytes of window twice (#620) |
 
 ## Tests, benchmarks, and tools
 
