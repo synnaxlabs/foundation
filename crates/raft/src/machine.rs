@@ -2504,7 +2504,7 @@ mod tests {
         }
 
         // Node 3 missed its release, so it campaigns. The leader sends it nothing:
-        // `mesh` tells it that it is out.
+        // the caller tells it that it is out.
         #[test]
         fn a_leader_sends_nothing_to_a_removed_node_that_campaigns() {
             let mut raft = leader();
