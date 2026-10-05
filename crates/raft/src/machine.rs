@@ -28,7 +28,8 @@ pub enum Role {
 const BATCH: usize = 64;
 
 // One voter: the leader's view of its log, its answer to the current campaign, and
-// whether it answered this leader since the last quorum check.
+// whether the next quorum check counts it: it answered this leader since the last
+// check, or a change just added it.
 #[derive(Debug)]
 struct Peer {
     progress: Progress,
@@ -71,7 +72,8 @@ pub struct Raft {
     // `Start.voters`: in force while no entry in the log holds a configuration.
     base: Voters,
     voters: Voters,
-    // The voters in force, plus the nodes a change removed until its leave commits.
+    // The voters in force, plus the nodes a change removed until `release` drops
+    // them.
     peers: BTreeMap<node::Key, Peer>,
     election_ticks: u64,
     heartbeat_ticks: u64,
@@ -396,8 +398,19 @@ impl Raft {
     fn heartbeat(&mut self, leader: node::Key, commit: u64) -> Result<(), Error> {
         self.follow(leader)?;
         self.log.commit_to(commit);
+        self.forget_removed();
         self.send(leader, self.term, Body::HeartbeatReply);
         Ok(())
+    }
+
+    // Drops the nodes a committed change removed, as a follower. The leader keeps
+    // them until `release`.
+    fn forget_removed(&mut self) {
+        if !self.settled() {
+            return;
+        }
+        let voters = &self.voters;
+        self.peers.retain(|&key, _| voters.contains(key));
     }
 
     // Appends the leader's entries as a follower and answers.
@@ -412,6 +425,7 @@ impl Raft {
             Ok(last) => {
                 self.sync_voters();
                 self.log.commit_to(commit.min(last));
+                self.forget_removed();
                 Body::AppendReply { last }
             }
             Err(hint) => Body::AppendReject { hint },
@@ -424,9 +438,35 @@ impl Raft {
         let accepted = self
             .heard_from(from)
             .is_some_and(|peer| peer.progress.accepted(last));
-        if accepted && !self.advance() {
+        if !accepted {
+            return;
+        }
+        if !self.advance() {
             self.catch_up(from);
         }
+        self.release(from);
+    }
+
+    // Drops a node a committed change removed once it holds the leave. A heartbeat
+    // tells it the commit, and it then hears nothing more from this node. A node
+    // that has not acknowledged the leave stays a peer and keeps getting appends.
+    fn release(&mut self, key: node::Key) {
+        if self.role != Role::Leader || self.voters.contains(key) || !self.settled() {
+            return;
+        }
+        let Some((at, _)) = self.log.voters() else {
+            return;
+        };
+        let Some(peer) = self.peers.get(&key) else {
+            return;
+        };
+        let matched = peer.progress.matched();
+        if matched < at.index {
+            return;
+        }
+        let commit = self.log.committed().min(matched);
+        self.send(key, self.term, Body::Heartbeat { commit });
+        self.peers.remove(&key);
     }
 
     // Notes that a voter answered this leader. `None` when this node does not lead
@@ -442,9 +482,10 @@ impl Raft {
 
     // Commits the highest index that a quorum holds, when an entry of the leader's
     // own term is there, leaves a joint phase whose entry is committed, and sends
-    // the followers the result. A group of one node commits the leave at once. A
-    // leader outside the committed configuration steps down after the send. Returns
-    // whether the commit index moved; when it did not, nothing is sent.
+    // the followers the result. A group of one node commits the leave at once. When
+    // the leave commits, the removed nodes that hold it are released, and a leader
+    // outside the configuration steps down after the send. Returns whether the
+    // commit index moved; when it did not, nothing is sent.
     fn advance(&mut self) -> bool {
         let mut moved = false;
         while self.commit_once() {
@@ -454,15 +495,18 @@ impl Raft {
         if !moved {
             return false;
         }
+        let removed: Vec<node::Key> = self
+            .peers
+            .keys()
+            .filter(|&&key| !self.voters.contains(key))
+            .copied()
+            .collect();
+        for key in removed {
+            self.release(key);
+        }
         self.replicate();
-        if self.settled() {
-            // The nodes a change removed got the commit; they leave the peers.
-            let voters = &self.voters;
-            self.peers.retain(|&key, _| voters.contains(key));
-            // A committed configuration without this node ends its lead.
-            if !voters.incoming.contains(&self.key) {
-                self.become_follower(self.term, None);
-            }
+        if self.settled() && !self.voters.incoming.contains(&self.key) {
+            self.become_follower(self.term, None);
         }
         true
     }
@@ -504,18 +548,22 @@ impl Raft {
 
     // Puts the last configuration in the log in force, or `base` with none. A new
     // peer starts at the end of the log. A node a change removed stays a peer until
-    // `advance` sends it the commit of the leave.
+    // `release` drops it.
     fn sync_voters(&mut self) {
         let voters = self.log.voters().map_or(&self.base, |(_, voters)| voters);
         if *voters == self.voters {
             return;
         }
-        let voters = voters.clone();
         let last = self.log.last().index;
-        for key in voters.peers() {
-            self.peers.entry(key).or_insert_with(|| Peer::new(last));
+        let old = std::mem::replace(&mut self.voters, voters.clone());
+        for key in self.voters.peers() {
+            let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
+            // A node a change adds counts as heard until the next quorum check, so
+            // the leader does not step down before the node can answer.
+            if !old.contains(key) {
+                peer.active = true;
+            }
         }
-        self.voters = voters;
     }
 
     // Sends each follower the entries it lacks and the commit index.
@@ -615,6 +663,10 @@ impl Raft {
             let heard = self
                 .voters
                 .quorum(|key| key == self.key || self.peer(key).active);
+            // A removed node that answered nothing since the last check is gone.
+            let voters = &self.voters;
+            self.peers
+                .retain(|&key, peer| peer.active || voters.contains(key));
             for peer in self.peers.values_mut() {
                 peer.active = false;
             }
@@ -2144,8 +2196,15 @@ mod tests {
             accept(&mut raft, &[2], 3);
             let ready = raft.ready();
             assert_eq!(ready.committed, [config(1, 3, new)]);
-            // The commit reaches node 3, then the leader forgets it.
+            // Node 3 stays a peer until it holds the leave.
             assert_eq!(to(&ready.messages), [key(2), key(3)]);
+            raft.tick(0);
+            assert_eq!(to(&raft.ready().messages), [key(2), key(3), key(4)]);
+            // Node 3 holds the leave: its commit reaches it, then the leader forgets it.
+            accept(&mut raft, &[3], 3);
+            let ready = raft.ready();
+            assert_eq!(to(&ready.messages), [key(3)]);
+            assert_eq!(ready.messages[0].body, Body::Heartbeat { commit: 3 });
             raft.tick(0);
             assert_eq!(to(&raft.ready().messages), [key(2), key(4)]);
             assert_eq!(raft.role(), Role::Leader);
@@ -2260,6 +2319,45 @@ mod tests {
             assert_eq!(messages[0].body, commit);
             tick_times(&mut raft, 40);
             assert_eq!(raft.role(), Role::Follower);
+        }
+
+        // Only the node a change adds counts as heard; the voters that stayed
+        // silent still fail the quorum check.
+        #[test]
+        fn a_change_does_not_make_the_silent_voters_heard() {
+            let mut raft = leader();
+            // The first check passes on the accepted appends and clears the slate.
+            tick_times(&mut raft, 19);
+            assert_eq!(raft.role(), Role::Leader);
+            raft.propose_voters(set(&[1, 2, 3, 4])).unwrap();
+            raft.tick(0);
+            assert_eq!(raft.role(), Role::Follower);
+        }
+
+        // A follower that takes a committed change forgets the removed node, so
+        // its campaign asks the voters alone, and a change that adds the node again
+        // starts from a fresh peer that counts as heard.
+        #[test]
+        fn a_follower_forgets_a_removed_node_when_the_change_commits() {
+            let mut raft = raft(&[1, 2, 3, 4], Hard::default());
+            let mut entries = entries(&[(1, 1)]);
+            entries.push(config(1, 2, voters(&[1, 2, 3], &[1, 2, 3, 4])));
+            entries.push(config(1, 3, voters(&[1, 2, 3], &[])));
+            let append = Body::Append {
+                prev: Position::default(),
+                entries,
+                commit: 3,
+            };
+            raft.step(message(2, 1, append)).unwrap();
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3], &[]));
+            sent(&mut raft);
+            raft.campaign();
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+            elect(&mut raft, &[3]);
+            raft.propose_voters(set(&[1, 2, 3, 4])).unwrap();
+            raft.step(message(3, 2, Body::HeartbeatReply)).unwrap();
+            tick_times(&mut raft, 10);
+            assert_eq!(raft.role(), Role::Leader);
         }
     }
 

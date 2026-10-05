@@ -782,11 +782,15 @@ How to read this record:
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.
-  The leader sends a node the change removed the leave and its commit, then drops
-  it. A leader outside the committed final set sends the commit and steps down. A
-  node outside an uncommitted configuration still campaigns: the entry may be
-  truncated, and a removed leader that lost its lead before the leave reached a peer
-  is the only node that can win the election that commits it.
+  A node the change removed stays a peer of the leader, and keeps getting appends, until
+  it holds the committed leave: then the leader sends it the commit in a heartbeat and
+  drops it, so the node learns it is out and never campaigns. A removed node that
+  answered nothing over a whole quorum check period is dropped at that check instead. A
+  follower drops the removed nodes when the leave commits. A leader outside the
+  committed final set sends the commit and steps down. A node outside an uncommitted
+  configuration still campaigns: the entry may be truncated, and a removed leader that
+  lost its lead before the leave reached a peer is the only node that can win the
+  election that commits it.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
