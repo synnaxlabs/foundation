@@ -814,6 +814,10 @@ How to read this record:
   integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
+- **HCL IDENTIFIERS (2026-10-05)** The reader accepts identifiers outside ASCII as HCL
+  does (Unicode `XID_Start` and `XID_Continue`, through `unicode-ident`), so
+  `température = 1` reads. A new error for each such identifier lost: a valid HCL file
+  would fail. The person decided on 2026-10-05 ("go with yes"), with low priority, #263.
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
