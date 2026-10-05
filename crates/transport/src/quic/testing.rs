@@ -43,14 +43,19 @@ pub(super) fn draft_29() -> (Meta, Vec<u8>) {
     let id = [[len].as_slice(), &[1; cid::LEN]].concat();
     let mut initial = [[0xc0].as_slice(), &[0xff, 0, 0, 0x1d], &id, &id].concat();
     initial.resize(usize::from(MTU_MIN), 0);
-    let meta = Meta {
-        source: CLIENT,
+    (meta(CLIENT, &initial), initial)
+}
+
+/// The meta of `datagram` alone, from `source`.
+pub(super) fn meta(source: SocketAddr, datagram: &[u8]) -> Meta {
+    let len = datagram.len();
+    Meta {
+        source,
         destination: None,
         ecn: None,
-        len: initial.len(),
-        stride: initial.len(),
-    };
-    (meta, initial)
+        len,
+        stride: len,
+    }
 }
 
 /// The noq-proto connection of `key`, queued for [`Endpoint::transmit`].

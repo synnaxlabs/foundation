@@ -154,9 +154,7 @@ impl Endpoint {
         let mut datagrams = self.received.split();
         while !datagrams.is_empty() {
             let datagram = datagrams.split_to(meta.stride.min(datagrams.len()));
-            if !settings::dropped(&datagram) {
-                self.handle(now, path, ecn, datagram);
-            }
+            self.handle(now, path, ecn, datagram);
         }
     }
 
@@ -442,6 +440,9 @@ impl Endpoint {
         ecn: Option<EcnCodepoint>,
         datagram: BytesMut,
     ) {
+        if dropped(&datagram) {
+            return;
+        }
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -482,6 +483,23 @@ impl Endpoint {
         } else {
             queue(&mut self.ready, connection);
         }
+    }
+}
+
+/// Whether the endpoint drops `datagram` unread: a long header of a version it does
+/// not speak, in fewer than [`MTU_MIN`](settings::MTU_MIN) bytes. noq-proto 1.3.0
+/// answers such a header at any size, which QUIC forbids, so a spoofed source would
+/// get more bytes than it sent (#534). Version 0 is a version negotiation for a dial,
+/// so it passes.
+fn dropped(datagram: &[u8]) -> bool {
+    match *datagram {
+        [form, a, b, c, d, ..]
+            if form & 0x80 != 0 && datagram.len() < usize::from(settings::MTU_MIN) =>
+        {
+            let version = u32::from_be_bytes([a, b, c, d]);
+            version != 0 && !settings::VERSIONS.contains(&version)
+        }
+        _ => false,
     }
 }
 
@@ -574,13 +592,10 @@ mod tests {
     fn deliver(pair: &mut Pair, destination: Option<IpAddr>, ecn: Option<Ecn>) {
         let (now, mut buffer) = (pair.now(), Vec::new());
         while let Some(transmit) = pair.client.endpoint.transmit(now, &mut buffer) {
-            let len = transmit.contents.len();
             let meta = Meta {
-                source: testing::CLIENT,
                 destination,
                 ecn,
-                len,
-                stride: len,
+                ..testing::meta(testing::CLIENT, transmit.contents)
             };
             pair.server.endpoint.receive(now, &meta, transmit.contents);
         }

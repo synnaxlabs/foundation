@@ -1,6 +1,5 @@
-//! What noq-proto gets from a [`Config`], and the datagrams it never gets. Every
-//! option that changes behavior is set by name, and every random value outside TLS
-//! comes from `Entropy`.
+//! What noq-proto gets from a [`Config`]. Every option that changes behavior is set
+//! by name, and every random value outside TLS comes from `Entropy`.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -23,6 +22,9 @@ use crate::Config;
 use crate::tls::{Epoch, Tls};
 
 const QUIC_V1: u32 = 1;
+
+/// The QUIC versions this node speaks.
+pub(super) const VERSIONS: [u32; 1] = [QUIC_V1];
 
 /// The smallest datagram QUIC allows. Every datagram is this size until MTU
 /// discovery finds a larger one.
@@ -90,13 +92,15 @@ fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
     config.entropy.fill(&mut rng);
     let issuer = cid::Issuer {
         shard,
+        key: key(&config.private_key, b"connection id"),
         entropy: config.entropy.clone(),
     };
     #[expect(
         clippy::disallowed_methods,
         reason = "the config sets the ID generator and rng_seed"
     )]
-    let mut endpoint = EndpointConfig::new(Arc::new(reset_key(&config.private_key)));
+    let mut endpoint =
+        EndpointConfig::new(Arc::new(key(&config.private_key, b"stateless reset")));
     endpoint
         .max_udp_payload_size(PAYLOAD_IPV4)
         .expect("invariant: QUIC allows 1200 to 65527")
@@ -104,27 +108,13 @@ fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
             Box::new(issuer.clone())
         }))
         .rng_seed(Some(rng))
-        .supported_versions(vec![QUIC_V1])
+        .supported_versions(VERSIONS.to_vec())
         .grease_quic_bit(true)
-        // A reset is smaller than the datagram that caused it, so it needs no rate
-        // limit, and one shared limit lets junk from one address take every reset.
+        // A reset answers only an ID this node issued, and is smaller than the
+        // datagram that caused it, so it needs no rate limit. One shared limit lets
+        // one address take every reset.
         .min_reset_interval(Duration::ZERO);
     endpoint
-}
-
-/// Whether the endpoint drops `datagram` unread: a long header of an unknown
-/// version in fewer than [`MTU_MIN`] bytes. noq-proto answers such a header at any
-/// size, so a spoofed source would get more bytes than it sent. Version 0 is a
-/// version negotiation for a dial, so it passes.
-pub(super) fn dropped(datagram: &[u8]) -> bool {
-    match *datagram {
-        [form, a, b, c, d, ..]
-            if form & 0x80 != 0 && datagram.len() < usize::from(MTU_MIN) =>
-        {
-            !matches!(u32::from_be_bytes([a, b, c, d]), 0 | QUIC_V1)
-        }
-        _ => false,
-    }
 }
 
 fn server(tls: &Tls, transport: Arc<TransportConfig>) -> ServerConfig {
@@ -204,13 +194,13 @@ fn idle_ms(idle: Span) -> u64 {
     nanos.div_ceil(1_000_000)
 }
 
-/// The key that signs stateless resets. It comes from the node key, so every shard
-/// and every restart of the node signs alike, and a restarted node resets a
-/// peer's stale connection at once.
-fn reset_key(private_key: &PrivateKey) -> hmac::Key {
+/// The key for `label` that signs stateless resets or connection IDs. It comes from
+/// the node key, so every shard and every restart of the node signs alike, and a
+/// restarted node resets a peer's stale connection at once.
+fn key(private_key: &PrivateKey, label: &[u8]) -> hmac::Key {
     hkdf::Salt::new(hkdf::HKDF_SHA256, b"foundation/1 quic")
         .extract(&private_key.0)
-        .expand(&[b"stateless reset".as_slice()], hmac::HMAC_SHA256)
+        .expand(&[label], hmac::HMAC_SHA256)
         .expect("invariant: an HMAC key is shorter than HKDF's limit")
         .into()
 }
@@ -242,7 +232,6 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::task::Poll;
 
-    use env::net::udp::Meta;
     use noq_proto::Dir;
     use noq_proto::crypto::HmacKey;
     use types::time::Monotonic;
@@ -295,18 +284,6 @@ mod tests {
         message.to_vec()
     }
 
-    /// The meta of `datagram` alone, from `source`.
-    fn meta(source: SocketAddr, datagram: &[u8]) -> Meta {
-        let len = datagram.len();
-        Meta {
-            source,
-            destination: None,
-            ecn: None,
-            len,
-            stride: len,
-        }
-    }
-
     /// What `endpoint` sends back for `datagram` from `source` at `now`.
     fn reply(
         endpoint: &mut Endpoint,
@@ -314,7 +291,7 @@ mod tests {
         source: SocketAddr,
         datagram: &[u8],
     ) -> Option<Vec<u8>> {
-        endpoint.receive(now, &meta(source, datagram), datagram);
+        endpoint.receive(now, &testing::meta(source, datagram), datagram);
         let mut buffer = Vec::new();
         let transmit = endpoint.transmit(now, &mut buffer)?;
         Some(transmit.contents.to_vec())
@@ -336,24 +313,29 @@ mod tests {
         }
     }
 
-    mod reset_key {
+    mod key {
         use super::*;
 
-        fn sign(private_key: [u8; 32]) -> [u8; 32] {
-            let key = reset_key(&PrivateKey(private_key));
+        fn sign(private_key: [u8; 32], label: &[u8]) -> [u8; 32] {
+            let key = key(&PrivateKey(private_key), label);
             let mut signature = [0; 32];
             key.sign(b"a connection id", &mut signature);
             signature
         }
 
         #[test]
-        fn signs_alike_for_one_node_key() {
-            assert_eq!(sign([1; 32]), sign([1; 32]));
+        fn signs_alike_for_one_node_key_and_label() {
+            assert_eq!(sign([1; 32], b"a"), sign([1; 32], b"a"));
         }
 
         #[test]
         fn signs_otherwise_for_another_node_key() {
-            assert_ne!(sign([1; 32]), sign([2; 32]));
+            assert_ne!(sign([1; 32], b"a"), sign([2; 32], b"a"));
+        }
+
+        #[test]
+        fn signs_otherwise_for_another_label() {
+            assert_ne!(sign([1; 32], b"a"), sign([1; 32], b"b"));
         }
     }
 
@@ -531,12 +513,11 @@ mod tests {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
-                let (meta, initial) = testing::draft_29();
-                endpoint.receive(Monotonic(0), &meta, &initial);
-                let mut buffer = Vec::new();
-                let transmit = endpoint.transmit(Monotonic(0), &mut buffer);
-                let reply = transmit.expect("a reply").contents;
-                let (_, Some(_)) = ids(reply) else {
+                let (_, initial) = testing::draft_29();
+                let reply =
+                    reply(&mut endpoint, Monotonic(0), testing::CLIENT, &initial);
+                let reply = reply.expect("a reply");
+                let (_, Some(_)) = ids(&reply) else {
                     panic!("not a long header: {reply:02x?}");
                 };
                 let versions = &reply[1 + 4 + 1 + cid::LEN + 1 + cid::LEN..];
@@ -588,7 +569,7 @@ mod tests {
                     &unknown,
                 ]
                 .concat();
-                let meta = meta(testing::SERVER, &negotiation);
+                let meta = testing::meta(testing::SERVER, &negotiation);
                 pair.client
                     .endpoint
                     .receive(pair.now(), &meta, &negotiation);
@@ -703,19 +684,26 @@ mod tests {
             assert_eq!(reason, broken);
         }
 
+        /// A short-header datagram the client sent on its connection to the server,
+        /// and a new server endpoint with the same node key, as after a restart.
+        fn stale(shard: &testing::Shard) -> (Vec<u8>, Endpoint) {
+            let pair = dial(shard, Duration::from_millis(100));
+            let mut sent = pair.client.sent.iter().rev();
+            let (_, _, stale) = sent
+                .find(|(_, _, datagram)| datagram[0] & 0x80 == 0)
+                .expect("a short header");
+            let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+            let endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+            (stale.clone(), endpoint)
+        }
+
         #[test]
         fn resets_each_stale_datagram_while_another_address_sends_junk() {
             let resets = testing::run(1, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+                let (stale, mut endpoint) = stale(shard);
                 let attacker = SocketAddr::new(testing::CLIENT.ip(), 9);
-                let short = |id, len| {
-                    let mut datagram = vec![0x40, SERVER_SHARD];
-                    datagram.resize(len, id);
-                    datagram
-                };
-                let (junk, stale) = (short(9, 23), short(1, 40));
+                let mut junk = vec![0x40, SERVER_SHARD];
+                junk.resize(23, 9);
                 let mut resets = 0;
                 for ms in 0..1_000 {
                     let now = testing::at(Duration::from_millis(ms));
@@ -730,6 +718,45 @@ mod tests {
                 resets
             });
             assert_eq!(resets, 10);
+        }
+
+        #[test]
+        fn resets_a_stale_datagram_that_another_address_sent_at_the_same_time() {
+            let resets = testing::run(1, |shard| {
+                let (stale, mut endpoint) = stale(shard);
+                let attacker = SocketAddr::new(testing::CLIENT.ip(), 9);
+                let now = testing::at(Duration::from_millis(1));
+                [attacker, testing::CLIENT]
+                    .map(|source| reply(&mut endpoint, now, source, &stale).is_some())
+            });
+            assert_eq!(resets, [true, true]);
+        }
+
+        #[test]
+        fn ignores_a_short_header_with_an_id_it_never_issued() {
+            let reply = testing::run(1, |shard| {
+                let (stale, mut endpoint) = stale(shard);
+                let mut junk = stale;
+                junk[1 + cid::LEN - 1] ^= 1;
+                reply(&mut endpoint, Monotonic(0), testing::CLIENT, &junk)
+            });
+            assert_eq!(reply, None);
+        }
+
+        #[test]
+        fn answers_a_reset_with_nothing() {
+            let replies = testing::run(1, |shard| {
+                let (stale, mut server) = stale(shard);
+                let now = Monotonic(0);
+                let reset = reply(&mut server, now, testing::CLIENT, &stale);
+                let reset = reset.expect("a reset");
+                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let mut client =
+                    Endpoint::new(&config, CLIENT_SHARD, NonZeroUsize::MIN);
+                [&mut server, &mut client]
+                    .map(|endpoint| reply(endpoint, now, testing::SERVER, &reset))
+            });
+            assert_eq!(replies, [None, None]);
         }
     }
 }
