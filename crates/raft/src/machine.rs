@@ -69,10 +69,8 @@ pub struct Ready {
 #[derive(Debug)]
 pub struct Raft {
     key: node::Key,
-    // `Start.voters`: in force while no entry in the log holds a configuration.
-    base: Voters,
     voters: Voters,
-    // Where the log holds `voters`, or the default position for `base`.
+    // Where the log holds `voters`: the zero position for `Start.voters`.
     in_force: Position,
     // The voters in force, plus the nodes that the configuration in force removed,
     // until a release, a quorum check, or the next configuration drops them.
@@ -127,15 +125,13 @@ impl Raft {
             });
         }
         voters.check()?;
-        let log = Log::new(entries, applied)?;
+        let log = Log::new(voters, entries, applied)?;
         let last = log.last();
-        let base = voters;
-        let (in_force, voters) = log.voters().map_or_else(
-            || (Position::default(), base.clone()),
-            |(at, voters)| (at, voters.clone()),
-        );
-        let peers = voters
+        let (in_force, voters) = log.voters();
+        let voters = voters.clone();
+        let peers = log
             .peers()
+            .into_iter()
             .map(|key| (key, Peer::new(last.index)))
             .collect();
         if hard.term < last.term {
@@ -146,7 +142,6 @@ impl Raft {
         }
         Ok(Self {
             key,
-            base,
             voters,
             in_force,
             peers,
@@ -255,9 +250,8 @@ impl Raft {
         if voters.is_empty() {
             return Err(Error::NoVoters);
         }
-        if let Some((at, _)) = self.log.voters()
-            && at.index > self.log.committed()
-        {
+        let (at, _) = self.log.voters();
+        if at.index > self.log.committed() {
             return Err(Error::ChangePending { at });
         }
         let joint = self.voters.enter(voters);
@@ -466,8 +460,8 @@ impl Raft {
     // the node, such as a configuration that makes it a voter again. All are of a
     // lower term, so that entry replaces them.
     fn removed_end(&self) -> u64 {
-        let leave = self.log.voters().map_or(0, |(at, _)| at.index);
-        leave.max(self.log.first_of(self.term))
+        let (leave, _) = self.log.voters();
+        leave.index.max(self.log.first_of(self.term))
     }
 
     // Releases the nodes a committed change removed: they leave the peers. A leader
@@ -597,21 +591,15 @@ impl Raft {
 
     // Whether the configuration in force is committed.
     fn settled(&self) -> bool {
-        self.log
-            .voters()
-            .is_none_or(|(at, _)| at.index <= self.log.committed())
+        let (at, _) = self.log.voters();
+        at.index <= self.log.committed()
     }
 
-    // Puts the last configuration in the log in force, or `base` with none. The
-    // peers become its voters and the nodes it removed: the other voters of the
-    // configuration before it. A new peer starts at the end of the log.
+    // Puts the log's configuration in force. The peers become its voters and the
+    // nodes it removed: the other voters of the configuration before it. A new peer
+    // starts at the end of the log.
     fn sync_voters(&mut self) {
-        let (at, voters) = self
-            .log
-            .voters()
-            .map_or((Position::default(), &self.base), |(at, voters)| {
-                (at, voters)
-            });
+        let (at, voters) = self.log.voters();
         // Equal voters at another position still change who was removed.
         if at == self.in_force {
             return;
@@ -619,19 +607,14 @@ impl Raft {
         self.in_force = at;
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
-        let before = self.log.voters_before(at.index).unwrap_or(&self.base);
-        let voters = &self.voters;
-        self.peers
-            .retain(|&key, _| voters.contains(key) || before.contains(key));
-        for key in before.peers() {
-            self.peers.entry(key).or_insert_with(|| Peer::new(last));
-        }
-        for key in voters.peers() {
+        let keep = self.log.peers();
+        self.peers.retain(|key, _| keep.contains(key));
+        for key in keep {
             let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
             // A node a change adds counts as heard until the next quorum check, even
             // when a removal left its peer, so the leader does not step down before
             // the node can answer.
-            if !old.contains(key) {
+            if self.voters.contains(key) && !old.contains(key) {
                 peer.active = true;
             }
         }
@@ -2594,6 +2577,44 @@ mod tests {
             assert_eq!(to_3, [&Body::Heartbeat { commit: 3 }]);
             raft.tick(0);
             assert_eq!(to(&raft.ready().messages), [key(2), key(4)]);
+        }
+
+        // Node 3 holds the joint entry and the leave that removes it, neither
+        // committed. Whether it restarts with them or gets them in an append, its
+        // peers are the voters in force and the voters before them.
+        #[test]
+        fn a_restart_with_an_uncommitted_leave_has_the_peers_an_append_gives() {
+            let joint = voters(&[1, 2], &[1, 2, 3]);
+            let new = voters(&[1, 2], &[]);
+            let entries = vec![config(1, 1, joint), config(1, 2, new)];
+            let fresh = start(&[1, 2, 3], Hard::default());
+            let held = Start {
+                hard: Hard {
+                    term: Term(1),
+                    vote: None,
+                },
+                entries: entries.clone(),
+                ..fresh.clone()
+            };
+            let config = Config {
+                key: key(3),
+                ..CONFIG
+            };
+            let restarted = Raft::new(config, held).unwrap();
+            let mut appended = Raft::new(config, fresh).unwrap();
+            let append = Body::Append {
+                prev: Position::default(),
+                entries,
+                commit: 0,
+            };
+            let append = Message {
+                to: key(3),
+                ..message(1, 1, append)
+            };
+            appended.step(append).unwrap();
+            let peers = |raft: &Raft| raft.peers.keys().copied().collect::<Vec<_>>();
+            assert_eq!(peers(&restarted), peers(&appended));
+            assert_eq!(peers(&restarted), [key(1), key(2), key(3)]);
         }
 
         // The indexes of the entries in each `Append` to node `to`.
