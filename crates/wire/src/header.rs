@@ -1,5 +1,6 @@
-//! The header at the start of each stream's first message and of each datagram: the
-//! wire version (little-endian `u16`), then the protocol number (`u8`).
+//! The header that names a stream's or datagram's protocol: the wire version
+//! (little-endian `u16`), then the protocol number (`u8`). It is the whole first
+//! message of a stream and the start of a datagram.
 
 use std::fmt;
 
