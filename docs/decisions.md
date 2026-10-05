@@ -159,6 +159,15 @@ How to read this record:
   once per handoff. A writer asks for authority at open, capped by access. Authority 255
   cannot be taken. The control lease is an optional writer setting. There is no control
   policy.
+- **GATE RULES (write-path, 2026-10-04)** Writers that do not hold control wait. When
+  the holder closes or its control lease runs out, the waiter with the highest
+  authority takes control; on a tie, the one that opened first. Each accepted write
+  renews the control lease. A writer whose control lease ran out stays out of the gate
+  until it reopens. Lease and grace times are the home's monotonic time, and the X18
+  grace is a positive span like a control lease. During the grace the recorded holder
+  ranks first: the first writer of its subject takes its place, and a higher authority
+  takes control. A handoff is recorded only when the
+  holder's subject or authority changes. Basis: S11, X18, r8 trace (d).
 - **S13 + BQ13** Quality is an ordinary channel of type `Quality` (OPC UA 32-bit status
   codes) that data channels point at. One quality channel can serve many channels. It
   may sit on its own index (written on change; a value holds until the next) or share
@@ -315,20 +324,24 @@ How to read this record:
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
   same estimator serves device clocks in the connector library.
-- **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about the node's monotonic
-  clock: its offset is mesh time minus the monotonic reading at `at`, and its error is
-  a half-width from 0 to 36500 days. Device clocks use the oscillator fit, whose issue
-  sets its input. A bound grows by the drift bound times the time from `at`, in both
-  directions. The drift bound is at most 10%; `Drift::UNDISCIPLINED` is 200 ppm. A
-  measured oscillator rate goes into `Drift` later, as an additive change. Each source
-  keeps its last 8 measurements and offers the one with the smallest bound now. This
-  reads R6 TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange
-  loses to a fresh slower one. `combine` takes one `Filter` per source and returns the
-  hull of the offsets inside the most bounds (Marzullo). It fails when no offset is
-  inside more than half of them. This reads C6's "follows the smallest measured
-  bound": when sources agree, the result is never wider than the narrowest. The
-  result holds the true offset when the bounds that hold it are a majority and every
-  other bound misses them. Decided by the `time` builder (#49).
+- **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about one local clock (the node's
+  monotonic clock, or a device's sample clock in nanoseconds, #84): its offset is mesh
+  time minus the local reading at `at`, and its error is a half-width from 0 to 36500
+  days. A bound grows by the drift bound times the time from `at`, in both directions.
+  The drift bound is at most 10%; `Drift::UNDISCIPLINED` is 200 ppm. A measured
+  oscillator rate goes into `Drift` later, as an additive change. Each source keeps its
+  last 8 measurements and offers the one with the smallest bound now. This reads R6 TIME
+  LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a fresh
+  slower one. `combine` takes one `Filter` per source and returns the hull of the
+  offsets inside the most bounds (Marzullo). It fails when no offset is inside more than
+  half of them. This reads C6's "follows the smallest measured bound": when sources
+  agree, the result is never wider than the narrowest. The result holds the true offset
+  when the bounds that hold it are a majority and every other bound misses them. Decided
+  by the `time` builder (#49). A device's measurements go to the oscillator fit (`Fit`),
+  never to `combine`. Node sources keep `Filter`, not `Fit`: a network exchange puts the
+  true offset at about the same place in each bracket, so an overlap gains little, and a
+  broken drift bound would stay wrong for the life of a fit, not for 8 exchanges.
+  Decided by the coordinator (#84).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -382,6 +395,14 @@ How to read this record:
   receive loop saturates on Linux, add a reuse-port group steered by the same
   connection ID. Decided by the design session under the architecture delegation
   (#53).
+- **TLS RANDOMNESS (2026-10-04)** All randomness inside TLS (key shares, client
+  random, nonces) comes from aws-lc, not from `env`. rustls holds its random source
+  as a `&'static` value, and aws-lc makes X25519 key shares with its own randomness,
+  so neither can be injected without a leak per `Transport`. It changes bytes, never
+  sizes or timing. Simulated runs still replay because nothing branches on those
+  bytes; replay traces leave out ciphertext and handshake randoms, and a `sim` test
+  runs one value twice and compares the traces. The person accepted it ("Accept TLS
+  RANDOMNESS"), from `network`'s proposal on #54.
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
 - **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and
@@ -763,11 +784,13 @@ How to read this record:
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
   other way to count allocations. Never in a library or the `node` binary. The
   `xtask globals` check allows only this case.
-- **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake
-  protocol can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner
-  always on" and said "I have tons of AWS credits". The runner is `foundation-arm-1`,
-  an AWS c7g.2xlarge in us-east-1 with no inbound ports, tagged
-  `project=foundation-ci`, outside BENCH SPEND. The coordinator owns it.
+- **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
+  can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
+  said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
+  share one AWS m7g.2xlarge (8 vCPU, 32 GiB) in us-east-1 with no inbound ports, tagged
+  `project=foundation-ci`, outside BENCH SPEND. One runner queued 9 runs while its host
+  used about 30% CPU, so the person asked: "can we have multiple runners on a single
+  machine?" ARM skips docs-only changes. The coordinator owns it.
 
 ### 1.15 Releases
 
