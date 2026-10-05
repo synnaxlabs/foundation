@@ -4,31 +4,59 @@
 
 use std::iter;
 
-use block::Block;
+use block::{Block, Pool, Unique};
+use types::channel::Slot;
 
 use crate::entry::{self, Header};
+use crate::record;
 use crate::wal::{Full, Plan, Writer};
 
-/// The entries of one group commit, in append order. [`Closed::clear`] gives it back
-/// with its capacity, so two groups that alternate between the handle and the
-/// commit task make no heap allocation per commit.
+/// The most entries one record holds, and the most parts: with the header block,
+/// one record is one vectored write within `IOV_MAX`.
+pub(crate) const ENTRIES_MAX: usize = 1023;
+
+/// Bytes of the block that holds a record header and the largest entry table: one
+/// block of the pool's 64 KiB class.
+pub(crate) const META_LEN: usize =
+    record::HEADER_LEN + 4 + ENTRIES_MAX * entry::HEADER_LEN;
+
+/// One entry of a batch: the index's slot, the header, and the bytes as parts.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Item<'a> {
+    pub(crate) slot: Slot,
+    pub(crate) header: Header,
+    pub(crate) parts: &'a [Block],
+}
+
+/// The entries of one group commit, in append order. The first push takes the block
+/// for the record header and the table and the block for a wrap header, so that
+/// [`close`](Self::close) allocates nothing. [`Closed::clear`] gives the group back
+/// with its capacity, so groups that alternate between the handle and the commit
+/// task make no heap allocation per commit.
 #[derive(Debug, Default)]
 pub(crate) struct Group {
     headers: Vec<Header>,
-    parts: Vec<Block>,
-    table: Vec<u8>,
+    slots: Vec<Slot>,
+    /// The bytes of every entry, in order. At close the record header and the
+    /// table go in front.
+    writes: Vec<Block>,
     /// The bytes of every entry together.
     bytes: usize,
+    meta: Option<Unique>,
+    wrap: Option<Unique>,
 }
 
-/// Why a group did not take an entry. Nothing changed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Why a group did not take a batch. Nothing changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Rejected {
-    /// The record with the entry would be over the layout's maximum body. The
-    /// caller closes the group and pushes the entry into the next one.
+    /// The record with the batch would be over the layout's maximum body or
+    /// [`ENTRIES_MAX`] entries or parts. The caller closes the group and pushes
+    /// the batch into the next one.
     Record,
-    /// The ring has no room for the record with the entry.
+    /// The ring has no room for the record with the batch.
     Ring(Full),
+    /// The pool has no block for the record header of a new group.
+    Pool(block::Error),
 }
 
 impl Group {
@@ -36,91 +64,161 @@ impl Group {
         self.headers.is_empty()
     }
 
-    /// The record body with one more entry of `bytes` bytes: the table and every
-    /// entry's bytes.
-    fn body_len_with(&self, bytes: usize) -> usize {
+    /// The record body with `count` more entries of `bytes` bytes together: the
+    /// table and every entry's bytes.
+    fn body_len_with(&self, count: usize, bytes: usize) -> usize {
         self.headers
             .len()
-            .checked_add(1)
+            .checked_add(count)
             .map(entry::table_len)
             .and_then(|table| table.checked_add(self.bytes))
             .and_then(|body| body.checked_add(bytes))
             .expect("invariant: a body fits in usize")
     }
 
-    /// Adds an entry whose bytes are `parts` together, when the record with it fits
-    /// the layout and the ring of `writer`; it sets `header.bytes`.
+    /// Adds every entry of `batch`, or none, when the record with them fits the
+    /// layout and the ring of `writer`; it sets each header's `bytes`. The first
+    /// entry takes the group's blocks from `pool`.
     ///
     /// # Errors
     ///
-    /// [`Rejected`] when the entry does not fit. Nothing changes.
+    /// [`Rejected`] when the batch does not fit or the pool has no block. Nothing
+    /// changes.
     ///
     /// # Panics
     ///
-    /// When the entry alone is over the layout's maximum body, or when `parts` hold
-    /// more than `u32::MAX` bytes.
-    pub(crate) fn push(
+    /// When the batch alone is over the layout's maximum body or [`ENTRIES_MAX`],
+    /// or when an entry's parts hold more than `u32::MAX` bytes.
+    pub(crate) fn push<'a>(
         &mut self,
+        pool: &Pool,
         writer: &Writer,
-        mut header: Header,
-        parts: &[Block],
+        batch: impl IntoIterator<Item = Item<'a>, IntoIter: Clone>,
     ) -> Result<(), Rejected> {
-        let len = parts.iter().map(|part| part.len()).sum::<usize>();
-        let Ok(bytes) = u32::try_from(len) else {
-            panic!("invariant: an entry of {len} bytes holds more than u32::MAX");
-        };
-        header.bytes = bytes;
-        let body = self.body_len_with(len);
+        let batch = batch.into_iter();
+        let count = batch.clone().count();
+        if count == 0 {
+            return Ok(());
+        }
+        let parts = batch.clone().map(|item| item.parts.len()).sum::<usize>();
+        let len = batch
+            .clone()
+            .flat_map(|item| item.parts)
+            .map(|part| part.len())
+            .sum::<usize>();
+        let body = self.body_len_with(count, len);
         if body > writer.body_max() {
             assert!(
                 !self.is_empty(),
-                "invariant: an entry of {len} bytes is over the maximum body of {} \
-                 bytes",
+                "invariant: a batch of {count} entries and {len} bytes is over the \
+                 maximum body of {} bytes",
                 writer.body_max()
             );
             return Err(Rejected::Record);
         }
+        let over = |have: usize| have.saturating_add(count.max(parts)) > ENTRIES_MAX;
+        if over(self.headers.len()) || over(self.writes.len()) {
+            assert!(
+                !self.is_empty(),
+                "invariant: a batch of {count} entries and {parts} parts is over \
+                 the most of {ENTRIES_MAX}"
+            );
+            return Err(Rejected::Record);
+        }
         writer.fits(body).map_err(Rejected::Ring)?;
-        let Some(total) = self.bytes.checked_add(len) else {
-            panic!("invariant: a body fits in usize");
-        };
-        self.bytes = total;
-        self.headers.push(header);
-        self.parts.extend(parts.iter().cloned());
+        if self.meta.is_none() {
+            let meta = pool.alloc(META_LEN).map_err(Rejected::Pool)?;
+            let wrap = pool.alloc(record::HEADER_LEN).map_err(Rejected::Pool)?;
+            self.meta = Some(meta);
+            self.wrap = Some(wrap);
+        }
+        for Item {
+            slot,
+            mut header,
+            parts,
+        } in batch
+        {
+            let len = parts.iter().map(|part| part.len()).sum::<usize>();
+            let Ok(bytes) = u32::try_from(len) else {
+                panic!("invariant: an entry of {len} bytes holds more than u32::MAX");
+            };
+            header.bytes = bytes;
+            self.headers.push(header);
+            self.slots.push(slot);
+            self.writes.extend(parts.iter().cloned());
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(len)
+            .expect("invariant: a body fits in usize");
         Ok(())
     }
 
-    /// Writes the entry table and plans the record with `writer`.
+    /// Plans the record with `writer` and writes its header and the entry table at
+    /// the end of the group's block, in front of the parts.
     ///
     /// # Panics
     ///
     /// When the group is empty.
     pub(crate) fn close(mut self, writer: &mut Writer) -> Closed {
-        assert!(
-            !self.headers.is_empty(),
-            "invariant: an empty group has no record"
-        );
-        self.table.resize(entry::table_len(self.headers.len()), 0);
-        entry::write_table(&self.headers, &mut self.table);
-        let table = self.table.as_slice();
-        let body = iter::once(table).chain(self.parts.iter().map(|part| &**part));
-        let plan = writer.append(body).unwrap_or_else(|full| {
+        let (Some(mut meta), Some(mut wrap)) = (self.meta.take(), self.wrap.take())
+        else {
+            panic!("invariant: an empty group has no record");
+        };
+        let used = record::HEADER_LEN
+            .checked_add(entry::table_len(self.headers.len()))
+            .expect("invariant: a table fits in memory");
+        let start = meta.len().checked_sub(used).unwrap_or_else(|| {
             panic!(
-                "invariant: a closed group needs {} bytes of the ring, {} are free",
-                full.needed, full.free
+                "invariant: a block of {} bytes holds no header and table of {used} \
+                 bytes",
+                meta.len()
             )
         });
-        Closed { group: self, plan }
+        let (_, tail) = meta.split_at_mut(start);
+        let (header, table) = tail.split_at_mut(record::HEADER_LEN);
+        entry::write_table(&self.headers, table);
+        let parts = self.writes.iter().map(|part| &**part);
+        let plan = writer
+            .append(iter::once(&*table).chain(parts))
+            .unwrap_or_else(|full| {
+                panic!(
+                    "invariant: a closed group needs {} bytes of the ring, {} are \
+                     free",
+                    full.needed, full.free
+                )
+            });
+        header.copy_from_slice(&plan.record.header);
+        self.writes.insert(0, meta.freeze().skip(start));
+        let wrap = plan.wrap.map(|write| {
+            let start =
+                wrap.len()
+                    .checked_sub(record::HEADER_LEN)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "invariant: a block of {} bytes holds no wrap header",
+                            wrap.len()
+                        )
+                    });
+            let (_, header) = wrap.split_at_mut(start);
+            header.copy_from_slice(&write.header);
+            wrap.freeze().skip(start)
+        });
+        Closed {
+            group: self,
+            plan,
+            wrap,
+        }
     }
 }
 
-/// A group whose record is planned. The record's bytes at `plan.record.place` are
-/// `plan.record.header`, then [`table`](Self::table), then each of
-/// [`parts`](Self::parts).
+/// A group whose record is planned: [`writes`](Self::writes) go back to back at
+/// `plan.record.place`, after [`wrap`](Self::wrap) at `plan.wrap.place`.
 #[derive(Debug)]
 pub(crate) struct Closed {
     group: Group,
     plan: Plan,
+    wrap: Option<Block>,
 }
 
 impl Closed {
@@ -128,14 +226,14 @@ impl Closed {
         self.plan
     }
 
-    /// The entry table.
-    pub(crate) fn table(&self) -> &[u8] {
-        &self.group.table
+    /// The bytes of the record: its header, the table, then each entry.
+    pub(crate) fn writes(&self) -> &[Block] {
+        &self.group.writes
     }
 
-    /// The bytes of every entry, in order.
-    pub(crate) fn parts(&self) -> &[Block] {
-        &self.group.parts
+    /// The header of the wrap record, when the plan has one.
+    pub(crate) fn wrap(&self) -> Option<&Block> {
+        self.wrap.as_ref()
     }
 
     /// The headers, for the durable tails once the record is synced.
@@ -143,12 +241,17 @@ impl Closed {
         &self.group.headers
     }
 
-    /// Drops the entries and gives the group back with its capacity.
+    /// The slot of each header, in the same order.
+    pub(crate) fn slots(&self) -> &[Slot] {
+        &self.group.slots
+    }
+
+    /// Drops the entries and the blocks and gives the group back with its capacity.
     pub(crate) fn clear(self) -> Group {
         let mut group = self.group;
         group.headers.clear();
-        group.parts.clear();
-        group.table.clear();
+        group.slots.clear();
+        group.writes.clear();
         group.bytes = 0;
         group
     }
@@ -158,7 +261,7 @@ impl Closed {
 #[expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
 mod tests {
     use super::*;
-    use block::{Config, Heap, Pool};
+    use block::{Config, Heap};
     use proptest::prelude::*;
     use types::channel;
     use types::frame::Path;
@@ -189,6 +292,10 @@ mod tests {
         channel::Key::from_u128(value)
     }
 
+    fn slot(value: u128) -> Slot {
+        Slot::new(u32::try_from(value).expect("a small index"))
+    }
+
     fn header(index: u128, path: Path, first: u64) -> Header {
         Header {
             index: key(index),
@@ -199,6 +306,14 @@ mod tests {
             last: Some(Stamp::from_nanos(9)),
             tag: 3,
             bytes: 99,
+        }
+    }
+
+    fn item(header: Header, parts: &[Block]) -> Item<'_> {
+        Item {
+            slot: slot(header.index.as_u128()),
+            header,
+            parts,
         }
     }
 
@@ -215,18 +330,29 @@ mod tests {
     struct Area {
         bytes: Vec<u8>,
         writer: Writer,
+        pool: Pool,
+        layout: Layout,
     }
 
     impl Area {
         fn new() -> Self {
+            Self::with_body_max(BODY_MAX)
+        }
+
+        fn with_body_max(body_max: usize) -> Self {
             let bytes = vec![0; index(AREA)];
-            let layout = Layout::new(AREA, BODY_MAX).expect("the sizes make a ring");
+            let layout = Layout::new(AREA, body_max).expect("the sizes make a ring");
             let mut cursor = Cursor::new(layout, start());
             let Window { place, len } = cursor.window();
             let step = cursor.next(&bytes[index(place)..index(place + len)]);
             assert_eq!(step, Ok(Step::End), "a zeroed area ends at once");
             let (writer, plan) = cursor.writer(start(), 1).expect("the ring is empty");
-            let mut area = Self { bytes, writer };
+            let mut area = Self {
+                bytes,
+                writer,
+                pool: pool(1 << 22),
+                layout,
+            };
             area.write(&plan, [1u32.to_le_bytes().as_slice()]);
             area
         }
@@ -246,16 +372,36 @@ mod tests {
             }
         }
 
-        /// Writes a closed group's record.
+        /// Writes a closed group's record as the commit task does: the wrap header
+        /// at its place, then the writes back to back at the record's place.
         fn commit(&mut self, closed: &Closed) {
-            let parts = closed.parts().iter().map(|part| &**part);
-            self.write(&closed.plan(), iter::once(closed.table()).chain(parts));
+            let plan = closed.plan();
+            assert_eq!(plan.wrap.is_some(), closed.wrap().is_some(), "a wrap");
+            if let (Some(wrap), Some(write)) = (plan.wrap, closed.wrap()) {
+                let at = index(wrap.place);
+                assert_eq!(&**write, &wrap.header, "the wrap header");
+                self.bytes[at..at + write.len()].copy_from_slice(write);
+            }
+            let mut at = index(plan.record.place);
+            for part in closed.writes() {
+                self.bytes[at..at + part.len()].copy_from_slice(part);
+                at += part.len();
+            }
+        }
+
+        fn push(&mut self, group: &mut Group, header: Header, parts: &[Block]) {
+            group
+                .push(&self.pool, &self.writer, [item(header, parts)])
+                .expect("the ring has room");
         }
 
         /// The data bodies, as recovery reads them.
         fn walk(&self) -> Vec<Vec<u8>> {
-            let layout = Layout::new(AREA, BODY_MAX).expect("the sizes make a ring");
-            let mut cursor = Cursor::new(layout, start());
+            self.walk_from(start())
+        }
+
+        fn walk_from(&self, tail: Position) -> Vec<Vec<u8>> {
+            let mut cursor = Cursor::new(self.layout, tail);
             let mut bodies = Vec::new();
             loop {
                 let Window { place, len } = cursor.window();
@@ -314,13 +460,13 @@ mod tests {
         fn recovery_reads_back_what_was_pushed(
             groups in prop::collection::vec(prop::collection::vec(next(), 1..8), 1..5),
         ) {
-            let pool = pool(1 << 20);
             let mut area = Area::new();
             let mut seqs: hash::Map<(u128, Path), u64> = hash::Map::default();
             let mut group = Group::default();
             let mut expected: Vec<Vec<Stored>> = Vec::new();
             for entries in groups {
                 let mut stored = Vec::new();
+                let mut slots = Vec::new();
                 for next in entries {
                     let seq = seqs.entry((next.index, next.path)).or_default();
                     let bytes = next.parts.concat();
@@ -335,14 +481,16 @@ mod tests {
                         bytes: u32::try_from(bytes.len()).expect("under 300 bytes"),
                     };
                     let blocks: Vec<Block> =
-                        next.parts.iter().map(|part| block(&pool, part)).collect();
-                    prop_assert_eq!(group.push(&area.writer, header, &blocks), Ok(()));
+                        next.parts.iter().map(|part| block(&area.pool, part)).collect();
+                    area.push(&mut group, header, &blocks);
                     *seq = header.first + u64::from(header.len);
                     stored.push((header, bytes));
+                    slots.push(slot(next.index));
                 }
                 let closed = group.close(&mut area.writer);
                 let headers: Vec<Header> = stored.iter().map(|(header, _)| *header).collect();
                 prop_assert_eq!(closed.headers(), headers.as_slice());
+                prop_assert_eq!(closed.slots(), slots.as_slice());
                 area.commit(&closed);
                 group = closed.clear();
                 prop_assert!(group.is_empty());
@@ -365,11 +513,10 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_group_holds_the_table_and_the_parts() {
-        let pool = pool(1 << 16);
+    fn a_closed_group_holds_the_header_the_table_and_the_parts() {
         let mut area = Area::new();
         let mut group = Group::default();
-        let parts = [block(&pool, b"abc"), block(&pool, b"de")];
+        let parts = [block(&area.pool, b"abc"), block(&area.pool, b"de")];
         let first = Header {
             bytes: 3,
             ..header(1, Path::Live, 0)
@@ -378,80 +525,126 @@ mod tests {
             bytes: 2,
             ..header(2, Path::Backfill, 7)
         };
-        group
-            .push(&area.writer, first, &parts[..1])
-            .expect("the ring has room");
-        group
-            .push(&area.writer, second, &parts[1..])
-            .expect("the ring has room");
+        area.push(&mut group, first, &parts[..1]);
+        area.push(&mut group, second, &parts[1..]);
         let closed = group.close(&mut area.writer);
-        let mut table = vec![0; table_len(2)];
-        entry::write_table(&[first, second], &mut table);
-        assert_eq!(closed.table(), table);
-        let parts: Vec<&[u8]> = closed.parts().iter().map(|part| &**part).collect();
-        assert_eq!(parts, [b"abc".as_slice(), b"de"]);
+        let mut meta = closed.plan().record.header.to_vec();
+        meta.resize(HEADER_LEN + table_len(2), 0);
+        entry::write_table(&[first, second], &mut meta[HEADER_LEN..]);
+        let writes: Vec<&[u8]> = closed.writes().iter().map(|part| &**part).collect();
+        assert_eq!(writes, [meta.as_slice(), b"abc", b"de"]);
         assert_eq!(closed.headers(), [first, second]);
+        assert_eq!(closed.slots(), [slot(1), slot(2)]);
+        assert!(closed.wrap().is_none());
+    }
+
+    /// Ten records of three blocks follow the restart block, so a record of two
+    /// blocks does not fit in the last block and wraps once the tail moves past
+    /// the first record.
+    #[test]
+    fn a_closed_group_holds_the_wrap_header_when_the_record_wraps() {
+        let mut area = Area::new();
+        let mut group = Group::default();
+        let mut tail = start();
+        for first in 0..10 {
+            let part = block(&area.pool, &vec![7; BODY_MAX - table_len(1)]);
+            area.push(&mut group, header(1, Path::Live, 2 * first), &[part]);
+            let closed = group.close(&mut area.writer);
+            area.commit(&closed);
+            if first == 0 {
+                tail = closed.plan().next;
+            }
+            group = closed.clear();
+        }
+        assert_eq!(area.writer.head().offset(), 31 * 4096);
+        assert_eq!(tail.offset(), 4 * 4096);
+        area.writer.release(tail);
+        let part = block(&area.pool, &[7; 4096]);
+        area.push(&mut group, header(1, Path::Live, 100), &[part]);
+        let closed = group.close(&mut area.writer);
+        let wrap = closed.plan().wrap.expect("the record wraps");
+        assert_eq!(wrap.place, 31 * 4096);
+        assert_eq!(closed.wrap().map(|block| &**block), Some(&wrap.header[..]));
+        assert_eq!(closed.plan().record.place, 0);
+        area.commit(&closed);
+        let bodies = area.walk_from(tail);
+        assert_eq!(bodies.len(), 10);
+        assert_eq!(bodies[9].len(), table_len(1) + 4096);
     }
 
     #[test]
     fn push_sets_the_bytes_of_the_header_from_its_parts() {
-        let pool = pool(1 << 16);
-        let area = Area::new();
+        let mut area = Area::new();
         let mut group = Group::default();
-        group
-            .push(
-                &area.writer,
-                header(1, Path::Live, 0),
-                &[block(&pool, b"abcd"), block(&pool, b"")],
-            )
-            .expect("the ring has room");
-        group
-            .push(&area.writer, header(1, Path::Live, 2), &[])
-            .expect("the ring has room");
+        let parts = [block(&area.pool, b"abcd"), block(&area.pool, b"")];
+        area.push(&mut group, header(1, Path::Live, 0), &parts);
+        area.push(&mut group, header(1, Path::Live, 2), &[]);
         let bytes: Vec<u32> = group.headers.iter().map(|header| header.bytes).collect();
         assert_eq!(bytes, [4, 0]);
-        assert_eq!(group.body_len_with(10), table_len(3) + 14);
+        assert_eq!(group.body_len_with(1, 10), table_len(3) + 14);
     }
 
     #[test]
     fn a_group_with_an_entry_of_no_bytes_is_not_empty() {
-        let area = Area::new();
+        let mut area = Area::new();
         let mut group = Group::default();
-        group
-            .push(&area.writer, header(1, Path::Live, 0), &[])
-            .expect("the ring has room");
+        area.push(&mut group, header(1, Path::Live, 0), &[]);
         assert!(!group.is_empty());
     }
 
     #[test]
     fn an_entry_over_the_record_asks_for_a_close() {
-        let pool = pool(1 << 16);
-        let area = Area::new();
+        let mut area = Area::new();
         let mut group = Group::default();
         let half = (BODY_MAX - table_len(2)) / 2 + 1;
-        let big = block(&pool, &vec![7; half]);
-        group
-            .push(
-                &area.writer,
-                header(1, Path::Live, 0),
-                std::slice::from_ref(&big),
-            )
-            .expect("the ring has room");
-        let rejected = group.push(&area.writer, header(1, Path::Live, 2), &[big]);
+        let big = block(&area.pool, &vec![7; half]);
+        area.push(
+            &mut group,
+            header(1, Path::Live, 0),
+            std::slice::from_ref(&big),
+        );
+        let rejected = group.push(
+            &area.pool,
+            &area.writer,
+            [item(header(1, Path::Live, 2), &[big])],
+        );
         assert_eq!(rejected, Err(Rejected::Record));
         assert_eq!(group.headers.len(), 1);
         assert_eq!(group.bytes, half);
     }
 
     #[test]
+    fn an_entry_past_the_most_entries_asks_for_a_close() {
+        let area = Area::with_body_max(60_000);
+        let mut group = Group::default();
+        let mut push = |first| {
+            group.push(
+                &area.pool,
+                &area.writer,
+                [item(header(1, Path::Live, first), &[])],
+            )
+        };
+        for first in 0..ENTRIES_MAX {
+            assert_eq!(push(u64::try_from(first).expect("small")), Ok(()));
+        }
+        assert_eq!(push(9999), Err(Rejected::Record));
+        assert_eq!(group.headers.len(), ENTRIES_MAX);
+        const { assert!(META_LEN <= 1 << 16, "the table fits one 64 KiB block") };
+    }
+
+    #[test]
     fn an_entry_the_ring_has_no_room_for_changes_nothing() {
-        let pool = pool(1 << 20);
         let mut area = Area::new();
         let mut group = Group::default();
-        let part = block(&pool, &vec![7; BODY_MAX - table_len(1)]);
+        let part = block(&area.pool, &vec![7; BODY_MAX - table_len(1)]);
         let entry = header(1, Path::Live, 0);
         let rejected = loop {
-            match group.push(&area.writer, entry, std::slice::from_ref(&part)) {
+            let pushed = group.push(
+                &area.pool,
+                &area.writer,
+                [item(entry, std::slice::from_ref(&part))],
+            );
+            match pushed {
                 Ok(()) => {
                     let closed = group.close(&mut area.writer);
                     area.commit(&closed);
@@ -469,35 +662,62 @@ mod tests {
         assert_eq!(rejected, Rejected::Ring(full));
         assert!(group.is_empty());
         assert_eq!(group.bytes, 0);
+        assert!(group.meta.is_none(), "a refused first entry takes no block");
     }
 
     #[test]
-    fn clear_keeps_the_capacity() {
-        let pool = pool(1 << 16);
+    fn a_first_entry_the_pool_has_no_block_for_changes_nothing() {
+        let mut area = Area::new();
+        area.pool = pool(1 << 17);
+        let _held = area.pool.alloc(META_LEN).expect("the first block fits");
+        let available = (1 << 17) - area.pool.committed();
+        let mut group = Group::default();
+        let rejected = group.push(
+            &area.pool,
+            &area.writer,
+            [item(header(1, Path::Live, 0), &[])],
+        );
+        let exhausted = block::Error::Exhausted {
+            requested: META_LEN,
+            available,
+        };
+        assert_eq!(rejected, Err(Rejected::Pool(exhausted)));
+        assert!(group.is_empty());
+    }
+
+    #[test]
+    fn clear_keeps_the_capacity_and_gives_the_blocks_back() {
         let mut area = Area::new();
         let mut group = Group::default();
         for first in 0..3 {
-            group
-                .push(
-                    &area.writer,
-                    header(1, Path::Live, 2 * first),
-                    &[block(&pool, b"xy")],
-                )
-                .expect("the ring has room");
+            let part = block(&area.pool, b"xy");
+            area.push(&mut group, header(1, Path::Live, 2 * first), &[part]);
         }
+        let lent = area.pool.committed();
         let closed = group.close(&mut area.writer);
         let capacity = |group: &Group| {
             (
                 group.headers.capacity(),
-                group.parts.capacity(),
-                group.table.capacity(),
+                group.slots.capacity(),
+                group.writes.capacity(),
             )
         };
         let before = capacity(&closed.group);
         let group = closed.clear();
         assert!(group.is_empty());
-        assert_eq!(group.body_len_with(0), table_len(1));
+        assert_eq!(group.body_len_with(0, 0), table_len(0));
         assert_eq!(capacity(&group), before);
+        area.pool.reclaim();
+        assert_eq!(
+            area.pool.committed(),
+            lent,
+            "the budget stays with the classes"
+        );
+        let meta = area
+            .pool
+            .alloc(META_LEN)
+            .expect("the dropped block is free");
+        assert_eq!(meta.len(), META_LEN);
     }
 
     #[test]
@@ -509,14 +729,80 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "invariant: an entry of 8138 bytes is over the maximum body of 8192 \
-                    bytes"
+        expected = "invariant: a batch of 1 entries and 8138 bytes is over the maximum \
+                    body of 8192 bytes"
     )]
-    fn an_entry_alone_over_the_record_is_a_broken_invariant() {
-        let pool = pool(1 << 16);
+    fn a_batch_alone_over_the_record_is_a_broken_invariant() {
         let area = Area::new();
-        let part = block(&pool, &vec![7; BODY_MAX - table_len(1) + 1]);
-        let _rejected =
-            Group::default().push(&area.writer, header(1, Path::Live, 0), &[part]);
+        let part = block(&area.pool, &vec![7; BODY_MAX - table_len(1) + 1]);
+        let _rejected = Group::default().push(
+            &area.pool,
+            &area.writer,
+            [item(header(1, Path::Live, 0), &[part])],
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a batch of 1 entries and 1024 parts is over the most \
+                    of 1023"
+    )]
+    fn a_batch_alone_over_the_most_parts_is_a_broken_invariant() {
+        let area = Area::new();
+        let parts = vec![block(&area.pool, b""); ENTRIES_MAX + 1];
+        let _rejected = Group::default().push(
+            &area.pool,
+            &area.writer,
+            [item(header(1, Path::Live, 0), &parts)],
+        );
+    }
+
+    #[test]
+    fn a_batch_goes_in_whole_or_not_at_all() {
+        let mut area = Area::new();
+        let mut group = Group::default();
+        let third = (BODY_MAX - table_len(3)) / 3;
+        let part = block(&area.pool, &vec![7; third]);
+        area.push(
+            &mut group,
+            header(1, Path::Live, 0),
+            std::slice::from_ref(&part),
+        );
+        let batch = [
+            item(header(1, Path::Live, 2), std::slice::from_ref(&part)),
+            item(header(2, Path::Live, 0), std::slice::from_ref(&part)),
+            item(header(3, Path::Live, 0), &[]),
+        ];
+        let rejected = group.push(&area.pool, &area.writer, batch);
+        assert_eq!(rejected, Err(Rejected::Record));
+        assert_eq!(group.headers.len(), 1);
+        assert_eq!(group.bytes, third);
+        let pushed = group.push(&area.pool, &area.writer, batch.into_iter().skip(1));
+        assert_eq!(pushed, Ok(()));
+        assert_eq!(group.headers.len(), 3);
+        assert_eq!(group.slots, [slot(1), slot(2), slot(3)]);
+        assert_eq!(group.bytes, 2 * third);
+    }
+
+    #[test]
+    fn parts_count_against_the_most_entries() {
+        let area = Area::with_body_max(60_000);
+        let mut group = Group::default();
+        let parts = vec![block(&area.pool, b""); ENTRIES_MAX - 1];
+        let one = header(1, Path::Live, 0);
+        assert_eq!(
+            group.push(&area.pool, &area.writer, [item(one, &parts)]),
+            Ok(())
+        );
+        let two = [item(header(1, Path::Live, 2), &parts[..1]); 2];
+        assert_eq!(
+            group.push(&area.pool, &area.writer, two),
+            Err(Rejected::Record)
+        );
+        assert_eq!(
+            group.push(&area.pool, &area.writer, two[..1].iter().copied()),
+            Ok(())
+        );
+        assert_eq!(group.writes.len(), ENTRIES_MAX);
     }
 }
