@@ -296,7 +296,8 @@ impl Lab {
         self.link(a, b, self.link);
     }
 
-    fn link(&mut self, a: Node, b: Node, config: sim::link::Config) {
+    /// Sets every link between `a` and `b` to `config`.
+    pub(crate) fn link(&mut self, a: Node, b: Node, config: sim::link::Config) {
         let (a, b) = (&self.members[a.0].host, &self.members[b.0].host);
         self.sim.link(a, b, config);
         self.sim.link(b, a, config);
@@ -312,6 +313,12 @@ impl Lab {
         if let Err(e) = self.sim.run_for(Span::from_nanos(nanos)) {
             panic!("{e}");
         }
+    }
+
+    /// A hash of every scheduling choice and datagram so far. One key gives one
+    /// digest.
+    pub(crate) fn digest(&self) -> u64 {
+        self.sim.digest()
     }
 
     /// Stops every node and runs the simulation until each has ended.
