@@ -34,7 +34,7 @@ pub enum Error {
     },
     /// An HCL form that a file cannot hold.
     Form {
-        /// Where the form starts.
+        /// The token that shows the form, such as the operator or `?`.
         span: Span,
         /// The form.
         form: Form,
@@ -137,6 +137,23 @@ pub enum Form {
     Null,
     /// An interpolation `${` or a directive `%{` in a string.
     Template,
+    /// An operator, such as `+`, `==`, `!`, or `-` before a value that is not a
+    /// number.
+    Operator,
+    /// A conditional, such as `a ? b : c`.
+    Conditional,
+    /// A `for` expression, such as `[for x in xs : x]`.
+    For,
+    /// An index or an attribute access after a value, such as `a[0]` or `f().b`.
+    Index,
+    /// A splat, such as `a[*].b` or `a.*.b`.
+    Splat,
+    /// Parentheses around a value.
+    Parentheses,
+    /// A function in a namespace, such as `provider::aws::arn_parse(x)`.
+    Namespace,
+    /// An argument expanded with `...`, such as `f(xs...)`.
+    Expansion,
 }
 
 impl fmt::Display for Form {
@@ -149,6 +166,33 @@ impl fmt::Display for Form {
             Self::Template => {
                 "templates do not exist in Foundation files. Write `$${` or `%%{` for \
                  the text `${` or `%{`"
+            }
+            Self::Operator => {
+                "operators do not exist in Foundation files. Write the result as a \
+                 value"
+            }
+            Self::Conditional => {
+                "conditionals do not exist in Foundation files. Write the value that \
+                 applies"
+            }
+            Self::For => {
+                "`for` expressions do not exist in Foundation files. Write each item"
+            }
+            Self::Index => {
+                "indexes and attribute access do not exist in Foundation files. Write \
+                 the value itself"
+            }
+            Self::Splat => "splats do not exist in Foundation files. Write each value",
+            Self::Parentheses => {
+                "parentheses do not exist in Foundation files. Remove them"
+            }
+            Self::Namespace => {
+                "function namespaces do not exist in Foundation files. Call the \
+                 function by its name only"
+            }
+            Self::Expansion => {
+                "argument expansion does not exist in Foundation files. Write each \
+                 argument"
             }
         })
     }
@@ -264,6 +308,43 @@ mod tests {
                 Form::Template,
                 "templates do not exist in Foundation files. Write `$${` or `%%{` for \
                  the text `${` or `%{`",
+            ),
+            (
+                Form::Operator,
+                "operators do not exist in Foundation files. Write the result as a \
+                 value",
+            ),
+            (
+                Form::Conditional,
+                "conditionals do not exist in Foundation files. Write the value that \
+                 applies",
+            ),
+            (
+                Form::For,
+                "`for` expressions do not exist in Foundation files. Write each item",
+            ),
+            (
+                Form::Index,
+                "indexes and attribute access do not exist in Foundation files. Write \
+                 the value itself",
+            ),
+            (
+                Form::Splat,
+                "splats do not exist in Foundation files. Write each value",
+            ),
+            (
+                Form::Parentheses,
+                "parentheses do not exist in Foundation files. Remove them",
+            ),
+            (
+                Form::Namespace,
+                "function namespaces do not exist in Foundation files. Call the \
+                 function by its name only",
+            ),
+            (
+                Form::Expansion,
+                "argument expansion does not exist in Foundation files. Write each \
+                 argument",
             ),
         ];
         for (form, message) in cases {

@@ -21,6 +21,15 @@ pub(crate) enum Kind {
     Number,
     /// A quoted string, with its escapes read.
     String(Box<str>),
+    /// `!`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `+`, `/`, or `%`.
+    Operator,
+    Star,
+    Question,
+    Dot,
+    /// `...`.
+    Ellipsis,
+    /// `::`.
+    DoubleColon,
     Equals,
     Colon,
     Comma,
@@ -43,6 +52,7 @@ pub(crate) enum Kind {
 }
 
 /// Splits text into tokens, skipping spaces, tabs, and comments.
+#[derive(Clone)]
 pub(crate) struct Tokens<'a> {
     source: Source,
     rest: &'a str,
@@ -94,7 +104,23 @@ impl<'a> Tokens<'a> {
             '\n' => Kind::Newline,
             '\r' if self.eat('\n') => Kind::Newline,
             '"' => Kind::String(self.string(start)?),
+            '=' if self.eat('=') => Kind::Operator,
             '=' => Kind::Equals,
+            '!' | '<' | '>' => {
+                self.eat('=');
+                Kind::Operator
+            }
+            '&' if self.eat('&') => Kind::Operator,
+            '|' if self.eat('|') => Kind::Operator,
+            '+' | '/' | '%' => Kind::Operator,
+            '*' => Kind::Star,
+            '?' => Kind::Question,
+            '.' if self.rest.starts_with("..") => {
+                self.skip_bytes(2);
+                Kind::Ellipsis
+            }
+            '.' => Kind::Dot,
+            ':' if self.eat(':') => Kind::DoubleColon,
             ':' => Kind::Colon,
             ',' => Kind::Comma,
             '-' => Kind::Minus,

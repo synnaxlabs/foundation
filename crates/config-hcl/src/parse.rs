@@ -152,6 +152,12 @@ impl<'a> Parser<'a> {
     /// Reads a value. Returns `None` when the value has a problem that does not stop
     /// reading.
     fn value(&mut self, depth: usize) -> Result<Option<Value>, Error> {
+        let value = self.term(depth)?;
+        self.suffix()?;
+        Ok(value)
+    }
+
+    fn term(&mut self, depth: usize) -> Result<Option<Value>, Error> {
         if self.token.kind == lex::Kind::End {
             return Err(self.syntax(Expected::Value));
         }
@@ -165,7 +171,18 @@ impl<'a> Parser<'a> {
                 let digits = self.take()?;
                 return Ok(self.number(&digits, Some(token.span)));
             }
-            lex::Kind::Minus => return Err(self.syntax(Expected::Value)),
+            lex::Kind::Minus | lex::Kind::Operator | lex::Kind::Star => {
+                return Err(Error::Form {
+                    span: token.span,
+                    form: Form::Operator,
+                });
+            }
+            lex::Kind::OpenParenthesis => {
+                return Err(Error::Form {
+                    span: token.span,
+                    form: Form::Parentheses,
+                });
+            }
             lex::Kind::String(text) => value::Kind::String(text),
             lex::Kind::OpenBracket => return self.list(&token, depth).map(Some),
             lex::Kind::OpenBrace => return self.object(&token, depth).map(Some),
@@ -180,6 +197,41 @@ impl<'a> Parser<'a> {
             kind,
             span: Some(token.span),
         }))
+    }
+
+    /// Refuses an HCL form that goes on after a value.
+    fn suffix(&self) -> Result<(), Error> {
+        let form = match self.token.kind {
+            lex::Kind::Operator | lex::Kind::Minus | lex::Kind::Star => Form::Operator,
+            lex::Kind::Question => Form::Conditional,
+            lex::Kind::OpenBracket | lex::Kind::Dot
+                if self.after().kind == lex::Kind::Star =>
+            {
+                Form::Splat
+            }
+            lex::Kind::OpenBracket | lex::Kind::Dot => Form::Index,
+            lex::Kind::DoubleColon => Form::Namespace,
+            lex::Kind::Ellipsis => Form::Expansion,
+            _ => return Ok(()),
+        };
+        Err(Error::Form {
+            span: self.token.span,
+            form,
+        })
+    }
+
+    /// Refuses a `for` expression at the start of a list or an object.
+    fn for_expression(&self) -> Result<(), Error> {
+        if self.token.kind == lex::Kind::Identifier
+            && self.token.text == "for"
+            && self.after().kind == lex::Kind::Identifier
+        {
+            return Err(Error::Form {
+                span: self.token.span,
+                form: Form::For,
+            });
+        }
+        Ok(())
     }
 
     fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
@@ -246,6 +298,8 @@ impl<'a> Parser<'a> {
 
     fn list(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
         let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
+        self.skip_newlines()?;
+        self.for_expression()?;
         let mut items = Vec::new();
         let close = loop {
             self.skip_newlines()?;
@@ -285,6 +339,8 @@ impl<'a> Parser<'a> {
         attributes: &mut Vec<Attribute>,
         depth: usize,
     ) -> Result<Token<'a>, Error> {
+        self.skip_newlines()?;
+        self.for_expression()?;
         loop {
             self.skip_newlines()?;
             match self.token.kind {
@@ -384,6 +440,11 @@ impl<'a> Parser<'a> {
         );
         let next = self.tokens.next();
         Ok(std::mem::replace(&mut self.token, next))
+    }
+
+    /// The token after the next one.
+    fn after(&self) -> Token<'a> {
+        self.tokens.clone().next()
     }
 
     /// The problem at the next token: the lexer's error, or `expected`.
@@ -634,6 +695,15 @@ c = "°C # not a comment"
                 ),
             ]);
             assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_for_as_a_word_when_no_identifier_follows() {
+            let expected = attributes(vec![
+                ("a", value::Kind::List(vec![value(reference("for"))])),
+                ("b", value::Kind::Map(map(vec![("for", integer(1))]))),
+            ]);
+            assert_eq!(ok("a = [for]\nb = { for = 1 }\n"), expected);
         }
 
         #[test]
@@ -889,6 +959,77 @@ c = "°C # not a comment"
         }
 
         #[test]
+        fn refuses_each_form_at_the_token_that_shows_it() {
+            let cases = [
+                ("a = 1 + 2\n", on(6, 7), Form::Operator),
+                ("a = 1 - 2\n", on(6, 7), Form::Operator),
+                ("a = b * c\n", on(6, 7), Form::Operator),
+                ("a = 1 / 2\n", on(6, 7), Form::Operator),
+                ("a = 7 % 2\n", on(6, 7), Form::Operator),
+                ("a = 1 == 2\n", on(6, 8), Form::Operator),
+                ("a = 1 != 2\n", on(6, 8), Form::Operator),
+                ("a = 1 < 2\n", on(6, 7), Form::Operator),
+                ("a = 1 <= 2\n", on(6, 8), Form::Operator),
+                ("a = 1 > 2\n", on(6, 7), Form::Operator),
+                ("a = 1 >= 2\n", on(6, 8), Form::Operator),
+                ("a = b && c\n", on(6, 8), Form::Operator),
+                ("a = b || c\n", on(6, 8), Form::Operator),
+                ("a = !b\n", on(4, 5), Form::Operator),
+                ("a = -b\n", on(4, 5), Form::Operator),
+                ("a = *b\n", on(4, 5), Form::Operator),
+                ("a = /x\n", on(4, 5), Form::Operator),
+                ("a = b ? 1 : 2\n", on(6, 7), Form::Conditional),
+                ("a = [for x in y : x]\n", on(5, 8), Form::For),
+                ("a = { for k, v in m : k => v }\n", on(6, 9), Form::For),
+                (
+                    "a = [\n  for x in y : x\n]\n",
+                    span(at(8, 1, 2), at(11, 1, 5)),
+                    Form::For,
+                ),
+                ("a = b[0]\n", on(5, 6), Form::Index),
+                ("a = f(1).b\n", on(8, 9), Form::Index),
+                ("a = 1.x\n", on(5, 6), Form::Index),
+                ("a = [1][0]\n", on(7, 8), Form::Index),
+                ("a = b[*].c\n", on(5, 6), Form::Splat),
+                ("a = b[ * ]\n", on(5, 6), Form::Splat),
+                ("a = b.*.c\n", on(5, 6), Form::Splat),
+                ("a = (1)\n", on(4, 5), Form::Parentheses),
+                ("a = provider::aws::f(1)\n", on(12, 14), Form::Namespace),
+                ("a = f(xs...)\n", on(8, 11), Form::Expansion),
+                ("a = [1 + 2]\n", on(7, 8), Form::Operator),
+                ("a = { k = 1 + 2 }\n", on(12, 13), Form::Operator),
+                ("a = f(1 + 2)\n", on(8, 9), Form::Operator),
+                ("b { k = 1 + 2 }\n", on(10, 11), Form::Operator),
+                (
+                    "b {\n  k = 1 + 2\n}\n",
+                    span(at(12, 1, 8), at(13, 1, 9)),
+                    Form::Operator,
+                ),
+            ];
+            for (text, span, form) in cases {
+                let message = form.to_string();
+                check(text, &[(Error::Form { span, form }, &message)]);
+            }
+        }
+
+        #[test]
+        fn keeps_a_problem_before_a_form() {
+            let null = Error::Form {
+                span: on(4, 8),
+                form: Form::Null,
+            };
+            let operator = Error::Form {
+                span: span(at(15, 1, 6), at(16, 1, 7)),
+                form: Form::Operator,
+            };
+            let message = Form::Operator.to_string();
+            check(
+                "a = null\nb = 1 + 2\n",
+                &[(null, NULL), (operator, &message)],
+            );
+        }
+
+        #[test]
         fn refuses_a_string_that_does_not_end() {
             let quote = "the file needs `\"` to end the string here";
             check("s = \"abc", &[(syntax(on(4, 8), Expected::Quote), quote)]);
@@ -916,10 +1057,9 @@ c = "°C # not a comment"
                 ("a = $\n", on(4, 5), Expected::Value),
                 ("a =", on(3, 3), Expected::Value),
                 ("a = [", on(5, 5), Expected::Value),
-                ("a = -x\n", on(5, 6), Expected::Value),
-                ("a = /x\n", on(4, 5), Expected::Value),
+                ("a = ?\n", on(4, 5), Expected::Value),
+                ("a = .5\n", on(4, 5), Expected::Value),
                 ("a = 1\rb = 2\n", on(5, 6), Expected::Newline),
-                ("a = 1.x\n", on(5, 6), Expected::Newline),
                 ("a = 1ex\n", on(5, 7), Expected::Newline),
                 ("a = 1 b = 2\n", on(6, 7), Expected::Newline),
                 ("a 1\n", on(2, 3), Expected::AttributeOrBlock),
@@ -1254,9 +1394,14 @@ c = "°C # not a comment"
                         Err(vec![Error::TooDeep { span }])
                     );
                 }
-                let text = format!("a = {}1", "-".repeat(100_000));
-                let expected = syntax(on(5, 6), Expected::Value);
-                assert_eq!(read(Source(0), &text), Err(vec![expected]));
+                for prefix in ["-", "!"] {
+                    let text = format!("a = {}1", prefix.repeat(100_000));
+                    let expected = Error::Form {
+                        span: on(4, 5),
+                        form: Form::Operator,
+                    };
+                    assert_eq!(read(Source(0), &text), Err(vec![expected]));
+                }
             });
         }
     }
