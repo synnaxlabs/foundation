@@ -235,7 +235,16 @@ impl Budget {
 
     /// Charges `bytes` to `claim` when they fit. Else `stream` waits for the next
     /// wake.
+    ///
+    /// # Panics
+    ///
+    /// When `bytes` is over the budget, as they would never fit.
     fn charge(&mut self, stream: Key, bytes: usize, claim: &mut Claim) -> bool {
+        assert!(
+            bytes <= self.max,
+            "a claim of {bytes} bytes is over the budget of {}",
+            self.max
+        );
         if self.waits(claim) {
             return false;
         }
@@ -502,13 +511,8 @@ impl Streams {
         } = receiver;
         let receiving = &mut self.receiving;
         let mut recv = inner.recv_stream(key.id);
-        let result = if receiving.waits(claim) {
-            // The reader takes no bytes while it waits, so only this finds a reset.
-            match recv.received_reset().expect(RECEIVING) {
-                Some(error) => Err(reset_error(error)),
-                None => Ok(Poll::Pending),
-            }
-        } else {
+        let mut result = Ok(Poll::Pending);
+        if !receiving.waits(claim) {
             let mut chunks = recv.read(true).expect(RECEIVING);
             let alloc = |len| {
                 if !receiving.charge(*key, len, claim) {
@@ -516,12 +520,18 @@ impl Streams {
                 }
                 message::alloc(pool, len).map(Poll::Ready)
             };
-            reader.read(alloc, |max| match chunks.next(max) {
+            result = reader.read(alloc, |max| match chunks.next(max) {
                 Ok(chunk) => Ok(Poll::Ready(chunk.map(|chunk| chunk.bytes))),
                 Err(ReadError::Blocked) => Ok(Poll::Pending),
                 Err(ReadError::Reset(error)) => Err(reset_error(error)),
-            })
-        };
+            });
+        }
+        // The reader takes no bytes while it waits, so only this finds a reset.
+        if receiving.waits(claim)
+            && let Some(error) = recv.received_reset().expect(RECEIVING)
+        {
+            result = Err(reset_error(error));
+        }
         if !matches!(result, Ok(Poll::Pending)) {
             receiving.release(*key, claim, events);
         }
@@ -1448,6 +1458,43 @@ mod tests {
                 stream: receivers[3].key(),
             };
             assert!(!got(&pair.server, seen, &readable));
+        });
+    }
+
+    #[test]
+    fn a_reset_message_that_finds_no_room_after_a_wake_fails_the_read() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let ids = prefixes(&mut pair, 5);
+            let mut receivers = wait(&mut pair);
+            let reset = pair
+                .client
+                .connection()
+                .send_stream(ids[3])
+                .reset(7u32.into());
+            reset.expect("reset");
+            let body = vec![7; MESSAGE_MAX];
+            let mut send = pair.client.connection().send_stream(ids[0]);
+            assert_eq!(send.write(&body), Ok(MESSAGE_MAX));
+            pair.run(RUN);
+            let now = pair.now();
+            let read = drain(&mut pair.server, now, &mut receivers[0]);
+            assert_eq!(read, (vec![body], false));
+            let read = next(&mut pair.server, now, &mut receivers[4]);
+            assert_eq!(read, Ok(Poll::Pending));
+            let read = next(&mut pair.server, now, &mut receivers[3]);
+            assert_eq!(read, Err(Error::Reset { code: Code(7) }));
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "a claim of 131073 bytes is over the budget of 131072")]
+    fn a_message_over_the_send_budget_panics() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let (now, message) = (pair.now(), shard.block(&vec![1; NARROW + 1]));
+            drop(pair.client.endpoint.write(now, &mut sender, message));
         });
     }
 

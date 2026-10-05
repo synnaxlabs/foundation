@@ -288,7 +288,8 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `sender` holds part of a message, or after [`Endpoint::finish`].
+    /// When `sender` holds part of a message, after [`Endpoint::finish`], or when
+    /// `message` is over the peer's window (this side's own until the hello).
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
