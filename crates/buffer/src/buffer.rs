@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::fmt;
+use std::future::poll_fn;
 use std::mem;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -171,8 +172,9 @@ impl From<header::Error> for Error {
 }
 
 /// One shard's logs. It lives on its shard: the commit task runs on the shard's
-/// `tasks`, and a drop ends the task at its next deadline. Entries queued and not
-/// yet committed at the drop are not written.
+/// `tasks`. The task idles while nothing is queued and nothing waits on a commit.
+/// A drop ends the task at once when it idles, else after its next commit, which
+/// writes what was queued.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -205,16 +207,39 @@ struct State {
     /// How many deadlines synced what they took.
     commits: u64,
     wakers: Vec<Waker>,
+    /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
+    parked: Option<Waker>,
     /// The error that ended the task.
     failed: Option<Error>,
 }
 
 impl State {
+    /// Whether nothing is queued and nothing waits on a commit.
+    fn idle(&self) -> bool {
+        self.open.is_empty() && self.queue.is_empty() && self.wakers.is_empty()
+    }
+
     /// Closes the open group into the queue and opens a spare.
     fn close_open(&mut self) {
         let spare = self.spares.pop().unwrap_or_default();
         let full = mem::replace(&mut self.open, spare);
         self.queue.push(full.close(&mut self.writer));
+    }
+}
+
+impl Shared {
+    /// Wakes the task when it idles. Call it with the state not borrowed.
+    fn unpark(&self) {
+        let parked = self.state.borrow_mut().parked.take();
+        if let Some(waker) = parked {
+            waker.wake();
+        }
+    }
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        self.shared.unpark();
     }
 }
 
@@ -291,6 +316,7 @@ impl Buffer {
                 taken: 0,
                 commits: 0,
                 wakers: Vec::new(),
+                parked: None,
                 failed: None,
             }),
         });
@@ -337,8 +363,8 @@ impl Buffer {
     /// bytes, or more than 1023 entries or parts.
     pub fn append(&self, entries: &[Entry<'_>]) -> Result<(), Error> {
         let shared = &*self.shared;
-        let mut state = shared.state.borrow_mut();
-        let state = &mut *state;
+        let mut guard = shared.state.borrow_mut();
+        let state = &mut *guard;
         if let Some(error) = &state.failed {
             return Err(error.clone());
         }
@@ -356,6 +382,8 @@ impl Buffer {
         for entry in entries {
             state.tails.advance(entry.slot, &entry.header());
         }
+        drop(guard);
+        shared.unpark();
         Ok(())
     }
 
@@ -488,11 +516,23 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span) {
     let mut woken: Vec<Waker> = Vec::new();
     let mut sleep = clock.sleep(commit);
     loop {
-        (&mut sleep).await;
-        sleep.reset(clock.now() + commit);
-        if Rc::strong_count(&shared) == 1 {
+        let ended = poll_fn(|cx| {
+            if Rc::strong_count(&shared) == 1 {
+                return Poll::Ready(true);
+            }
+            let mut state = shared.state.borrow_mut();
+            if !state.idle() {
+                return Poll::Ready(false);
+            }
+            state.parked = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+        if ended {
             return;
         }
+        sleep.reset(clock.now() + commit);
+        (&mut sleep).await;
         {
             let mut state = shared.state.borrow_mut();
             state.taken += 1;
@@ -561,6 +601,8 @@ impl Future for Commit<'_> {
         if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
             state.wakers.push(cx.waker().clone());
         }
+        drop(state);
+        self.shared.unpark();
         Poll::Pending
     }
 }
