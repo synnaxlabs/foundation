@@ -233,6 +233,32 @@ How to read this record:
   record at once when they open, close, or are taken over, and on the home's interval
   when the position changed. A session open at a crash restores as closed at the
   restore. Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+- **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
+  `hub` grants credit to each session on one index as an absolute byte limit since the
+  session opened, in a `Credit` message apart from the ack. Both sides count from zero
+  at each session, including a takeover and a resume at a new home. The open carries the
+  first grant; until then the session has no credit. A grant only raises the limit, so a
+  repeated or reordered grant does no harm. A `Credit` is sent reliably: a blocked
+  session gets no frame, so no later grant would replace a lost one. The home drops a
+  grant for a session it closed. The home sends a whole frame while the bytes it has
+  spent are below the limit, so it passes the limit by less than one frame and never
+  splits a frame. After a refusal, the session gets no later frame until it has the
+  refused one; frames from catch-up spend credit too. A frame costs its charge: the
+  bytes its pool block pins, which are `block`'s header, the frame header, the
+  descriptors, and the encoded series (M3). `types` sets the charge with the frame
+  layout, so the home and the `hub` compute the same charge from the frame alone, and a
+  frame with only empty series still costs its headers. Per-connection framing in `wire`
+  (X35) pins no pool memory and does not count. Credits apply only to complete delivery,
+  which is reliable: a lost frame would leak credit. The `hub` raises the limit only
+  after it releases a frame, and it bounds its decoded copies itself, since a small
+  encoded frame can decode to much more. It sends a `Credit` only when the room it has
+  not announced reaches half the window, and puts the grants for all sessions on one
+  link into one message. It sizes one window per reader from the link's bandwidth-delay
+  product, adapts it, and divides it among the indexes the reader reads. Each session
+  with room can pass its limit by one frame, so the `hub` counts one largest frame per
+  such session against the window, and a reader pins at most its window. Replaces r11
+  5.2 (a window beyond the acknowledged position): flow control stays apart from durable
+  acks. Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync.
@@ -1046,7 +1072,7 @@ Storage classes used in the table:
 | Gaps | Index log records (explicit gap with a count) | `home`, `buffer` | Complete readers | `home`, `buffer` |
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
 | Latest mailbox | Memory: depth 1 per latest reader per index | `delivery` | The reader session | `delivery` |
-| Credits | Memory per reader per index; credit messages on the wire | The reader's `hub` grants | `delivery` | `delivery`, `wire` |
+| Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; the home spends | `delivery` | `delivery`, `wire` |
 | Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `delivery` |
 | Death records | Quality channel samples (X19) | `home` | Sinks | `home` |
 | Read copy data | The copy node's index log | `replica` | The copy's readers, served by `home` in copy mode (X43) | `replica`, `home` |
