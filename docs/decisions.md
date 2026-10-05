@@ -805,6 +805,17 @@ How to read this record:
   Until the hello carries the peer's window, a sender uses its own. Proposed by
   `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
   `network` in #228.
+- **RECV WAITS (#581, 2026-10-05)** `stream::Receiver::recv` waits while it has no
+  block, because the pool has no room or the system refused a commit. It never returns
+  `Error::Pool` or `Error::Memory`: it gives the next message, `None` at the end, or
+  the error that ended the session. The message stays queued, and QUIC flow control
+  holds the peer. A freed block wakes the waiting reads; `transport` retries a refused
+  commit on a timer, which simulation sets. Waiting reads take blocks highest class
+  first, then oldest first. `transport` counts the time that reads wait for a block
+  and each refused commit. Dropping the future or calling `stop` ends a wait. A
+  datagram with no block drops. Rejected: each caller retries (every caller writes the
+  same timer), and ending the stream (memory pressure becomes stream churn and lost
+  messages). Decided by the advisor under the delivery and wire delegation.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -2356,6 +2367,7 @@ Parameters and later choices, recorded and not asked:
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52.
+- Delivery and wire: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
