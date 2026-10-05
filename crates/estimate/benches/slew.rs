@@ -17,6 +17,7 @@ fn at_mid_slew(bencher: Bencher<'_, '_>) {
     let mut now = 1_000_000_000;
     bencher.bench_local(|| {
         now += 1_000;
-        divan::black_box(slew).at(Monotonic(now), Drift::UNDISCIPLINED)
+        let drift = divan::black_box(Drift::UNDISCIPLINED);
+        divan::black_box(slew).at(Monotonic(now), drift)
     });
 }

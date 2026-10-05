@@ -503,7 +503,13 @@ How to read this record:
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The
   part not yet applied goes into the error, so a slew of 1 s takes 2000 s and its
   error says so. Only the first estimate steps. A clock in holdover keeps its slew.
-  Decided by the `time` builder (#202).
+  Cost: after a stale first estimate (a Pi 4 with no real-time clock, or a Windows OS
+  clock alone under OS CLOCK BOUND), a correction of 1 h takes 83 days and one of 1
+  day about 5.5 years, with a true error the whole time. Lost: a frequency loop (a
+  PLL, as in ntpd), because R6 bounds drift with an error that grows and a PLL can
+  overshoot; the slew private in `clock`, because it is decision logic in layer 2; a
+  forward step whenever an estimate is ahead, because a majority of falsetickers
+  could push mesh time into the future. Decided by the `time` builder (#202).
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), the reading has the largest
