@@ -9,12 +9,12 @@ pub mod bench;
 )]
 mod crc32c;
 #[cfg_attr(
-    not(any(test, feature = "bench")),
+    not(test),
     expect(dead_code, reason = "the ring engine is the first user")
 )]
 mod header;
 #[cfg_attr(
-    not(test),
+    not(any(test, feature = "bench")),
     expect(dead_code, reason = "the ring engine is the first user")
 )]
 mod record;
