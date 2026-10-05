@@ -159,6 +159,15 @@ How to read this record:
   once per handoff. A writer asks for authority at open, capped by access. Authority 255
   cannot be taken. The control lease is an optional writer setting. There is no control
   policy.
+- **GATE RULES (write-path, 2026-10-04)** Writers that do not hold control wait. When
+  the holder closes or its control lease runs out, the waiter with the highest
+  authority takes control; on a tie, the one that opened first. Each accepted write
+  renews the control lease. A writer whose control lease ran out stays out of the gate
+  until it reopens. Lease and grace times are the home's monotonic time, and the X18
+  grace is a positive span like a control lease. During the grace the recorded holder
+  ranks first: the first writer of its subject takes its place, and a higher authority
+  takes control. A handoff is recorded only when the
+  holder's subject or authority changes. Basis: S11, X18, r8 trace (d).
 - **S13 + BQ13** Quality is an ordinary channel of type `Quality` (OPC UA 32-bit status
   codes) that data channels point at. One quality channel can serve many channels. It
   may sit on its own index (written on change; a value holds until the next) or share
@@ -251,11 +260,22 @@ How to read this record:
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
   fsync is fatal and never retried.
-  Ring record (starting point): `[len: u32][crc32c: u32][payload]`, one per group
-  commit, starting on a 4096-byte boundary so a commit never rewrites a synced block.
-  The CRC continues from the record before (a chain), and each open of the ring starts
-  a chain from a random value, so bytes of an earlier chain never read as the next
-  record.
+  Ring record (starting point): `[len: u32][crc32c: u32][kind: u8][body]`, starting
+  on a 4096-byte boundary so a commit never rewrites a synced block. The CRC covers
+  `len`, `kind`, and the body. It continues from the record before (a chain), so
+  bytes of an earlier chain never read as the next record.
+  Kinds: data (1), one per group commit; wrap (2), no body, the rest of the area is
+  not used and the next record is at its start; restart (3), written at each open,
+  its body is a random `u32` and the chain continues from that value. A record never
+  crosses the end of the area. Kind 0 is never valid.
+  Offsets count bytes since the ring was made and never wrap; the place in the area
+  is the offset modulo the area length. The area is at least twice the largest record
+  less one block, so an empty ring takes any record. A body is at most `u32::MAX`
+  bytes.
+  Recovery walks from the tail to the first record that does not follow the chain.
+  A record that follows the chain but has an unknown kind or a wrong shape fails the
+  open. The restart record needs one free block: an open of a full ring first moves
+  records at the tail to a segment.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -396,6 +416,20 @@ How to read this record:
   RANDOMNESS"), from `network`'s proposal on #54.
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
+- **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and
+  accepts; the node's sockets and relays sit in one node-level part (ONE PORT PER
+  NODE). A `Session` goes to one peer over one path, direct or relayed, fixed for its
+  life, and runs every class on one carrier. A second carrier for some classes waits
+  for the measurement in TRANSPORT SHAPE LOCKED, which must show that `Latest` p99
+  holds while `CatchUp` runs on the other carrier. Streams carry whole messages in
+  pool blocks, not bytes; the QUIC carrier benchmark decides whether decode reads
+  chunks in place instead. A stream reaches the peer with its first message, and a
+  `Sender` dropped without `finish` resets it. Each stream has a `Class` (`Command`,
+  `Latest`, `Complete`, `CatchUp`) that sets its priority and preferred carrier. A
+  peer is a node key or a `Client` (an SDK, proved by its signed hello above).
+  Callers admit peers, dispatch streams (STREAM DISPATCH), and cancel stale latest
+  frames. Builds on SIM NETWORK. Proposed by `network` in #45; approved by the
+  coordinator on PR #53.
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -547,6 +581,14 @@ How to read this record:
   editor exists. `node` builds the front-end table keyed by file extension. Files hold
   data only (no loops, variables, or modules). SDK code may produce a Document directly.
   Never shrink the model to the weakest syntax. Supersedes: r3 plain HCL.
+- **DOCUMENT MODEL (2026-10-04)** A Document is attributes in a map sorted by key
+  (keys unique) plus blocks in order. Values: bool, integer (`i128`), finite float,
+  string, reference (`types::name::Name`), list, map, and call. No null and no
+  expressions. Refines K1: a front end gives every key, keyword, label, function
+  name, and value a span (byte offset, then line and column in Unicode scalar values,
+  from 0); SDK and spec documents have none (section 2.1, kind config). `==` never
+  reads spans, so a Document from a file equals the same Document from the spec.
+  Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -752,11 +794,13 @@ How to read this record:
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
   other way to count allocations. Never in a library or the `node` binary. The
   `xtask globals` check allows only this case.
-- **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake
-  protocol can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner
-  always on" and said "I have tons of AWS credits". The runner is `foundation-arm-1`,
-  an AWS c7g.2xlarge in us-east-1 with no inbound ports, tagged
-  `project=foundation-ci`, outside BENCH SPEND. The coordinator owns it.
+- **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
+  can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
+  said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
+  share one AWS m7g.2xlarge (8 vCPU, 32 GiB) in us-east-1 with no inbound ports, tagged
+  `project=foundation-ci`, outside BENCH SPEND. One runner queued 9 runs while its host
+  used about 30% CPU, so the person asked: "can we have multiple runners on a single
+  machine?" ARM skips docs-only changes. The coordinator owns it.
 
 ### 1.15 Releases
 
