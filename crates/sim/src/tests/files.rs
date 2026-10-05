@@ -663,3 +663,130 @@ fn the_digest_holds_the_result_of_each_file_call() {
     assert_eq!(free_digest(false), free_digest(false));
     assert_ne!(free_digest(false), free_digest(true));
 }
+
+/// The 512 bytes of a file after writes of 1 over bytes 0 to 100 and of 2 over bytes
+/// 200 to 300 were in flight at once and both ended with success.
+fn writes_that_share_no_byte(value: u64) -> Vec<u8> {
+    run(value, MIB, |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 512).await);
+        let pool = pool();
+        let (writer, parts) = (Rc::clone(&file), [block(&pool, &[1; 100])]);
+        tasks.spawn(async move { writer.write_at(0, &parts).await.unwrap() });
+        file.write_at(200, &[block(&pool, &[2; 100])])
+            .await
+            .unwrap();
+        node.clock().sleep(Span::MILLISECOND).await;
+        read(&file, &pool, 0, 512).await
+    })
+}
+
+#[test]
+fn writes_in_flight_that_share_no_byte_both_stay() {
+    for value in 0..64 {
+        let found = writes_that_share_no_byte(value);
+        let kept = (found[..100] == [1; 100], found[200..300] == [2; 100]);
+        assert_eq!(
+            kept,
+            (true, true),
+            "value {value}: (first kept, second kept)"
+        );
+    }
+}
+
+#[test]
+fn a_read_of_the_last_sector_of_the_largest_file_ends() {
+    let bytes = run(0, u64::MAX, |node, _| async move {
+        let file = create(&node, "a", u64::MAX).await;
+        read(&file, &pool(), u64::MAX - 1, 1).await
+    });
+    assert_eq!(bytes, vec![0]);
+}
+
+#[test]
+fn an_open_of_a_file_with_a_trailing_slash_fails() {
+    let opened = run(0, MIB, |node, _| async move {
+        drop(create(&node, "a", 1).await);
+        let opened = node.files().open(Path::new("a/"), Mode::Read).await;
+        opened.map(drop)
+    });
+    assert_eq!(opened, Err(io("a/", Operation::Open, 20)));
+}
+
+#[test]
+fn a_write_to_the_last_sector_of_the_largest_file_stays() {
+    let bytes = run(0, u64::MAX, |node, _| async move {
+        let file = create(&node, "a", u64::MAX).await;
+        let pool = pool();
+        file.write_at(u64::MAX - 1, &[block(&pool, &[7])])
+            .await
+            .unwrap();
+        read(&file, &pool, u64::MAX - 2, 2).await
+    });
+    assert_eq!(bytes, vec![0, 7]);
+}
+
+/// The values of bytes 0 to 100 and 100 to 200 of a file after writes of 1 over the
+/// first, 2 over the second, and 3 over both were in flight at once.
+fn three_writes_in_flight(value: u64) -> (u8, u8) {
+    let bytes = run(value, MIB, |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 512).await);
+        let pool = pool();
+        for (offset, len, byte) in [(0, 100, 1), (100, 100, 2)] {
+            let (writer, parts) = (Rc::clone(&file), [block(&pool, &vec![byte; len])]);
+            tasks.spawn(async move { writer.write_at(offset, &parts).await.unwrap() });
+        }
+        file.write_at(0, &[block(&pool, &[3; 200])]).await.unwrap();
+        node.clock().sleep(Span::MILLISECOND).await;
+        read(&file, &pool, 0, 200).await
+    });
+    let (first, second) = bytes.split_at(100);
+    assert!(first.iter().all(|&byte| byte == first[0]), "{first:?}");
+    assert!(second.iter().all(|&byte| byte == second[0]), "{second:?}");
+    (first[0], second[0])
+}
+
+#[test]
+fn three_writes_in_flight_leave_the_result_of_each_order() {
+    let results: BTreeSet<(u8, u8)> = (0..128).map(three_writes_in_flight).collect();
+    let orders = BTreeSet::from([(1, 2), (1, 3), (3, 2), (3, 3)]);
+    assert_eq!(results, orders);
+}
+
+#[test]
+fn a_path_with_a_trailing_slash_names_only_a_directory() {
+    let results = run(0, MIB, |node, _| async move {
+        let files = node.files();
+        drop(create(&node, "a", 1).await);
+        files.create_dir(Path::new("d")).await.unwrap();
+        let mut results = Vec::new();
+        for (path, mode) in [
+            ("a/", Mode::Write),
+            ("a/.", Mode::Read),
+            ("a//", Mode::Read),
+            ("a/", Mode::Create { len: 1 }),
+            ("b/", Mode::Create { len: 1 }),
+            ("b/", Mode::Read),
+            ("d/", Mode::Read),
+        ] {
+            results.push(files.open(Path::new(path), mode).await.map(drop));
+        }
+        for path in ["a/", "b/", "d/", "a"] {
+            results.push(files.remove(Path::new(path)).await);
+        }
+        results
+    });
+    let expected = [
+        Err(io("a/", Operation::Open, 20)),
+        Err(io("a/.", Operation::Open, 20)),
+        Err(io("a//", Operation::Open, 20)),
+        Err(io("a/", Operation::Open, 21)),
+        Err(io("b/", Operation::Open, 21)),
+        Err(Error::NotFound { path: "b/".into() }),
+        Err(io("d/", Operation::Open, 21)),
+        Err(io("a/", Operation::Remove, 20)),
+        Ok(()),
+        Err(io("d/", Operation::Remove, 21)),
+        Ok(()),
+    ];
+    assert_eq!(results, expected);
+}

@@ -71,6 +71,8 @@ struct Version {
     bytes: [u8; 512],
     /// The tick at which its write ended.
     written: u64,
+    /// The bytes of the sector that its write covered.
+    covered: Range<usize>,
 }
 
 impl Disk {
@@ -125,12 +127,23 @@ impl Disk {
         Ok(())
     }
 
+    /// The file `inode` that an entry names. A `slashed` path names only a directory.
+    fn named(&mut self, inode: u64, slashed: bool) -> Result<&mut File, Cause> {
+        match self.inodes.get_mut(&inode) {
+            Some(Inode::File(_)) if slashed => Err(Cause::Code(NOT_DIRECTORY)),
+            Some(Inode::File(file)) => Ok(file),
+            _ => Err(Cause::Code(DIRECTORY)),
+        }
+    }
+
     /// Opens the file at `segments`, and gives its key and length. The open holds
-    /// it. A file that it makes takes the key `key`.
+    /// it. A file that it makes takes the key `key`. A `slashed` path names only a
+    /// directory.
     pub(crate) fn open(
         &mut self,
         key: u64,
         segments: &[&OsStr],
+        slashed: bool,
         mode: Mode,
     ) -> Result<(u64, u64), Cause> {
         let Some((name, parent)) = segments.split_last() else {
@@ -138,6 +151,7 @@ impl Disk {
         };
         let dir = self.dir(parent)?;
         let inode = match (self.dir_mut(dir).entries.get(*name).copied(), mode) {
+            (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
             (Some(inode), _) => inode,
             (None, Mode::Create { len }) => {
                 self.take(len)?;
@@ -155,9 +169,7 @@ impl Disk {
             }
             (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
         };
-        let Some(Inode::File(file)) = self.inodes.get_mut(&inode) else {
-            return Err(Cause::Code(DIRECTORY));
-        };
+        let file = self.named(inode, slashed)?;
         file.holds += 1;
         Ok((inode, file.len))
     }
@@ -196,8 +208,13 @@ impl Disk {
         }
     }
 
-    /// Unlinks the file at `segments`. It stays while a hold remains.
-    pub(crate) fn remove(&mut self, segments: &[&OsStr]) -> Result<(), Cause> {
+    /// Unlinks the file at `segments`. It stays while a hold remains. A `slashed` path
+    /// names only a directory.
+    pub(crate) fn remove(
+        &mut self,
+        segments: &[&OsStr],
+        slashed: bool,
+    ) -> Result<(), Cause> {
         let Some((name, parent)) = segments.split_last() else {
             return Err(Cause::Code(DIRECTORY));
         };
@@ -207,10 +224,7 @@ impl Disk {
             .entries
             .get(*name)
             .ok_or(Cause::NotFound)?;
-        let Some(Inode::File(file)) = self.inodes.get_mut(&inode) else {
-            return Err(Cause::Code(DIRECTORY));
-        };
-        file.linked = false;
+        self.named(inode, slashed)?.linked = false;
         self.dir_mut(dir).entries.remove(*name);
         self.collect(inode);
         Ok(())
@@ -310,9 +324,11 @@ impl File {
     }
 
     /// Ends a write of `bytes` at `offset` that started at tick `started`. Each
-    /// sector that another write ended on since then, and each sector of a write
-    /// whose future dropped, keeps its bytes or takes the new ones by a coin. Each
-    /// sector that takes them gets a new version.
+    /// sector of a write whose future dropped keeps its bytes or takes the new ones
+    /// by a coin. Where writes that ended since tick `started` covered the same
+    /// bytes, the write goes at a random place among them, and keeps only the bytes
+    /// that none after that place covered. Each sector that takes bytes gets a new
+    /// version.
     pub(crate) fn write(
         &mut self,
         offset: u64,
@@ -323,24 +339,38 @@ impl File {
         rng: &mut Rng,
     ) {
         for (sector, part) in sectors(&(offset..offset + len(bytes))) {
-            let found = self.sectors.get(&sector);
-            let raced = found.is_some_and(|found| found.last().written > started);
-            if (raced || dropped) && rng.below(2) == 0 {
+            if dropped && rng.below(2) == 0 {
                 continue;
             }
             let zeros = || {
                 Sector(vec![Version {
                     bytes: [0; 512],
                     written: 0,
+                    covered: 0..0,
                 }])
             };
             let found = self.sectors.entry(sector).or_insert_with(zeros);
+            let covered = within(sector * SECTOR, &part);
+            let later: Vec<&Range<usize>> = (found.0.iter())
+                .filter(|version| version.written > started)
+                .map(|version| &version.covered)
+                .filter(|range| overlap(*range, &covered).is_some())
+                .collect();
+            let place = if later.is_empty() {
+                0
+            } else {
+                index(rng.below(len(&later) + 1))
+            };
             let mut new = found.last().bytes;
-            new[within(sector * SECTOR, &part)]
-                .copy_from_slice(&bytes[within(offset, &part)]);
+            for (at, &byte) in covered.clone().zip(&bytes[within(offset, &part)]) {
+                if !later[place..].iter().any(|range| range.contains(&at)) {
+                    new[at] = byte;
+                }
+            }
             found.0.push(Version {
                 bytes: new,
                 written: tick,
+                covered,
             });
             self.dirty.insert(sector);
         }
@@ -419,8 +449,8 @@ impl Sector {
     }
 }
 
-/// The bytes that `a` and `b` share, or `None` when they share none.
-fn overlap(a: &Range<u64>, b: &Range<u64>) -> Option<Range<u64>> {
+/// The positions that `a` and `b` share, or `None` when they share none.
+fn overlap<T: Ord + Copy>(a: &Range<T>, b: &Range<T>) -> Option<Range<T>> {
     let (start, end) = (a.start.max(b.start), a.end.min(b.end));
     (start < end).then_some(start..end)
 }
@@ -428,7 +458,8 @@ fn overlap(a: &Range<u64>, b: &Range<u64>) -> Option<Range<u64>> {
 /// Each sector that holds a byte of `range`, with the part of `range` in it.
 fn sectors(range: &Range<u64>) -> impl Iterator<Item = (u64, Range<u64>)> {
     (range.start / SECTOR..range.end.div_ceil(SECTOR)).filter_map(|sector| {
-        let part = overlap(&(sector * SECTOR..(sector + 1) * SECTOR), range)?;
+        let start = sector * SECTOR;
+        let part = overlap(&(start..start.saturating_add(SECTOR)), range)?;
         Some((sector, part))
     })
 }
@@ -448,6 +479,14 @@ pub(crate) fn segments(path: &Path) -> Vec<&OsStr> {
         .collect()
 }
 
+/// Whether `path` goes on past its last name, as `a/` and `a/.` do. Such a path
+/// names only a directory.
+pub(crate) fn slashed(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    (segments(path).last())
+        .is_some_and(|name| !bytes.ends_with(name.as_encoded_bytes()))
+}
+
 /// The path of the same file as `path`, with only its names.
 pub(crate) fn normal(path: &Path) -> PathBuf {
     segments(path).into_iter().collect()
@@ -457,8 +496,8 @@ fn index(at: u64) -> usize {
     usize::try_from(at).expect("invariant: a position in memory fits usize")
 }
 
-fn len(bytes: &[u8]) -> u64 {
-    u64::try_from(bytes.len()).expect("invariant: usize fits u64")
+fn len<T>(items: &[T]) -> u64 {
+    u64::try_from(items.len()).expect("invariant: usize fits u64")
 }
 
 #[cfg(test)]
