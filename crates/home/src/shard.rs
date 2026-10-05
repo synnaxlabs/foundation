@@ -982,6 +982,32 @@ mod tests {
     }
 
     #[test]
+    fn stores_no_group_of_a_frame_whose_blocks_ran_out_partway() {
+        run(16, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let stamps: Vec<_> = (1..=100).collect();
+            let series: [(usize, &[i64]); 3] = [(0, &[10]), (1, &[1]), (2, &stamps)];
+            let live = frame(&test.pool, &set, &series);
+            // The split frees the raw frame. Its twin keeps that size in use, so no
+            // other size takes the room.
+            let twin = frame(&test.pool, &set, &series);
+            // The open record keeps its header block, so the append needs no block.
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let room = [80, 56].map(|len| test.pool.alloc(len).expect("a block"));
+            let blocks = test.fill();
+            drop(room);
+            assert_eq!(
+                shard.write(a, LIVE, live, NOW, MESH),
+                Ok(&[lost(0, 0, 1), lost(2, 0, 100)][..])
+            );
+            drop((twin, blocks));
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(shard.stored(Slot::new(0), Path::Live), 0);
+        });
+    }
+
+    #[test]
     fn records_a_handoff_at_open_and_close() {
         run(8, |test| async move {
             let set = two_indexes();
