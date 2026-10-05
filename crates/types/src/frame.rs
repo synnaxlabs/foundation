@@ -1260,8 +1260,7 @@ mod tests {
         let mut drafted = Vec::new();
         for (entry, bytes) in draft.iter() {
             let group = set.entries()[entry].group;
-            let at = usize::try_from(group).expect("groups are few");
-            prop_assert_eq!(draft.range(group), ranges[at]);
+            prop_assert_eq!(draft.range(group), ranges[to_usize(group)]);
             drafted.push((entry, bytes.to_vec()));
         }
         prop_assert_eq!(&drafted, &written);

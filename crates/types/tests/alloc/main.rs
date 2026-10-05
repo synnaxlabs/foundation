@@ -45,16 +45,10 @@ fn main() {
         draft.series(0).expect("entry 0 is present").fill(1);
         draft.set_count(0, 2);
         draft.set_seq(0, 9);
-        assert_eq!(
-            draft.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
-            32,
-            "the draft reads both series"
-        );
-        assert_eq!(
-            draft.range(0),
-            Some(Range { seq: 9, count: 2 }),
-            "the draft reads its range"
-        );
+        let drafted: usize = draft.iter().map(|(_, bytes)| bytes.len()).sum();
+        assert_eq!(drafted, 32, "the draft reads both series");
+        let expected = Some(Range { seq: 9, count: 2 });
+        assert_eq!(draft.range(0), expected, "the draft reads its range");
         let frame = draft.freeze(Path::Backfill);
         let copy = frame.clone();
         assert_eq!(frame.charge(), 192, "the frame charges its block");
