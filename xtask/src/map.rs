@@ -11,14 +11,15 @@ pub(crate) struct Crate {
 pub(crate) enum Deps {
     /// Only these crates.
     Only(&'static [&'static str]),
-    /// Any layer 1 crate, plus these.
+    /// Any layer 1 crate not in [`TEST_ONLY`], plus these.
     Layer1And(&'static [&'static str]),
-    /// Any crate.
+    /// Any crate not in [`TEST_ONLY`].
     Any,
 }
 
-/// Crates any crate may use as a dev-dependency, for tests.
-pub(crate) const TEST_ONLY: &[&str] = &["sim"];
+/// Crates any crate may use as a dev-dependency, for tests. A normal dependency on
+/// one must be named in the crate's [`Deps`].
+pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
 
 /// Every crate with its layer and the workspace crates it may depend on.
 pub(crate) const CRATES: &[Crate] = &[
@@ -30,6 +31,11 @@ pub(crate) const CRATES: &[Crate] = &[
     },
     Crate {
         name: "ring",
+        layer: 1,
+        deps: Deps::Only(&[]),
+    },
+    Crate {
+        name: "counting",
         layer: 1,
         deps: Deps::Only(&[]),
     },
@@ -187,7 +193,7 @@ pub(crate) const CRATES: &[Crate] = &[
     Crate {
         name: "config-hcl",
         layer: 4,
-        deps: Deps::Only(&["document"]),
+        deps: Deps::Only(&["types", "document"]),
     },
     Crate {
         name: "config",
@@ -233,10 +239,10 @@ impl Crate {
     /// Reports whether this crate may depend on `dep`.
     pub(crate) fn allows(&self, dep: &str) -> bool {
         match self.deps {
-            Deps::Only(list) => list.contains(&dep),
-            Deps::Layer1And(list) => {
-                list.contains(&dep) || find(dep).is_some_and(|d| d.layer == 1)
-            }
+            Deps::Only(list) | Deps::Layer1And(list) if list.contains(&dep) => true,
+            Deps::Only(_) => false,
+            _ if TEST_ONLY.contains(&dep) => false,
+            Deps::Layer1And(_) => find(dep).is_some_and(|d| d.layer == 1),
             Deps::Any => true,
         }
     }
@@ -246,9 +252,51 @@ impl Crate {
         match self.deps {
             Deps::Only([]) => "no workspace crates".to_string(),
             Deps::Only(list) => list.join(", "),
-            Deps::Layer1And([]) => "any layer 1 crate".to_string(),
-            Deps::Layer1And(list) => format!("any layer 1 crate, {}", list.join(", ")),
-            Deps::Any => "any crate".to_string(),
+            Deps::Layer1And([]) => {
+                "any layer 1 crate that is not test-only".to_string()
+            }
+            Deps::Layer1And(list) => format!(
+                "any layer 1 crate that is not test-only, {}",
+                list.join(", ")
+            ),
+            Deps::Any => "any crate that is not test-only".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_a_test_only_crate_as_a_normal_dependency_only_where_named() {
+        for (name, dep, allowed) in [
+            ("secret", "counting", false),
+            ("node", "counting", false),
+            ("node", "sim", false),
+            ("ops", "sim", true),
+            ("secret", "block", true),
+            ("node", "hub", true),
+        ] {
+            let entry = find(name).expect("in the map");
+            assert_eq!(entry.allows(dep), allowed, "`{name}` on `{dep}`");
+        }
+    }
+
+    #[test]
+    fn describes_the_allowed_dependencies() {
+        for (name, text) in [
+            ("counting", "no workspace crates"),
+            ("sim", "env, types, block"),
+            ("secret", "any layer 1 crate that is not test-only"),
+            (
+                "connector",
+                "any layer 1 crate that is not test-only, hub, secret",
+            ),
+            ("node", "any crate that is not test-only"),
+        ] {
+            let entry = find(name).expect("in the map");
+            assert_eq!(entry.describe(), text, "`{name}`");
         }
     }
 }

@@ -1,54 +1,9 @@
-//! CRC32C (Castagnoli).
+//! CRC32C (Castagnoli), with the hardware instruction where the CPU has one.
 
-/// The Castagnoli polynomial, bit-reflected.
-const POLY: u32 = 0x82F6_3B78;
-
-const TABLE: [u32; 256] = table();
-
-const fn table() -> [u32; 256] {
-    let mut table = [0; 256];
-    let mut byte = 0u32;
-    while byte < 256 {
-        let mut crc = byte;
-        let mut bit = 0;
-        while bit < 8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ POLY
-            } else {
-                crc >> 1
-            };
-            bit += 1;
-        }
-        table[byte as usize] = crc;
-        byte += 1;
-    }
-    table
-}
-
-/// A running CRC32C over the bytes given so far.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Crc32c(u32);
-
-impl Crc32c {
-    pub(crate) const fn new() -> Self {
-        Self(!0)
-    }
-
-    /// Continues from the `finish` value of earlier bytes.
-    pub(crate) const fn resume(crc: u32) -> Self {
-        Self(!crc)
-    }
-
-    pub(crate) fn update(&mut self, bytes: &[u8]) {
-        self.0 = bytes.iter().fold(self.0, |crc, &byte| {
-            let [low, ..] = crc.to_le_bytes();
-            TABLE[usize::from(low ^ byte)] ^ (crc >> 8)
-        });
-    }
-
-    pub(crate) const fn finish(self) -> u32 {
-        !self.0
-    }
+/// Continues `crc` over `bytes`. A CRC starts at `0`: the value after one call over
+/// `a` and then one over `b` equals the value of one call over `a` then `b`.
+pub(crate) fn append(crc: u32, bytes: &[u8]) -> u32 {
+    crc32c::crc32c_append(crc, bytes)
 }
 
 #[cfg(test)]
@@ -57,11 +12,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn crc(parts: &[&[u8]]) -> u32 {
-        let mut crc = Crc32c::new();
-        for part in parts {
-            crc.update(part);
-        }
-        crc.finish()
+        parts.iter().fold(0, |crc, part| append(crc, part))
     }
 
     /// The check value of the CRC catalogue, then the iSCSI test vectors.
@@ -89,9 +40,7 @@ mod tests {
         ) {
             let (head, tail) = bytes.split_at(cut.index(bytes.len() + 1));
             prop_assert_eq!(crc(&[head, tail]), crc(&[&bytes]));
-            let mut resumed = Crc32c::resume(crc(&[head]));
-            resumed.update(tail);
-            prop_assert_eq!(resumed.finish(), crc(&[&bytes]));
+            prop_assert_eq!(append(crc(&[head]), tail), crc(&[&bytes]));
         }
     }
 }

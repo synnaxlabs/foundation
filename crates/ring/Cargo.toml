@@ -8,10 +8,16 @@ publish.workspace = true
 [dependencies]
 
 [dev-dependencies]
+counting = { path = "../counting" }
+divan = { workspace = true }
 proptest = { workspace = true }
 
 [target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
+
+[[bench]]
+name = "ring"
+harness = false
 
 [[test]]
 name = "alloc"

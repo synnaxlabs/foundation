@@ -10,7 +10,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      deps: ${{ steps.filter.outputs.deps }}
+      models: ${{ steps.filter.outputs.models }}
+    steps:
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'bench/**'
+              - 'fuzz/**'
+              - 'xtask/**'
+              - 'oracles/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'rust-toolchain*'
+              - 'clippy.toml'
+              - 'rustfmt.toml'
+              - 'deny.toml'
+              - '.github/workflows/**'
+            deps:
+              - 'Cargo.toml'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - '.github/workflows/**'
+            models:
+              - 'crates/ring/**'
+              - 'crates/block/**'
+              - 'crates/counting/**'
+              - 'xtask/**'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'rust-toolchain*'
+              - '.github/workflows/**'
+
   check:
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name == 'push' ||
+      needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,15 +66,21 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Layers
         run: cargo xtask layers
+      - name: Globals
+        run: cargo xtask globals
       - name: Oracles
         run: cargo xtask oracles
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
 
   features:
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name == 'push' ||
+      needs.changes.outputs.rust == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +92,10 @@ jobs:
         run: cargo hack check --workspace --each-feature --no-dev-deps
 
   deny:
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name == 'push' ||
+      needs.changes.outputs.deps == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,18 +106,26 @@ jobs:
         run: cargo deny check advisories bans licenses sources
 
   loom:
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name == 'push' ||
+      needs.changes.outputs.models == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy -p ring --all-targets -- -D warnings
+        run: cargo clippy -p ring -p block --all-targets -- -D warnings
         env:
           RUSTFLAGS: --cfg loom
       - name: Loom
         run: cargo xtask loom
 
   shuttle:
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name == 'push' ||
+      needs.changes.outputs.models == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +134,10 @@ jobs:
         run: cargo xtask shuttle
 
   miri:
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name == 'push' ||
+      needs.changes.outputs.models == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,7 +150,10 @@ jobs:
         run: cargo xtask miri
 
   mutants:
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,4 +166,12 @@ jobs:
       - name: Mutants in the diff
         run: |
           git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
-          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch"
+          status=0
+          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch" || status=$?
+          # A timeout is a mutant that made a test hang, so a test caught it. Exit 3
+          # (timeout) wins over exit 2 (missed), so read the missed list too.
+          if [ "$status" -eq 3 ] && [ ! -s mutants.out/missed.txt ]; then
+            cat mutants.out/timeout.txt
+            status=0
+          fi
+          exit "$status"

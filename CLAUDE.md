@@ -50,7 +50,7 @@ GitHub issue.
 2. **Layer 1 decides. Layer 2 does.** Layer 1 is pure logic: no I/O, no clock, no
    threads, no async runtime. Layer 2 drives I/O. It gets clock, network, disk, and
    randomness as inputs (`env`), never from the OS directly. Wall time comes only from
-   `clock`.
+   `clock`. One exception: TLS draws its own randomness from aws-lc (TLS RANDOMNESS).
 3. **Layer 3 reaches the core only through `hub`.** Connectors and calculations never
    import another layer 2 crate.
 4. **`node` is the composition root.** It is the only crate that knows every other
@@ -199,4 +199,5 @@ default, template, and system instruction.
 - Commit and push only on your own branch, in your own worktree.
 - Never force-push a commit that someone else may have pulled.
 - Never stash. Never `git checkout` or `git reset` over files you did not change.
-- A person merges every PR.
+- A person merges every PR, except the routine PRs that `docs/coordination.md` lets
+  the coordinator merge.

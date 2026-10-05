@@ -3,6 +3,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::hash;
+
 /// A channel's identity: a UUIDv7 made with the channel. It never changes and is never
 /// reused. Files never hold it; the stored spec maps each name to its key.
 ///
@@ -80,6 +82,32 @@ impl Slot {
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
+    }
+}
+
+/// The node's table of channel slots. `node` makes one and injects it into `hub` and
+/// `home`, which assign slots at session open.
+#[derive(Debug, Default)]
+pub struct Slots(hash::Map<Key, Slot>);
+
+impl Slots {
+    /// A table with no slots.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The slot of `key`. The first call for a key assigns the next slot, from 0. A
+    /// slot is never reused.
+    ///
+    /// # Panics
+    ///
+    /// If the table already holds 2^32 channels.
+    pub fn assign(&mut self, key: Key) -> Slot {
+        let next = self.0.len();
+        *self.0.entry(key).or_insert_with(|| {
+            Slot(u32::try_from(next).expect("a node holds at most 2^32 channels"))
+        })
     }
 }
 
@@ -215,5 +243,16 @@ mod tests {
                 prop_assert_eq!(key.to_string().parse(), Ok(key));
             }
         }
+    }
+
+    #[test]
+    fn assigns_dense_slots_once_per_key() {
+        let mut slots = Slots::new();
+        let a = Key::from_u128(7);
+        let b = Key::from_u128(3);
+        assert_eq!(slots.assign(a), Slot::new(0));
+        assert_eq!(slots.assign(b), Slot::new(1));
+        assert_eq!(slots.assign(a), Slot::new(0));
+        assert_eq!(slots.assign(Key::from_u128(9)), Slot::new(2));
     }
 }

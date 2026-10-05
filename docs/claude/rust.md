@@ -10,16 +10,19 @@
 - One Cargo workspace. Crates live in `crates/<name>`, with `publish = false`. The
   package name is the bare module name (`types`, `hub`), so code reads `types::Frame`.
 - Dev tools live in `xtask` and run as `cargo xtask <task>`.
-- Features are additive: each feature builds alone (r16 16).
+- Features are additive: each feature builds alone (r16 16). CI runs Clippy and the
+  tests with `--all-features`, so code and tests behind a feature run on every PR;
+  the ARM job tests the defaults.
 
 ## Commands
 
 ```sh
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo xtask layers
+cargo xtask globals
 cargo xtask oracles
-cargo test --workspace
+cargo test --workspace --all-features
 cargo bench -p <crate>
 ```
 
@@ -52,6 +55,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   and `env::wall::Wall::now` outside `clock`. Only `os` implements the `env` seams and
   calls the OS clock, files, sockets, randomness, and threads. Only `node` reads
   arguments and exits. Each such call carries one `#[expect]`.
+- `clippy.toml` also forbids the rustls calls that read the OS clock, a key log file,
+  or the process-wide provider. Only `transport::tls` builds rustls configs, with
+  `builder_with_details`, its own provider, and a fixed time.
 - A crate's `[lints]` table cannot add to the workspace set, so stricter lints go at
   the top of `lib.rs` as `#![deny(...)]` (r16 63):
   - Decoders of outside input (`codec`, `wire`, `document`, `config-hcl`, and each
@@ -105,7 +111,7 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 ## Unsafe
 
 - `unsafe_code` is denied. Only the crates the crate map names may hold `unsafe`:
-  `block`, `ring`, and later FFI connectors. Such a module uses
+  `block`, `ring`, `counting`, and later FFI connectors. Such a module uses
   `#[expect(unsafe_code, reason = "...")]` and runs under Miri (r16 24).
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The
   comment relies only on earlier checks, type invariants, and well-formed inputs
@@ -146,8 +152,11 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - Hash iteration order never decides behavior. Sort, or use a `BTreeMap` (r16 44).
 - Never print a pointer. Addresses change from run to run (r16 45).
 - No mutable globals: no `thread_local!` and no `static` with interior mutability
-  (r16 46). The one exception is a counting `#[global_allocator]` in a test or
-  benchmark binary, never in a library or the `node` binary.
+  (r16 46). The one exception is `#[global_allocator] static ALLOCATOR:
+  counting::Allocator` in a test or benchmark binary, never in a library or the
+  `node` binary. Clippy refuses `global_allocator`, and only a crate-level
+  `#![expect(clippy::disallowed_macros)]` lifts it. `cargo xtask globals` refuses
+  that lift outside a test or benchmark root.
 
 ## Async and threads
 

@@ -5,7 +5,8 @@ together. When this file and a message disagree, this file wins.
 
 ## Roles
 
-**The person** owns contracts and oracles, merges every PR, and answers escalations.
+**The person** owns contracts and oracles, merges every PR that is not routine
+(below), and answers escalations.
 
 **The coordinator** (session `coordinator`) owns:
 
@@ -13,7 +14,8 @@ together. When this file and a message disagree, this file wins.
 - `docs/decisions.md`;
 - the issue board: it assigns crates to builders and checks that no two open issues
   own one crate;
-- the merge queue: it checks each PR's gates and asks the person to merge.
+- the merge queue: it checks each PR's gates, asks the person to merge, and merges
+  routine PRs that wait (below).
 
 The coordinator does not build crates.
 
@@ -44,7 +46,16 @@ Fable uses plan limits faster. Widen or narrow its use from what the limits show
 
 Most of the cost is context size per turn, so keep each context small:
 
-- `.claude/settings.json` compacts a session when its context reaches 300k tokens.
+- `.claude/settings.json` compacts a session near 200k tokens, keeps the prompt cache
+  five minutes (99% of calls come sooner), and turns off plugins we never use.
+- Every token in context is read again on every later call until compaction. Read the
+  lines you need (`grep -n`, then `sed -n` or Read with a range), never a whole file
+  or log; look at `--stat` or `--name-only` before a diff; and cut long output with
+  `tail`.
+- Wait for CI with one background `gh pr checks <n> --watch`, not repeated checks. A
+  Monitor must filter to events you act on.
+- Never fork from a large context. Brief a fresh subagent instead.
+- The person: a `/login` that switches organizations flushes every session's cache.
 - Read only the sections of `docs/decisions.md` and `docs/research/` you need.
 - Send reading, searching, and reviews to subagents; keep their results, not their
   file dumps.
@@ -115,6 +126,9 @@ git -C ~/Desktop/synnaxlabs/foundation worktree add \
 A builder makes a branch per issue inside its worktree. Never work in another session's
 worktree.
 
+Never share `CARGO_TARGET_DIR` between worktrees. Cargo gives a path crate the same hash
+in each, so a stale build of another worktree's code can pass or fail a gate.
+
 ## Issues
 
 Every task is a GitHub issue. An issue states its goal, the crates it owns, the tests
@@ -148,8 +162,20 @@ next issue for a crate early, labeled `blocked` with a link to the open one.
   the diff, and their findings go on the PR as comments. The author fixes each finding
   or answers it on the PR. When the PR changes how a crate is used, the author also
   asks the owners of the crates that use it.
-- **Merge:** the coordinator adds `ready` and messages the person. The person merges
-  with a squash.
+- **Ready:** the author adds `ready` when every check on the PR's current head passed,
+  the PR has no conflict with `main`, every review finding is fixed or answered, and
+  the body is complete: oracle changes, Complexity, Shape decisions, and the six
+  performance answers on a hot path. The exception is a PR that changes a public
+  surface, a locked decision, or an oracle: the author messages the coordinator
+  instead, and only the coordinator adds `ready`.
+- **Merge:** the coordinator tells the person about each new `ready` PR, one line
+  each. The person merges with a squash.
+- **Routine merge:** when the person has not merged a routine PR 30 minutes after it
+  got `ready`, the coordinator reads every check on its current head again and merges
+  it the way the person does, then tells the person. A PR is routine when it adds,
+  removes, or changes no `pub` item, has no `interface` label, and touches nothing in
+  `oracles/`, `docs/decisions.md`, `docs/coordination.md`, `CLAUDE.md`, `.github/`,
+  `.claude/`, `.cargo/`, `xtask/`, `clippy.toml`, or any `Cargo.toml`.
 
 ## Interface changes
 
@@ -205,6 +231,12 @@ Sessions message each other with `SendMessage`, by name. Find names with
 
 Comment on each open issue you own: what is done, the next step, and open questions. A
 new session starts from that comment.
+
+## Outside projects
+
+Never open an issue, PR, or comment on a project outside `synnaxlabs`. It publishes
+from the person's account. Fix a dependency with a local patch
+(`docs/dependencies.md`).
 
 ## Escalate to the person when
 

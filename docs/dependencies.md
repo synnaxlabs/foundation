@@ -18,9 +18,21 @@ approval; pin the version you build against there.
 | `rustls` | `transport`, `bench/carrier` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
 | `aws-lc-rs` | `transport`, signing | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
-| `hcl-edit` | `config-hcl` | Parse HCL and keep its formatting (r3 section 2); our own checker compiles the tree | MIT or Apache-2.0 | 0.9.7 | 2026-10-04 |
 | `crc32c` | `buffer` | Hardware CRC32C for write-ahead records (S4, r2 Q4, #48) | Apache-2.0 or MIT | 0.6.8 | 2026-10-04 |
 | `bytes` | `transport` | The buffer type of `noq-proto`'s stream and datagram calls (#55) | MIT | 1.12.1 | 2026-10-04 |
+
+One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`
+feature pulls RustCrypto's `aes-gcm`, used only for the QUIC Retry integrity tag, whose
+key is public (RFC 9001 section 5.8). The person accepted it on 2026-10-04 until a
+local patch of `noq-proto` uses the `aws-lc-rs` AEAD for that tag: "no opening github
+issues on other peoples projects. we should do a local patch instead". Remove the
+exception when the patch lands (#55).
+
+## Local patches
+
+We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
+carry a local patch through `[patch.crates-io]` in the root `Cargo.toml`, keep the
+change small, and list it here with its reason.
 
 ## Tests, benchmarks, and tools
 

@@ -6,6 +6,7 @@ mod build;
 mod cfg;
 mod field;
 mod files;
+mod globals;
 mod map;
 mod miri;
 mod oracles;
@@ -24,11 +25,12 @@ fn main() -> ExitCode {
     #[expect(clippy::disallowed_methods, reason = "a dev tool reads its arguments")]
     let result = match std::env::args().nth(1).as_deref() {
         Some("layers") => layers(root),
+        Some("globals") => globals::check(root),
         Some("oracles") => oracles::check(root),
         Some(name @ ("loom" | "shuttle")) => cfg::test(root, name),
         Some("miri") => miri::run(root),
         _ => {
-            eprintln!("usage: cargo xtask <layers|oracles|loom|shuttle|miri>");
+            eprintln!("usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>");
             return ExitCode::FAILURE;
         }
     };
@@ -151,7 +153,34 @@ mod tests {
         };
         assert_eq!(
             layers(&fixture()),
-            Err(vec![missing("a"), missing("model")])
+            Err(vec![missing("a"), missing("globals"), missing("model")])
         );
+    }
+
+    #[test]
+    fn models_filter_names_each_crate_that_a_model_task_selects() {
+        type Matcher = fn(&str) -> bool;
+        let root = fixture().join("../..");
+        let ci =
+            std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
+        let models = ci
+            .split("models:\n")
+            .nth(1)
+            .expect("ci.yaml has a models filter");
+        let metadata = metadata(&root).unwrap();
+        let tasks: [(&str, Matcher); 3] = [
+            ("loom", |s| select::names_cfg(s, "loom")),
+            ("shuttle", |s| select::names_cfg(s, "shuttle")),
+            ("miri", |s| select::has_word(s, "unsafe_code")),
+        ];
+        for (task, matches) in tasks {
+            for name in select::packages(&metadata, matches).unwrap() {
+                assert!(
+                    models.contains(&format!("'crates/{name}/**'")),
+                    "`cargo xtask {task}` runs `{name}`, but the `models` filter in \
+                     .github/workflows/ci.yaml lacks 'crates/{name}/**'"
+                );
+            }
+        }
     }
 }

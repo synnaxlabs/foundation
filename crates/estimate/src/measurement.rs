@@ -6,8 +6,8 @@ use crate::{Drift, Error};
 /// bound still fits in a [`Span`].
 pub(crate) const MAX_ERROR: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
 
-/// What one time source says about this node's monotonic clock: at monotonic time
-/// `at`, mesh time minus monotonic time is within `error` of `offset`.
+/// What one time source says about a local clock, a node's or a device's: at local
+/// time `at`, mesh time minus local time is within `error` of `offset`.
 ///
 /// ```
 /// use types::time::{Monotonic, Span};
@@ -36,13 +36,13 @@ impl Measurement {
         Ok(Self { at, offset, error })
     }
 
-    /// The monotonic time of the measurement.
+    /// The local time of the measurement.
     #[must_use]
     pub const fn at(self) -> Monotonic {
         self.at
     }
 
-    /// Mesh time minus monotonic time.
+    /// Mesh time minus local time.
     #[must_use]
     pub const fn offset(self) -> Span {
         self.offset
@@ -69,6 +69,24 @@ impl Measurement {
         let offset = i128::from(self.offset.nanos());
         (offset - error, offset + error)
     }
+
+    /// The measurement at `at` that covers every offset from `low` to `high`, with its
+    /// offset and error saturated to a span.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Bound`] when the error is more than 36500 days.
+    pub(crate) fn between(at: Monotonic, low: i128, high: i128) -> Result<Self, Error> {
+        let offset = saturated((low + high).div_euclid(2));
+        let center = i128::from(offset.nanos());
+        Self::new(at, offset, saturated((high - center).max(center - low)))
+    }
+}
+
+/// `nanos` as a span, or the nearest span when it is past a span's range.
+fn saturated(nanos: i128) -> Span {
+    let nanos = nanos.clamp(i64::MIN.into(), i64::MAX.into());
+    Span::from_nanos(i64::try_from(nanos).expect("invariant: clamped to i64"))
 }
 
 #[cfg(test)]
