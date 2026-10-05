@@ -747,7 +747,7 @@ fn assert_panicked(sim: &mut Sim, handle: thread::Handle, message: &str) {
     );
     assert_eq!(
         handle.join(),
-        Err(thread::Error::Panicked {
+        Err(thread::Panicked {
             name: "shard-0".into()
         })
     );
