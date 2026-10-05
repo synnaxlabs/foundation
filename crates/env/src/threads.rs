@@ -67,8 +67,20 @@ impl Threads {
     where
         F: Future<Output = ()> + 'static,
     {
+        check_name(name)?;
         self.0.start(name, Box::new(|| Box::pin(body())))
     }
+}
+
+/// Gives [`Error::Start`] when `name` holds a NUL byte, which no OS thread name can.
+pub(crate) fn check_name(name: &str) -> Result<(), Error> {
+    if name.contains('\0') {
+        return Err(Error::Start {
+            name: name.to_owned(),
+            reason: "the name holds a NUL byte".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 impl fmt::Debug for Threads {
@@ -178,7 +190,7 @@ impl std::error::Error for Error {}
 /// ```
 pub trait Driver: Send + Sync {
     /// Starts a thread with an executor for one future, and runs `body()` on it to
-    /// completion, with the rules of [`Threads::start`].
+    /// completion, with the rules of [`Threads::start`]. `name` holds no NUL byte.
     ///
     /// # Errors
     ///
@@ -189,6 +201,46 @@ pub trait Driver: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod start {
+        use super::*;
+
+        /// A driver that starts every thread at once.
+        struct Started;
+
+        impl Driver for Started {
+            fn start(&self, _: &str, _: Body) -> Result<Handle, Error> {
+                Ok(Handle::new(|| Ok(())))
+            }
+        }
+
+        fn start(name: &str) -> Result<Handle, Error> {
+            Threads::new(Started).start(name, || async {})
+        }
+
+        #[test]
+        fn a_name_without_a_nul_byte_reaches_the_driver() {
+            let Ok(handle) = start("modbus-poll") else {
+                panic!("modbus-poll did not start");
+            };
+            assert_eq!(handle.join(), Ok(()));
+        }
+
+        #[test]
+        fn a_name_with_a_nul_byte_cannot_start() {
+            let Err(e) = start("modbus\0poll") else {
+                panic!("a name with a NUL byte started");
+            };
+            let reason = "the name holds a NUL byte".into();
+            assert_eq!(
+                e,
+                Error::Start {
+                    name: "modbus\0poll".into(),
+                    reason
+                }
+            );
+        }
+    }
 
     mod error {
         use super::*;
