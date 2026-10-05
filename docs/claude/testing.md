@@ -32,6 +32,15 @@ Benchmarks run on a dedicated machine. Mutation testing (`cargo-mutants --in-dif
 checks that agent-written tests catch real changes. Miri and cargo-fuzz run on one
 pinned nightly that only those gates use.
 
+## Fuzzing
+
+- Targets live in one `fuzz/` crate at the root (`cargo-fuzz`), outside the
+  workspace members, because it needs nightly. Each decoder of outside input has one
+  target, named `<crate>_<decoder>`, such as `spec_tree`.
+- Inputs live in `oracles/fuzz/<target>/`. A crash becomes a permanent input there.
+- Each PR runs every target for 60 seconds. A nightly schedule runs them longer on
+  the ARM runner, which is idle at night.
+
 Simulation checks liveness as well as safety: after faults stop, the mesh converges
 within a bound (r16 60). A failed run prints its replay value, and CI runs that value
 again once to prove that the failure replays (r16 59).
