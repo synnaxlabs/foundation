@@ -905,7 +905,15 @@ How to read this record:
   name comes from a file. A run or a discovery fails with one of three classes:
   `Config` (stop until the spec changes), `Device`, and `Retry` (restart with
   backoff). Decided by the `connector` builder in the plan on #338, after
-  `/eb-review`.
+  `/eb-review`; approved by the coordinator (#338).
+- **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
+  run before the last one returned. After `Device` or `Retry` it restarts with full
+  jitter backoff (1 s first, 60 s cap, constants). The waits start again from 1 s
+  after a run that lasted at least the cap. `Ok` from `run` ends the connector.
+  `Config` returns to the caller, which starts a new supervisor when the spec
+  changes (R12-4). Decided by the `connector` builder in the plan on #338, after
+  `/eb-review`; approved by the coordinator (#338), except the reset after a long
+  run, which this PR adds.
 - **BQ15** A set of devices that the driver acquires as one unit is one connector.
   Otherwise, separate connectors and indexes, never two writers.
 - **R7 starting points** OPC UA: open62541 compiled in, with our own crypto plugin on
