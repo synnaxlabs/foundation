@@ -28,9 +28,10 @@ behavior. Never print a pointer. No `thread_local!` state.
 | 7 | Protocol simulators per connector | Every merge |
 | 8 | Hardware in the loop with real devices | Nightly and release |
 
-Benchmarks run on a dedicated machine. Mutation testing (`cargo-mutants --in-diff`)
-checks that agent-written tests catch real changes. Miri and cargo-fuzz run on one
-pinned nightly that only those gates use.
+Benchmarks run on a dedicated machine. Mutation testing (`cargo mutants --in-diff`)
+checks on each PR that agent-written tests catch real changes. It skips `xtask`. Miri
+and cargo-fuzz run on one pinned nightly, named in `rust-toolchain-nightly`, that only
+those gates use.
 
 Simulation checks liveness as well as safety: after faults stop, the mesh converges
 within a bound (r16 60). A failed run prints its replay value, and CI runs that value
@@ -67,7 +68,8 @@ again once to prove that the failure replays (r16 59).
   dependency approval in `docs/dependencies.md` first (r16 51, 52).
 - **Wake protocols and lock-free code** get loom for small models and shuttle (PCT)
   for larger ones. Only `ring` gates std types behind `cfg(loom)`. Code with `unsafe`
-  runs under Miri (r16 61).
+  runs under Miri (r16 61). CI runs `RUSTFLAGS="--cfg loom" cargo test --release
+  --tests` on each crate whose source contains `cfg(loom)`.
 - **Hot paths** run under a counting allocator that fails on any allocation.
 - **Unit tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject
   and condition with nested modules. Name each test as the behavior it checks, with
@@ -85,6 +87,9 @@ conformance suites, and fuzz inputs. Committed proptest failure files
 Agents add to them freely and never weaken them. Weakening means a removed test or
 assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input
 or proptest failure file.
+
+`cargo xtask oracles` fails when a `.rs` file under `oracles/` is not the root of a
+`[[test]]` target, or when an oracle test target runs no tests.
 
 Each PR description starts with an oracle section that lists changes under `oracles/`
 and flags any weakening. A fresh adversarial reviewer checks each flagged change and

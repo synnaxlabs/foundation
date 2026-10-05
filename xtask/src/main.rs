@@ -3,6 +3,7 @@
 #![expect(clippy::print_stderr, reason = "xtask reports to the terminal")]
 
 mod map;
+mod oracles;
 
 use std::collections::BTreeSet;
 use std::process::{Command, ExitCode};
@@ -11,11 +12,15 @@ use serde_json::Value;
 
 fn main() -> ExitCode {
     #[expect(clippy::disallowed_methods, reason = "a dev tool reads its arguments")]
-    if std::env::args().nth(1).as_deref() != Some("layers") {
-        eprintln!("usage: cargo xtask layers");
-        return ExitCode::FAILURE;
-    }
-    match layers() {
+    let result = match std::env::args().nth(1).as_deref() {
+        Some("layers") => layers(),
+        Some("oracles") => oracles::check(),
+        _ => {
+            eprintln!("usage: cargo xtask <layers|oracles>");
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(problems) => {
             for problem in problems {
@@ -87,9 +92,7 @@ fn violation(entry: &map::Crate, dep: &str) -> String {
 }
 
 fn metadata() -> Result<Value, String> {
-    #[expect(clippy::disallowed_methods, reason = "cargo sets CARGO for its tools")]
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
+    let output = cargo()
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .output()
         .map_err(|e| format!("cargo metadata: {e}"))?;
@@ -97,4 +100,11 @@ fn metadata() -> Result<Value, String> {
         return Err(String::from_utf8_lossy(&output.stderr).into_owned());
     }
     serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))
+}
+
+/// A command that runs the cargo that runs this task.
+fn cargo() -> Command {
+    #[expect(clippy::disallowed_methods, reason = "cargo sets CARGO for its tools")]
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    Command::new(cargo)
 }

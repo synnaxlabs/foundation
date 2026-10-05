@@ -21,5 +21,82 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Layers
         run: cargo xtask layers
+      - name: Oracles
+        run: cargo xtask oracles
       - name: Test
         run: cargo test --workspace
+
+  features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - name: Each feature alone
+        run: cargo hack check --workspace --each-feature --no-dev-deps
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Dependencies
+        run: cargo deny check advisories bans licenses sources
+
+  loom:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg loom
+      LOOM_MAX_PREEMPTIONS: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Loom
+        run: |
+          crates=$({ grep -rlE --include='*.rs' 'cfg\(loom\)' crates || true; } \
+            | cut -d/ -f2 | sort -u)
+          if [ -z "$crates" ]; then
+            echo "No crate has loom tests."
+            exit 0
+          fi
+          cargo test --release --tests $(printf -- '-p %s ' $crates)
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned nightly
+        run: |
+          nightly=$(cat rust-toolchain-nightly)
+          rustup toolchain install "$nightly" --profile minimal \
+            --component miri,rust-src
+          echo "NIGHTLY=$nightly" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - name: Miri with strict provenance
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: cargo "+$NIGHTLY" miri test -p block -p ring
+      - name: Miri with tree borrows
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-tree-borrows
+        run: cargo "+$NIGHTLY" miri test -p block -p ring
+
+  mutants:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: Mutants in the diff
+        run: |
+          git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
+          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch"

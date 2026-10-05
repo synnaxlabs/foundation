@@ -1,0 +1,2 @@
+# Mutation testing checks product code. xtask is a dev tool that runs cargo.
+exclude_globs = ["xtask/**"]
