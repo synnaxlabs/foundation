@@ -421,7 +421,9 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "invariant: the gate changed after the check of writer 0")]
+        #[should_panic(
+            expected = "invariant: the gate changed after the check of writer 0"
+        )]
         fn panics_when_the_holder_changed_after_the_check() {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
