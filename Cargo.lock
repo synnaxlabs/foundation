@@ -82,6 +82,10 @@ version = "0.0.0"
 [[package]]
 name = "block"
 version = "0.0.0"
+dependencies = [
+ "loom",
+ "proptest",
+]
 
 [[package]]
 name = "buffer"
@@ -187,6 +191,10 @@ dependencies = [
  "proptest",
  "types",
 ]
+
+[[package]]
+name = "counting"
+version = "0.0.0"
 
 [[package]]
 name = "cpufeatures"
@@ -598,6 +606,7 @@ version = "0.0.0"
 name = "ring"
 version = "0.0.0"
 dependencies = [
+ "counting",
  "divan",
  "loom",
  "proptest",
@@ -741,6 +750,11 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "sim"
 version = "0.0.0"
+dependencies = [
+ "env",
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "smallvec"
@@ -1011,6 +1025,9 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "wire"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "wit-bindgen"
