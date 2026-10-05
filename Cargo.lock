@@ -82,6 +82,10 @@ version = "0.0.0"
 [[package]]
 name = "block"
 version = "0.0.0"
+dependencies = [
+ "loom",
+ "proptest",
+]
 
 [[package]]
 name = "buffer"
