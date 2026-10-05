@@ -6,6 +6,15 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+types = { path = "../types" }
+
+[dev-dependencies]
+divan = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "gate"
+harness = false
 
 [lints]
 workspace = true
