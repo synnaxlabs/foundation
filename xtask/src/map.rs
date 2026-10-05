@@ -18,7 +18,7 @@ pub(crate) enum Deps {
 }
 
 /// Crates any crate may use as a dev-dependency, for tests.
-pub(crate) const TEST_ONLY: &[&str] = &["sim"];
+pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
 
 /// Every crate with its layer and the workspace crates it may depend on.
 pub(crate) const CRATES: &[Crate] = &[
@@ -30,6 +30,11 @@ pub(crate) const CRATES: &[Crate] = &[
     },
     Crate {
         name: "ring",
+        layer: 1,
+        deps: Deps::Only(&[]),
+    },
+    Crate {
+        name: "counting",
         layer: 1,
         deps: Deps::Only(&[]),
     },

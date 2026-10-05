@@ -105,8 +105,11 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 ## Unsafe
 
 - `unsafe_code` is denied. Only the crates the crate map names may hold `unsafe`:
-  `block`, `ring`, and later FFI connectors. Such a module uses
+  `block`, `ring`, `counting`, and later FFI connectors. Such a module uses
   `#[expect(unsafe_code, reason = "...")]` and runs under Miri (r16 24).
+- The one allowed global: a test or benchmark binary may declare
+  `#[global_allocator] static ALLOCATOR: counting::Allocator`. Rust requires a static
+  for a global allocator. Nothing else holds state in a static.
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The
   comment relies only on earlier checks, type invariants, and well-formed inputs
   (r16 25).
