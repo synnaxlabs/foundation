@@ -52,22 +52,19 @@ impl Node {
     }
 
     /// Steps the wall clock by `span`, forward or back, as when NTP or an operator
-    /// sets it. The monotonic clock does not move. A step forward can bring the end
-    /// of true time nearer (see [`Sim::run_for`](crate::Sim::run_for)); a timer past
-    /// the new end never fires.
+    /// sets it. The monotonic clock does not move. A step can move the end of true
+    /// time (see [`Sim::run_for`](crate::Sim::run_for)).
     ///
     /// # Panics
     ///
     /// When the wall leaves the range of a [`Stamp`].
     pub fn step_wall(&self, span: Span) {
-        let mut state = lock(&self.0.shared);
-        let stepped = state.step_wall(self.0.node, span);
-        drop(state);
-        let Some(wakers) = stepped else {
-            let node = self.0.node;
-            panic!("step_wall({span}) moves the wall of node {node} out of range")
-        };
-        drop(wakers);
+        let stepped = lock(&self.0.shared).step_wall(self.0.node, span);
+        let node = self.0.node;
+        assert!(
+            stepped,
+            "step_wall({span}) moves the wall of node {node} out of range"
+        );
     }
 
     /// Runs nothing on the node for `span` of true time while its clocks move, as in

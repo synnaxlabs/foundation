@@ -827,7 +827,7 @@ fn a_wall_step_out_of_range_panics() {
 }
 
 #[test]
-fn a_wall_step_toward_its_end_makes_later_timers_never_fire() {
+fn a_timer_past_the_end_after_a_wall_step_waits() {
     let mut sim = sim(0);
     let node = ending(&mut sim);
     let clock = node.clock();
@@ -949,6 +949,63 @@ fn a_pause_past_the_end_of_true_time_never_ends() {
     let mut sim = sim(0);
     let node = ending(&mut sim);
     node.pause(Span::from_nanos(2 * Span::SECOND.nanos()));
+    let _handle = node.shards().start(shard("shard-0"), |_| async {});
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
+}
+
+#[test]
+fn a_wall_step_back_lets_a_waiting_timer_fire() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let handle = log_after(&node, "a", millis(750), &log);
+    sim.run_for(Span::ZERO).unwrap();
+    node.step_wall(millis(500));
+    sim.run_for(millis(500)).unwrap();
+    node.step_wall(millis(-500));
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let start = node::Config::default().monotonic;
+    assert_eq!(log.lock().unwrap().clone(), [("a", start + millis(750))]);
+}
+
+#[test]
+fn a_node_added_later_holds_back_a_timer_past_its_end() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let _handle =
+        log_after(&node, "a", Span::from_nanos(2 * Span::SECOND.nanos()), &log);
+    sim.run_for(Span::ZERO).unwrap();
+    let _ending = ending(&mut sim);
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["a".into()],
+            seed: 0,
+        })
+    );
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(log.lock().unwrap().clone(), []);
+}
+
+#[test]
+fn a_pause_past_the_range_of_true_time_never_ends() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        monotonic: Monotonic(0),
+        wall: Stamp::from_nanos(i64::MIN),
+        ..node::Config::default()
+    });
+    sim.run_for(Span::from_nanos(i64::MAX)).unwrap();
+    sim.run_for(Span::from_nanos(i64::MAX)).unwrap();
+    node.pause(Span::from_nanos(i64::MAX));
     let _handle = node.shards().start(shard("shard-0"), |_| async {});
     assert_eq!(
         sim.run(),

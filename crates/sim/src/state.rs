@@ -27,11 +27,8 @@ pub(crate) fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
 }
 
 pub(crate) struct State {
-    /// True time: zero when the run starts.
+    /// True time: zero when the run starts. It never passes [`State::last`].
     now: Monotonic,
-    /// The end of true time: the last instant at which every node's clocks can be
-    /// read. It never falls below `now`, and it never rises.
-    last: Monotonic,
     nodes: Vec<Node>,
     threads: BTreeMap<u64, Thread>,
     /// The thread of each live task.
@@ -54,8 +51,9 @@ struct Node {
     base: Monotonic,
     monotonic: Monotonic,
     wall: Stamp,
-    /// The true time at which the node's pause ends. The node runs from then on.
-    paused: Monotonic,
+    /// The true time at which the node runs again after its pause, or `None` when the
+    /// pause never ends.
+    resumes: Option<Monotonic>,
     cores: NonZeroUsize,
     entropy: Rng,
 }
@@ -90,9 +88,9 @@ pub(crate) enum Next {
 pub(crate) enum Due {
     /// Its deadline has passed.
     Passed,
-    /// At this true time.
+    /// At this true time, once true time reaches it.
     At(Monotonic),
-    /// Never: its deadline is past the end of true time.
+    /// Never: its deadline is past the range of true time.
     Never,
 }
 
@@ -105,7 +103,6 @@ impl State {
     pub(crate) fn new(epoch: Instant) -> Self {
         Self {
             now: Monotonic::default(),
-            last: Monotonic(u64::MAX),
             nodes: Vec::new(),
             threads: BTreeMap::new(),
             tasks: BTreeMap::new(),
@@ -135,18 +132,23 @@ impl State {
             base: self.now,
             monotonic: config.monotonic,
             wall: config.wall,
-            paused: self.now,
+            resumes: Some(self.now),
             cores: config.cores,
             entropy,
         };
-        self.last = self.last.min(node.last());
         self.nodes.push(node);
         self.nodes.len() - 1
     }
 
+    /// The end of true time: the last instant at which every node's clocks can be
+    /// read. It is never below `now`.
+    fn last(&self) -> Monotonic {
+        (self.nodes.iter().map(Node::last).min()).unwrap_or(Monotonic(u64::MAX))
+    }
+
     /// True time `span` from now, or `None` past the end of true time.
     pub(crate) fn after(&self, span: Span) -> Option<Monotonic> {
-        self.now.checked_add(span).filter(|&end| end <= self.last)
+        self.now.checked_add(span).filter(|&end| end <= self.last())
     }
 
     /// True time since the base of `node`.
@@ -174,43 +176,35 @@ impl State {
         self.nodes[node].entropy.fill(bytes);
     }
 
-    /// Steps the wall of `node` by `span`. Returns the wakers of the timers past the
-    /// new end of true time, which never fire, or `None` when the wall leaves the
-    /// range of a [`Stamp`].
-    pub(crate) fn step_wall(&mut self, node: usize, span: Span) -> Option<Vec<Waker>> {
-        let wall = self.wall(node).checked_add(span)?;
-        let monotonic = self.monotonic(node);
-        let now = self.now;
+    /// Steps the wall of `node` by `span`, or returns `false` when the wall would
+    /// leave the range of a [`Stamp`].
+    pub(crate) fn step_wall(&mut self, node: usize, span: Span) -> bool {
+        let Some(wall) = self.wall(node).checked_add(span) else {
+            return false;
+        };
+        let (now, monotonic) = (self.now, self.monotonic(node));
         let stepped = &mut self.nodes[node];
         (stepped.base, stepped.monotonic, stepped.wall) = (now, monotonic, wall);
-        self.last = self.last.min(stepped.last());
-        let mut wakers = Vec::new();
-        while let Some(timer) = self.timers.last_entry() {
-            if timer.key().0 <= self.last {
-                break;
-            }
-            wakers.push(timer.remove());
-        }
-        Some(wakers)
+        true
     }
 
     /// Holds the tasks of `node` until `span` from now; a negative span is zero. A
     /// pause that overlaps another ends at the later end.
     pub(crate) fn pause(&mut self, node: usize, span: Span) {
-        let end =
-            (self.now.checked_add(span.max(Span::ZERO))).unwrap_or(Monotonic(u64::MAX));
-        let paused = &mut self.nodes[node].paused;
-        *paused = (*paused).max(end);
+        let end = self.now.checked_add(span.max(Span::ZERO));
+        let resumes = &mut self.nodes[node].resumes;
+        *resumes = (*resumes).zip(end).map(|(old, end)| old.max(end));
     }
 
-    /// The end of the pause of the node that runs `task`.
-    fn paused(&self, task: u64) -> Monotonic {
-        self.nodes[self.threads[&self.tasks[&task]].node].paused
+    /// When the node that runs `task` runs again after its pause.
+    fn resumes(&self, task: u64) -> Option<Monotonic> {
+        self.nodes[self.threads[&self.tasks[&task]].node].resumes
     }
 
     /// The ready tasks whose nodes are not paused.
     fn runnable(&self) -> impl Iterator<Item = u64> + '_ {
-        (self.ready.iter().copied()).filter(|&task| self.paused(task) <= self.now)
+        (self.ready.iter().copied())
+            .filter(|&task| self.resumes(task).is_some_and(|at| at <= self.now))
     }
 
     /// When a timer of `node` with `deadline` fires.
@@ -220,8 +214,8 @@ impl State {
             return Due::Passed;
         }
         match self.now.0.checked_add(deadline.0 - now.0) {
-            Some(at) if at <= self.last.0 => Due::At(Monotonic(at)),
-            _ => Due::Never,
+            Some(at) => Due::At(Monotonic(at)),
+            None => Due::Never,
         }
     }
 
@@ -288,14 +282,19 @@ impl State {
         if self.runnable().next().is_some() {
             return Some(Next::Poll);
         }
+        let last = self.last();
         let timer = self.timers.first_key_value().map(|(&(at, _), _)| at);
-        let pauses = (self.ready.iter()).map(|&task| self.paused(task));
-        let pause = pauses.filter(|&at| at <= self.last).min();
-        match timer.into_iter().chain(pause).min() {
+        let pauses = (self.ready.iter()).filter_map(|&task| self.resumes(task));
+        let at = timer
+            .into_iter()
+            .chain(pauses)
+            .filter(|&at| at <= last)
+            .min();
+        match at {
             Some(at) if end.is_none_or(|end| at <= end) => Some(Next::Advance(at)),
             _ => {
                 if let Some(end) = end {
-                    self.now = end.min(self.last);
+                    self.now = end.min(last);
                 }
                 None
             }
@@ -310,11 +309,11 @@ impl State {
     ///
     /// When no such task is ready.
     pub(crate) fn pick(&mut self, rng: &mut Rng) -> (u64, u64, Option<Start>) {
-        let count = self.runnable().count();
-        let count = u64::try_from(count).expect("invariant: usize fits u64");
+        let runnable: Vec<u64> = self.runnable().collect();
+        let count = u64::try_from(runnable.len()).expect("invariant: usize fits u64");
         let nth = usize::try_from(rng.below(count))
             .expect("invariant: a value below a usize fits usize");
-        let task = (self.runnable().nth(nth)).expect("invariant: nth is below count");
+        let task = runnable[nth];
         self.ready.remove(&task);
         let thread = self.tasks[&task];
         self.current = Some(thread);
