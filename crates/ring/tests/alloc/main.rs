@@ -1,4 +1,5 @@
-//! The hot path makes no heap allocation.
+//! The hot path makes no heap allocation. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(unsafe_code, reason = "a counting allocator implements `GlobalAlloc`")]
 
@@ -52,10 +53,7 @@ impl Wake for Tally {
     }
 }
 
-// The count covers every thread, so this binary holds one test: a second test would
-// allocate while this one counts.
-#[test]
-fn push_try_pop_and_pop_do_not_allocate() {
+fn main() {
     assert_eq!(count(|| drop(Box::new(1_u8))), 1, "the allocator counts");
 
     let (mut producer, mut consumer) = ring::new(Config {
@@ -68,24 +66,26 @@ fn push_try_pop_and_pop_do_not_allocate() {
         .map(|tally| Waker::from(Arc::clone(tally)));
     let allocations = count(|| {
         for value in 0..64_u64 {
-            assert_eq!(producer.push(value), Ok(()));
-            assert_eq!(producer.push(value), Ok(()));
-            assert_eq!(consumer.try_pop(), Some(value));
-            assert_eq!(consumer.try_pop(), Some(value));
-            assert_eq!(consumer.try_pop(), None);
+            assert_eq!(producer.push(value), Ok(()), "the ring has room");
+            assert_eq!(producer.push(value), Ok(()), "the ring has room");
+            assert_eq!(consumer.try_pop(), Some(value), "values come in order");
+            assert_eq!(consumer.try_pop(), Some(value), "values come in order");
+            assert_eq!(consumer.try_pop(), None, "the ring is empty");
         }
         for value in 0..4_u64 {
-            assert_eq!(producer.push(value), Ok(()));
+            assert_eq!(producer.push(value), Ok(()), "the ring has room");
         }
-        assert_eq!(producer.push(4), Err(Full(4)));
+        assert_eq!(producer.push(4), Err(Full(4)), "the ring is full");
         for value in 0..4_u64 {
-            assert_eq!(consumer.try_pop(), Some(value));
+            assert_eq!(consumer.try_pop(), Some(value), "values come in order");
         }
         for (value, waker) in (0..64_u64).zip(wakers.iter().cycle()) {
             let mut cx = Context::from_waker(waker);
-            assert_eq!(pin!(consumer.pop()).poll(&mut cx), Poll::Pending);
-            assert_eq!(producer.push(value), Ok(()));
-            assert_eq!(pin!(consumer.pop()).poll(&mut cx), Poll::Ready(Some(value)));
+            let parked = pin!(consumer.pop()).poll(&mut cx);
+            assert_eq!(parked, Poll::Pending, "the ring is empty");
+            assert_eq!(producer.push(value), Ok(()), "the ring has room");
+            let popped = pin!(consumer.pop()).poll(&mut cx);
+            assert_eq!(popped, Poll::Ready(Some(value)), "the push woke the pop");
         }
     });
     assert_eq!(allocations, 0, "the hot path allocated");

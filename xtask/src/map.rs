@@ -92,7 +92,7 @@ pub(crate) const CRATES: &[Crate] = &[
     Crate {
         name: "os",
         layer: 2,
-        deps: Deps::Only(&["env", "types"]),
+        deps: Deps::Only(&["env", "types", "block"]),
     },
     Crate {
         name: "transport",
@@ -117,7 +117,7 @@ pub(crate) const CRATES: &[Crate] = &[
     Crate {
         name: "sim",
         layer: 2,
-        deps: Deps::Only(&["env", "types", "block", "transport"]),
+        deps: Deps::Only(&["env", "types", "block"]),
     },
     Crate {
         name: "mesh",
