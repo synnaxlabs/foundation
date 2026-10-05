@@ -1,6 +1,6 @@
 use document::{Position, Source, Span};
 
-use crate::{Error, Expected, Form};
+use crate::{Error, Expected, Form, Unclosed};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Token<'a> {
@@ -274,15 +274,18 @@ impl<'a> Tokens<'a> {
 
     fn block_comment(&mut self) -> Result<(), Error> {
         let start = self.at;
-        let end = self.rest.get(2..).and_then(|body| body.find("*/"));
-        if let Some(len) = end.and_then(|end| end.checked_add(4)) {
+        self.skip_bytes(2);
+        let opener = self.span(start);
+        if let Some(len) = self.rest.find("*/") {
             self.skip_bytes(len);
+            self.skip_bytes(2);
             Ok(())
         } else {
             self.skip_bytes(self.rest.len());
-            Err(Error::Syntax {
-                span: self.span(start),
-                expected: Expected::CommentEnd,
+            Err(Error::Unclosed {
+                span: self.span(self.at),
+                opener,
+                part: Unclosed::Comment,
             })
         }
     }
@@ -337,15 +340,17 @@ impl<'a> Tokens<'a> {
 
     /// Reads a quoted string after its opening quote at `start`.
     fn string(&mut self, start: Position) -> Result<Box<str>, Error> {
+        let opener = self.span(start);
         let mut text = String::new();
         // Each pass moves past a character or returns.
         for _ in 0..=self.rest.len() {
             let at = self.at;
             match self.peek_in_line() {
                 None => {
-                    return Err(Error::Syntax {
-                        span: self.span(start),
-                        expected: Expected::Quote,
+                    return Err(Error::Unclosed {
+                        span: self.span(self.at),
+                        opener,
+                        part: Unclosed::String,
                     });
                 }
                 Some('"') => {
@@ -400,9 +405,10 @@ impl<'a> Tokens<'a> {
     fn heredoc(&mut self, start: Position) -> Result<Box<str>, Error> {
         let indented = self.eat('-');
         let marker = self.marker();
+        let opener = self.span(start);
         if marker.is_empty() || !self.eat_newline() {
             return Err(Error::Syntax {
-                span: self.span(start),
+                span: opener,
                 expected: Expected::HeredocStart,
             });
         }
@@ -421,9 +427,10 @@ impl<'a> Tokens<'a> {
             }
             match self.bump() {
                 None => {
-                    return Err(Error::Syntax {
-                        span: self.span(start),
-                        expected: Expected::HeredocEnd,
+                    return Err(Error::Unclosed {
+                        span: self.span(self.at),
+                        opener,
+                        part: Unclosed::Heredoc,
                     });
                 }
                 Some(c @ ('$' | '%')) => self.sigil(c, at, &mut text)?,

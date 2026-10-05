@@ -13,9 +13,9 @@ use crate::{Error, Expected, Form, Number};
 ///
 /// # Errors
 ///
-/// Returns each problem found, in source order. A syntax error, a string escape that
-/// HCL does not have, a template, or nesting past the limit stops reading, so it is
-/// the last one.
+/// Returns each problem found, in source order. A syntax error, an unclosed string,
+/// heredoc, or comment, a string escape that HCL does not have, a template, or nesting
+/// past the limit stops reading, so it is the last one.
 pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut tokens = Tokens::new(source, text).map_err(|error| vec![error])?;
     let token = tokens.next();
@@ -726,8 +726,9 @@ fn join(start: Span, end: Span) -> Span {
 mod tests {
     use super::*;
     use crate::arbitrary::document;
-    use crate::write;
+    use crate::{Unclosed, write};
     use document::Position;
+    use document::diagnostic::{Diagnostic, Note};
     use proptest::prelude::*;
 
     fn at(offset: u32, line: u32, column: u32) -> Position {
@@ -1466,18 +1467,22 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn refuses_a_heredoc_that_does_not_end() {
+        fn points_an_unclosed_heredoc_at_the_end_of_the_text() {
             let cases = [
-                ("a = <<EOT\n", at(10, 1, 0)),
-                ("a = <<EOT\nx", at(11, 1, 1)),
-                ("a = <<EOT\nx\n", at(12, 2, 0)),
-                ("a = <<EOT\nEOTX\nEOT x\n", at(21, 3, 0)),
-                ("a = <<-EOT\n  x\n  eot\n", at(21, 3, 0)),
-                ("a = <<EOT\nx\nEOT\r", at(16, 2, 4)),
+                ("a = <<EOT\n", at(10, 1, 0), on(4, 9)),
+                ("a = <<EOT\nx", at(11, 1, 1), on(4, 9)),
+                ("a = <<EOT\nx\n", at(12, 2, 0), on(4, 9)),
+                ("a = <<EOT\nEOTX\nEOT x\n", at(21, 3, 0), on(4, 9)),
+                ("a = <<-EOT\n  x\n  eot\n", at(21, 3, 0), on(4, 10)),
+                ("a = <<EOT\nx\nEOT\r", at(16, 2, 4), on(4, 9)),
             ];
-            for (text, end) in cases {
-                let open = syntax(span(at(4, 0, 4), end), Expected::HeredocEnd);
-                check(text, &[(open, &needs(END))]);
+            for (text, end, opener) in cases {
+                let unclosed = Error::Unclosed {
+                    span: span(end, end),
+                    opener,
+                    part: Unclosed::Heredoc,
+                };
+                check(text, &[(unclosed, &needs(END))]);
             }
         }
 
@@ -1806,23 +1811,40 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn refuses_a_string_that_does_not_end() {
+        fn points_an_unclosed_string_at_the_end_of_its_line() {
             let quote = &needs("`\"` to end the string");
-            check("s = \"abc", &[(syntax(on(4, 8), Expected::Quote), quote)]);
+            let unclosed = |end| Error::Unclosed {
+                span: on(end, end),
+                opener: on(4, 5),
+                part: Unclosed::String,
+            };
+            check("s = \"abc", &[(unclosed(8), quote)]);
             for text in ["s = \"ab\nc\"\n", "s = \"ab\r\nc\"\r\n"] {
-                check(text, &[(syntax(on(4, 7), Expected::Quote), quote)]);
+                check(text, &[(unclosed(7), quote)]);
             }
+            let errors = read(Source(0), "s = \"ab\nc\"\n").unwrap_err();
+            let note = Note {
+                span: on(4, 5),
+                text: "the string starts here".into(),
+            };
+            assert_eq!(Diagnostic::from(&errors[0]).notes, vec![note]);
         }
 
         #[test]
-        fn refuses_a_comment_that_does_not_end() {
-            check(
-                "a = 1 /* x",
-                &[(
-                    syntax(on(6, 10), Expected::CommentEnd),
-                    &needs("`*/` to end the comment"),
-                )],
-            );
+        fn points_an_unclosed_comment_at_the_end_of_the_text() {
+            let cases = [
+                ("a = 1 /* x", at(10, 0, 10)),
+                ("a = 1 /* x\ny", at(12, 1, 1)),
+                ("a = 1 /*/", at(9, 0, 9)),
+            ];
+            for (text, end) in cases {
+                let unclosed = Error::Unclosed {
+                    span: span(end, end),
+                    opener: on(6, 8),
+                    part: Unclosed::Comment,
+                };
+                check(text, &[(unclosed, &needs("`*/` to end the comment"))]);
+            }
         }
 
         #[test]
