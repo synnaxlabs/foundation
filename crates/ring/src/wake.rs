@@ -22,7 +22,8 @@ pub(crate) struct Parker {
     waker: UnsafeCell<Option<Waker>>,
 }
 
-// SAFETY: `state` gives the waker cell to one side at a time.
+// SAFETY: the consumer thread owns the waker cell in `AWAKE` and the producer thread
+// owns it in `WAKING`. Only a `Waker` crosses, and it is `Send + Sync`.
 unsafe impl Sync for Parker {}
 
 impl Parker {
@@ -45,7 +46,8 @@ impl Parker {
     pub(crate) unsafe fn park(&self, waker: &Waker) -> bool {
         match self.state.compare_exchange(PARKED, AWAKE, Acquire, Acquire) {
             Ok(_) | Err(AWAKE) => {}
-            Err(_) => return false,
+            Err(WAKING) => return false,
+            Err(state) => unreachable!("invariant: park state {state} does not exist"),
         }
         self.waker.with_mut(|cell| {
             // SAFETY: the state is `AWAKE` and the producer only leaves `PARKED`, so
@@ -65,6 +67,22 @@ impl Parker {
         // A failure means the producer saw the park, and it wakes the consumer.
         let (Ok(_) | Err(_)) =
             self.state.compare_exchange(PARKED, AWAKE, Relaxed, Relaxed);
+    }
+
+    /// Drops the waker that a park left, when the consumer goes.
+    ///
+    /// # Safety
+    ///
+    /// Only the one consumer calls this, from one thread at a time.
+    pub(crate) unsafe fn clear(&self) {
+        // In `WAKING` the producer takes the waker out itself.
+        if let Ok(_) | Err(AWAKE) =
+            self.state.compare_exchange(PARKED, AWAKE, Acquire, Acquire)
+        {
+            // SAFETY: the state is `AWAKE` and the producer only leaves `PARKED`, so
+            // the consumer has sole access to the cell.
+            self.waker.with_mut(|cell| unsafe { *cell = None });
+        }
     }
 
     /// Wakes the consumer if it parked. The caller must publish its work first.

@@ -4,9 +4,10 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::pin::pin;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 use ring::{Config, Full};
 
@@ -41,6 +42,17 @@ fn count(f: impl FnOnce()) -> u64 {
     ALLOCATOR.count.load(Relaxed) - before
 }
 
+/// A waker with a reference count, as a task has.
+struct Ignore;
+
+impl Wake for Ignore {
+    #[expect(
+        clippy::manual_noop_waker,
+        reason = "the test needs two wakers that differ"
+    )]
+    fn wake(self: Arc<Self>) {}
+}
+
 // The count covers every thread, so this binary holds one test: a second test would
 // allocate while this one counts.
 #[test]
@@ -51,7 +63,7 @@ fn push_try_pop_and_pop_do_not_allocate() {
         capacity: 4,
         spins: 0,
     });
-    let mut cx = Context::from_waker(Waker::noop());
+    let wakers = [Waker::from(Arc::new(Ignore)), Waker::from(Arc::new(Ignore))];
     let allocations = count(|| {
         for value in 0..64_u64 {
             assert_eq!(producer.push(value), Ok(()));
@@ -67,8 +79,8 @@ fn push_try_pop_and_pop_do_not_allocate() {
         for value in 0..4_u64 {
             assert_eq!(consumer.try_pop(), Some(value));
         }
-        // A park, a wake, and a pop.
-        for value in 0..64_u64 {
+        for (value, waker) in (0..64_u64).zip(wakers.iter().cycle()) {
+            let mut cx = Context::from_waker(waker);
             assert_eq!(pin!(consumer.pop()).poll(&mut cx), Poll::Pending);
             assert_eq!(producer.push(value), Ok(()));
             assert_eq!(pin!(consumer.pop()).poll(&mut cx), Poll::Ready(Some(value)));

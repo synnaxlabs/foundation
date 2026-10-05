@@ -10,8 +10,9 @@ pub(crate) struct Slots<T> {
     mask: usize,
 }
 
-// SAFETY: a slot is reached only through `write` and `read`, and their contracts give
-// each call sole access to its slot. Values move between threads, so `T: Send`.
+// SAFETY: the producer thread owns a slot from `write` until it publishes it, then
+// the consumer thread owns it for `read`. The contracts of `write` and `read` keep
+// that order. Values of `T` cross, so `T: Send`.
 unsafe impl<T: Send> Sync for Slots<T> {}
 
 impl<T> Slots<T> {
@@ -19,15 +20,18 @@ impl<T> Slots<T> {
     ///
     /// # Panics
     ///
-    /// When `capacity` rounded up to a power of two does not fit in memory.
+    /// When the slots for `capacity` cannot be allocated.
     pub(crate) fn new(capacity: usize) -> Self {
+        let mut cells = Vec::new();
         let len = capacity
             .checked_next_power_of_two()
-            .expect("ring capacity is too large");
+            .filter(|&len| cells.try_reserve_exact(len).is_ok());
+        let Some(len) = len else {
+            panic!("ring capacity {capacity} is too large to allocate");
+        };
+        cells.resize_with(len, || UnsafeCell::new(MaybeUninit::uninit()));
         Self {
-            cells: (0..len)
-                .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
-                .collect(),
+            cells: cells.into_boxed_slice(),
             mask: len - 1,
         }
     }
