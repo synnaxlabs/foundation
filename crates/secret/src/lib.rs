@@ -63,8 +63,8 @@ impl Resolver {
     ) -> Result<Self, Error> {
         let stores: BTreeMap<_, _> = stores.into_iter().collect();
         let rules: Vec<_> = rules.into_iter().collect();
-        let mut named = rules.iter().map(|(_, key)| key).chain([&default]);
-        if let Some(key) = named.find(|key| !stores.contains_key(*key)) {
+        let named = rules.iter().map(|(_, key)| key).chain([&default]);
+        if let Some(key) = named.into_iter().find(|key| !stores.contains_key(*key)) {
             return Err(Error::UnknownStore { store: key.clone() });
         }
         Ok(Self {
