@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use raft::{Body, Config, Hard, Message, Position, Raft, Role, Start, Term};
+use raft::{Body, Config, Entry, Hard, Message, Position, Raft, Role, Start, Term};
 use types::node;
 
 const ELECTION: u32 = 10;
@@ -29,16 +29,27 @@ fn build(id: u8, voters: &[u8], election: u32, hard: Hard, last: Position) -> Ra
         election_ticks: election,
         heartbeat_ticks: 1,
     };
+    // A log of `last.index` entries, all in `last.term`, ends at `last`.
+    let entries = (1..=last.index)
+        .map(|index| Entry {
+            at: Position {
+                term: last.term,
+                index,
+            },
+            data: Vec::new(),
+        })
+        .collect();
     let start = Start {
         hard,
         voters: voters.iter().copied().map(key).collect(),
-        last,
+        entries,
+        applied: 0,
     };
     Raft::new(config, start).unwrap()
 }
 
 fn drain(raft: &mut Raft) -> Vec<Message> {
-    raft.messages().collect()
+    raft.ready().messages
 }
 
 /// The etcd test network: it delivers messages in order until none remain. A voter
