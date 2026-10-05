@@ -27,6 +27,8 @@ pub use block::{Block, Label};
 pub use map::{Attribute, Map};
 pub use span::{Position, Source, Span};
 
+use diagnostic::{Code, Diagnostic, Note};
+
 /// Attributes and blocks. A file, the body of a block, and a connector's config in the
 /// spec are each one document.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -51,25 +53,31 @@ pub enum Error {
     },
 }
 
-impl Error {
-    fn message(&self) -> String {
-        match self {
-            Self::DuplicateKey { key, .. } => {
-                format!("the key {key:?} repeats an earlier key")
+impl From<&Error> for Diagnostic {
+    fn from(error: &Error) -> Self {
+        match error {
+            Error::DuplicateKey { key, first, second } => {
+                let mut diagnostic = Self::new(
+                    DUPLICATE_KEY,
+                    *second,
+                    format!("the key {key:?} repeats an earlier key"),
+                    "Remove it, or give it a different key".into(),
+                );
+                diagnostic.notes.extend(first.map(|span| Note {
+                    span,
+                    text: "the earlier key".into(),
+                }));
+                diagnostic
             }
-        }
-    }
-
-    fn fix(&self) -> &'static str {
-        match self {
-            Self::DuplicateKey { .. } => "Remove it, or give it a different key",
         }
     }
 }
 
+const DUPLICATE_KEY: Code = Code::new("document.duplicate-key");
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}. {}", self.message(), self.fix())
+        fmt::Display::fmt(&Diagnostic::from(self), f)
     }
 }
 
@@ -204,10 +212,45 @@ mod tests {
                 second: None,
             };
             assert_eq!(
+                Diagnostic::from(&err),
+                Diagnostic::new(
+                    Code::new("document.duplicate-key"),
+                    None,
+                    "the key \"url\" repeats an earlier key".into(),
+                    "Remove it, or give it a different key".into(),
+                )
+            );
+            assert_eq!(
                 err.to_string(),
                 "the key \"url\" repeats an earlier key. Remove it, or give it a \
                  different key"
             );
+        }
+
+        #[test]
+        fn duplicate_key_points_at_both_keys() {
+            let at = |offset| Position {
+                offset,
+                line: 0,
+                column: offset,
+            };
+            let span = |start, end| Span::new(Source(0), at(start), at(end)).unwrap();
+            let err = Error::DuplicateKey {
+                key: "a".into(),
+                first: Some(span(0, 1)),
+                second: Some(span(6, 7)),
+            };
+            let mut expected = Diagnostic::new(
+                Code::new("document.duplicate-key"),
+                Some(span(6, 7)),
+                "the key \"a\" repeats an earlier key".into(),
+                "Remove it, or give it a different key".into(),
+            );
+            expected.notes.push(Note {
+                span: span(0, 1),
+                text: "the earlier key".into(),
+            });
+            assert_eq!(Diagnostic::from(&err), expected);
         }
     }
 }
