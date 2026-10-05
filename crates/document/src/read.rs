@@ -61,10 +61,12 @@ pub fn size(value: &Value) -> Result<u64, Diagnostic> {
         ));
     };
     let trimmed = text.trim();
-    let (number, unit) = trimmed
-        .find(|c: char| c.is_alphabetic() || c.is_whitespace())
-        .and_then(|at| trimmed.split_at_checked(at))
-        .map_or((trimmed, ""), |(number, unit)| (number, unit.trim_start()));
+    let at = trimmed
+        .rfind(char::is_whitespace)
+        .or_else(|| trimmed.find(char::is_alphabetic))
+        .unwrap_or(trimmed.len());
+    let (number, unit) = trimmed.split_at(at);
+    let (number, unit) = (number.trim_end(), unit.trim_start());
     if number.is_empty() {
         return Err(bad(
             format!("the byte size {text:?} has no number"),
@@ -85,26 +87,33 @@ pub fn size(value: &Value) -> Result<u64, Diagnostic> {
         let (message, fix) = not_digits(text, number, found);
         return Err(bad(message, fix));
     }
+    let Some(bytes) = number
+        .parse::<u64>()
+        .ok()
+        .and_then(|count| count.checked_mul(found.bytes.get()))
+    else {
+        return Err(bad(
+            format!("the byte size {text:?} is more than {} bytes", u64::MAX),
+            format!("Use at most {} {unit}", u64::MAX / found.bytes),
+        ));
+    };
     if **text != format!("{number} {unit}") {
         return Err(bad(
             format!("the byte size {text:?} is not a number, one space, and a unit"),
             format!("Write \"{number} {unit}\""),
         ));
     }
-    number
-        .parse::<u64>()
-        .ok()
-        .and_then(|count| count.checked_mul(found.bytes.get()))
-        .ok_or_else(|| {
-            bad(
-                format!("the byte size {text:?} is more than {} bytes", u64::MAX),
-                format!("Use at most {} {unit}", u64::MAX / found.bytes),
-            )
-        })
+    Ok(bytes)
 }
 
 /// The message and fix for a unit that is not in [`UNITS`].
 fn unknown(unit: &str) -> (String, String) {
+    if unit.ends_with('b') {
+        return (
+            format!("the unit {unit:?} ends in b, which means bits"),
+            "Write bytes as B, KiB, MiB, GiB, or TiB".into(),
+        );
+    }
     for known in &UNITS {
         if known.name.eq_ignore_ascii_case(unit) {
             return (
@@ -123,7 +132,7 @@ fn unknown(unit: &str) -> (String, String) {
         }
     }
     (
-        format!("{unit:?} is not a byte size unit"),
+        format!("the unit {unit:?} is not a byte size unit"),
         "Use B, KiB, MiB, GiB, or TiB".into(),
     )
 }
@@ -269,6 +278,18 @@ mod tests {
                 "Use at most 16777215 TiB",
             ),
             (
+                "18446744073709551616B",
+                "the byte size \"18446744073709551616B\" is more than \
+                 18446744073709551615 bytes",
+                "Use at most 18446744073709551615 B",
+            ),
+            (
+                " 16777216 TiB",
+                "the byte size \" 16777216 TiB\" is more than \
+                 18446744073709551615 bytes",
+                "Use at most 16777215 TiB",
+            ),
+            (
                 "99999999999999999999999 KiB",
                 "the byte size \"99999999999999999999999 KiB\" is more than \
                  18446744073709551615 bytes",
@@ -327,25 +348,39 @@ mod tests {
     fn names_the_unit_in_its_case() {
         assert_refused(&[
             (
-                "200 gib",
-                "the unit \"gib\" has the wrong case",
-                "Write it as GiB",
-            ),
-            (
                 "200 GIB",
                 "the unit \"GIB\" has the wrong case",
                 "Write it as GiB",
             ),
-            ("1 b", "the unit \"b\" has the wrong case", "Write it as B"),
             (
-                "1 kib",
-                "the unit \"kib\" has the wrong case",
+                "1 KIB",
+                "the unit \"KIB\" has the wrong case",
                 "Write it as KiB",
             ),
             (
+                "1.5 mIB",
+                "the unit \"mIB\" has the wrong case",
+                "Write it as MiB",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn names_a_unit_that_ends_in_b_as_bits() {
+        let fix = "Write bytes as B, KiB, MiB, GiB, or TiB";
+        assert_refused(&[
+            ("1 b", "the unit \"b\" ends in b, which means bits", fix),
+            (
+                "200 gib",
+                "the unit \"gib\" ends in b, which means bits",
+                fix,
+            ),
+            ("1 Gb", "the unit \"Gb\" ends in b, which means bits", fix),
+            ("1 mb", "the unit \"mb\" ends in b, which means bits", fix),
+            (
                 "1.5 tIb",
-                "the unit \"tIb\" has the wrong case",
-                "Write it as TiB",
+                "the unit \"tIb\" ends in b, which means bits",
+                fix,
             ),
         ]);
     }
@@ -369,8 +404,8 @@ mod tests {
                 "Use the binary unit KiB",
             ),
             (
-                "1 mb",
-                "the unit \"mb\" is decimal",
+                "1 mB",
+                "the unit \"mB\" is decimal",
                 "Use the binary unit MiB",
             ),
             (
@@ -385,11 +420,20 @@ mod tests {
     fn refuses_an_unknown_unit() {
         let fix = "Use B, KiB, MiB, GiB, or TiB";
         assert_refused(&[
-            ("200 PiB", "\"PiB\" is not a byte size unit", fix),
-            ("200 bytes", "\"bytes\" is not a byte size unit", fix),
-            ("1 G", "\"G\" is not a byte size unit", fix),
-            ("1e3 B", "\"e3 B\" is not a byte size unit", fix),
-            ("2 GiB GiB", "\"GiB GiB\" is not a byte size unit", fix),
+            ("200 PiB", "the unit \"PiB\" is not a byte size unit", fix),
+            (
+                "200 bytes",
+                "the unit \"bytes\" is not a byte size unit",
+                fix,
+            ),
+            ("1 G", "the unit \"G\" is not a byte size unit", fix),
+            ("200 B2", "the unit \"B2\" is not a byte size unit", fix),
+            ("1e3B", "the unit \"e3B\" is not a byte size unit", fix),
+            (
+                "2\u{2170}GiB",
+                "the unit \"\u{2170}GiB\" is not a byte size unit",
+                fix,
+            ),
         ]);
     }
 
@@ -428,6 +472,25 @@ mod tests {
             ("1_000 B", "the number \"1_000\" is not digits 0 to 9", fix),
             ("1,000 B", "the number \"1,000\" is not digits 0 to 9", fix),
             ("1.2.3 B", "the number \"1.2.3\" is not digits 0 to 9", fix),
+            ("-1.5 GiB", "the number \"-1.5\" is not digits 0 to 9", fix),
+            ("+1.5 GiB", "the number \"+1.5\" is not digits 0 to 9", fix),
+            (
+                "1 000 GiB",
+                "the number \"1 000\" is not digits 0 to 9",
+                fix,
+            ),
+            ("1e3 B", "the number \"1e3\" is not digits 0 to 9", fix),
+            ("0x10 B", "the number \"0x10\" is not digits 0 to 9", fix),
+            (
+                "2 GiB GiB",
+                "the number \"2 GiB\" is not digits 0 to 9",
+                fix,
+            ),
+            (
+                "2\u{2170} GiB",
+                "the number \"2\u{2170}\" is not digits 0 to 9",
+                fix,
+            ),
             (". B", "the number \".\" is not digits 0 to 9", fix),
             (
                 "\u{661}\u{660} B",
@@ -473,7 +536,7 @@ mod tests {
     fn near() -> impl Strategy<Value = String> {
         prop_oneof![
             any::<String>(),
-            "[0-9]{0,3}[ .\t+-]{0,2}[0-9]{0,2} ?(B|KiB|MiB|GiB|TiB|kB|GB|gib| |)",
+            "[0-9]{0,22}[ .\t+-]{0,2}[0-9]{0,2} ?(B|KiB|MiB|GiB|TiB|kB|GB|gib|b| |)",
         ]
     }
 
@@ -512,6 +575,13 @@ mod tests {
                 Err(diagnostic) => {
                     prop_assert_eq!(diagnostic.code, Code::new("document.bad-size"));
                     prop_assert_eq!(diagnostic.span, Some(span()));
+                    let written = diagnostic
+                        .fix
+                        .strip_prefix("Write \"")
+                        .and_then(|rest| rest.strip_suffix('"'));
+                    if let Some(written) = written {
+                        prop_assert!(size(&string(written)).is_ok(), "{:?}", text);
+                    }
                 }
             }
         }

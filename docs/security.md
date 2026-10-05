@@ -148,9 +148,9 @@ state on `main`.
   encoding (`document`). Both readers bound nesting at 64 levels.
   `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
   `config_hcl_read`, `config_hcl_update`, `config_hcl_write`,
-  `document_encoding`. Open: #446 (`update` puts a new block after a kept block
-  it must come before; the `config_hcl_update` target finds it, so its long runs
-  wait on the fix).
+  `document_encoding`, `document_read_size`. Open: #446 (`update` puts a new block
+  after a kept block it must come before; the `config_hcl_update` target finds it,
+  so its long runs wait on the fix).
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -246,6 +246,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `codec_series` | `codec::validate`, `codec::decode` | Both give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
+| `document_read_size` | `document::read::size` | Reads only a count, one space, and a unit; a written fix reads |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |

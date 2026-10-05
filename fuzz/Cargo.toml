@@ -74,6 +74,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "document_read_size"
+path = "fuzz_targets/document_read_size.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ops_mcp"
 path = "fuzz_targets/ops_mcp.rs"
 test = false
