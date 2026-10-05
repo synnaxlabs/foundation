@@ -15,6 +15,9 @@ fuzz_target!(|bytes: &[u8]| {
     let count = usize::from(u16::from_le_bytes([*low, *high]));
     let mut out = vec![0; count * scalar.width()];
     let validated = codec::validate(scalar, count, series);
+    if let Ok(len) = validated {
+        assert_eq!(len, out.len(), "validate gives another length");
+    }
     let decoded = codec::decode(scalar, count, series, &mut out);
-    assert_eq!(validated, decoded, "validate and decode disagree");
+    assert_eq!(validated.map(|_| ()), decoded, "validate and decode disagree");
 });

@@ -15,11 +15,13 @@ fuzz_target!(|bytes: &[u8]| {
     let samples = &rest[..rest.len() - rest.len() % scalar.width()];
     let count = samples.len() / scalar.width();
     let mut series = vec![0; codec::max_len(scalar, count)];
-    let len = Encoder::new(scalar).encode(samples, &mut series);
+    let len = Encoder::new(scalar)
+        .encode(count, samples, &mut series)
+        .expect("the samples fit the count");
     let series = &series[..len];
     assert_eq!(
         codec::validate(scalar, count, series),
-        Ok(()),
+        Ok(samples.len()),
         "an encoded series is not valid"
     );
     let mut out = vec![0; samples.len()];
