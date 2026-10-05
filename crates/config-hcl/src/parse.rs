@@ -7,7 +7,7 @@ use crate::lex::{self, Token, Tokens};
 use crate::{Error, Expected, Form};
 
 /// Reads HCL text as a Document. Each key, keyword, label, function name, and value
-/// has a span in `source`.
+/// has a span in `source`. A heredoc's lines end in `\n`, whatever the file uses.
 ///
 /// # Errors
 ///
@@ -194,7 +194,9 @@ impl<'a> Parser<'a> {
                 let digits = self.take()?;
                 return Ok(self.number(&digits, Some(token.span)));
             }
-            lex::Kind::String(text) => value::Kind::String(text),
+            lex::Kind::String(text) | lex::Kind::Heredoc(text) => {
+                value::Kind::String(text)
+            }
             lex::Kind::OpenBracket => return self.list(&token, depth).map(Some),
             lex::Kind::OpenBrace => return self.object(&token, depth).map(Some),
             _ => {
@@ -643,6 +645,11 @@ mod tests {
         Error::Syntax { span, expected }
     }
 
+    const TEMPLATE: &str = "templates do not exist in Foundation files. Write `$${` \
+                            or `%%{` for the text `${` or `%{`";
+    const NULL: &str = "`null` does not exist in Foundation files. Remove the \
+                        attribute to use its default";
+
     mod values {
         use super::*;
 
@@ -959,21 +966,283 @@ c = "°C # not a comment"
         }
     }
 
+    mod heredocs {
+        use super::*;
+
+        const START: &str =
+            "the file needs a marker and a new line to start the heredoc here";
+        const END: &str =
+            "the file needs the marker on a line of its own to end the heredoc here";
+        /// Checks that `a = ` and then each heredoc reads as its string.
+        fn reads(cases: &[(&str, &str)]) {
+            for &(heredoc, expected) in cases {
+                let document = ok(&format!("a = {heredoc}"));
+                let expected = attributes(vec![("a", string(expected))]);
+                assert_eq!(document, expected, "{heredoc:?}");
+            }
+        }
+
+        #[test]
+        fn reads_lines_as_written() {
+            reads(&[
+                ("<<EOT\nhello\n  world\nEOT\n", "hello\n  world\n"),
+                ("<<EOT\nEOT\n", ""),
+                ("<<EOT\n\nEOT\n", "\n"),
+                ("<<EOT\nx\n \t EOT\t \n", "x\n"),
+                (
+                    "<<EOT\nEOT x\nxEOT\nEOTX\neot\nEOT\n",
+                    "EOT x\nxEOT\nEOTX\neot\n",
+                ),
+                ("<<EOT\nx\nEOT", "x\n"),
+                ("<<END-1_a\nx\nEND-1_a\n", "x\n"),
+                ("<<_\nx\n_\n", "x\n"),
+                ("<<EOT\n°C\nEOT\n", "°C\n"),
+                (
+                    "<<EOT\n\\n \\\" # a // b /* c \"\nEOT\n",
+                    "\\n \\\" # a // b /* c \"\n",
+                ),
+                (
+                    "<<EOT\n$${x} %%{y} $ % $$ %% $$${z}\nEOT\n",
+                    "${x} %{y} $ % $$ %% $${z}\n",
+                ),
+            ]);
+        }
+
+        #[test]
+        fn reads_crlf_line_ends_as_new_lines() {
+            reads(&[
+                ("<<EOT\r\nx\r\ny\rz\r\nEOT\r\n", "x\ny\rz\n"),
+                ("<<-EOT\r\n  a\r\n    b\r\n  EOT\r\n", "a\n  b\n"),
+            ]);
+            let expected = attributes(vec![("a", string("x\n")), ("b", integer(1))]);
+            assert_eq!(ok("a = <<EOT\r\nx\r\nEOT\r\nb = 1\r\n"), expected);
+        }
+
+        #[test]
+        fn removes_the_indent_that_lines_share() {
+            reads(&[
+                ("<<-EOT\n    a\n      b\n    EOT\n", "a\n  b\n"),
+                ("<<-EOT\n\ta\n\t\tb\nEOT\n", "a\n\tb\n"),
+                ("<<-EOT\n \ta\n  b\nEOT\n", "a\nb\n"),
+                ("<<-EOT\na\n  b\nEOT\n", "a\n  b\n"),
+                ("<<-EOT\n  $${a}\n    b\nEOT\n", "${a}\n  b\n"),
+                ("<<EOT\n  a\n  EOT\n", "  a\n"),
+            ]);
+        }
+
+        #[test]
+        fn keeps_blank_lines_as_written() {
+            reads(&[
+                ("<<-EOT\n    a\n\n   \n      b\nEOT\n", "a\n\n   \n  b\n"),
+                ("<<-EOT\n  \n\nEOT\n", "  \n\n"),
+            ]);
+        }
+
+        #[test]
+        fn reads_a_heredoc_where_a_value_can_be() {
+            let text = "a = [<<EOT\nx\nEOT\n, 1]\nb = f(\n  <<EOT\ny\nEOT\n)\n\
+                        c = { k = <<EOT\nz\nEOT\n  j = 2 }\nd {\n  e = <<-EOT\n    \
+                        w\n    EOT\n}\n";
+            let document = ok(text);
+            let call = value::Kind::Call(Call {
+                function: "f".into(),
+                function_span: None,
+                arguments: vec![value(string("y\n"))],
+            });
+            let expected = Document {
+                attributes: map(vec![
+                    (
+                        "a",
+                        value::Kind::List(vec![
+                            value(string("x\n")),
+                            value(integer(1)),
+                        ]),
+                    ),
+                    ("b", call),
+                    (
+                        "c",
+                        value::Kind::Map(map(vec![
+                            ("k", string("z\n")),
+                            ("j", integer(2)),
+                        ])),
+                    ),
+                ]),
+                blocks: vec![block("d", &[], attributes(vec![("e", string("w\n"))]))],
+            };
+            assert_eq!(document, expected);
+        }
+
+        #[test]
+        fn covers_the_opener_to_the_marker() {
+            let document = ok("a = <<EOT\nx\nEOT\nb = 1\n");
+            let a = document.attributes.get("a").unwrap();
+            assert_eq!(a.value.span, Some(span(at(4, 0, 4), at(15, 2, 3))));
+            let b = document.attributes.get("b").unwrap();
+            assert_eq!(b.key_span, Some(span(at(16, 3, 0), at(17, 3, 1))));
+            assert_eq!(b.value.span, Some(span(at(20, 3, 4), at(21, 3, 5))));
+
+            let document = ok("a = <<-EOT\n  x\n  EOT\n");
+            let a = document.attributes.get("a").unwrap();
+            assert_eq!(a.value.span, Some(span(at(4, 0, 4), at(20, 2, 5))));
+        }
+
+        #[test]
+        fn refuses_an_opener_without_a_marker_and_a_new_line() {
+            let cases = [
+                ("a = << EOT\nx\nEOT\n", 6),
+                ("a = <<\"EOT\"\nx\nEOT\n", 6),
+                ("a = <<1\n", 6),
+                ("a = <<-\nx\n-\n", 7),
+                ("a = <<--EOT\n", 7),
+                ("a = <<EOT x\nx\nEOT\n", 9),
+                ("a = <<EOT # c\nx\nEOT\n", 9),
+                ("a = <<EOT", 9),
+            ];
+            for (text, end) in cases {
+                let start = syntax(on(4, end), Expected::HeredocStart);
+                check(text, &[(start, START)]);
+            }
+        }
+
+        #[test]
+        fn refuses_a_heredoc_that_does_not_end() {
+            let cases = [
+                ("a = <<EOT\n", at(10, 1, 0)),
+                ("a = <<EOT\nx", at(11, 1, 1)),
+                ("a = <<EOT\nx\n", at(12, 2, 0)),
+                ("a = <<EOT\nEOTX\nEOT x\n", at(21, 3, 0)),
+                ("a = <<-EOT\n  x\n  eot\n", at(21, 3, 0)),
+            ];
+            for (text, end) in cases {
+                let open = syntax(span(at(4, 0, 4), end), Expected::HeredocEnd);
+                check(text, &[(open, END)]);
+            }
+        }
+
+        #[test]
+        fn refuses_a_template() {
+            let template = |start, end| {
+                let form = Form::Template;
+                (
+                    Error::Form {
+                        span: span(start, end),
+                        form,
+                    },
+                    TEMPLATE,
+                )
+            };
+            check(
+                "a = <<EOT\nx ${y}\nEOT\n",
+                &[template(at(12, 1, 2), at(14, 1, 4))],
+            );
+            check(
+                "a = <<-EOT\n  %{ if x }\n  EOT\n",
+                &[template(at(13, 1, 2), at(15, 1, 4))],
+            );
+            let null = Error::Form {
+                span: on(4, 8),
+                form: Form::Null,
+            };
+            check(
+                "a = null\nb = <<EOT\n${x}\nEOT\nc = null\n",
+                &[(null, NULL), template(at(19, 2, 0), at(21, 2, 2))],
+            );
+        }
+
+        #[test]
+        fn refuses_a_heredoc_as_a_label_or_a_key() {
+            check(
+                "b <<EOT\nx\nEOT\n {\n}\n",
+                &[(
+                    syntax(span(at(2, 0, 2), at(13, 2, 3)), Expected::AttributeOrBlock),
+                    "the file needs `=`, a label, or `{` after the name here",
+                )],
+            );
+            check(
+                "b \"l\" <<EOT\nx\nEOT\n {\n}\n",
+                &[(
+                    syntax(span(at(6, 0, 6), at(17, 2, 3)), Expected::BlockStart),
+                    "the file needs a label or `{` here",
+                )],
+            );
+            check(
+                "a = { <<EOT\nk\nEOT\n = 1 }\n",
+                &[(
+                    syntax(span(at(6, 0, 6), at(17, 2, 3)), Expected::Key),
+                    "the file needs a key or `}` here",
+                )],
+            );
+        }
+
+        #[test]
+        fn reads_on_after_a_form_before_a_heredoc() {
+            let operator = |span| Error::Form {
+                span,
+                form: Form::Operator,
+            };
+            let operator_message = Form::Operator.to_string();
+            check(
+                "a = -<<EOT\nx\nEOT\n",
+                &[(operator(on(4, 5)), &operator_message)],
+            );
+            let null = Error::Form {
+                span: span(at(24, 3, 4), at(28, 3, 8)),
+                form: Form::Null,
+            };
+            check(
+                "a = 1 + <<EOT\nx\nEOT\nb = null\n",
+                &[(operator(on(6, 7)), &operator_message), (null, NULL)],
+            );
+        }
+
+        /// Lines with no `{`, so no line starts a template.
+        fn lines() -> impl Strategy<Value = Vec<String>> {
+            prop::collection::vec("[ \t]{0,3}[a-z$% \t]{0,5}", 0..6)
+        }
+
+        /// Writes `a = ` and a heredoc of `lines`, with `indent` before each line
+        /// that is not blank and before the marker.
+        fn heredoc(opener: &str, lines: &[String], indent: &str) -> String {
+            let mut text = format!("a = {opener}EOT\n");
+            for line in lines {
+                if !line.trim_start_matches([' ', '\t']).is_empty() {
+                    text.push_str(indent);
+                }
+                text.push_str(line);
+                text.push('\n');
+            }
+            text.push_str(indent);
+            text.push_str("EOT\n");
+            text
+        }
+
+        proptest! {
+            #[test]
+            fn reads_an_indented_heredoc_as_the_heredoc_it_indents(
+                mut lines in lines(),
+                line in "[a-z$%][a-z$% \t]{0,5}",
+                at in any::<prop::sample::Index>(),
+                indent in "[ \t]{0,4}",
+            ) {
+                lines.insert(at.index(lines.len().saturating_add(1)), line);
+                let indented = read(Source(0), &heredoc("<<-", &lines, &indent));
+                let plain = read(Source(0), &heredoc("<<", &lines, ""));
+                prop_assert_eq!(indented, plain);
+            }
+        }
+    }
+
     mod errors {
         use super::*;
 
         const ESCAPE: &str = "the string has an escape that HCL does not have. \
                               Use `\\n`, `\\r`, `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or \
                               `\\UNNNNNNNN`";
-        const TEMPLATE: &str = "templates do not exist in Foundation files. Write \
-                                `$${` or `%%{` for the text `${` or `%{`";
         const NAME: &str = "the reference is not a valid name: \"a.@\" has a segment \
                             that is not valid: \"@\". Use letters, digits, `_`, and \
                             `-`, separated by dots";
         const NUMBER: &str = "the number is out of range. Use an integer that fits \
                               in 128 bits, or a float that fits in 64 bits";
-        const NULL: &str = "`null` does not exist in Foundation files. Remove the \
-                            attribute to use its default";
         const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
                               give it a different key";
 
@@ -1565,7 +1834,7 @@ c = "°C # not a comment"
             let c = prop::sample::select(
                 &[
                     '{', '}', '[', ']', '(', ')', '"', '=', ',', '.', ':', '#', '/',
-                    '*', '$', '%', '\\', '-', '\n', '\r', ' ', 'a', '1', '°',
+                    '*', '$', '%', '\\', '-', '\n', '\r', ' ', 'a', '1', '°', '<',
                 ][..],
             );
             (any::<prop::sample::Index>(), prop::option::of(c))

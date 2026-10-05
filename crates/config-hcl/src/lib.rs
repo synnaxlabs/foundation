@@ -227,6 +227,10 @@ pub enum Expected {
     ArgumentsEnd,
     /// `"` at the end of a string.
     Quote,
+    /// A marker and a new line after `<<` or `<<-`.
+    HeredocStart,
+    /// The marker on a line of its own at the end of a heredoc.
+    HeredocEnd,
     /// `*/` at the end of a comment.
     CommentEnd,
 }
@@ -247,6 +251,8 @@ impl fmt::Display for Expected {
             Self::ObjectEnd => "`,`, a new line, or `}`",
             Self::ArgumentsEnd => "`,` or `)`",
             Self::Quote => "`\"` to end the string",
+            Self::HeredocStart => "a marker and a new line to start the heredoc",
+            Self::HeredocEnd => "the marker on a line of its own to end the heredoc",
             Self::CommentEnd => "`*/` to end the comment",
         })
     }
@@ -285,6 +291,14 @@ mod tests {
             (Expected::ObjectEnd, "`,`, a new line, or `}`"),
             (Expected::ArgumentsEnd, "`,` or `)`"),
             (Expected::Quote, "`\"` to end the string"),
+            (
+                Expected::HeredocStart,
+                "a marker and a new line to start the heredoc",
+            ),
+            (
+                Expected::HeredocEnd,
+                "the marker on a line of its own to end the heredoc",
+            ),
             (Expected::CommentEnd, "`*/` to end the comment"),
         ];
         for (expected, phrase) in cases {

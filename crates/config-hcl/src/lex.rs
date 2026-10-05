@@ -21,6 +21,9 @@ pub(crate) enum Kind {
     Number,
     /// A quoted string, with its escapes read.
     String(Box<str>),
+    /// A heredoc, with `\n` for each line end and, after `<<-`, without the indent
+    /// that its lines share.
+    Heredoc(Box<str>),
     /// `!`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `+`, `/`, or `%`.
     Operator,
     Star,
@@ -46,8 +49,8 @@ pub(crate) enum Kind {
     Other,
     /// The end of the text.
     End,
-    /// A string or comment that does not end, a string escape that HCL does not
-    /// have, or a template in a string. Reading stops here.
+    /// A string, heredoc, or comment that does not end, a heredoc with no marker, a
+    /// string escape that HCL does not have, or a template. Reading stops here.
     Error(Error),
 }
 
@@ -109,15 +112,17 @@ impl<'a> Tokens<'a> {
         self.skip()?;
         let start = self.at;
         let rest = self.rest;
+        if self.newline() {
+            return Ok(self.token(Kind::Newline, rest, start));
+        }
         let Some(c) = self.bump() else {
             return Ok(self.token(Kind::End, rest, start));
         };
         let kind = match c {
-            '\n' => Kind::Newline,
-            '\r' if self.eat('\n') => Kind::Newline,
             '"' => Kind::String(self.string(start)?),
             '=' if self.eat('=') => Kind::Operator,
             '=' => Kind::Equals,
+            '<' if self.eat('<') => Kind::Heredoc(self.heredoc(start)?),
             '!' | '<' | '>' => {
                 self.eat('=');
                 Kind::Operator
@@ -146,7 +151,7 @@ impl<'a> Tokens<'a> {
                 self.number();
                 Kind::Number
             }
-            c if c.is_ascii_alphabetic() || c == '_' || c == '@' => self.word(c),
+            c if identifier_start(c) || c == '@' => self.word(c),
             _ => Kind::Other,
         };
         Ok(self.token(kind, rest, start))
@@ -294,7 +299,7 @@ impl<'a> Tokens<'a> {
     /// Moves past the rest of a word after its first character, `first`.
     fn word(&mut self, first: char) -> Kind {
         let bytes = self.rest.as_bytes();
-        let part = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'@');
+        let part = |b: u8| identifier_part(char::from(b)) || b == b'@';
         // A dot is part of the word unless it starts a splat or an expansion.
         let dot = |i: usize| {
             let rest = bytes.get(i..).unwrap_or_default();
@@ -340,26 +345,114 @@ impl<'a> Tokens<'a> {
                 }
                 Some(c @ ('$' | '%')) => {
                     self.bump();
-                    if self.peek() == Some('{') {
-                        self.bump();
-                        return Err(Error::Form {
-                            span: self.span(at),
-                            form: Form::Template,
-                        });
-                    }
-                    if self.peek() == Some(c) && self.second(|c| c == '{') {
-                        self.bump();
-                        self.bump();
-                        text.push(c);
-                        text.push('{');
-                    } else {
-                        text.push(c);
-                    }
+                    self.sigil(c, at, &mut text)?;
                 }
                 Some(c) => {
                     self.bump();
                     text.push(c);
                 }
+            }
+        }
+        unreachable!("invariant: each pass moves past a character")
+    }
+
+    /// Reads what follows `sigil`, a `$` or `%` at `start`, into `text`: `$${` and
+    /// `%%{` are the text `${` and `%{`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Form::Template`] when `sigil` starts a template.
+    fn sigil(
+        &mut self,
+        sigil: char,
+        start: Position,
+        text: &mut String,
+    ) -> Result<(), Error> {
+        if self.eat('{') {
+            return Err(Error::Form {
+                span: self.span(start),
+                form: Form::Template,
+            });
+        }
+        text.push(sigil);
+        if self.peek() == Some(sigil) && self.second(|c| c == '{') {
+            self.bump();
+            self.bump();
+            text.push('{');
+        }
+        Ok(())
+    }
+
+    /// Reads a heredoc after its `<<` at `start`.
+    fn heredoc(&mut self, start: Position) -> Result<Box<str>, Error> {
+        let indented = self.eat('-');
+        let marker = self.marker();
+        if marker.is_empty() || !self.newline() {
+            return Err(Error::Syntax {
+                span: self.span(start),
+                expected: Expected::HeredocStart,
+            });
+        }
+        let mut text = String::new();
+        // Each pass moves past a line or returns.
+        for _ in 0..=self.rest.len() {
+            if self.rest.is_empty() {
+                return Err(Error::Syntax {
+                    span: self.span(start),
+                    expected: Expected::HeredocEnd,
+                });
+            }
+            let line = self.rest.split('\n').next().unwrap_or_default();
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if line.trim_matches([' ', '\t']) == marker {
+                self.eat_while(|c| matches!(c, ' ' | '\t'));
+                self.skip_bytes(marker.len());
+                return Ok(if indented { dedent(&text) } else { text }.into());
+            }
+            self.heredoc_line(&mut text)?;
+        }
+        unreachable!("invariant: each pass moves past a line")
+    }
+
+    /// Moves past an identifier, and returns it, or `""` when none starts here.
+    fn marker(&mut self) -> &'a str {
+        let rest = self.rest;
+        let len = if rest.starts_with(identifier_start) {
+            rest.find(|c| !identifier_part(c)).unwrap_or(rest.len())
+        } else {
+            0
+        };
+        self.skip_bytes(len);
+        rest.get(..len)
+            .expect("invariant: an identifier ends on a character boundary")
+    }
+
+    /// Moves past a `\n` or `\r\n`, and reports whether one was there.
+    fn newline(&mut self) -> bool {
+        let len = if self.rest.starts_with('\n') {
+            1
+        } else if self.rest.starts_with("\r\n") {
+            2
+        } else {
+            0
+        };
+        self.skip_bytes(len);
+        len > 0
+    }
+
+    /// Reads one line of a heredoc into `text`, with `\n` for its line end.
+    fn heredoc_line(&mut self, text: &mut String) -> Result<(), Error> {
+        // Each pass moves past a character or returns.
+        for _ in 0..=self.rest.len() {
+            let at = self.at;
+            if self.newline() {
+                text.push('\n');
+                return Ok(());
+            }
+            match self.bump() {
+                None => return Ok(()),
+                Some(c @ ('$' | '%')) => self.sigil(c, at, text)?,
+                Some(c) => text.push(c),
             }
         }
         unreachable!("invariant: each pass moves past a character")
@@ -402,6 +495,39 @@ impl<'a> Tokens<'a> {
         }
         char::from_u32(value)
     }
+}
+
+fn identifier_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+fn identifier_part(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
+}
+
+/// Removes the indent that the lines of `text` that are not blank share. A blank line
+/// holds only spaces and tabs, and stays as written, as in HCL.
+fn dedent(text: &str) -> String {
+    fn content(line: &str) -> &str {
+        line.trim_start_matches([' ', '\t'])
+    }
+    let blank = |line: &str| content(line) == "\n";
+    let shared = text
+        .split_inclusive('\n')
+        .filter(|line| !blank(line))
+        .map(|line| line.len().saturating_sub(content(line).len()))
+        .min()
+        .unwrap_or(0);
+    text.split_inclusive('\n')
+        .map(|line| {
+            if blank(line) {
+                line
+            } else {
+                line.get(shared..)
+                    .expect("invariant: each line that is not blank has the indent")
+            }
+        })
+        .collect()
 }
 
 /// Refuses a text whose offsets do not fit in a span.
