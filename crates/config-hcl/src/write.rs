@@ -5,7 +5,7 @@ use document::value::{Call, Kind, Value};
 use document::{Attribute, Block, Document, Map, Span};
 
 use crate::lex;
-use crate::parse::{Ends, literal};
+use crate::parse::{Ends, literal, opens_for};
 use crate::{Error, Unwritable};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
@@ -287,7 +287,14 @@ impl<'a> Writer<'a> {
     /// Writes what comes before the items: `[`, the function and `(`, or `{`.
     fn open(&mut self, items: Items<'_>) {
         match items {
-            Items::List(_) => self.out.push('['),
+            Items::List(values) => {
+                if let Some(first) = values.first()
+                    && starts_for(&first.kind)
+                {
+                    self.refuse(first.span, Unwritable::For);
+                }
+                self.out.push('[');
+            }
             Items::Call(call) => {
                 if lex::word(&call.function) != Some(lex::Kind::Identifier) {
                     self.refuse(call.function_span, Unwritable::Function);
@@ -324,10 +331,25 @@ impl<'a> Writer<'a> {
     }
 }
 
+/// Reports whether `kind` is written with a first word that opens a `for` expression
+/// after `[`.
+fn starts_for(kind: &Kind) -> bool {
+    match kind {
+        Kind::Reference(name) => opens_for(name.as_str()),
+        Kind::Call(call) => opens_for(&call.function),
+        Kind::Bool(_)
+        | Kind::Integer(_)
+        | Kind::Float(_)
+        | Kind::String(_)
+        | Kind::List(_)
+        | Kind::Map(_) => false,
+    }
+}
+
 /// Writes a map key: bare when it is an identifier, and quoted when not. `for` is
 /// quoted, because HCL reads `{ for` as a `for` expression.
 fn key(out: &mut String, key: &str) {
-    if lex::word(key) == Some(lex::Kind::Identifier) && key != "for" {
+    if lex::word(key) == Some(lex::Kind::Identifier) && !opens_for(key) {
         out.push_str(key);
     } else {
         quoted(out, key);
@@ -556,7 +578,7 @@ mod tests {
             ("zero", float(-0.0)),
             ("string", string("\"q\" \\ ${a} %{b} $c\t\r\u{1}é")),
             ("reference", reference("@a.7b")),
-            ("words", list(vec![reference("for"), reference("a-b")])),
+            ("words", list(vec![reference("a-b"), reference("for")])),
             (
                 "map",
                 Kind::Map(map(vec![
@@ -589,7 +611,7 @@ mod tests {
              small = -1e-7\n\
              string = \"\\\"q\\\" \\\\ $${a} %%{b} $c\\t\\r\\u0001é\"\n\
              température = é()\n\
-             words = [for, a-b]\n\
+             words = [a-b, for]\n\
              zero = 0.0\n"
         );
     }
@@ -753,6 +775,42 @@ mod tests {
                 unwritable(None, Unwritable::Keyword),
             ])
         );
+    }
+
+    #[test]
+    fn refuses_a_list_that_starts_with_for_as_the_reader_does() {
+        let item = |kind, span| Value {
+            kind,
+            span: Some(span),
+        };
+        let long = string(&"x".repeat(90));
+        let cases = [
+            (vec![item(reference("for"), on(5, 8))], on(5, 8)),
+            (
+                vec![item(reference("for.x"), on(5, 10)), value(Kind::Integer(1))],
+                on(5, 10),
+            ),
+            (
+                vec![item(call("for", vec![Kind::Integer(1)]), on(5, 11))],
+                on(5, 11),
+            ),
+            (
+                vec![item(reference("for"), on(5, 8)), value(long)],
+                on(5, 8),
+            ),
+            (
+                vec![value(Kind::List(vec![item(reference("for"), on(6, 9))]))],
+                on(6, 9),
+            ),
+        ];
+        for (items, span) in cases {
+            let document = attributes(vec![("a", Kind::List(items))]);
+            let error = Error::Unwritable {
+                span: Some(span),
+                part: Unwritable::For,
+            };
+            assert_eq!(write(&document), Err(vec![error]), "{document:?}");
+        }
     }
 
     #[test]

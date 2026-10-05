@@ -260,9 +260,10 @@ impl<'a> Parser<'a> {
 
     /// Refuses a `for` expression at the start of a list or an object.
     fn refuse_for(&mut self) -> Result<(), Error> {
-        if self.token.kind == lex::Kind::Identifier
-            && self.token.text == "for"
-            && self.after().kind == lex::Kind::Identifier
+        if matches!(
+            self.token.kind,
+            lex::Kind::Identifier | lex::Kind::Reference
+        ) && opens_for(self.token.text)
         {
             self.refuse(Form::For, Ends::Close)?;
         }
@@ -610,6 +611,12 @@ impl<'a> Parser<'a> {
 pub(crate) enum Literal {
     Bool(bool),
     Null,
+}
+
+/// Reports whether HCL reads `word` after `[` or `{` as the start of a `for`
+/// expression: whether its part before the first `.` is `for`.
+pub(crate) fn opens_for(word: &str) -> bool {
+    word.split('.').next() == Some("for")
 }
 
 /// The value that `word` reads as by itself, or `None` for a reference.
@@ -968,12 +975,40 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn reads_for_as_a_word_when_no_identifier_follows() {
-            let expected = attributes(vec![
-                ("a", value::Kind::List(vec![value(reference("for"))])),
-                ("b", value::Kind::Map(map(vec![("for", integer(1))]))),
+        fn reads_for_as_a_word_after_the_start_of_a_list_or_an_object() {
+            let text = "a = [1, for]\nb = { k = 1, for = 2 }\nc = for(1)\nd = f(for)\n\
+                        e = [\"for\"]\nf = { \"for\" = 1 }\ng = [for-x]\nfor = 1\n\
+                        h { for = 1 }\n";
+            let call = |function: &str, argument: value::Kind| {
+                value::Kind::Call(Call {
+                    function: function.into(),
+                    function_span: None,
+                    arguments: vec![value(argument)],
+                })
+            };
+            let list = |kind| value::Kind::List(vec![value(kind)]);
+            let mut expected = attributes(vec![
+                (
+                    "a",
+                    value::Kind::List(vec![value(integer(1)), value(reference("for"))]),
+                ),
+                (
+                    "b",
+                    value::Kind::Map(map(vec![("k", integer(1)), ("for", integer(2))])),
+                ),
+                ("c", call("for", integer(1))),
+                ("d", call("f", reference("for"))),
+                ("e", list(string("for"))),
+                ("f", value::Kind::Map(map(vec![("for", integer(1))]))),
+                ("g", list(reference("for-x"))),
+                ("for", integer(1)),
             ]);
-            assert_eq!(ok("a = [for]\nb = { for = 1 }\n"), expected);
+            expected.blocks.push(block(
+                "h",
+                &[],
+                attributes(vec![("for", integer(1))]),
+            ));
+            assert_eq!(ok(text), expected);
         }
 
         #[test]
@@ -1580,6 +1615,13 @@ c = "°C # not a comment"
                 ("a = b ? 1 : 2\n", on(6, 7), Form::Conditional),
                 ("a = [for x in y : x]\n", on(5, 8), Form::For),
                 ("a = { for k, v in m : k => v }\n", on(6, 9), Form::For),
+                ("a = [for]\n", on(5, 8), Form::For),
+                ("a = [for, 1]\n", on(5, 8), Form::For),
+                ("a = [for(1)]\n", on(5, 8), Form::For),
+                ("a = [for.x]\n", on(5, 10), Form::For),
+                ("a = { for = 1 }\n", on(6, 9), Form::For),
+                ("a = { for : 1 }\n", on(6, 9), Form::For),
+                ("a = { for.x = 1 }\n", on(6, 11), Form::For),
                 (
                     "a = [\n  for x in y : x\n]\n",
                     span(at(8, 1, 2), at(11, 1, 5)),
@@ -1642,6 +1684,12 @@ c = "°C # not a comment"
                 ),
                 ("a = [for\n  x in y : x]\n", on(5, 8), Form::For),
                 ("a = { for\n  k, v in m : k => v }\n", on(6, 9), Form::For),
+                ("a = [for\n]\n", on(5, 8), Form::For),
+                (
+                    "a = {\nfor = 1 }\n",
+                    span(at(6, 1, 0), at(9, 1, 3)),
+                    Form::For,
+                ),
                 (
                     "a = {\n  for k, v in m : k => v\n}\n",
                     span(at(8, 1, 2), at(11, 1, 5)),

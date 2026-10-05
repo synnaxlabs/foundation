@@ -180,6 +180,7 @@ const UNWRITABLE_KEY: Code = Code::new("hcl.unwritable-key");
 const UNWRITABLE_KEYWORD: Code = Code::new("hcl.unwritable-keyword");
 const UNWRITABLE_FUNCTION: Code = Code::new("hcl.unwritable-function");
 const UNWRITABLE_REFERENCE: Code = Code::new("hcl.unwritable-reference");
+const UNWRITABLE_FOR: Code = Code::new("hcl.unwritable-for");
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -295,6 +296,9 @@ pub enum Unwritable {
     /// A name that HCL does not read as a reference, such as `true`, `null`, `7a`, or
     /// `-a`.
     Reference,
+    /// A list whose first item starts with the word `for`, such as the reference `for`
+    /// or `for.x`, or the call `for(1)`. HCL reads `[for` as a `for` expression.
+    For,
     /// A block or a value nested deeper than [`document::encoding::DEPTH_MAX`], which
     /// [`read`] refuses.
     Depth,
@@ -323,6 +327,12 @@ impl Unwritable {
                 "the name does not read as a reference in HCL",
                 "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, \
                  or `null`",
+            ),
+            Self::For => (
+                UNWRITABLE_FOR,
+                "a list cannot start with the word `for`, because HCL reads `[for` as a \
+                 `for` expression",
+                "Put another item first, or rename it",
             ),
             Self::Depth => return Diagnostic::from(&TooDeep { span }),
         };
@@ -623,7 +633,7 @@ mod tests {
         assert_eq!(error.to_string(), format!("{message}. {fix}"));
     }
 
-    const UNWRITABLE: [(Unwritable, &str, &str, &str); 4] = [
+    const UNWRITABLE: [(Unwritable, &str, &str, &str); 5] = [
         (
             Unwritable::Key,
             "hcl.unwritable-key",
@@ -649,6 +659,13 @@ mod tests {
             "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, or \
              `null`",
         ),
+        (
+            Unwritable::For,
+            "hcl.unwritable-for",
+            "a list cannot start with the word `for`, because HCL reads `[for` as a \
+             `for` expression",
+            "Put another item first, or rename it",
+        ),
     ];
 
     #[test]
@@ -659,7 +676,8 @@ mod tests {
                 Unwritable::Key
                 | Unwritable::Keyword
                 | Unwritable::Function
-                | Unwritable::Reference => {}
+                | Unwritable::Reference
+                | Unwritable::For => {}
                 Unwritable::Depth => unreachable!("`Depth` has its own test"),
             }
             let error = Error::Unwritable {

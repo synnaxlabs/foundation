@@ -20,7 +20,7 @@ fn text() -> impl Strategy<Value = String> {
 fn name() -> impl Strategy<Value = Kind> {
     "[a-z_][a-z0-9_]{0,4}(\\.@?[a-z0-9_]{1,5}){0,2}"
         .prop_filter("a keyword is not a reference", |name| {
-            !matches!(name.as_str(), "true" | "false" | "null" | "for")
+            !matches!(name.as_str(), "true" | "false" | "null")
         })
         .prop_map(|name| Kind::Reference(name.parse().unwrap()))
 }
@@ -39,7 +39,15 @@ fn value() -> impl Strategy<Value = Value> {
     leaf.prop_recursive(3, 16, 4, |inner| {
         let key = prop_oneof![identifier(), text(), "-?(0|[1-9][0-9]{0,40})"];
         let kind = prop_oneof![
-            prop::collection::vec(inner.clone(), 0..4).prop_map(Kind::List),
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_filter("HCL reads `[for` as a for expression", |items| {
+                    !items.first().is_some_and(|item| match &item.kind {
+                        Kind::Reference(name) => name.segments().next() == Some("for"),
+                        Kind::Call(call) => &*call.function == "for",
+                        _ => false,
+                    })
+                })
+                .prop_map(Kind::List),
             prop::collection::btree_map(key, inner.clone(), 0..4)
                 .prop_map(|entries| Kind::Map(map(entries))),
             (identifier(), prop::collection::vec(inner, 0..4)).prop_map(
