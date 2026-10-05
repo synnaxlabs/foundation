@@ -86,14 +86,15 @@ impl Index {
     ///
     /// # Panics
     ///
-    /// If the path moved after the check.
+    /// If either path moved after the check.
     pub(crate) fn advance(
         &mut self,
-        accepted: &Accepted,
+        accepted: Accepted,
         frame: Option<Frame>,
     ) -> &[delivery::Key] {
+        let path = accepted.path;
         self.order.advance(accepted);
-        match (accepted.path, frame) {
+        match (path, frame) {
             (Path::Live, Some(frame)) => self.readers.put(frame),
             (Path::Live, None) | (Path::Backfill, _) => &[],
         }
@@ -235,8 +236,9 @@ mod tests {
         now: Monotonic,
     ) -> Result<Range<u64>, Refusal> {
         let accepted = index.check(key, Path::Live, &stamps(seconds), now, mesh())?;
-        let _ = index.advance(&accepted, None);
-        Ok(accepted.seq)
+        let seq = accepted.seq.clone();
+        let _ = index.advance(accepted, None);
+        Ok(seq)
     }
 
     fn handed_to(index: &Index) -> Option<Writer> {
@@ -259,6 +261,18 @@ mod tests {
                 "not in control: another writer holds the gate"
             );
             assert_eq!(write(&mut index, holder, &[1, 2], at(2)), Ok(0..2));
+        }
+
+        #[test]
+        fn refuses_a_waiter_for_control_before_its_stamps() {
+            let mut index = index();
+            let holder = index.open(writer("a", 10), None, at(0));
+            let waiter = index.open(writer("b", 5), None, at(0));
+            assert_eq!(write(&mut index, holder, &[5], at(1)), Ok(0..1));
+            assert_eq!(
+                write(&mut index, waiter, &[4], at(2)),
+                Err(Refusal::Control(control::Error::Waiting))
+            );
         }
 
         #[test]
@@ -331,7 +345,7 @@ mod tests {
                 .check(key, Path::Live, &series, at(1), mesh())
                 .expect("a holder's frame in order");
             let frame = frames.frame(Path::Live, &series);
-            assert_eq!(index.advance(&accepted, Some(frame.clone())), &[session]);
+            assert_eq!(index.advance(accepted, Some(frame.clone())), &[session]);
             let taken = index.readers.take(session).expect("the newest frame");
             assert_eq!(taken.series(0), frame.series(0));
         }
@@ -347,7 +361,7 @@ mod tests {
                 .check(key, Path::Backfill, &series, at(1), mesh())
                 .expect("a holder's frame in order");
             assert_eq!(
-                index.advance(&accepted, Some(frames.frame(Path::Backfill, &series))),
+                index.advance(accepted, Some(frames.frame(Path::Backfill, &series))),
                 &[]
             );
             assert!(index.readers.take(session).is_none());
@@ -365,14 +379,14 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "invariant: the Live path moved after the check")]
+        #[should_panic(expected = "invariant: the order moved after the check")]
         fn panics_when_the_path_moved_after_the_check() {
             let mut index = index();
             let key = index.open(writer("a", 10), None, at(0));
             let first = index.check(key, Path::Live, &stamps(&[1]), at(1), mesh());
             let first = first.expect("a holder's frame in order");
             assert_eq!(write(&mut index, key, &[1], at(2)), Ok(0..1));
-            let _ = index.advance(&first, None);
+            let _ = index.advance(first, None);
         }
     }
 

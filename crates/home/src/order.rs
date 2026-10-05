@@ -16,7 +16,7 @@ pub(crate) struct Config {
 }
 
 /// A frame whose stamps passed [`Order::check`] on one path.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Accepted {
     /// The path of the frame.
     pub(crate) path: Path,
@@ -24,6 +24,8 @@ pub(crate) struct Accepted {
     pub(crate) seq: Range<u64>,
     /// The newest stamp of the frame, or `None` when it is empty.
     last: Option<Stamp>,
+    /// The seq of the live and backfill paths at the check.
+    checked: [u64; 2],
 }
 
 /// Where one path of an index stands.
@@ -82,6 +84,7 @@ impl Order {
             path,
             seq: start..end,
             last: stamps.last().copied().map(stamp),
+            checked: [self.live.seq, self.backfill.seq],
         })
     }
 
@@ -90,19 +93,25 @@ impl Order {
     ///
     /// # Panics
     ///
-    /// If the path moved after the check.
-    pub(crate) fn advance(&mut self, accepted: &Accepted) {
-        let tail = match accepted.path {
+    /// If either path moved after the check.
+    pub(crate) fn advance(&mut self, accepted: Accepted) {
+        let Accepted {
+            path,
+            seq,
+            last,
+            checked,
+        } = accepted;
+        assert_eq!(
+            [self.live.seq, self.backfill.seq],
+            checked,
+            "invariant: the order moved after the check of {path:?} seq {seq:?}",
+        );
+        let tail = match path {
             Path::Live => &mut self.live,
             Path::Backfill => &mut self.backfill,
         };
-        assert_eq!(
-            tail.seq, accepted.seq.start,
-            "invariant: the {:?} path moved after the check of {accepted:?}",
-            accepted.path,
-        );
-        if let Some(last) = accepted.last {
-            tail.seq = accepted.seq.end;
+        if let Some(last) = last {
+            tail.seq = seq.end;
             tail.stamp = Some(last);
         }
     }
@@ -329,8 +338,9 @@ mod tests {
         now: Interval,
     ) -> Result<Range<u64>, Error> {
         let accepted = order.check(path, stamps, now)?;
-        order.advance(&accepted);
-        Ok(accepted.seq)
+        let seq = accepted.seq.clone();
+        order.advance(accepted);
+        Ok(seq)
     }
 
     fn order() -> Order {
@@ -549,8 +559,19 @@ mod tests {
             let accepted = accepted.expect("stamps in order");
             assert_eq!(accepted.seq, 0..2);
             assert_eq!(order.tail(Path::Live), Tail::default());
-            order.advance(&accepted);
+            order.advance(accepted);
             assert_eq!(order.tail(Path::Live), tail(2, 2));
+        }
+
+        #[test]
+        #[should_panic(expected = "invariant: the order moved after the check")]
+        fn panics_when_the_other_path_moved_after_the_check() {
+            let mut order = order();
+            let live = order.check(Path::Live, &stamps(&[5]), now());
+            let live = live.expect("stamps in order");
+            let backfill = order.check(Path::Backfill, &stamps(&[7]), now());
+            order.advance(backfill.expect("backfill before any live sample"));
+            order.advance(live);
         }
 
         #[test]
