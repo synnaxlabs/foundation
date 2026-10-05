@@ -99,20 +99,33 @@ impl Overlap {
     ///
     /// # Errors
     ///
-    /// [`Error::Open`] when no reading gave a low edge, or none gave a high edge.
+    /// - [`Error::Open`] when no reading gave a low edge, or none gave a high edge.
+    /// - [`Error::Bound`] when the readings, before drift, allow an error of more
+    ///   than 36500 days.
     pub fn at(&self, now: Monotonic) -> Result<Measurement, Error> {
+        let (low, high) = self.edges(|r| r.at)?;
+        // Edges read at different times can cross.
+        Measurement::checked_between(now, low, high.max(low))?;
+        let (low, high) = self.edges(|_| now)?;
+        Ok(Measurement::between(now, low, high))
+    }
+
+    /// The highest low edge and the lowest high edge, each widened to `when` the
+    /// reading gives and rounded outward to whole nanoseconds.
+    fn edges(
+        &self,
+        when: impl Fn(Reading) -> Monotonic,
+    ) -> Result<(i128, i128), Error> {
         let edges = [self.low, self.high]
             .into_iter()
             .flatten()
-            .map(|r| r.edges_at(now, self.drift));
+            .map(|r| r.edges_at(when(r), self.drift));
         let low = edges.clone().filter_map(|(low, _)| low).max();
         let high = edges.filter_map(|(_, high)| high).min();
         let (Some(low), Some(high)) = (low, high) else {
             return Err(Error::Open);
         };
-        // Whole nanoseconds, rounded outward.
-        let (low, high) = (low.div_euclid(PER_NANO), -(-high).div_euclid(PER_NANO));
-        Ok(Measurement::between(now, low, high))
+        Ok((low.div_euclid(PER_NANO), -(-high).div_euclid(PER_NANO)))
     }
 
     fn narrow(&mut self, reading: Reading) -> Result<(), Error> {
@@ -358,9 +371,29 @@ mod tests {
         }
 
         #[test]
-        fn stops_an_error_wider_than_a_span_at_36500_days() {
+        fn fails_when_the_readings_allow_more_than_36500_days() {
+            let widest = MAX_ERROR.nanos();
+            let edge = [Push::Low(0, -widest), Push::High(0, widest)];
+            assert_eq!(check(0, &edge, 0), Ok((0, widest)));
+            let past = [Push::Low(0, -widest - 1), Push::High(0, widest + 1)];
+            let error = Span::from_nanos(widest + 1);
+            assert_eq!(check(0, &past, 0), Err(Error::Bound { error }));
+            let one_sided = [Push::Low(0, i64::MIN), Push::High(0, 0)];
+            let error = Span::from_nanos(1 << 62);
+            assert_eq!(check(0, &one_sided, 0), Err(Error::Bound { error }));
+        }
+
+        #[test]
+        fn fails_with_the_largest_span_for_a_wider_error() {
+            let error = Span::from_nanos(i64::MAX);
             let all = [Push::Both(0, i64::MIN, i64::MAX)];
-            assert_eq!(check(0, &all, 0), Ok((-1, MAX_ERROR.nanos())));
+            assert_eq!(check(0, &all, 0), Err(Error::Bound { error }));
+        }
+
+        #[test]
+        fn takes_edges_that_cross_before_drift() {
+            let pushes = [Push::Low(0, 10), Push::High(SECOND_NS, 5)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok((-493, 498)));
         }
     }
 
@@ -643,9 +676,9 @@ mod tests {
                         prop_assert_eq!(m.at(), Monotonic(now));
                         prop_assert!(m.error() <= MAX_ERROR);
                     }
-                    Err(Error::Open) => {}
-                    Err(e @ (Error::Backwards { .. } | Error::Bound { .. }
-                        | Error::Disjoint | Error::Drift { .. } | Error::NoSources
+                    Err(Error::Bound { .. } | Error::Open) => {}
+                    Err(e @ (Error::Backwards { .. } | Error::Disjoint
+                        | Error::Drift { .. } | Error::NoSources
                         | Error::NoMajority { .. } | Error::Crossed)) => {
                         prop_assert!(false, "unexpected {e}");
                     }

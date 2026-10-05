@@ -48,7 +48,8 @@ impl Measurement {
     }
 
     /// How far the true offset can be from [`Measurement::offset`] at
-    /// [`Measurement::at`]: from zero to 36500 days, where 36500 days means unknown.
+    /// [`Measurement::at`]: from zero to 36500 days. An estimate with 36500 days is
+    /// unknown, and the true offset can be farther.
     #[must_use]
     pub const fn error(self) -> Span {
         self.error
@@ -58,34 +59,68 @@ impl Measurement {
     /// can add between them, up to 36500 days.
     #[must_use]
     pub fn error_at(self, now: Monotonic, drift: Drift) -> Span {
-        let growth = drift.over(now.0.abs_diff(self.at.0));
-        capped(i128::from(self.error.nanos()) + i128::from(growth))
+        capped(self.grown(now, drift))
     }
 
-    /// The lowest and highest true offset at `now`, in nanoseconds.
+    /// The lowest and highest true offset at `now`, in nanoseconds. Unlike
+    /// [`Measurement::error_at`], the error does not stop at 36500 days.
     pub(crate) fn bounds_at(self, now: Monotonic, drift: Drift) -> (i128, i128) {
-        let error = i128::from(self.error_at(now, drift).nanos());
+        let error = self.grown(now, drift);
         let offset = i128::from(self.offset.nanos());
         (offset - error, offset + error)
     }
 
-    /// The measurement at `at` that covers every offset from `low` to `high`, with its
-    /// offset saturated to a span and its error capped at 36500 days.
+    fn grown(self, now: Monotonic, drift: Drift) -> i128 {
+        let growth = drift.over(now.0.abs_diff(self.at.0));
+        i128::from(self.error.nanos()) + i128::from(growth)
+    }
+
+    /// The measurement at `at` centered between `low` and `high`, with its offset
+    /// saturated to a span. Its error covers both, up to 36500 days.
     ///
     /// # Panics
     ///
     /// When `low` is above `high`.
     pub(crate) fn between(at: Monotonic, low: i128, high: i128) -> Self {
-        let offset = saturated((low + high).div_euclid(2));
-        let center = i128::from(offset.nanos());
-        let error = capped((high - center).max(center - low));
-        Self { at, offset, error }
+        let (offset, error) = center(low, high);
+        Self {
+            at,
+            offset,
+            error: capped(error),
+        }
     }
+
+    /// As [`Measurement::between`], for a source that makes a measurement: an error
+    /// over 36500 days fails.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Bound`] when the error is over 36500 days.
+    ///
+    /// # Panics
+    ///
+    /// When `low` is above `high`.
+    pub(crate) fn checked_between(
+        at: Monotonic,
+        low: i128,
+        high: i128,
+    ) -> Result<Self, Error> {
+        let (offset, error) = center(low, high);
+        Self::new(at, offset, saturated(error))
+    }
+}
+
+/// The offset between `low` and `high`, saturated to a span, and the error that
+/// covers both from it.
+fn center(low: i128, high: i128) -> (Span, i128) {
+    assert!(low <= high, "invariant: low {low}ns is above high {high}ns");
+    let offset = saturated((low + high).div_euclid(2));
+    let center = i128::from(offset.nanos());
+    (offset, (high - center).max(center - low))
 }
 
 /// `nanos` as an error bound: 36500 days when it is wider.
 fn capped(nanos: i128) -> Span {
-    assert!(nanos >= 0, "invariant: error bound {nanos}ns is negative");
     saturated(nanos.min(MAX_ERROR.nanos().into()))
 }
 
@@ -179,6 +214,18 @@ mod tests {
                 at(0, MAX_ERROR).error_at(Monotonic(u64::MAX), drift(100_000_000));
             assert_eq!(error, MAX_ERROR);
         }
+
+        #[test]
+        fn bounds_past_36500_days() {
+            let m = Measurement::new(Monotonic(0), Span::SECOND, MAX_ERROR);
+            let m = m.expect("valid");
+            let (offset, error) =
+                (1_000_000_000, i128::from(MAX_ERROR.nanos()) + 1_000);
+            assert_eq!(
+                m.bounds_at(Monotonic(SECOND_NS), drift(1_000)),
+                (offset - error, offset + error)
+            );
+        }
     }
 
     mod between {
@@ -195,9 +242,42 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "invariant: error bound -1ns is negative")]
+        fn fails_past_36500_days_when_checked() {
+            let widest = i128::from(MAX_ERROR.nanos());
+            let m = Measurement::checked_between(Monotonic(3), -widest, widest);
+            let m = m.expect("36500 days");
+            assert_eq!((m.offset(), m.error()), (Span::ZERO, MAX_ERROR));
+            let err =
+                Measurement::checked_between(Monotonic(3), -widest - 1, widest + 1);
+            let error = Span::from_nanos(MAX_ERROR.nanos() + 1);
+            assert_eq!(err, Err(Error::Bound { error }));
+        }
+
+        #[test]
+        fn fails_when_checked_and_the_center_is_past_a_span() {
+            let low = i128::from(i64::MIN) - i128::from(MAX_ERROR.nanos());
+            let m = Measurement::checked_between(Monotonic(0), low, low);
+            let m = m.expect("36500 days from the lowest span");
+            assert_eq!(
+                (m.offset(), m.error()),
+                (Span::from_nanos(i64::MIN), MAX_ERROR)
+            );
+            let err = Measurement::checked_between(Monotonic(0), low - 1, low - 1);
+            let error = Span::from_nanos(MAX_ERROR.nanos() + 1);
+            assert_eq!(err, Err(Error::Bound { error }));
+        }
+
+        #[test]
+        #[should_panic(expected = "invariant: low 1ns is above high 0ns")]
         fn panics_when_low_is_above_high() {
-            let _ = Measurement::between(Monotonic(0), 2, 0);
+            let _ = Measurement::between(Monotonic(0), 1, 0);
+        }
+
+        #[test]
+        #[should_panic(expected = "is above high 9223372036854775812ns")]
+        fn panics_when_low_is_above_high_past_a_span() {
+            let top = i128::from(i64::MAX);
+            let _ = Measurement::between(Monotonic(0), top + 10, top + 5);
         }
     }
 

@@ -3,6 +3,7 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -32,8 +33,7 @@ fn main() {
     );
 
     let (mut producer, mut consumer) = ring::new(Config {
-        capacity: 4,
-        spins: 0,
+        capacity: NonZeroUsize::new(4).expect("not zero"),
     });
     let tallies = [Arc::new(Tally::default()), Arc::new(Tally::default())];
     let wakers = tallies

@@ -207,6 +207,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a thread test; `ring` has no `env`"
+    )]
     fn clones_read_on_another_thread() {
         let (mut writer, reader) = new([0, 0]);
         writer.update(|_| [1, 2]);

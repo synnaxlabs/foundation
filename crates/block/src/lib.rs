@@ -1036,6 +1036,10 @@ mod tests {
         use super::*;
 
         #[test]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a thread test; `block` has no `env`"
+        )]
         fn returns_a_block_one_time_when_each_thread_drops_a_clone() {
             let pool = create_pool(128);
             let rounds = if cfg!(miri) { 20 } else { 2000 };
@@ -1093,6 +1097,10 @@ mod tests {
         }
 
         #[test]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a thread test; `block` has no `env`"
+        )]
         fn keeps_the_memory_until_the_last_block_is_gone() {
             let (pool, drops) = create_watched_pool(1024);
             let mut unique = pool.alloc(8).expect("the budget has room");
