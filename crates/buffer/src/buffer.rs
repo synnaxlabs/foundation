@@ -26,7 +26,7 @@ use types::time::Span;
 use crate::entry::{self, Entry};
 use crate::group::{Closed, Group, Limit, META_LEN, Rejected, Sealed};
 use crate::header::{self, Header};
-use crate::record::{self, ALIGN, AREA_START};
+use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::tails::{self, Tail, Tails};
 use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 
@@ -307,11 +307,10 @@ impl Buffer {
             Err(error) => return Err(error.into()),
         };
         let header = read_header(&file, &pool, &entropy, layout).await?;
-        let mut cursor = Cursor::new(header.layout, header.tail);
+        let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
         let mut tails = Tails::default();
         loop {
             let Window { place, len } = cursor.window();
-            let len = usize::try_from(len).expect("invariant: a window fits in memory");
             let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
             let offset = cursor.offset();
             match cursor.next(&bytes)? {
@@ -507,15 +506,15 @@ async fn read_header(
 
 /// Advances the tails past the entries of a record body at `offset`.
 fn recover(
-    body: &[u8],
+    body: Body<'_>,
     offset: u64,
     slots: &mut Slots,
     tails: &mut Tails,
 ) -> Result<(), Error> {
     let unread = |_: entry::Invalid| Error::Invalid { offset };
     let misplaced = |_: tails::Invalid| Error::Invalid { offset };
-    for entry in entry::parse(body).map_err(unread)? {
-        let (header, _) = entry.map_err(unread)?;
+    for header in entry::parse(body.start, body.len).map_err(unread)? {
+        let header = header.map_err(unread)?;
         tails
             .advance(slots.assign(header.index), &header)
             .map_err(misplaced)?;

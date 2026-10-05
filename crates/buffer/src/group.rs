@@ -9,18 +9,13 @@ use std::slice;
 use block::{Block, Pool, Unique};
 use types::channel::Slot;
 
-use crate::entry::{self, Entry, Header};
+use crate::entry::{self, ENTRIES_MAX, Entry, Header};
 use crate::record;
 use crate::wal::{Full, Plan, Writer};
 
-/// The most entries one record holds, and the most parts: with the header block,
-/// one record is one vectored write within `IOV_MAX`.
-pub(crate) const ENTRIES_MAX: usize = 1023;
-
 /// Bytes of the block that holds a record header and the largest entry table: one
 /// block of the pool's 64 KiB class.
-pub(crate) const META_LEN: usize =
-    record::HEADER_LEN + 4 + ENTRIES_MAX * entry::HEADER_LEN;
+pub(crate) const META_LEN: usize = record::HEADER_LEN + entry::TABLE_MAX;
 const _: () = assert!(META_LEN <= 1 << 16, "the table fits one 64 KiB block");
 
 /// The entries of one group commit, in append order. The first push takes the block
@@ -432,9 +427,9 @@ mod tests {
         let block = header::Header::new(small, CHAIN).encode();
         let opened = header::Header::decode(&block, &[0; 4096]).expect("a whole block");
         let bytes = vec![0; index(AREA)];
-        let mut cursor = Cursor::new(opened.layout, opened.tail);
+        let mut cursor = Cursor::new(opened.layout, opened.tail, 1 << 16);
         let Window { place, len } = cursor.window();
-        let step = cursor.next(&bytes[index(place)..index(place + len)]);
+        let step = cursor.next(&bytes[index(place)..index(place) + len]);
         assert_eq!(step, Ok(Step::End));
         let (writer, _) = cursor
             .writer(opened.tail.offset(), 1)
@@ -462,9 +457,9 @@ mod tests {
         fn with_body_max(body_max: usize) -> Self {
             let bytes = vec![0; index(AREA)];
             let layout = Layout::new(AREA, body_max).expect("the sizes make a ring");
-            let mut cursor = Cursor::new(layout, start());
+            let mut cursor = Cursor::new(layout, start(), 1 << 16);
             let Window { place, len } = cursor.window();
-            let step = cursor.next(&bytes[index(place)..index(place + len)]);
+            let step = cursor.next(&bytes[index(place)..index(place) + len]);
             assert_eq!(step, Ok(Step::End), "a zeroed area ends at once");
             let (writer, sealed) = cursor.writer(0, 1).expect("the ring is empty");
             let body = 1u32.to_le_bytes();
@@ -529,16 +524,19 @@ mod tests {
         }
 
         fn walk_from(&self, tail: Position) -> Vec<Vec<u8>> {
-            let mut cursor = Cursor::new(self.layout, tail);
+            let mut cursor = Cursor::new(self.layout, tail, 1 << 16);
             let mut bodies = Vec::new();
             loop {
                 let Window { place, len } = cursor.window();
-                let window = &self.bytes[index(place)..index(place + len)];
+                let window = &self.bytes[index(place)..index(place) + len];
                 match cursor
                     .next(window)
                     .expect("the ring holds what was written")
                 {
-                    Step::Data(body) => bodies.push(body.to_vec()),
+                    Step::Data(body) => {
+                        let start = index(place) + HEADER_LEN;
+                        bodies.push(self.bytes[start..start + body.len].to_vec());
+                    }
                     Step::Moved | Step::More => {}
                     Step::End => return bodies,
                 }
@@ -629,9 +627,7 @@ mod tests {
             for (body, stored) in bodies.iter().zip(&expected) {
                 let bytes: usize = stored.iter().map(|(_, bytes)| bytes.len()).sum();
                 prop_assert_eq!(body.len(), table_len(stored.len()) + bytes);
-                let entries: Result<Vec<(Header, &[u8])>, _> =
-                    entry::parse(body).expect("the table is whole").collect();
-                let entries = entries.expect("every entry is whole");
+                let entries = entry::parsed(body).expect("every entry is whole");
                 let stored: Vec<(Header, &[u8])> =
                     stored.iter().map(|(header, bytes)| (*header, bytes.as_slice())).collect();
                 prop_assert_eq!(entries, stored);

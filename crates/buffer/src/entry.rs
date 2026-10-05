@@ -29,6 +29,13 @@ use types::time::Stamp;
 /// The encoded size of one [`Header`].
 pub(crate) const HEADER_LEN: usize = 16 + 1 + 8 + 4 + 8 + 9 + 1 + 4;
 
+/// The most entries one record holds, and the most parts: with the header block,
+/// one record is one vectored write within `IOV_MAX`.
+pub(crate) const ENTRIES_MAX: usize = 1023;
+
+/// Bytes of the largest table, `table_len(ENTRIES_MAX)`.
+pub(crate) const TABLE_MAX: usize = 4 + ENTRIES_MAX * HEADER_LEN;
+
 /// The bytes of one entry: no block, one, or two. The ring writes them in place,
 /// with no copy, and drops them when the commit that writes them ends.
 #[derive(Clone, Debug, Default)]
@@ -267,6 +274,8 @@ pub(crate) fn write_table(headers: &[Header], into: &mut [u8]) -> usize {
 pub(crate) enum Invalid {
     /// The body ends before the table or the bytes it names.
     Truncated,
+    /// A count of entries over [`ENTRIES_MAX`].
+    Count(u32),
     /// A path byte that is not live or backfill.
     Path(u8),
     /// A `last` presence byte that is not 0 or 1.
@@ -275,67 +284,100 @@ pub(crate) enum Invalid {
     Trailing(usize),
 }
 
-/// Reads the table of `body` and gives each entry with its bytes, in order. The
-/// entries end at the first invalid one, which is the last item.
+/// Reads the table at the start of a body and gives each header, in order.
+/// `start` is the first bytes of the body and holds the whole table; `len` is the
+/// length of the body. The headers end at the first invalid one, which is the
+/// last item.
 ///
 /// # Errors
 ///
-/// [`Invalid::Truncated`] when `body` holds no count or fewer headers than the count.
-/// Each entry checks its own header and bytes.
-pub(crate) fn parse(body: &[u8]) -> Result<Entries<'_>, Invalid> {
-    let (count, rest) = body.split_first_chunk::<4>().ok_or(Invalid::Truncated)?;
+/// [`Invalid::Truncated`] when `start` holds no count or fewer headers than the
+/// count, and [`Invalid::Count`] when the count is over [`ENTRIES_MAX`]. Each header
+/// checks its own fields and that the body holds its bytes.
+///
+/// # Panics
+///
+/// When `start` is longer than `len`.
+pub(crate) fn parse(start: &[u8], len: usize) -> Result<Headers<'_>, Invalid> {
+    assert!(start.len() <= len, "invariant: the body holds its start");
+    let (count, rest) = start.split_first_chunk::<4>().ok_or(Invalid::Truncated)?;
     let count = u32::from_le_bytes(*count);
     let headers_len = usize::try_from(count)
         .ok()
-        .and_then(|count| count.checked_mul(HEADER_LEN))
-        .ok_or(Invalid::Truncated)?;
-    let (headers, bytes) = rest
+        .filter(|&entries| entries <= ENTRIES_MAX)
+        .and_then(|entries| entries.checked_mul(HEADER_LEN))
+        .ok_or(Invalid::Count(count))?;
+    let (headers, rest) = rest
         .split_at_checked(headers_len)
         .ok_or(Invalid::Truncated)?;
-    Ok(Entries { headers, bytes })
+    let bytes = len
+        .checked_sub(start.len())
+        .and_then(|outside| outside.checked_add(rest.len()))
+        .expect("invariant: the body holds its start");
+    Ok(Headers { headers, bytes })
 }
 
-/// The entries of one group commit, in order.
+/// The headers of one group commit, in order.
 #[derive(Clone, Debug)]
-pub(crate) struct Entries<'a> {
+pub(crate) struct Headers<'a> {
     headers: &'a [u8],
-    bytes: &'a [u8],
+    /// Bytes of the body after the table that no header given so far names.
+    bytes: usize,
 }
 
-impl<'a> Iterator for Entries<'a> {
-    type Item = Result<(Header, &'a [u8]), Invalid>;
+impl Iterator for Headers<'_> {
+    type Item = Result<Header, Invalid>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let item = self.entry()?;
+        let item = self.header()?;
         if item.is_err() {
             self.headers = &[];
-            self.bytes = &[];
+            self.bytes = 0;
         }
         Some(item)
     }
 }
 
-impl<'a> Entries<'a> {
-    fn entry(&mut self) -> Option<Result<(Header, &'a [u8]), Invalid>> {
+impl Headers<'_> {
+    fn header(&mut self) -> Option<Result<Header, Invalid>> {
         let Some((header, rest)) = self.headers.split_first_chunk::<HEADER_LEN>()
         else {
-            return (!self.bytes.is_empty())
-                .then_some(Err(Invalid::Trailing(self.bytes.len())));
+            return (self.bytes != 0).then_some(Err(Invalid::Trailing(self.bytes)));
         };
         self.headers = rest;
         let header = match Header::decode(header) {
             Ok(header) => header,
             Err(invalid) => return Some(Err(invalid)),
         };
-        let Some(len) = usize::try_from(header.bytes).ok() else {
+        let Some(bytes) = usize::try_from(header.bytes)
+            .ok()
+            .and_then(|len| self.bytes.checked_sub(len))
+        else {
             return Some(Err(Invalid::Truncated));
         };
-        let Some((bytes, rest)) = self.bytes.split_at_checked(len) else {
-            return Some(Err(Invalid::Truncated));
-        };
-        self.bytes = rest;
-        Some(Ok((header, bytes)))
+        self.bytes = bytes;
+        Some(Ok(header))
     }
+}
+
+/// Each header with its bytes, from a body that is whole in memory.
+#[cfg(test)]
+pub(crate) fn parsed(body: &[u8]) -> Result<Vec<(Header, &[u8])>, Invalid> {
+    let headers = parse(body, body.len())?;
+    let table = body
+        .len()
+        .checked_sub(headers.bytes)
+        .expect("the table is in the body");
+    let mut bytes = body.get(table..).unwrap_or(&[]);
+    headers
+        .map(|header| {
+            let header = header?;
+            let len = usize::try_from(header.bytes).expect("the body holds the bytes");
+            let (mine, rest) = bytes.split_at(len);
+            bytes = rest;
+            Ok((header, mine))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -366,10 +408,6 @@ mod tests {
             body.extend_from_slice(bytes);
         }
         body
-    }
-
-    fn parsed(body: &[u8]) -> Result<Vec<(Header, &[u8])>, Invalid> {
-        parse(body)?.collect()
     }
 
     #[test]
@@ -418,6 +456,18 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_count_over_the_most_entries() {
+        let over = u32::try_from(ENTRIES_MAX + 1).expect("fits");
+        let mut whole = over.to_le_bytes().to_vec();
+        whole.resize(table_len(ENTRIES_MAX + 1), 0);
+        assert_eq!(parsed(&whole), Err(Invalid::Count(over)));
+        assert_eq!(
+            parsed(&u32::MAX.to_le_bytes()),
+            Err(Invalid::Count(u32::MAX))
+        );
+    }
+
+    #[test]
     fn refuses_a_path_or_presence_byte_it_does_not_know() {
         let mut whole = body(&[(header(1), b"a")]);
         whole[4 + 16] = 2;
@@ -431,12 +481,12 @@ mod tests {
     fn ends_at_the_first_bad_entry() {
         let mut whole = body(&[(header(3), b"abc"), (header(2), b"de")]);
         whole[4 + 16] = 2;
-        let mut entries = parse(&whole).expect("the table is whole");
+        let mut entries = parse(&whole, whole.len()).expect("the table is whole");
         assert_eq!(entries.next(), Some(Err(Invalid::Path(2))), "the bad entry");
         assert_eq!(entries.next(), None, "nothing after the bad entry");
         whole[4 + 16] = 1;
         let short = &whole[..whole.len() - 1];
-        let mut entries = parse(short).expect("the table is whole");
+        let mut entries = parse(short, short.len()).expect("the table is whole");
         assert!(
             entries.next().is_some_and(|entry| entry.is_ok()),
             "the first"
@@ -450,7 +500,7 @@ mod tests {
         let mut whole = body(&[(header(3), b"abc")]);
         whole.extend_from_slice(b"junk");
         assert_eq!(parsed(&whole), Err(Invalid::Trailing(4)));
-        let mut entries = parse(&whole).expect("the table is whole");
+        let mut entries = parse(&whole, whole.len()).expect("the table is whole");
         assert!(
             entries.next().is_some_and(|entry| entry.is_ok()),
             "the entry"
