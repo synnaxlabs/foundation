@@ -567,9 +567,15 @@ How to read this record:
   the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
   issuer are not checked. A node sends its certificate when it dials; an SDK client
   sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
-  session protocol gets a new name. Resumption and 0-RTT are off, so rustls gets a
-  fixed time and never reads the OS clock. Randomness inside TLS comes from aws-lc
-  (TLS RANDOMNESS). Decided by `network` in #54.
+  session protocol gets a new name. A session that agrees no ALPN, or another name,
+  ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
+  ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
+  dialing node offers them in that order, and the client's order decides, so nodes
+  agree AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between
+  nodes and "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so
+  an SDK may offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
+  reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS).
+  Decided by `network` in #54; the ALPN check, suites, and groups in #108.
 
 ### 1.8 Consensus, regions, and the spec
 
