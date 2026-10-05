@@ -1,0 +1,723 @@
+//! Cancellation for a connector's run and its parts.
+
+use std::fmt;
+use std::mem;
+use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::task::{Context, Poll, Waker};
+
+/// Cancels a run or one part of it. Clones refer to the same token. Cancelling a
+/// token cancels all its children; cancelling a child leaves its parent live. Any
+/// thread may use it.
+///
+/// ```
+/// let run = connector::cancel::Token::new();
+/// let part = run.child();
+/// run.cancel();
+/// assert!(part.cancelled(), "a child cancels with its parent");
+/// ```
+#[derive(Clone)]
+pub struct Token(Arc<Node>);
+
+impl Token {
+    /// Makes a live root token. The supervisor makes one for each run.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Arc::new(Node {
+            parent: None,
+            cancelled: AtomicBool::new(false),
+            state: Mutex::default(),
+        }))
+    }
+
+    /// Makes a child that cancels when this token cancels. A child of a cancelled
+    /// token starts cancelled.
+    #[must_use]
+    pub fn child(&self) -> Self {
+        let mut parent = self.0.lock();
+        if self.0.cancelled.load(Relaxed) {
+            return Self(Arc::new(Node {
+                parent: None,
+                cancelled: AtomicBool::new(true),
+                state: Mutex::default(),
+            }));
+        }
+        Self(Arc::new_cyclic(|me| Node {
+            parent: Some((
+                Arc::clone(&self.0),
+                parent.children.insert(Weak::clone(me)),
+            )),
+            cancelled: AtomicBool::new(false),
+            state: Mutex::default(),
+        }))
+    }
+
+    /// Cancels this token and its children: wakes every [`Wait`], then runs each hook
+    /// on the calling thread. Later calls do nothing.
+    ///
+    /// # Panics
+    ///
+    /// When a hook panics. The tokens are cancelled, and hooks after it do not run.
+    pub fn cancel(&self) {
+        let mut hooks = Vec::new();
+        let mut nodes = vec![Arc::clone(&self.0)];
+        while let Some(node) = nodes.pop() {
+            let state = {
+                let mut state = node.lock();
+                if node.cancelled.load(Relaxed) {
+                    continue;
+                }
+                node.cancelled.store(true, Release);
+                mem::take(&mut *state)
+            };
+            state.wakers.into_values().for_each(Waker::wake);
+            hooks.extend(state.hooks.into_values());
+            nodes.extend(state.children.into_values().filter_map(|c| c.upgrade()));
+            if let Some((parent, key)) = &node.parent {
+                drop(parent.remove(*key, |state| &mut state.children));
+            }
+        }
+        for hook in hooks {
+            hook();
+        }
+    }
+
+    /// Whether the token is cancelled.
+    #[must_use]
+    pub fn cancelled(&self) -> bool {
+        self.0.cancelled.load(Acquire)
+    }
+
+    /// Returns a future that completes when the token is cancelled. It is safe to
+    /// drop at any time. After its first poll, polling allocates nothing.
+    ///
+    /// ```
+    /// async fn read(cancel: &connector::cancel::Token) {
+    ///     cancel.wait().await;
+    /// }
+    /// ```
+    pub fn wait(&self) -> Wait {
+        Wait {
+            node: Arc::clone(&self.0),
+            key: None,
+        }
+    }
+
+    /// Runs `f` once, on the thread that cancels, to unblock a blocking vendor call.
+    /// That thread may be a shard, so `f` must not block. When the token is already
+    /// cancelled, runs `f` now. Dropping the returned [`Hook`] before cancel removes
+    /// `f`; it does not wait for an `f` that already runs, so `f` must own what it
+    /// touches.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicBool, Ordering};
+    ///
+    /// let cancel = connector::cancel::Token::new();
+    /// let stopped = Arc::new(AtomicBool::new(false));
+    /// let flag = Arc::clone(&stopped);
+    /// let _hook = cancel.on_cancel(move || flag.store(true, Ordering::Relaxed));
+    /// cancel.cancel();
+    /// assert!(stopped.load(Ordering::Relaxed), "the hook ran");
+    /// ```
+    pub fn on_cancel(&self, f: impl FnOnce() + Send + 'static) -> Hook {
+        let mut state = self.0.lock();
+        if self.0.cancelled.load(Relaxed) {
+            drop(state);
+            f();
+            return Hook { node: None };
+        }
+        let key = state.hooks.insert(Box::new(f));
+        Hook {
+            node: Some((Arc::clone(&self.0), key)),
+        }
+    }
+}
+
+impl Default for Token {
+    /// Makes a live root token, as [`Token::new`].
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Token")
+            .field("cancelled", &self.cancelled())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The future from [`Token::wait`].
+#[must_use = "a future does nothing unless it is awaited"]
+pub struct Wait {
+    node: Arc<Node>,
+    /// The waker's slot in `node`, from the first poll on.
+    key: Option<usize>,
+}
+
+impl Future for Wait {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = &mut *self;
+        if this.node.cancelled.load(Acquire) {
+            this.key = None;
+            return Poll::Ready(());
+        }
+        let mut state = this.node.lock();
+        if this.node.cancelled.load(Relaxed) {
+            this.key = None;
+            return Poll::Ready(());
+        }
+        match this.key {
+            Some(key) => state.wakers.get_mut(key).clone_from(cx.waker()),
+            None => this.key = Some(state.wakers.insert(cx.waker().clone())),
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for Wait {
+    fn drop(&mut self) {
+        if let Some(key) = self.key {
+            drop(self.node.remove(key, |state| &mut state.wakers));
+        }
+    }
+}
+
+impl fmt::Debug for Wait {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Wait")
+            .field("cancelled", &self.node.cancelled.load(Acquire))
+            .finish_non_exhaustive()
+    }
+}
+
+/// Keeps a hook from [`Token::on_cancel`] registered. Drop it to remove the hook.
+#[must_use = "dropping a hook removes it"]
+pub struct Hook {
+    /// `None` when the hook already ran in [`Token::on_cancel`].
+    node: Option<(Arc<Node>, usize)>,
+}
+
+impl Drop for Hook {
+    fn drop(&mut self) {
+        if let Some((node, key)) = &self.node {
+            drop(node.remove(*key, |state| &mut state.hooks));
+        }
+    }
+}
+
+impl fmt::Debug for Hook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Hook").finish_non_exhaustive()
+    }
+}
+
+/// One token in the tree. A child holds its parent; a parent holds only weak links.
+/// A child leaves its parent's list once: when it cancels, or at its last drop.
+struct Node {
+    /// The parent and this node's slot in its children.
+    parent: Option<(Arc<Node>, usize)>,
+    /// Set once, under `state`'s lock. After it is set, `state` stays empty, so a
+    /// stale slot key never removes another entry.
+    cancelled: AtomicBool,
+    state: Mutex<State>,
+}
+
+impl Node {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .expect("invariant: nothing panics while it holds a token's lock")
+    }
+
+    /// Takes the entry at `key` out of a slab, unless the token is cancelled. The
+    /// caller drops it after the lock is released, since its drop may run any code.
+    fn remove<T>(
+        &self,
+        key: usize,
+        slab: impl FnOnce(&mut State) -> &mut Slab<T>,
+    ) -> Option<T> {
+        let mut state = self.lock();
+        if self.cancelled.load(Relaxed) {
+            return None;
+        }
+        Some(slab(&mut state).remove(key))
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        if self.cancelled.load(Relaxed) {
+            return;
+        }
+        if let Some((parent, key)) = &self.parent {
+            drop(parent.remove(*key, |state| &mut state.children));
+        }
+    }
+}
+
+#[derive(Default)]
+struct State {
+    wakers: Slab<Waker>,
+    hooks: Slab<Box<dyn FnOnce() + Send>>,
+    children: Slab<Weak<Node>>,
+}
+
+/// Values in reused slots, so a waiter, hook, or child that comes and goes does not
+/// grow its token.
+struct Slab<T> {
+    slots: Vec<Option<T>>,
+    free: Vec<usize>,
+}
+
+impl<T> Default for Slab<T> {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+        }
+    }
+}
+
+impl<T> Slab<T> {
+    fn insert(&mut self, value: T) -> usize {
+        if let Some(key) = self.free.pop() {
+            self.slots[key] = Some(value);
+            key
+        } else {
+            self.slots.push(Some(value));
+            self.slots.len() - 1
+        }
+    }
+
+    fn get_mut(&mut self, key: usize) -> &mut T {
+        self.slots[key]
+            .as_mut()
+            .expect("invariant: a live key names a full slot")
+    }
+
+    fn remove(&mut self, key: usize) -> T {
+        let value = self.slots[key]
+            .take()
+            .expect("invariant: a live key names a full slot");
+        self.free.push(key);
+        value
+    }
+
+    fn into_values(self) -> impl Iterator<Item = T> {
+        self.slots.into_iter().flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::pin;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::task::Wake;
+
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// A waker that counts its wakes.
+    #[derive(Default)]
+    struct Tally(AtomicU64);
+
+    impl Wake for Tally {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, SeqCst);
+        }
+    }
+
+    impl Tally {
+        fn waker() -> (Arc<Self>, Waker) {
+            let tally = Arc::new(Self::default());
+            let waker = Waker::from(Arc::clone(&tally));
+            (tally, waker)
+        }
+
+        fn wakes(&self) -> u64 {
+            self.0.load(SeqCst)
+        }
+    }
+
+    fn poll(wait: Pin<&mut Wait>, waker: &Waker) -> Poll<()> {
+        wait.poll(&mut Context::from_waker(waker))
+    }
+
+    /// Counts how often a hook runs.
+    fn counter() -> (Arc<AtomicU64>, impl FnOnce() + Send + 'static) {
+        let runs = Arc::new(AtomicU64::new(0));
+        let shared = Arc::clone(&runs);
+        (runs, move || {
+            shared.fetch_add(1, SeqCst);
+        })
+    }
+
+    fn entries(token: &Token) -> (usize, usize, usize) {
+        let state = token.0.lock();
+        let live = |slots: &[Option<_>]| slots.iter().flatten().count();
+        (
+            state.wakers.slots.iter().flatten().count(),
+            state.hooks.slots.iter().flatten().count(),
+            live(&state.children.slots),
+        )
+    }
+
+    mod cancel {
+        use super::*;
+
+        #[test]
+        fn wakes_every_waiter() {
+            let token = Token::new();
+            let tallies: Vec<_> = (0..3).map(|_| Tally::waker()).collect();
+            let mut waits: Vec<_> =
+                tallies.iter().map(|_| Box::pin(token.wait())).collect();
+            for (wait, (_, waker)) in waits.iter_mut().zip(&tallies) {
+                assert_eq!(poll(wait.as_mut(), waker), Poll::Pending, "live token");
+            }
+            token.cancel();
+            for (wait, (tally, waker)) in waits.iter_mut().zip(&tallies) {
+                assert_eq!(tally.wakes(), 1, "cancel wakes each waiter once");
+                assert_eq!(poll(wait.as_mut(), waker), Poll::Ready(()), "cancelled");
+            }
+        }
+
+        #[test]
+        fn twice_does_nothing_more() {
+            let token = Token::new();
+            let (runs, f) = counter();
+            let _hook = token.on_cancel(f);
+            token.cancel();
+            token.cancel();
+            assert!(token.cancelled(), "the token is cancelled");
+            assert_eq!(runs.load(SeqCst), 1, "the hook runs once");
+        }
+
+        #[test]
+        fn wakes_waiters_of_children_before_hooks_run() {
+            let token = Token::new();
+            let child = token.child();
+            let (tally, waker) = Tally::waker();
+            let mut wait = pin!(child.wait());
+            assert_eq!(poll(wait.as_mut(), &waker), Poll::Pending, "live token");
+            let seen = Arc::new(AtomicU64::new(u64::MAX));
+            let (shared, observed) = (Arc::clone(&tally), Arc::clone(&seen));
+            let _hook = token.on_cancel(move || observed.store(shared.wakes(), SeqCst));
+            token.cancel();
+            assert_eq!(seen.load(SeqCst), 1, "the child's waiter woke first");
+        }
+    }
+
+    mod child {
+        use super::*;
+
+        #[test]
+        fn cancels_with_its_parent() {
+            let parent = Token::new();
+            let grandchild = parent.child().child();
+            parent.cancel();
+            assert!(grandchild.cancelled(), "a grandchild cancels with its root");
+        }
+
+        #[test]
+        fn leaves_its_parent_live() {
+            let parent = Token::new();
+            let child = parent.child();
+            child.cancel();
+            assert!(child.cancelled(), "the child is cancelled");
+            assert!(!parent.cancelled(), "the parent stays live");
+            assert_eq!(entries(&parent), (0, 0, 0), "the parent forgot the child");
+        }
+
+        #[test]
+        fn of_a_cancelled_token_starts_cancelled() {
+            let parent = Token::new();
+            parent.cancel();
+            assert!(parent.child().cancelled(), "born cancelled");
+        }
+
+        #[test]
+        fn dropped_leaves_no_entry_in_its_parent() {
+            let parent = Token::new();
+            for _ in 0..100 {
+                drop(parent.child().child());
+            }
+            assert_eq!(entries(&parent), (0, 0, 0), "no child is left");
+            assert!(
+                parent.0.lock().children.slots.len() <= 1,
+                "slots are reused"
+            );
+        }
+
+        #[test]
+        fn cancels_through_a_dropped_middle_token() {
+            let root = Token::new();
+            let leaf = root.child().child();
+            root.cancel();
+            assert!(leaf.cancelled(), "the leaf keeps its dropped parent alive");
+        }
+    }
+
+    mod wait {
+        use super::*;
+
+        #[test]
+        fn is_ready_at_once_when_cancelled() {
+            let token = Token::new();
+            token.cancel();
+            let (tally, waker) = Tally::waker();
+            assert_eq!(
+                poll(pin!(token.wait()), &waker),
+                Poll::Ready(()),
+                "cancelled"
+            );
+            assert_eq!(tally.wakes(), 0, "no wake is needed");
+        }
+
+        #[test]
+        fn dropped_leaves_no_waker() {
+            let token = Token::new();
+            let (_, waker) = Tally::waker();
+            for _ in 0..100 {
+                let mut wait = Box::pin(token.wait());
+                assert_eq!(poll(wait.as_mut(), &waker), Poll::Pending, "live token");
+            }
+            assert_eq!(entries(&token), (0, 0, 0), "no waker is left");
+            assert!(token.0.lock().wakers.slots.len() <= 1, "slots are reused");
+        }
+
+        #[test]
+        fn wakes_the_waker_of_the_last_poll() {
+            let token = Token::new();
+            let (first, a) = Tally::waker();
+            let (second, b) = Tally::waker();
+            let mut wait = pin!(token.wait());
+            assert_eq!(poll(wait.as_mut(), &a), Poll::Pending, "live token");
+            assert_eq!(poll(wait.as_mut(), &b), Poll::Pending, "live token");
+            assert_eq!(entries(&token), (1, 0, 0), "one waker per wait");
+            token.cancel();
+            assert_eq!((first.wakes(), second.wakes()), (0, 1), "the newest waker");
+        }
+    }
+
+    mod hook {
+        use super::*;
+
+        #[test]
+        fn runs_once_before_cancel_returns() {
+            let token = Token::new();
+            let (runs, f) = counter();
+            let _hook = token.on_cancel(f);
+            assert_eq!(runs.load(SeqCst), 0, "not before cancel");
+            token.cancel();
+            assert_eq!(runs.load(SeqCst), 1, "the hook ran in cancel");
+        }
+
+        #[test]
+        fn runs_at_once_when_cancelled() {
+            let token = Token::new();
+            token.cancel();
+            let (runs, f) = counter();
+            let hook = token.on_cancel(f);
+            assert_eq!(runs.load(SeqCst), 1, "a late hook runs at once");
+            drop(hook);
+            assert_eq!(runs.load(SeqCst), 1, "dropping it changes nothing");
+        }
+
+        #[test]
+        fn dropped_never_runs() {
+            let token = Token::new();
+            let (runs, f) = counter();
+            drop(token.on_cancel(f));
+            assert_eq!(entries(&token), (0, 0, 0), "the hook is removed");
+            token.cancel();
+            assert_eq!(runs.load(SeqCst), 0, "a dropped hook never runs");
+        }
+
+        #[test]
+        fn may_cancel_tokens_and_add_hooks() {
+            let token = Token::new();
+            let other = Token::new();
+            let (runs, f) = counter();
+            let (inner, again) = (other.clone(), token.clone());
+            let _hook = token.on_cancel(move || {
+                inner.cancel();
+                again.cancel();
+                drop(again.on_cancel(f));
+            });
+            token.cancel();
+            assert!(other.cancelled(), "the hook cancelled another token");
+            assert_eq!(runs.load(SeqCst), 1, "a hook added in a hook runs at once");
+        }
+    }
+
+    /// One step of a script over a tree of tokens.
+    #[derive(Clone, Debug)]
+    enum Op {
+        Child(usize),
+        Cancel(usize),
+        Drop(usize),
+        Hook(usize),
+        DropHook(usize),
+        Wait(usize),
+        DropWait(usize),
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        let i = 0..16_usize;
+        prop_oneof![
+            i.clone().prop_map(Op::Child),
+            i.clone().prop_map(Op::Cancel),
+            i.clone().prop_map(Op::Drop),
+            i.clone().prop_map(Op::Hook),
+            i.clone().prop_map(Op::DropHook),
+            i.clone().prop_map(Op::Wait),
+            i.prop_map(Op::DropWait),
+        ]
+    }
+
+    /// The model of one token: its parent, and whether it is cancelled.
+    struct Model {
+        parent: Option<usize>,
+        cancelled: bool,
+    }
+
+    fn cancelled(model: &[Model], mut node: usize) -> bool {
+        loop {
+            if model[node].cancelled {
+                return true;
+            }
+            match model[node].parent {
+                Some(parent) => node = parent,
+                None => return false,
+            }
+        }
+    }
+
+    /// Node, guard, and run count of a hook, and the count when the guard dropped.
+    type Hooked = (usize, Option<Hook>, Arc<AtomicU64>, Option<u64>);
+
+    /// Node, future, waker, and whether the first poll was ready, of a wait.
+    type Waiting = (usize, Option<Pin<Box<Wait>>>, Arc<Tally>, Waker, bool);
+
+    struct Run {
+        model: Vec<Model>,
+        tokens: Vec<Option<Token>>,
+        hooks: Vec<Hooked>,
+        waits: Vec<Waiting>,
+    }
+
+    impl Run {
+        fn new() -> Self {
+            Self {
+                model: vec![Model {
+                    parent: None,
+                    cancelled: false,
+                }],
+                tokens: vec![Some(Token::new())],
+                hooks: Vec::new(),
+                waits: Vec::new(),
+            }
+        }
+
+        fn cancelled(&self, node: usize) -> bool {
+            cancelled(&self.model, node)
+        }
+
+        fn apply(&mut self, op: &Op) {
+            let pick = |len: usize, i: usize| i % len;
+            match *op {
+                Op::Child(i) => {
+                    let i = pick(self.tokens.len(), i);
+                    if let Some(child) = self.tokens[i].as_ref().map(Token::child) {
+                        self.model.push(Model {
+                            parent: Some(i),
+                            cancelled: false,
+                        });
+                        self.tokens.push(Some(child));
+                    }
+                }
+                Op::Cancel(i) => {
+                    let i = pick(self.tokens.len(), i);
+                    if let Some(token) = &self.tokens[i] {
+                        token.cancel();
+                        self.model[i].cancelled = true;
+                    }
+                }
+                Op::Drop(i) => {
+                    let i = pick(self.tokens.len(), i);
+                    self.tokens[i] = None;
+                }
+                Op::Hook(i) => {
+                    let i = pick(self.tokens.len(), i);
+                    if let Some(token) = &self.tokens[i] {
+                        let (runs, f) = counter();
+                        self.hooks.push((i, Some(token.on_cancel(f)), runs, None));
+                    }
+                }
+                Op::DropHook(i) if !self.hooks.is_empty() => {
+                    let i = pick(self.hooks.len(), i);
+                    let hook = &mut self.hooks[i];
+                    if hook.1.take().is_some() {
+                        hook.3 = Some(hook.2.load(SeqCst));
+                    }
+                }
+                Op::Wait(i) => {
+                    let i = pick(self.tokens.len(), i);
+                    if let Some(token) = &self.tokens[i] {
+                        let (tally, waker) = Tally::waker();
+                        let mut wait = Box::pin(token.wait());
+                        let ready = poll(wait.as_mut(), &waker).is_ready();
+                        assert_eq!(ready, self.cancelled(i), "first poll");
+                        self.waits.push((i, Some(wait), tally, waker, ready));
+                    }
+                }
+                Op::DropWait(i) if !self.waits.is_empty() => {
+                    let i = pick(self.waits.len(), i);
+                    self.waits[i].1 = None;
+                }
+                Op::DropHook(_) | Op::DropWait(_) => {}
+            }
+        }
+
+        fn check(&mut self) {
+            for (i, token) in self.tokens.iter().enumerate() {
+                if let Some(token) = token {
+                    assert_eq!(token.cancelled(), self.cancelled(i), "token {i}");
+                }
+            }
+            for (node, _, runs, frozen) in &self.hooks {
+                let expected = frozen.unwrap_or(u64::from(self.cancelled(*node)));
+                assert_eq!(runs.load(SeqCst), expected, "hook on token {node}");
+            }
+            for (node, wait, tally, waker, ready) in &mut self.waits {
+                let cancelled = cancelled(&self.model, *node);
+                if let Some(wait) = wait {
+                    let woken = cancelled && !*ready;
+                    assert_eq!(tally.wakes(), u64::from(woken), "wake on token {node}");
+                    let ready = poll(wait.as_mut(), waker).is_ready();
+                    assert_eq!(ready, cancelled, "poll on token {node}");
+                }
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn matches_the_model(ops in prop::collection::vec(op(), 1..64)) {
+            let mut run = Run::new();
+            for op in &ops {
+                run.apply(op);
+                run.check();
+            }
+        }
+    }
+}
