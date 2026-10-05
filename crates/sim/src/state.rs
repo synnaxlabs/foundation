@@ -1,19 +1,24 @@
 //! The state of one run, shared by the scheduler and the drivers.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::IoSliceMut;
 use std::mem;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::task::{Wake, Waker};
+use std::task::{Poll, Wake, Waker};
 use std::time::Instant;
 
+use env::net::udp::{self, Meta, Transmit};
 use env::rng::Rng;
 use env::shards::Main;
 use env::tasks::Task;
-use env::threads::{Body, Error};
+use env::thread::Error;
+use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
-use crate::node;
+use crate::net::{Bound, Network};
+use crate::{link, node};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
 
@@ -27,11 +32,8 @@ pub(crate) fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
 }
 
 pub(crate) struct State {
-    /// True time: zero when the run starts.
+    /// True time: zero when the run starts. It never passes [`State::last`].
     now: Monotonic,
-    /// The end of true time: the last instant at which every node's clocks can be
-    /// read. It never falls below `now`.
-    last: Monotonic,
     nodes: Vec<Node>,
     threads: BTreeMap<u64, Thread>,
     /// The thread of each live task.
@@ -47,13 +49,20 @@ pub(crate) struct State {
     /// The `Instant` at `Monotonic(0)` on every node.
     epoch: Instant,
     next: u64,
+    net: Network,
+    /// A hash of every pick and every datagram event, in order.
+    digest: DefaultHasher,
 }
 
 struct Node {
-    /// True time when the node was added.
-    added: Monotonic,
+    /// The true time at which the node's clocks read `monotonic` and `wall`.
+    base: Monotonic,
     monotonic: Monotonic,
     wall: Stamp,
+    wall_error: Option<Span>,
+    /// The true time at which the node runs again after its pause, or `None` when the
+    /// pause never ends.
+    resumes: Option<Monotonic>,
     cores: NonZeroUsize,
     entropy: Rng,
 }
@@ -64,7 +73,7 @@ impl Node {
         let monotonic = u64::MAX - self.monotonic.0;
         let wall = u64::try_from(i128::from(i64::MAX) - i128::from(self.wall.nanos()))
             .expect("invariant: i64::MAX minus an i64 fits u64");
-        Monotonic(self.added.0.saturating_add(monotonic.min(wall)))
+        Monotonic(self.base.0.saturating_add(monotonic.min(wall)))
     }
 }
 
@@ -79,17 +88,18 @@ struct Thread {
 pub(crate) enum Next {
     /// Poll a ready task.
     Poll,
-    /// Move true time to the first timer.
-    Fire(Monotonic),
+    /// Move true time to the first timer, the first arrival, or the first end of a
+    /// pause that holds a ready task.
+    Advance(Monotonic),
 }
 
 /// When a timer fires.
 pub(crate) enum Due {
     /// Its deadline has passed.
     Passed,
-    /// At this true time.
+    /// At this true time, once true time reaches it.
     At(Monotonic),
-    /// Never: its deadline is past the end of true time.
+    /// Never: its deadline is past the range of true time.
     Never,
 }
 
@@ -99,10 +109,9 @@ pub(crate) enum Start {
 }
 
 impl State {
-    pub(crate) fn new(epoch: Instant) -> Self {
+    pub(crate) fn new(epoch: Instant, net: Network) -> Self {
         Self {
             now: Monotonic::default(),
-            last: Monotonic(u64::MAX),
             nodes: Vec::new(),
             threads: BTreeMap::new(),
             tasks: BTreeMap::new(),
@@ -112,6 +121,8 @@ impl State {
             current: None,
             epoch,
             next: 0,
+            net,
+            digest: DefaultHasher::new(),
         }
     }
 
@@ -129,37 +140,51 @@ impl State {
     /// index.
     pub(crate) fn add(&mut self, config: node::Config, entropy: Rng) -> usize {
         let node = Node {
-            added: self.now,
+            base: self.now,
             monotonic: config.monotonic,
             wall: config.wall,
+            wall_error: config.wall_error,
+            resumes: Some(self.now),
             cores: config.cores,
             entropy,
         };
-        self.last = self.last.min(node.last());
         self.nodes.push(node);
         self.nodes.len() - 1
     }
 
-    /// True time `span` from now, or `None` past the end of true time.
-    pub(crate) fn after(&self, span: Span) -> Option<Monotonic> {
-        self.now.checked_add(span).filter(|&end| end <= self.last)
+    /// The end of true time: the last instant at which every node's clocks can be
+    /// read. It is never below `now`.
+    fn last(&self) -> Monotonic {
+        (self.nodes.iter().map(Node::last).min()).unwrap_or(Monotonic(u64::MAX))
     }
 
-    /// True time since `node` was added.
+    /// True time `span` from now, or `None` past the end of true time.
+    pub(crate) fn after(&self, span: Span) -> Option<Monotonic> {
+        self.now.checked_add(span).filter(|&end| end <= self.last())
+    }
+
+    /// True time since the base of `node`.
     fn since(&self, node: usize) -> u64 {
-        self.now.0 - self.nodes[node].added.0
+        self.now.0 - self.nodes[node].base.0
     }
 
     pub(crate) fn monotonic(&self, node: usize) -> Monotonic {
         Monotonic(self.nodes[node].monotonic.0 + self.since(node))
     }
 
-    pub(crate) fn wall(&self, node: usize) -> Stamp {
+    pub(crate) fn wall(&self, node: usize) -> env::wall::Reading {
         let nanos =
             i128::from(self.nodes[node].wall.nanos()) + i128::from(self.since(node));
         let nanos = i64::try_from(nanos)
             .expect("invariant: true time ends before a wall clock");
-        Stamp::from_nanos(nanos)
+        env::wall::Reading {
+            time: Stamp::from_nanos(nanos),
+            error: self.nodes[node].wall_error,
+        }
+    }
+
+    pub(crate) fn set_wall_error(&mut self, node: usize, error: Option<Span>) {
+        self.nodes[node].wall_error = error;
     }
 
     pub(crate) fn cores(&self, node: usize) -> NonZeroUsize {
@@ -170,6 +195,37 @@ impl State {
         self.nodes[node].entropy.fill(bytes);
     }
 
+    /// Steps the wall of `node` by `span`, or returns `false` when the wall would
+    /// leave the range of a [`Stamp`].
+    pub(crate) fn step_wall(&mut self, node: usize, span: Span) -> bool {
+        let Some(wall) = self.wall(node).time.checked_add(span) else {
+            return false;
+        };
+        let (now, monotonic) = (self.now, self.monotonic(node));
+        let stepped = &mut self.nodes[node];
+        (stepped.base, stepped.monotonic, stepped.wall) = (now, monotonic, wall);
+        true
+    }
+
+    /// Holds the tasks of `node` until `span` from now; a negative span is zero. A
+    /// pause that overlaps another ends at the later end.
+    pub(crate) fn pause(&mut self, node: usize, span: Span) {
+        let end = self.now.checked_add(span.max(Span::ZERO));
+        let resumes = &mut self.nodes[node].resumes;
+        *resumes = (*resumes).zip(end).map(|(old, end)| old.max(end));
+    }
+
+    /// When the node that runs `task` runs again after its pause.
+    fn resumes(&self, task: u64) -> Option<Monotonic> {
+        self.nodes[self.threads[&self.tasks[&task]].node].resumes
+    }
+
+    /// The ready tasks whose nodes are not paused.
+    fn runnable(&self) -> impl Iterator<Item = u64> + '_ {
+        (self.ready.iter().copied())
+            .filter(|&task| self.resumes(task).is_some_and(|at| at <= self.now))
+    }
+
     /// When a timer of `node` with `deadline` fires.
     pub(crate) fn due(&self, node: usize, deadline: Monotonic) -> Due {
         let now = self.monotonic(node);
@@ -177,8 +233,8 @@ impl State {
             return Due::Passed;
         }
         match self.now.0.checked_add(deadline.0 - now.0) {
-            Some(at) if at <= self.last.0 => Due::At(Monotonic(at)),
-            _ => Due::Never,
+            Some(at) => Due::At(Monotonic(at)),
+            None => Due::Never,
         }
     }
 
@@ -193,9 +249,54 @@ impl State {
         self.timers.remove(&(at, key))
     }
 
-    /// The node of the thread that the scheduler polls now, if any.
-    pub(crate) fn current(&self) -> Option<usize> {
-        self.current.map(|thread| self.threads[&thread].node)
+    /// The thread that the scheduler polls now and its node, if any.
+    pub(crate) fn current(&self) -> Option<(u64, usize)> {
+        self.current
+            .map(|thread| (thread, self.threads[&thread].node))
+    }
+
+    /// Sets the link from node `from` to node `to`.
+    pub(crate) fn link(&mut self, from: usize, to: usize, config: link::Config) {
+        self.net.link(from, to, config);
+    }
+
+    /// Binds a UDP socket on `node`.
+    pub(crate) fn bind(
+        &mut self,
+        node: usize,
+        config: &udp::Config,
+    ) -> Result<Bound, env::net::Error> {
+        self.net.bind(node, config)
+    }
+
+    /// Removes socket `socket`, and returns its waker for the caller to drop after it
+    /// releases the lock.
+    pub(crate) fn close(&mut self, socket: u64) -> Option<Waker> {
+        self.net.close(socket)
+    }
+
+    /// Sends `transmit` from socket `socket` now.
+    pub(crate) fn send(
+        &mut self,
+        socket: u64,
+        transmit: &Transmit<'_>,
+    ) -> Result<(), env::net::Error> {
+        self.net.send(self.now, &mut self.digest, socket, transmit)
+    }
+
+    /// Receives from socket `socket`, as [`Network::recv`].
+    pub(crate) fn recv(
+        &mut self,
+        socket: u64,
+        waker: Waker,
+        buffers: &mut [IoSliceMut<'_>],
+        meta: &mut [Meta],
+    ) -> (Poll<usize>, Option<Waker>) {
+        self.net.recv(socket, waker, buffers, meta)
+    }
+
+    pub(crate) fn digest(&self) -> u64 {
+        self.digest.finish()
     }
 
     /// Adds a thread whose first task is ready, and returns the thread's key.
@@ -239,38 +340,46 @@ impl State {
     }
 
     /// The next step of a run that stops at true time `end`, or `None` when it stops
-    /// there or when no task is ready and no timer waits. A run that stops at `end`
-    /// is at `end`.
+    /// there or when nothing can run again. A run that stops at `end` is at `end`, or
+    /// at the end of true time when a wall step in the run brought it nearer.
     pub(crate) fn next(&mut self, end: Option<Monotonic>) -> Option<Next> {
-        if !self.ready.is_empty() {
+        if self.runnable().next().is_some() {
             return Some(Next::Poll);
         }
-        let due = self.timers.first_key_value().map(|(&(due, _), _)| due);
-        match (due, end) {
-            (Some(due), Some(end)) if due > end => {
-                self.now = end;
+        let last = self.last();
+        let timer = self.timers.first_key_value().map(|(&(at, _), _)| at);
+        let pauses = (self.ready.iter()).filter_map(|&task| self.resumes(task));
+        let at = timer
+            .into_iter()
+            .chain(self.net.first())
+            .chain(pauses)
+            .filter(|&at| at <= last)
+            .min();
+        match at {
+            Some(at) if end.is_none_or(|end| at <= end) => Some(Next::Advance(at)),
+            _ => {
+                if let Some(end) = end {
+                    self.now = end.min(last);
+                }
                 None
             }
-            (Some(due), _) => Some(Next::Fire(due)),
-            (None, Some(end)) => {
-                self.now = end;
-                None
-            }
-            (None, None) => None,
         }
     }
 
-    /// Takes a ready task at random and makes its thread the current one. Returns
-    /// the task, its thread, and the thread's start when the task is its first.
+    /// Takes a ready task of a node that is not paused, at random, and makes its
+    /// thread the current one. Returns the task, its thread, and the thread's start
+    /// when the task is its first.
     ///
     /// # Panics
     ///
-    /// When no task is ready.
+    /// When no such task is ready.
     pub(crate) fn pick(&mut self, rng: &mut Rng) -> (u64, u64, Option<Start>) {
-        let ready = u64::try_from(self.ready.len()).expect("invariant: usize fits u64");
-        let nth = usize::try_from(rng.below(ready))
+        let runnable: Vec<u64> = self.runnable().collect();
+        let count = u64::try_from(runnable.len()).expect("invariant: usize fits u64");
+        let nth = usize::try_from(rng.below(count))
             .expect("invariant: a value below a usize fits usize");
-        let task = *(self.ready.iter().nth(nth)).expect("invariant: nth is below len");
+        let task = runnable[nth];
+        task.hash(&mut self.digest);
         self.ready.remove(&task);
         let thread = self.tasks[&task];
         self.current = Some(thread);
@@ -311,16 +420,18 @@ impl State {
         tasks
     }
 
-    /// Moves true time to `due` and returns the wakers of the timers due by then.
-    pub(crate) fn advance(&mut self, due: Monotonic) -> Vec<Waker> {
-        self.now = due;
+    /// Moves true time to `at`, delivers the datagrams that arrive by then, and
+    /// returns the wakers of the timers due and of the sockets that receive.
+    pub(crate) fn advance(&mut self, at: Monotonic) -> Vec<Waker> {
+        self.now = at;
         let mut wakers = Vec::new();
         while let Some(timer) = self.timers.first_entry() {
-            if timer.key().0 > due {
+            if timer.key().0 > at {
                 break;
             }
             wakers.push(timer.remove());
         }
+        wakers.extend(self.net.deliver(at, &mut self.digest));
         wakers
     }
 

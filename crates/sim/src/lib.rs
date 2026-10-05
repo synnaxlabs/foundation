@@ -3,14 +3,17 @@
 //!
 //! One [`Sim`] runs every node of a mesh on the calling thread. A seeded scheduler
 //! polls one ready task at a time, and true time moves only when no task is ready: to
-//! the next timer. The same seed and the same calls give the same run.
+//! the next timer or datagram arrival. Datagrams cross [`link`]s with delay and
+//! faults. The same seed and the same calls give the same run.
 //!
 //! A task panic becomes [`Error::Panicked`] only in a build that unwinds on panic, as
 //! tests do. A build with `panic = "abort"` ends the process at the panic.
 
+pub mod link;
 pub mod node;
 
 mod drivers;
+mod net;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -27,6 +30,7 @@ use std::time::Instant;
 use env::rng::Rng;
 use types::time::{Monotonic, Span};
 
+use crate::net::Network;
 use crate::node::Node;
 use crate::state::{Futures, Next, Shared, Start, State, lock};
 
@@ -35,21 +39,25 @@ use crate::state::{Futures, Next, Shared, Start, State, lock};
 /// ```
 /// let config = sim::Config { seed: 0x2a, ..sim::Config::default() };
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Config {
     /// The replay value: the same seed and the same calls give the same run.
     pub seed: u64,
     /// The most steps in one call to [`Sim::run`] or [`Sim::run_for`]. A step polls
-    /// one task or moves true time to the next timer.
+    /// one task, or moves true time to the next timer, arrival, or end of a pause.
     pub steps_max: u64,
+    /// The link from each node to each node, itself too, until [`Sim::link`] sets
+    /// another.
+    pub link: link::Config,
 }
 
 impl Default for Config {
-    /// Seed 0 and ten million steps.
+    /// Seed 0, ten million steps, and the default link.
     fn default() -> Self {
         Self {
             seed: 0,
             steps_max: 10_000_000,
+            link: link::Config::default(),
         }
     }
 }
@@ -82,19 +90,26 @@ pub struct Sim {
 
 impl Sim {
     /// Makes a run with no nodes, at true time zero.
+    ///
+    /// # Panics
+    ///
+    /// When `config.link` has a negative span or a chance outside 0 to 1.
     #[must_use]
     #[expect(
         clippy::disallowed_methods,
         reason = "the epoch is an opaque base: only differences from it are read"
     )]
     pub fn new(config: Config) -> Self {
+        config.link.check();
         let mut streams = Rng::from_seed(config.seed);
-        let state = State::new(Instant::now());
+        let scheduler = Rng::from_seed(streams.next_u64());
+        let net = Network::new(config.link, Rng::from_seed(streams.next_u64()));
+        let state = State::new(Instant::now(), net);
         Self {
             config,
             shared: Arc::new(Mutex::new(state)),
             futures: Rc::default(),
-            scheduler: Rng::from_seed(streams.next_u64()),
+            scheduler,
             streams,
         }
     }
@@ -108,16 +123,40 @@ impl Sim {
         Node(drivers::Node { shared, node })
     }
 
+    /// Sets the link from `from` to `to`, one way, for the datagrams sent from now on.
+    ///
+    /// # Panics
+    ///
+    /// When a node belongs to another run, or when `config` has a negative span or a
+    /// chance outside 0 to 1.
+    pub fn link(&mut self, from: &Node, to: &Node, config: link::Config) {
+        for node in [from, to] {
+            let own = Arc::ptr_eq(&node.0.shared, &self.shared);
+            assert!(own, "{node:?} belongs to another sim");
+        }
+        config.check();
+        lock(&self.shared).link(from.0.node, to.0.node, config);
+    }
+
+    /// A hash of every scheduler pick and every datagram event so far: the time,
+    /// addresses, length, and fate, never the bytes. In one build, the same seed and
+    /// the same calls give the same digest.
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        lock(&self.shared).digest()
+    }
+
     /// Runs until every thread of every node has ended.
     ///
     /// # Errors
     ///
     /// - [`Error::Panicked`] when a task panics. The run stops there, and the
-    ///   thread's [`env::threads::Handle::join`] returns
-    ///   [`env::threads::Error::Panicked`].
+    ///   thread's [`env::thread::Handle::join`] returns
+    ///   [`env::thread::Error::Panicked`].
     /// - [`Error::Steps`] past [`Config::steps_max`] steps.
-    /// - [`Error::Stuck`] when threads remain but no task is ready and no timer
-    ///   waits.
+    /// - [`Error::Stuck`] when threads remain but nothing can run again: no task is
+    ///   ready on a node that runs, and no timer, arrival, or pause ends before true
+    ///   time.
     pub fn run(&mut self) -> Result<(), Error> {
         self.drive(None)
     }
@@ -127,7 +166,8 @@ impl Sim {
     ///
     /// True time ends where the first clock of a node can count no further: the
     /// monotonic clock at `u64::MAX` nanoseconds, or the wall clock in 2262. A timer
-    /// past that end never fires.
+    /// or arrival past that end comes only if a wall step moves the end past it. A
+    /// wall step in the run can bring the end nearer; the run then stops there.
     ///
     /// # Errors
     ///
@@ -158,8 +198,8 @@ impl Sim {
             })?;
             match next {
                 Next::Poll => self.step()?,
-                Next::Fire(due) => {
-                    let wakers = lock(&self.shared).advance(due);
+                Next::Advance(at) => {
+                    let wakers = lock(&self.shared).advance(at);
                     wakers.into_iter().for_each(Waker::wake);
                 }
             }
@@ -185,7 +225,7 @@ impl Sim {
         lock(&self.shared).release();
         let Err(payload) = run else { return Ok(()) };
         let name = lock(&self.shared).name(thread);
-        let panicked = env::threads::Error::Panicked { name: name.clone() };
+        let panicked = env::thread::Error::Panicked { name: name.clone() };
         let tasks = lock(&self.shared).end(thread, Err(panicked));
         self.drop_futures(&tasks);
         Err(Error::Panicked {

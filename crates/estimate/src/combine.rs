@@ -353,7 +353,8 @@ mod tests {
                 match combine(Monotonic(now), drift(ppb), &filters(&sources)) {
                     Ok(_) | Err(Error::Bound { .. } | Error::NoMajority { .. }) => {}
                     Err(e @ (Error::Backwards { .. } | Error::Disjoint
-                        | Error::Drift { .. } | Error::NoSources)) => {
+                        | Error::Drift { .. } | Error::NoSources | Error::Open
+                        | Error::Crossed)) => {
                         prop_assert!(false, "unexpected {e}");
                     }
                 }

@@ -65,9 +65,15 @@ pub enum Error {
         /// What broke, for people to read.
         reason: String,
     },
-    /// The shard's pool has no room for a received message. The message stays
-    /// queued.
-    Pool(block::Error),
+    /// The shard's pool has no room for a received message now. The message stays
+    /// queued; call again when a block frees.
+    Pool {
+        /// The message's size.
+        bytes: usize,
+        /// The bytes of the pool's budget that are free. A block for `bytes` needs
+        /// more.
+        available: usize,
+    },
     /// A [`Config`](crate::Config) value is out of range.
     Config {
         /// The field's name.
@@ -107,26 +113,16 @@ impl fmt::Display for Error {
                 )
             }
             Self::Broken { reason } => write!(f, "the connection broke: {reason}"),
-            Self::Pool(error) => write!(f, "no room for a received message: {error}"),
+            Self::Pool { bytes, available } => write!(
+                f,
+                "no room for a received message of {bytes} bytes ({available} free)"
+            ),
             Self::Config { field, rule } => write!(f, "config {field} {rule}"),
         }
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Pool(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<block::Error> for Error {
-    fn from(error: block::Error) -> Self {
-        Self::Pool(error)
-    }
-}
+impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
@@ -227,14 +223,14 @@ mod tests {
         }
 
         #[test]
-        fn includes_the_pool_error() {
-            let pool = block::Error::Exhausted {
-                requested: 10,
+        fn gives_the_size_and_the_room_of_the_pool() {
+            let error = Error::Pool {
+                bytes: 10,
                 available: 4,
             };
             check(
-                &Error::from(pool.clone()),
-                &format!("no room for a received message: {pool}"),
+                &error,
+                "no room for a received message of 10 bytes (4 free)",
             );
         }
 
@@ -245,28 +241,6 @@ mod tests {
                 rule: "must be positive",
             };
             check(&error, "config idle must be positive");
-        }
-    }
-
-    mod source {
-        use std::error::Error as _;
-
-        use super::*;
-
-        #[test]
-        fn of_a_pool_error_is_the_pool_error() {
-            let pool = block::Error::Exhausted {
-                requested: 10,
-                available: 4,
-            };
-            let error = Error::from(pool.clone());
-            let source = error.source().map(ToString::to_string);
-            assert_eq!(source, Some(pool.to_string()));
-        }
-
-        #[test]
-        fn of_other_errors_is_none() {
-            assert!(Error::TimedOut.source().is_none());
         }
     }
 }

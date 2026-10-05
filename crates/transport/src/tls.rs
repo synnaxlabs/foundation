@@ -7,14 +7,14 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
+use rustls::crypto::aws_lc_rs::sign::any_eddsa_type;
 use rustls::crypto::{
     CryptoProvider, WebPkiSupportedAlgorithms, verify_tls13_signature,
 };
-use rustls::pki_types::{
-    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
-};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::server::ParsedCertificate;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::server::{NoServerSessionStorage, ParsedCertificate};
+use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::time_provider::TimeProvider;
 use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName,
@@ -25,7 +25,7 @@ use types::node::{PrivateKey, PublicKey};
 use crate::session::Peer;
 
 /// The protocol both sides offer in ALPN. A new session protocol gets a new name.
-pub(crate) const ALPN: &[u8] = b"foundation/1";
+const ALPN: &[u8] = b"foundation/1";
 
 /// Ed25519 (1.3.101.112) as an `AlgorithmIdentifier`.
 const ED25519: &[u8] = b"\x30\x05\x06\x03\x2b\x65\x70";
@@ -55,47 +55,62 @@ const _: () = assert!(
     "the certificate header holds its length"
 );
 
-/// The node's certificate and private key, made once per transport.
-pub(crate) struct Credentials {
-    certificate: CertificateDer<'static>,
-    private_key: PrivatePkcs8KeyDer<'static>,
+/// The node's TLS: its certificate and key, and the configs that use them. Made once
+/// per transport.
+pub(crate) struct Tls {
+    provider: Arc<CryptoProvider>,
+    resolver: Arc<SingleCertAndKey>,
+    time: Arc<dyn TimeProvider>,
+    server: Arc<ServerConfig>,
 }
 
-impl Credentials {
+impl Tls {
     /// Makes a self-signed certificate for the node key. The same key always gives
     /// the same bytes.
     pub(crate) fn new(private_key: &PrivateKey) -> Self {
         let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
             .expect("invariant: any 32 bytes are an Ed25519 private key");
-        let key = pair.public_key().as_ref();
-        let mut tbs = Vec::with_capacity(TBS_BYTES);
-        for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, key] {
-            tbs.extend_from_slice(part);
-        }
-        let signature = pair.sign(&tbs);
-        let mut certificate = Vec::with_capacity(CERTIFICATE_BYTES);
-        for part in [CERTIFICATE, &tbs, ED25519, SIGNATURE, signature.as_ref()] {
-            certificate.extend_from_slice(part);
-        }
+        let certificate = issue(pair.public_key().as_ref(), |tbs| {
+            pair.sign(tbs).as_ref().to_vec()
+        });
+        let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
+        let key = any_eddsa_type(&pkcs8)
+            .expect("invariant: the PKCS#8 template holds an Ed25519 key");
+        Self::with(CertifiedKey::new(vec![certificate.into()], key))
+    }
+
+    fn with(certified: CertifiedKey) -> Self {
+        let provider = Arc::new(provider());
+        let resolver = Arc::new(SingleCertAndKey::from(certified));
+        let time: Arc<dyn TimeProvider> = Arc::new(Epoch);
+        let algorithms = provider.signature_verification_algorithms;
+        #[expect(clippy::disallowed_methods, reason = "it passes the fixed time")]
+        let mut server = ServerConfig::builder_with_details(
+            Arc::clone(&provider),
+            Arc::clone(&time),
+        )
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("invariant: aws-lc-rs has TLS 1.3 suites")
+        .with_client_cert_verifier(Arc::new(AnyKey { algorithms }))
+        .with_cert_resolver(Arc::<SingleCertAndKey>::clone(&resolver));
+        server.alpn_protocols = vec![ALPN.to_vec()];
+        server.send_tls13_tickets = 0;
         Self {
-            certificate: certificate.into(),
-            private_key: [PKCS8, &private_key.0].concat().into(),
+            provider,
+            resolver,
+            time,
+            server: Arc::new(server),
         }
     }
 
-    fn private_key(&self) -> PrivateKeyDer<'static> {
-        PrivateKeyDer::Pkcs8(self.private_key.clone_key())
-    }
-}
-
-/// Dials a node: accepts the server only when it proves `expected`.
-pub(crate) fn client(
-    credentials: &Credentials,
-    expected: PublicKey,
-) -> Arc<ClientConfig> {
-    let provider = provider();
-    let algorithms = provider.signature_verification_algorithms;
-    let mut config = ClientConfig::builder_with_details(provider, Arc::new(Epoch))
+    /// Dials a node: accepts the server only when it proves `expected`.
+    pub(crate) fn client(&self, expected: PublicKey) -> Arc<ClientConfig> {
+        let algorithms = self.provider.signature_verification_algorithms;
+        #[expect(clippy::disallowed_methods, reason = "it passes the fixed time")]
+        let mut config = ClientConfig::builder_with_details(
+            Arc::clone(&self.provider),
+            Arc::clone(&self.time),
+        )
         .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("invariant: aws-lc-rs has TLS 1.3 suites")
         .dangerous()
@@ -103,62 +118,141 @@ pub(crate) fn client(
             expected,
             algorithms,
         }))
-        .with_client_auth_cert(
-            vec![credentials.certificate.clone()],
-            credentials.private_key(),
-        )
-        .expect("invariant: the private key signed the certificate");
-    config.alpn_protocols = vec![ALPN.to_vec()];
-    config.resumption = rustls::client::Resumption::disabled();
-    Arc::new(config)
+        .with_client_cert_resolver(Arc::<SingleCertAndKey>::clone(&self.resolver));
+        config.alpn_protocols = vec![ALPN.to_vec()];
+        config.resumption = rustls::client::Resumption::disabled();
+        Arc::new(config)
+    }
+
+    /// Accepts nodes and clients. A client may send no certificate.
+    pub(crate) fn server(&self) -> Arc<ServerConfig> {
+        Arc::clone(&self.server)
+    }
 }
 
-/// Accepts nodes and clients. A client may send no certificate.
-pub(crate) fn server(credentials: &Credentials) -> Arc<ServerConfig> {
-    let provider = provider();
-    let algorithms = provider.signature_verification_algorithms;
-    let mut config = ServerConfig::builder_with_details(provider, Arc::new(Epoch))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .expect("invariant: aws-lc-rs has TLS 1.3 suites")
-        .with_client_cert_verifier(Arc::new(AnyKey { algorithms }))
-        .with_single_cert(
-            vec![credentials.certificate.clone()],
-            credentials.private_key(),
-        )
-        .expect("invariant: the private key signed the certificate");
-    config.alpn_protocols = vec![ALPN.to_vec()];
-    config.session_storage = Arc::new(NoServerSessionStorage {});
-    config.send_tls13_tickets = 0;
-    Arc::new(config)
+/// aws-lc's TLS 1.3 suites and groups in a fixed order, so no rustls feature changes
+/// them. The dialer's order decides, so nodes agree AES-128-GCM and X25519MLKEM768 on
+/// every CPU. A FIPS build must drop `ChaCha20`.
+fn provider() -> CryptoProvider {
+    use rustls::crypto::aws_lc_rs::{cipher_suite, default_provider, kx_group};
+    CryptoProvider {
+        cipher_suites: vec![
+            cipher_suite::TLS13_AES_128_GCM_SHA256,
+            cipher_suite::TLS13_AES_256_GCM_SHA384,
+            cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+        ],
+        kx_groups: vec![
+            kx_group::X25519MLKEM768,
+            kx_group::X25519,
+            kx_group::SECP256R1,
+            kx_group::SECP384R1,
+        ],
+        ..default_provider()
+    }
 }
 
-fn provider() -> Arc<CryptoProvider> {
-    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+/// The template certificate for `key`, with the signature `sign` gives for its
+/// to-be-signed part.
+fn issue(key: &[u8], sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
+    let mut tbs = Vec::with_capacity(TBS_BYTES);
+    for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, key] {
+        tbs.extend_from_slice(part);
+    }
+    let signature = sign(&tbs);
+    let mut certificate = Vec::with_capacity(CERTIFICATE_BYTES);
+    for part in [CERTIFICATE, &tbs, ED25519, SIGNATURE, &signature] {
+        certificate.extend_from_slice(part);
+    }
+    certificate
 }
 
-/// The peer of a handshake whose certificates a verifier here accepted.
+/// The peer of a finished handshake, from the protocol it agreed and the
+/// certificates a verifier here accepted.
+///
+/// # Errors
+///
+/// [`rustls::Error::NoApplicationProtocol`] when the protocol is not [`ALPN`]. rustls
+/// requires a protocol only over QUIC.
 ///
 /// # Panics
 ///
-/// When the certificate carries no Ed25519 key, which the verifiers refuse.
-pub(crate) fn peer(certificates: Option<&[CertificateDer<'_>]>) -> Peer {
-    match certificates.and_then(<[_]>::first) {
+/// When the certificate carries no node key, which the verifiers refuse.
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "another key here is a verifier defect, not a peer error"
+)]
+pub(crate) fn peer(
+    protocol: Option<&[u8]>,
+    certificates: Option<&[CertificateDer<'_>]>,
+) -> Result<Peer, rustls::Error> {
+    if protocol != Some(ALPN) {
+        return Err(rustls::Error::NoApplicationProtocol);
+    }
+    Ok(match certificates.and_then(<[_]>::first) {
         None => Peer::Client,
         Some(certificate) => Peer::Node(
             key(certificate).expect("invariant: a verifier accepted this certificate"),
         ),
-    }
+    })
 }
 
-/// The node key that `certificate` carries.
+/// The node key that `certificate` carries. A key of small order is not a node key:
+/// a signature for it passes with no private key.
 fn key(certificate: &CertificateDer<'_>) -> Result<PublicKey, rustls::Error> {
     let parsed = ParsedCertificate::try_from(certificate)?;
     parsed
         .subject_public_key_info()
         .strip_prefix(SPKI)
         .and_then(|key| <[u8; 32]>::try_from(key).ok())
+        .filter(|key| !small_order(*key))
         .map(PublicKey)
         .ok_or_else(|| CertificateError::ApplicationVerificationFailure.into())
+}
+
+/// The y of each Ed25519 point of small order, and p and p + 1, which aws-lc's
+/// portable decoder reads as 0 and 1.
+const SMALL_ORDER: [[u8; 32]; 7] = [
+    // 0 and p: order 4.
+    [0; 32],
+    [
+        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+    ],
+    // 1 and p + 1: the identity.
+    [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+    ],
+    // p - 1: order 2.
+    [
+        0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+    ],
+    // Order 8.
+    [
+        0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4, 0x89, 0xf2,
+        0xef, 0x98, 0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6, 0x33, 0x39, 0xb1, 0x38,
+        0x02, 0x88, 0x6d, 0x53, 0xfc, 0x05,
+    ],
+    [
+        0xc7, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d,
+        0x10, 0x67, 0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7,
+        0xfd, 0x77, 0x92, 0xac, 0x03, 0x7a,
+    ],
+];
+
+/// Whether `key` encodes a point of small order, with either sign of x.
+fn small_order(mut key: [u8; 32]) -> bool {
+    key[31] &= 0x7f;
+    SMALL_ORDER.contains(&key)
 }
 
 /// Accepts a server only when it proves the key the caller dialed.
@@ -190,7 +284,7 @@ impl ServerCertVerifier for Pinned {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        unreachable!("invariant: TLS 1.2 is not compiled in")
+        unreachable!("invariant: the config offers only TLS 1.3")
     }
 
     fn verify_tls13_signature(
@@ -237,7 +331,7 @@ impl ClientCertVerifier for AnyKey {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        unreachable!("invariant: TLS 1.2 is not compiled in")
+        unreachable!("invariant: the config offers only TLS 1.3")
     }
 
     fn verify_tls13_signature(
@@ -254,10 +348,11 @@ impl ClientCertVerifier for AnyKey {
     }
 }
 
-/// rustls reads wall time on each handshake, and its default reads the OS clock.
-/// Nothing here uses the time: the verifiers ignore dates and resumption is off.
+/// The wall time this crate gives a library that asks for one: `UNIX_EPOCH`. The
+/// defaults read the OS clock. Nothing here uses the time: the verifiers ignore
+/// dates, and resumption, Retry, and `NEW_TOKEN` are off.
 #[derive(Debug)]
-struct Epoch;
+pub(crate) struct Epoch;
 
 impl TimeProvider for Epoch {
     fn current_time(&self) -> Option<UnixTime> {
@@ -269,8 +364,20 @@ impl TimeProvider for Epoch {
 mod tests {
     use std::net::{IpAddr, Ipv6Addr};
 
+    use aws_lc_rs::signature::{
+        ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, UnparsedPublicKey,
+    };
     use proptest::prelude::*;
-    use rustls::{CertificateError, Connection, HandshakeKind};
+    use rustls::client::ResolvesClientCert;
+    use rustls::crypto::SupportedKxGroup;
+    use rustls::crypto::aws_lc_rs::sign::any_ecdsa_type;
+    use rustls::crypto::aws_lc_rs::{cipher_suite, default_provider, kx_group};
+    use rustls::pki_types::PrivateKeyDer;
+    use rustls::sign::{Signer, SigningKey};
+    use rustls::{
+        CertificateError, CipherSuite, ClientConnection, Connection, HandshakeKind,
+        NamedGroup, ServerConnection, SignatureAlgorithm, SupportedCipherSuite,
+    };
 
     use super::*;
 
@@ -293,37 +400,51 @@ mod tests {
         }
     }
 
-    /// Joins `client` and `server` in memory with a full handshake. Returns the peer
-    /// each side sees, client first, or the first error either side raised.
-    fn handshake(
+    /// Joins `client` and `server` in memory until both finish the handshake and the
+    /// records sent with the last flight arrive. Returns both, or the first error
+    /// either side raised.
+    fn connect(
         client: Arc<ClientConfig>,
         server: Arc<ServerConfig>,
-    ) -> Result<(Peer, Peer), rustls::Error> {
+    ) -> Result<(ClientConnection, ServerConnection), rustls::Error> {
         let name = ServerName::from(IpAddr::from(Ipv6Addr::LOCALHOST));
-        let mut client = Connection::from(rustls::ClientConnection::new(client, name)?);
-        let mut server = Connection::from(rustls::ServerConnection::new(server)?);
+        let mut client = Connection::from(ClientConnection::new(client, name)?);
+        let mut server = Connection::from(ServerConnection::new(server)?);
         for _ in 0..8 {
-            if !client.is_handshaking() && !server.is_handshaking() {
-                assert_eq!(client.alpn_protocol(), Some(ALPN));
-                assert_eq!(server.alpn_protocol(), Some(ALPN));
-                assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
-                return Ok((
-                    peer(client.peer_certificates()),
-                    peer(server.peer_certificates()),
-                ));
-            }
             pass(&mut client, &mut server);
             server.process_new_packets()?;
             pass(&mut server, &mut client);
             client.process_new_packets()?;
+            if !client.is_handshaking() && !server.is_handshaking() {
+                let (Connection::Client(client), Connection::Server(server)) =
+                    (client, server)
+                else {
+                    unreachable!("built as a client and a server");
+                };
+                return Ok((client, server));
+            }
         }
         panic!("the handshake did not finish in 8 rounds");
     }
 
+    /// The peer each side sees after a full handshake, client first.
+    fn handshake(
+        client: Arc<ClientConfig>,
+        server: Arc<ServerConfig>,
+    ) -> Result<(Peer, Peer), rustls::Error> {
+        let (client, server) = connect(client, server)?;
+        assert_eq!(client.handshake_kind(), Some(HandshakeKind::Full));
+        Ok((
+            peer(client.alpn_protocol(), client.peer_certificates())?,
+            peer(server.alpn_protocol(), server.peer_certificates())?,
+        ))
+    }
+
     /// A client like an SDK: it pins the server's key and has no certificate.
-    fn anonymous(expected: PublicKey) -> Arc<ClientConfig> {
-        let provider = provider();
+    fn anonymous(provider: CryptoProvider, expected: PublicKey) -> Arc<ClientConfig> {
+        let provider = Arc::new(provider);
         let algorithms = provider.signature_verification_algorithms;
+        #[expect(clippy::disallowed_methods, reason = "it passes the fixed time")]
         let mut config = ClientConfig::builder_with_details(provider, Arc::new(Epoch))
             .with_protocol_versions(&[&rustls::version::TLS13])
             .expect("TLS 1.3 is available")
@@ -337,25 +458,111 @@ mod tests {
         Arc::new(config)
     }
 
-    /// A server that presents `certificate` but signs with `signer`'s key.
-    fn borrowing(certificate: &Credentials, signer: &Credentials) -> Arc<ServerConfig> {
-        let provider = provider();
-        let algorithms = provider.signature_verification_algorithms;
-        let key = provider
-            .key_provider
-            .load_private_key(signer.private_key())
-            .expect("a valid key");
-        let certified =
-            rustls::sign::CertifiedKey::new(vec![certificate.certificate.clone()], key);
-        let mut config = ServerConfig::builder_with_details(provider, Arc::new(Epoch))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .expect("TLS 1.3 is available")
-            .with_client_cert_verifier(Arc::new(AnyKey { algorithms }))
-            .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(
-                certified,
-            )));
-        config.alpn_protocols = vec![ALPN.to_vec()];
-        Arc::new(config)
+    /// The node's certificate and key, as its resolver gives them.
+    fn certified(tls: &Tls) -> Arc<CertifiedKey> {
+        let schemes = [SignatureScheme::ED25519];
+        ResolvesClientCert::resolve(&*tls.resolver, &[], &schemes).expect("a key")
+    }
+
+    fn certificate(tls: &Tls) -> CertificateDer<'static> {
+        certified(tls).cert[0].clone()
+    }
+
+    /// TLS that presents `certificate`'s certificate but signs with `signer`'s key.
+    fn borrowing(certificate: &Tls, signer: &Tls) -> Tls {
+        Tls::with(CertifiedKey::new(
+            certified(certificate).cert.clone(),
+            Arc::clone(&certified(signer).key),
+        ))
+    }
+
+    /// TLS with an ECDSA P-256 certificate, that signs with ECDSA whatever schemes
+    /// the peer asks for.
+    fn ecdsa() -> Tls {
+        const P256: &[u8] = b"\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\
+            \x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00";
+        let sec1 = [
+            b"\x30\x31\x02\x01\x01\x04\x20".as_slice(),
+            &[1; 32],
+            b"\xa0\x0a\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07",
+        ]
+        .concat();
+        let pair =
+            EcdsaKeyPair::from_private_key_der(&ECDSA_P256_SHA256_ASN1_SIGNING, &sec1)
+                .expect("a P-256 key");
+        let mut tbs = b"\x30\x81\xba\xa0\x03\x02\x01\x02\x02\x01\x01".to_vec();
+        for part in [
+            ED25519,
+            NAME,
+            VALIDITY,
+            NAME,
+            P256,
+            pair.public_key().as_ref(),
+        ] {
+            tbs.extend_from_slice(part);
+        }
+        assert_eq!(tbs.len(), 3 + 0xba);
+        let mut der = b"\x30\x82\x01\x07".to_vec();
+        for part in [&tbs[..], ED25519, SIGNATURE, &[0; 64]] {
+            der.extend_from_slice(part);
+        }
+        assert_eq!(der.len(), 4 + 0x107);
+        let key = any_ecdsa_type(&PrivateKeyDer::Sec1(sec1.into())).expect("ECDSA");
+        Tls::with(CertifiedKey::new(vec![der.into()], Arc::new(Ecdsa(key))))
+    }
+
+    #[derive(Debug)]
+    struct Ecdsa(Arc<dyn SigningKey>);
+
+    impl SigningKey for Ecdsa {
+        fn choose_scheme(&self, _: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+            self.0
+                .choose_scheme(&[SignatureScheme::ECDSA_NISTP256_SHA256])
+        }
+
+        fn algorithm(&self) -> SignatureAlgorithm {
+            self.0.algorithm()
+        }
+    }
+
+    /// The identity point of Ed25519: a public key that has no private key.
+    const IDENTITY: [u8; 32] = {
+        let mut point = [0; 32];
+        point[0] = 1;
+        point
+    };
+
+    /// Signs every message with `R = identity, S = 0`, with no private key.
+    #[derive(Debug)]
+    struct Forged;
+
+    impl SigningKey for Forged {
+        fn choose_scheme(&self, _: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+            Some(Box::new(Self))
+        }
+
+        fn algorithm(&self) -> SignatureAlgorithm {
+            SignatureAlgorithm::ED25519
+        }
+    }
+
+    impl Signer for Forged {
+        fn sign(&self, _: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+            Ok([IDENTITY, [0; 32]].concat())
+        }
+
+        fn scheme(&self) -> SignatureScheme {
+            SignatureScheme::ED25519
+        }
+    }
+
+    /// TLS for `key`, a point of small order, made with no private key.
+    fn keyless(key: [u8; 32]) -> Tls {
+        let certificate = issue(&key, |_| vec![0; 64]);
+        Tls::with(CertifiedKey::new(
+            vec![certificate.into()],
+            Arc::new(Forged),
+        ))
     }
 
     mod handshake {
@@ -364,10 +571,8 @@ mod tests {
         #[test]
         fn when_key_matches_both_sides_see_the_other_node() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
-            let peers = handshake(
-                client(&Credentials::new(&a), public(&b)),
-                server(&Credentials::new(&b)),
-            );
+            let peers =
+                handshake(Tls::new(&a).client(public(&b)), Tls::new(&b).server());
             assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Node(public(&a)))));
         }
 
@@ -378,10 +583,8 @@ mod tests {
                 PrivateKey([2; 32]),
                 PrivateKey([3; 32]),
             );
-            let peers = handshake(
-                client(&Credentials::new(&a), public(&c)),
-                server(&Credentials::new(&b)),
-            );
+            let peers =
+                handshake(Tls::new(&a).client(public(&c)), Tls::new(&b).server());
             assert_eq!(
                 peers,
                 Err(CertificateError::ApplicationVerificationFailure.into())
@@ -391,15 +594,20 @@ mod tests {
         #[test]
         fn when_client_has_no_certificate_the_server_sees_a_client() {
             let b = PrivateKey([2; 32]);
-            let peers = handshake(anonymous(public(&b)), server(&Credentials::new(&b)));
+            let peers = handshake(
+                anonymous(default_provider(), public(&b)),
+                Tls::new(&b).server(),
+            );
             assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Client)));
         }
 
         #[test]
-        fn when_repeated_it_does_not_resume() {
+        fn when_server_sends_tickets_the_node_does_not_resume() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
-            let client = client(&Credentials::new(&a), public(&b));
-            let server = server(&Credentials::new(&b));
+            let client = Tls::new(&a).client(public(&b));
+            let mut server = (*Tls::new(&b).server()).clone();
+            server.send_tls13_tickets = 2;
+            let server = Arc::new(server);
             for _ in 0..2 {
                 let peers = handshake(Arc::clone(&client), Arc::clone(&server));
                 assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Node(public(&a)))));
@@ -407,17 +615,195 @@ mod tests {
         }
 
         #[test]
-        fn when_certificate_is_borrowed_the_signature_fails() {
+        fn when_client_is_an_sdk_it_does_not_resume() {
+            let b = PrivateKey([2; 32]);
+            let client = anonymous(default_provider(), public(&b));
+            let server = Tls::new(&b).server();
+            for _ in 0..2 {
+                let peers = handshake(Arc::clone(&client), Arc::clone(&server));
+                assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Client)));
+            }
+        }
+
+        #[test]
+        fn when_client_certificate_is_borrowed_the_server_refuses() {
+            let (thief, b, victim) = (
+                PrivateKey([1; 32]),
+                PrivateKey([2; 32]),
+                PrivateKey([3; 32]),
+            );
+            let peers = handshake(
+                borrowing(&Tls::new(&victim), &Tls::new(&thief)).client(public(&b)),
+                Tls::new(&b).server(),
+            );
+            assert_eq!(peers, Err(CertificateError::BadSignature.into()));
+        }
+
+        #[test]
+        fn when_client_key_is_ecdsa_the_server_refuses() {
+            let b = PrivateKey([2; 32]);
+            let peers = handshake(ecdsa().client(public(&b)), Tls::new(&b).server());
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_both_are_nodes_they_agree_aes_128_gcm_and_the_hybrid() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let (client, _) =
+                connect(Tls::new(&a).client(public(&b)), Tls::new(&b).server())
+                    .expect("a handshake");
+            let agreed = (
+                client.negotiated_cipher_suite().map(|suite| suite.suite()),
+                client
+                    .negotiated_key_exchange_group()
+                    .map(rustls::crypto::SupportedKxGroup::name),
+            );
+            assert_eq!(
+                agreed,
+                (
+                    Some(CipherSuite::TLS13_AES_128_GCM_SHA256),
+                    Some(NamedGroup::X25519MLKEM768)
+                )
+            );
+        }
+
+        /// The suites of NODE KEY TLS, in the order a node offers them.
+        fn suites() -> [SupportedCipherSuite; 3] {
+            [
+                cipher_suite::TLS13_AES_128_GCM_SHA256,
+                cipher_suite::TLS13_AES_256_GCM_SHA384,
+                cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            ]
+        }
+
+        /// The groups of NODE KEY TLS, in the order a node offers them.
+        fn groups() -> [&'static dyn SupportedKxGroup; 4] {
+            [
+                kx_group::X25519MLKEM768,
+                kx_group::X25519,
+                kx_group::SECP256R1,
+                kx_group::SECP384R1,
+            ]
+        }
+
+        #[test]
+        fn when_a_node_dials_it_offers_the_suites_and_groups_in_order() {
+            let provider = provider();
+            let ids = |suites: &[SupportedCipherSuite]| {
+                suites
+                    .iter()
+                    .map(SupportedCipherSuite::suite)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(ids(&provider.cipher_suites), ids(&suites()));
+            let names = |groups: &[&dyn SupportedKxGroup]| {
+                groups.iter().map(|group| group.name()).collect::<Vec<_>>()
+            };
+            assert_eq!(names(&provider.kx_groups), names(&groups()));
+        }
+
+        #[test]
+        fn when_an_sdk_offers_one_suite_and_group_the_server_agrees() {
+            let b = PrivateKey([2; 32]);
+            let server = Tls::new(&b).server();
+            for suite in suites() {
+                for group in groups() {
+                    let provider = CryptoProvider {
+                        cipher_suites: vec![suite],
+                        kx_groups: vec![group],
+                        ..default_provider()
+                    };
+                    let client = anonymous(provider, public(&b));
+                    let peers = handshake(client, Arc::clone(&server));
+                    let expected = Ok((Peer::Node(public(&b)), Peer::Client));
+                    assert_eq!(peers, expected, "{suite:?} {group:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn when_server_certificate_is_borrowed_the_client_refuses() {
             let (a, thief, victim) = (
                 PrivateKey([1; 32]),
                 PrivateKey([2; 32]),
                 PrivateKey([3; 32]),
             );
             let peers = handshake(
-                client(&Credentials::new(&a), public(&victim)),
-                borrowing(&Credentials::new(&victim), &Credentials::new(&thief)),
+                Tls::new(&a).client(public(&victim)),
+                borrowing(&Tls::new(&victim), &Tls::new(&thief)).server(),
             );
             assert_eq!(peers, Err(CertificateError::BadSignature.into()));
+        }
+
+        #[test]
+        fn when_client_key_is_the_identity_point_the_server_refuses() {
+            let b = PrivateKey([2; 32]);
+            let peers =
+                handshake(keyless(IDENTITY).client(public(&b)), Tls::new(&b).server());
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_server_key_is_the_identity_point_the_client_refuses() {
+            let a = PrivateKey([1; 32]);
+            let peers = handshake(
+                Tls::new(&a).client(PublicKey(IDENTITY)),
+                keyless(IDENTITY).server(),
+            );
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_dialed_key_is_all_zero_no_keyless_server_passes() {
+            let a = PrivateKey([1; 32]);
+            let client = Tls::new(&a).client(PublicKey([0; 32]));
+            let server = keyless([0; 32]).server();
+            for _ in 0..64 {
+                assert_eq!(
+                    handshake(Arc::clone(&client), Arc::clone(&server)),
+                    Err(CertificateError::ApplicationVerificationFailure.into())
+                );
+            }
+        }
+    }
+
+    mod alpn {
+        use super::*;
+
+        #[test]
+        fn when_client_offers_no_protocol_the_server_refuses() {
+            let b = PrivateKey([2; 32]);
+            let mut config = (*anonymous(default_provider(), public(&b))).clone();
+            config.alpn_protocols.clear();
+            let (_, server) = connect(Arc::new(config), Tls::new(&b).server())
+                .expect("rustls finishes a handshake over TCP with no protocol");
+            assert_eq!(
+                peer(server.alpn_protocol(), server.peer_certificates()),
+                Err(rustls::Error::NoApplicationProtocol)
+            );
+        }
+
+        #[test]
+        fn when_server_agrees_no_protocol_the_client_refuses() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let mut config = (*Tls::new(&b).server()).clone();
+            config.alpn_protocols.clear();
+            let (client, _) =
+                connect(Tls::new(&a).client(public(&b)), Arc::new(config))
+                    .expect("rustls finishes a handshake over TCP with no protocol");
+            assert_eq!(
+                peer(client.alpn_protocol(), client.peer_certificates()),
+                Err(rustls::Error::NoApplicationProtocol)
+            );
         }
     }
 
@@ -426,7 +812,7 @@ mod tests {
 
         #[test]
         fn refuses_a_key_that_is_not_ed25519() {
-            let mut der = Credentials::new(&PrivateKey([1; 32])).certificate.to_vec();
+            let mut der = certificate(&Tls::new(&PrivateKey([1; 32]))).to_vec();
             let at = der
                 .windows(SPKI.len())
                 .position(|window| window == SPKI)
@@ -446,6 +832,37 @@ mod tests {
                 Err(CertificateError::BadEncoding.into())
             );
         }
+
+        #[test]
+        fn refuses_each_encoding_of_a_point_of_small_order() {
+            for hex in [
+                "0100000000000000000000000000000000000000000000000000000000000000",
+                "0100000000000000000000000000000000000000000000000000000000000080",
+                "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+                "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000080",
+                "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+                "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+                "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+                "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+            ] {
+                let mut encoding = [0; 32];
+                for (byte, pair) in encoding.iter_mut().zip(hex.as_bytes().chunks(2)) {
+                    let pair = std::str::from_utf8(pair).expect("ASCII");
+                    *byte = u8::from_str_radix(pair, 16).expect("hex");
+                }
+                assert_eq!(
+                    key(&certificate(&keyless(encoding))),
+                    Err(CertificateError::ApplicationVerificationFailure.into()),
+                    "{hex}"
+                );
+            }
+        }
     }
 
     mod certificate {
@@ -455,17 +872,30 @@ mod tests {
             #[test]
             fn carries_the_public_key(bytes: [u8; 32]) {
                 let private_key = PrivateKey(bytes);
-                let credentials = Credentials::new(&private_key);
-                let expected = public(&private_key);
-                prop_assert_eq!(key(&credentials.certificate), Ok(expected));
+                let certificate = certificate(&Tls::new(&private_key));
+                prop_assert_eq!(key(&certificate), Ok(public(&private_key)));
             }
         }
 
         #[test]
         fn is_the_same_for_the_same_key() {
-            let first = Credentials::new(&PrivateKey([1; 32])).certificate;
-            let second = Credentials::new(&PrivateKey([1; 32])).certificate;
+            let first = certificate(&Tls::new(&PrivateKey([1; 32])));
+            let second = certificate(&Tls::new(&PrivateKey([1; 32])));
             assert_eq!(first, second);
+        }
+
+        #[test]
+        fn is_signed_by_its_own_key() {
+            let private_key = PrivateKey([1; 32]);
+            let certificate = certificate(&Tls::new(&private_key));
+            let der = certificate.as_ref();
+            let tbs = &der[CERTIFICATE.len()..][..TBS_BYTES];
+            let signature = &der[der.len() - 64..];
+            let verifier = UnparsedPublicKey::new(
+                &aws_lc_rs::signature::ED25519,
+                public(&private_key).0,
+            );
+            assert_eq!(verifier.verify(tbs, signature), Ok(()));
         }
     }
 }

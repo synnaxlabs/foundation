@@ -1,6 +1,9 @@
 //! The hot path makes no heap allocation. This binary has no test harness: the count
 //! covers each thread, and a harness allocates on its own thread at any time.
 
+#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
+
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -30,8 +33,7 @@ fn main() {
     );
 
     let (mut producer, mut consumer) = ring::new(Config {
-        capacity: 4,
-        spins: 0,
+        capacity: NonZeroUsize::new(4).expect("not zero"),
     });
     let tallies = [Arc::new(Tally::default()), Arc::new(Tally::default())];
     let wakers = tallies
@@ -64,4 +66,13 @@ fn main() {
     assert_eq!(allocations, 0, "the hot path allocated");
     let counts = tallies.each_ref().map(|tally| tally.0.load(Relaxed));
     assert_eq!(counts, [32, 32], "each park got one wake");
+
+    let (mut writer, reader) = ring::latest::new([0_u64; 6]);
+    let ((), allocations) = ALLOCATOR.count(|| {
+        for round in 1..=64_u64 {
+            writer.update(|value| value.map(|word| word + 1));
+            assert_eq!(reader.read(|value| value[5]), round, "the newest value");
+        }
+    });
+    assert_eq!(allocations, 0, "latest allocated");
 }

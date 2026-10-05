@@ -1,5 +1,7 @@
 # Mutants that no test can catch, each with the reason.
 exclude_re = [
+  # Benchmarks ship in no binary; the run itself checks them.
+  '^bench/',
   # `main` reads the arguments and calls a task. Each task has its own tests.
   'xtask/src/main\.rs:.*(replace main ->| in main$)',
   # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
@@ -7,6 +9,8 @@ exclude_re = [
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
+  # `len < ALIGN` and `len <= ALIGN` pick the same payload at `len == ALIGN`.
+  'crates/block/src/lib\.rs:.*replace < with <= in class_of',
   # Stubs that panic until #68 fills them; #68 removes this line.
   'crates/transport/src/(datagram|session|stream)\.rs:',
   # `Vec::leak(Vec::new())` is the same empty slice as `&[]`.

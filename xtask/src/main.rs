@@ -6,6 +6,7 @@ mod build;
 mod cfg;
 mod field;
 mod files;
+mod globals;
 mod map;
 mod miri;
 mod oracles;
@@ -24,11 +25,12 @@ fn main() -> ExitCode {
     #[expect(clippy::disallowed_methods, reason = "a dev tool reads its arguments")]
     let result = match std::env::args().nth(1).as_deref() {
         Some("layers") => layers(root),
+        Some("globals") => globals::check(root),
         Some("oracles") => oracles::check(root),
         Some(name @ ("loom" | "shuttle")) => cfg::test(root, name),
         Some("miri") => miri::run(root),
         _ => {
-            eprintln!("usage: cargo xtask <layers|oracles|loom|shuttle|miri>");
+            eprintln!("usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>");
             return ExitCode::FAILURE;
         }
     };
@@ -55,7 +57,13 @@ fn layers(root: &Path) -> Result<(), Vec<String>> {
         let Some(name) = package["name"].as_str() else {
             continue;
         };
-        if name == "xtask" {
+        let bench = package["manifest_path"].as_str().is_some_and(|path| {
+            Path::new(path)
+                .components()
+                .any(|c| c.as_os_str() == "bench")
+        });
+        // Tools and benchmarks ship in no binary, so the crate map does not cover them.
+        if name == "xtask" || bench {
             continue;
         }
         let Some(entry) = map::find(name) else {
@@ -145,7 +153,7 @@ mod tests {
         };
         assert_eq!(
             layers(&fixture()),
-            Err(vec![missing("a"), missing("model")])
+            Err(vec![missing("a"), missing("globals"), missing("model")])
         );
     }
 

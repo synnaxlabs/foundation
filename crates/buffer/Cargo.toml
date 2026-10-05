@@ -6,6 +6,9 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+block = { path = "../block" }
+crc32c = { workspace = true }
+types = { path = "../types" }
 
 [lints]
 workspace = true

@@ -1,3 +1,12 @@
 {
-  "autoCompactWindow": 300000
+  "autoCompactWindow": 200000,
+  "promptCacheTtl": "5m",
+  "enabledPlugins": {
+    "vercel@claude-plugins-official": false,
+    "figma@claude-plugins-official": false,
+    "linear@claude-plugins-official": false,
+    "clangd-lsp@claude-plugins-official": false,
+    "gopls-lsp@claude-plugins-official": false,
+    "lua-lsp@claude-plugins-official": false
+  }
 }

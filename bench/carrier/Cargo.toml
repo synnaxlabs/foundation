@@ -1,0 +1,15 @@
+[package]
+name = "carrier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+noq = { workspace = true, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+rustls = { workspace = true, features = ["aws_lc_rs", "std"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
+
+[lints]
+workspace = true

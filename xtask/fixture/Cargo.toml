@@ -1,4 +1,4 @@
 # A workspace for the tests of xtask. It is not a member of the Foundation workspace.
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "bench/*"]
 resolver = "3"

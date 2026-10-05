@@ -1,6 +1,6 @@
-//! Byte-level values shared by every crate: time, sample types, keys, names,
-//! selectors, quality, control authority, and content digests. Frames, series, and key
-//! sets join them here.
+//! Byte-level values shared by every crate: time, sample types, keys, key sets, names,
+//! selectors, quality, control authority, and content digests. Frames and series join
+//! them here.
 //!
 //! These types describe layout only. What a value means (enum names, units) lives in
 //! `spec`.
@@ -8,6 +8,7 @@
 pub mod authority;
 pub mod channel;
 pub mod digest;
+pub mod frame;
 pub mod hash;
 pub mod name;
 pub mod node;

@@ -1,13 +1,15 @@
 # Raft conformance
 
-Election scenarios ported from the tests of etcd/raft
+Election and replication scenarios ported from the tests of etcd/raft
 (<https://github.com/etcd-io/raft>, commit `1c0011d2c6b7`, Copyright 2015 The etcd
 Authors, Apache License 2.0). `crates/raft` runs them as its `conformance` test. The
 `[[test]]` entry in `crates/raft/Cargo.toml` is part of this oracle: to remove it is
 to weaken the oracle.
 
-`LICENSE` is the license of the etcd source. `election.rs` is a modified work: it
-is a port from Go to Rust, and the port rules below list the changes.
+`LICENSE` is the license of the etcd source. `election.rs`, `replication.rs`, and
+`common.rs` (the test network and the node disks the scenarios share) are modified
+works: ports from Go to Rust, and the port rules below list the changes. `main.rs` is
+the root of the test binary.
 
 ```sh
 cargo test -p raft --test conformance
@@ -18,9 +20,12 @@ cargo test -p raft --test conformance
 - Each scenario keeps the name and the steps of its etcd source.
 - Foundation's Raft always runs PreVote and CheckQuorum. etcd runs some scenarios with
   one of them off. Such a scenario is adapted, and its comment states the difference.
-- This phase has no log replication. A new leader sends a heartbeat where etcd sends
-  an append, and a scenario sets a node's last log position directly.
-- A scenario reaches a state only through the public surface of `raft`.
+- A scenario reaches a state only through the public surface of `raft`: a node
+  starts from its stored state and log, and an election runs through messages where
+  etcd calls `becomeLeader`. A `Disk` does what each `Ready` says, so a scenario reads
+  the log and the applied entries that etcd reads from `raftLog`.
+- A message that etcd hands to a handler directly carries the term the handler
+  expects.
 
 ## Scenarios
 
@@ -42,8 +47,23 @@ cargo test -p raft --test conformance
 | `free_stuck_candidate_with_check_quorum` | `TestFreeStuckCandidateWithCheckQuorum` |
 | `non_promotable_voter_with_check_quorum` | `TestNonPromotableVoterWithCheckQuorum` |
 | `disruptive_follower_prevote` | `TestDisruptiveFollowerPreVote` |
+| `leader_start_replication` | `TestLeaderStartReplication` |
+| `leader_commit_entry` | `TestLeaderCommitEntry` |
+| `leader_acknowledge_commit` | `TestLeaderAcknowledgeCommit` |
+| `leader_commit_preceding_entries` | `TestLeaderCommitPrecedingEntries` |
+| `follower_commit_entry` | `TestFollowerCommitEntry` |
+| `follower_check_msg_app` | `TestFollowerCheckMsgApp` |
+| `follower_append_entries` | `TestFollowerAppendEntries` |
+| `leader_sync_follower_log` | `TestLeaderSyncFollowerLog` |
+| `leader_only_commits_log_from_current_term` | `TestLeaderOnlyCommitsLogFromCurrentTerm` |
+| `handle_msg_app` | `TestHandleMsgApp` |
+| `handle_heartbeat` | `TestHandleHeartbeat` |
+| `handle_heartbeat_resp` | `TestHandleHeartbeatResp` |
+| `msg_app_resp_wait_reset` | `TestMsgAppRespWaitReset` |
+| `log_replication` | `TestLogReplication` |
 
-Not ported: etcd tests that need log replication, learners, or leader transfer, and
-tests that set private state. The unit tests in `crates/raft` cover the single-node
-cases (`TestCandidateConcede`, `TestStepIgnoreOldTermMsg`, `TestAllServerStepdown`,
-`TestCampaignWhileLeader`, `TestPastElectionTimeout`).
+Not ported: etcd tests that need snapshots, learners, configuration changes, or
+leader transfer, and tests that set private state (`TestLeaderIncreaseNext`,
+`TestSendAppendForProgressProbe`, `TestRecvMsgBeat`). The unit tests in `crates/raft`
+cover the single-node cases (`TestCandidateConcede`, `TestStepIgnoreOldTermMsg`,
+`TestAllServerStepdown`, `TestCampaignWhileLeader`, `TestPastElectionTimeout`).

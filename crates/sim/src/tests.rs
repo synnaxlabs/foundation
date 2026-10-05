@@ -1,5 +1,7 @@
 //! Tests of a simulated run through the `env` handles that production code gets.
 
+mod net;
+
 use std::collections::BTreeSet;
 use std::future::pending;
 use std::pin::Pin;
@@ -8,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use crate::{Config, Error, Sim, node};
-use env::threads::Error as Thread;
+use env::thread;
 use proptest::prelude::*;
 use types::time::{Monotonic, Span, Stamp};
 
@@ -44,6 +46,7 @@ fn sim(seed: u64) -> Sim {
     Sim::new(Config {
         seed,
         steps_max: 10_000,
+        ..Config::default()
     })
 }
 
@@ -211,8 +214,11 @@ fn each_node_reads_its_own_wall_clock() {
         ..node::Config::default()
     });
     sim.run_for(Span::SECOND).unwrap();
-    assert_eq!(a.wall().now(), node::Config::default().wall + Span::SECOND);
-    assert_eq!(b.wall().now(), Stamp::from_nanos(-7) + Span::SECOND);
+    assert_eq!(
+        a.wall().now().time,
+        node::Config::default().wall + Span::SECOND
+    );
+    assert_eq!(b.wall().now().time, Stamp::from_nanos(-7) + Span::SECOND);
 }
 
 fn bytes(seed: u64) -> ([u8; 16], [u8; 16]) {
@@ -265,7 +271,7 @@ fn a_panic_ends_the_run_and_its_thread() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "shard-0".into()
         })
     );
@@ -292,7 +298,7 @@ fn a_panic_in_a_spawned_task_ends_its_shard() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "shard-0".into()
         })
     );
@@ -304,6 +310,7 @@ fn a_run_stops_past_the_step_limit() {
     let mut sim = Sim::new(Config {
         seed: 0,
         steps_max: 100,
+        ..Config::default()
     });
     let node = sim.node(node::Config::default());
     let _handle = node.shards().start(shard("shard-0"), |_| async {
@@ -340,21 +347,10 @@ fn a_run_with_threads_that_nothing_can_wake_is_stuck() {
 }
 
 #[test]
-fn a_shard_cannot_pin_past_the_node_cores() {
+fn a_shard_pins_to_the_last_node_core() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
     assert_eq!(node.shards().cores().get(), 4);
-    let config = env::shards::Config {
-        name: "shard-4".into(),
-        core: Some(4),
-    };
-    assert_eq!(
-        node.shards().start(config, |_| async {}).unwrap_err(),
-        Thread::Pin {
-            name: "shard-4".into(),
-            core: 4
-        }
-    );
     let config = env::shards::Config {
         name: "shard-3".into(),
         core: Some(3),
@@ -365,23 +361,35 @@ fn a_shard_cannot_pin_past_the_node_cores() {
 }
 
 #[test]
+#[should_panic(expected = "shard-4 asks for core 4 of 4")]
+fn a_shard_past_the_node_cores_panics() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let config = env::shards::Config {
+        name: "shard-4".into(),
+        core: Some(4),
+    };
+    drop(node.shards().start(config, |_| async {}));
+}
+
+#[test]
 fn a_thread_name_with_a_nul_byte_starts() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
     let shard = node
         .shards()
         .start(shard("a\0b"), |_| async { panic!("shard") });
-    let thread = node.threads().start("c\0d", || async {});
+    let handle = node.threads().start("c\0d", || async {});
     let e = sim.run().unwrap_err();
     assert!(matches!(e, Error::Panicked { thread, .. } if thread == "a\0b"));
     assert_eq!(
         shard.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "a\0b".into()
         })
     );
     sim.run().unwrap();
-    thread.unwrap().join().unwrap();
+    handle.unwrap().join().unwrap();
 }
 
 #[test]
@@ -414,7 +422,7 @@ fn a_sleep_on_the_clock_of_another_node_panics() {
         sim.run(),
         Err(Error::Panicked {
             thread: "b-0".into(),
-            message: "a clock of node 0 sleeps on a thread of node 1".into(),
+            message: "a sleep of node 0 runs on a thread of node 1".into(),
             seed: 0,
         })
     );
@@ -533,6 +541,15 @@ fn a_run_with_no_threads_ends_at_once() {
 }
 
 #[test]
+fn the_digest_holds_each_poll() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let _idle = node.shards().start(shard("idle"), |_| async {}).unwrap();
+    sim.run().unwrap();
+    assert_ne!(sim.digest(), Sim::new(Config::default()).digest());
+}
+
+#[test]
 fn dropping_the_sim_drops_waiting_tasks_and_unstarted_threads() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
@@ -570,7 +587,9 @@ fn debug_names_the_config_and_the_node() {
     let node = sim.node(node::Config::default());
     assert_eq!(
         format!("{sim:?}"),
-        "Sim { config: Config { seed: 0, steps_max: 10000 }, .. }"
+        "Sim { config: Config { seed: 0, steps_max: 10000, link: Config { \
+         delay: Span(250000), jitter: Span(0), loss: 0.0, duplication: 0.0, \
+         mtu: 1500 } }, .. }"
     );
     assert_eq!(format!("{node:?}"), "Node(0)");
 }
@@ -680,7 +699,7 @@ fn a_panic_in_the_drop_of_a_task_ends_the_run_and_its_thread() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "shard-0".into()
         })
     );
@@ -720,7 +739,7 @@ fn the_clocks_read_up_to_the_end_of_true_time() {
     let mut sim = sim(0);
     let node = ending(&mut sim);
     sim.run_for(Span::SECOND).unwrap();
-    assert_eq!(node.wall().now(), Stamp::from_nanos(i64::MAX));
+    assert_eq!(node.wall().now().time, Stamp::from_nanos(i64::MAX));
     let start = node::Config::default().monotonic;
     assert_eq!(node.clock().now(), start + Span::SECOND);
 }
@@ -746,7 +765,7 @@ fn a_node_added_later_reads_its_config_now() {
     let config = node::Config::default();
     let node = sim.node(config);
     assert_eq!(node.clock().now(), config.monotonic);
-    assert_eq!(node.wall().now(), config.wall);
+    assert_eq!(node.wall().now().time, config.wall);
     sim.run_for(Span::SECOND).unwrap();
     assert_eq!(node.clock().now(), config.monotonic + Span::SECOND);
 }
@@ -791,4 +810,335 @@ fn a_timer_wakes_its_task_only_when_due() {
     a.unwrap().join().unwrap();
     b.unwrap().join().unwrap();
     assert_eq!(polls.load(Ordering::Relaxed), 2);
+}
+
+fn millis(n: i64) -> Span {
+    Span::from_nanos(n * Span::MILLISECOND.nanos())
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_step_moves_only_the_wall_of_its_node() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config::default());
+    let config = node::Config::default();
+    a.step_wall(Span::HOUR);
+    assert_eq!(a.wall().now().time, config.wall + Span::HOUR);
+    assert_eq!(a.clock().now(), config.monotonic);
+    assert_eq!(b.wall().now().time, config.wall);
+    a.step_wall(Span::from_nanos(-Span::DAY.nanos()));
+    sim.run_for(Span::SECOND).unwrap();
+    let wall = config.wall + Span::HOUR - Span::DAY + Span::SECOND;
+    assert_eq!(a.wall().now().time, wall);
+    assert_eq!(b.wall().now().time, config.wall + Span::SECOND);
+}
+
+#[test]
+#[should_panic(expected = "step_wall(2s) moves the wall of node 0 out of range")]
+fn a_wall_step_out_of_range_panics() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    node.step_wall(Span::from_nanos(2 * Span::SECOND.nanos()));
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn each_node_reads_its_own_wall_error() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config {
+        wall_error: None,
+        ..node::Config::default()
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    let config = node::Config::default();
+    let reading = env::wall::Reading {
+        time: config.wall + Span::SECOND,
+        error: Some(millis(10)),
+    };
+    assert_eq!(a.wall().now(), reading);
+    assert_eq!(
+        b.wall().now(),
+        env::wall::Reading {
+            error: None,
+            ..reading
+        }
+    );
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_error_change_applies_to_the_next_reading_of_its_node() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config::default());
+    let wall = a.wall();
+    a.set_wall_error(Some(Span::SECOND));
+    let config = node::Config::default();
+    let reading = env::wall::Reading {
+        time: config.wall,
+        error: Some(Span::SECOND),
+    };
+    assert_eq!(wall.now(), reading);
+    assert_eq!(b.wall().now().error, config.wall_error);
+    a.set_wall_error(None);
+    assert_eq!(
+        wall.now(),
+        env::wall::Reading {
+            error: None,
+            ..reading
+        }
+    );
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_step_keeps_the_error() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    node.set_wall_error(Some(Span::ZERO));
+    node.step_wall(Span::HOUR);
+    let reading = env::wall::Reading {
+        time: node::Config::default().wall + Span::HOUR,
+        error: Some(Span::ZERO),
+    };
+    assert_eq!(node.wall().now(), reading);
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_error_change_does_not_move_the_wall() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    sim.run_for(Span::SECOND).unwrap();
+    node.set_wall_error(Some(Span::SECOND));
+    sim.run_for(Span::SECOND).unwrap();
+    let config = node::Config::default();
+    let two = Span::from_nanos(2 * Span::SECOND.nanos());
+    assert_eq!(node.wall().now().time, config.wall + two);
+    assert_eq!(node.clock().now(), config.monotonic + two);
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_bad_wall_error_reaches_the_reading() {
+    let mut sim = sim(0);
+    let negative = Some(Span::from_nanos(-1));
+    let a = sim.node(node::Config {
+        wall_error: negative,
+        ..node::Config::default()
+    });
+    let b = sim.node(node::Config::default());
+    b.set_wall_error(negative);
+    assert_eq!(a.wall().now().error, negative);
+    assert_eq!(b.wall().now().error, negative);
+}
+
+#[test]
+fn a_timer_past_the_end_after_a_wall_step_waits() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    let clock = node.clock();
+    let _handle = node.shards().start(shard("shard-0"), move |_| async move {
+        clock.sleep(millis(750)).await;
+    });
+    sim.run_for(Span::ZERO).unwrap();
+    node.step_wall(millis(500));
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
+}
+
+/// Starts a shard on `node` that sleeps for `span`, then logs its name and the time.
+fn log_after(
+    node: &node::Node,
+    name: &'static str,
+    span: Span,
+    log: &Arc<Mutex<Vec<(&'static str, Monotonic)>>>,
+) -> env::thread::Handle {
+    let clock = node.clock();
+    let log = Arc::clone(log);
+    let handle = node.shards().start(shard(name), move |_| async move {
+        clock.sleep(span).await;
+        log.lock().unwrap().push((name, clock.now()));
+    });
+    handle.unwrap()
+}
+
+#[test]
+fn a_paused_node_runs_nothing_until_the_pause_ends() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config::default());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    a.pause(Span::SECOND);
+    let handles = [
+        log_after(&a, "a", Span::ZERO, &log),
+        log_after(&b, "b", millis(500), &log),
+    ];
+    sim.run().unwrap();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let start = node::Config::default().monotonic;
+    let log = log.lock().unwrap().clone();
+    assert_eq!(
+        log,
+        [("b", start + millis(500)), ("a", start + Span::SECOND)]
+    );
+}
+
+#[test]
+fn a_timer_that_falls_due_in_a_pause_fires_when_it_ends() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let handle = log_after(&node, "a", millis(250), &log);
+    sim.run_for(Span::ZERO).unwrap();
+    node.pause(Span::SECOND);
+    sim.run_for(millis(999)).unwrap();
+    assert_eq!(log.lock().unwrap().clone(), []);
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let start = node::Config::default().monotonic;
+    assert_eq!(log.lock().unwrap().clone(), [("a", start + Span::SECOND)]);
+}
+
+#[test]
+fn overlapping_pauses_end_at_the_later_end() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    node.pause(Span::from_nanos(2 * Span::SECOND.nanos()));
+    node.pause(Span::SECOND);
+    node.pause(Span::from_nanos(-1));
+    let handle = log_after(&node, "a", Span::ZERO, &log);
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let start = node::Config::default().monotonic;
+    let end = start + Span::from_nanos(2 * Span::SECOND.nanos());
+    assert_eq!(log.lock().unwrap().clone(), [("a", end)]);
+}
+
+#[test]
+fn a_run_ends_without_waiting_for_a_pause_with_nothing_ready() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    node.pause(Span::SECOND);
+    sim.run().unwrap();
+    assert_eq!(node.clock().now(), node::Config::default().monotonic);
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_step_in_a_run_ends_it_at_the_new_end_of_true_time() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    let stepper = node.clone();
+    let handle = node.shards().start(shard("shard-0"), move |_| async move {
+        stepper.step_wall(millis(500));
+    });
+    sim.run_for(millis(900)).unwrap();
+    handle.unwrap().join().unwrap();
+    assert_eq!(node.wall().now().time, Stamp::from_nanos(i64::MAX));
+    let start = node::Config::default().monotonic;
+    assert_eq!(node.clock().now(), start + millis(500));
+}
+
+#[test]
+fn a_pause_past_the_end_of_true_time_never_ends() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    node.pause(Span::from_nanos(2 * Span::SECOND.nanos()));
+    let _handle = node.shards().start(shard("shard-0"), |_| async {});
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
+}
+
+#[test]
+fn a_wall_step_back_lets_a_waiting_timer_fire() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let handle = log_after(&node, "a", millis(750), &log);
+    sim.run_for(Span::ZERO).unwrap();
+    node.step_wall(millis(500));
+    sim.run_for(millis(500)).unwrap();
+    node.step_wall(millis(-500));
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let start = node::Config::default().monotonic;
+    assert_eq!(log.lock().unwrap().clone(), [("a", start + millis(750))]);
+}
+
+#[test]
+fn a_node_added_later_holds_back_a_timer_past_its_end() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let _handle =
+        log_after(&node, "a", Span::from_nanos(2 * Span::SECOND.nanos()), &log);
+    sim.run_for(Span::ZERO).unwrap();
+    let _ending = ending(&mut sim);
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["a".into()],
+            seed: 0,
+        })
+    );
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(log.lock().unwrap().clone(), []);
+}
+
+#[test]
+fn a_pause_past_the_range_of_true_time_never_ends() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        monotonic: Monotonic(0),
+        wall: Stamp::from_nanos(i64::MIN),
+        ..node::Config::default()
+    });
+    sim.run_for(Span::from_nanos(i64::MAX)).unwrap();
+    sim.run_for(Span::from_nanos(i64::MAX)).unwrap();
+    node.pause(Span::from_nanos(i64::MAX));
+    let _handle = node.shards().start(shard("shard-0"), |_| async {});
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
 }

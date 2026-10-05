@@ -1,6 +1,8 @@
 //! As the global allocator, the count covers every thread. This binary has no test
 //! harness, because a harness allocates on its own threads at any time.
 
+#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
+
 use std::hint::black_box;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::{Acquire, Release};
@@ -18,6 +20,10 @@ fn main() {
 }
 
 /// One box made on a thread that started before the count counts once.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a thread test; `counting` has no `env`"
+)]
 fn counts_other_threads() {
     let [ready, go, done] = [const { AtomicBool::new(false) }; 3];
     let wait = |flag: &AtomicBool| {

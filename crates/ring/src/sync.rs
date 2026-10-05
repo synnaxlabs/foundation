@@ -5,13 +5,13 @@ pub(crate) use loom::{
     cell::UnsafeCell,
     hint::spin_loop,
     sync::Arc,
-    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, fence},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, fence},
 };
 #[cfg(not(loom))]
 pub(crate) use std::{
     hint::spin_loop,
     sync::Arc,
-    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, fence},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, fence},
 };
 
 /// A cell with loom's closure interface, so one body serves both builds.

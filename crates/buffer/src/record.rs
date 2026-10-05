@@ -20,7 +20,7 @@
     clippy::string_slice
 )]
 
-use crate::crc32c::Crc32c;
+use crate::crc32c;
 
 /// Every record starts at a multiple of this many bytes.
 pub(crate) const ALIGN: usize = 4096;
@@ -84,25 +84,24 @@ pub(crate) struct Record<'a> {
 /// # Panics
 ///
 /// When the parts hold more than `u32::MAX` bytes together.
-pub(crate) fn header(
+pub(crate) fn header<'a>(
     chain: u32,
     kind: Kind,
-    body: &[&[u8]],
+    body: impl IntoIterator<Item = &'a [u8], IntoIter: Clone>,
 ) -> ([u8; HEADER_LEN], u32) {
+    let body = body.into_iter();
     let len = body
-        .iter()
+        .clone()
         .try_fold(0u32, |len, part| {
             len.checked_add(u32::try_from(part.len()).ok()?)
         })
         .expect("invariant: a record holds at most u32::MAX bytes");
     let [l0, l1, l2, l3] = len.to_le_bytes();
     let kind = kind.byte();
-    let mut crc = Crc32c::resume(chain);
-    crc.update(&[l0, l1, l2, l3, kind]);
+    let mut crc = crc32c::append(chain, &[l0, l1, l2, l3, kind]);
     for part in body {
-        crc.update(part);
+        crc = crc32c::append(crc, part);
     }
-    let crc = crc.finish();
     let [c0, c1, c2, c3] = crc.to_le_bytes();
     ([l0, l1, l2, l3, c0, c1, c2, c3, kind], crc)
 }
@@ -143,10 +142,7 @@ pub(crate) fn read(bytes: &[u8], chain: u32) -> Option<Record<'_>> {
     }
     let len = usize::try_from(u32::from_le_bytes([l0, l1, l2, l3])).ok()?;
     let body = rest.get(..len)?;
-    let mut crc = Crc32c::resume(chain);
-    crc.update(&[l0, l1, l2, l3, kind]);
-    crc.update(body);
-    let crc = crc.finish();
+    let crc = crc32c::append(crc32c::append(chain, &[l0, l1, l2, l3, kind]), body);
     if crc != u32::from_le_bytes([c0, c1, c2, c3]) {
         return None;
     }
@@ -170,7 +166,7 @@ mod tests {
     /// A whole record as the writer puts it on disk, padded with `fill`, and the
     /// chain value of the next record.
     fn image(chain: u32, kind: Kind, parts: &[&[u8]], fill: u8) -> (Vec<u8>, u32) {
-        let (header, crc) = header(chain, kind, parts);
+        let (header, crc) = header(chain, kind, parts.iter().copied());
         let mut image = header.to_vec();
         for part in parts {
             image.extend_from_slice(part);
@@ -218,16 +214,16 @@ mod tests {
         #[should_panic(expected = "a record holds at most u32::MAX bytes")]
         fn panics_on_a_body_over_u32_max() {
             let part = vec![0; 1 << 20];
-            let _ = header(7, Kind::Data, &vec![part.as_slice(); 1 << 12]);
+            let _ = header(7, Kind::Data, vec![part.as_slice(); 1 << 12]);
         }
 
         /// The CRC values come from another CRC32C implementation.
         #[test]
         fn lays_out_len_crc_and_kind_little_endian() {
-            let first = header(0x0102_0304, Kind::Data, &[b"ab", b"c"]);
+            let first = header(0x0102_0304, Kind::Data, [b"ab".as_slice(), b"c"]);
             let bytes = [3, 0, 0, 0, 0xCC, 0x3B, 0x83, 0xA6, 1];
             assert_eq!(first, (bytes, 0xA683_3BCC));
-            let second = header(first.1, Kind::Wrap, &[b"defg"]);
+            let second = header(first.1, Kind::Wrap, [b"defg".as_slice()]);
             let bytes = [4, 0, 0, 0, 0x5C, 0x6F, 0xB9, 0xEF, 2];
             assert_eq!(second, (bytes, 0xEFB9_6F5C));
         }
@@ -271,18 +267,15 @@ mod tests {
 
         #[test]
         fn rejects_a_zero_kind_with_its_right_crc() {
-            let mut crc = Crc32c::resume(1);
-            crc.update(&[0; 5]);
+            let crc = crc32c::append(1, &[0; 5]);
             let mut image = vec![0; ALIGN];
-            image[4..8].copy_from_slice(&crc.finish().to_le_bytes());
+            image[4..8].copy_from_slice(&crc.to_le_bytes());
             assert_eq!(read(&image, 1), None);
         }
 
         #[test]
         fn reads_a_record_with_no_body_and_a_kind_it_does_not_know() {
-            let mut crc = Crc32c::resume(1);
-            crc.update(&[0, 0, 0, 0, 9]);
-            let crc = crc.finish();
+            let crc = crc32c::append(1, &[0, 0, 0, 0, 9]);
             let mut image = vec![0; ALIGN];
             image[4..8].copy_from_slice(&crc.to_le_bytes());
             image[8] = 9;
