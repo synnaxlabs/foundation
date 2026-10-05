@@ -249,8 +249,8 @@ impl Pool {
     /// - [`Error::TooLarge`] when no block of the pool holds `len` bytes. It never
     ///   succeeds later.
     /// - [`Error::Exhausted`] when the budget has no room for the block now.
-    /// - [`Error::Refused`] when the system refused memory for the block. The sizes
-    ///   the pool gave back to make room stay given back.
+    /// - [`Error::Refused`] when the system refused memory for the block after the
+    ///   pool gave back each idle size. The sizes stay given back.
     pub fn alloc(&self, len: usize) -> Result<Unique, Error> {
         let index = class_of(len);
         if index >= self.classes.len() {
@@ -273,8 +273,11 @@ impl Pool {
                 });
             }
             let offset = self.span_start(index) + class.carved.get();
-            if let Err(Refused) = self.shared().memory.commit(offset, size) {
-                return Err(Error::Refused { requested: len });
+            while let Err(Refused) = self.shared().memory.commit(offset, size) {
+                let Some(other) = self.idle(index).next() else {
+                    return Err(Error::Refused { requested: len });
+                };
+                self.release(other);
             }
             let carved = class.carved.get() + size;
             class.carved.set(carved);
@@ -358,11 +361,7 @@ impl Pool {
     /// calls it when `index` has no free block.
     ///
     /// It walks nothing when the budget has the room already, and purges nothing
-    /// when the idle classes cannot cover the need together. The
-    /// classes above `index` go first, smallest first, so one purge covers the
-    /// need. Then the classes below it, largest first. The walk starts at `index`
-    /// itself: it has no free block, so it has nothing idle, and the range reads
-    /// the same for the mutation check either way.
+    /// when the idle classes cannot cover the need together.
     fn press(&self, index: usize) -> usize {
         let size = class_footprint(index);
         let mut available = self.budget - self.committed.get();
@@ -370,25 +369,32 @@ impl Pool {
             return available;
         }
         let spare: usize = self
-            .classes
-            .iter()
-            .filter(|class| class.idle())
-            .map(|class| class.carved.get())
+            .idle(index)
+            .map(|other| self.classes[other].carved.get())
             .sum();
         if available + spare < size {
             return available;
         }
-        let above = index..self.classes.len();
-        let below = (0..index).rev();
-        for other in above.chain(below) {
-            if self.classes[other].idle() {
-                available += self.release(other);
-                if available >= size {
-                    break;
-                }
+        for other in self.idle(index) {
+            available += self.release(other);
+            if available >= size {
+                break;
             }
         }
         available
+    }
+
+    /// The idle classes in the order a carve of class `index` takes their pages:
+    /// the classes above `index` first, smallest first, so one purge covers the
+    /// need, then the classes below it, largest first. The walk starts at `index`
+    /// itself: it has no free block, so it has nothing idle, and the range reads
+    /// the same for the mutation check either way.
+    fn idle(&self, index: usize) -> impl Iterator<Item = usize> {
+        let above = index..self.classes.len();
+        let below = (0..index).rev();
+        above
+            .chain(below)
+            .filter(move |&other| self.classes[other].idle())
     }
 
     /// First byte of the span of class `index`.
@@ -749,6 +755,7 @@ impl std::error::Error for Error {}
 /// Pools over heap memory for the tests and the models.
 #[cfg(test)]
 mod fixture {
+    use std::collections::BTreeSet;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
@@ -762,12 +769,27 @@ mod fixture {
     }
 
     /// What a pool did with its memory.
-    #[derive(Default)]
     pub(crate) struct Watch {
         pub(crate) drops: AtomicUsize,
         /// The system has no memory: each `commit` refuses.
         pub(crate) refusing: AtomicBool,
+        /// Bytes the system can hold committed after the header. A purge gives
+        /// its bytes back to the system.
+        pub(crate) limit: AtomicUsize,
+        charged: Mutex<BTreeSet<usize>>,
         calls: Mutex<Vec<Call>>,
+    }
+
+    impl Default for Watch {
+        fn default() -> Self {
+            Self {
+                drops: AtomicUsize::new(0),
+                refusing: AtomicBool::new(false),
+                limit: AtomicUsize::new(usize::MAX),
+                charged: Mutex::default(),
+                calls: Mutex::default(),
+            }
+        }
     }
 
     impl Watch {
@@ -778,6 +800,25 @@ mod fixture {
 
         fn record(&self, call: Call) {
             self.calls.lock().expect("no test panicked").push(call);
+        }
+
+        /// Charges the bytes to the system. False when they go over `limit`.
+        fn charge(&self, offset: usize, len: usize) -> bool {
+            let mut charged = self.charged.lock().expect("no test panicked");
+            let mut next = charged.clone();
+            next.extend(offset / ALIGN..(offset + len).div_ceil(ALIGN));
+            let fits = next.len().saturating_mul(ALIGN) <= self.limit.load(Relaxed);
+            if fits {
+                *charged = next;
+            }
+            fits
+        }
+
+        fn discharge(&self, offset: usize, len: usize) {
+            let mut charged = self.charged.lock().expect("no test panicked");
+            for unit in offset.div_ceil(ALIGN)..(offset + len) / ALIGN {
+                charged.remove(&unit);
+            }
         }
     }
 
@@ -799,7 +840,7 @@ mod fixture {
 
         fn commit(&self, offset: usize, len: usize) -> Result<(), Refused> {
             self.watch.record(Call::Commit { offset, len });
-            if self.watch.refusing.load(Relaxed) {
+            if self.watch.refusing.load(Relaxed) || !self.watch.charge(offset, len) {
                 return Err(Refused);
             }
             self.heap.commit(offset, len)
@@ -807,6 +848,7 @@ mod fixture {
 
         fn purge(&self, offset: usize, len: usize) {
             self.watch.record(Call::Purge { offset, len });
+            self.watch.discharge(offset, len);
             self.heap.purge(offset, len);
         }
     }
@@ -1288,6 +1330,84 @@ mod tests {
         }
 
         #[test]
+        fn serves_from_its_idle_pages_when_the_system_has_no_more() {
+            for budget in [1024, 4096] {
+                let (pool, watch) = create_watched_pool(budget);
+                watch.limit.store(1024, Relaxed);
+                let small: Vec<_> = (0..8)
+                    .map(|_| pool.alloc(64).expect("the system has memory"))
+                    .collect();
+                drop(small);
+                pool.reclaim();
+                assert_eq!(pool.committed(), 1024, "the idle size keeps its pages");
+                let block = pool.alloc(512).expect("the idle size holds 576 bytes");
+                assert_eq!(block.len(), 512, "budget {budget}");
+                assert_eq!(pool.committed(), 576, "budget {budget}");
+            }
+        }
+
+        #[test]
+        fn gives_back_the_size_above_first_when_the_system_refuses() {
+            let (pool, watch) = create_watched_pool(4096);
+            watch.limit.store(384, Relaxed);
+            drop(pool.alloc(64).expect("the system has memory"));
+            drop(pool.alloc(192).expect("the system has memory"));
+            pool.reclaim();
+            assert_eq!(pool.committed(), 384);
+            let block = pool.alloc(128).expect("the size above gives its pages");
+            assert_eq!(block.len(), 128);
+            assert_eq!(pool.committed(), 320, "the size below keeps its pages");
+            let carve = Commit {
+                offset: 4160,
+                len: 192,
+            };
+            assert_eq!(
+                &watch.calls()[2..],
+                [
+                    carve,
+                    Purge {
+                        offset: 8256,
+                        len: 256
+                    },
+                    carve,
+                ]
+            );
+        }
+
+        #[test]
+        fn fails_after_each_idle_size_went_back() {
+            let (pool, watch) = create_watched_pool(1024);
+            drop(pool.alloc(64).expect("the budget has room"));
+            drop(pool.alloc(128).expect("the budget has room"));
+            pool.reclaim();
+            watch.refusing.store(true, Relaxed);
+            let error = pool.alloc(192).expect_err("the system refuses memory");
+            assert_eq!(error, refused(192));
+            assert_eq!(pool.committed(), 0, "each idle size went back");
+            let carve = Commit {
+                offset: 2112,
+                len: 256,
+            };
+            assert_eq!(
+                &watch.calls()[2..],
+                [
+                    carve,
+                    Purge {
+                        offset: 1088,
+                        len: 192
+                    },
+                    carve,
+                    Purge {
+                        offset: 64,
+                        len: 128
+                    },
+                    carve,
+                ],
+                "the size below goes back largest first, one per retry"
+            );
+        }
+
+        #[test]
         fn moves_the_budget_of_a_free_block_to_another_class() {
             let pool = create_pool(256);
             drop(pool.alloc(64).expect("the budget has room"));
@@ -1599,6 +1719,8 @@ mod tests {
                             } else {
                                 prop_assert!(refusing, "{error} with {room} room");
                                 prop_assert_eq!(error, refused(len));
+                                let idle = pool.classes.iter().any(Class::idle);
+                                prop_assert!(!idle, "refused with an idle size left");
                             }
                         }
                     }
