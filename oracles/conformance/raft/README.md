@@ -1,15 +1,15 @@
 # Raft conformance
 
-Election and replication scenarios ported from the tests of etcd/raft
-(<https://github.com/etcd-io/raft>, commit `1c0011d2c6b7`, Copyright 2015 The etcd
-Authors, Apache License 2.0). `crates/raft` runs them as its `conformance` test. The
-`[[test]]` entry in `crates/raft/Cargo.toml` is part of this oracle: to remove it is
+Election, replication, and membership change scenarios ported from the tests of
+etcd/raft (<https://github.com/etcd-io/raft>, commit `1c0011d2c6b7`, Copyright 2015 The
+etcd Authors, Apache License 2.0). `crates/raft` runs them as its `conformance` test.
+The `[[test]]` entry in `crates/raft/Cargo.toml` is part of this oracle: to remove it is
 to weaken the oracle.
 
-`LICENSE` is the license of the etcd source. `election.rs`, `replication.rs`, and
-`common.rs` (the test network and the node disks the scenarios share) are modified
-works: ports from Go to Rust, and the port rules below list the changes. `main.rs` is
-the root of the test binary.
+`LICENSE` is the license of the etcd source. `election.rs`, `replication.rs`,
+`change.rs`, and `common.rs` (the test network and the node disks the scenarios share)
+are modified works: ports from Go to Rust, and the port rules below list the changes.
+`main.rs` is the root of the test binary.
 
 `quorum/` holds etcd's `quorum/testdata` tables unchanged; the unit tests of
 `crates/raft/src/voters.rs` read them with `include_str!`. Each case is a `committed`
@@ -34,6 +34,14 @@ cargo test -p raft --lib voters
   the log and the applied entries that etcd reads from `raftLog`.
 - A message that etcd hands to a handler directly carries the term the handler
   expects.
+- etcd applies a configuration when the caller applies its entry, and the caller
+  writes each phase of a change. Here a node uses a configuration from the time it
+  writes the entry, and the leader writes the leave on its own, so a change scenario
+  sees the joint entry and the leave where etcd sees one entry. A second change while
+  one is pending is `Error::ChangePending`, and an empty voter set is `Error::NoVoters`,
+  where etcd writes an empty entry or panics. Only an uncommitted configuration entry
+  blocks a change; etcd also blocks one until the new leader commits an entry of its
+  term.
 
 ## Scenarios
 
@@ -69,9 +77,17 @@ cargo test -p raft --lib voters
 | `handle_heartbeat_resp` | `TestHandleHeartbeatResp` |
 | `msg_app_resp_wait_reset` | `TestMsgAppRespWaitReset` |
 | `log_replication` | `TestLogReplication` |
+| `step_config` | `TestStepConfig` |
+| `step_ignore_config` | `TestStepIgnoreConfig` |
+| `new_leader_pending_config` | `TestNewLeaderPendingConfig` |
+| `add_node` | `TestAddNode` |
+| `add_node_check_quorum` | `TestAddNodeCheckQuorum` |
+| `remove_node` | `TestRemoveNode` |
+| `commit_after_remove_node` | `TestCommitAfterRemoveNode` |
+| `promotable` | `TestPromotable` |
 
-Not ported: etcd tests that need snapshots, learners, configuration changes, or
-leader transfer, and tests that set private state (`TestLeaderIncreaseNext`,
-`TestSendAppendForProgressProbe`, `TestRecvMsgBeat`). The unit tests in `crates/raft`
-cover the single-node cases (`TestCandidateConcede`, `TestStepIgnoreOldTermMsg`,
-`TestAllServerStepdown`, `TestCampaignWhileLeader`, `TestPastElectionTimeout`).
+Not ported: etcd tests that need snapshots, learners, or leader transfer, and tests that
+set private state (`TestLeaderIncreaseNext`, `TestSendAppendForProgressProbe`,
+`TestRecvMsgBeat`). The unit tests in `crates/raft` cover the single-node cases
+(`TestCandidateConcede`, `TestStepIgnoreOldTermMsg`, `TestAllServerStepdown`,
+`TestCampaignWhileLeader`, `TestPastElectionTimeout`).
