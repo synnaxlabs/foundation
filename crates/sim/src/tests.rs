@@ -257,7 +257,7 @@ fn a_panic_ends_the_run_and_its_thread() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(thread::Error::Panicked {
+        Err(thread::Panicked {
             name: "shard-0".into()
         })
     );
@@ -284,7 +284,7 @@ fn a_panic_in_a_spawned_task_ends_its_shard() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(thread::Error::Panicked {
+        Err(thread::Panicked {
             name: "shard-0".into()
         })
     );
@@ -370,7 +370,7 @@ fn a_thread_name_with_a_nul_byte_starts() {
     assert!(matches!(e, Error::Panicked { thread, .. } if thread == "a\0b"));
     assert_eq!(
         shard.unwrap().join(),
-        Err(thread::Error::Panicked {
+        Err(thread::Panicked {
             name: "a\0b".into()
         })
     );
@@ -710,7 +710,7 @@ fn a_panic_in_the_drop_of_a_task_ends_the_run_and_its_thread() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(thread::Error::Panicked {
+        Err(thread::Panicked {
             name: "shard-0".into()
         })
     );

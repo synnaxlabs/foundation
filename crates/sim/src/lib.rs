@@ -181,7 +181,7 @@ impl Sim {
     /// - [`Error::Panicked`] when a task panics, in a poll or in the drop of its
     ///   future. The run stops there, the thread's other futures drop, and the
     ///   thread's [`env::thread::Handle::join`] returns
-    ///   [`env::thread::Error::Panicked`].
+    ///   [`env::thread::Panicked`].
     /// - [`Error::Steps`] past [`Config::steps_max`] steps.
     /// - [`Error::Stuck`] when threads remain but nothing can run again: no task is
     ///   ready on a node that runs, and no timer, arrival, file call, or pause ends
@@ -259,7 +259,7 @@ impl Sim {
             return Ok(());
         }
         let name = lock(&self.shared).name(thread);
-        let panicked = env::thread::Error::Panicked { name: name.clone() };
+        let panicked = env::thread::Panicked { name: name.clone() };
         let tasks = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
         panics.extend(self.drop_futures(&tasks));
         Err(Error::Panicked {
