@@ -944,7 +944,7 @@ mod tests {
         );
         assert_eq!(updated("a = 1", "a = 1\nb = 2"), "a = 1\nb = 2\n");
         assert_eq!(
-            updated("a = <<EOT\r\nx\r\nEOT", "a = \"x\\n\"\nb = 2"),
+            updated("a = <<EOT\r\nx\r\nEOT\r\n", "a = \"x\\n\"\nb = 2"),
             "a = <<EOT\r\nx\r\nEOT\r\nb = 2\r\n"
         );
         assert_eq!(

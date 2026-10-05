@@ -1291,7 +1291,6 @@ c = "°C # not a comment"
                     "<<EOT\nEOT x\nxEOT\nEOTX\neot\nEOT\n",
                     "EOT x\nxEOT\nEOTX\neot\n",
                 ),
-                ("<<EOT\nx\nEOT", "x\n"),
                 ("<<END-1_a\nx\nEND-1_a\n", "x\n"),
                 ("<<_\nx\n_\n", "x\n"),
                 ("<<ÉOT\nx\nÉOT\n", "x\n"),
@@ -1423,6 +1422,9 @@ c = "°C # not a comment"
                 ("a = <<EOT\nEOTX\nEOT x\n", at(21, 3, 0), on(4, 9)),
                 ("a = <<-EOT\n  x\n  eot\n", at(21, 3, 0), on(4, 10)),
                 ("a = <<EOT\nx\nEOT\r", at(16, 2, 4), on(4, 9)),
+                ("a = <<EOT\nx\nEOT", at(15, 2, 3), on(4, 9)),
+                ("a = <<EOT\nx\nEOT  ", at(17, 2, 5), on(4, 9)),
+                ("a = <<-EOT\n  x\n  EOT", at(20, 2, 5), on(4, 10)),
             ];
             for (text, end, opener) in cases {
                 let unclosed = Error::Unclosed {

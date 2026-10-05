@@ -455,7 +455,7 @@ impl<'a> Tokens<'a> {
     }
 
     /// Moves past the rest of the line when it holds only `marker`, with whitespace
-    /// around it, and reports whether it did.
+    /// around it, and a line end, and reports whether it did.
     fn close(&mut self, marker: &str) -> bool {
         let mut end = self.clone();
         end.eat_while(space);
@@ -464,7 +464,7 @@ impl<'a> Tokens<'a> {
         }
         end.skip_bytes(marker.len());
         end.eat_while(space);
-        let closed = end.rest.is_empty() || end.line_end() > 0;
+        let closed = end.line_end() > 0;
         if closed {
             *self = end;
         }
