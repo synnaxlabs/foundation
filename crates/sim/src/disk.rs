@@ -1,4 +1,4 @@
-//! The file system of one node: directories, and sparse files of 512-byte sectors.
+//! The file system of one node: directories, and sparse files of sectors.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -6,13 +6,13 @@ use std::mem;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
-use env::files::Mode;
+use env::files::{self, Mode};
 use env::rng::Rng;
 
 /// The key of the data directory.
 pub(crate) const ROOT: u64 = 0;
-/// The bytes of a sector: a write keeps or loses each sector whole.
-const SECTOR: u64 = 512;
+/// [`files::SECTOR`] as a file offset.
+const SECTOR: u64 = files::SECTOR as u64;
 /// The bytes that a directory takes, as on ext4.
 const DIR_BYTES: u64 = 4_096;
 /// The Linux code for a path that is there (`EEXIST`).
@@ -66,7 +66,7 @@ pub(crate) struct File {
 /// The durable bytes of a sector, and the writes on it since then in one order that
 /// the times of their calls allow.
 struct Sector {
-    durable: [u8; 512],
+    durable: [u8; files::SECTOR],
     writes: Vec<Write>,
 }
 
@@ -79,7 +79,7 @@ struct Write {
     /// Its bytes over `covered`.
     bytes: Vec<u8>,
     /// The sector after it and each write before it.
-    after: [u8; 512],
+    after: [u8; files::SECTOR],
 }
 
 impl Disk {
@@ -340,7 +340,7 @@ impl File {
                 continue;
             }
             let zeros = || Sector {
-                durable: [0; 512],
+                durable: [0; files::SECTOR],
                 writes: Vec::new(),
             };
             let found = self.sectors.entry(sector).or_insert_with(zeros);
@@ -352,7 +352,7 @@ impl File {
                 written: tick,
                 covered: within(sector * SECTOR, &part),
                 bytes: bytes[within(offset, &part)].to_vec(),
-                after: [0; 512],
+                after: [0; files::SECTOR],
             };
             found.writes.insert(place, write);
             found.replay(place);
@@ -439,7 +439,7 @@ impl File {
 
 impl Sector {
     /// The bytes that a read sees.
-    fn last(&self) -> &[u8; 512] {
+    fn last(&self) -> &[u8; files::SECTOR] {
         self.writes
             .last()
             .map_or(&self.durable, |write| &write.after)
@@ -528,14 +528,17 @@ mod tests {
             .map(|seed| {
                 let mut rng = Rng::from_seed(seed);
                 let mut file = file();
-                file.write(0, &[1; 512], 1, 2, false, &mut rng);
+                file.write(0, &[1; files::SECTOR], 1, 2, false, &mut rng);
                 file.sync(2);
                 // As at a power cut: keep one version that is still in play.
                 file.tear(u64::MAX, &mut rng);
                 file.bytes(0..SECTOR)
             })
             .collect();
-        assert_eq!(kept, BTreeSet::from([vec![0; 512], vec![1; 512]]));
+        assert_eq!(
+            kept,
+            BTreeSet::from([vec![0; files::SECTOR], vec![1; files::SECTOR]])
+        );
     }
 
     #[test]
@@ -544,12 +547,15 @@ mod tests {
             .map(|seed| {
                 let mut rng = Rng::from_seed(seed);
                 let mut file = file();
-                file.write(0, &[1; 512], 1, 2, false, &mut rng);
-                file.write(0, &[2; 512], 2, 3, false, &mut rng);
+                file.write(0, &[1; files::SECTOR], 1, 2, false, &mut rng);
+                file.write(0, &[2; files::SECTOR], 2, 3, false, &mut rng);
                 file.bytes(0..SECTOR)
             })
             .collect();
-        assert_eq!(last, BTreeSet::from([vec![1; 512], vec![2; 512]]));
+        assert_eq!(
+            last,
+            BTreeSet::from([vec![1; files::SECTOR], vec![2; files::SECTOR]])
+        );
     }
 
     #[test]
@@ -572,8 +578,8 @@ mod tests {
     fn a_sync_leaves_dirty_only_the_sectors_with_a_later_write() {
         let mut rng = Rng::from_seed(0);
         let mut file = file();
-        file.write(0, &[1; 1024], 1, 2, false, &mut rng);
-        file.write(SECTOR, &[2; 512], 3, 5, false, &mut rng);
+        file.write(0, &[1; 2 * files::SECTOR], 1, 2, false, &mut rng);
+        file.write(SECTOR, &[2; files::SECTOR], 3, 5, false, &mut rng);
         file.sync(4);
         assert_eq!(file.dirty, BTreeSet::from([1]));
     }
