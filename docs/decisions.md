@@ -378,8 +378,9 @@ How to read this record:
   unknown path or presence byte, or bytes after the last entry is a wrong shape.
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
-  open. The restart record needs one free block: an open of a full ring first moves
-  records at the tail to a segment.
+  open, and so does an entry whose `first` is below the tail of its path or whose
+  `first + len` passes `u64::MAX`. The restart record needs one free block: an open
+  of a full ring first moves records at the tail to a segment.
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][zero padding][crc32c: u32]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is the last four bytes and covers the rest.
@@ -920,7 +921,16 @@ How to read this record:
   name comes from a file. A run or a discovery fails with one of three classes:
   `Config` (stop until the spec changes), `Device`, and `Retry` (restart with
   backoff). Decided by the `connector` builder in the plan on #338, after
-  `/eb-review`.
+  `/eb-review`; approved by the coordinator (#338).
+- **SUPERVISOR** `supervisor::Supervisor::run` runs one connector and never starts a
+  run before the last one returned, and none after a cancel. Each run gets a child of
+  the caller's token. After `Device` or `Retry` it restarts with full jitter backoff
+  (1 s first, 60 s cap, constants). The waits start again from 1 s after a run that
+  lasted at least 60 s. `Ok` from `run` ends the connector.
+  `Config` returns to the caller, which starts a new supervisor when the spec
+  changes (R12-4). Restart errors reach the connector's status in #420. Decided by the
+  `connector` builder in the plan on #338, after `/eb-review`; approved by the
+  coordinator (#338), with the reset after a long run approved on #338 later.
 - **BQ15** A set of devices that the driver acquires as one unit is one connector.
   Otherwise, separate connectors and indexes, never two writers.
 - **R7 starting points** OPC UA: open62541 compiled in, with our own crypto plugin on
@@ -1071,7 +1081,10 @@ How to read this record:
   as written there (session opens signed, a key list per subject in OpenSSH format,
   `apply` signs the plan hash, every node checks every change record, audit records
   the subject and the forwarding node, MCP runs beside the agent, the caller seals
-  secret values, no end-to-end frame integrity in v1).
+  secret values, no end-to-end frame integrity in v1). A secret write is a
+  `mesh.changes` record, so every node checks its subject signature and the `secret`
+  action on the name against the spec. Applies r15 decisions 4, 5, and 9; approved by
+  the coordinator (#409).
 
 ### 1.13 Operations, agents, and the factory
 
@@ -1427,7 +1440,7 @@ Storage classes used in the table:
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
 | Seq blocks | Region state of the home node's region | The home, through lease renewals | A new home after promotion | `mesh` |
 | Index history (re-index) | Region state: spans and seals. The spec keeps only the current index. Which region: X39 | The old home proposes the seal; voters seal at lease end if it is down | `hub` joins spans for readers | `mesh` |
-| Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40) | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it with `secret::seal` | `mesh` (record), `secret` (seal and open) |
+| Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40), with a version per name in the associated data. Every node takes a write or a delete only at the newest version plus one, and a re-seal only at the newest version, from and to nodes of the secret's placement. A delete is a version with no value. The newest version of a name is never compacted away, also after the spec removes the secret | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it in `secret::store::Sealed`, which refuses a value that does not open at its version | `mesh` (record), `secret` (seal and open) |
 | Join ticket record | Region state: options and use count. The ticket itself is a secret, never in files | Admin through `ops` | Voters at join | `mesh`, `ops` |
 | Delegation record | The parent region's spec: `{ prefix, epoch, initial voters }` | Parent voters | Nodes (epoch fencing) | `mesh` |
 | Spec pointer | Region state: `{ version, root hash }` | `apply` (compare-and-swap) | Every node that follows the region | `mesh` |

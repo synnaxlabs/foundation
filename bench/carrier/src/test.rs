@@ -36,6 +36,8 @@ const MIN_FRAME: usize = 16;
 const WARMUP: Duration = Duration::from_secs(1);
 /// A datagram with no echo after this long counts as lost.
 const LOST_AFTER: Duration = Duration::from_millis(100);
+/// How long a flow runs on past its `secs` to measure once.
+const GRACE: Duration = Duration::from_secs(5);
 /// Marks a CPU time the server could not read.
 const NONE: u64 = u64::MAX;
 
@@ -88,6 +90,9 @@ impl FromStr for Load {
     }
 }
 
+/// A test measures for `secs` after the [`WARMUP`], and runs on until each of its flows
+/// has measured once, so a run starved for all of `secs` still has a result. A flow
+/// with no echo by the [`GRACE`] after that fails.
 #[derive(Debug)]
 pub(crate) enum Test {
     /// One stream, as fast as it goes.
@@ -506,7 +511,7 @@ async fn pump(
     })
 }
 
-/// Writes `frame` until `end` and returns how many it wrote.
+/// Writes `frame` once, then until `end`, and returns how many it wrote.
 async fn send_until(
     w: &mut Writer,
     frame: &[u8],
@@ -514,14 +519,16 @@ async fn send_until(
     yielding: bool,
 ) -> Result<u64, Error> {
     let mut frames = 0;
-    while Instant::now() < end {
+    loop {
         w.write_all(frame).await?;
         frames += 1;
         if yielding {
             tokio::task::yield_now().await;
         }
+        if Instant::now() >= end {
+            return Ok(frames);
+        }
     }
-    Ok(frames)
 }
 
 /// One measured echo, in nanoseconds: the round trip from the send, and for a paced
@@ -569,7 +576,7 @@ async fn ping_stream(
     let mut echoes = Vec::new();
     for seq in 0.. {
         let since = base.elapsed();
-        if since >= WARMUP + secs {
+        if ended(since, secs, !echoes.is_empty())? {
             break;
         }
         w.write_all(&frame(&[], &payload(size, seq, since))).await?;
@@ -595,7 +602,7 @@ async fn ping_datagrams(
     let (mut echoes, mut lost) = (Vec::new(), 0);
     for seq in 0.. {
         let since = base.elapsed();
-        if since >= WARMUP + secs {
+        if ended(since, secs, !echoes.is_empty())? {
             break;
         }
         datagrams.send(payload(size, seq, since))?;
@@ -617,6 +624,19 @@ async fn ping_datagrams(
         }
     }
     Ok((echoes, lost))
+}
+
+/// Whether a flow is over at `since` from its start: `secs` after the warmup passed,
+/// and the flow has `measured` once. Fails when it measured nothing by the [`GRACE`]
+/// after that.
+fn ended(since: Duration, secs: Duration, measured: bool) -> Result<bool, Error> {
+    let end = WARMUP + secs;
+    if !measured && since >= end + GRACE {
+        return Err(
+            format!("a flow measured nothing in the {GRACE:?} after the run").into(),
+        );
+    }
+    Ok(measured && since >= end)
 }
 
 /// The send times of a paced flow: one frame each period from `base`.
@@ -660,10 +680,11 @@ async fn paced_stream(
     w.write_all(&[ECHO]).await?;
     let mut schedule = Schedule::new(pace.period);
     let base = schedule.base;
+    let echoed = Cell::new(false);
     let send = async {
         loop {
             let (seq, since) = schedule.next().await;
-            if since >= WARMUP + pace.secs {
+            if ended(since, pace.secs, echoed.get())? {
                 break;
             }
             w.write_all(&frame(&[], &payload(pace.size, seq, since)))
@@ -684,6 +705,7 @@ async fn paced_stream(
             }
             r.read_exact(&mut back[4..]).await?;
             rtts.extend(measured(base, &back[4..]));
+            echoed.set(!rtts.is_empty());
         }
     };
     let ((), rtts) = tokio::try_join!(send, receive)?;
@@ -697,11 +719,11 @@ async fn paced_datagrams(
     let mut schedule = Schedule::new(pace.period);
     let base = schedule.base;
     let mut expected = 0;
-    let done = Cell::new(false);
+    let (echoed, done) = (Cell::new(false), Cell::new(false));
     let send = async {
         loop {
             let (seq, since) = schedule.next().await;
-            if since >= WARMUP + pace.secs {
+            if ended(since, pace.secs, echoed.get())? {
                 break;
             }
             if since >= WARMUP {
@@ -718,6 +740,7 @@ async fn paced_datagrams(
             match timeout(LOST_AFTER, datagrams.read()).await {
                 Ok(back) => {
                     rtts.extend(measured(base, &back?.ok_or("the session closed")?));
+                    echoed.set(!rtts.is_empty());
                 }
                 Err(_) if done.get() => return Ok::<_, Error>(rtts),
                 Err(_) => {}
@@ -741,7 +764,8 @@ async fn paced_mux(
     w.write_all(&[MUX]).await?;
     let mut schedule = Schedule::new(pace.period);
     let base = schedule.base;
-    let send = mux_send(&mut w, &mut schedule, pace, cpus);
+    let echoed = Cell::new(false);
+    let send = mux_send(&mut w, &mut schedule, pace, &echoed, cpus);
     let receive = async {
         let mut back = vec![0u8; 4 + pace.size];
         let mut rtts = Vec::new();
@@ -750,6 +774,7 @@ async fn paced_mux(
                 ECHO => {
                     r.read_exact(&mut back).await?;
                     rtts.extend(measured(base, &back[4..]));
+                    echoed.set(!rtts.is_empty());
                 }
                 BULK => return Ok::<_, Error>(rtts),
                 tag => return Err(format!("unknown tag {tag}").into()),
@@ -768,13 +793,16 @@ async fn paced_mux(
     Ok((paced_echoes(&rtts, &schedule.delays)?, bulk))
 }
 
-/// Sends bulk frames and the due echo frames on a `MUX` stream until the run ends. A
-/// due echo frame goes out after the bulk frame in progress. Returns the bulk frames
-/// sent after the warmup mark, and the time and CPU sample at the mark.
+/// Sends bulk frames and the due echo frames on a `MUX` stream until the run ends, at
+/// the end of `pace` once a bulk frame went out after the warmup mark and `echoed` is
+/// set, which the receive half does on an echo of a frame sent after the warmup. A due
+/// echo frame goes out after the bulk frame in progress. Returns the bulk frames sent
+/// after the mark, and the time and CPU sample at the mark.
 async fn mux_send(
     w: &mut Writer,
     schedule: &mut Schedule,
     pace: Pace,
+    echoed: &Cell<bool>,
     cpus: &[usize],
 ) -> Result<(u64, Instant, Sample), Error> {
     let bulk = frame(&[BULK], &vec![0xa5; MUX_CHUNK]);
@@ -790,7 +818,7 @@ async fn mux_send(
                 w.write_all(&head(BULK, MARK)).await?;
                 mark = Some((Instant::now(), Sample::now(cpus)?));
             }
-            if since >= WARMUP + pace.secs {
+            if ended(since, pace.secs, frames > 0 && echoed.get())? {
                 break;
             }
         }
@@ -815,7 +843,7 @@ async fn mux_send(
     }
     w.write_all(&head(BULK, END)).await?;
     w.flush().await?;
-    let (begin, cpu) = mark.ok_or("the run ended in its warmup")?;
+    let (begin, cpu) = mark.expect("invariant: frames are counted after the mark");
     Ok((frames, begin, cpu))
 }
 
@@ -995,10 +1023,35 @@ mod tests {
     use super::*;
     use crate::session::{Config, Listener};
 
-    const MS: Duration = Duration::from_millis(100);
+    /// The `secs` of a timed test: long against a run that ignores it.
+    const WINDOW: Duration = Duration::from_secs(1);
 
-    /// Runs `test` against a loopback server.
+    /// Runs `test` against a loopback server that echoes.
     async fn loopback(carrier: Carrier, test: Test) -> Result<Outcome, Error> {
+        against(carrier, test, |listener| {
+            crate::serve(listener, Arc::from([]))
+        })
+        .await
+    }
+
+    /// Runs `test` over QUIC against a loopback server that holds the session and
+    /// echoes nothing.
+    async fn silent(test: Test) -> Result<Outcome, Error> {
+        against(Carrier::Quic, test, |listener| async move {
+            let _session = listener.accept().await?.finish().await?;
+            std::future::pending().await
+        })
+        .await
+    }
+
+    async fn against<F>(
+        carrier: Carrier,
+        test: Test,
+        serve: impl FnOnce(Listener) -> F,
+    ) -> Result<Outcome, Error>
+    where
+        F: Future<Output = Result<(), Error>> + Send + 'static,
+    {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata");
         let provider = Arc::new(Config::provider());
         let config = Config::new(carrier, provider, false, 1500)?;
@@ -1006,14 +1059,21 @@ mod tests {
         let listener =
             Listener::bind(&config, "127.0.0.1:0".parse()?, &cert, &key).await?;
         let server = listener.local_addr()?;
-        let serving = tokio::spawn(crate::serve(listener, Arc::from([])));
+        let serving = tokio::spawn(serve(listener));
         let mut session =
             Session::connect(&config, server, &format!("{dir}/ca.pem")).await?;
+        let (Test::Bulk { secs } | Test::Ping { secs, .. } | Test::Paced { secs, .. }) =
+            test;
+        let start = Instant::now();
         // A broken protocol waits forever; this makes it fail.
         let outcome =
             timeout(Duration::from_secs(10), run(&mut session, &test, &[])).await?;
         session.close().await;
         serving.abort();
+        if outcome.is_ok() {
+            let took = start.elapsed();
+            assert!(took >= WARMUP + secs, "the run took {took:?}");
+        }
         outcome
     }
 
@@ -1041,7 +1101,7 @@ mod tests {
     #[tokio::test]
     async fn bulk_counts_match_over_quic() {
         assert_bulk(
-            &loopback(Carrier::Quic, Test::Bulk { secs: MS })
+            &loopback(Carrier::Quic, Test::Bulk { secs: WINDOW })
                 .await
                 .unwrap(),
         );
@@ -1050,39 +1110,49 @@ mod tests {
     #[tokio::test]
     async fn bulk_counts_match_over_tls() {
         assert_bulk(
-            &loopback(Carrier::Tls, Test::Bulk { secs: MS })
+            &loopback(Carrier::Tls, Test::Bulk { secs: WINDOW })
                 .await
                 .unwrap(),
         );
     }
 
-    fn ping(frames: Frames) -> Test {
+    #[tokio::test]
+    async fn a_bulk_run_of_zero_seconds_counts_a_frame() {
+        let test = Test::Bulk {
+            secs: Duration::ZERO,
+        };
+        assert_bulk(&loopback(Carrier::Quic, test).await.unwrap());
+    }
+
+    fn ping(frames: Frames, secs: Duration) -> Test {
         Test::Ping {
             frames,
             size: 64,
-            secs: MS,
+            secs,
         }
     }
 
-    fn paced(frames: Frames) -> Test {
+    fn paced(frames: Frames, secs: Duration) -> Test {
         Test::Paced {
             frames,
             size: 256,
             rate: 1000,
-            secs: MS,
+            secs,
             load: Load::Shared,
         }
     }
 
     #[tokio::test]
     async fn ping_echoes_quic_streams() {
-        let outcome = loopback(Carrier::Quic, ping(Frames::Stream)).await.unwrap();
+        let outcome = loopback(Carrier::Quic, ping(Frames::Stream, WINDOW))
+            .await
+            .unwrap();
         assert_latency(&outcome, false, false);
     }
 
     #[tokio::test]
     async fn ping_echoes_quic_datagrams() {
-        let outcome = loopback(Carrier::Quic, ping(Frames::Datagram))
+        let outcome = loopback(Carrier::Quic, ping(Frames::Datagram, WINDOW))
             .await
             .unwrap();
         assert_latency(&outcome, false, false);
@@ -1090,13 +1160,62 @@ mod tests {
 
     #[tokio::test]
     async fn ping_echoes_the_tls_stream() {
-        let outcome = loopback(Carrier::Tls, ping(Frames::Stream)).await.unwrap();
+        let outcome = loopback(Carrier::Tls, ping(Frames::Stream, WINDOW))
+            .await
+            .unwrap();
         assert_latency(&outcome, false, false);
     }
 
     #[tokio::test]
+    async fn a_ping_run_of_zero_seconds_measures_a_stream_echo() {
+        let test = ping(Frames::Stream, Duration::ZERO);
+        let outcome = loopback(Carrier::Quic, test).await.unwrap();
+        assert_latency(&outcome, false, false);
+    }
+
+    #[tokio::test]
+    async fn a_ping_run_of_zero_seconds_measures_a_datagram_echo() {
+        let test = ping(Frames::Datagram, Duration::ZERO);
+        let outcome = loopback(Carrier::Quic, test).await.unwrap();
+        assert_latency(&outcome, false, false);
+    }
+
+    /// Asserts the error of a run that measured nothing.
+    fn assert_unmeasured<T>(result: Result<T, Error>) {
+        let error = result.err().unwrap().to_string();
+        assert_eq!(error, "a flow measured nothing in the 5s after the run");
+    }
+
+    #[test]
+    fn a_flow_ends_after_its_secs_once_it_measured() {
+        let (end, tick) = (WARMUP + WINDOW, Duration::from_millis(1));
+        assert!(!ended(end.saturating_sub(tick), WINDOW, true).unwrap());
+        assert!(ended(end, WINDOW, true).unwrap());
+        assert!(!ended(end, WINDOW, false).unwrap());
+        assert!(!ended((end + GRACE).saturating_sub(tick), WINDOW, false).unwrap());
+        assert_unmeasured(ended(end + GRACE, WINDOW, false));
+    }
+
+    #[tokio::test]
+    async fn a_datagram_ping_with_no_echo_fails_after_the_grace() {
+        assert_unmeasured(silent(ping(Frames::Datagram, Duration::ZERO)).await);
+    }
+
+    #[tokio::test]
+    async fn a_paced_datagram_run_with_no_echo_fails_after_the_grace() {
+        let test = Test::Paced {
+            frames: Frames::Datagram,
+            size: 256,
+            rate: 1000,
+            secs: Duration::ZERO,
+            load: Load::None,
+        };
+        assert_unmeasured(silent(test).await);
+    }
+
+    #[tokio::test]
     async fn ping_rejects_datagrams_over_tls() {
-        let error = loopback(Carrier::Tls, ping(Frames::Datagram))
+        let error = loopback(Carrier::Tls, ping(Frames::Datagram, WINDOW))
             .await
             .err()
             .unwrap();
@@ -1105,7 +1224,7 @@ mod tests {
 
     #[tokio::test]
     async fn paced_shares_a_quic_connection_with_bulk_streams() {
-        let outcome = loopback(Carrier::Quic, paced(Frames::Stream))
+        let outcome = loopback(Carrier::Quic, paced(Frames::Stream, WINDOW))
             .await
             .unwrap();
         assert_latency(&outcome, true, true);
@@ -1113,7 +1232,7 @@ mod tests {
 
     #[tokio::test]
     async fn paced_shares_a_quic_connection_with_bulk_datagrams() {
-        let outcome = loopback(Carrier::Quic, paced(Frames::Datagram))
+        let outcome = loopback(Carrier::Quic, paced(Frames::Datagram, WINDOW))
             .await
             .unwrap();
         assert_latency(&outcome, true, true);
@@ -1121,7 +1240,30 @@ mod tests {
 
     #[tokio::test]
     async fn paced_multiplexes_bulk_on_the_tls_stream() {
-        let outcome = loopback(Carrier::Tls, paced(Frames::Stream)).await.unwrap();
+        let outcome = loopback(Carrier::Tls, paced(Frames::Stream, WINDOW))
+            .await
+            .unwrap();
+        assert_latency(&outcome, true, true);
+    }
+
+    #[tokio::test]
+    async fn a_paced_run_of_zero_seconds_measures_a_quic_stream_echo_and_bulk() {
+        let test = paced(Frames::Stream, Duration::ZERO);
+        let outcome = loopback(Carrier::Quic, test).await.unwrap();
+        assert_latency(&outcome, true, true);
+    }
+
+    #[tokio::test]
+    async fn a_paced_run_of_zero_seconds_measures_a_datagram_echo_and_bulk() {
+        let test = paced(Frames::Datagram, Duration::ZERO);
+        let outcome = loopback(Carrier::Quic, test).await.unwrap();
+        assert_latency(&outcome, true, true);
+    }
+
+    #[tokio::test]
+    async fn a_paced_run_of_zero_seconds_measures_a_tls_echo_and_bulk() {
+        let test = paced(Frames::Stream, Duration::ZERO);
+        let outcome = loopback(Carrier::Tls, test).await.unwrap();
         assert_latency(&outcome, true, true);
     }
 
