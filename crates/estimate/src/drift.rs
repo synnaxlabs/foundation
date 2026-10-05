@@ -42,7 +42,7 @@ impl Drift {
 
 #[cfg(test)]
 mod tests {
-    use crate::Drift;
+    use super::Drift;
 
     fn drift(ppb: u32) -> Drift {
         Drift::from_ppb(ppb).expect("valid")

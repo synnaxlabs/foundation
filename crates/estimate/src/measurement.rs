@@ -1,6 +1,6 @@
 use types::time::{Monotonic, Span};
 
-use crate::{Drift, Error};
+use crate::Drift;
 
 /// The widest error bound, which means the offset is unknown. A wider bound stops here.
 pub(crate) const MAX_ERROR: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
@@ -11,9 +11,8 @@ pub(crate) const MAX_ERROR: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
 /// ```
 /// use types::time::{Monotonic, Span};
 ///
-/// let m = estimate::Measurement::new(Monotonic(10), Span::SECOND, Span::MILLISECOND)?;
-/// assert_eq!(m.offset(), Span::SECOND);
-/// # Ok::<(), estimate::Error>(())
+/// let m = estimate::Measurement::new(Monotonic(10), Span::SECOND, Span::MILLISECOND);
+/// assert_eq!(m.map(|m| m.offset()), Some(Span::SECOND));
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Measurement {
@@ -23,16 +22,14 @@ pub struct Measurement {
 }
 
 impl Measurement {
-    /// Makes a measurement.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Bound`] when `error` is negative or more than 36500 days.
-    pub const fn new(at: Monotonic, offset: Span, error: Span) -> Result<Self, Error> {
+    /// Makes a measurement, or `None` when `error` is negative or more than 36500
+    /// days.
+    #[must_use]
+    pub const fn new(at: Monotonic, offset: Span, error: Span) -> Option<Self> {
         if error.nanos() < 0 || error.nanos() > MAX_ERROR.nanos() {
-            return Err(Error::Bound { error });
+            return None;
         }
-        Ok(Self { at, offset, error })
+        Some(Self { at, offset, error })
     }
 
     /// The local time of the measurement.
@@ -95,7 +92,7 @@ impl Measurement {
     ///
     /// # Errors
     ///
-    /// [`Error::Bound`] when the error is over 36500 days.
+    /// The error, saturated to a span, when it is over 36500 days.
     ///
     /// # Panics
     ///
@@ -104,9 +101,10 @@ impl Measurement {
         at: Monotonic,
         low: i128,
         high: i128,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Span> {
         let (offset, error) = center(low, high);
-        Self::new(at, offset, saturated(error))
+        let error = saturated(error);
+        Self::new(at, offset, error).ok_or(error)
     }
 }
 
@@ -135,7 +133,7 @@ mod tests {
     use types::time::{Monotonic, Span};
 
     use super::MAX_ERROR;
-    use crate::{Drift, Error, Measurement};
+    use crate::{Drift, Measurement};
 
     fn at(ns: u64, error: Span) -> Measurement {
         Measurement::new(Monotonic(ns), Span::ZERO, error).expect("valid")
@@ -147,19 +145,13 @@ mod tests {
         #[test]
         fn rejects_a_negative_error() {
             let error = Span::from_nanos(-1);
-            let err = Measurement::new(Monotonic(0), Span::ZERO, error);
-            assert_eq!(err, Err(Error::Bound { error }));
-            assert_eq!(
-                Error::Bound { error }.to_string(),
-                "error bound -1ns is not between 0s and 36500d"
-            );
+            assert_eq!(Measurement::new(Monotonic(0), Span::ZERO, error), None);
         }
 
         #[test]
         fn rejects_an_error_over_36500_days() {
             let error = Span::from_nanos(MAX_ERROR.nanos() + 1);
-            let err = Measurement::new(Monotonic(0), Span::ZERO, error);
-            assert_eq!(err, Err(Error::Bound { error }));
+            assert_eq!(Measurement::new(Monotonic(0), Span::ZERO, error), None);
         }
 
         #[test]
@@ -249,8 +241,7 @@ mod tests {
             assert_eq!((m.offset(), m.error()), (Span::ZERO, MAX_ERROR));
             let err =
                 Measurement::checked_between(Monotonic(3), -widest - 1, widest + 1);
-            let error = Span::from_nanos(MAX_ERROR.nanos() + 1);
-            assert_eq!(err, Err(Error::Bound { error }));
+            assert_eq!(err, Err(Span::from_nanos(MAX_ERROR.nanos() + 1)));
         }
 
         #[test]
@@ -263,8 +254,7 @@ mod tests {
                 (Span::from_nanos(i64::MIN), MAX_ERROR)
             );
             let err = Measurement::checked_between(Monotonic(0), low - 1, low - 1);
-            let error = Span::from_nanos(MAX_ERROR.nanos() + 1);
-            assert_eq!(err, Err(Error::Bound { error }));
+            assert_eq!(err, Err(Span::from_nanos(MAX_ERROR.nanos() + 1)));
         }
 
         #[test]

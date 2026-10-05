@@ -1,6 +1,10 @@
+//! One estimate from the best measurement of each source.
+
+use std::fmt;
+
 use types::time::Monotonic;
 
-use crate::{Drift, Error, Filter, Measurement};
+use crate::{Drift, Filter, Measurement};
 
 /// Combines the best measurement of each source into one estimate at `now`.
 ///
@@ -26,11 +30,12 @@ use crate::{Drift, Error, Filter, Measurement};
 /// let mut sources = [Filter::default(), Filter::default(), Filter::default()];
 /// let readings = [(10, 4), (12, 4), (500, 1)];
 /// for (filter, (offset, error)) in sources.iter_mut().zip(readings) {
-///     filter.push(Measurement::new(Monotonic(0), ms(offset), ms(error))?);
+///     let m = Measurement::new(Monotonic(0), ms(offset), ms(error));
+///     filter.push(m.expect("at most 36500 days"));
 /// }
 /// let estimate = estimate::combine(Monotonic(0), Drift::UNDISCIPLINED, &sources)?;
 /// assert_eq!((estimate.offset(), estimate.error()), (ms(11), ms(3)));
-/// # Ok::<(), estimate::Error>(())
+/// # Ok::<(), estimate::combine::Error>(())
 /// ```
 pub fn combine<'a>(
     now: Monotonic,
@@ -55,6 +60,34 @@ pub fn combine<'a>(
     }
     Ok(Measurement::between(now, low, high))
 }
+
+/// Why [`combine`] gave no estimate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// No filter holds a measurement.
+    NoSources,
+    /// No offset is inside the bounds of more than half of the sources.
+    NoMajority {
+        /// The number of sources.
+        sources: usize,
+        /// The most sources whose bounds share an offset.
+        agreeing: usize,
+    },
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoSources => f.write_str("no time sources to combine"),
+            Self::NoMajority { sources, agreeing } => write!(
+                f,
+                "no majority of time sources agree: at most {agreeing} of {sources}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Edge {
@@ -89,8 +122,9 @@ fn most_covered(edges: &[(i128, Edge)]) -> (usize, i128, i128) {
 mod tests {
     use types::time::{Monotonic, Span};
 
+    use super::Error;
     use crate::measurement::MAX_ERROR;
-    use crate::{Drift, Error, Filter, Measurement, combine};
+    use crate::{Drift, Filter, Measurement, combine};
 
     fn drift(ppb: u32) -> Drift {
         Drift::from_ppb(ppb).expect("valid")
@@ -188,12 +222,14 @@ mod tests {
         #[test]
         fn fails_with_no_majority() {
             let err = check(&[source(0, 1), source(10, 1)]);
+            let split = Error::NoMajority {
+                sources: 2,
+                agreeing: 1,
+            };
+            assert_eq!(err, Err(split));
             assert_eq!(
-                err,
-                Err(Error::NoMajority {
-                    sources: 2,
-                    agreeing: 1
-                })
+                split.to_string(),
+                "no majority of time sources agree: at most 1 of 2"
             );
         }
 
@@ -394,11 +430,7 @@ mod tests {
                 match combine(Monotonic(now), drift(ppb), &filters(&sources)) {
                     Ok(m) => prop_assert!(m.error() <= MAX_ERROR),
                     Err(Error::NoMajority { .. }) => {}
-                    Err(e @ (Error::Backwards { .. } | Error::Bound { .. }
-                        | Error::Disjoint | Error::Drift { .. } | Error::NoSources
-                        | Error::Open | Error::Crossed)) => {
-                        prop_assert!(false, "unexpected {e}");
-                    }
+                    Err(e @ Error::NoSources) => prop_assert!(false, "unexpected {e}"),
                 }
             }
         }
