@@ -1091,6 +1091,13 @@ How to read this record:
   hand-kept list of the 23; own tables generated from HCL's Unicode version; and
   `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
   `ID_Start` and `ID_Continue`.
+- **HCL REFERENCES (2026-10-05)** The reader reads a reference part by part, as HCL
+  reads a traversal: identifiers joined by `.`, with spaces around each `.` and new
+  lines inside `[` and `(`. A first part `true`, `false`, or `null` is a value, so
+  `true.x` is an index. A `.` that no identifier follows, as in `b.0` or
+  `site_a.@changes`, is refused as `Form::Index`. So a name with a reserved `@` part
+  has no HCL reference form, and `write` refuses it. Lost: a new `Expected` variant for
+  a bad part, a public change for no new fix. #363.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for

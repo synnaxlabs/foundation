@@ -315,12 +315,8 @@ impl<'a> Tokens<'a> {
 
     /// Moves past the rest of an identifier after its first character.
     fn identifier(&mut self) {
-        let len = self
-            .rest
-            .char_indices()
-            .find(|&(_, c)| !identifier_part(c))
-            .map_or(self.rest.len(), |(i, _)| i);
-        self.skip_bytes(len);
+        let len = self.rest.find(|c| !identifier_part(c));
+        self.skip_bytes(len.unwrap_or(self.rest.len()));
     }
 
     /// Reads a quoted string after its opening quote at `start`.
