@@ -1,9 +1,6 @@
 //! The hot path makes no heap allocation. This binary has no test harness: the count
 //! covers each thread, and a harness allocates on its own thread at any time.
 
-#![expect(unsafe_code, reason = "a counting allocator implements `GlobalAlloc`")]
-
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -12,36 +9,8 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use ring::{Config, Full};
 
-/// Counts the allocations of the process.
-struct Counting {
-    count: AtomicU64,
-}
-
-// SAFETY: every call goes to `System` unchanged.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.count.fetch_add(1, Relaxed);
-        // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc`.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the caller keeps the contract of `GlobalAlloc::dealloc`.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
 #[global_allocator]
-static ALLOCATOR: Counting = Counting {
-    count: AtomicU64::new(0),
-};
-
-/// Allocations the process makes while `f` runs.
-fn count(f: impl FnOnce()) -> u64 {
-    let before = ALLOCATOR.count.load(Relaxed);
-    f();
-    ALLOCATOR.count.load(Relaxed) - before
-}
+static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
 /// A waker with a reference count, as a task has. It counts its wakes.
 #[derive(Default)]
@@ -54,7 +23,11 @@ impl Wake for Tally {
 }
 
 fn main() {
-    assert_eq!(count(|| drop(Box::new(1_u8))), 1, "the allocator counts");
+    assert_eq!(
+        ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
+        1,
+        "the allocator counts"
+    );
 
     let (mut producer, mut consumer) = ring::new(Config {
         capacity: 4,
@@ -64,7 +37,7 @@ fn main() {
     let wakers = tallies
         .each_ref()
         .map(|tally| Waker::from(Arc::clone(tally)));
-    let allocations = count(|| {
+    let ((), allocations) = ALLOCATOR.count(|| {
         for value in 0..64_u64 {
             assert_eq!(producer.push(value), Ok(()), "the ring has room");
             assert_eq!(producer.push(value), Ok(()), "the ring has room");
