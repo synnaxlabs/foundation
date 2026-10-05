@@ -256,6 +256,20 @@ How to read this record:
   (natural order), RLE; timestamps add stride; floats raw, ALP, fdelta, RLE; `max` mode
   adds pco. No zstd and no ALP_rd. Policy: `compression { select, mode = auto, raw, or
   max }`, default `auto`. The validator is the top fuzz target.
+- **CODEC FORMAT V1 (#4)** A vector is a tag byte, a bit width byte, header fields,
+  zeros to a multiple of the sample width, then a body padded the same way. Tags: 0
+  raw; 1 FFOR (reference; body `sample - reference`); 2 delta (first, base; body
+  `sample - previous - base` for each sample after the first); 3 RLE (`u16` run count;
+  body the values, then `u16` lengths). Sample arithmetic is modulo 2^b, where b is
+  the bit count of a sample. Packing is in natural order in every vector, least
+  significant bit first. The person chose it ("Natural order") over FastLanes order
+  for full vectors: a natural-order FFOR decode prototype took 197 ns per vector on an
+  M3 Max, about 1.9% of a core at 100M samples/s. FastLanes order can come later as a
+  new tag. Raw and RLE have bit width 0. Integers, `Stamp`, and `Span` use all four
+  tags; other scalars use raw. Timestamp stride (BQ4) comes later as a new tag. The
+  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len`
+  (raw plus one raw header per vector) sizes the output, and the encoder makes one
+  pass. `codec/src/vector.rs` is the full spec.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
@@ -598,6 +612,14 @@ How to read this record:
   from 0); SDK and spec documents have none (section 2.1, kind config). `==` never
   reads spans, so a Document from a file equals the same Document from the spec.
   Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
+- **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
+  recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
+  `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
+  ended the process, `hcl-primitives` read `-18446744073709551615` as 1, and its errors
+  had no fix-it hints. The reader refuses nesting past the Document limit, reads
+  integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
+  section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
+  in `docs/dependencies.md`.
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -1517,7 +1539,7 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
-| 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, and shared value readers. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
