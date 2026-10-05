@@ -1,5 +1,5 @@
 //! Benchmarks of `ring::latest`: the cost of a read of six words, alone and beside a
-//! writer that updates once a millisecond.
+//! writer.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
@@ -31,9 +31,8 @@ fn read(bencher: Bencher<'_, '_>) {
         .bench_local(|| read_all(&reader));
 }
 
-/// Reads beside a writer that updates once a millisecond on another thread.
-#[divan::bench(sample_count = 20)]
-fn read_with_a_writer(bencher: Bencher<'_, '_>) {
+/// Reads beside a writer on another thread that updates, then waits `pause`.
+fn read_beside_a_writer(bencher: Bencher<'_, '_>, pause: Duration) {
     let (mut writer, reader) = latest::new([1; WORDS]);
     let stopped = AtomicBool::new(false);
     thread::scope(|scope| {
@@ -44,7 +43,9 @@ fn read_with_a_writer(bencher: Bencher<'_, '_>) {
         scope.spawn(|| {
             while !stopped.load(Relaxed) {
                 writer.update(|value| value.map(|word| word + 1));
-                thread::sleep(Duration::from_millis(1));
+                if !pause.is_zero() {
+                    thread::sleep(pause);
+                }
             }
         });
         bencher
@@ -52,4 +53,17 @@ fn read_with_a_writer(bencher: Bencher<'_, '_>) {
             .bench_local(|| read_all(&reader));
         stopped.store(true, Relaxed);
     });
+}
+
+/// Reads beside a writer that updates once a millisecond, about a thousand times the
+/// production rate.
+#[divan::bench(sample_count = 20)]
+fn read_with_a_writer(bencher: Bencher<'_, '_>) {
+    read_beside_a_writer(bencher, Duration::from_millis(1));
+}
+
+/// Reads beside a writer in a tight loop: the worst case, where most reads run again.
+#[divan::bench(sample_count = 20)]
+fn read_with_a_spinning_writer(bencher: Bencher<'_, '_>) {
+    read_beside_a_writer(bencher, Duration::ZERO);
 }

@@ -2,7 +2,7 @@
 //!
 //! A sequence number is odd during an update. A reader that sees an odd number, or a
 //! number that changed while it read, reads again. So a read never returns a torn
-//! value, and a read that returns the old value ended before the update began.
+//! value, and a read that returns the old value saw no part of the update.
 
 use std::array;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
@@ -20,12 +20,15 @@ pub fn new<const N: usize>(value: [u64; N]) -> (Writer<N>, Reader<N>) {
     (
         Writer {
             shared: Arc::clone(&shared),
+            seq: 0,
             value,
         },
         Reader { shared },
     )
 }
 
+/// The alignment keeps the `Arc` counts off the lines a read touches.
+#[repr(align(128))]
 struct Shared<const N: usize> {
     /// Odd during an update.
     seq: AtomicU64,
@@ -36,42 +39,46 @@ struct Shared<const N: usize> {
 #[derive(Debug)]
 pub struct Writer<const N: usize> {
     shared: Arc<Shared<N>>,
+    /// The number in the cell between updates.
+    seq: u64,
     value: [u64; N],
 }
 
 impl<const N: usize> Writer<N> {
-    /// Replaces the value with `f(value)`. A read that overlaps the call runs again on
-    /// the new value, so a read that returns the old value ended before `f` began: a
-    /// clock reading inside `f` is later than one inside such a read. If `f` panics,
-    /// the old value stays.
+    /// Replaces the value with `f(value)`. Every reader waits while `f` runs, so `f`
+    /// must be short and must not block. The odd number is visible before `f` runs,
+    /// and a read that overlaps the call runs again on the new value, so a read that
+    /// returns the old value saw no part of the update ([`Reader::read`] has the order
+    /// with a clock). If `f` panics, the old value stays.
     pub fn update(&mut self, f: impl FnOnce([u64; N]) -> [u64; N]) {
-        let seq = self.shared.seq.load(Relaxed);
-        self.shared.seq.store(seq + 1, Relaxed);
+        self.shared.seq.store(self.seq + 1, Relaxed);
         // SeqCst, not Release: the odd number must be visible before `f` reads a
         // clock, and a clock reading is not a memory operation.
         fence(SeqCst);
-        let even = Even {
+        let update = Update {
             seq: &self.shared.seq,
-            next: seq + 2,
+            next: &mut self.seq,
         };
         let value = f(self.value);
         for (word, &new) in self.shared.words.iter().zip(&value) {
             word.store(new, Relaxed);
         }
         self.value = value;
-        drop(even);
+        drop(update);
     }
 }
 
-/// Ends an update when it drops, with or without a panic in the writer's closure.
-struct Even<'a> {
+/// An update in progress. Its drop ends the update, with or without a panic in the
+/// writer's closure.
+struct Update<'a> {
     seq: &'a AtomicU64,
-    next: u64,
+    next: &'a mut u64,
 }
 
-impl Drop for Even<'_> {
+impl Drop for Update<'_> {
     fn drop(&mut self) {
-        self.seq.store(self.next, Release);
+        *self.next += 2;
+        self.seq.store(*self.next, Release);
     }
 }
 
@@ -87,9 +94,11 @@ impl<const N: usize> Reader<N> {
     /// value. So `f` must have no effect other than its result. Only the last result
     /// comes out.
     ///
-    /// A clock reading inside `f` is no later than one inside an update that `f` did
-    /// not see, when the reading is ordered with the loads around it (an ordered
-    /// counter read, as the OS clock makes).
+    /// A read that returns a value saw no update after `f`, and an update makes its
+    /// number visible before its own `f` runs. So a clock reading in a read's `f` is no
+    /// later than one in the `f` of the update that replaced the value, when the
+    /// caller orders each reading with the loads around it: a counter read is not a
+    /// memory operation.
     pub fn read<R>(&self, mut f: impl FnMut([u64; N]) -> R) -> R {
         loop {
             let mut before = self.shared.seq.load(Acquire);
@@ -163,6 +172,24 @@ mod tests {
     }
 
     #[test]
+    fn does_not_reuse_a_number_a_reader_saw_after_a_panic() {
+        let (mut writer, reader) = new([5]);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| writer.update(|_| panic!("once"))))
+                .is_err()
+        );
+        let mut updated = false;
+        let value = reader.read(|[value]| {
+            if !updated {
+                updated = true;
+                writer.update(|_| [6]);
+            }
+            value
+        });
+        assert_eq!(value, 6);
+    }
+
+    #[test]
     fn debug_shows_the_sequence_and_the_words() {
         let (mut writer, reader) = new([7]);
         let shared = |seq: u64, word: u64| {
@@ -178,7 +205,7 @@ mod tests {
         assert_eq!(format!("{reader:?}"), shared(6, 8));
         assert_eq!(
             format!("{writer:?}"),
-            "Writer { shared: Shared { seq: 6, words: [8] }, value: [8] }"
+            "Writer { shared: Shared { seq: 6, words: [8] }, seq: 6, value: [8] }"
         );
     }
 
@@ -206,12 +233,13 @@ mod model {
 
     use super::new;
 
-    /// Checks schedules with at most two forced thread switches. A reader that loom
-    /// keeps on a stale word repeats its read, so the models need many branches.
+    /// Checks schedules with at most five forced thread switches, as the ring models
+    /// do. A reader that loom keeps on a stale word repeats its read, so the models
+    /// need many branches.
     fn bounded(model: impl Fn() + Send + Sync + 'static) {
         let mut builder = Builder::new();
-        builder.preemption_bound = Some(2);
-        builder.max_branches = 20_000;
+        builder.preemption_bound = Some(5);
+        builder.max_branches = 2_000_000;
         builder.check(model);
     }
 
