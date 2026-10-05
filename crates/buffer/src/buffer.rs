@@ -24,9 +24,9 @@ use types::frame::Path;
 use types::time::Span;
 
 use crate::entry::{self, Entry};
-use crate::group::{Closed, Group, META_LEN, Rejected, Sealed};
+use crate::group::{Closed, Group, Limit, META_LEN, Rejected, Sealed};
 use crate::header::{self, Header};
-use crate::record::{self, ALIGN, AREA_START};
+use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::tails::{self, Tail, Tails};
 use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 
@@ -55,6 +55,10 @@ pub struct Config {
 /// Why a call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    /// The batch alone is over a limit of one record, so it never fits this ring.
+    /// The limit is the first one it is over, in the order of [`Limit`]. Nothing
+    /// is queued.
+    Large(Limit),
     /// The ring has no room for the batch. The caller records a gap. Room returns
     /// at a commit, or never when the offsets left before their end are under
     /// `needed`.
@@ -80,7 +84,8 @@ pub enum Error {
     },
     /// No header block has the magic: the file is not a ring.
     Missing,
-    /// Both header blocks have the magic and a wrong CRC: the ring is lost.
+    /// Both header blocks have the magic and a wrong CRC, which no crash leaves:
+    /// the ring is lost.
     Damaged,
     /// The ring has a format version this build does not read.
     Version(u16),
@@ -97,6 +102,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Large(limit) => write!(f, "{limit}"),
             Self::Full { needed, free } => write!(
                 f,
                 "the ring has no room for the batch: it needs {needed} bytes and \
@@ -299,11 +305,10 @@ impl Buffer {
             Err(error) => return Err(error.into()),
         };
         let header = read_header(&file, &pool, &entropy, layout).await?;
-        let mut cursor = Cursor::new(header.layout, header.tail);
+        let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
         let mut tails = Tails::default();
         loop {
             let Window { place, len } = cursor.window();
-            let len = usize::try_from(len).expect("invariant: a window fits in memory");
             let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
             let offset = cursor.offset();
             match cursor.next(&bytes)? {
@@ -366,16 +371,15 @@ impl Buffer {
     ///
     /// # Errors
     ///
-    /// [`Error::Full`] when the ring has no room for the whole call, and
-    /// [`Error::Pool`] when the pool has no block for the record header; nothing is
-    /// queued and no tail moves. [`Error::Files`] after a failed sync.
+    /// [`Error::Large`] when no record holds the entries together, [`Error::Full`]
+    /// when the ring has no room for the whole call, and [`Error::Pool`] when the
+    /// pool has no block for the record header; nothing is queued and no tail
+    /// moves. [`Error::Files`] after a failed sync.
     ///
     /// # Panics
     ///
     /// When a `first` is below the tail of its path, with the index, the path,
-    /// `first`, and the tail, or when `first + len` passes `u64::MAX`. When the
-    /// entries together hold more than `body_max` bytes, or more than 1023 entries
-    /// or parts.
+    /// `first`, and the tail, or when `first + len` passes `u64::MAX`.
     pub fn append(&self, entries: &[Entry<'_>]) -> Result<(), Error> {
         let shared = &*self.shared;
         let mut guard = shared.state.borrow_mut();
@@ -419,9 +423,10 @@ impl Buffer {
     }
 }
 
-/// The error of a push into an empty group.
+/// The error of a push that a new group refuses too.
 fn rejected(rejected: Rejected) -> Error {
     match rejected {
+        Rejected::Large(limit) => Error::Large(limit),
         Rejected::Ring(full) => full.into(),
         Rejected::Pool(error) => error.into(),
         Rejected::Record => {
@@ -481,15 +486,15 @@ async fn read_header(
 
 /// Advances the tails past the entries of a record body at `offset`.
 fn recover(
-    body: &[u8],
+    body: Body<'_>,
     offset: u64,
     slots: &mut Slots,
     tails: &mut Tails,
 ) -> Result<(), Error> {
     let unread = |_: entry::Invalid| Error::Invalid { offset };
     let misplaced = |_: tails::Invalid| Error::Invalid { offset };
-    for entry in entry::parse(body).map_err(unread)? {
-        let (header, _) = entry.map_err(unread)?;
+    for header in entry::parse(body.start, body.len).map_err(unread)? {
+        let header = header.map_err(unread)?;
         tails
             .advance(slots.assign(header.index), &header)
             .map_err(misplaced)?;
