@@ -160,7 +160,8 @@ mod tests {
             ]),
         ) {
             let text = decimal(bytes, shift, unit);
-            prop_assert_eq!(text.parse::<Size>().map(Size::bytes), Ok(bytes), "{}", text);
+            let read = text.parse::<Size>().map(Size::bytes);
+            prop_assert_eq!(read, Ok(bytes), "{}", text);
         }
     }
 
