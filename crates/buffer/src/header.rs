@@ -245,7 +245,8 @@ mod tests {
 
     /// Puts the CRC of the block after its fields.
     fn seal(block: &mut [u8; ALIGN]) {
-        block[CRC..CRC + 4].copy_from_slice(&crc(block).to_le_bytes());
+        let crc = crc(block).to_le_bytes();
+        block[CRC..CRC + 4].copy_from_slice(&crc);
     }
 
     fn any_header() -> impl Strategy<Value = Header> {

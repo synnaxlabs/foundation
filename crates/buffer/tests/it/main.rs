@@ -862,7 +862,7 @@ fn open_after_a_cut(
 #[test]
 fn a_power_cut_during_the_first_open_leaves_a_ring_that_opens() {
     let ring = layout(AREA, BODY_MAX);
-    for seed in 0..8 {
+    for seed in 0..64 {
         let mut cut = 0;
         loop {
             let (ended, opened) = open_after_a_cut(seed, cut, ring);
@@ -870,7 +870,7 @@ fn a_power_cut_during_the_first_open_leaves_a_ring_that_opens() {
             if ended {
                 break;
             }
-            cut += 5_000;
+            cut += 10_000;
         }
     }
 }
