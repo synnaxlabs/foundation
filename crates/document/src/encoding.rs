@@ -55,7 +55,7 @@ pub fn encode(document: &Document) -> Result<Vec<u8>, TooDeep> {
 }
 
 /// Checks that [`encode`] can write `document`: it nests no deeper than [`DEPTH_MAX`].
-/// It stops at the first level past the limit, so a document of any depth is safe.
+/// It never recurses past [`DEPTH_MAX`] levels, however deep `document` is.
 ///
 /// # Errors
 ///
@@ -276,6 +276,7 @@ fn enter(depth: usize) -> Option<usize> {
     depth.checked_add(1).filter(|&inner| inner <= DEPTH_MAX)
 }
 
+/// Recurses once per level, so it runs only on a Document that [`check`] accepts.
 struct Writer {
     out: Vec<u8>,
 }
@@ -492,7 +493,7 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arbitrary::document;
+    use crate::arbitrary::{Edits, document, rebuild};
     use crate::{Position, Source};
     use proptest::prelude::*;
 
@@ -762,6 +763,66 @@ mod tests {
             assert_eq!(encode(&document).map(drop), expected);
         }
 
+        /// `document` with no spans.
+        fn unspanned(document: &Document) -> Document {
+            let edits = &mut Edits {
+                span: &mut |_| None,
+                text: &mut |text| text.into(),
+                leaf: &mut Clone::clone,
+            };
+            rebuild(document, edits)
+        }
+
+        /// The one attribute of `document`.
+        fn attribute(document: Document) -> Attribute {
+            document.attributes.into_vec().remove(0)
+        }
+
+        #[test]
+        fn checks_siblings_in_order() {
+            let (first, spans) = nested_document(&[Level::Block; 65]);
+            let second = unspanned(&first);
+            let siblings = Document {
+                attributes: Map::default(),
+                blocks: first.blocks.into_iter().chain(second.blocks).collect(),
+            };
+            let expected = Err(TooDeep {
+                span: Some(spans[DEPTH_MAX]),
+            });
+            assert_eq!(check(&siblings), expected, "blocks");
+
+            let (first, spans) = nested_document(&[Level::List; 65]);
+            let mut second = attribute(unspanned(&first));
+            second.key = "b".into();
+            let siblings = Document {
+                attributes: Map::new(vec![attribute(first), second]).unwrap(),
+                blocks: Vec::new(),
+            };
+            let expected = Err(TooDeep {
+                span: Some(spans[DEPTH_MAX]),
+            });
+            assert_eq!(check(&siblings), expected, "attributes");
+
+            let (first, spans) = nested_document(&[Level::List; 64]);
+            let second = attribute(unspanned(&first)).value;
+            let list = Attribute {
+                key: "a".into(),
+                key_span: None,
+                value: Value {
+                    kind: Kind::List(vec![attribute(first).value, second]),
+                    span: None,
+                },
+            };
+            let siblings = Document {
+                attributes: Map::new(vec![list]).unwrap(),
+                blocks: Vec::new(),
+            };
+            let expected = Err(TooDeep {
+                span: Some(spans[63]),
+            });
+            assert_eq!(check(&siblings), expected, "list items");
+        }
+
         /// Drops `document` one level at a time. A plain drop recurses once per level.
         fn tear_down(document: Document) {
             let mut documents = vec![document];
@@ -792,9 +853,11 @@ mod tests {
                 let expected = Err(TooDeep {
                     span: Some(spans[DEPTH_MAX]),
                 });
-                assert_eq!(check(&document), expected);
-                assert_eq!(encode(&document).map(drop), expected);
+                let checked = check(&document);
+                // A wrong `check` lets the writer recurse to the bottom.
+                let encoded = checked.is_err().then(|| encode(&document).map(drop));
                 tear_down(document);
+                assert_eq!((checked, encoded), (expected, Some(expected)), "{level:?}");
             }
         }
 
