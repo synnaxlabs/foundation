@@ -65,11 +65,24 @@ disallowed-methods = [
   { path = "rustls::TicketSwitcher::new", reason = "reads the OS clock" },
   { path = "rustls::pki_types::UnixTime::now", reason = "use the injected clock" },
   { path = "rustls::KeyLogFile::new", reason = "configuration is an input" },
+  # noq-proto: its defaults draw OS randomness and read the OS clock.
+  # `transport::quic::settings` builds every config, with each such option set.
+  { path = "noq_proto::Endpoint::new", reason = "use quic::settings" },
+  { path = "noq_proto::EndpointConfig::new", reason = "use quic::settings" },
+  { path = "noq_proto::ServerConfig::new", reason = "use quic::settings" },
+  { path = "noq_proto::ServerConfig::with_crypto", reason = "OS randomness breaks replay" },
+  { path = "noq_proto::ServerConfig::with_single_cert", reason = "OS randomness breaks replay" },
+  { path = "noq_proto::ClientConfig::new", reason = "use quic::settings" },
+  { path = "noq_proto::ClientConfig::with_root_certificates", reason = "OS randomness breaks replay" },
 ]
 disallowed-types = [
   { path = "std::collections::HashMap", reason = "use types::hash::Map" },
   { path = "std::collections::HashSet", reason = "use types::hash::Set" },
   { path = "std::hash::RandomState", reason = "OS randomness breaks replay" },
+  { path = "noq_proto::StdSystemTime", reason = "use the injected clock" },
+  { path = "noq_proto::RandomConnectionIdGenerator", reason = "OS randomness breaks replay" },
+  { path = "noq_proto::HashedConnectionIdGenerator", reason = "OS randomness breaks replay" },
+  { path = "noq_proto::congestion::Bbr3Config", reason = "OS randomness breaks replay" },
 ]
 disallowed-macros = [
   { path = "std::thread_local", reason = "no mutable globals" },
