@@ -1,0 +1,4 @@
+a = "EOT\n"
+b = " EOT\n"
+c = "EOT \n"
+d = "$${x} %%{y}\n"

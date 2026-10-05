@@ -143,8 +143,9 @@ state on `main`.
 ### Files to the spec
 
 - HCL text becomes a `Document` (`config-hcl`), and a `Document` has one canonical
-  encoding (`document`). Both readers bound nesting at 64 levels. Fuzzed:
-  `config_hcl_read`, `document_encoding`.
+  encoding (`document`). Both readers bound nesting at 64 levels.
+  `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
+  `config_hcl_read`, `config_hcl_write`, `document_encoding`.
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -227,16 +228,18 @@ state on `main`.
 ## Fuzz targets
 
 The rule is one target for each decoder of outside input
-(`docs/claude/testing.md`). Inputs are in `oracles/fuzz/<target>/`. The crate is in
-#241; its CI job is #252.
+(`docs/claude/testing.md`). An encoder or a writer also gets a target when a
+decoder must read its output back (`codec_encoder`, `config_hcl_write`). Inputs are
+in `oracles/fuzz/<target>/`. The CI job is #252.
 
-| Target | Reads | Checks besides "no panic" |
+| Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode` | Both give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
+| `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |

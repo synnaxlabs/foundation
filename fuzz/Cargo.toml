@@ -41,6 +41,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "config_hcl_write"
+path = "fuzz_targets/config_hcl_write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "document_encoding"
 path = "fuzz_targets/document_encoding.rs"
 test = false
