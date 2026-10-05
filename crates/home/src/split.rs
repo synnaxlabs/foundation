@@ -221,7 +221,7 @@ impl Split<'_> {
         else {
             panic!("group {group} is absent from the frame");
         };
-        let part = &mut scratch.parts[at];
+        let part = &scratch.parts[at];
         if let Err(error) = &part.check {
             panic!("group {group} failed its check: {error}");
         }
@@ -229,13 +229,12 @@ impl Split<'_> {
             !part.made,
             "the index frame of group {group} was made already"
         );
-        part.made = true;
         if scratch.parts.len() == 1
             && let Some(draft) = self.draft.take()
         {
+            scratch.parts[at].made = true;
             return Ok(draft);
         }
-        let part = &scratch.parts[at];
         let series = &scratch.series[part.series.clone()];
         scratch.lens.clear();
         scratch
@@ -252,6 +251,7 @@ impl Split<'_> {
             out.copy_from_slice(bytes);
         }
         index.set_count(group, part.count);
+        scratch.parts[at].made = true;
         Ok(index)
     }
 }
@@ -630,6 +630,25 @@ mod tests {
                      {available} bytes free"
                 )
             );
+        }
+
+        #[test]
+        fn makes_the_frame_after_a_pool_error_once_the_pool_has_room() {
+            let set = two_groups();
+            let write = both();
+            let pool = pool(1 << 16);
+            let mut scratch = Scratch::default();
+            let mut split = scratch.split(&set, draft(&pool, &set, Form::Raw, &write));
+            let mut held = Vec::new();
+            while let Ok(block) = pool.alloc(64) {
+                held.push(block);
+            }
+            split.frame(&pool, 0).expect_err("a full pool");
+            drop(held);
+
+            let frame = split.frame(&pool, 0).expect("room after the pool frees");
+
+            assert_index_frame(&set, &write, 0, &frame.freeze(Path::Live));
         }
 
         mod panics {
