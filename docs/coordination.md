@@ -49,11 +49,14 @@ Most of the cost is context size per turn, so keep each context small:
 - Send reading, searching, and reviews to subagents; keep their results, not their
   file dumps.
 - Finish each issue with its state comment, so compaction or `/clear` loses nothing.
+- On usage credits, the prompt cache lives five minutes. A session that sleeps longer
+  reads its whole context again at full price, so `/clear` before a long wait.
 
 ## Current sessions
 
 | Session | Model | Owns |
 | --- | --- | --- |
+| **Laptop** | | |
 | `coordinator` | Opus | Interfaces, `docs/decisions.md`, issues, merge queue |
 | `memory` | Fable | `block`, `ring` |
 | `data-path` | Opus | `types`, `codec`, `wire` |
@@ -65,9 +68,26 @@ Most of the cost is context size per turn, so keep each context small:
 | `config` | Opus | `document`, `config-hcl`, then `config` |
 | `network` | Opus | `transport` |
 | `advisor` | Opus | Answers design questions; writes no code here |
+| **Factory host** | | |
+| `hub` | Fable | `hub` |
+| `connector` | Opus | `connector` (the kind contract, supervisor, `ctx`, components) |
+| `access` | Opus | `access`, `secret` |
+| `ops` | Opus | `ops`, `node` |
+| `opcua` | Opus | `connector-opcua` |
+| `modbus` | Opus | `connector-modbus` |
+| `ni` | Opus | `connector-ni` |
+| `influx` | Opus | `connector-influx` |
+| `verify` | Opus | `acceptance` (MVP tests, test-only), the chaos lab |
+| `red-team` | Fable | Attacks merged code, security included; owns no crate |
+| `audit` | Opus | Architecture, practices, and performance audits; owns no crate |
+| `ux` | Opus | The end user's experience; owns no crate |
 
-Not owned yet: `access` (after `spec`), `hub`, `secret`, `connector` and each
-`connector-<kind>` (after the `hub` and `connector` surfaces), `ops`, and `node`.
+A connector kind starts with its protocol codec and its device simulator, which need
+only layer 1. It moves onto the `connector` contract when that surface merges.
+
+Sessions on the two machines talk through Remote Control. Turn it on for every new
+session in `/config` ("Enable Remote Control for all sessions"), or run
+`/remote-control` in a running one.
 
 Two first surfaces have a named reviewer besides the coordinator: `consensus` reviews
 `document`, because `spec` uses it; `simulation` reviews `transport`, because `sim`
@@ -185,18 +205,21 @@ Two cases skip the interface issue:
 
 ## Cloud machines
 
-Only the coordinator rents machines. The limit is in `docs/decisions.md` (BENCH
-SPEND).
+The coordinator rents benchmark machines within BENCH SPEND (`docs/decisions.md`). The
+coordinator, `verify`, and `red-team` rent test machines within the test budget
+(`docs/decisions.md` 5.5): 1000 USD in total and at most 40 USD a day.
 
 1. The builder asks on its issue: instance types, count, and hours.
-2. Before launch, the coordinator posts the cap on the spend ledger issue (#15):
-   on-demand price per hour times count times lifetime. The sum of caps stays at or
-   under 90 USD.
-3. Every instance has the tags `project=foundation-bench` and `issue=<n>`, shutdown
-   behavior `terminate`, a root volume that is deleted on termination, and user data
-   that runs `shutdown -h +<minutes>` at boot. The lifetime is at most 240 minutes.
-4. The coordinator terminates the instances when the run ends, posts the actual hours
-   on the ledger, and checks for running tagged instances on each loop.
+2. Before launch, the renting session posts the cap on the spend ledger issue (#15):
+   on-demand price per hour times count times lifetime. The sum of caps stays inside
+   the limit.
+3. Every instance has the tags `project=foundation-bench` (or `foundation-test`) and
+   `issue=<n>`, shutdown behavior `terminate`, a root volume that is deleted on
+   termination, and user data that runs `shutdown -h +<minutes>` at boot. The lifetime
+   is at most 240 minutes.
+4. The renting session terminates the instances when the run ends and posts the
+   actual hours on the ledger. The coordinator checks for running tagged
+   instances on each loop.
 
 ## Messages
 
@@ -226,5 +249,5 @@ from the person's account. Fix a dependency with a local patch
 - a change touches a locked decision, a contract, or an oracle;
 - two sessions still disagree after one exchange;
 - a PR adds a third-party dependency (record it in `docs/dependencies.md`);
-- work would spend money: cloud resources or paid services, except rented benchmark
-  machines within the BENCH SPEND limit.
+- work would spend money: cloud resources or paid services, except rented machines
+  within BENCH SPEND or the test budget.
