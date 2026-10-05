@@ -366,8 +366,8 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
             Some(At::Header(head)) if head.number == next => {
                 segment = segment.saturating_add(1);
             }
-            // A file that starts with a stale record or with garbage, and a file with
-            // no record that is not the last one.
+            // A next file that starts with a stale record or with garbage, or that has
+            // no record and is not the last file.
             Some(At::Header(_) | At::Garbage) => {
                 return Err(Error::Corrupt {
                     path: after,
