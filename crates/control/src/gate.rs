@@ -267,10 +267,10 @@ fn deadline(now: Monotonic, lease: Lease) -> Monotonic {
 
 #[cfg(test)]
 mod tests {
+    use types::authority::Authority;
     use types::time::Span;
 
     use super::*;
-    use types::authority::Authority;
 
     fn writer(subject: &str, authority: u8) -> Writer {
         Writer {
