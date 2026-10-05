@@ -450,8 +450,8 @@ How to read this record:
   Raspberry Pi 4 with 1 GB: idle under 50 MB, start under 1 s. A regression over 5% on
   the dedicated machine blocks a merge.
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
-  (slots plus types, R9-D1). Frames point at the key set id. Supersedes: S1 frame
-  struct.
+  (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
+  frame struct. Approved by the coordinator (#390).
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
   home routes by key set.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
@@ -1483,7 +1483,7 @@ Storage classes used in the table:
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
-| Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
+| Key set | Memory, one per writer session: sorted slots, with each entry's key and type | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
 | Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one in its header | Whoever freezes the frame: the home on a write, from its label after the B7 check; a decoder or catch-up, from the path the frame came with | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Label (a path or resend) | A value, `frame::Label` (B7), on each write: the `hub` writer call and the wire write message. The only source of a write's path; none means live. Not in the frame block | The writer | `hub`, `wire`, `home` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
@@ -2016,11 +2016,12 @@ but `home` (below `hub`) routes by key set and writes companion samples, so a
 `hub`-owned table would point upward.
 Resolution (memory delegation): both tables are layer-1 data structures, the slot table
 (`types::channel::Slots`) and the interner (`types::frame::key_set::Interner`). `node`
-constructs one of each per node and injects them into `hub` and `home`. Interning
-happens at session open; each shard reads a snapshot. `buffer` keys its in-memory
-tails, floors, and read cursors by slot, and keeps the key on disk. `Buffer::open`
-takes the slot table and assigns a slot to each index it recovers; `node` opens
-every buffer before it opens sessions (#219, 2026-10-05).
+constructs one interner per node, which owns the slot table, and passes that table to
+`Buffer::open`. `node` injects the interner into `hub` and `home`. Interning happens
+at session open; each shard reads a snapshot. `buffer` keys its in-memory tails,
+floors, and read cursors by slot, and keeps the key on disk. `Buffer::open` assigns a
+slot to each index it recovers; `node` opens every buffer before it opens sessions
+(#219, 2026-10-05). Approved by the coordinator on PR #449.
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**

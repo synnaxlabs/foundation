@@ -636,7 +636,7 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
-    use crate::channel::Slot;
+    use crate::channel;
     use crate::sample::{Scalar, Type};
     use key_set::{Group, Interner};
     use proptest::collection::vec;
@@ -645,8 +645,17 @@ mod tests {
     const F64: Type = Type::Scalar(Scalar::F64);
     const U8: Type = Type::Scalar(Scalar::U8);
 
-    fn slot(n: u32) -> Slot {
-        Slot::new(n)
+    fn key(n: u32) -> channel::Key {
+        channel::Key::from_u128(u128::from(n))
+    }
+
+    /// An interner where key `n` has slot `n`, for each `n` below 1000.
+    fn interner() -> Interner {
+        let mut interner = Interner::new();
+        for n in 0..1000 {
+            interner.slots().assign(key(n));
+        }
+        interner
     }
 
     fn pool(budget: usize) -> block::Pool {
@@ -655,41 +664,41 @@ mod tests {
         block::Pool::new(config, memory)
     }
 
-    /// One group: index slot 1 (entry 0), then slots 2 and 3 (entries 1 and 2).
+    /// One group: index key 1 (entry 0), then keys 2 and 3 (entries 1 and 2).
     fn one_group(interner: &mut Interner) -> std::sync::Arc<KeySet> {
         interner.intern(&[Group {
-            index: slot(1),
-            data: &[(slot(2), F64), (slot(3), U8)],
+            index: key(1),
+            data: &[(key(2), F64), (key(3), U8)],
         }])
     }
 
-    /// Two groups: index slot 1 with slot 2, and index slot 3 with slot 4.
+    /// Two groups: index key 1 with key 2, and index key 3 with key 4.
     fn two_groups() -> std::sync::Arc<KeySet> {
-        Interner::new().intern(&[
+        interner().intern(&[
             Group {
-                index: slot(1),
-                data: &[(slot(2), F64)],
+                index: key(1),
+                data: &[(key(2), F64)],
             },
             Group {
-                index: slot(3),
-                data: &[(slot(4), F64)],
+                index: key(3),
+                data: &[(key(4), F64)],
             },
         ])
     }
 
     /// The error of a draft of `series` over [`one_group`].
     fn refusal(series: &[(usize, usize)]) -> Error {
-        let set = one_group(&mut Interner::new());
+        let set = one_group(&mut interner());
         let result = Draft::new(&pool(1 << 16), &set, Form::Raw, series);
         result.unwrap_err()
     }
 
     #[test]
     fn lays_out_a_frame_byte_for_byte() {
-        let mut interner = Interner::new();
+        let mut interner = interner();
         for n in 10..13 {
             interner.intern(&[Group {
-                index: slot(n),
+                index: key(n),
                 data: &[],
             }]);
         }
@@ -745,11 +754,11 @@ mod tests {
 
     #[test]
     fn reads_the_header_of_a_draft() {
-        let mut interner = Interner::new();
+        let mut interner = interner();
         // A key wider than one byte, and unlike the counts in the header.
         for n in 0..256 {
             interner.intern(&[Group {
-                index: slot(1000 + n),
+                index: key(1000 + n),
                 data: &[],
             }]);
         }
@@ -935,11 +944,11 @@ mod tests {
     fn finds_ranges_and_series_among_many() {
         let groups: Vec<Group<'_>> = (0..130)
             .map(|n| Group {
-                index: slot(n),
+                index: key(n),
                 data: &[],
             })
             .collect();
-        let set = Interner::new().intern(&groups);
+        let set = interner().intern(&groups);
         let pool = pool(1 << 16);
         let series = [(0, 8), (64, 8), (129, 8)];
         let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
@@ -963,7 +972,7 @@ mod tests {
     #[test]
     fn returns_the_pool_error() {
         let pool = pool(512);
-        let set = one_group(&mut Interner::new());
+        let set = one_group(&mut interner());
         let result = Draft::new(&pool, &set, Form::Raw, &[(0, 1000)]);
         let error = result.unwrap_err();
         let cause = block::Error::TooLarge {
@@ -983,8 +992,8 @@ mod tests {
 
     #[test]
     fn returns_the_pool_error_past_u32_max_bytes() {
-        let set = Interner::new().intern(&[Group {
-            index: slot(1),
+        let set = interner().intern(&[Group {
+            index: key(1),
             data: &[],
         }]);
         let pool = pool(1 << 16);
@@ -1151,22 +1160,22 @@ mod tests {
 
     /// The key set of `case` and the series of its frame.
     fn shape(case: &Case) -> (std::sync::Arc<KeySet>, Vec<(usize, usize)>) {
-        let data: Vec<Vec<(Slot, Type)>> = (0..case.data.len())
+        let data: Vec<Vec<(channel::Key, Type)>> = (0..case.data.len())
             .map(|g| {
                 let base = u32::try_from(g * 100).unwrap();
                 let count = u32::try_from(case.data[g]).unwrap();
-                (0..count).map(|j| (slot(base + 2 * j + 1), F64)).collect()
+                (0..count).map(|j| (key(base + 2 * j + 1), F64)).collect()
             })
             .collect();
         let groups: Vec<Group<'_>> = data
             .iter()
             .enumerate()
             .map(|(g, data)| Group {
-                index: slot(u32::try_from(g * 100 + 40).unwrap()),
+                index: key(u32::try_from(g * 100 + 40).unwrap()),
                 data,
             })
             .collect();
-        let set = Interner::new().intern(&groups);
+        let set = interner().intern(&groups);
         let series = (0..set.entries().len())
             .filter(|&entry| {
                 let group = usize::try_from(set.entries()[entry].group).unwrap();
