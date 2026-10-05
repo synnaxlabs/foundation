@@ -281,3 +281,150 @@ fn error_codes_and_fixes_match_the_golden_file() {
         .collect();
     assert_eq!(lines.concat(), include_str!("codes.golden"));
 }
+
+mod mcp {
+    use serde_json::{Value, json};
+
+    fn ask(message: &Value) -> Value {
+        let reply = crate::mcp(&message.to_string()).expect("a reply");
+        assert!(!reply.contains('\n'), "one line: {reply}");
+        serde_json::from_str(&reply).expect("json")
+    }
+
+    fn request(id: Value, method: &str, params: Value) -> Value {
+        let mut request = json!({ "jsonrpc": "2.0", "method": method });
+        request["id"] = id;
+        request["params"] = params;
+        request
+    }
+
+    fn failure(id: Value, code: i64, message: &str) -> Value {
+        let mut failure =
+            json!({ "jsonrpc": "2.0", "error": { "code": code, "message": message } });
+        failure["id"] = id;
+        failure
+    }
+
+    #[test]
+    fn initialize_gives_the_version_and_the_tools_capability() {
+        let reply = ask(&request(
+            json!(1),
+            "initialize",
+            json!({ "protocolVersion": "2025-06-18" }),
+        ));
+        assert_eq!(
+            reply,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "foundation", "version": env!("CARGO_PKG_VERSION") },
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn initialize_offers_its_own_version_for_another() {
+        let reply = ask(&request(
+            json!("a"),
+            "initialize",
+            json!({ "protocolVersion": "1999-01-01" }),
+        ));
+        assert_eq!(reply["id"], "a");
+        assert_eq!(reply["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn ping_gets_an_empty_result() {
+        assert_eq!(
+            ask(&request(json!(2), "ping", Value::Null)),
+            json!({ "jsonrpc": "2.0", "id": 2, "result": {} })
+        );
+    }
+
+    #[test]
+    fn tools_list_and_call_return_the_generated_results() {
+        let list = ask(&request(json!(3), "tools/list", json!({})));
+        assert_eq!(
+            list,
+            json!({ "jsonrpc": "2.0", "id": 3, "result": crate::tools() })
+        );
+        let call = ask(&request(
+            json!(4),
+            "tools/call",
+            json!({ "name": "version", "arguments": {} }),
+        ));
+        assert_eq!(
+            call,
+            json!({ "jsonrpc": "2.0", "id": 4, "result": crate::call("version", json!({})) })
+        );
+        let bare = ask(&request(
+            json!(5),
+            "tools/call",
+            json!({ "name": "version" }),
+        ));
+        assert_eq!(bare["result"]["isError"], false);
+        let failed = ask(&request(json!(6), "tools/call", json!({ "name": "nope" })));
+        assert_eq!(
+            failed["result"]["structuredContent"]["code"],
+            "ops.unknown-operation"
+        );
+    }
+
+    #[test]
+    fn a_notification_gets_no_reply() {
+        let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        assert_eq!(crate::mcp(&note.to_string()), None);
+        let unknown = json!({ "jsonrpc": "2.0", "method": "nope" });
+        assert_eq!(crate::mcp(&unknown.to_string()), None);
+    }
+
+    #[test]
+    fn bad_json_is_a_parse_error() {
+        let reply: Value =
+            serde_json::from_str(&crate::mcp("{").expect("a reply")).expect("json");
+        assert_eq!(reply, failure(Value::Null, -32700, "Parse error"));
+    }
+
+    #[test]
+    fn a_message_that_is_not_a_request_is_invalid() {
+        assert_eq!(
+            ask(&json!([1])),
+            failure(Value::Null, -32600, "Invalid Request")
+        );
+        assert_eq!(
+            ask(&json!({ "id": 1, "method": "ping" })),
+            failure(Value::Null, -32600, "Invalid Request")
+        );
+        assert_eq!(
+            ask(&json!({ "jsonrpc": "2.0", "id": true, "method": "ping" })),
+            failure(Value::Null, -32600, "Invalid Request")
+        );
+        assert_eq!(
+            ask(&json!({ "jsonrpc": "2.0", "id": 7 })),
+            failure(json!(7), -32600, "Invalid Request")
+        );
+    }
+
+    #[test]
+    fn an_unknown_method_is_not_found() {
+        assert_eq!(
+            ask(&request(json!(8), "nope", json!({}))),
+            failure(json!(8), -32601, "Method not found")
+        );
+    }
+
+    #[test]
+    fn bad_call_params_are_invalid() {
+        for params in [Value::Null, json!([]), json!({}), json!({ "name": 1 })] {
+            assert_eq!(
+                ask(&request(json!(9), "tools/call", params.clone())),
+                failure(json!(9), -32602, "Invalid params"),
+                "{params}"
+            );
+        }
+    }
+}

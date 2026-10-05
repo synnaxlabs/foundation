@@ -6,10 +6,12 @@ use std::ffi::OsString;
 use serde_json::{Value, json};
 
 mod error;
+mod mcp;
 mod operation;
 #[cfg(test)]
 mod tests;
 
+pub use mcp::mcp;
 use operation::{Parsed, TABLE};
 
 /// What one run of the command line writes, and how the process exits.
