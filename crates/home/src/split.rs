@@ -7,6 +7,8 @@ use types::frame::key_set::KeySet;
 use types::frame::{self, Draft, Form};
 use types::sample::{Scalar, Type};
 
+use crate::index::Refusal;
+
 /// The buffers of [`Split`], kept from one frame to the next, so that a split makes no
 /// heap allocation once they are large enough.
 #[derive(Debug, Default)]
@@ -48,8 +50,8 @@ struct Part {
     series: Range<usize>,
     /// Its index stamps in [`Scratch::stamps`].
     stamps: Range<usize>,
-    /// The error of its first series that does not fit `count`.
-    check: Result<(), codec::Error>,
+    /// The refusal of its first series that does not fit `count`.
+    check: Result<(), Refusal>,
     made: bool,
 }
 
@@ -154,7 +156,10 @@ impl Scratch {
                         part.stamps = self.stamps.len() - count..self.stamps.len();
                     }
                 }
-                Err(error) => part.check = Err(error),
+                Err(error) => {
+                    let channel = set.entries()[entry].key;
+                    part.check = Err(Refusal::Codec { channel, error });
+                }
             }
         }
     }
@@ -186,11 +191,11 @@ pub(crate) struct Split<'a> {
 }
 
 impl Split<'_> {
-    /// Each present group, in group order, with the stamps of its index series, or the
-    /// `codec` error of its first series that does not fit the group's count.
+    /// Each present group, in group order, with the stamps of its index series, or
+    /// [`Refusal::Codec`] for its first series that does not fit the group's count.
     pub(crate) fn groups(
         &self,
-    ) -> impl Iterator<Item = (u32, Result<&[[u8; 8]], codec::Error>)> {
+    ) -> impl Iterator<Item = (u32, Result<&[[u8; 8]], Refusal>)> {
         self.scratch.parts.iter().map(|part| {
             let stamps = part.check.clone();
             (
@@ -576,7 +581,12 @@ mod tests {
 
                     let groups: Vec<_> = split.groups().collect();
                     assert_eq!(expected.to_string(), message);
-                    assert_eq!(groups[0], (0, Err(expected)), "{form:?}");
+                    let channel = key(Slot::new(2));
+                    let refusal = Refusal::Codec {
+                        channel,
+                        error: expected,
+                    };
+                    assert_eq!(groups[0], (0, Err(refusal)), "{form:?}");
                     let stamps = stamps(&write[&1].series[&2]);
                     assert_eq!(groups[1], (1, Ok(&stamps[..])), "{form:?}");
                 }
@@ -603,7 +613,12 @@ mod tests {
                     expected.to_string(),
                     "vector 0 needs 32 bytes, but 24 are left"
                 );
-                assert_eq!(groups[1], (1, Err(expected)));
+                let channel = key(Slot::new(3));
+                let refusal = Refusal::Codec {
+                    channel,
+                    error: expected,
+                };
+                assert_eq!(groups[1], (1, Err(refusal)));
                 let stamps = stamps(&write[&0].series[&0]);
                 assert_eq!(groups[0], (0, Ok(&stamps[..])));
             }
@@ -632,7 +647,12 @@ mod tests {
                     expected: 0,
                     actual: 16,
                 };
-                assert_eq!(groups, [(1, Err(expected))]);
+                let channel = key(Slot::new(3));
+                let refusal = Refusal::Codec {
+                    channel,
+                    error: expected,
+                };
+                assert_eq!(groups, [(1, Err(refusal))]);
             }
         }
     }
@@ -775,8 +795,9 @@ mod tests {
             }
 
             #[test]
-            #[should_panic(expected = "group 0 failed its check: the values hold 8 \
-                                       bytes, but the samples take 12")]
+            #[should_panic(expected = "group 0 failed its check: channel \
+                                       02000000-0000-0000-0000-000000000002: the \
+                                       values hold 8 bytes, but the samples take 12")]
             fn on_a_group_that_failed_its_check() {
                 let set = two_groups();
                 let mut write = both();

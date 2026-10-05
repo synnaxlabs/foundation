@@ -6,6 +6,7 @@ use std::ops::Range;
 
 use control::{Gate, Permit};
 use delivery::Readers;
+use types::channel;
 use types::frame::{Draft, Frame, Path};
 use types::time::{Interval, Monotonic};
 
@@ -120,6 +121,13 @@ pub(crate) enum Refusal {
     Control(control::Error),
     /// A stamp broke a rule.
     Order(order::Error),
+    /// A series of `channel` does not hold the group's count of samples.
+    Codec {
+        /// The series' channel.
+        channel: channel::Key,
+        /// Why the series does not fit.
+        error: codec::Error,
+    },
 }
 
 impl fmt::Display for Refusal {
@@ -127,6 +135,7 @@ impl fmt::Display for Refusal {
         match self {
             Self::Control(error) => error.fmt(f),
             Self::Order(error) => error.fmt(f),
+            Self::Codec { channel, error } => write!(f, "channel {channel}: {error}"),
         }
     }
 }
@@ -139,7 +148,6 @@ mod tests {
 
     use control::{Handoff, Lease, Writer};
     use types::authority::Authority;
-    use types::channel;
     use types::frame::key_set::{Group, Interner, KeySet};
     use types::frame::{self, Form};
     use types::time::{Span, Stamp};

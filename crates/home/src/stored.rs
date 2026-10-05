@@ -2,7 +2,7 @@
 //! frame by its channel and type, then the frame's series bytes.
 
 use block::Block;
-use types::channel::{self, Slot};
+use types::channel;
 use types::frame::key_set::KeySet;
 use types::frame::{self, Form, Frame};
 use types::sample::{Scalar, Type};
@@ -21,8 +21,8 @@ mod at {
 }
 
 /// The stored body of `frame`, an encoded index frame of `set`, as the two parts of
-/// one buffer entry: a header block from `pool`, then [`Frame::body`]. `key` gives the
-/// channel key of a slot. Copies no series byte.
+/// one buffer entry: a header block from `pool`, then [`Frame::body`]. Copies no
+/// series byte.
 ///
 /// # Errors
 ///
@@ -35,7 +35,6 @@ pub(crate) fn body(
     pool: &block::Pool,
     frame: &Frame,
     set: &KeySet,
-    key: impl Fn(Slot) -> channel::Key,
 ) -> Result<[Block; 2], block::Error> {
     assert_eq!(frame.form(), Form::Encoded, "the frame is not encoded");
     assert_eq!(
@@ -58,7 +57,7 @@ pub(crate) fn body(
             "the frame has more than one group"
         );
         let (kind, element, n) = codes(entry.data_type);
-        let channel = key(entry.slot).as_u128().to_le_bytes();
+        let channel = entry.key.as_u128().to_le_bytes();
         descriptor[..at::KIND].copy_from_slice(&channel);
         descriptor[at::KIND] = kind;
         descriptor[at::ELEMENT] = element;
@@ -202,8 +201,8 @@ mod tests {
 
     use proptest::collection::vec;
     use proptest::prelude::*;
-    use std::collections::BTreeMap;
 
+    use types::channel::Slot;
     use types::frame::key_set::{Group, Interner};
     use types::frame::{Draft, Path};
 
@@ -261,7 +260,7 @@ mod tests {
         }]);
         let pool = pool(4096);
         let frame = frame(&pool, &set, &[(0, &[9; 8])]);
-        joined(&body(&pool, &frame, &set, key).expect("room"))
+        joined(&body(&pool, &frame, &set).expect("room"))
     }
 
     mod body {
@@ -277,7 +276,7 @@ mod tests {
             let pool = pool(4096);
             let stamps = [7; 16];
             let frame = frame(&pool, &set, &[(0, &stamps), (1, &[1, 2, 3])]);
-            let parts = body(&pool, &frame, &set, key).expect("room");
+            let parts = body(&pool, &frame, &set).expect("room");
             let header = [
                 &[2, 0, 0, 0][..],
                 &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
@@ -339,7 +338,7 @@ mod tests {
                 .map(|entry| (entry, &[][..]))
                 .collect();
             let frame = frame(&pool, &set, &series);
-            let parts = body(&pool, &frame, &set, key).expect("room");
+            let parts = body(&pool, &frame, &set).expect("room");
 
             let (descriptors, rest) = parts[0][COUNT..].as_chunks::<DESCRIPTOR>();
             assert!(rest.is_empty(), "the header is whole descriptors");
@@ -372,7 +371,7 @@ mod tests {
             }
             let available = 4096 - heads.committed();
 
-            let error = body(&heads, &frame, &set, key).expect_err("full");
+            let error = body(&heads, &frame, &set).expect_err("full");
 
             assert_eq!(
                 error,
@@ -399,7 +398,7 @@ mod tests {
                 }]);
                 let pool = pool(4096);
                 let frame = draft(&pool, &set, Form::Raw, &[(0, &[0; 8])]);
-                drop(body(&pool, &frame, &set, key));
+                drop(body(&pool, &frame, &set));
             }
 
             #[test]
@@ -414,7 +413,7 @@ mod tests {
                 });
                 let pool = pool(4096);
                 let frame = frame(&pool, &of, &[(0, &[0; 8])]);
-                drop(body(&pool, &frame, &other, key));
+                drop(body(&pool, &frame, &other));
             }
 
             #[test]
@@ -426,7 +425,7 @@ mod tests {
                 }));
                 let pool = pool(4096);
                 let frame = frame(&pool, &set, &[(0, &[0; 8]), (1, &[0; 8])]);
-                drop(body(&pool, &frame, &set, key));
+                drop(body(&pool, &frame, &set));
             }
         }
     }
@@ -519,7 +518,6 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Entry {
             present: bool,
-            channel: channel::Key,
             bytes: Vec<u8>,
         }
 
@@ -528,12 +526,8 @@ mod tests {
         fn write() -> impl Strategy<Value = (Vec<Vec<Type>>, usize, Vec<Entry>)> {
             vec(vec(data_type(), 0..4), 1..4).prop_flat_map(|groups| {
                 let entries: usize = groups.iter().map(|data| data.len() + 1).sum();
-                let entry = (any::<bool>(), any::<u128>(), vec(any::<u8>(), 0..24))
-                    .prop_map(|(present, bits, bytes)| Entry {
-                        present,
-                        channel: channel::Key::from_u128(bits),
-                        bytes,
-                    });
+                let entry = (any::<bool>(), vec(any::<u8>(), 0..24))
+                    .prop_map(|(present, bytes)| Entry { present, bytes });
                 (0..groups.len(), vec(entry, entries), Just(groups))
                     .prop_map(|(group, entries, groups)| (groups, group, entries))
             })
@@ -566,14 +560,10 @@ mod tests {
                     .filter(|&e| entries[e].present && entries[set.index(e)].present)
                     .map(|entry| (entry, &entries[entry].bytes[..]))
                     .collect();
-                let channels: BTreeMap<_, _> = iter::zip(set.entries(), &entries)
-                    .map(|(entry, write)| (entry.slot, write.channel))
-                    .collect();
                 let pool = pool(1 << 16);
                 let frame = frame(&pool, &set, &series);
 
-                let key = |slot| channels[&slot];
-                let parts = body(&pool, &frame, &set, key).expect("room");
+                let parts = body(&pool, &frame, &set).expect("room");
 
                 prop_assert_eq!(parts[0].len(), COUNT + DESCRIPTOR * series.len());
                 let body = joined(&parts);
@@ -581,7 +571,7 @@ mod tests {
                 let expected: Vec<_> = series
                     .iter()
                     .map(|&(entry, bytes)| Series {
-                        channel: channels[&set.entries()[entry].slot],
+                        channel: set.entries()[entry].key,
                         data_type: set.entries()[entry].data_type,
                         bytes,
                     })
