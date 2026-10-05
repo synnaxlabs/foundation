@@ -591,6 +591,11 @@ mod tests {
     }
 
     #[test]
+    fn the_meta_block_holds_the_record_header_and_the_largest_table() {
+        assert_eq!(META_LEN, HEADER_LEN + table_len(ENTRIES_MAX));
+    }
+
+    #[test]
     fn a_group_with_an_entry_of_no_bytes_is_not_empty() {
         let mut area = Area::new();
         let mut group = Group::default();
