@@ -6,7 +6,7 @@
 //! near it and their parents.
 //!
 //! The tree does no I/O. The caller keeps the chunk bytes, puts the chunks that an
-//! operation needs into a [`Chunks`], and stores the chunks that [`apply`] returns.
+//! operation needs into a [`Chunks`], and stores the chunks that [`apply`] adds.
 
 mod chunk;
 mod chunker;
@@ -65,6 +65,12 @@ impl Chunks {
         hash
     }
 
+    /// Returns the bytes of a chunk.
+    #[must_use]
+    pub fn get(&self, hash: Hash) -> Option<&[u8]> {
+        self.0.get(&hash).map(Vec::as_slice)
+    }
+
     fn node(&self, hash: Hash) -> Result<Node<'_>, Error> {
         let bytes = match self.0.get(&hash) {
             Some(bytes) => bytes,
@@ -104,19 +110,21 @@ pub fn get<'a>(
 pub struct Update {
     /// The root hash of the changed tree.
     pub root: Hash,
-    /// The bytes of each chunk that is in the changed tree and not in the tree
-    /// before, in hash order. The caller stores them.
-    pub chunks: Vec<Vec<u8>>,
+    /// The hash of each chunk that is in the changed tree and not in the tree
+    /// before, in hash order. The chunks are now in the [`Chunks`].
+    pub chunks: Vec<Hash>,
 }
 
-/// Changes the tree at `root`. A change with a value sets the entry of that name. A
-/// change with `None` deletes it. The last change to a name wins.
+/// Changes the tree at `root`, and adds the chunks that it makes to `chunks`. A
+/// change with a value sets the entry of that name. A change with `None` deletes it.
+/// The last change to a name wins.
 ///
 /// # Errors
 ///
-/// [`Error::Missing`] if a chunk near a change is not in `chunks`.
+/// [`Error::Missing`] if a chunk near a change is not in `chunks`. `chunks` is then
+/// not changed.
 pub fn apply(
-    chunks: &Chunks,
+    chunks: &mut Chunks,
     root: Hash,
     changes: impl IntoIterator<Item = (Name, Option<Vec<u8>>)>,
 ) -> Result<Update, Error> {
@@ -127,7 +135,7 @@ pub fn apply(
 type Edit = (Vec<u8>, Option<Vec<u8>>);
 
 fn apply_at(
-    chunks: &Chunks,
+    chunks: &mut Chunks,
     scale: u32,
     root: Hash,
     changes: impl IntoIterator<Item = (Name, Option<Vec<u8>>)>,
@@ -186,8 +194,9 @@ fn apply_at(
         fresh.remove(&root);
         root = child;
     }
-    let chunks = fresh.into_values().collect();
-    Ok(Update { root, chunks })
+    let made = fresh.keys().copied().collect();
+    chunks.0.extend(fresh);
+    Ok(Update { root, chunks: made })
 }
 
 fn as_hash(payload: &[u8]) -> Hash {

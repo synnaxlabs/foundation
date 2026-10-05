@@ -16,11 +16,7 @@ fn name(id: u16) -> Name {
 
 fn step(chunks: &mut Chunks, scale: u32, root: Hash, changes: &[Change]) -> Update {
     let named = changes.iter().map(|(id, value)| (name(*id), value.clone()));
-    let update = apply_at(chunks, scale, root, named).unwrap();
-    for bytes in &update.chunks {
-        chunks.insert(bytes.clone());
-    }
-    update
+    apply_at(chunks, scale, root, named).unwrap()
 }
 
 fn build(chunks: &mut Chunks, scale: u32, model: &Model) -> Hash {
@@ -29,7 +25,7 @@ fn build(chunks: &mut Chunks, scale: u32, model: &Model) -> Hash {
 }
 
 fn hashes(update: &Update) -> BTreeSet<Hash> {
-    update.chunks.iter().map(|bytes| Hash::of(bytes)).collect()
+    update.chunks.iter().copied().collect()
 }
 
 // Each chunk of the tree at `root`, without the chunk of the empty tree.
@@ -174,12 +170,13 @@ fn a_missing_chunk_is_named() {
     let key = model.keys().copied().min_by_key(|id| name(*id)).unwrap();
 
     assert_eq!(get(&chunks, root, &name(key)), Err(Error::Missing(first)));
-    let change = [(name(key), None)];
-    assert_eq!(apply(&chunks, root, change), Err(Error::Missing(first)));
+    let change = [(name(key), None), (name(1999), Some(vec![2]))];
+    assert_eq!(apply(&mut chunks, root, change), Err(Error::Missing(first)));
+    assert_eq!(chunks.0.len(), all.0.len() - 1);
     assert_eq!(diff(&chunks, empty(), root), Err(Error::Missing(first)));
-    let none = Chunks::default();
+    let mut none = Chunks::default();
     assert_eq!(get(&none, root, &name(key)), Err(Error::Missing(root)));
-    assert_eq!(apply(&none, root, []), Err(Error::Missing(root)));
+    assert_eq!(apply(&mut none, root, []), Err(Error::Missing(root)));
     assert_eq!(diff(&none, root, empty()), Err(Error::Missing(root)));
     assert_eq!(
         Error::Missing(Hash([0x1f; 32])).to_string(),
@@ -207,8 +204,8 @@ fn a_change_reads_only_the_chunks_near_it() {
     assert!(near.0.len() < 10);
 
     let change = [(first.clone(), Some(vec![1]))];
-    let update = apply(&near, root, change.clone()).unwrap();
-    assert_eq!(update, apply(&all, root, change).unwrap());
+    let update = apply(&mut near, root, change.clone()).unwrap();
+    assert_eq!(update, apply(&mut all, root, change).unwrap());
     assert_eq!(get(&near, root, &first), Ok(value.as_deref()));
 }
 
@@ -217,7 +214,7 @@ fn bytes_that_are_not_a_chunk_are_named() {
     let mut chunks = Chunks::default();
     let root = chunks.insert(vec![0, 9]);
     assert_eq!(get(&chunks, root, &name(1)), Err(Error::Corrupt(root)));
-    assert_eq!(apply(&chunks, root, []), Err(Error::Corrupt(root)));
+    assert_eq!(apply(&mut chunks, root, []), Err(Error::Corrupt(root)));
     assert_eq!(diff(&chunks, empty(), root), Err(Error::Corrupt(root)));
     // A leaf whose key is not a name.
     let root = chunks.insert(vec![0, 1, b'!', 0]);
@@ -230,11 +227,7 @@ fn bytes_that_are_not_a_chunk_are_named() {
 
 // A spec of 50,000 definitions with names and value sizes like real ones.
 fn plant(chunks: &mut Chunks) -> Update {
-    let update = apply(chunks, empty(), (0..50_000).map(definition)).unwrap();
-    for bytes in &update.chunks {
-        chunks.insert(bytes.clone());
-    }
-    update
+    apply(chunks, empty(), (0..50_000).map(definition)).unwrap()
 }
 
 fn definition(id: u32) -> (Name, Option<Vec<u8>>) {
@@ -248,8 +241,9 @@ fn chunk_sizes_stay_near_the_scale() {
     let mut chunks = Chunks::default();
     let update = plant(&mut chunks);
     assert_eq!(height(&chunks, update.root), 3);
-    let leaves = update.chunks.iter().filter(|bytes| bytes[0] == 0);
-    let mut sizes: Vec<usize> = leaves.map(Vec::len).collect();
+    let made = update.chunks.iter().map(|hash| chunks.get(*hash).unwrap());
+    let leaves = made.filter(|bytes| bytes[0] == 0);
+    let mut sizes: Vec<usize> = leaves.map(<[u8]>::len).collect();
     sizes.sort_unstable();
     let at = |percent: usize| sizes[(sizes.len() - 1) * percent / 100];
     let mean = sizes.iter().sum::<usize>() / sizes.len();
@@ -271,7 +265,7 @@ fn one_change_to_a_large_tree_rewrites_about_one_chunk_for_each_level() {
             1 => Some(vec![9; 33]),
             _ => value,
         };
-        let update = apply(&chunks, root, [(name, value)]).unwrap();
+        let update = apply(&mut chunks.clone(), root, [(name, value)]).unwrap();
         *counts.entry(update.chunks.len()).or_insert(0_usize) += 1;
     }
     let changes: usize = counts.range(1..).map(|(_, changes)| changes).sum();

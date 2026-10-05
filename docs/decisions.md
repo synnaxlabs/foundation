@@ -367,9 +367,9 @@ How to read this record:
   function of its entries. The empty tree has the root `tree::empty()` and no stored
   chunk. The tree does no I/O: the caller fills a `tree::Chunks`, and `get`, `apply`,
   and `diff` return `Error::Missing(hash)` for a chunk that is not there, so the
-  caller fetches it and runs the operation again. `apply` takes a batch of changes
-  and returns the new root and the new chunks. To change the chunk format or the
-  boundary rule changes every root hash.
+  caller fetches it and runs the operation again. `apply` takes a batch of changes,
+  adds the new chunks to the `Chunks`, and returns the new root and their hashes. To
+  change the chunk format or the boundary rule changes every root hash.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
