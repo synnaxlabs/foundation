@@ -7,7 +7,7 @@ use std::num::NonZeroUsize;
 use types::time::{Monotonic, Span, Stamp};
 
 use crate::state::lock;
-use crate::{drivers, net};
+use crate::{drivers, net, shard};
 
 /// One simulated node: the `env` handles that its code gets. Clones refer to the same
 /// node.
@@ -43,6 +43,28 @@ impl Node {
     #[must_use]
     pub fn shards(&self) -> env::shards::Shards {
         env::shards::Shards::new(self.0.clone())
+    }
+
+    /// Makes the next shard start on `core` of the node get `fault`. Faults on one
+    /// core fire in turn, one per start. A shard with no core gets none.
+    ///
+    /// # Panics
+    ///
+    /// When `core` is not below [`Config::cores`].
+    pub fn fail_shard(&self, core: usize, fault: shard::Fault) {
+        let cores = lock(&self.0.shared).cores(self.0.node);
+        assert!(
+            core < cores.get(),
+            "a shard fault aims at core {core} of {cores}"
+        );
+        lock(&self.0.shared).shards(self.0.node).fail(core, fault);
+    }
+
+    /// The config of each shard start on the node, in order, with the ones that a
+    /// fault failed.
+    #[must_use]
+    pub fn shard_starts(&self) -> Vec<env::shards::Config> {
+        lock(&self.0.shared).shards(self.0.node).configs()
     }
 
     /// Starts dedicated threads on the node.

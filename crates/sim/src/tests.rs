@@ -1,6 +1,7 @@
 //! Tests of a simulated run through the `env` handles that production code gets.
 
 mod net;
+mod shards;
 
 use std::collections::BTreeSet;
 use std::future::pending;

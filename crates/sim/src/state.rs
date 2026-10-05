@@ -18,7 +18,7 @@ use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
 use crate::net::{Bound, Network};
-use crate::{link, node};
+use crate::{link, node, shard};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
 
@@ -65,6 +65,7 @@ struct Node {
     resumes: Option<Monotonic>,
     cores: NonZeroUsize,
     entropy: Rng,
+    shards: shard::Starts,
 }
 
 impl Node {
@@ -147,6 +148,7 @@ impl State {
             resumes: Some(self.now),
             cores: config.cores,
             entropy,
+            shards: shard::Starts::default(),
         };
         self.nodes.push(node);
         self.nodes.len() - 1
@@ -189,6 +191,10 @@ impl State {
 
     pub(crate) fn cores(&self, node: usize) -> NonZeroUsize {
         self.nodes[node].cores
+    }
+
+    pub(crate) fn shards(&mut self, node: usize) -> &mut shard::Starts {
+        &mut self.nodes[node].shards
     }
 
     pub(crate) fn fill(&mut self, node: usize, bytes: &mut [u8]) {
