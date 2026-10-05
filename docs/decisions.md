@@ -247,6 +247,11 @@ How to read this record:
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
   fsync is fatal and never retried.
+  Ring record (starting point): `[len: u32][crc32c: u32][payload]`, one per group
+  commit, starting on a 4096-byte boundary so a commit never rewrites a synced block.
+  The CRC continues from the record before (a chain), and each open of the ring starts
+  a chain from a random value, so bytes of an earlier chain never read as the next
+  record.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -1469,8 +1474,8 @@ Parameters and later choices, recorded and not asked:
 - Delivery and wire: group commit interval, credit window (bytes, from link BDP), batch
   size, linger, max packet size, latest-over-TCP send buffer, priority mapping, catch-up
   merge size.
-- Storage: write-ahead ring size, segment flush size and age, chunk sizes, memtable cost
-  per channel (estimate 100 to 200 bytes), eviction timing.
+- Storage: write-ahead ring size, ring record alignment, segment flush size and age,
+  chunk sizes, memtable cost per channel (estimate 100 to 200 bytes), eviction timing.
 - Codecs: ALP refresh interval and skip rule (R10-D8), natural-order delta decode speed
   on a Pi 4 (R10-D5), fdelta on recorded plant data (R10-D4), when to build `max`
   (R10-D7), short-vector packing.
