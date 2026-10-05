@@ -28,6 +28,12 @@ mod at {
     pub(super) const SERIES: usize = 8;
     pub(super) const FORM: usize = 12;
     pub(super) const PATH: usize = 13;
+
+    /// Offsets of a range's fields after its group, which is at 0.
+    pub(super) mod range {
+        pub(in crate::frame) const COUNT: usize = 4;
+        pub(in crate::frame) const SEQ: usize = 8;
+    }
 }
 
 /// One of an index's two write paths, each with its own seq. Backfill is late data
@@ -102,6 +108,18 @@ pub struct Range {
     pub seq: u64,
     /// How many samples each series of the group holds.
     pub count: u32,
+}
+
+impl Range {
+    /// The range of `group` in the frame `bytes`, or `None` when it is absent.
+    fn find(bytes: &[u8], group: u32) -> Option<Self> {
+        let (ranges, ..) = split(bytes);
+        let range = &ranges[search(ranges, group)?];
+        Some(Self {
+            seq: u64::from_le_bytes(get(range, at::range::SEQ)),
+            count: u32::from_le_bytes(get(range, at::range::COUNT)),
+        })
+    }
 }
 
 /// Why [`Draft::new`] refused a frame.
@@ -205,7 +223,7 @@ impl Draft {
             .filter(|&entry| set.index(entry) == entry);
         for (range, index) in ranges.iter_mut().zip(indexes) {
             put(range, 0, &set.entries()[index].group.to_le_bytes());
-            range[4..].fill(0);
+            range[at::range::COUNT..].fill(0);
         }
         for &(entry, _) in series {
             if search(ranges, set.entries()[entry].group).is_none() {
@@ -245,18 +263,42 @@ impl Draft {
         })
     }
 
-    /// Sets the samples of group `group`.
+    /// The samples of group `group`, or `None` when its index is absent. Time is
+    /// logarithmic in the number of present groups.
+    #[must_use]
+    pub fn range(&self, group: u32) -> Option<Range> {
+        Range::find(&self.0, group)
+    }
+
+    /// Sets how many samples each series of group `group` holds.
     ///
     /// # Panics
     ///
     /// If `group` is absent from the frame.
-    pub fn set_range(&mut self, group: u32, range: Range) {
+    pub fn set_count(&mut self, group: u32, count: u32) {
+        put(
+            self.record_mut(group),
+            at::range::COUNT,
+            &count.to_le_bytes(),
+        );
+    }
+
+    /// Sets the seq of the first sample of group `group`, on the path the frame
+    /// freezes on.
+    ///
+    /// # Panics
+    ///
+    /// If `group` is absent from the frame.
+    pub fn set_seq(&mut self, group: u32, seq: u64) {
+        put(self.record_mut(group), at::range::SEQ, &seq.to_le_bytes());
+    }
+
+    fn record_mut(&mut self, group: u32) -> &mut [u8; RANGE] {
         let (ranges, ..) = split_mut(&mut self.0);
         let Some(n) = search(ranges, group) else {
             panic!("group {group} is absent from the frame");
         };
-        put(&mut ranges[n], 4, &range.count.to_le_bytes());
-        put(&mut ranges[n], 8, &range.seq.to_le_bytes());
+        &mut ranges[n]
     }
 
     /// The finished frame on `path`, the path whose seq its ranges count on.
@@ -294,12 +336,7 @@ impl Frame {
     /// logarithmic in the number of present groups.
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
-        let (ranges, ..) = split(&self.0);
-        let range = &ranges[search(ranges, group)?];
-        Some(Range {
-            seq: u64::from_le_bytes(get(range, 8)),
-            count: u32::from_le_bytes(get(range, 4)),
-        })
+        Range::find(&self.0, group)
     }
 
     /// The series bytes of `entry`, or `None` when it is absent. Time is logarithmic
@@ -653,7 +690,8 @@ mod tests {
         let mut draft = Draft::new(&pool, &set, Form::Encoded, &series).unwrap();
         draft.series(0).unwrap().copy_from_slice(&[0xaa; 3]);
         draft.series(2).unwrap().copy_from_slice(&[1, 2]);
-        draft.set_range(0, Range { seq: 7, count: 2 });
+        draft.set_count(0, 2);
+        draft.set_seq(0, 7);
         let frame = draft.freeze(Path::Backfill);
         let mut expected = Vec::new();
         for n in [3_u32, 1, 2] {
@@ -880,7 +918,8 @@ mod tests {
                 .unwrap()
                 .fill(u8::try_from(seq).unwrap());
             let group = u32::try_from(entry).unwrap();
-            draft.set_range(group, Range { seq, count: 1 });
+            draft.set_count(group, 1);
+            draft.set_seq(group, seq);
         }
         let frame = draft.freeze(Path::Live);
         assert_eq!(frame.range(64), Some(Range { seq: 2, count: 1 }));
@@ -989,12 +1028,40 @@ mod tests {
     }
 
     #[test]
+    fn sets_count_and_seq_apart() {
+        let pool = pool(1 << 16);
+        let series = [(0, 8), (2, 8)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        assert_eq!(draft.range(0), Some(Range::default()));
+        draft.set_count(0, 5);
+        assert_eq!(draft.range(0), Some(Range { seq: 0, count: 5 }));
+        draft.set_seq(0, 9);
+        assert_eq!(draft.range(0), Some(Range { seq: 9, count: 5 }));
+        draft.set_seq(1, 4);
+        draft.set_count(1, 3);
+        draft.set_count(0, 6);
+        assert_eq!(draft.range(2), None);
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.range(0), Some(Range { seq: 9, count: 6 }));
+        assert_eq!(frame.range(1), Some(Range { seq: 4, count: 3 }));
+    }
+
+    #[test]
     #[should_panic(expected = "group 1 is absent from the frame")]
-    fn refuses_a_range_for_an_absent_group() {
+    fn refuses_a_count_for_an_absent_group() {
         let pool = pool(1 << 16);
         let series = [(0, 1)];
         let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
-        draft.set_range(1, Range::default());
+        draft.set_count(1, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "group 1 is absent from the frame")]
+    fn refuses_a_seq_for_an_absent_group() {
+        let pool = pool(1 << 16);
+        let series = [(0, 1)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        draft.set_seq(1, 1);
     }
 
     #[derive(Clone, Debug)]
@@ -1007,7 +1074,8 @@ mod tests {
         present: Vec<bool>,
         /// Each entry's series length, by entry position.
         lens: Vec<usize>,
-        ranges: Vec<(u64, u32)>,
+        /// Each group's seq and count, and whether the seq is set first.
+        ranges: Vec<(u64, u32, bool)>,
         path: Path,
         form: Form,
         /// Whether the draft is filled through `iter_mut` or by entry.
@@ -1024,7 +1092,7 @@ mod tests {
                     vec(any::<bool>(), n),
                     vec(any::<bool>(), n * 41),
                     vec(0_usize..40, n * 41),
-                    vec(any::<(u64, u32)>(), n),
+                    vec(any::<(u64, u32, bool)>(), n),
                     prop_oneof![Just(Path::Live), Just(Path::Backfill)],
                     prop_oneof![Just(Form::Raw), Just(Form::Encoded)],
                     any::<bool>(),
@@ -1122,13 +1190,18 @@ mod tests {
         let taken = to_u64(pool.committed() - before);
         fill(&mut draft, &series, entries, case.in_order)?;
         let mut ranges = Vec::new();
-        for ((group, &(seq, count)), &present) in
+        for ((group, &(seq, count, seq_first)), &present) in
             (0_u32..).zip(&case.ranges).zip(&case.groups)
         {
             let range = present.then_some(Range { seq, count });
-            if let Some(range) = range {
-                draft.set_range(group, range);
+            if present && seq_first {
+                draft.set_seq(group, seq);
+                draft.set_count(group, count);
+            } else if present {
+                draft.set_count(group, count);
+                draft.set_seq(group, seq);
             }
+            prop_assert_eq!(draft.range(group), range);
             ranges.push(range);
         }
         ranges.push(None);

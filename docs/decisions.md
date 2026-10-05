@@ -363,7 +363,8 @@ How to read this record:
   Offsets count bytes since the ring was made and never wrap; the place in the area
   is the offset modulo the area length. The area is at least twice the largest record
   less one block, so an empty ring takes any record. A ring whose head reaches the
-  end of the offsets is full for good. A body is at most `u32::MAX` bytes.
+  end of the offsets is full for good. A body is at most `u32::MAX` bytes and at
+  least the table of one entry.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
@@ -382,9 +383,10 @@ How to read this record:
   The magic, the version, and the place of the CRC are the same in every version, so
   an older build reads a newer block and reports its version. Two blocks at the
   start of the ring hold the last two checkpoints: checkpoint `n` goes to block `n
-  mod 2`. Open takes the whole block with the higher `seq` (on a tie, the first);
-  one torn block leaves the other. No block with the magic: not a ring. Both with
-  the magic and a wrong CRC: the ring is lost. The header with a new tail is durable
+  mod 2`. Open takes the whole block whose `seq` comes after the other's, wrapped
+  as the writer wraps it (on a tie, the first); one torn block leaves the other. No
+  block with the magic: not a ring. Both with the magic and a wrong CRC: the ring is
+  lost. The header with a new tail is durable
   before the writer releases the space, so the header's tail is at or before the
   writer's tail and the records between are whole. The layout comes from the header
   at open; configuration sets it at create, and a changed `body_max` takes effect at
