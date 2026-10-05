@@ -68,6 +68,8 @@ pub struct Ready {
 #[derive(Debug)]
 pub struct Raft {
     key: node::Key,
+    // `Start.voters`: in force while no entry in the log holds a configuration.
+    base: Voters,
     voters: Voters,
     peers: BTreeMap<node::Key, Peer>,
     election_ticks: u64,
@@ -122,6 +124,8 @@ impl Raft {
         voters.check()?;
         let log = Log::new(entries, applied)?;
         let last = log.last();
+        let base = voters;
+        let voters = log.voters().cloned().unwrap_or_else(|| base.clone());
         let peers = voters
             .peers()
             .map(|key| (key, Peer::new(last.index)))
@@ -134,6 +138,7 @@ impl Raft {
         }
         Ok(Self {
             key,
+            base,
             voters,
             peers,
             outbox: Vec::new(),
@@ -223,6 +228,7 @@ impl Raft {
             });
         }
         let at = self.log.push(self.term, data);
+        self.sync_voters();
         self.commit();
         self.replicate();
         Ok(at)
@@ -346,7 +352,7 @@ impl Raft {
     // Commits what the leader's heartbeat says and answers it.
     fn heartbeat(&mut self, leader: node::Key, commit: u64) -> Result<(), Error> {
         self.follow(leader)?;
-        self.commit_to(commit);
+        self.log.commit_to(commit);
         self.send(leader, self.term, Body::HeartbeatReply);
         Ok(())
     }
@@ -361,7 +367,8 @@ impl Raft {
     ) {
         let reply = match self.log.append(prev, entries) {
             Ok(last) => {
-                self.commit_to(commit.min(last));
+                self.sync_voters();
+                self.log.commit_to(commit.min(last));
                 Body::AppendReply { last }
             }
             Err(hint) => Body::AppendReject { hint },
@@ -407,26 +414,21 @@ impl Raft {
         });
         let current = self.log.at(index).is_some_and(|at| at.term == self.term);
         if index > self.log.committed() && current {
-            self.commit_to(index);
+            self.log.commit_to(index);
             return true;
         }
         false
     }
 
-    // Raises the commit index to `index` and puts the last configuration it commits
-    // in force. A lower `index` changes nothing.
-    fn commit_to(&mut self, index: u64) {
-        let from = self.log.committed();
-        self.log.commit_to(index);
-        let to = self.log.committed();
-        if let Some(voters) = self.log.last_voters(from, to).cloned() {
-            self.set_voters(voters);
+    // Puts the last configuration in the log in force, or `base` with none. The one
+    // writer of `voters` and `peers` after `new`. A peer that stays keeps its
+    // progress; a new one starts at the end of the log.
+    fn sync_voters(&mut self) {
+        let voters = self.log.voters().unwrap_or(&self.base);
+        if *voters == self.voters {
+            return;
         }
-    }
-
-    // The one writer of `voters` and `peers` after `new`. A peer that stays keeps
-    // its progress; a new one starts at the end of the log.
-    fn set_voters(&mut self, voters: Voters) {
+        let voters = voters.clone();
         let last = self.log.last().index;
         let mut old = std::mem::take(&mut self.peers);
         self.peers = voters
@@ -1836,81 +1838,104 @@ mod tests {
             raft
         }
 
-        fn heartbeat(raft: &mut Raft, commit: u64) {
-            raft.step(message(2, 1, Body::Heartbeat { commit }))
-                .unwrap();
-        }
-
         #[test]
-        fn a_leader_puts_a_committed_configuration_in_force() {
+        fn a_leader_uses_a_configuration_from_the_time_it_writes_it() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             elect(&mut raft, &[2]);
+            for from in [2, 3] {
+                raft.step(message(from, 1, Body::AppendReply { last: 1 }))
+                    .unwrap();
+            }
+            sent(&mut raft);
             let new = voters(&[1, 2, 3, 4]);
             let at = raft.propose_entry(Data::Voters(new.clone())).unwrap();
             assert_eq!(at.index, 2);
-            sent(&mut raft);
-            assert_eq!(raft.voters(), &voters(&[1, 2, 3]));
-            raft.step(message(2, 1, Body::AppendReply { last: 2 }))
-                .unwrap();
-            let ready = raft.ready();
-            assert_eq!(ready.committed.last(), Some(&config(1, 2, new.clone())));
             assert_eq!(raft.voters(), &new);
             // The new peer gets one probe from the end of the log, then waits.
-            let to: Vec<node::Key> = ready.messages.iter().map(|m| m.to).collect();
-            assert_eq!(to, [key(2), key(4)]);
+            let messages = sent(&mut raft);
+            let to: Vec<node::Key> = messages.iter().map(|m| m.to).collect();
+            assert_eq!(to, [key(2), key(3), key(4)]);
             let probe = Body::Append {
                 prev: Position {
                     term: Term(1),
                     index: 2,
                 },
                 entries: Vec::new(),
-                commit: 2,
+                commit: 1,
             };
-            assert_eq!(ready.messages[1].body, probe);
-            raft.propose(vec![7]).unwrap();
-            let to: Vec<node::Key> = sent(&mut raft).iter().map(|m| m.to).collect();
-            assert_eq!(to, [key(2)]);
+            assert_eq!(messages[2].body, probe);
+            // Two of the four voters do not commit; three do.
+            raft.step(message(2, 1, Body::AppendReply { last: 2 }))
+                .unwrap();
+            assert_eq!(raft.ready().committed, []);
+            raft.step(message(3, 1, Body::AppendReply { last: 2 }))
+                .unwrap();
+            assert_eq!(raft.ready().committed, [config(1, 2, new)]);
         }
 
         #[test]
-        fn a_follower_puts_a_committed_configuration_in_force() {
+        fn a_follower_uses_a_configuration_from_the_time_it_writes_it() {
             let new = voters(&[2, 3]);
             let mut raft = follower_with(vec![
                 entries(&[(1, 1)]).remove(0),
                 config(1, 2, new.clone()),
             ]);
-            assert_eq!(raft.voters(), &voters(&[1, 2, 3]));
-            heartbeat(&mut raft, 2);
-            assert_eq!(raft.ready().committed.len(), 2);
             assert_eq!(raft.voters(), &new);
+            assert_eq!(raft.ready().committed, []);
             tick_times(&mut raft, 40);
             assert_eq!(raft.role(), Role::Follower);
         }
 
         #[test]
-        fn only_the_last_configuration_a_commit_covers_counts() {
+        fn the_last_configuration_in_the_log_counts() {
             let last = voters(&[1, 2, 3, 4, 5]);
-            let mut raft = follower_with(vec![
+            let raft = follower_with(vec![
                 entries(&[(1, 1)]).remove(0),
                 config(1, 2, voters(&[1, 2])),
                 config(1, 3, last.clone()),
             ]);
-            heartbeat(&mut raft, 3);
             assert_eq!(raft.voters(), &last);
         }
 
         #[test]
-        fn a_restart_waits_for_the_entries_after_applied_to_commit() {
+        fn a_truncated_configuration_gives_way_to_the_one_before_it() {
+            let second = voters(&[1, 2]);
+            let mut raft = follower_with(vec![
+                entries(&[(1, 1)]).remove(0),
+                config(1, 2, second.clone()),
+                config(1, 3, voters(&[1, 2, 3, 4, 5])),
+            ]);
+            let body = Body::Append {
+                prev: Position {
+                    term: Term(1),
+                    index: 2,
+                },
+                entries: entries(&[(2, 3)]),
+                commit: 0,
+            };
+            raft.step(message(2, 2, body)).unwrap();
+            assert_eq!(raft.voters(), &second);
+            let body = Body::Append {
+                prev: Position {
+                    term: Term(1),
+                    index: 1,
+                },
+                entries: entries(&[(2, 2)]),
+                commit: 0,
+            };
+            raft.step(message(2, 2, body)).unwrap();
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3]));
+        }
+
+        #[test]
+        fn a_restart_uses_the_last_configuration_in_its_log() {
             let new = voters(&[1, 2, 3, 4]);
             let start = Start {
                 entries: vec![entries(&[(1, 1)]).remove(0), config(1, 2, new.clone())],
                 applied: 1,
                 ..start(&[1, 2, 3], at_term(1))
             };
-            let mut raft = Raft::new(CONFIG, start).unwrap();
-            assert_eq!(raft.voters(), &voters(&[1, 2, 3]));
-            heartbeat(&mut raft, 2);
-            assert_eq!(raft.ready().committed, [config(1, 2, new.clone())]);
+            let raft = Raft::new(CONFIG, start).unwrap();
             assert_eq!(raft.voters(), &new);
         }
 

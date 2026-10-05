@@ -16,22 +16,23 @@ pub enum Data {
     Empty,
     /// What the caller proposed.
     Bytes(Vec<u8>),
-    /// A voter configuration, in force from the time the entry commits. The caller
-    /// applies nothing, but stores it with `applied`: it is `Start.voters` after a
-    /// restart.
+    /// A voter configuration. A node uses it from the time it writes the entry,
+    /// committed or not. The caller applies nothing.
     Voters(Voters),
 }
 
 // The log in memory. Entry `i` has index `i + 1`, and terms start above zero and
 // never decrease. Three indexes trail the end: `committed` is what a quorum holds,
 // `applied` is the last entry given to the caller to apply, and `stable` is the
-// last entry given to the caller to write.
+// last entry given to the caller to write. `voters` is the index of the last
+// configuration entry, or 0 with none.
 #[derive(Debug)]
 pub(crate) struct Log {
     entries: Vec<Entry>,
     committed: u64,
     applied: u64,
     stable: u64,
+    voters: u64,
 }
 
 impl Log {
@@ -44,6 +45,7 @@ impl Log {
             });
         }
         Ok(Self {
+            voters: last_voters(&entries),
             entries,
             committed: applied,
             applied,
@@ -59,6 +61,12 @@ impl Log {
 
     pub(crate) fn committed(&self) -> u64 {
         self.committed
+    }
+
+    // The last configuration in the log, or `None` with no configuration entry.
+    pub(crate) fn voters(&self) -> Option<&Voters> {
+        let at = usize::try_from(self.voters.checked_sub(1)?).ok()?;
+        self.entries.get(at).and_then(voters_in)
     }
 
     // The position at `index`: the zero position for 0, `None` past the end.
@@ -88,6 +96,9 @@ impl Log {
             term,
             index: self.last().index + 1,
         };
+        if matches!(data, Data::Voters(_)) {
+            self.voters = at.index;
+        }
         self.entries.push(Entry { at, data });
         at
     }
@@ -117,10 +128,14 @@ impl Log {
             return Ok(last);
         };
         let from = entries[first].at.index;
-        self.entries
-            .truncate(usize::try_from(from - 1).unwrap_or(usize::MAX));
+        let kept = usize::try_from(from - 1).unwrap_or(usize::MAX);
+        self.entries.truncate(kept);
         self.stable = self.stable.min(from - 1);
+        if self.voters >= from {
+            self.voters = last_voters(&self.entries);
+        }
         self.entries.extend(entries.into_iter().skip(first));
+        self.voters = self.voters.max(last_voters(&self.entries[kept..]));
         Ok(last)
     }
 
@@ -144,19 +159,6 @@ impl Log {
         entries
     }
 
-    // The last configuration among the entries in `(from, to]`.
-    pub(crate) fn last_voters(&self, from: u64, to: u64) -> Option<&Voters> {
-        let range = usize::try_from(from).unwrap_or(usize::MAX)
-            ..usize::try_from(to).unwrap_or(usize::MAX);
-        self.entries[range]
-            .iter()
-            .rev()
-            .find_map(|entry| match &entry.data {
-                Data::Voters(voters) => Some(voters),
-                Data::Empty | Data::Bytes(_) => None,
-            })
-    }
-
     // The committed entries no `Ready` has given to apply yet.
     pub(crate) fn take_committed(&mut self) -> Vec<Entry> {
         let count =
@@ -165,6 +167,22 @@ impl Log {
         self.applied = self.committed;
         entries
     }
+}
+
+fn voters_in(entry: &Entry) -> Option<&Voters> {
+    match &entry.data {
+        Data::Voters(voters) => Some(voters),
+        Data::Empty | Data::Bytes(_) => None,
+    }
+}
+
+// The index of the last configuration entry in `entries`, or 0 with none.
+fn last_voters(entries: &[Entry]) -> u64 {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| voters_in(entry).is_some())
+        .map_or(0, |entry| entry.at.index)
 }
 
 // Checks that `entries` follow `before`: indexes in sequence, terms non-decreasing
@@ -182,10 +200,8 @@ pub(crate) fn check(
                 before,
             });
         }
-        if let Data::Voters(voters) = &entry.data {
-            if voters.incoming.is_empty() {
-                return Err(Error::NoVoters);
-            }
+        if voters_in(entry).is_some_and(|voters| voters.incoming.is_empty()) {
+            return Err(Error::NoVoters);
         }
         before = entry.at;
     }
@@ -300,21 +316,44 @@ mod tests {
         assert_eq!(log.take_committed(), vec![entry(3, 3)]);
     }
 
-    #[test]
-    fn finds_the_last_configuration_in_a_range() {
-        let voters = |id: u128| Voters {
+    fn voters(id: u128) -> Voters {
+        Voters {
             incoming: [types::node::Key::from_u128(id)].into_iter().collect(),
             ..Voters::default()
-        };
+        }
+    }
+
+    fn config(term: u64, index: u64, id: u128) -> Entry {
+        Entry {
+            at: position(term, index),
+            data: Data::Voters(voters(id)),
+        }
+    }
+
+    #[test]
+    fn holds_the_last_configuration_it_wrote() {
         let mut log = log(&[1]);
+        assert_eq!(log.voters(), None);
         log.push(Term(1), Data::Voters(voters(1)));
         log.push(Term(1), Data::Voters(voters(2)));
         log.push(Term(1), Data::Bytes(vec![9]));
-        assert_eq!(log.last_voters(0, 1), None);
-        assert_eq!(log.last_voters(0, 4), Some(&voters(2)));
-        assert_eq!(log.last_voters(1, 2), Some(&voters(1)));
-        assert_eq!(log.last_voters(3, 4), None);
-        assert_eq!(log.last_voters(4, 4), None);
+        assert_eq!(log.voters(), Some(&voters(2)));
+        let log = Log::new(vec![entry(1, 1), config(1, 2, 3)], 0).unwrap();
+        assert_eq!(log.voters(), Some(&voters(3)));
+    }
+
+    #[test]
+    fn an_append_puts_in_force_the_last_configuration_it_leaves_in_the_log() {
+        let mut log =
+            Log::new(vec![entry(1, 1), config(1, 2, 1), config(1, 3, 2)], 0).unwrap();
+        assert_eq!(log.append(position(1, 3), vec![entry(2, 4)]), Ok(4));
+        assert_eq!(log.voters(), Some(&voters(2)));
+        assert_eq!(log.append(position(1, 2), vec![entry(3, 3)]), Ok(3));
+        assert_eq!(log.voters(), Some(&voters(1)));
+        assert_eq!(log.append(position(3, 3), vec![config(3, 4, 4)]), Ok(4));
+        assert_eq!(log.voters(), Some(&voters(4)));
+        assert_eq!(log.append(position(1, 1), vec![entry(4, 2)]), Ok(2));
+        assert_eq!(log.voters(), None);
     }
 
     #[test]
