@@ -54,6 +54,13 @@ const _: () = assert!(
     CERTIFICATE_BYTES == 3 + 0xd8,
     "the certificate header holds its length"
 );
+/// The largest certificate a peer may present. It is part of `foundation/1`, so a
+/// larger one needs a new ALPN.
+const CERTIFICATE_BYTES_MAX: usize = 1024;
+const _: () = assert!(
+    CERTIFICATE_BYTES <= CERTIFICATE_BYTES_MAX,
+    "a node takes a peer's template"
+);
 
 /// The node's TLS: its certificate and key, and the configs that use them. Made once
 /// per transport.
@@ -176,7 +183,8 @@ fn issue(key: &[u8], sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
 ///
 /// # Panics
 ///
-/// When the certificate carries no node key, which the verifiers refuse.
+/// When the chain is not one certificate that carries a node key, which the
+/// verifiers refuse.
 #[expect(
     clippy::unwrap_in_result,
     reason = "another key here is a verifier defect, not a peer error"
@@ -188,17 +196,25 @@ pub(crate) fn peer(
     if protocol != Some(ALPN) {
         return Err(rustls::Error::NoApplicationProtocol);
     }
-    Ok(match certificates.and_then(<[_]>::first) {
+    Ok(match certificates.and_then(<[_]>::split_first) {
         None => Peer::Client,
-        Some(certificate) => Peer::Node(
-            key(certificate).expect("invariant: a verifier accepted this certificate"),
+        Some((end_entity, intermediates)) => Peer::Node(
+            key(end_entity, intermediates)
+                .expect("invariant: a verifier accepted this chain"),
         ),
     })
 }
 
-/// The node key that `certificate` carries.
-fn key(certificate: &CertificateDer<'_>) -> Result<PublicKey, rustls::Error> {
-    let parsed = ParsedCertificate::try_from(certificate)?;
+/// The node key that a chain carries. Refuses a chain that is not one certificate of
+/// at most `CERTIFICATE_BYTES_MAX`, so a peer cannot make the node hold more.
+fn key(
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+) -> Result<PublicKey, rustls::Error> {
+    if !intermediates.is_empty() || end_entity.len() > CERTIFICATE_BYTES_MAX {
+        return Err(CertificateError::ApplicationVerificationFailure.into());
+    }
+    let parsed = ParsedCertificate::try_from(end_entity)?;
     parsed
         .subject_public_key_info()
         .strip_prefix(SPKI)
@@ -218,12 +234,12 @@ impl ServerCertVerifier for Pinned {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
+        intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        if key(end_entity)? == self.expected {
+        if key(end_entity, intermediates)? == self.expected {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(CertificateError::ApplicationVerificationFailure.into())
@@ -271,10 +287,10 @@ impl ClientCertVerifier for AnyKey {
     fn verify_client_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
+        intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        key(end_entity).map(|_| ClientCertVerified::assertion())
+        key(end_entity, intermediates).map(|_| ClientCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -331,8 +347,11 @@ mod tests {
     use rustls::client::ResolvesClientCert;
     use rustls::crypto::SupportedKxGroup;
     use rustls::crypto::aws_lc_rs::sign::any_ecdsa_type;
-    use rustls::crypto::aws_lc_rs::{cipher_suite, default_provider, kx_group};
+    use rustls::crypto::aws_lc_rs::{
+        ALL_CIPHER_SUITES, ALL_KX_GROUPS, default_provider,
+    };
     use rustls::pki_types::PrivateKeyDer;
+    use rustls::server::Acceptor;
     use rustls::sign::{Signer, SigningKey};
     use rustls::{
         CertificateError, CipherSuite, ClientConnection, Connection, HandshakeKind,
@@ -341,8 +360,13 @@ mod tests {
 
     use super::*;
 
-    /// Moves every pending TLS record from `from` to `to`.
-    fn pass(from: &mut Connection, to: &mut Connection) {
+    /// Moves every pending TLS record from `from` to `to`, and has `to` process
+    /// each part as it reads it, because its read buffer is smaller than a flight.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a Vec and a slice give no I/O error; the Result is the peer's"
+    )]
+    fn pass(from: &mut Connection, to: &mut Connection) -> Result<(), rustls::Error> {
         let mut wire = Vec::new();
         while from.wants_write() {
             from.write_tls(&mut wire).expect("writes to a Vec");
@@ -350,7 +374,9 @@ mod tests {
         let mut rest = wire.as_slice();
         while !rest.is_empty() {
             to.read_tls(&mut rest).expect("reads from a slice");
+            to.process_new_packets()?;
         }
+        Ok(())
     }
 
     /// Joins `client` and `server` in memory until both finish the handshake and the
@@ -364,10 +390,8 @@ mod tests {
         let mut client = Connection::from(ClientConnection::new(client, name)?);
         let mut server = Connection::from(ServerConnection::new(server)?);
         for _ in 0..8 {
-            pass(&mut client, &mut server);
-            server.process_new_packets()?;
-            pass(&mut server, &mut client);
-            client.process_new_packets()?;
+            pass(&mut client, &mut server)?;
+            pass(&mut server, &mut client)?;
             if !client.is_handshaking() && !server.is_handshaking() {
                 let (Connection::Client(client), Connection::Server(server)) =
                     (client, server)
@@ -427,6 +451,50 @@ mod tests {
             certified(certificate).cert.clone(),
             Arc::clone(&certified(signer).key),
         ))
+    }
+
+    /// TLS that presents `tls`'s certificate twice.
+    fn chained(tls: &Tls) -> Tls {
+        let chain = [certified(tls).cert.clone(), certified(tls).cert.clone()].concat();
+        Tls::with(CertifiedKey::new(chain, Arc::clone(&certified(tls).key)))
+    }
+
+    /// TLS with [`padded_der`]'s certificate.
+    fn padded(private_key: &PrivateKey, subject_bytes: usize) -> Tls {
+        Tls::with(CertifiedKey::new(
+            vec![padded_der(private_key, subject_bytes).into()],
+            Arc::clone(&certified(&Tls::new(private_key)).key),
+        ))
+    }
+
+    /// A self-signed certificate for `private_key`, like the template but with a
+    /// subject name of `subject_bytes` junk bytes.
+    fn padded_der(private_key: &PrivateKey, subject_bytes: usize) -> Vec<u8> {
+        fn seq(content: &[u8]) -> Vec<u8> {
+            let len = u16::try_from(content.len()).expect("under 64 KiB");
+            [&[0x30, 0x82], len.to_be_bytes().as_slice(), content].concat()
+        }
+        let pair =
+            Ed25519KeyPair::from_seed_unchecked(&private_key.0).expect("32 bytes");
+        let subject = seq(&vec![0xa5; subject_bytes]);
+        // `TBS` without its header.
+        let tbs = seq(&[
+            &TBS[3..],
+            ED25519,
+            NAME,
+            VALIDITY,
+            &subject,
+            SPKI,
+            pair.public_key().as_ref(),
+        ]
+        .concat());
+        let signature = pair.sign(&tbs);
+        seq(&[&tbs[..], ED25519, SIGNATURE, signature.as_ref()].concat())
+    }
+
+    /// The subject bytes that make [`padded_der`] `bytes` long.
+    fn subject_bytes(private_key: &PrivateKey, bytes: usize) -> usize {
+        bytes - padded_der(private_key, 0).len()
     }
 
     /// TLS with an ECDSA P-256 certificate, that signs with ECDSA whatever schemes
@@ -593,6 +661,62 @@ mod tests {
         }
 
         #[test]
+        fn when_client_chain_has_more_certificates_the_server_refuses() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let peers = handshake(
+                chained(&Tls::new(&a)).client(public(&b)),
+                Tls::new(&b).server(),
+            );
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_server_chain_has_more_certificates_the_client_refuses() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let peers = handshake(
+                Tls::new(&a).client(public(&b)),
+                chained(&Tls::new(&b)).server(),
+            );
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_client_certificate_is_padded_the_server_refuses() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let peers =
+                handshake(padded(&a, 60_000).client(public(&b)), Tls::new(&b).server());
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_server_certificate_is_padded_the_client_refuses() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let peers =
+                handshake(Tls::new(&a).client(public(&b)), padded(&b, 60_000).server());
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_both_certificates_are_at_the_limit_each_side_takes_the_other() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let full = |key| padded(key, subject_bytes(key, CERTIFICATE_BYTES_MAX));
+            let peers = handshake(full(&a).client(public(&b)), full(&b).server());
+            assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Node(public(&a)))));
+        }
+
+        #[test]
         fn when_client_key_is_ecdsa_the_server_refuses() {
             let b = PrivateKey([2; 32]);
             let peers = handshake(ecdsa().client(public(&b)), Tls::new(&b).server());
@@ -623,39 +747,65 @@ mod tests {
             );
         }
 
-        /// The suites of NODE KEY TLS, in the order a node offers them.
-        fn suites() -> [SupportedCipherSuite; 3] {
-            [
-                cipher_suite::TLS13_AES_128_GCM_SHA256,
-                cipher_suite::TLS13_AES_256_GCM_SHA384,
-                cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
-            ]
+        const ALPNS: &str =
+            include_str!("../../../oracles/conformance/transport/alpn.txt");
+        const SUITES: &str =
+            include_str!("../../../oracles/conformance/transport/suites.txt");
+        const GROUPS: &str =
+            include_str!("../../../oracles/conformance/transport/groups.txt");
+
+        /// The code points of an oracle list, which holds one in hex and its name on
+        /// each line, in the order a node offers them.
+        fn codes(list: &str) -> Vec<u16> {
+            let code = |line: &str| {
+                let code = line.split_whitespace().next().expect("a code point");
+                u16::from_str_radix(code, 16).expect("hex")
+            };
+            list.lines().map(code).collect()
         }
 
-        /// The groups of NODE KEY TLS, in the order a node offers them.
-        fn groups() -> [&'static dyn SupportedKxGroup; 4] {
-            [
-                kx_group::X25519MLKEM768,
-                kx_group::X25519,
-                kx_group::SECP256R1,
-                kx_group::SECP384R1,
-            ]
+        /// aws-lc's suites of [`SUITES`].
+        fn suites() -> Vec<SupportedCipherSuite> {
+            let find = |code| {
+                let mut all = ALL_CIPHER_SUITES.iter();
+                *all.find(|suite| u16::from(suite.suite()) == code)
+                    .expect("aws-lc has the suite")
+            };
+            codes(SUITES).into_iter().map(find).collect()
+        }
+
+        /// aws-lc's groups of [`GROUPS`].
+        fn groups() -> Vec<&'static dyn SupportedKxGroup> {
+            let find = |code| {
+                let mut all = ALL_KX_GROUPS.iter();
+                *all.find(|group| u16::from(group.name()) == code)
+                    .expect("aws-lc has the group")
+            };
+            codes(GROUPS).into_iter().map(find).collect()
         }
 
         #[test]
-        fn when_a_node_dials_it_offers_the_suites_and_groups_in_order() {
-            let provider = provider();
-            let ids = |suites: &[SupportedCipherSuite]| {
-                suites
-                    .iter()
-                    .map(SupportedCipherSuite::suite)
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(ids(&provider.cipher_suites), ids(&suites()));
-            let names = |groups: &[&dyn SupportedKxGroup]| {
-                groups.iter().map(|group| group.name()).collect::<Vec<_>>()
-            };
-            assert_eq!(names(&provider.kx_groups), names(&groups()));
+        fn when_a_node_dials_its_client_hello_offers_the_oracle_lists() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let name = ServerName::from(IpAddr::from(Ipv6Addr::LOCALHOST));
+            let client = Tls::new(&a).client(public(&b));
+            let mut client = ClientConnection::new(client, name).expect("a client");
+            let mut wire = Vec::new();
+            while client.wants_write() {
+                client.write_tls(&mut wire).expect("writes to a Vec");
+            }
+            let mut acceptor = Acceptor::default();
+            let mut rest = wire.as_slice();
+            acceptor.read_tls(&mut rest).expect("reads from a slice");
+            let accepted = acceptor.accept().expect("a hello").expect("a whole hello");
+            let hello = accepted.client_hello();
+            let alpn = hello.alpn().expect("ALPN").collect::<Vec<_>>();
+            assert_eq!(alpn, ALPNS.lines().map(str::as_bytes).collect::<Vec<_>>());
+            let suites = hello.cipher_suites().iter().map(|&suite| u16::from(suite));
+            assert_eq!(suites.collect::<Vec<_>>(), codes(SUITES));
+            let groups = hello.named_groups().expect("groups").iter();
+            let groups = groups.map(|&group| u16::from(group));
+            assert_eq!(groups.collect::<Vec<_>>(), codes(GROUPS));
         }
 
         #[test]
@@ -747,7 +897,31 @@ mod tests {
             // 1.3.101.112 (Ed25519) becomes 1.3.101.110 (X25519).
             der[at + 8] = 0x6e;
             assert_eq!(
-                key(&CertificateDer::from(der)),
+                key(&CertificateDer::from(der), &[]),
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn takes_a_certificate_at_the_limit() {
+            let private_key = PrivateKey([1; 32]);
+            let subject = subject_bytes(&private_key, CERTIFICATE_BYTES_MAX);
+            let der = padded_der(&private_key, subject);
+            assert_eq!(der.len(), 1024);
+            assert_eq!(
+                key(&CertificateDer::from(der), &[]),
+                Ok(public(&private_key))
+            );
+        }
+
+        #[test]
+        fn refuses_a_certificate_over_the_limit() {
+            let private_key = PrivateKey([1; 32]);
+            let subject = subject_bytes(&private_key, CERTIFICATE_BYTES_MAX + 1);
+            let der = padded_der(&private_key, subject);
+            assert_eq!(der.len(), 1025);
+            assert_eq!(
+                key(&CertificateDer::from(der), &[]),
                 Err(CertificateError::ApplicationVerificationFailure.into())
             );
         }
@@ -755,7 +929,7 @@ mod tests {
         #[test]
         fn refuses_bytes_that_are_not_der() {
             assert_eq!(
-                key(&CertificateDer::from(vec![1, 2, 3])),
+                key(&CertificateDer::from(vec![1, 2, 3]), &[]),
                 Err(CertificateError::BadEncoding.into())
             );
         }
@@ -769,8 +943,18 @@ mod tests {
             fn carries_the_public_key(bytes: [u8; 32]) {
                 let private_key = PrivateKey(bytes);
                 let certificate = certificate(&Tls::new(&private_key));
-                prop_assert_eq!(key(&certificate), Ok(public(&private_key)));
+                prop_assert_eq!(key(&certificate, &[]), Ok(public(&private_key)));
             }
+        }
+
+        #[test]
+        fn matches_the_oracle() {
+            let golden =
+                include_str!("../../../oracles/conformance/transport/certificate.txt");
+            let golden = golden.split_whitespace().collect::<String>();
+            let certificate = certificate(&Tls::new(&PrivateKey([1; 32])));
+            let hex = certificate.iter().map(|byte| format!("{byte:02x}"));
+            assert_eq!(hex.collect::<String>(), golden);
         }
 
         #[test]

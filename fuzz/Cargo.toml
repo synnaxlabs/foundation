@@ -21,6 +21,7 @@ document = { path = "../crates/document" }
 env = { path = "../crates/env" }
 libfuzzer-sys = "0.4.13"
 ops = { path = "../crates/ops" }
+secret = { path = "../crates/secret" }
 sim = { path = "../crates/sim" }
 types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
@@ -68,6 +69,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "connector_modbus_rtu"
+path = "fuzz_targets/connector_modbus_rtu.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "connector_modbus_tcp"
 path = "fuzz_targets/connector_modbus_tcp.rs"
 test = false
@@ -84,6 +92,13 @@ bench = false
 [[bin]]
 name = "ops_mcp"
 path = "fuzz_targets/ops_mcp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secret_sealed"
+path = "fuzz_targets/secret_sealed.rs"
 test = false
 doc = false
 bench = false
