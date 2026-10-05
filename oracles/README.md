@@ -6,7 +6,8 @@ and never weaken them (see `docs/claude/testing.md`).
 - `targets.toml` -> the performance targets (P1).
 - `baselines/` -> benchmark baselines per crate. A regression over 5% blocks a merge.
 - `invariants/` -> properties every simulated mesh run must keep.
-- `conformance/` -> vectors every codec and SDK must match.
+- `conformance/` -> vectors every codec and SDK must match, and scenario suites a
+  crate must pass (`conformance/raft/`).
 - `fuzz/` -> fuzz inputs. Crashes become permanent inputs here.
 - `proptest-regressions/` in each crate -> committed proptest failure files. Agents
   add them and never delete them.
