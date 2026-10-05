@@ -36,6 +36,7 @@ tests:
                                     bulk flow on the same connection and thread
   <frames> is `stream` or `datagram` (QUIC only).
   A test measures for <secs> after a 1 s warmup, and on until each flow measured once.
+  A flow that measured nothing 5 s after that fails.
 options:
   unsegmented      QUIC sends without GSO
   mtu=<bytes>      the link MTU (1500)

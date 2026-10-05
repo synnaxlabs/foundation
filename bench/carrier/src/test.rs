@@ -632,7 +632,9 @@ async fn ping_datagrams(
 fn ended(since: Duration, secs: Duration, measured: bool) -> Result<bool, Error> {
     let end = WARMUP + secs;
     if !measured && since >= end + GRACE {
-        return Err(format!("no echo in the {GRACE:?} after the run").into());
+        return Err(
+            format!("a flow measured nothing in the {GRACE:?} after the run").into(),
+        );
     }
     Ok(measured && since >= end)
 }
@@ -1021,7 +1023,8 @@ mod tests {
     use super::*;
     use crate::session::{Config, Listener};
 
-    const WINDOW: Duration = Duration::from_millis(100);
+    /// The `secs` of a timed test: long against a run that ignores it.
+    const WINDOW: Duration = Duration::from_secs(1);
 
     /// Runs `test` against a loopback server that echoes.
     async fn loopback(carrier: Carrier, test: Test) -> Result<Outcome, Error> {
@@ -1059,11 +1062,18 @@ mod tests {
         let serving = tokio::spawn(serve(listener));
         let mut session =
             Session::connect(&config, server, &format!("{dir}/ca.pem")).await?;
+        let (Test::Bulk { secs } | Test::Ping { secs, .. } | Test::Paced { secs, .. }) =
+            test;
+        let start = Instant::now();
         // A broken protocol waits forever; this makes it fail.
         let outcome =
             timeout(Duration::from_secs(10), run(&mut session, &test, &[])).await?;
         session.close().await;
         serving.abort();
+        if outcome.is_ok() {
+            let took = start.elapsed();
+            assert!(took >= WARMUP + secs, "the run took {took:?}");
+        }
         outcome
     }
 
@@ -1170,15 +1180,25 @@ mod tests {
         assert_latency(&outcome, false, false);
     }
 
-    /// Asserts the error of a run that measured no echo.
-    fn assert_no_echo(outcome: Result<Outcome, Error>) {
-        let error = outcome.err().unwrap().to_string();
-        assert_eq!(error, "no echo in the 5s after the run");
+    /// Asserts the error of a run that measured nothing.
+    fn assert_unmeasured<T>(result: Result<T, Error>) {
+        let error = result.err().unwrap().to_string();
+        assert_eq!(error, "a flow measured nothing in the 5s after the run");
+    }
+
+    #[test]
+    fn a_flow_ends_after_its_secs_once_it_measured() {
+        let (end, tick) = (WARMUP + WINDOW, Duration::from_millis(1));
+        assert!(!ended(end.saturating_sub(tick), WINDOW, true).unwrap());
+        assert!(ended(end, WINDOW, true).unwrap());
+        assert!(!ended(end, WINDOW, false).unwrap());
+        assert!(!ended((end + GRACE).saturating_sub(tick), WINDOW, false).unwrap());
+        assert_unmeasured(ended(end + GRACE, WINDOW, false));
     }
 
     #[tokio::test]
     async fn a_datagram_ping_with_no_echo_fails_after_the_grace() {
-        assert_no_echo(silent(ping(Frames::Datagram, Duration::ZERO)).await);
+        assert_unmeasured(silent(ping(Frames::Datagram, Duration::ZERO)).await);
     }
 
     #[tokio::test]
@@ -1190,7 +1210,7 @@ mod tests {
             secs: Duration::ZERO,
             load: Load::None,
         };
-        assert_no_echo(silent(test).await);
+        assert_unmeasured(silent(test).await);
     }
 
     #[tokio::test]
