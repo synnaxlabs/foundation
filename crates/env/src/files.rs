@@ -228,13 +228,13 @@ impl fmt::Debug for Files {
 pub enum Mode {
     /// Reads a file that is there.
     Read,
-    /// Reads and writes a file that is there. Only one handle at a time holds a file
-    /// with this mode or [`Mode::Create`]; see [`Files::open`].
+    /// Reads and writes a file that is there. One handle at a time writes a file; see
+    /// [`Files::open`].
     Write,
     /// Reads and writes a file. When it is not there, makes it with `len` bytes,
     /// allocated and zeroed, and makes the allocation durable before the open ends. A
-    /// file that is there keeps its bytes and must have `len` bytes. Only one handle
-    /// at a time holds a file with this mode or [`Mode::Write`].
+    /// file that is there keeps its bytes and must have `len` bytes. One handle at a
+    /// time writes a file; see [`Files::open`].
     Create {
         /// The length of the file.
         len: u64,
@@ -596,7 +596,7 @@ pub trait Driver {
     /// durable before it ends (`os`: `fallocate`, then `fsync` the file), so a
     /// `sync_dir` alone makes the file whole. A write open of a file that a write
     /// handle holds gives [`Error::Busy`] before any other check or change of the
-    /// file (`os`: `File::try_lock`).
+    /// file.
     fn open<'a>(
         &'a self,
         path: &'a Path,

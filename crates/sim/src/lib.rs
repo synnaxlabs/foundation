@@ -152,10 +152,10 @@ impl Sim {
     /// When `node` belongs to another run.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
-        let (tasks, starts) = lock(&self.shared).crash(node);
+        let (tasks, starts) = lock(&self.shared).stop(node);
         self.drop_futures(&tasks);
         drop(starts);
-        let orphans = lock(&self.shared).halt(node, crash);
+        let orphans = lock(&self.shared).crash(node, crash);
         drop(orphans);
     }
 
@@ -332,8 +332,8 @@ impl fmt::Debug for Sim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Crash {
     /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
-    /// keeps each call that ended, and each file call in flight ends at the crash,
-    /// as if its future dropped.
+    /// keeps each call that ended. Each file call in flight takes effect at the
+    /// crash, as if its future dropped, so a write keeps any subset of its sectors.
     Process,
     /// The machine loses power and boots again.
     ///

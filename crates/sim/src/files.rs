@@ -223,10 +223,7 @@ impl Files {
             let ended = self.apply(key, flight);
             (due, key, kind, ended.result.is_ok()).hash(digest);
             if dropped {
-                if let Ok(Done::Open { handle, .. }) = ended.result {
-                    self.disks[node].release(handle);
-                }
-                orphans.extend(ended.held);
+                orphans.extend(self.discard(node, ended));
             } else {
                 self.done.insert(key, ended);
                 wakers.extend(waker);
@@ -333,10 +330,17 @@ impl Files {
         }
         let ended = (self.done.remove(&key))
             .expect("invariant: a call whose result was not taken has ended");
+        (None, self.discard(node, ended))
+    }
+
+    /// Drops call `ended` of `node`, whose future dropped: an open releases the file
+    /// it opened. Returns the blocks of the call, for the caller to drop after it
+    /// releases the lock.
+    fn discard(&mut self, node: usize, ended: Ended) -> Option<Held> {
         if let Ok(Done::Open { handle, .. }) = ended.result {
             self.disks[node].release(handle);
         }
-        (None, ended.held)
+        ended.held
     }
 
     /// Crashes `node` by `crash` at true time `at`, whose calls in flight have all
@@ -364,10 +368,7 @@ impl Files {
                 crash == Crash::Process || matches!(flight.call, Call::Write { .. });
             let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
-                if let Ok(Done::Open { handle, .. }) = ended.result {
-                    self.disks[node].release(handle);
-                }
-                (ended.result.is_ok(), ended.held)
+                (ended.result.is_ok(), self.discard(node, ended))
             } else {
                 if let Some(handle) = flight.call.handle() {
                     self.disks[node].release(handle);

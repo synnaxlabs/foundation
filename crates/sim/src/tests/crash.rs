@@ -519,3 +519,34 @@ fn a_power_cut_restarts_the_monotonic_clock_and_the_wall_runs_on() {
     assert_eq!(clocks(Crash::Process), ran);
     assert_eq!(clocks(Crash::Power), (config.monotonic, ran.1));
 }
+
+#[test]
+fn a_process_crash_frees_a_file_that_a_write_open_in_flight_opens() {
+    for value in 0..16 {
+        let (mut sim, node) = disk(value);
+        crash_after(&mut sim, &node, Crash::Process, |node| async move {
+            drop(create_synced(&node).await);
+            until_crash(&node).await;
+            hang(node.files().open(Path::new("a"), Mode::Write)).await;
+        });
+        let open = on(&mut sim, &node, |node| async move {
+            node.files().open(Path::new("a"), Mode::Write).await.err()
+        });
+        assert_eq!(open, None, "value {value}");
+    }
+}
+
+#[test]
+fn a_process_crash_applies_a_create_dir_in_flight() {
+    for value in 0..16 {
+        let (mut sim, node) = disk(value);
+        crash_after(&mut sim, &node, Crash::Process, |node| async move {
+            until_crash(&node).await;
+            hang(node.files().create_dir(Path::new("d"))).await;
+        });
+        let names = on(&mut sim, &node, |node| async move {
+            node.files().list(Path::new("")).await.unwrap()
+        });
+        assert_eq!(names, [PathBuf::from("d")], "value {value}");
+    }
+}

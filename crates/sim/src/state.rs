@@ -483,7 +483,7 @@ impl State {
     /// Ends each live thread of `node` in a crash. Returns the tasks whose futures
     /// the caller drops, and the starts of the threads that had not run, for the
     /// caller to drop after it releases the lock.
-    pub(crate) fn crash(&mut self, node: usize) -> (Vec<u64>, Vec<Start>) {
+    pub(crate) fn stop(&mut self, node: usize) -> (Vec<u64>, Vec<Start>) {
         let live: Vec<(u64, u64)> = (self.threads.iter())
             .filter(|(_, thread)| thread.node == node && thread.outcome.is_none())
             .map(|(&key, thread)| (key, thread.main))
@@ -500,7 +500,7 @@ impl State {
     /// `Power` crash, its monotonic clock reads its boot value again, and its disk
     /// keeps what is durable. Returns the blocks of the calls, for the caller to drop
     /// after it releases the lock.
-    pub(crate) fn halt(&mut self, node: usize, crash: Crash) -> Vec<Held> {
+    pub(crate) fn crash(&mut self, node: usize, crash: Crash) -> Vec<Held> {
         let now = self.now;
         if crash == Crash::Power {
             let wall = self.wall(node).time;

@@ -860,7 +860,7 @@ fn syncs_in_flight_end_in_any_order() {
     }
 }
 
-pub(super) fn busy(path: &str) -> Error {
+fn busy(path: &str) -> Error {
     Error::Busy { path: path.into() }
 }
 
