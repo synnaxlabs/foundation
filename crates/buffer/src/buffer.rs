@@ -35,7 +35,8 @@ use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 pub struct Config {
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
-    /// The directory of this shard's ring, relative to the data directory.
+    /// The directory of this shard's ring, relative to the data directory. Its parent
+    /// must be there. [`Buffer::open`] makes it durably when it is not there.
     pub dir: PathBuf,
     /// Blocks for record headers and recovery reads. It needs a class of 64 KiB.
     pub pool: Rc<Pool>,
@@ -300,6 +301,9 @@ impl Buffer {
             Ok(file) => file,
             Err(files::Error::NotFound { .. }) => {
                 files.create_dir(&dir).await?;
+                // A new directory is durable only after a sync of its parent. An
+                // empty `dir` has no parent: it is the data directory.
+                files.sync_dir(dir.parent().unwrap_or(&dir)).await?;
                 let len = layout.file_len();
                 let file = files.open(&path, Mode::Create { len }).await?;
                 files.sync_dir(&dir).await?;

@@ -957,20 +957,6 @@ fn open_after_a_cut(
         ..sim::Config::default()
     });
     let node = sim.node(sim::node::Config::default());
-    let made = node.clone();
-    let handle = on_node(&node, "dir", move |_| async move {
-        let files = made.files();
-        files
-            .create_dir(FilePath::new(DIR))
-            .await
-            .expect("the dir is made");
-        files
-            .sync_dir(FilePath::new(""))
-            .await
-            .expect("the dir is synced");
-    });
-    sim.run().expect("the run ends");
-    handle.join().expect("the shard ended");
     let ended = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&ended);
     let first = node.clone();
@@ -1020,6 +1006,43 @@ fn a_power_cut_during_the_first_open_leaves_a_ring_that_opens() {
             cut += 10_000;
         }
     }
+}
+
+/// The first open makes the directory of the ring durable, so a power cut after a
+/// commit keeps the committed entries.
+#[test]
+fn a_power_cut_after_the_first_commit_keeps_the_committed_entries() {
+    let ring = layout(AREA, BODY_MAX);
+    let mut sim = sim::Sim::new(sim::Config {
+        seed: 1,
+        ..sim::Config::default()
+    });
+    let node = sim.node(sim::node::Config::default());
+    let first = node.clone();
+    let handle = on_node(&node, "first", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&first, tasks, ring);
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    sim.crash(&node, sim::Crash::Power);
+    let second = node.clone();
+    let handle = on_node(&node, "second", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&second, tasks, ring);
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens again");
+        let a = slots.assign(key(1));
+        assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
 }
 
 #[test]
