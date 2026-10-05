@@ -34,6 +34,8 @@ deny = [
   { crate = "openssl-sys", reason = "aws-lc-rs is the only crypto provider" },
   # The version requirement passes the workspace crate `ring` 0.0.0.
   { crate = "ring:>=0.1", reason = "aws-lc-rs is the only crypto provider" },
+  # `terminal_size` comes in through `clap`, which the `divan` benchmarks use.
+  { crate = "rustix", wrappers = ["os", "terminal_size"], reason = "only os calls the OS" },
 ]
 
 [sources]

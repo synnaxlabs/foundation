@@ -1,7 +1,7 @@
 //! Address space from the OS for block pools.
 
-use std::fmt;
 use std::ptr::{self, NonNull};
+use std::{fmt, process};
 
 use rustix::mm::{self, MapFlags, ProtFlags};
 
@@ -19,7 +19,6 @@ const PROT: ProtFlags = ProtFlags::READ.union(ProtFlags::WRITE);
 ///
 /// On Linux with strict overcommit (`vm.overcommit_memory=2`), the OS counts the full
 /// reserve as committed, so a large reserve can fail.
-#[derive(Debug)]
 pub struct Memory {
     base: NonNull<u8>,
     len: usize,
@@ -40,7 +39,7 @@ impl Memory {
         assert!(len > 0, "memory must be more than 0 bytes");
         // SAFETY: the OS picks the address, so the mapping replaces nothing.
         let base = unsafe { mm::mmap_anonymous(ptr::null_mut(), len, PROT, FLAGS) }
-            .map_err(|errno| Error {
+            .map_err(|errno| Error::Reserve {
                 len,
                 code: errno.raw_os_error(),
             })?;
@@ -55,6 +54,16 @@ impl Memory {
 
 // SAFETY: `Memory` owns its mapping, and any thread may unmap it.
 unsafe impl Send for Memory {}
+
+impl fmt::Debug for Memory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { len, page, .. } = self;
+        f.debug_struct("Memory")
+            .field("len", len)
+            .field("page", page)
+            .finish()
+    }
+}
 
 // SAFETY: the mapping stays at `base` for `len` bytes until the drop. The OS zeroes
 // each page when first touched, so each byte is readable, writable, and initialized
@@ -82,14 +91,11 @@ unsafe impl block::Memory for Memory {
                 self.len
             )
         };
-        let (start, end) = (
-            offset.next_multiple_of(self.page),
-            end / self.page * self.page,
-        );
-        if start < end {
-            // SAFETY: `start` is inside the mapping.
-            let at = unsafe { self.base.add(start) };
-            discard(at, end - start);
+        let pages = offset.div_ceil(self.page)..end / self.page;
+        if !pages.is_empty() {
+            // SAFETY: the pages are inside the mapping.
+            let at = unsafe { self.base.add(pages.start * self.page) };
+            discard(at, pages.len() * self.page);
         }
     }
 }
@@ -98,49 +104,59 @@ unsafe impl block::Memory for Memory {
 /// `MAP_FIXED`, as on macOS: a failed `MAP_FIXED` on Linux can leave a hole.
 #[cfg(target_os = "linux")]
 fn discard(at: NonNull<u8>, len: usize) {
-    // SAFETY: the pages are in a private anonymous mapping, and no Rust reference
-    // covers them.
+    // SAFETY: the pages are in this private anonymous mapping, and the
+    // `block::Memory` contract lets a purge change the bytes in its range.
     unsafe { mm::madvise(at.as_ptr().cast(), len, mm::Advice::LinuxDontNeed) }
         .unwrap_or_else(|errno| panic!("purge of {len} bytes failed: {errno}"));
 }
 
+#[cfg(target_os = "macos")]
+use self::remap as discard;
+
 /// Gives back `len` bytes of whole pages at `at`, which read zero after it. Not
-/// `MADV_FREE`, which keeps the pages resident until the system needs memory.
-#[cfg(not(target_os = "linux"))]
-fn discard(at: NonNull<u8>, len: usize) {
-    // SAFETY: the pages are in this mapping, and no Rust reference covers them.
-    // `MAP_FIXED` puts zeroed pages at the same address.
-    unsafe {
-        mm::mmap_anonymous(at.as_ptr().cast(), len, PROT, FLAGS | MapFlags::FIXED)
-    }
-    .unwrap_or_else(|errno| panic!("purge of {len} bytes failed: {errno}"));
+/// `MADV_FREE`, which keeps the pages resident until the system needs memory. Tests
+/// run it on Linux too.
+#[cfg(any(target_os = "macos", test))]
+fn remap(at: NonNull<u8>, len: usize) {
+    let flags = FLAGS.union(MapFlags::FIXED);
+    // SAFETY: the pages are in this mapping, and the `block::Memory` contract lets a
+    // purge change the bytes in its range. `MAP_FIXED` puts zeroed pages at the same
+    // address, and on macOS a failed one leaves the old pages.
+    unsafe { mm::mmap_anonymous(at.as_ptr().cast(), len, PROT, flags) }
+        .unwrap_or_else(|errno| panic!("purge of {len} bytes failed: {errno}"));
 }
 
 impl Drop for Memory {
     fn drop(&mut self) {
-        // It fails only on arguments that `new` rules out. `Drop` never panics, so a
-        // failure leaks the range.
         // SAFETY: `new` mapped `len` bytes at `base`, and the pool that used them is
         // gone.
-        let _unmapped = unsafe { mm::munmap(self.base.as_ptr().cast(), self.len) };
+        let unmapped = unsafe { mm::munmap(self.base.as_ptr().cast(), self.len) };
+        // It fails only on arguments that `new` rules out, and `Drop` never panics.
+        if unmapped.is_err() {
+            process::abort();
+        }
     }
 }
 
-/// The OS gave no address space for a reserve.
+/// A failure to get memory from the OS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Error {
-    /// The bytes asked for.
-    pub len: usize,
-    /// The OS error code.
-    pub code: i32,
+pub enum Error {
+    /// The OS gave no range of `len` bytes of address space.
+    Reserve {
+        /// The bytes asked for.
+        len: usize,
+        /// The OS error code.
+        code: i32,
+    },
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { len, code } = self;
+        let Self::Reserve { len, code } = self;
         write!(
             f,
-            "a reserve of {len} bytes of address space failed with OS error {code}"
+            "a reserve of {len} bytes of address space failed with OS error {code}; \
+             lower the memory budget"
         )
     }
 }
@@ -150,6 +166,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use std::ffi::c_void;
+    use std::io;
     use std::ops::Range;
     use std::slice;
 
@@ -158,9 +175,14 @@ mod tests {
 
     use super::*;
 
+    /// `msync` starts the writes and returns at once.
+    const MS_ASYNC: i32 = 1;
+
     unsafe extern "C" {
         /// Sets bit 0 of one byte per page of the range when the page is resident.
         fn mincore(addr: *mut c_void, len: usize, vec: *mut u8) -> i32;
+        /// Fails with `ENOMEM` when a page of the range is not mapped.
+        fn msync(addr: *mut c_void, len: usize, flags: i32) -> i32;
     }
 
     /// Whether each page of `pages` in the mapping at `base` is resident.
@@ -264,13 +286,40 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri has no MAP_FIXED or mincore")]
+    fn a_remap_gives_back_each_page_in_its_range() {
+        let page = page_size();
+        let mut memory = Memory::new(3 * page).unwrap();
+        bytes(&mut memory).fill(1);
+        // SAFETY: the page is inside the mapping.
+        remap(unsafe { memory.base().add(page) }, page);
+        assert_eq!(resident(memory.base(), 0..3), [true, false, true]);
+        let bytes = bytes(&mut memory);
+        assert!(bytes[..page].iter().all(|&byte| byte == 1));
+        assert!(bytes[page..2 * page].iter().all(|&byte| byte == 0));
+        assert!(bytes[2 * page..].iter().all(|&byte| byte == 1));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri has no msync")]
+    fn a_drop_gives_back_the_range() {
+        // No other mapping of the test binary is large enough to fill the range.
+        let len = 1 << 30;
+        let base = Memory::new(len).unwrap().base();
+        // SAFETY: an async sync of anonymous pages changes nothing.
+        let code = unsafe { msync(base.as_ptr().cast(), len, MS_ASYNC) };
+        let error = io::Error::last_os_error().raw_os_error();
+        assert_eq!((code, error), (-1, Some(12)), "the range is still mapped");
+    }
+
+    #[test]
     #[cfg(target_pointer_width = "64")]
     #[cfg_attr(miri, ignore = "Miri has no address space failure")]
     fn a_reserve_larger_than_the_address_space_fails() {
         let error = Memory::new(1 << 62).unwrap_err();
         assert_eq!(
             error,
-            Error {
+            Error::Reserve {
                 len: 1 << 62,
                 code: 12
             }
@@ -278,7 +327,17 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "a reserve of 4611686018427387904 bytes of address space failed with OS \
-             error 12"
+             error 12; lower the memory budget"
+        );
+    }
+
+    #[test]
+    fn debug_prints_no_address() {
+        let page = page_size();
+        let memory = Memory::new(3 * page).unwrap();
+        assert_eq!(
+            format!("{memory:?}"),
+            format!("Memory {{ len: {}, page: {page} }}", 3 * page)
         );
     }
 

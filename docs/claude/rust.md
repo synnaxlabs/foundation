@@ -114,8 +114,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 ## Unsafe
 
 - `unsafe_code` is denied. Only the crates the crate map names may hold `unsafe`:
-  `block`, `ring`, `counting`, `os`, and later FFI connectors. Such a module uses
-  `#[expect(unsafe_code, reason = "...")]` and runs under Miri (r16 24).
+  `block`, `ring`, `counting`, the `memory` module of `os`, and later FFI connectors.
+  Such a module uses `#[expect(unsafe_code, reason = "...")]` and runs under Miri
+  (r16 24).
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The
   comment relies only on earlier checks, type invariants, and well-formed inputs
   (r16 25).
