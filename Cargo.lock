@@ -1199,6 +1199,7 @@ dependencies = [
  "proptest",
  "sim",
  "types",
+ "zeroize",
 ]
 
 [[package]]

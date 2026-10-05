@@ -1,12 +1,18 @@
-use types::time::{Interval, Monotonic};
+//! Measurements from round trips to another clock.
 
-use crate::{Drift, Error, Measurement};
+use std::fmt;
+
+use types::time::{Interval, Monotonic, Span};
+
+use crate::measurement::MAX_ERROR;
+use crate::{Drift, Measurement};
 
 /// One reading of another clock's mesh time, taken between two readings of the local
 /// monotonic clock.
 ///
 /// ```
-/// use estimate::{Drift, Exchange};
+/// use estimate::Drift;
+/// use estimate::exchange::Exchange;
 /// use types::time::{Interval, Monotonic, Span, Stamp};
 ///
 /// let peer = |ns: i64| Interval {
@@ -19,10 +25,10 @@ use crate::{Drift, Error, Measurement};
 ///     answered: peer(6_150),
 ///     returned: Monotonic(1_250),
 /// };
-/// let m = exchange.measure(Drift::from_ppb(0)?)?;
+/// let m = exchange.measure(Drift::from_ppb(0).expect("at most 10%"))?;
 /// let ns = Span::from_nanos;
 /// assert_eq!((m.offset(), m.error()), (ns(5_000), ns(110)));
-/// # Ok::<(), estimate::Error>(())
+/// # Ok::<(), estimate::exchange::Error>(())
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exchange {
@@ -43,9 +49,7 @@ impl Exchange {
     ///
     /// # Errors
     ///
-    /// - [`Error::Crossed`] when the exchange allows no offset: an interval is
-    ///   inverted, the other clock goes back, the local clock drifts more than
-    ///   `drift`, or `sent` is after `returned`.
+    /// - [`Error::Crossed`] when the exchange allows no offset.
     /// - [`Error::Bound`] when the error is more than 36500 days.
     pub fn measure(self, drift: Drift) -> Result<Measurement, Error> {
         let (received, answered) = (self.received, self.answered);
@@ -66,15 +70,45 @@ impl Exchange {
             return Err(Error::Crossed);
         }
         Measurement::checked_between(self.returned, low, high)
+            .map_err(|error| Error::Bound { error })
     }
 }
+
+/// Why an [`Exchange`] gave no measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The exchange allows no offset: an interval is inverted, the other clock goes
+    /// back, the local clock drifts more than the drift bound, or `sent` is after
+    /// `returned`.
+    Crossed,
+    /// The error is more than 36500 days, as when the other clock does not know mesh
+    /// time.
+    Bound {
+        /// The error bound, or the largest span when the bound is wider.
+        error: Span,
+    },
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Crossed => f.write_str("exchange allows no offset"),
+            Self::Bound { error } => {
+                write!(f, "error bound {error} is more than {MAX_ERROR}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
     use types::time::{Interval, Monotonic, Span, Stamp};
 
+    use super::{Error, Exchange};
+    use crate::Drift;
     use crate::measurement::MAX_ERROR;
-    use crate::{Drift, Error, Exchange};
 
     const SECOND_NS: u64 = 1_000_000_000;
 
@@ -100,7 +134,7 @@ mod tests {
             answered,
             returned: Monotonic(returned),
         };
-        let m = exchange.measure(Drift::from_ppb(ppb)?)?;
+        let m = exchange.measure(Drift::from_ppb(ppb).expect("valid"))?;
         Ok((m.offset().nanos(), m.error().nanos()))
     }
 
@@ -156,6 +190,10 @@ mod tests {
             assert_eq!(
                 check(0, 0, interval, interval, 0),
                 Err(Error::Bound { error })
+            );
+            assert_eq!(
+                Error::Bound { error }.to_string(),
+                "error bound 3153600000.000000001s is more than 36500d"
             );
         }
 
@@ -317,11 +355,6 @@ mod tests {
                         prop_assert!(m.error() <= MAX_ERROR);
                     }
                     Err(Error::Crossed | Error::Bound { .. }) => {}
-                    Err(e @ (Error::Backwards { .. } | Error::Disjoint
-                        | Error::Drift { .. } | Error::NoSources
-                        | Error::NoMajority { .. } | Error::Open)) => {
-                        prop_assert!(false, "unexpected {e}");
-                    }
                 }
             }
         }
