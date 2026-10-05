@@ -86,7 +86,14 @@ How to read this record:
 - **A3** Names are dot-separated segments of letters, digits, `_`, and `-`.
   Case-sensitive; case-only collisions are rejected. `*` matches one segment, `**` any
   depth. The `@` prefix is reserved for Foundation. Hierarchy and struct fields share
-  the dot. MQTT maps `.` to `/`.
+  the dot. MQTT maps `.` to `/`. Letters are ASCII (decided by the person,
+  2026-10-04). Widening to Unicode later stays backward compatible. `discover` maps
+  non-ASCII device tags to ASCII names.
+- **SPECIFICITY (#3)** Pattern specificity orders by more literal segments, then fewer
+  `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` > `**`. A run of wildcards
+  counts as its `*`s and one `**` (`a.**.*.**` is `a.*.**`). Two different patterns may
+  tie (`a.*` and `*.a`); a tie between setting policies on one name is the S12 plan
+  error. Access has no ties (X25).
 - **A4 + M1/M2 answer** `channel::Key` is a UUIDv7 made with the channel. It is never
   reused and never changes. Files carry names only. The stored spec maps name to key,
   and `apply` assigns a key the first time a name appears. Renames are explicit
@@ -493,7 +500,7 @@ How to read this record:
   plan error; `explain` shows each effective value and its source. A rename can move a
   channel under other policies, and `plan` shows it. Current policy kinds: retention,
   placement, transmission, compression, reduction, time, access, and secret store.
-  Targets and combination rules: X25, X26.
+  Targets and combination rules: X25, X26. Specificity: SPECIFICITY (#3).
 
 ### 1.12 Access, identity, and secrets
 
@@ -635,6 +642,23 @@ How to read this record:
 - **R16-9 (2026-10-04)** Miri and cargo-fuzz run on one pinned nightly toolchain that
   only those gates use. The workspace toolchain stays stable. Decided by the advisor
   under the quality delegation.
+- **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
+  trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
+  `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
+  `wall::Wall`: the OS wall clock, which only `clock` reads (a lint).
+  `entropy::Entropy`: random bytes from the OS, or from the run's seed in simulation.
+  `rng::Rng` is concrete (xoshiro256++ seeded from `Entropy`), so simulation replays it.
+  `shards::Shards`, held only by `node`: the core count, and one thread per shard with
+  its own executor. `tasks::Tasks`: spawns `!Send` tasks on the current shard.
+  `threads::Threads`: dedicated threads for blocking code. Each runs one future, and it
+  waits for an event only by awaiting a future, so simulation controls every wait. A
+  lint denies the std blocking waits (`park`, `Condvar`, `Barrier`, `mpsc` receive).
+  When a shard's main future completes, the shard drops its other tasks. A panic in any
+  task ends its shard, and its `Handle::join` returns `Error::Panicked`. A dropped
+  `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
+  Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
+  scheduler runs them. No other crate calls Tokio's timers or spawn. Files come later
+  (S4).
 
 ### 1.15 Releases
 
@@ -1306,7 +1330,11 @@ T2 calls that too strict, and C9c enforces oracles by visibility only. Resolutio
 People still own contracts and oracles; agents may edit them, and every weakening gets
 an adversarial reviewer and a person's merge.
 
-Count: 53 items (X1 to X53).
+**X54. "Clock".** It means `env::clock::Clock`, the monotonic clock of one node, and
+the `clock` crate, which serves mesh time. Resolution: in prose, "monotonic clock" for
+the `env` seam and "mesh clock" for what the `clock` crate serves.
+
+Count: 54 items (X1 to X54).
 
 ---
 
