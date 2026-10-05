@@ -2,4 +2,5 @@
 //! the component library, and the compositions.
 
 pub mod cancel;
+pub mod kind;
 pub mod pace;
