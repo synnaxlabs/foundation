@@ -1,9 +1,9 @@
 //! The write path of one shard: the indexes it carries, their writers, and each frame
 //! from split to one buffer append.
 
+use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::{fmt, mem};
 
 use block::Block;
 use buffer::{Buffer, Entry};
@@ -66,8 +66,6 @@ struct Batch {
     handoffs: Vec<(u32, u64, Option<Block>)>,
     /// The stored body of each accepted group, in group order.
     bodies: Vec<Body>,
-    /// See [`reuse`].
-    entries: Vec<Entry<'static>>,
 }
 
 /// The stored body of one accepted group.
@@ -395,8 +393,7 @@ impl Batch {
         path: Path,
         mesh: Interval,
     ) -> Result<bool, Error> {
-        let mut entries = reuse(mem::take(&mut self.entries));
-        let handoffs = self.handoffs.iter().map(|(group, first, parts)| {
+        let handoffs = self.handoffs.iter_mut().map(|(group, first, parts)| {
             let (_, entry) = session.claim(*group);
             Entry {
                 index: entry.key,
@@ -407,10 +404,10 @@ impl Batch {
                 stored_at: mesh.latest,
                 last: None,
                 tag: handoff::TAG,
-                parts: parts.as_slice(),
+                parts: parts.take().into(),
             }
         });
-        let bodies = self.bodies.iter().map(|body| {
+        let bodies = self.bodies.drain(..).map(|body| {
             let (_, entry) = session.claim(body.group);
             Entry {
                 index: entry.key,
@@ -421,18 +418,15 @@ impl Batch {
                 stored_at: mesh.latest,
                 last: body.last,
                 tag: stored::TAG,
-                parts: &body.parts,
+                parts: body.parts.into(),
             }
         });
-        entries.extend(handoffs.chain(bodies));
-        let room = room(buffer.append(&entries));
-        self.entries = reuse(entries);
+        let room = room(buffer.append(handoffs.chain(bodies)));
         for (group, _, _) in self.handoffs.drain(..) {
             if room == Ok(true) {
                 indexes[session.claim(group).0.place].gate.recorded();
             }
         }
-        self.bodies.clear();
         room
     }
 
@@ -470,17 +464,6 @@ fn spend<'a>(
         });
     }
     out
-}
-
-/// Empties `entries` and gives back its allocation for entries of another lifetime,
-/// so an append allocates no vector.
-fn reuse<'b>(mut entries: Vec<Entry<'_>>) -> Vec<Entry<'b>> {
-    entries.clear();
-    // Same layout, so the collect runs in place and keeps the allocation.
-    entries
-        .into_iter()
-        .map(|_| -> Entry<'b> { unreachable!("the entries are cleared") })
-        .collect()
 }
 
 /// The seq range of an accepted group.
@@ -1174,29 +1157,6 @@ mod tests {
                 "the home does not take a resend frame yet"
             );
         });
-    }
-
-    #[test]
-    fn reuses_the_allocation_of_the_entries() {
-        let mut entries: Vec<Entry<'_>> = Vec::with_capacity(8);
-        let at = entries.as_ptr().addr();
-        let parts: [Block; 0] = [];
-        entries.push(Entry {
-            index: key(Slot::new(0)),
-            slot: Slot::new(0),
-            path: Path::Live,
-            first: 0,
-            len: 0,
-            stored_at: Stamp::from_nanos(1),
-            last: None,
-            tag: handoff::TAG,
-            parts: &parts,
-        });
-        let entries: Vec<Entry<'static>> = reuse(entries);
-        assert_eq!(
-            (entries.as_ptr().addr(), entries.len(), entries.capacity()),
-            (at, 0, 8)
-        );
     }
 
     #[test]
