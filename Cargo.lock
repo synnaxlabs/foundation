@@ -294,6 +294,7 @@ dependencies = [
  "document",
  "proptest",
  "types",
+ "unicode-ident",
 ]
 
 [[package]]
