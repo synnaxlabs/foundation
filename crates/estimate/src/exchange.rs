@@ -2,8 +2,8 @@ use types::time::{Interval, Monotonic};
 
 use crate::{Drift, Error, Measurement};
 
-/// One offset exchange with a peer, seen from the node that asked. The request carries
-/// `sent`, and the peer echoes it, so the asking node keeps no state.
+/// One reading of another clock's mesh time, taken between two readings of the local
+/// monotonic clock.
 ///
 /// ```
 /// use estimate::{Drift, Exchange};
@@ -26,34 +26,36 @@ use crate::{Drift, Error, Measurement};
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exchange {
-    /// The asking node's monotonic reading when the request left.
+    /// The local monotonic reading when the request left.
     pub sent: Monotonic,
-    /// The peer's mesh time when the request arrived.
+    /// The other clock's mesh time when the request arrived.
     pub received: Interval,
-    /// The peer's mesh time when it answered.
+    /// The other clock's mesh time when it answered.
     pub answered: Interval,
-    /// The asking node's monotonic reading when the answer arrived.
+    /// The local monotonic reading when the answer arrived.
     pub returned: Monotonic,
 }
 
 impl Exchange {
-    /// The offset of the asking node's monotonic clock at `returned`, for a clock that
-    /// drifts from mesh time by at most `drift`. Mesh time only goes forward, so at
-    /// `returned` it is at least both `earliest` edges, and at `sent` it is at most both
-    /// `latest` edges. The offset holds whatever the delay in each direction.
+    /// The offset of the local monotonic clock at `returned`, for a clock that drifts
+    /// from mesh time by at most `drift`. When both intervals hold the other clock's
+    /// true mesh time, it holds the true offset whatever the delay in each direction.
     ///
     /// # Errors
     ///
-    /// - [`Error::Crossed`] when the exchange allows no offset: a peer interval is
-    ///   false, the clock drifts more than `drift`, or `sent` is after `returned`.
+    /// - [`Error::Crossed`] when the exchange allows no offset: an interval is
+    ///   inverted, the other clock goes back, the local clock drifts more than
+    ///   `drift`, or `sent` is after `returned`.
     /// - [`Error::Bound`] when the error is more than 36500 days.
     pub fn measure(self, drift: Drift) -> Result<Measurement, Error> {
         let (received, answered) = (self.received, self.answered);
-        let earliest = received.earliest.max(answered.earliest);
-        let latest = received.latest.min(answered.latest);
-        if received.earliest > latest || earliest > answered.latest {
+        let inverted = |i: Interval| i.earliest > i.latest;
+        let back = received.earliest > answered.latest;
+        if inverted(received) || inverted(answered) || back {
             return Err(Error::Crossed);
         }
+        let earliest = received.earliest.max(answered.earliest);
+        let latest = received.latest.min(answered.latest);
         let round_trip = self.returned.0.checked_sub(self.sent.0);
         let round_trip = round_trip.ok_or(Error::Crossed)?;
         let offset = |mesh: i64, local: u64| i128::from(mesh) - i128::from(local);
@@ -156,6 +158,13 @@ mod tests {
                 Err(Error::Bound { error })
             );
         }
+
+        #[test]
+        fn saturates_an_error_wider_than_a_span() {
+            let widest = peer(i64::MIN, i64::MAX);
+            let error = Span::from_nanos(i64::MAX);
+            assert_eq!(check(0, 0, widest, widest, 0), Err(Error::Bound { error }));
+        }
     }
 
     mod when_crossed {
@@ -187,7 +196,7 @@ mod tests {
             let (honest, inverted) = (peer(6_150, 6_150), peer(6_100, 5_900));
             let err = check(0, 1_000, inverted, honest, 1_250);
             assert_eq!(err, Err(Error::Crossed));
-            let (honest, inverted) = (peer(6_100, 6_100), peer(6_150, 5_950));
+            let (honest, inverted) = (peer(6_000, 6_250), peer(6_250, 6_000));
             let err = check(0, 1_000, honest, inverted, 1_250);
             assert_eq!(err, Err(Error::Crossed));
         }
