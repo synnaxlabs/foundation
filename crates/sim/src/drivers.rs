@@ -1,5 +1,6 @@
 //! The `env` drivers of a simulated node.
 
+mod files;
 mod net;
 
 use std::cell::RefCell;

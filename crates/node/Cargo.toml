@@ -6,6 +6,13 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+env = { path = "../env" }
+
+[dev-dependencies]
+sim = { path = "../sim" }
+
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
 
 [lints]
 workspace = true

@@ -18,12 +18,62 @@
     clippy::string_slice
 )]
 
-use types::channel;
+use block::Block;
+use types::channel::{self, Slot};
 use types::frame::Path;
 use types::time::Stamp;
 
 /// The encoded size of one [`Header`].
 pub(crate) const HEADER_LEN: usize = 16 + 1 + 8 + 4 + 8 + 9 + 1 + 4;
+
+/// What one `append` stores: one frame's samples of one index on one path, or a
+/// record the caller owns (a position, a handoff, a gap).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Entry<'a> {
+    /// The index.
+    pub(crate) index: channel::Key,
+    /// The node's slot of `index`. Never stored.
+    pub(crate) slot: Slot,
+    /// The path.
+    pub(crate) path: Path,
+    /// The first seq.
+    pub(crate) first: u64,
+    /// How many samples. A caller record has `len` 0.
+    pub(crate) len: u32,
+    /// Mesh time at which the home stored it; retention trims by it.
+    pub(crate) stored_at: Stamp,
+    /// The newest stamp of the samples, `None` for a caller record.
+    pub(crate) last: Option<Stamp>,
+    /// A tag the caller gives and reads back. The buffer does not read it.
+    pub(crate) tag: u8,
+    /// The bytes, written in place with no copy.
+    pub(crate) parts: &'a [Block],
+}
+
+impl Entry<'_> {
+    /// The header of this entry, with the size of its parts.
+    ///
+    /// # Panics
+    ///
+    /// When the parts hold more than `u32::MAX` bytes: a group checks the body
+    /// before it takes the entry.
+    pub(crate) fn header(&self) -> Header {
+        let len = self.parts.iter().map(|part| part.len()).sum::<usize>();
+        let Ok(bytes) = u32::try_from(len) else {
+            unreachable!("invariant: the entry of {len} bytes is under the maximum");
+        };
+        Header {
+            index: self.index,
+            path: self.path,
+            first: self.first,
+            len: self.len,
+            stored_at: self.stored_at,
+            last: self.last,
+            tag: self.tag,
+            bytes,
+        }
+    }
+}
 
 /// What one `append` stored, without its bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
