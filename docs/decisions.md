@@ -298,16 +298,15 @@ How to read this record:
   never landed, and the home applies it to the live path. When no sample exists and the
   data fits A6, it applies as backfill. Anything else is an error: some samples stored
   and some not, a stored timestamp with other values, data that fits neither path, or a
-  range below the buffer's floor. When the indexes of one resend land on different
-  paths, the home splits it into frames of one path each and drops the repeats. It
-  confirms the resend when every part has landed or was dropped. Only a mixed resend
-  pays this copy; `home` measures it when it builds the split. Live and backfill frames
-  pay no check. Values are compared decoded, not as bytes. Writers assign no numbers: a
-  resend comes in a new session, and the writer never learned them. The person decided
-  on 2026-10-05: "By timestamp + same values" (#148), then "A `resend` label" (#168),
-  then the split, a resend of every unconfirmed frame, and no session path: "as long as
-  you've evaluated the performance costs of your decision against correctness then I'm
-  ok with this" (#243).
+  range below the buffer's floor. The home checks a resend per index frame (INDEX
+  FRAMES): each one lands on one path or is dropped as a repeat, with no second split.
+  It confirms the resend when every index frame has landed or was dropped. Live and
+  backfill frames pay no check. Values are compared decoded, not as bytes. Writers
+  assign no numbers: a resend comes in a new session, and the writer never learned
+  them. The person decided on 2026-10-05: "By timestamp + same values" (#148), then "A
+  `resend` label" (#168), then the split, a resend of every unconfirmed frame, and no
+  session path: "as long as you've evaluated the performance costs of your decision
+  against correctness then I'm ok with this" (#243).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -402,8 +401,9 @@ How to read this record:
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later
-  gives it to readers. B7, the log, the seq, and reader positions are per index.
-  Decided by the `write-path` builder; approved by the coordinator (#191).
+  gives it to readers. B7, the log, the seq, and reader positions are per index. A
+  write with more than one present group pays one copy of its series into the index
+  frames. Decided by the `write-path` builder; approved by the coordinator (#191).
 - **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
   of the index frame in entry order, then the frame's encoded series bytes,
