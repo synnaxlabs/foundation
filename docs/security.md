@@ -118,7 +118,9 @@ state on `main`.
   placement. Not built (`spec`).
 - `raft` does not check the sender of a request, by decision: the caller
   authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
-  built (`mesh`). `raft` trusts each field of a message. Open: #232.
+  built (`mesh`). `raft` trusts each field of a message. Open: #232. A leased leader
+  takes a `PreVote` at its next term from any sender as a removed node that lacks
+  the commit of its leave, and replicates its log to it (RAFT VOTERS).
 - `raft` counts a reply only from a voter. But it takes a higher term from any
   sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
   #352 (a reply from a node that is not a voter makes the leader step down; one
@@ -143,8 +145,12 @@ state on `main`.
 ### Files to the spec
 
 - HCL text becomes a `Document` (`config-hcl`), and a `Document` has one canonical
-  encoding (`document`). Both readers bound nesting at 64 levels. Fuzzed:
-  `config_hcl_read`, `document_encoding`.
+  encoding (`document`). Both readers bound nesting at 64 levels.
+  `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
+  `config_hcl_read`, `config_hcl_update`, `config_hcl_write`,
+  `document_encoding`. Open: #446 (`update` puts a new block after a kept block
+  it must come before; the `config_hcl_update` target finds it, so its long runs
+  wait on the fix).
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -170,6 +176,9 @@ state on `main`.
   of the file, or, for the small body of #300, a `Layout` from the node's own
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
+- Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
+  reported durable or cannot open). Fixed: #393 (two CRC-valid fields stopped the
+  node at open); the `area` and `below_tail` inputs hold both.
 
 ### Device to connector
 
@@ -227,16 +236,19 @@ state on `main`.
 ## Fuzz targets
 
 The rule is one target for each decoder of outside input
-(`docs/claude/testing.md`). Inputs are in `oracles/fuzz/<target>/`. The crate is in
-#241; its CI job is #252.
+(`docs/claude/testing.md`). An encoder or a writer also gets a target when a
+decoder must read its output back (`codec_encoder`, `config_hcl_write`). Inputs are
+in `oracles/fuzz/<target>/`. The CI job is #252.
 
-| Target | Reads | Checks besides "no panic" |
+| Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode` | Both give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
+| `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
+| `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
@@ -244,8 +256,8 @@ The rule is one target for each decoder of outside input
 | `types_span` | `Span` | Printed text reads back to the same value |
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
+| `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), the `buffer` header blocks and records (#361), `raft` messages
-(their encoding is in `mesh`), `spec` tree chunks (#64), `types::time::Rate`, and
-each connector's protocol parser.
+and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
+(#64), `types::time::Rate`, and each connector's protocol parser.

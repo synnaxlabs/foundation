@@ -256,13 +256,15 @@ How to read this record:
   refused one; frames from catch-up spend credit too. A frame costs its charge,
   `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
   `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
-  just past a class costs about twice its length, and a frame with only empty series
-  still costs its headers. The charge depends only on the frame's length, so the home
-  and the `hub` compute the same charge for the same frame. A remote complete reader
-  gets only the series of its view (M2): the home sends a frame of those series, and
-  both ends charge that frame. The person chose this on 2026-10-05 ("B is approved ...
-  send only partial frames"), #267. The charge is part of the wire contract: a change to
-  `block`'s header or size classes needs a new wire version (C9d). The window counts
+  costs its length plus the header and at most 64 bytes or a quarter of its length
+  more, and a frame with only empty series still costs its headers. The charge depends
+  only on the frame's length, so the home and the `hub` compute the same charge for
+  the same frame. A remote complete reader gets only the series of its view (M2): the
+  home sends a frame of those series, and both ends charge that frame. The person
+  chose this on 2026-10-05 ("B is approved ... send only partial frames"), #267. The
+  charge is part of the wire contract: a change to `block`'s header or size classes
+  needs a new wire version (C9d). The classes changed to four per doubling under wire
+  version 1 (#188), because no release carries that version. The window counts
   charges, not wire bytes. Per-connection framing in `wire` (X35) pins no pool memory
   and does not count. Credits apply only to complete delivery, which is reliable: a lost
   frame would leak credit. The `hub` raises the limit only after it releases a frame,
@@ -451,8 +453,8 @@ How to read this record:
   Raspberry Pi 4 with 1 GB: idle under 50 MB, start under 1 s. A regression over 5% on
   the dedicated machine blocks a merge.
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
-  (slots plus types, R9-D1). Frames point at the key set id. Supersedes: S1 frame
-  struct.
+  (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
+  frame struct. Approved by the coordinator (#390).
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
   home routes by key set.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
@@ -523,7 +525,8 @@ How to read this record:
   with drift, slew only. Sources are read directly: mesh peers, GPS, PPS with NMEA, the
   NIC hardware clock (kept by ptp4l), and the OS daemon. No PTP client in v1. Device
   clock fitting (DAQmx, LabJack) is a connector-library component that writes residual
-  error to the index's error channel.
+  error to the index's error channel. Amended by MESH SLEW: mesh time also steps
+  forward when it is more than 500 us behind every offset an estimate allows.
 - **TIME ADAPTERS** Neutral model `Measurement { at: local monotonic, offset, error }`.
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
@@ -559,13 +562,18 @@ How to read this record:
   this (OS CLOCK BOUND); counting a grown bound is from the `time` builder, approved by
   the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
   Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
-  showed this case before the person chose. An exchange with an error over 36500 days
-  fails with `Bound`, and an overlap whose readings allow one before drift gives `None`:
-  a stopped bound stored as a measurement could miss the true offset. Decided by the
-  `time` builder (#258). Each function returns only the errors it can give: one `Error`
-  per module (`exchange`, `overlap`, `combine`), and `Option` where a caller does the
-  same for each cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by
-  the coordinator (#272).
+  showed this case before the person chose. When only unknown bounds vote, the estimate
+  is unknown too, at the center of the offsets inside the most of them. Approved by the
+  coordinator (#437). `Measurement::unknown(at, offset)` gives
+  the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
+  bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
+  (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
+  whose readings allow one before drift gives `None`: a stopped bound stored as a
+  measurement could miss the true offset. Decided by the `time` builder (#258). Each
+  function returns only the errors it can give: one `Error` per module (`exchange`,
+  `overlap`, `combine`), and `Option` where a caller does the same for each cause
+  (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the coordinator
+  (#272).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -608,18 +616,42 @@ How to read this record:
   by drift. It never follows the largest group or one side of a tie.
   `push` returns the holdover and its cause, and `node` publishes it. The next majority
   ends the holdover. Decided by the `time` builder (#142).
+- **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
+  estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
+  not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
+  so. When the offset served at `now` is more than 500 us (1 s of slew) below the
+  earliest offset the new estimate allows at `now`, mesh time steps forward to that
+  earliest offset. In every other case it slews. Mesh time never steps back. A clock in
+  holdover keeps its slew. Cost: mesh time that is ahead still slews. After a stale
+  first estimate that is ahead, or for an estimate with an unknown error (a Windows OS
+  clock alone under OS CLOCK BOUND, whose earliest offset is 36500 days back), a
+  correction of 1 h takes 83 days and one of 1 day about 5.5 years, with a true error
+  the whole time. A majority of falsetickers more than 500 us ahead steps mesh time into
+  the future, and it does not come back. That is outside the fault model. Lost: a
+  frequency loop (a PLL, as in ntpd), because R6 bounds drift with an error that grows
+  and a PLL can overshoot; the slew private in `clock`, because it is decision logic in
+  layer 2; a step only when the estimate's whole interval is ahead of mesh time's,
+  because when both bounds hold the intervals overlap and it never fires. Amends R6 TIME
+  LOCKED ("slew only") and r6 Q3 item 6 ("Step forward only at startup"). The person
+  decided on 2026-10-05 ("Ok 225 mesh slew approved"), with the forward step. The person
+  changed the forward step on 2026-10-05 ("I think (b)"), because the first rule never
+  fires when both bounds hold.
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
-  `clock` reads that as the largest error, 36500 days: a node alone still gets OS time,
-  with an error that says "unknown", and beside a known bound the reading does not vote
-  (ESTIMATE COMBINE). A fixed invented error lost: a wrong value gives a bound that is
-  not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
+  `clock` reads that as `Measurement::unknown` (36500 days): a node alone still gets OS
+  time, with an error that says "unknown", and beside a known bound the reading does not
+  vote (ESTIMATE COMBINE). A fixed invented error lost: a wrong value gives a bound that
+  is not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
   'unknown'"), #144. The split between `env::wall` and `clock` is from #172. When known
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
   source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
-  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314.
+  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` adds
+  the OS bound to the error of its own read, so the error is never less than the OS
+  bound. An error over 36500 days reads as unknown, the same as no bound (the
+  coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
+  lint denies it elsewhere (BQ20).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
@@ -708,6 +740,18 @@ How to read this record:
   is a node key or a `Client` (an SDK, proved by its signed hello above). Callers admit
   peers, dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on
   SIM NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
+- **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
+  class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
+  `CatchUp`. The byte goes with the first message, so a stream reaches the peer with
+  its first message. A stream that ends or resets before its class byte drops: the
+  peer never accepts it, and resets the reply half of a two-way stream with code 0.
+  Each message is a QUIC varint length, then that many bytes, at most
+  `message_bytes_max`. A node accepts the waiting streams highest class first. A node
+  resets a stream with the stop's code when the stop arrives. A peer breaks the
+  protocol when it sends another class byte, ends a stream inside a message, sends a
+  message over the limit, or resets or stops a stream with a code over 32 bits. The
+  node then closes the connection with application code 2^32 and the reason as text,
+  and the caller gets `Error::Broken`. Proposed by `network` in #55.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -786,11 +830,18 @@ How to read this record:
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.
-  The leader sends a node the change removed the leave and its commit, then drops
-  it. A leader outside the committed final set sends the commit and steps down. A
-  node outside an uncommitted configuration still campaigns: the entry may be
-  truncated, and a removed leader that lost its lead before the leave reached a peer
-  is the only node that can win the election that commits it.
+  A node the change removed stays a peer of the leader, and keeps getting appends, until
+  it holds the committed leave: then the leader sends it the commit in a heartbeat and
+  releases it, so the node learns it is out and never campaigns. A removed node that
+  answered nothing over a whole quorum check period is released at that check instead.
+  A follower releases the removed nodes when the leave commits. A removed node that
+  campaigns at the leader's term did not learn the commit: the leader takes it back
+  as a peer and probes it from the end of its log, so it gets the leave and is
+  released again. A leader outside the
+  committed final set sends the commit and steps down. A node outside an uncommitted
+  configuration still campaigns: the entry may be truncated, and a removed leader that
+  lost its lead before the leave reached a peer is the only node that can win the
+  election that commits it.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -953,6 +1004,15 @@ How to read this record:
   calc align) and compositions (polled, clocked, pushed, cyclic, out, calc). The
   kind's `&self` holds process-lifetime parts that `node` injects; `ctx` holds one
   run's capabilities. Group-based parts need revision (X5).
+- **ENDPOINT REGISTRY** `endpoint::Registry<K, S, T>` keeps at most one open
+  endpoint per key on a node. `acquire(key, settings, open)` shares the open endpoint,
+  or calls `open` when none is open. Opens and closes of one key run one at a time;
+  other keys do not wait. Unequal settings on an open key give `Error::Config`
+  (`connector.endpoint-settings`). The endpoint closes when the last `Lease` drops.
+  `node` makes one registry per kind that needs it. A FIFO lock (`endpoint::Shared`)
+  composes as `T` later. A `Lease` is not `Clone`, and the close runs after the
+  registry's lock is released. Decided by the `connector` builder in the plan on #422,
+  after `/eb-review`; approved by the coordinator (#422).
 - **PACE (2026-10-05)** `pace::Timer` ticks on a grid of deadlines at `start + n /
   rate`, from a `types::time::Rate`, and skips and counts the ticks a stall missed.
   It has one async `tick(&cancel::Token)`, with no blocking wait and no sleep, hybrid,
@@ -1009,6 +1069,20 @@ How to read this record:
   hand-kept list of the 23; own tables generated from HCL's Unicode version; and
   `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
   `ID_Start` and `ID_Continue`.
+- **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
+  a new Document. Each attribute and block that keeps its value and its place keeps its
+  bytes, comments, and blank lines. A changed value and a changed block on one line
+  are written again, without the comments in them. A removed item is cut with the
+  comment lines directly above it, up to a blank line. A new attribute goes after the
+  kept attribute before it in key order, and a new block after the kept block before
+  it. The k-th block of a keyword and labels pairs with the k-th new one, and the
+  longest run of pairs in the same order stays, so a moved block is cut and written
+  again. New text takes the file's line end. Lost: an edit list by span, which puts
+  the diff on each caller; returning edits, which each caller must apply; a lossless
+  syntax tree with comments as trivia, which needs a second tree type in the reader;
+  writing the whole file with comments attached to items, which loses the layout; and
+  moving the bytes of a moved block, which a caller that changes the Document it read
+  never needs. Decided by the `config` builder; approved by the coordinator (#249).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -1047,8 +1121,18 @@ How to read this record:
   connectors, policies, and access. Most specific pattern wins; equal specificity is a
   plan error; `explain` shows each effective value and its source. A rename can move a
   channel under other policies, and `plan` shows it. Current policy kinds: retention,
-  placement, transmission, compression, reduction, time, access, and secret store.
-  Targets and combination rules: X25, X26. Specificity: SPECIFICITY (#3).
+  placement, transmission, compression, reduction, time, access, secret store, and node
+  settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
+  SPECIFICITY (#3).
+- **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
+  that selects node names: `node_settings { select = "site-a/*" disk = "200 GiB" }`.
+  A node that no policy selects computes a default from its free disk and memory at
+  start, so a mesh with no policy works. Before it reads the spec, a node uses the last
+  budget it applied, which it keeps in its data directory; the first start uses the
+  default. The data directory is node-local: a start argument of `foundation`, with a
+  default, because the spec is stored in it. Node-local config for the budgets lost:
+  `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
+  decided on 2026-10-05 ("Yeah mesh node"), #342.
 
 ### 1.12 Access, identity, and secrets
 
@@ -1295,10 +1379,12 @@ How to read this record:
   pages back on a timer that the shard owns (#2).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
-  `{ header, start: u32, len: u32 }`, 16 bytes, so a pool has at most 26 size classes
-  and the largest block holds 2 GiB; a budget above that gives more blocks, not larger
-  ones. `slice(&self, range)` lost: it clones the count for every view, and nothing
-  needs a range yet. Decided by `memory`.
+  `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
+  budget above that gives more blocks, not larger ones. A pool has at most 96 size
+  classes, four per doubling, so a payload is at most 64 bytes or a quarter above its
+  length (#188; 26 power-of-two classes wasted up to 100%). `slice(&self, range)`
+  lost: it clones the count for every view, and nothing needs a range yet. Decided
+  by `memory`.
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
@@ -1323,7 +1409,10 @@ How to read this record:
   is an ordinary operation, rolling one node at a time; nodes fetch the signed binary by
   hash from a nearby peer. Each wire and disk format has one integer version; a node
   reads its own and the previous one; new formats turn on only after every node runs the
-  release. Compatibility is owed only to stable releases.
+  release. Compatibility is owed only to stable releases. Until the first stable
+  release, each wire and disk format stays at version 1, and a breaking change does not
+  add a version. The person decided on 2026-10-05 ("keep version 1. we should only make
+  breaking changes until we release v1"), #374.
 - **BQ18** The desired version is in the spec. Nodes report versions with lease
   renewals. A rollout lock upgrades one node at a time. Finalize when all report.
   Multi-region scope: 5.1.
@@ -1401,7 +1490,7 @@ Storage classes used in the table:
 | `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
-| Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
+| Key set | Memory, one per writer session: sorted slots, with each entry's key and type | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
 | Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one in its header | Whoever freezes the frame: the home on a write, from its label after the B7 check; a decoder or catch-up, from the path the frame came with | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Label (a path or resend) | A value, `frame::Label` (B7), on each write: the `hub` writer call and the wire write message. The only source of a write's path; none means live. Not in the frame block | The writer | `hub`, `wire`, `home` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
@@ -1499,7 +1588,7 @@ Storage classes used in the table:
 | Mesh clock state | Memory per node; published as `<node>.clock.offset` and `.clock.error` | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
 | Operation table | Binary | The build | CLI, MCP, embedded docs | `ops` |
 | Node key material | Node-local disk | `node` at join | `transport`, `node` | `node` |
-| Per-node settings (disk budget, pool budget, data directory) | Open (5.1) | | `buffer`, `block` | Open |
+| Per-node settings (disk budget, pool budget, data directory) | Budgets: a policy in the spec; data directory: a start argument (NODE SETTINGS) | `apply`; whoever starts the node | `buffer`, `block` | `node` |
 | SDK guide, JSON schemas for editors | Generated from kinds and the operation table | `ops`, `init` | Agents, editors | `ops` |
 
 ---
@@ -1934,11 +2023,12 @@ but `home` (below `hub`) routes by key set and writes companion samples, so a
 `hub`-owned table would point upward.
 Resolution (memory delegation): both tables are layer-1 data structures, the slot table
 (`types::channel::Slots`) and the interner (`types::frame::key_set::Interner`). `node`
-constructs one of each per node and injects them into `hub` and `home`. Interning
-happens at session open; each shard reads a snapshot. `buffer` keys its in-memory
-tails, floors, and read cursors by slot, and keeps the key on disk. `Buffer::open`
-takes the slot table and assigns a slot to each index it recovers; `node` opens
-every buffer before it opens sessions (#219, 2026-10-05).
+constructs one interner per node, which owns the slot table, and passes that table to
+`Buffer::open`. `node` injects the interner into `hub` and `home`. Interning happens
+at session open; each shard reads a snapshot. `buffer` keys its in-memory tails,
+floors, and read cursors by slot, and keeps the key on disk. `Buffer::open` assigns a
+slot to each index it recovers; `node` opens every buffer before it opens sessions
+(#219, 2026-10-05). Approved by the coordinator on PR #449.
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
@@ -2047,7 +2137,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
-| 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits. | `types` |
+| 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits, and slews mesh time. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
 | 1 | `delivery` | Keeps each reader's state per index: positions, credits, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
@@ -2098,18 +2188,16 @@ Parameters and later choices, recorded and not asked:
 
 4. Struct template storage: whether the spec stores templates and instance records for
    SDK code generation and `export`.
-5. Per-node settings (disk budget, pool budget, data directory): node-local config or a
-   policy that selects node names.
-6. The transmission policy target: links, indexes, or both (B6).
-7. Upgrades across regions: which region holds the desired version and the format
+5. The transmission policy target: links, indexes, or both (B6).
+6. Upgrades across regions: which region holds the desired version and the format
    flag, and how finalization waits for every region (BQ18, C9d).
-8. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
+7. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
    path.
-9. A20: whether a channel may carry a default max age.
-10. A3: partial-segment wildcards.
-11. A13: bounded lists.
-12. D3: license, free tier, monetization.
-13. D5: a plugin system.
+8. A20: whether a channel may carry a default max age.
+9. A3: partial-segment wildcards.
+10. A13: bounded lists.
+11. D3: license, free tier, monetization.
+12. D5: a plugin system.
 
 ### 5.2 Settled under a delegation
 
@@ -2216,3 +2304,12 @@ The first wave builds the riskiest pieces in parallel: `block` and `ring` (`memo
 (`simulation`). The second wave adds `control`, `delivery`, `access`, then `buffer`,
 `home`, and `replica` for a single-node write path measured against P1, then
 `transport`, `mesh`, `clock`, and `hub`.
+
+**FIRST SLICE (2026-10-05)** Before more features, one thin slice runs end to end: two
+nodes in `sim` on the real `transport`, a writer on node A writes one channel, its home
+stores it, and a reader on node B gets the same values in the same order. It goes
+through a minimal `mesh` (the members and the home of one index, no snapshots) and a
+minimal `hub` (one writer and one reader session). Access, config files, and failover
+wait until its acceptance scenario passes. The plan and owners are on #462. The person
+decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
+the system is solid.

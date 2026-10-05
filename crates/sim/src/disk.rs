@@ -63,14 +63,23 @@ pub(crate) struct File {
     durable: bool,
 }
 
-/// The durable bytes of a sector, then its bytes after each write on it since
-/// then, in order. A read sees the last.
-struct Sector(Vec<Version>);
+/// The durable bytes of a sector, and the writes on it since then in one order that
+/// the times of their calls allow.
+struct Sector {
+    durable: [u8; 512],
+    writes: Vec<Write>,
+}
 
-struct Version {
-    bytes: [u8; 512],
-    /// The tick at which its write ended.
+/// One write on a sector.
+struct Write {
+    /// The tick at which it ended.
     written: u64,
+    /// The bytes of the sector that it covered.
+    covered: Range<usize>,
+    /// Its bytes over `covered`.
+    bytes: Vec<u8>,
+    /// The sector after it and each write before it.
+    after: [u8; 512],
 }
 
 impl Disk {
@@ -88,7 +97,7 @@ impl Disk {
     }
 
     /// The directory at `segments`.
-    pub(crate) fn dir(&self, segments: &[&OsStr]) -> Result<u64, Cause> {
+    fn dir(&self, segments: &[&OsStr]) -> Result<u64, Cause> {
         let mut at = ROOT;
         for segment in segments {
             let Inode::Dir(dir) = &self.inodes[&at] else {
@@ -125,19 +134,30 @@ impl Disk {
         Ok(())
     }
 
-    /// Opens the file at `segments`, and gives its key and length. The open holds
-    /// it. A file that it makes takes the key `key`.
+    /// The file `inode` that an entry names. A `slashed` path names only a directory.
+    fn named(&mut self, inode: u64, slashed: bool) -> Result<&mut File, Cause> {
+        match self.inodes.get_mut(&inode) {
+            Some(Inode::File(_)) if slashed => Err(Cause::Code(NOT_DIRECTORY)),
+            Some(Inode::File(file)) => Ok(file),
+            _ => Err(Cause::Code(DIRECTORY)),
+        }
+    }
+
+    /// Opens the file at `path`, and gives its key and length. The open holds it. A
+    /// file that it makes takes the key `key`.
     pub(crate) fn open(
         &mut self,
         key: u64,
-        segments: &[&OsStr],
+        path: &Path,
         mode: Mode,
     ) -> Result<(u64, u64), Cause> {
+        let (segments, slashed) = (segments(path), slashed(path));
         let Some((name, parent)) = segments.split_last() else {
             return Err(Cause::Code(DIRECTORY));
         };
         let dir = self.dir(parent)?;
         let inode = match (self.dir_mut(dir).entries.get(*name).copied(), mode) {
+            (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
             (Some(inode), _) => inode,
             (None, Mode::Create { len }) => {
                 self.take(len)?;
@@ -155,16 +175,14 @@ impl Disk {
             }
             (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
         };
-        let Some(Inode::File(file)) = self.inodes.get_mut(&inode) else {
-            return Err(Cause::Code(DIRECTORY));
-        };
+        let file = self.named(inode, slashed)?;
         file.holds += 1;
         Ok((inode, file.len))
     }
 
-    /// The names in the directory at `segments`.
-    pub(crate) fn list(&mut self, segments: &[&OsStr]) -> Result<Vec<PathBuf>, Cause> {
-        let dir = self.dir(segments)?;
+    /// The names in the directory at `path`.
+    pub(crate) fn list(&mut self, path: &Path) -> Result<Vec<PathBuf>, Cause> {
+        let dir = self.dir(&segments(path))?;
         Ok(self
             .dir_mut(dir)
             .entries
@@ -173,12 +191,9 @@ impl Disk {
             .collect())
     }
 
-    /// Makes the directory at `segments`, with the key `key`.
-    pub(crate) fn create_dir(
-        &mut self,
-        key: u64,
-        segments: &[&OsStr],
-    ) -> Result<(), Cause> {
+    /// Makes the directory at `path`, with the key `key`.
+    pub(crate) fn create_dir(&mut self, key: u64, path: &Path) -> Result<(), Cause> {
+        let segments = segments(path);
         let Some((name, parent)) = segments.split_last() else {
             return Ok(());
         };
@@ -196,8 +211,9 @@ impl Disk {
         }
     }
 
-    /// Unlinks the file at `segments`. It stays while a hold remains.
-    pub(crate) fn remove(&mut self, segments: &[&OsStr]) -> Result<(), Cause> {
+    /// Unlinks the file at `path`. It stays while a hold remains.
+    pub(crate) fn remove(&mut self, path: &Path) -> Result<(), Cause> {
+        let (segments, slashed) = (segments(path), slashed(path));
         let Some((name, parent)) = segments.split_last() else {
             return Err(Cause::Code(DIRECTORY));
         };
@@ -207,10 +223,7 @@ impl Disk {
             .entries
             .get(*name)
             .ok_or(Cause::NotFound)?;
-        let Some(Inode::File(file)) = self.inodes.get_mut(&inode) else {
-            return Err(Cause::Code(DIRECTORY));
-        };
-        file.linked = false;
+        self.named(inode, slashed)?.linked = false;
         self.dir_mut(dir).entries.remove(*name);
         self.collect(inode);
         Ok(())
@@ -236,10 +249,10 @@ impl Disk {
         }
     }
 
-    /// Makes the entries of the directory at `segments` durable, and frees each file
-    /// that only its old durable entries kept.
-    pub(crate) fn sync_dir(&mut self, segments: &[&OsStr]) -> Result<(), Cause> {
-        let key = self.dir(segments)?;
+    /// Makes the entries of the directory at `path` durable, and frees each file that
+    /// only its old durable entries kept.
+    pub(crate) fn sync_dir(&mut self, path: &Path) -> Result<(), Cause> {
+        let key = self.dir(&segments(path))?;
         let dir = self.dir_mut(key);
         let old = mem::replace(&mut dir.durable, dir.entries.clone());
         let new: BTreeSet<u64> = dir.durable.values().copied().collect();
@@ -303,16 +316,16 @@ impl File {
             if let Some(found) = self.sectors.get(&sector) {
                 let to = within(range.start, &part);
                 let from = within(sector * SECTOR, &part);
-                bytes[to].copy_from_slice(&found.last().bytes[from]);
+                bytes[to].copy_from_slice(&found.last()[from]);
             }
         }
         bytes
     }
 
     /// Ends a write of `bytes` at `offset` that started at tick `started`. Each
-    /// sector that another write ended on since then, and each sector of a write
-    /// whose future dropped, keeps its bytes or takes the new ones by a coin. Each
-    /// sector that takes them gets a new version.
+    /// sector of a write whose future dropped keeps its bytes or takes the new ones
+    /// by a coin. In each sector that takes them, the write goes at a random place
+    /// among the writes that ended since tick `started` and are not durable.
     pub(crate) fn write(
         &mut self,
         offset: u64,
@@ -323,54 +336,66 @@ impl File {
         rng: &mut Rng,
     ) {
         for (sector, part) in sectors(&(offset..offset + len(bytes))) {
-            let found = self.sectors.get(&sector);
-            let raced = found.is_some_and(|found| found.last().written > started);
-            if (raced || dropped) && rng.below(2) == 0 {
+            if dropped && rng.below(2) == 0 {
                 continue;
             }
-            let zeros = || {
-                Sector(vec![Version {
-                    bytes: [0; 512],
-                    written: 0,
-                }])
+            let zeros = || Sector {
+                durable: [0; 512],
+                writes: Vec::new(),
             };
             let found = self.sectors.entry(sector).or_insert_with(zeros);
-            let mut new = found.last().bytes;
-            new[within(sector * SECTOR, &part)]
-                .copy_from_slice(&bytes[within(offset, &part)]);
-            found.0.push(Version {
-                bytes: new,
+            let first = (found.writes.iter())
+                .rposition(|write| write.written < started)
+                .map_or(0, |at| at + 1);
+            let place = first + index(rng.below(len(&found.writes[first..]) + 1));
+            let write = Write {
                 written: tick,
-            });
+                covered: within(sector * SECTOR, &part),
+                bytes: bytes[within(offset, &part)].to_vec(),
+                after: [0; 512],
+            };
+            found.writes.insert(place, write);
+            found.replay(place);
             self.dirty.insert(sector);
         }
     }
 
-    /// Makes durable, in each sector, the last version of a write that ended before
-    /// tick `started`.
+    /// Makes durable, in each sector, each write that ended before tick `started`,
+    /// and each write before it in the order.
     pub(crate) fn sync(&mut self, started: u64) {
         self.settle(started, |count| count - 1);
     }
 
-    /// Makes durable, in each sector, its durable bytes or the bytes of a write that
-    /// ended before tick `started`, by `rng`, as a sync that fails.
+    /// Makes durable, in each sector, the writes before a random place up to the last
+    /// write that ended before tick `started`, by `rng`, as a sync that fails. The
+    /// writes past that place that ended before tick `started` are lost.
     pub(crate) fn tear(&mut self, started: u64, rng: &mut Rng) {
         self.settle(started, |count| rng.below(count));
     }
 
-    /// Makes one version of each sector durable and visible: of the durable version
-    /// and the versions of the writes that ended before tick `started`, the one that
-    /// `pick` gives for their count. The versions of later writes stay.
+    /// In each sector, makes durable the first writes up to the last that ended
+    /// before tick `started`, as many as `pick` gives for the count of choices, and
+    /// drops the others up to there that ended before tick `started`.
     fn settle(&mut self, started: u64, mut pick: impl FnMut(u64) -> u64) {
         for sector in mem::take(&mut self.dirty) {
-            let Sector(versions) = (self.sectors.get_mut(&sector))
+            let found = (self.sectors.get_mut(&sector))
                 .expect("invariant: a dirty sector is written");
-            let before = versions.partition_point(|version| version.written < started);
-            let count = u64::try_from(before).expect("invariant: usize fits u64");
-            let kept = index(pick(count));
-            versions.drain(kept + 1..before);
-            versions.drain(..kept);
-            if versions.len() > 1 {
+            let writes = &mut found.writes;
+            if let Some(last) = writes.iter().rposition(|write| write.written < started)
+            {
+                let kept = index(pick(len(&writes[..=last]) + 1));
+                if let Some(durable) = kept.checked_sub(1) {
+                    found.durable = writes[durable].after;
+                }
+                *writes = (mem::take(writes).into_iter().enumerate())
+                    .filter(|(at, write)| {
+                        *at > last || (*at >= kept && write.written >= started)
+                    })
+                    .map(|(_, write)| write)
+                    .collect();
+                found.replay(0);
+            }
+            if !found.writes.is_empty() {
                 self.dirty.insert(sector);
             }
         }
@@ -414,13 +439,26 @@ impl File {
 
 impl Sector {
     /// The bytes that a read sees.
-    fn last(&self) -> &Version {
-        self.0.last().expect("invariant: a sector has a version")
+    fn last(&self) -> &[u8; 512] {
+        self.writes
+            .last()
+            .map_or(&self.durable, |write| &write.after)
+    }
+
+    /// Puts each write from place `from` on over the sector before it.
+    fn replay(&mut self, from: usize) {
+        for at in from..self.writes.len() {
+            let (before, rest) = self.writes.split_at_mut(at);
+            let mut after = before.last().map_or(self.durable, |write| write.after);
+            let write = &mut rest[0];
+            after[write.covered.clone()].copy_from_slice(&write.bytes);
+            write.after = after;
+        }
     }
 }
 
-/// The bytes that `a` and `b` share, or `None` when they share none.
-fn overlap(a: &Range<u64>, b: &Range<u64>) -> Option<Range<u64>> {
+/// The positions that `a` and `b` share, or `None` when they share none.
+fn overlap<T: Ord + Copy>(a: &Range<T>, b: &Range<T>) -> Option<Range<T>> {
     let (start, end) = (a.start.max(b.start), a.end.min(b.end));
     (start < end).then_some(start..end)
 }
@@ -428,7 +466,8 @@ fn overlap(a: &Range<u64>, b: &Range<u64>) -> Option<Range<u64>> {
 /// Each sector that holds a byte of `range`, with the part of `range` in it.
 fn sectors(range: &Range<u64>) -> impl Iterator<Item = (u64, Range<u64>)> {
     (range.start / SECTOR..range.end.div_ceil(SECTOR)).filter_map(|sector| {
-        let part = overlap(&(sector * SECTOR..(sector + 1) * SECTOR), range)?;
+        let start = sector * SECTOR;
+        let part = overlap(&(start..start.saturating_add(SECTOR)), range)?;
         Some((sector, part))
     })
 }
@@ -439,13 +478,20 @@ fn within(start: u64, part: &Range<u64>) -> Range<usize> {
 }
 
 /// The segments of a checked path: only its names, since `.` adds nothing.
-pub(crate) fn segments(path: &Path) -> Vec<&OsStr> {
+fn segments(path: &Path) -> Vec<&OsStr> {
     (path.components())
         .filter_map(|component| match component {
             Component::Normal(name) => Some(name),
             _ => None,
         })
         .collect()
+}
+
+/// Whether `path` ends in `/` or `/.`, as `a/` does. Such a path names only a
+/// directory.
+fn slashed(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    bytes.ends_with(b"/") || bytes.ends_with(b"/.")
 }
 
 /// The path of the same file as `path`, with only its names.
@@ -457,8 +503,8 @@ fn index(at: u64) -> usize {
     usize::try_from(at).expect("invariant: a position in memory fits usize")
 }
 
-fn len(bytes: &[u8]) -> u64 {
-    u64::try_from(bytes.len()).expect("invariant: usize fits u64")
+fn len<T>(items: &[T]) -> u64 {
+    u64::try_from(items.len()).expect("invariant: usize fits u64")
 }
 
 #[cfg(test)]
@@ -490,6 +536,36 @@ mod tests {
             })
             .collect();
         assert_eq!(kept, BTreeSet::from([vec![0; 512], vec![1; 512]]));
+    }
+
+    #[test]
+    fn a_write_that_starts_at_the_tick_another_ends_may_go_before_it() {
+        let last: BTreeSet<Vec<u8>> = (0..64)
+            .map(|seed| {
+                let mut rng = Rng::from_seed(seed);
+                let mut file = file();
+                file.write(0, &[1; 512], 1, 2, false, &mut rng);
+                file.write(0, &[2; 512], 2, 3, false, &mut rng);
+                file.bytes(0..SECTOR)
+            })
+            .collect();
+        assert_eq!(last, BTreeSet::from([vec![1; 512], vec![2; 512]]));
+    }
+
+    #[test]
+    fn a_sync_that_fails_keeps_each_write_that_ended_after_it_started() {
+        let kept: BTreeSet<Vec<u8>> = (0..64)
+            .map(|seed| {
+                let mut rng = Rng::from_seed(seed);
+                let mut file = file();
+                file.write(256, &[1; 256], 2, 3, false, &mut rng);
+                file.write(0, &[2; 256], 1, 5, false, &mut rng);
+                file.tear(4, &mut rng);
+                file.bytes(0..SECTOR)
+            })
+            .collect();
+        let expected = [[[2; 256], [0; 256]].concat(), [[2; 256], [1; 256]].concat()];
+        assert_eq!(kept, BTreeSet::from(expected));
     }
 
     #[test]
