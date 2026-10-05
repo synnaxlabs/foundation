@@ -10,7 +10,7 @@ use std::task::{Context, Poll, Waker};
 
 use env::net::udp::{Config as Udp, Meta, Receiver, Sender, Transmit};
 use env::net::{Ecn, Error as Net};
-use env::threads::Handle;
+use env::thread::Handle;
 use types::time::{Monotonic, Span};
 
 use super::{millis, shard, sim};
