@@ -79,9 +79,9 @@ pub(super) fn write(chunk: &mut Vec<u8>, level: u8, key: &[u8], payload: &[u8]) 
 fn write_bytes(chunk: &mut Vec<u8>, bytes: &[u8]) {
     let length = u32::try_from(bytes.len());
     let mut length = length.expect("invariant: a key or value is under 4 GiB");
-    loop {
+    for _ in 0..5 {
         let [low, ..] = length.to_le_bytes();
-        length /= 0x80;
+        length >>= 7;
         if length == 0 {
             chunk.push(low & 0x7F);
             break;

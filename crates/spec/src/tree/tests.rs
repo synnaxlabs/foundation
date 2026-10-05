@@ -286,6 +286,19 @@ fn a_child_with_another_last_key_is_named() {
     assert_eq!(diff(&chunks, empty(), root), Err(Error::Corrupt(shared)));
 }
 
+#[test]
+fn a_value_longer_than_four_scales_is_alone_in_its_leaf() {
+    let mut chunks = Chunks::default();
+    let mut model: Model = (1..200).map(|id| (id, vec![1; 8])).collect();
+    model.insert(0, vec![7; 1100]);
+    let root = build(&mut chunks, SMALL, &model);
+    let first = model.keys().copied().min_by_key(|id| name(*id)).unwrap();
+    let key = name(first);
+    let leaf = Cursor::seek(&chunks, root, 0, key.as_str().as_bytes()).unwrap();
+    assert_eq!(leaf.node.entries.len(), 1);
+    assert_eq!(leaf.node.entries[0].key, key.as_str().as_bytes());
+}
+
 // A chunk at the small scale is shorter than the longest name, so this covers the
 // rule that a chunk above the leaves holds two entries.
 #[test]

@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use types::name::Name;
@@ -46,7 +47,8 @@ pub fn diff(chunks: &Chunks, old: Digest, new: Digest) -> Result<Diff<'_>, Error
     loop {
         let old_level = olds.first().map_or(0, |node| node.level);
         let new_level = news.first().map_or(0, |node| node.level);
-        if old_level == new_level {
+        let order = old_level.cmp(&new_level);
+        if order == Ordering::Equal {
             let same: BTreeSet<Digest> = olds.iter().map(|node| node.digest).collect();
             let same: BTreeSet<Digest> = news
                 .iter()
@@ -56,17 +58,18 @@ pub fn diff(chunks: &Chunks, old: Digest, new: Digest) -> Result<Diff<'_>, Error
             olds.retain(|node| !same.contains(&node.digest));
             news.retain(|node| !same.contains(&node.digest));
         }
-        if new_level >= old_level {
+        if order != Ordering::Greater {
             let made = news.iter().filter(|node| !node.entries.is_empty());
             diff.chunks.extend(made.map(|node| node.digest));
         }
         if old_level == 0 && new_level == 0 {
             break;
         }
-        if old_level >= new_level {
+        // The deeper side descends, until both reach the leaves together.
+        if order != Ordering::Less {
             olds = children(chunks, &olds)?;
         }
-        if new_level >= old_level {
+        if order != Ordering::Greater {
             news = children(chunks, &news)?;
         }
     }
@@ -74,30 +77,28 @@ pub fn diff(chunks: &Chunks, old: Digest, new: Digest) -> Result<Diff<'_>, Error
     let mut olds = entries(&olds).peekable();
     let mut news = entries(&news).peekable();
     loop {
-        let (digest, key, old, new) = match (olds.peek().copied(), news.peek().copied())
-        {
-            (Some((digest, old)), Some((_, new))) if old.key == new.key => {
-                olds.next();
-                news.next();
-                if old.payload == new.payload {
-                    continue;
-                }
-                (digest, old.key, Some(old.payload), Some(new.payload))
-            }
-            (Some((digest, old)), Some((_, new))) if old.key < new.key => {
-                olds.next();
-                (digest, old.key, Some(old.payload), None)
-            }
-            (Some((digest, old)), None) => {
-                olds.next();
-                (digest, old.key, Some(old.payload), None)
-            }
-            (_, Some((digest, new))) => {
-                news.next();
-                (digest, new.key, None, Some(new.payload))
-            }
+        let order = match (olds.peek(), news.peek()) {
+            (Some((_, old)), Some((_, new))) => old.key.cmp(new.key),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
             (None, None) => break,
         };
+        let (old, new) = match order {
+            Ordering::Less => (olds.next(), None),
+            Ordering::Equal => (olds.next(), news.next()),
+            Ordering::Greater => (None, news.next()),
+        };
+        if let (Some((_, old)), Some((_, new))) = (old, new)
+            && old.payload == new.payload
+        {
+            continue;
+        }
+        let Some((digest, entry)) = old.or(new) else {
+            break;
+        };
+        let key = entry.key;
+        let old = old.map(|(_, entry)| entry.payload);
+        let new = new.map(|(_, entry)| entry.payload);
         let name = str::from_utf8(key).ok().and_then(|name| name.parse().ok());
         let name = name.ok_or(Error::Corrupt(digest))?;
         diff.changes.push(Changed { name, old, new });
