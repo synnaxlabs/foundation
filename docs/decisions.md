@@ -1094,7 +1094,10 @@ How to read this record:
   share one AWS m7g.2xlarge (8 vCPU, 32 GiB) in us-east-1 with no inbound ports, tagged
   `project=foundation-ci`, outside BENCH SPEND. One runner queued 9 runs while its host
   used about 30% CPU, so the person asked: "can we have multiple runners on a single
-  machine?" ARM skips docs-only changes. The coordinator owns it.
+  machine?" ARM skips docs-only changes. The coordinator owns it. On 2026-10-05 the
+  host ran at 80 to 86% CPU with 14 runs queued, so a second host, an m7g.4xlarge (16
+  vCPU, 300 GB) with six runners (`foundation-arm-d` to `-i`), joined it. The person
+  chose "m7g.4xlarge, 6 runners".
 
 ### 1.15 Releases
 
