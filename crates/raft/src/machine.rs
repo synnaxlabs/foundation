@@ -48,7 +48,8 @@ impl Peer {
 }
 
 /// What the caller must do after an input, in this order: write `hard` and `entries`
-/// to disk, send `messages`, then apply `committed`.
+/// to disk, send `messages`, then apply `committed`. Write `hard` and `entries` in
+/// any order: a crash between the two is safe.
 #[must_use = "a dropped Ready loses its messages and its hard state"]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ready {
@@ -92,7 +93,9 @@ pub struct Raft {
 }
 
 impl Raft {
-    /// Builds a follower.
+    /// Builds a follower. When the last entry has a higher term than `hard`, the
+    /// node starts at that term with no vote: a crash came between the two writes of
+    /// one [`Ready`], and the first [`ready`](Self::ready) gives the new `hard`.
     ///
     /// # Errors
     ///
@@ -105,7 +108,6 @@ impl Raft {
     /// - [`Error::EntryOutOfOrder`] when `entries` do not run from index 1 with
     ///   terms that never decrease.
     /// - [`Error::AppliedPastLog`] when `applied` is past the last entry.
-    /// - [`Error::TermBehindLog`] when `hard.term` is lower than the last entry's term.
     pub fn new(config: Config, start: Start) -> Result<Self, Error> {
         let Config {
             key,
@@ -135,12 +137,11 @@ impl Raft {
             .peers()
             .map(|key| (key, Peer::new(last.index)))
             .collect();
-        if hard.term < last.term {
-            return Err(Error::TermBehindLog {
-                term: hard.term,
-                last,
-            });
-        }
+        let (term, vote) = if hard.term < last.term {
+            (last.term, None)
+        } else {
+            (hard.term, hard.vote)
+        };
         Ok(Self {
             key,
             base,
@@ -149,8 +150,8 @@ impl Raft {
             outbox: Vec::new(),
             election_ticks: u64::from(election_ticks),
             heartbeat_ticks: u64::from(heartbeat_ticks),
-            term: hard.term,
-            vote: hard.vote,
+            term,
+            vote,
             given: hard,
             log,
             role: Role::Follower,
@@ -1097,37 +1098,32 @@ mod tests {
             );
         }
 
+        // A crash between the entry write and the hard write of one `Ready`.
         #[test]
-        fn rejects_a_term_behind_the_log() {
+        fn restarts_after_a_crash_between_the_entry_write_and_the_hard_write() {
             let hard = Hard {
                 term: Term(2),
-                vote: None,
-            };
-            let last = Position {
-                term: Term(3),
-                index: 7,
+                vote: Some(key(2)),
             };
             let start = Start {
-                entries: entries(&[
-                    (1, 1),
-                    (3, 2),
-                    (3, 3),
-                    (3, 4),
-                    (3, 5),
-                    (3, 6),
-                    (3, 7),
-                ]),
-                ..start(&[1], hard)
+                entries: entries(&[(1, 1), (3, 2), (3, 3)]),
+                ..start(&[1, 2, 3], hard)
             };
-            let err = Raft::new(CONFIG, start).unwrap_err();
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            let expected = Hard {
+                term: Term(3),
+                vote: None,
+            };
             assert_eq!(
-                err,
-                Error::TermBehindLog {
-                    term: Term(2),
-                    last
-                }
+                (raft.term(), raft.role(), raft.hard()),
+                (Term(3), Role::Follower, expected)
             );
-            assert_eq!(err.to_string(), "term 2 is lower than term 3 of entry 7");
+            let ready = raft.ready();
+            assert_eq!(
+                (ready.hard, ready.entries, ready.messages),
+                (Some(expected), vec![], vec![])
+            );
+            assert_eq!(raft.ready(), Ready::default());
         }
     }
 
