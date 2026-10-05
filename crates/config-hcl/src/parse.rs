@@ -13,9 +13,9 @@ use crate::{Error, Expected, Form};
 ///
 /// # Errors
 ///
-/// Returns each problem found, in source order. A syntax error, a string escape that
-/// HCL does not have, a template, or nesting past the limit stops reading, so it is
-/// the last one.
+/// Returns each problem found, in source order. A syntax error, an unclosed string,
+/// heredoc, or comment, a string escape that HCL does not have, a template, or nesting
+/// past the limit stops reading, so it is the last one.
 pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut tokens = Tokens::new(source, text).map_err(|error| vec![error])?;
     let token = tokens.next();
@@ -1415,7 +1415,7 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn refuses_a_heredoc_that_does_not_end_at_the_end_of_the_text() {
+        fn points_an_unclosed_heredoc_at_the_end_of_the_text() {
             let cases = [
                 ("a = <<EOT\n", at(10, 1, 0), on(4, 9)),
                 ("a = <<EOT\nx", at(11, 1, 1), on(4, 9)),
@@ -1751,7 +1751,7 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn refuses_a_string_that_does_not_end_at_the_end_of_its_line() {
+        fn points_an_unclosed_string_at_the_end_of_its_line() {
             let quote = &needs("`\"` to end the string");
             let unclosed = |end| Error::Unclosed {
                 span: on(end, end),
@@ -1771,7 +1771,7 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn refuses_a_comment_that_does_not_end_at_the_end_of_the_text() {
+        fn points_an_unclosed_comment_at_the_end_of_the_text() {
             let cases = [
                 ("a = 1 /* x", at(10, 0, 10)),
                 ("a = 1 /* x\ny", at(12, 1, 1)),

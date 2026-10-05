@@ -97,7 +97,8 @@ pub enum Error {
 }
 
 impl Error {
-    /// Where the problem starts, to sort the problems from `read` in source order.
+    /// The start of the problem's span, to sort the problems from `read` in source
+    /// order.
     fn offset(&self) -> u32 {
         match self {
             Self::Syntax { span, .. }
@@ -126,12 +127,7 @@ impl Error {
 impl From<&Error> for Diagnostic {
     fn from(error: &Error) -> Self {
         match error {
-            Error::Syntax { span, expected } => Self::new(
-                SYNTAX,
-                Some(*span),
-                format!("the file needs {expected} here"),
-                SYNTAX_FIX.into(),
-            ),
+            Error::Syntax { span, expected } => syntax(*span, expected),
             Error::Unclosed { span, opener, part } => part.diagnostic(*span, *opener),
             Error::Form { span, form } => form.diagnostic(*span),
             Error::Name { span, .. } => Self::new(
@@ -173,7 +169,6 @@ impl From<&Error> for Diagnostic {
 }
 
 const SYNTAX: Code = Code::new("hcl.syntax");
-const SYNTAX_FIX: &str = "Write it here, or correct the text here or before it";
 const NULL: Code = Code::new("hcl.null");
 const TEMPLATE: Code = Code::new("hcl.template");
 const OPERATOR: Code = Code::new("hcl.operator");
@@ -194,6 +189,16 @@ const UNWRITABLE_KEYWORD: Code = Code::new("hcl.unwritable-keyword");
 const UNWRITABLE_FUNCTION: Code = Code::new("hcl.unwritable-function");
 const UNWRITABLE_REFERENCE: Code = Code::new("hcl.unwritable-reference");
 const UNWRITABLE_FOR: Code = Code::new("hcl.unwritable-for");
+
+/// A syntax error at `span`, which needs `needed` there.
+fn syntax(span: Span, needed: impl fmt::Display) -> Diagnostic {
+    Diagnostic::new(
+        SYNTAX,
+        Some(span),
+        format!("the file needs {needed} here"),
+        "Write it here, or correct the text here or before it".into(),
+    )
+}
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -429,12 +434,7 @@ impl Unclosed {
             ),
             Self::Comment => ("`*/` to end the comment", "comment"),
         };
-        let mut diagnostic = Diagnostic::new(
-            SYNTAX,
-            Some(span),
-            format!("the file needs {closer} here"),
-            SYNTAX_FIX.into(),
-        );
+        let mut diagnostic = syntax(span, closer);
         diagnostic.notes.push(Note {
             span: opener,
             text: format!("the {part} starts here"),
