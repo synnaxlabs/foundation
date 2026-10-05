@@ -35,7 +35,11 @@ pub(crate) const TABLE: &[Spec] = &[
 ];
 
 #[derive(Parser)]
-#[command(name = "foundation", about = "Run Foundation operations")]
+#[command(
+    name = "foundation",
+    about = "Run Foundation operations",
+    disable_help_subcommand = true
+)]
 struct Cli {
     /// Print the output or the error as JSON.
     #[arg(long, global = true)]
@@ -51,6 +55,8 @@ enum Command {
     /// Answer MCP messages on standard input, one JSON-RPC message per line, until it
     /// closes.
     Mcp,
+    /// Print this help, or the help of one command.
+    Help { command: Option<String> },
 }
 
 /// The input of each operation. Clap and serde both name a variant in kebab case.
@@ -99,23 +105,35 @@ pub(crate) fn command() -> clap::Command {
 }
 
 pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, Error> {
-    match command().try_get_matches_from(args) {
-        Ok(matches) => Cli::from_arg_matches(&matches)
-            .map(|cli| match cli.command {
-                Command::Run(request) => Parsed::Run(request),
-                Command::Mcp => Parsed::Mcp,
-            })
-            .map_err(|e| from_clap(&e)),
-        Err(e)
-            if matches!(
-                e.kind(),
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-            ) =>
-        {
-            Ok(Parsed::Help(e.to_string()))
+    let matches = match command().try_get_matches_from(args) {
+        Ok(matches) => matches,
+        Err(e) if e.kind() == ErrorKind::DisplayHelp => {
+            return Ok(Parsed::Help(e.to_string()));
         }
-        Err(e) => Err(from_clap(&e)),
+        Err(e) => return Err(from_clap(&e)),
+    };
+    match Cli::from_arg_matches(&matches)
+        .map_err(|e| from_clap(&e))?
+        .command
+    {
+        Command::Run(request) => Ok(Parsed::Run(request)),
+        Command::Mcp => Ok(Parsed::Mcp),
+        Command::Help { command } => help(command.as_deref()),
     }
+}
+
+/// The help that `foundation [name] --help` prints.
+fn help(name: Option<&str>) -> Result<Parsed, Error> {
+    let mut root = command();
+    root.build();
+    let command = match name {
+        None => &mut root,
+        Some("help") => return Err(unknown("help")),
+        Some(name) => root
+            .find_subcommand_mut(name)
+            .ok_or_else(|| unknown(name))?,
+    };
+    Ok(Parsed::Help(command.render_help().to_string()))
 }
 
 /// Reads a request for the operation `name` from its JSON `arguments`.
