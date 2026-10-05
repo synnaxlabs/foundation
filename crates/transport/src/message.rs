@@ -94,30 +94,48 @@ impl Reader {
         }
     }
 
-    /// Reads the next whole message into a block from `pool`. `source(max)` gives
-    /// the stream's next 1 to `max` bytes, `Pending` when it has none now, or `None`
-    /// when the stream has ended. The reader never asks for a byte past the current
-    /// message, so later messages stay with the source.
+    /// Reads the next whole message into a block from `alloc`. `alloc(len)` gives a
+    /// block of `len` bytes, or `Pending` when it has no room now. `source(max)`
+    /// gives the stream's next 1 to `max` bytes, `Pending` when it has none now, or
+    /// `None` when the stream has ended. The reader never asks for a byte past the
+    /// current message, so later messages stay with the source.
     ///
-    /// Returns the message, `Pending` when the source has no more bytes now, or
+    /// Returns the message, `Pending` when `alloc` or the source is pending, or
     /// `None` when the stream ended between two messages. After `Pending`, the next
-    /// call goes on where this one stopped.
+    /// call goes on where this one stopped. After an error of the source, the reader
+    /// holds no block.
     ///
     /// # Errors
     ///
     /// - [`Error::Broken`] when the peer breaks the framing: a message over
     ///   `bytes_max`, or a stream that ends inside a message. The stream cannot go on.
-    /// - [`Error::Pool`] when `pool` has no room for the message now. Its bytes stay
-    ///   with the source; call again when the pool has room.
+    /// - The error of `alloc`. The message's bytes stay with the source, and the next
+    ///   call asks `alloc` again.
     /// - The source's error.
     ///
     /// # Panics
     ///
-    /// When the source gives no bytes or more than `max`, or when `pool` cannot hold
-    /// a message of `bytes_max` bytes.
+    /// When the source gives no bytes or more than `max`.
     pub(crate) fn read<B: AsRef<[u8]>>(
         &mut self,
-        pool: &Pool,
+        alloc: impl FnMut(usize) -> Result<Poll<Unique>, Error>,
+        mut source: impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
+    ) -> Result<Poll<Option<Block>>, Error> {
+        let mut failed = false;
+        let read = self.next(alloc, |max| {
+            let next = source(max);
+            failed = next.is_err();
+            next
+        });
+        if failed {
+            self.state = START;
+        }
+        read
+    }
+
+    fn next<B: AsRef<[u8]>>(
+        &mut self,
+        mut alloc: impl FnMut(usize) -> Result<Poll<Unique>, Error>,
         mut source: impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
     ) -> Result<Poll<Option<Block>>, Error> {
         loop {
@@ -147,7 +165,20 @@ impl Reader {
                     }
                 }
                 State::Sized(value) => {
-                    let block = alloc(pool, *value, self.bytes_max)?;
+                    let Some(len) = usize::try_from(*value)
+                        .ok()
+                        .filter(|&len| len <= self.bytes_max)
+                    else {
+                        return Err(Error::Broken {
+                            reason: format!(
+                                "a message of {value} bytes is over the limit of {}",
+                                self.bytes_max
+                            ),
+                        });
+                    };
+                    let Poll::Ready(block) = alloc(len)? else {
+                        return Ok(Poll::Pending);
+                    };
                     self.state = State::Body { block, have: 0 };
                 }
                 State::Body { block, have } => {
@@ -172,24 +203,16 @@ impl Reader {
     }
 }
 
-/// A block for a message of `value` bytes.
+/// A block of `len` bytes from `pool`.
 ///
 /// # Errors
 ///
-/// [`Error::Broken`] when `value` is over `bytes_max`, and [`Error::Pool`] when the
-/// pool has no room now.
+/// [`Error::Pool`] when the pool has no room now.
 ///
 /// # Panics
 ///
-/// When the pool cannot hold a message of `bytes_max` bytes.
-fn alloc(pool: &Pool, value: u64, bytes_max: usize) -> Result<Unique, Error> {
-    let Some(len) = usize::try_from(value).ok().filter(|&len| len <= bytes_max) else {
-        return Err(Error::Broken {
-            reason: format!(
-                "a message of {value} bytes is over the limit of {bytes_max}"
-            ),
-        });
-    };
+/// When the pool cannot hold `len` bytes.
+pub(crate) fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
     match pool.alloc(len) {
         Ok(block) => Ok(block),
         Err(block::Error::Exhausted {
@@ -293,13 +316,18 @@ mod tests {
         }
     }
 
+    /// A block source for [`Reader::read`] that takes each block from `pool`.
+    fn blocks(pool: &Pool) -> impl FnMut(usize) -> Result<Poll<Unique>, Error> {
+        |len| alloc(pool, len).map(Poll::Ready)
+    }
+
     /// One read of `reader` from `source`, with the message as bytes.
     fn read(
         reader: &mut Reader,
         pool: &Pool,
         source: &mut Source,
     ) -> Result<Poll<Option<Vec<u8>>>, Error> {
-        let read = reader.read(pool, |max| Ok(source.take(max)))?;
+        let read = reader.read(blocks(pool), |max| Ok(source.take(max)))?;
         Ok(read.map(|block| block.map(|block| block.to_vec())))
     }
 
@@ -502,7 +530,7 @@ mod tests {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(16);
             let read = reader
-                .read::<Vec<u8>>(&pool, |_| {
+                .read::<Vec<u8>>(blocks(&pool), |_| {
                     Err(Error::Reset {
                         code: crate::Code(16),
                     })
@@ -517,18 +545,19 @@ mod tests {
         }
 
         #[test]
-        fn when_source_fails_inside_a_message_it_gives_the_error() {
-            let pool = pool(1 << 16);
-            let mut reader = Reader::new(16);
-            let mut given = false;
+        fn when_source_fails_inside_a_message_it_gives_the_error_and_drops_the_block() {
+            // A 100-byte block takes 192 bytes of the budget, so the pool holds one.
+            let pool = pool(300);
+            let mut reader = Reader::new(1_000);
+            let part = encode(&[vec![9; 100]]).into_iter().take(10).collect();
+            let mut source = Source::new(part, 64);
+            source.open = true;
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
             let read = reader
-                .read(&pool, |_| {
-                    if mem::replace(&mut given, true) {
-                        return Err(Error::Reset {
-                            code: crate::Code(16),
-                        });
-                    }
-                    Ok(Poll::Ready(Some([0x05])))
+                .read::<Vec<u8>>(blocks(&pool), |_| {
+                    Err(Error::Reset {
+                        code: crate::Code(16),
+                    })
                 })
                 .map(|read| read.map(|block| block.map(|block| block.to_vec())));
             assert_eq!(
@@ -537,6 +566,23 @@ mod tests {
                     code: crate::Code(16)
                 })
             );
+            drop(pool.alloc(100).expect("the reader dropped its block"));
+        }
+
+        #[test]
+        fn when_alloc_is_pending_it_takes_no_body_bytes_then_goes_on() {
+            let pool = pool(1 << 16);
+            let mut source = Source::new(encode(&[vec![4; 10]]), 64);
+            let mut reader = Reader::new(16);
+            let read = reader
+                .read(|_| Ok(Poll::Pending), |max| Ok(source.take(max)))
+                .map(|read| read.map(|block| block.map(|block| block.to_vec())));
+            assert_eq!(read, Ok(Poll::Pending));
+            assert_eq!(source.given, 1);
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
+                Ok(vec![vec![4; 10]])
+            );
         }
 
         #[test]
@@ -544,7 +590,7 @@ mod tests {
         fn when_source_gives_no_bytes_it_panics() {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(16);
-            drop(reader.read(&pool, |_| Ok(Poll::Ready(Some([0_u8; 0])))));
+            drop(reader.read(blocks(&pool), |_| Ok(Poll::Ready(Some([0_u8; 0])))));
         }
 
         #[test]

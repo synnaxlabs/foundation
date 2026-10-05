@@ -45,6 +45,8 @@ pub(crate) struct Endpoint {
     pool: Rc<Pool>,
     /// The largest message a receiver takes.
     message_bytes_max: usize,
+    /// The most bytes in flight on a connection in each direction.
+    window_bytes: usize,
     /// Indexed by noq-proto's handle.
     connections: Vec<Option<Connection>>,
     /// The connections made so far.
@@ -90,8 +92,17 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `config.idle` is not positive. `Transport::new` refuses it first.
+    /// When `config.idle` is not positive, or `config.window_bytes` is below
+    /// `block::footprint(config.message_bytes_max)`. `Transport::new` refuses both
+    /// first.
     pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
+        let footprint = block::footprint(config.message_bytes_max.get());
+        assert!(
+            config.window_bytes >= footprint,
+            "a window of {} bytes is below the footprint of the largest message, \
+             {footprint}",
+            config.window_bytes
+        );
         let (settings, endpoint) = Settings::new(config, shard);
         Self {
             epoch: config.clock.epoch(),
@@ -100,6 +111,7 @@ impl Endpoint {
             datagrams_max,
             pool: Rc::clone(&config.pool),
             message_bytes_max: config.message_bytes_max.get(),
+            window_bytes: config.window_bytes,
             connections: Vec::new(),
             serial: 0,
             ready: VecDeque::new(),
@@ -129,7 +141,9 @@ impl Endpoint {
             .unwrap_or_else(|error| {
                 panic!("a dial fails only on its address: {error}")
             });
-        let key = self.insert(handle, |key| Connection::dialed(key, inner, peer));
+        let key = self.insert(handle, |key, streams| {
+            Connection::dialed(key, inner, peer, streams)
+        });
         self.drive(handle, now);
         key
     }
@@ -300,8 +314,8 @@ impl Endpoint {
         sender: &mut Sender,
     ) -> Result<Poll<()>, Error> {
         let key = sender.key().connection;
-        self.streams(now, key, Poll::Pending, |streams, inner, _| {
-            streams.flush(inner, sender)
+        self.streams(now, key, Poll::Pending, |streams, inner, _, events| {
+            streams.flush(inner, sender, events)
         })
     }
 
@@ -324,7 +338,7 @@ impl Endpoint {
     ) -> Result<(), Error> {
         sender.end();
         let stream = sender.key();
-        self.streams(now, stream.connection, (), |streams, inner, _| {
+        self.streams(now, stream.connection, (), |streams, inner, _, _| {
             streams.finish(inner, stream.id)
         })
     }
@@ -349,8 +363,8 @@ impl Endpoint {
             return ended;
         }
         let key = receiver.key().connection;
-        self.streams(now, key, Poll::Pending, |_, inner, pool| {
-            stream::read(inner, receiver, pool)
+        self.streams(now, key, Poll::Pending, |streams, inner, pool, events| {
+            streams.read(inner, receiver, pool, events)
         })
     }
 
@@ -379,8 +393,8 @@ impl Endpoint {
         })
     }
 
-    /// Runs `call` on the streams of `key`'s connection with the pool, and drives
-    /// the connection. A fault of the peer's that `call` finds closes the
+    /// Runs `call` on the streams of `key`'s connection with the pool and the event
+    /// queue, and drives the connection. A fault of the peer's that `call` finds closes the
     /// connection: the caller gets it from [`Event::Closed`], and this gives
     /// `ended`, as it does when the connection ended before.
     fn streams<T>(
@@ -392,6 +406,7 @@ impl Endpoint {
             &mut Streams,
             &mut noq_proto::Connection,
             &Pool,
+            &mut VecDeque<Event>,
         ) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let now = self.instant(now);
@@ -400,7 +415,7 @@ impl Endpoint {
             return Ok(ended);
         };
         let Connection { inner, streams, .. } = connection;
-        let result = match call(streams, inner, &self.pool) {
+        let result = match call(streams, inner, &self.pool, &mut self.events) {
             Err(Error::Broken { reason }) => {
                 self.events.push_back(connection.fault(now, reason));
                 Ok(ended)
@@ -414,7 +429,7 @@ impl Endpoint {
     fn insert(
         &mut self,
         handle: ConnectionHandle,
-        connection: impl FnOnce(connection::Key) -> Connection,
+        connection: impl FnOnce(connection::Key, Streams) -> Connection,
     ) -> connection::Key {
         let key = connection::Key {
             handle,
@@ -429,7 +444,8 @@ impl Endpoint {
             entry.is_none(),
             "invariant: noq-proto reuses a drained handle"
         );
-        *entry = Some(connection(key));
+        let streams = Streams::new(self.window_bytes, self.message_bytes_max);
+        *entry = Some(connection(key, streams));
         key
     }
 
@@ -455,7 +471,9 @@ impl Endpoint {
             Some(DatagramEvent::NewConnection(incoming)) => {
                 match self.inner.accept(incoming, now, &mut reply, None) {
                     Ok((handle, inner)) => {
-                        self.insert(handle, |key| Connection::accepted(key, inner));
+                        self.insert(handle, |key, streams| {
+                            Connection::accepted(key, inner, streams)
+                        });
                         self.drive(handle, now);
                         None
                     }

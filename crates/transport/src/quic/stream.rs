@@ -3,8 +3,8 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::slice;
 use std::task::Poll;
+use std::{mem, slice};
 
 use block::{Block, Pool};
 use bytes::Bytes;
@@ -14,7 +14,7 @@ use noq_proto::{
 };
 
 use super::{Event, connection};
-use crate::message::{Prefix, Reader};
+use crate::message::{self, Prefix, Reader};
 use crate::{Class, Code, Error};
 
 /// Names one stream of a connection of an [`Endpoint`](super::Endpoint).
@@ -37,6 +37,8 @@ pub(crate) struct Sender {
     unsent: Range<usize>,
     /// The bytes of the message in hand that the stream has not taken.
     body: Bytes,
+    /// The bytes the message in hand counts against the send budget, or 0.
+    charged: usize,
     finished: bool,
 }
 
@@ -46,6 +48,8 @@ pub(crate) struct Sender {
 pub(crate) struct Receiver {
     key: Key,
     reader: Reader,
+    /// The bytes the message in the reader counts against the receive budget, or 0.
+    charged: usize,
     end: Option<End>,
 }
 
@@ -65,7 +69,7 @@ pub(crate) struct Incoming {
 }
 
 /// What a connection keeps of its streams between calls.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct Streams {
     /// Streams the peer opened whose class byte has not arrived.
     unclassified: Vec<StreamId>,
@@ -75,6 +79,24 @@ pub(super) struct Streams {
     /// Each stream that this side sends on and has not finished, with the code the
     /// peer stopped it with.
     senders: Vec<(StreamId, Option<Code>)>,
+    /// Pool bytes of the messages this side has started and the streams have not
+    /// taken in full. They stay within the peer's window, so the messages that hold
+    /// a block at the peer never use up the connection's credit.
+    sending: Budget,
+    /// Pool bytes of the messages that hold a block and have not gone to the caller.
+    receiving: Budget,
+}
+
+/// Pool bytes that the messages of one direction of a connection count, and the
+/// streams that found no room.
+#[derive(Debug)]
+struct Budget {
+    max: usize,
+    used: usize,
+    /// Each stream once, until the next refund.
+    waiting: Vec<Key>,
+    /// The event that tells the caller a waiting stream may go on.
+    wake: fn(Key) -> Event,
 }
 
 /// A fault of the peer's that closes the connection, with the reason.
@@ -110,6 +132,7 @@ impl Sender {
             header: [0; 9],
             unsent: 0..0,
             body: Bytes::new(),
+            charged: 0,
             finished: false,
         }
     }
@@ -160,6 +183,7 @@ impl Receiver {
         Self {
             key,
             reader: Reader::new(bytes_max),
+            charged: 0,
             end: None,
         }
     }
@@ -178,7 +202,57 @@ impl Receiver {
     }
 }
 
+impl Budget {
+    fn new(max: usize, wake: fn(Key) -> Event) -> Self {
+        Self {
+            max,
+            used: 0,
+            waiting: Vec::new(),
+            wake,
+        }
+    }
+
+    /// Charges `bytes` into `charged` when they fit. Else `stream` waits for the next
+    /// refund.
+    fn charge(&mut self, stream: Key, bytes: usize, charged: &mut usize) -> bool {
+        if bytes <= self.max - self.used {
+            self.used += bytes;
+            *charged = bytes;
+            return true;
+        }
+        if !self.waiting.contains(&stream) {
+            self.waiting.push(stream);
+        }
+        false
+    }
+
+    /// Gives back what `charged` holds. When it held any, each stream that waited
+    /// gets its wake in `events`.
+    fn refund(&mut self, charged: &mut usize, events: &mut VecDeque<Event>) {
+        let bytes = mem::take(charged);
+        if bytes > 0 {
+            self.used -= bytes;
+            events.extend(self.waiting.drain(..).map(self.wake));
+        }
+    }
+}
+
 impl Streams {
+    /// The streams of a connection whose peer's window is `window_bytes`, and that
+    /// refuses a message over `bytes_max`.
+    pub(super) fn new(window_bytes: usize, bytes_max: usize) -> Self {
+        Self {
+            unclassified: Vec::new(),
+            incoming: Default::default(),
+            senders: Vec::new(),
+            sending: Budget::new(window_bytes, |stream| Event::Writable { stream }),
+            receiving: Budget::new(
+                window_bytes.saturating_add(block::footprint(bytes_max)),
+                |stream| Event::Readable { stream },
+            ),
+        }
+    }
+
     /// What `event` of `inner`, the connection of `key`, means to the caller, if
     /// anything. A stream that the peer stops resets here with the stop's code.
     ///
@@ -268,17 +342,39 @@ impl Streams {
     }
 
     /// Writes what `sender` holds to `inner`. `Ready` when the stream took all of it.
+    /// `Pending` when the stream takes no more now, or the message has no room in the
+    /// send budget. Each message that stops counting wakes the senders that found no
+    /// room with [`Event::Writable`] in `events`.
     ///
     /// # Errors
     ///
     /// [`Error::Stopped`] when the peer stopped the stream. The sender drops what it
     /// holds.
     pub(super) fn flush(
-        &self,
+        &mut self,
+        inner: &mut noq_proto::Connection,
+        sender: &mut Sender,
+        events: &mut VecDeque<Event>,
+    ) -> Result<Poll<()>, Error> {
+        let flushed = self.write(inner, sender);
+        if !matches!(flushed, Ok(Poll::Pending)) {
+            self.sending.refund(&mut sender.charged, events);
+        }
+        flushed
+    }
+
+    fn write(
+        &mut self,
         inner: &mut noq_proto::Connection,
         sender: &mut Sender,
     ) -> Result<Poll<()>, Error> {
         let id = sender.key.id;
+        if sender.charged == 0 && sender.holds() {
+            let bytes = block::footprint(sender.body.len());
+            if !self.sending.charge(sender.key, bytes, &mut sender.charged) {
+                return Ok(Poll::Pending);
+            }
+        }
         let mut send = inner.send_stream(id);
         loop {
             let written = if !sender.unsent.is_empty() {
@@ -333,6 +429,68 @@ impl Streams {
             Err(FinishError::Stopped(_)) => panic!("{STOPPED}"),
             Err(FinishError::ClosedStream) => panic!("{OPEN}"),
         }
+    }
+
+    /// Reads the next whole message of `receiver`'s stream from `inner` into a block
+    /// from `pool`. `Ready(None)` at the end. `Pending` when no whole message is here
+    /// yet, or the next has no room in the receive budget. Each message that stops
+    /// counting wakes the receivers that found no room with [`Event::Readable`] in
+    /// `events`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reset`] when the peer reset the stream, [`Error::Pool`] when `pool`
+    /// has no room now, and [`Error::Broken`] when the peer broke the framing or
+    /// reset with a code over 32 bits.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a receiver never reads its stream after the end"
+    )]
+    pub(super) fn read(
+        &mut self,
+        inner: &mut noq_proto::Connection,
+        receiver: &mut Receiver,
+        pool: &Pool,
+        events: &mut VecDeque<Event>,
+    ) -> Result<Poll<Option<Block>>, Error> {
+        let Receiver {
+            key,
+            reader,
+            charged,
+            end,
+        } = receiver;
+        let receiving = &mut self.receiving;
+        let mut recv = inner.recv_stream(key.id);
+        let mut chunks = recv
+            .read(true)
+            .expect("invariant: a receiver's stream is open until it ends");
+        let alloc = |len| {
+            if !receiving.charge(*key, block::footprint(len), charged) {
+                return Ok(Poll::Pending);
+            }
+            message::alloc(pool, len)
+                .map(Poll::Ready)
+                .inspect_err(|_| receiving.refund(charged, events))
+        };
+        let result = reader.read(alloc, |max| match chunks.next(max) {
+            Ok(chunk) => Ok(Poll::Ready(chunk.map(|chunk| chunk.bytes))),
+            Err(ReadError::Blocked) => Ok(Poll::Pending),
+            Err(ReadError::Reset(error)) => Err(match code(error) {
+                Some(code) => Error::Reset { code },
+                None => Error::Broken {
+                    reason: format!("a reset code over 32 bits: {error}"),
+                },
+            }),
+        });
+        if !matches!(result, Ok(Poll::Pending)) {
+            receiving.refund(charged, events);
+        }
+        *end = match result {
+            Ok(Poll::Ready(None)) => Some(End::Finished),
+            Err(Error::Reset { code }) => Some(End::Reset(code)),
+            _ => None,
+        };
+        result
     }
 
     /// The code the peer stopped stream `id` with, if this side sends on it.
@@ -391,45 +549,6 @@ impl Streams {
 const STOPPED: &str = "invariant: a stream resets at the peer's stop";
 const OPEN: &str = "invariant: only a stop resets a sender's stream";
 
-/// Reads the next whole message of `receiver`'s stream from `inner` into a block from
-/// `pool`. `Ready(None)` at the end.
-///
-/// # Errors
-///
-/// [`Error::Reset`] when the peer reset the stream, [`Error::Pool`] when `pool` has no
-/// room now, and [`Error::Broken`] when the peer broke the framing or reset with a
-/// code over 32 bits.
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "a receiver never reads its stream after the end"
-)]
-pub(super) fn read(
-    inner: &mut noq_proto::Connection,
-    receiver: &mut Receiver,
-    pool: &Pool,
-) -> Result<Poll<Option<Block>>, Error> {
-    let mut recv = inner.recv_stream(receiver.key.id);
-    let mut chunks = recv
-        .read(true)
-        .expect("invariant: a receiver's stream is open until it ends");
-    let result = receiver.reader.read(pool, |max| match chunks.next(max) {
-        Ok(chunk) => Ok(Poll::Ready(chunk.map(|chunk| chunk.bytes))),
-        Err(ReadError::Blocked) => Ok(Poll::Pending),
-        Err(ReadError::Reset(error)) => Err(match code(error) {
-            Some(code) => Error::Reset { code },
-            None => Error::Broken {
-                reason: format!("a reset code over 32 bits: {error}"),
-            },
-        }),
-    });
-    receiver.end = match result {
-        Ok(Poll::Ready(None)) => Some(End::Finished),
-        Err(Error::Reset { code }) => Some(End::Reset(code)),
-        _ => None,
-    };
-    result
-}
-
 /// The byte that starts a stream of `class` on the wire. The byte order is the order
 /// in which [`Streams::accept`] gives streams.
 fn byte(class: Class) -> u8 {
@@ -485,6 +604,8 @@ mod tests {
     const DELAY: Duration = Duration::from_millis(10);
     /// Long enough for a datagram to go and its reply to come back.
     const RUN: Duration = Duration::from_millis(100);
+    /// A small part of a round trip, so that credit comes back in small steps.
+    const STEP: Duration = Duration::from_millis(1);
     /// The largest message in [`Shard::config`].
     const MESSAGE_MAX: usize = 1 << 16;
 
@@ -895,6 +1016,275 @@ mod tests {
             drop(held);
             let read = drain(&mut pair.server, now, &mut incoming.receiver);
             assert_eq!(read, (vec![vec![9; 100]], true));
+        });
+    }
+
+    /// A window of two of the largest messages, so the receive budget holds three.
+    const NARROW: usize = 2 * block::footprint(MESSAGE_MAX);
+
+    /// A connected pair whose endpoints have a window of [`NARROW`] bytes.
+    fn narrow(shard: &Shard) -> Pair {
+        let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+        let sides = [
+            (&mut pair.client, testing::CLIENT_KEY, testing::CLIENT_SHARD),
+            (&mut pair.server, testing::SERVER_KEY, testing::SERVER_SHARD),
+        ];
+        for (side, private_key, index) in sides {
+            let config = Config {
+                window_bytes: NARROW,
+                ..shard.config(private_key, Span::SECOND)
+            };
+            side.endpoint = Endpoint::new(&config, index, NonZeroUsize::MIN);
+        }
+        pair.dial(tls::public(&testing::SERVER_KEY));
+        pair.run(RUN);
+        pair
+    }
+
+    /// Opens `count` raw `Complete` streams on the client, and sends on each only the
+    /// prefix of a message of [`MESSAGE_MAX`] bytes. Gives the streams.
+    fn prefixes(pair: &mut Pair, count: u32) -> Vec<StreamId> {
+        let prefix = Prefix::new(MESSAGE_MAX);
+        let header = [[byte(Class::Complete)].as_slice(), &*prefix].concat();
+        let mut ids = Vec::new();
+        for _ in 0..count {
+            ids.push(raw(&mut pair.client, Dir::Uni, &header, false));
+        }
+        pair.run(RUN);
+        ids
+    }
+
+    /// Accepts each stream the peer opened on the server and reads each one time,
+    /// which gives `Pending`. Gives the receivers, oldest stream first.
+    fn wait(pair: &mut Pair) -> Vec<Receiver> {
+        let (now, server) = (pair.now(), key(&pair.server));
+        let mut receivers = Vec::new();
+        while let Some(mut incoming) = pair.server.endpoint.accept(server) {
+            let read = next(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, Ok(Poll::Pending));
+            receivers.push(incoming.receiver);
+        }
+        receivers
+    }
+
+    /// Runs the pair for `span` in steps of [`STEP`]. After each, the client flushes
+    /// each of `senders`, starting one later than before as many writers do, and the
+    /// server accepts each new stream and reads each stream. Gives each message the
+    /// server read, with its stream.
+    fn exchange(
+        pair: &mut Pair,
+        senders: &mut [Sender],
+        span: Duration,
+    ) -> Vec<(StreamId, Vec<u8>)> {
+        let server = key(&pair.server);
+        let (mut receivers, mut read) = (Vec::new(), Vec::new());
+        let end = pair.now().0 + u64::try_from(span.as_nanos()).expect("fits");
+        while pair.now().0 < end {
+            pair.run(STEP);
+            let now = pair.now();
+            senders.rotate_left(1);
+            for sender in &mut *senders {
+                let flushed = pair.client.endpoint.flush(now, sender);
+                assert!(flushed.is_ok(), "{flushed:?}");
+            }
+            while let Some(incoming) = pair.server.endpoint.accept(server) {
+                receivers.push(incoming.receiver);
+            }
+            for receiver in &mut receivers {
+                let (messages, _) = drain(&mut pair.server, now, receiver);
+                let id = receiver.key().id;
+                read.extend(messages.into_iter().map(|message| (id, message)));
+            }
+        }
+        read
+    }
+
+    /// The stream, length, and distinct bytes of each of `messages`, which stay
+    /// short in a failed assert.
+    fn shapes(messages: &[(StreamId, Vec<u8>)]) -> Vec<(StreamId, usize, Vec<u8>)> {
+        let shape = |(id, message): &(StreamId, Vec<u8>)| {
+            let mut bytes = message.clone();
+            bytes.dedup();
+            (*id, message.len(), bytes)
+        };
+        messages.iter().map(shape).collect()
+    }
+
+    /// Whether `side` got `event` after its first `seen` events.
+    fn got(side: &Side, seen: usize, event: &Event) -> bool {
+        side.events[seen..].iter().any(|(_, other)| other == event)
+    }
+
+    #[test]
+    fn prefixes_past_the_budget_wait_and_take_no_more_of_the_pool() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            prefixes(&mut pair, testing::STREAMS_MAX);
+            let before = shard.committed();
+            let receivers = wait(&mut pair);
+            assert_eq!(receivers.len(), 16);
+            let taken = shard.committed() - before;
+            assert_eq!(taken, 3 * block::footprint(MESSAGE_MAX));
+        });
+    }
+
+    #[test]
+    fn streams_that_wait_for_budget_let_the_streams_with_a_block_finish() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut senders: Vec<Sender> = (0..testing::STREAMS_MAX)
+                .map(|_| open_sender(&mut pair, Class::Complete))
+                .collect();
+            let now = pair.now();
+            let mut expected = Vec::new();
+            for (byte, sender) in iter::zip(0_u8.., &mut senders) {
+                let message = vec![byte; MESSAGE_MAX];
+                let written =
+                    pair.client
+                        .endpoint
+                        .write(now, sender, shard.block(&message));
+                assert!(written.is_ok(), "{written:?}");
+                expected.push((sender.key().id, message));
+            }
+            let mut read = exchange(&mut pair, &mut senders, 50 * RUN);
+            read.sort();
+            assert_eq!(shapes(&read), shapes(&expected));
+        });
+    }
+
+    #[test]
+    fn a_message_past_the_send_budget_waits_until_another_is_written() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            let count = fill(&mut pair, shard, &mut first);
+            let mut second = open_sender(&mut pair, Class::Complete);
+            let mut third = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            for (sender, byte) in [(&mut second, 0xb), (&mut third, 0xc)] {
+                let message = shard.block(&vec![byte; MESSAGE_MAX]);
+                let written = pair.client.endpoint.write(now, sender, message);
+                assert_eq!(written, Ok(Poll::Pending));
+            }
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.server);
+            let now = pair.now();
+            let (read, _) = drain(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read.len(), usize::from(count - 1));
+            pair.run(RUN);
+            let now = pair.now();
+            let flushed = pair.client.endpoint.flush(now, &mut third);
+            assert_eq!(flushed, Ok(Poll::Pending));
+            pair.run(RUN);
+            assert!(pair.server.endpoint.accept(key(&pair.server)).is_none());
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            let flushed = pair.client.endpoint.flush(now, &mut second);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+            pair.run(Duration::ZERO);
+            let writable = Event::Writable {
+                stream: third.key(),
+            };
+            assert!(got(&pair.client, seen, &writable));
+            let id = third.key().id;
+            let mut senders = [first, second, third];
+            let read = exchange(&mut pair, &mut senders, 10 * RUN);
+            let third: Vec<_> = read.into_iter().filter(|&(at, _)| at == id).collect();
+            let expected = [(id, vec![0xc; MESSAGE_MAX])];
+            assert_eq!(shapes(&third), shapes(&expected));
+        });
+    }
+
+    #[test]
+    fn a_read_that_waits_for_budget_is_woken_when_a_message_is_read() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let ids = prefixes(&mut pair, 4);
+            let mut receivers = wait(&mut pair);
+            let body = vec![7; MESSAGE_MAX];
+            let mut send = pair.client.connection().send_stream(ids[0]);
+            assert_eq!(send.write(&body), Ok(MESSAGE_MAX));
+            pair.run(RUN);
+            let (seen, now) = (pair.server.events.len(), pair.now());
+            let read = drain(&mut pair.server, now, &mut receivers[0]);
+            assert_eq!(read, (vec![body], false));
+            pair.run(Duration::ZERO);
+            let readable = Event::Readable {
+                stream: receivers[3].key(),
+            };
+            assert!(got(&pair.server, seen, &readable));
+        });
+    }
+
+    #[test]
+    fn a_reset_message_gives_back_its_budget() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let ids = prefixes(&mut pair, 4);
+            let mut receivers = wait(&mut pair);
+            let reset = pair
+                .client
+                .connection()
+                .send_stream(ids[0])
+                .reset(7u32.into());
+            reset.expect("reset");
+            pair.run(RUN);
+            let (seen, now) = (pair.server.events.len(), pair.now());
+            let read = next(&mut pair.server, now, &mut receivers[0]);
+            assert_eq!(read, Err(Error::Reset { code: Code(7) }));
+            pair.run(Duration::ZERO);
+            let readable = Event::Readable {
+                stream: receivers[3].key(),
+            };
+            assert!(got(&pair.server, seen, &readable));
+        });
+    }
+
+    #[test]
+    fn a_stopped_message_gives_back_its_budget() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let mut second = open_sender(&mut pair, Class::Complete);
+            let mut third = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            for sender in [&mut second, &mut third] {
+                let message = shard.block(&vec![1; MESSAGE_MAX]);
+                let written = pair.client.endpoint.write(now, sender, message);
+                assert_eq!(written, Ok(Poll::Pending));
+            }
+            pair.run(RUN);
+            let id = accept(&mut pair.server).receiver.key().id;
+            let stopped = pair.server.connection().recv_stream(id).stop(7u32.into());
+            stopped.expect("stopped");
+            pair.run(RUN);
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            let flushed = pair.client.endpoint.flush(now, &mut first);
+            assert_eq!(flushed, Err(Error::Stopped { code: Code(7) }));
+            pair.run(Duration::ZERO);
+            let writable = Event::Writable {
+                stream: third.key(),
+            };
+            assert!(got(&pair.client, seen, &writable));
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "a window of 65599 bytes is below the footprint of the largest \
+                    message, 65600"
+    )]
+    fn with_a_window_below_one_message_panics() {
+        testing::run(1, |shard| {
+            let config = Config {
+                window_bytes: block::footprint(MESSAGE_MAX) - 1,
+                ..shard.config(testing::SERVER_KEY, Span::SECOND)
+            };
+            drop(Endpoint::new(
+                &config,
+                testing::SERVER_SHARD,
+                NonZeroUsize::MIN,
+            ));
         });
     }
 

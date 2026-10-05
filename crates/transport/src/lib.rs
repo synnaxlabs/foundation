@@ -79,8 +79,8 @@ impl Transport {
     /// # Errors
     ///
     /// [`Error::Config`] when `config.idle` is not positive, `config.window_bytes` is
-    /// below `config.message_bytes_max`, or `config.message_bytes_max` is over
-    /// `config.pool.largest()`.
+    /// below `block::footprint(config.message_bytes_max)`, or
+    /// `config.message_bytes_max` is over `config.pool.largest()`.
     ///
     /// ```
     /// use transport::{Config, Error, Transport};
@@ -187,8 +187,10 @@ pub struct Config {
     /// peer's. Must be at most `pool.largest()`.
     pub message_bytes_max: NonZeroUsize,
     /// The most bytes in flight per session in each direction: sent and not yet
-    /// acknowledged, or received and not yet taken. It bounds the memory of a session.
-    /// Size it near bandwidth times round trip. Must be at least `message_bytes_max`.
+    /// acknowledged, or received and not yet taken. It bounds the memory of a session:
+    /// the messages a session receives take at most `window_bytes` plus
+    /// `block::footprint(message_bytes_max)` of the pool. Size it near bandwidth times
+    /// round trip. Must be at least `block::footprint(message_bytes_max)`.
     pub window_bytes: usize,
     /// The most two-way streams, and apart from them the most one-way streams, a peer
     /// may have open to this node at once, per session. Size it near the rate of new
