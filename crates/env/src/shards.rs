@@ -69,8 +69,11 @@ impl Shards {
     /// # Errors
     ///
     /// - [`Error::Start`] when the thread or its executor cannot start.
-    /// - [`Error::Pin`] when `config.core` is not below [`Shards::cores`], or the
-    ///   thread cannot pin to it.
+    /// - [`Error::Pin`] when the thread cannot pin to `config.core`.
+    ///
+    /// # Panics
+    ///
+    /// When `config.core` is not below [`Shards::cores`].
     ///
     /// ```
     /// use env::thread::{Error, Handle};
@@ -88,11 +91,10 @@ impl Shards {
     where
         F: Future<Output = ()> + 'static,
     {
-        if let Some(core) = config.core
-            && core >= self.cores().get()
-        {
-            let name = config.name;
-            return Err(Error::Pin { name, core });
+        if let Some(core) = config.core {
+            let cores = self.cores();
+            let name = &config.name;
+            assert!(core < cores.get(), "{name} asks for core {core} of {cores}");
         }
         self.0
             .start(config, Box::new(|tasks| Box::pin(main(tasks))))
@@ -165,7 +167,7 @@ mod tests {
     fn start(cores: usize, core: Option<usize>) -> Result<(), Error> {
         let cores = NonZeroUsize::new(cores).expect("a test asks for cores");
         let config = Config {
-            name: "shard".into(),
+            name: "shard-4".into(),
             core,
         };
         let shards = Shards::new(Cores(cores));
@@ -173,15 +175,18 @@ mod tests {
     }
 
     #[test]
-    fn a_core_starts_only_below_the_count() {
+    fn each_core_below_the_count_starts() {
         for cores in 1..=8 {
-            for core in (0..=9).chain([usize::MAX]) {
-                let name = "shard".to_owned();
-                let pinned = Err(Error::Pin { name, core });
-                let want = if core < cores { Ok(()) } else { pinned };
-                assert_eq!(start(cores, Some(core)), want, "{core} of {cores}");
+            for core in 0..cores {
+                assert_eq!(start(cores, Some(core)), Ok(()), "{core} of {cores}");
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "shard-4 asks for core 4 of 4")]
+    fn the_core_at_the_count_panics() {
+        start(4, Some(4)).unwrap();
     }
 
     #[test]

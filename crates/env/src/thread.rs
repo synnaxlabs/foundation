@@ -71,8 +71,7 @@ pub enum Error {
         /// What the OS or the simulation reported.
         reason: String,
     },
-    /// A shard asked for a core past [`Shards::cores`](crate::shards::Shards::cores),
-    /// or could not pin its thread to it.
+    /// A shard could not pin its thread to its core.
     Pin {
         /// The thread's name.
         name: String,

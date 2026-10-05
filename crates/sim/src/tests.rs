@@ -344,21 +344,10 @@ fn a_run_with_threads_that_nothing_can_wake_is_stuck() {
 }
 
 #[test]
-fn a_shard_cannot_pin_past_the_node_cores() {
+fn a_shard_pins_to_the_last_node_core() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
     assert_eq!(node.shards().cores().get(), 4);
-    let config = env::shards::Config {
-        name: "shard-4".into(),
-        core: Some(4),
-    };
-    assert_eq!(
-        node.shards().start(config, |_| async {}).unwrap_err(),
-        thread::Error::Pin {
-            name: "shard-4".into(),
-            core: 4
-        }
-    );
     let config = env::shards::Config {
         name: "shard-3".into(),
         core: Some(3),
@@ -366,6 +355,18 @@ fn a_shard_cannot_pin_past_the_node_cores() {
     let handle = node.shards().start(config, |_| async {});
     sim.run().unwrap();
     handle.unwrap().join().unwrap();
+}
+
+#[test]
+#[should_panic(expected = "shard-4 asks for core 4 of 4")]
+fn a_shard_past_the_node_cores_panics() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let config = env::shards::Config {
+        name: "shard-4".into(),
+        core: Some(4),
+    };
+    drop(node.shards().start(config, |_| async {}));
 }
 
 #[test]
