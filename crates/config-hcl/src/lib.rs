@@ -20,7 +20,7 @@ mod write;
 use std::fmt;
 
 use document::Span;
-use document::diagnostic::{Code, Diagnostic};
+use document::diagnostic::{Code, Diagnostic, Note};
 use document::encoding::TooDeep;
 use types::name::{self, Name};
 
@@ -37,6 +37,16 @@ pub enum Error {
         span: Span,
         /// What must come there.
         expected: Expected,
+    },
+    /// A string, a heredoc, or a comment with no closer.
+    Unclosed {
+        /// An empty span where the closer must go: the end of the line for a string,
+        /// the end of the file for a heredoc or a comment.
+        span: Span,
+        /// The opener: `"`, `<<EOT`, or `/*`.
+        opener: Span,
+        /// The part with no closer.
+        part: Unclosed,
     },
     /// An HCL form that a file cannot hold.
     Form {
@@ -91,6 +101,7 @@ impl Error {
     fn offset(&self) -> u32 {
         match self {
             Self::Syntax { span, .. }
+            | Self::Unclosed { span, .. }
             | Self::Form { span, .. }
             | Self::Name { span, .. }
             | Self::Number { span }
@@ -119,8 +130,9 @@ impl From<&Error> for Diagnostic {
                 SYNTAX,
                 Some(*span),
                 format!("the file needs {expected} here"),
-                "Write it here, or correct the text here or before it".into(),
+                SYNTAX_FIX.into(),
             ),
+            Error::Unclosed { span, opener, part } => part.diagnostic(*span, *opener),
             Error::Form { span, form } => form.diagnostic(*span),
             Error::Name { span, .. } => Self::new(
                 NAME,
@@ -161,6 +173,7 @@ impl From<&Error> for Diagnostic {
 }
 
 const SYNTAX: Code = Code::new("hcl.syntax");
+const SYNTAX_FIX: &str = "Write it here, or correct the text here or before it";
 const NULL: Code = Code::new("hcl.null");
 const TEMPLATE: Code = Code::new("hcl.template");
 const OPERATOR: Code = Code::new("hcl.operator");
@@ -369,14 +382,8 @@ pub enum Expected {
     ObjectEnd,
     /// `,` or `)` in a call.
     ArgumentsEnd,
-    /// `"` at the end of a string.
-    Quote,
     /// A marker, such as `EOT`, and a new line after `<<` or `<<-`.
     HeredocStart,
-    /// The marker on a line of its own at the end of a heredoc.
-    HeredocEnd,
-    /// `*/` at the end of a comment.
-    CommentEnd,
 }
 
 impl fmt::Display for Expected {
@@ -394,13 +401,45 @@ impl fmt::Display for Expected {
             Self::ObjectEquals => "`=` or `:` after the key",
             Self::ObjectEnd => "`,`, a new line, or `}`",
             Self::ArgumentsEnd => "`,` or `)`",
-            Self::Quote => "`\"` to end the string",
             Self::HeredocStart => {
                 "a marker, such as `EOT`, and a new line to start the heredoc"
             }
-            Self::HeredocEnd => "the marker on a line of its own to end the heredoc",
-            Self::CommentEnd => "`*/` to end the comment",
         })
+    }
+}
+
+/// A part of HCL text that needs a closer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unclosed {
+    /// A quoted string, which ends at `"` on its line.
+    String,
+    /// A heredoc, which ends at its marker on a line of its own.
+    Heredoc,
+    /// A block comment, which ends at `*/`.
+    Comment,
+}
+
+impl Unclosed {
+    fn diagnostic(self, span: Span, opener: Span) -> Diagnostic {
+        let (closer, part) = match self {
+            Self::String => ("`\"` to end the string", "string"),
+            Self::Heredoc => (
+                "the marker on a line of its own to end the heredoc",
+                "heredoc",
+            ),
+            Self::Comment => ("`*/` to end the comment", "comment"),
+        };
+        let mut diagnostic = Diagnostic::new(
+            SYNTAX,
+            Some(span),
+            format!("the file needs {closer} here"),
+            SYNTAX_FIX.into(),
+        );
+        diagnostic.notes.push(Note {
+            span: opener,
+            text: format!("the {part} starts here"),
+        });
+        diagnostic
     }
 }
 
@@ -409,7 +448,6 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use document::diagnostic::Note;
     use document::{Position, Source};
 
     fn span(offset: u32) -> Span {
@@ -428,7 +466,7 @@ mod tests {
         assert_eq!(error.to_string(), format!("{message}. {fix}"), "{error:?}");
     }
 
-    const EXPECTED: [(Expected, &str); 16] = [
+    const EXPECTED: [(Expected, &str); 13] = [
         (Expected::Item, "a key, a block, or the end of the body"),
         (
             Expected::AttributeOrBlock,
@@ -444,16 +482,10 @@ mod tests {
         (Expected::ObjectEquals, "`=` or `:` after the key"),
         (Expected::ObjectEnd, "`,`, a new line, or `}`"),
         (Expected::ArgumentsEnd, "`,` or `)`"),
-        (Expected::Quote, "`\"` to end the string"),
         (
             Expected::HeredocStart,
             "a marker, such as `EOT`, and a new line to start the heredoc",
         ),
-        (
-            Expected::HeredocEnd,
-            "the marker on a line of its own to end the heredoc",
-        ),
-        (Expected::CommentEnd, "`*/` to end the comment"),
     ];
 
     #[test]
@@ -473,10 +505,7 @@ mod tests {
                 | Expected::ObjectEquals
                 | Expected::ObjectEnd
                 | Expected::ArgumentsEnd
-                | Expected::Quote
-                | Expected::HeredocStart
-                | Expected::HeredocEnd
-                | Expected::CommentEnd => {}
+                | Expected::HeredocStart => {}
             }
             let error = Error::Syntax {
                 span: span(7),
@@ -488,6 +517,45 @@ mod tests {
                 &format!("the file needs {phrase} here"),
                 "Write it here, or correct the text here or before it",
             );
+        }
+    }
+
+    const UNCLOSED: [(Unclosed, &str, &str); 3] = [
+        (Unclosed::String, "`\"` to end the string", "string"),
+        (
+            Unclosed::Heredoc,
+            "the marker on a line of its own to end the heredoc",
+            "heredoc",
+        ),
+        (Unclosed::Comment, "`*/` to end the comment", "comment"),
+    ];
+
+    #[test]
+    fn each_unclosed_part_needs_its_closer_and_notes_its_opener() {
+        for (part, phrase, noun) in UNCLOSED {
+            // A new variant fails this match, so it joins `UNCLOSED`.
+            match part {
+                Unclosed::String | Unclosed::Heredoc | Unclosed::Comment => {}
+            }
+            let error = Error::Unclosed {
+                span: span(7),
+                opener: span(2),
+                part,
+            };
+            let message = format!("the file needs {phrase} here");
+            let fix = "Write it here, or correct the text here or before it";
+            let mut expected = Diagnostic::new(
+                Code::new("hcl.syntax"),
+                Some(span(7)),
+                message.clone(),
+                fix.into(),
+            );
+            expected.notes.push(Note {
+                span: span(2),
+                text: format!("the {noun} starts here"),
+            });
+            assert_eq!(Diagnostic::from(&error), expected, "{error:?}");
+            assert_eq!(error.to_string(), format!("{message}. {fix}"), "{error:?}");
         }
     }
 
@@ -742,8 +810,8 @@ mod tests {
         assert_eq!(error.to_string(), document.to_string());
     }
 
-    /// One error of each variant, each `Expected`, each `Form`, and each `Unwritable`
-    /// part.
+    /// One error of each variant, each `Expected`, each `Unclosed` part, each `Form`,
+    /// and each `Unwritable` part.
     fn every() -> Vec<Error> {
         let mut every = vec![
             Error::Name {
@@ -771,6 +839,11 @@ mod tests {
             span: span(7),
             expected,
         }));
+        every.extend(UNCLOSED.map(|(part, ..)| Error::Unclosed {
+            span: span(7),
+            opener: span(2),
+            part,
+        }));
         every.extend(FORMS.map(|(form, ..)| Error::Form {
             span: span(7),
             form,
@@ -782,6 +855,7 @@ mod tests {
             // A new variant fails this match, so it joins `every`.
             match error {
                 Error::Syntax { .. }
+                | Error::Unclosed { .. }
                 | Error::Form { .. }
                 | Error::Name { .. }
                 | Error::Number { .. }
@@ -802,7 +876,9 @@ mod tests {
             let code = Diagnostic::from(&error).code.as_str();
             let new = codes.insert(code);
             match error {
-                Error::Syntax { .. } => assert_eq!(code, "hcl.syntax"),
+                Error::Syntax { .. } | Error::Unclosed { .. } => {
+                    assert_eq!(code, "hcl.syntax");
+                }
                 Error::TooDeep { .. }
                 | Error::Document(_)
                 | Error::Unwritable {
