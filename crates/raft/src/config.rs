@@ -1,6 +1,6 @@
 use types::node;
 
-use crate::{Entry, Hard};
+use crate::{Entry, Hard, Voters};
 
 /// The fixed inputs of a [`Raft`](crate::Raft).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,9 +21,9 @@ pub struct Config {
 pub struct Start {
     /// The stored term and vote.
     pub hard: Hard,
-    /// The nodes whose votes count. A node that is not in its own list never starts
-    /// an election, but it still votes and follows.
-    pub voters: Vec<node::Key>,
+    /// The nodes whose votes count. A node that is not among them never starts an
+    /// election, but it still votes and follows.
+    pub voters: Voters,
     /// The log on disk, from index 1, in order.
     pub entries: Vec<Entry>,
     /// The index of the last entry the caller applied. The committed entries of a
