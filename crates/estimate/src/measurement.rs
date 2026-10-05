@@ -6,8 +6,8 @@ use crate::{Drift, Error};
 /// bound still fits in a [`Span`].
 pub(crate) const MAX_ERROR: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
 
-/// What one time source says about this node's monotonic clock: at monotonic time
-/// `at`, mesh time minus monotonic time is within `error` of `offset`.
+/// What one time source says about a local clock, a node's or a device's: at local
+/// time `at`, mesh time minus local time is within `error` of `offset`.
 ///
 /// ```
 /// use types::time::{Monotonic, Span};
@@ -36,13 +36,13 @@ impl Measurement {
         Ok(Self { at, offset, error })
     }
 
-    /// The monotonic time of the measurement.
+    /// The local time of the measurement.
     #[must_use]
     pub const fn at(self) -> Monotonic {
         self.at
     }
 
-    /// Mesh time minus monotonic time.
+    /// Mesh time minus local time.
     #[must_use]
     pub const fn offset(self) -> Span {
         self.offset

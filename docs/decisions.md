@@ -344,6 +344,18 @@ How to read this record:
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
   trips; input rejects an end before the start.
+- **ESTIMATE FIT (2026-10-04)** `Fit` is the oscillator fit for one device clock. It
+  keeps the overlap of all measurements of that clock, each widened by drift to a common
+  time, so it holds only the measurement with the highest low edge and the one with the
+  lowest high edge. A measurement that shares no offset with the fit returns `Disjoint`
+  and does not change the fit: the clock jumped or drifts faster than its bound, and the
+  caller starts a new fit with a gap. This reads r6 Q5's lower-envelope fit with the
+  rate bounded by `Drift`, not fitted. A line fit of offset and rate lost: it is honest
+  only if the rate stays constant, and no datasheet bounds oscillator wander. A device
+  adapter must give each measurement a two-sided bound. The return time of a read bounds
+  its last sample only from above. The lower bound comes from a device counter read
+  between two mesh stamps, or from a stated maximum transfer latency. Decided by the
+  `time` builder (#84).
 
 ### 1.7 Transport
 

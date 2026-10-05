@@ -2,15 +2,16 @@
 //! device oscillator fits.
 //!
 //! Each time source gives [`Measurement`]s. A [`Filter`] keeps the recent ones of one
-//! source, and [`combine`] intersects the best of each source into one estimate. The
-//! crate never knows what a source is, and it reads no clock: the caller passes the
-//! local monotonic time.
+//! source, and [`combine`] intersects the best of each source into one estimate. A
+//! [`Fit`] keeps the overlap of every measurement of one device clock. The crate never
+//! knows what a source is, and it reads no clock: the caller passes the local time.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
 mod combine;
 mod drift;
 mod filter;
+mod fit;
 mod measurement;
 #[cfg(test)]
 mod world;
@@ -22,6 +23,7 @@ use types::time::Span;
 pub use combine::combine;
 pub use drift::Drift;
 pub use filter::Filter;
+pub use fit::Fit;
 pub use measurement::Measurement;
 
 /// Why an estimate failed.
@@ -42,6 +44,8 @@ pub enum Error {
         /// The rate in parts per billion.
         ppb: u32,
     },
+    /// A measurement shares no offset with a [`Fit`].
+    Disjoint,
     /// There are no measurements to combine.
     NoSources,
     /// No offset is inside the bounds of more than half of the sources.
@@ -64,6 +68,7 @@ impl fmt::Display for Error {
             Self::Drift { ppb } => {
                 write!(f, "drift {ppb} ppb is more than 100000000 ppb (10%)")
             }
+            Self::Disjoint => f.write_str("measurement shares no offset with the fit"),
             Self::NoSources => f.write_str("no time sources to combine"),
             Self::NoMajority { sources, agreeing } => write!(
                 f,

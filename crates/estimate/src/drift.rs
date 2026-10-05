@@ -29,6 +29,10 @@ impl Drift {
         Ok(Self(ppb))
     }
 
+    pub(crate) const fn ppb(self) -> u32 {
+        self.0
+    }
+
     /// The most that an offset can move in `elapsed_ns`, rounded up. It is at most a
     /// tenth of `u64::MAX`.
     pub(crate) fn over(self, elapsed_ns: u64) -> i64 {
