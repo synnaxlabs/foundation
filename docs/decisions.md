@@ -964,6 +964,19 @@ How to read this record:
   sends the commit and steps down. A node outside an uncommitted configuration still
   campaigns: the entry may be truncated, and a removed leader that lost its lead before
   the leave reached a peer is the only node that can win the election that commits it.
+- **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
+  files `log-0`, `log-1`, and so on of one directory. One write of `raft` is one
+  record: an 8-byte check (the first bytes of `types::digest::Digest::of` of the rest),
+  the format version (1, C9d), the record's number, the body length, and the body.
+  The body holds the hard state, when it changed, and the entries, so one sync makes
+  both durable; two slots for the hard state lost, because they need a second sync
+  and a second torn-write rule. A later record replaces the entries from its first
+  index. A file is 1 MiB, or the length of its first record when that is more, and a
+  record that does not fit starts the next file. At a restart the first place with no
+  good record is the end of the log, which a power cut can leave. A bad record with a
+  good later record after it is `Error::Corrupt`, and the node does not start. Nothing
+  trims the log until snapshots (#253). `mesh` depends on `block` for the blocks of
+  its file calls. Decided by `consensus`.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -2342,7 +2355,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
 | 2 | `blob` | Stores content by hash and fetches it from peers (spec chunks, binaries). | `env`, `types`, `block`, `wire`, `transport` |
 | 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
-| 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
+| 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `block`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
 | 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
 | 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home` |

@@ -14,4 +14,9 @@
     not(test),
     expect(dead_code, reason = "the driver of #471 is the first user")
 )]
+mod log;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the driver of #471 is the first user")
+)]
 mod region;
