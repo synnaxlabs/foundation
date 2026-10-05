@@ -41,7 +41,7 @@ mod error;
 mod message;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the QUIC carrier is the first user")
+    expect(dead_code, reason = "`Transport::new` is the first user")
 )]
 mod quic;
 mod session;

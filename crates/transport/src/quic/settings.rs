@@ -1,4 +1,5 @@
-//! What noq-proto gets from a [`Config`].
+//! What noq-proto gets from a [`Config`]. Every option that changes behavior is set
+//! by name, and every random value outside TLS comes from `Entropy`.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -9,53 +10,59 @@ use noq_proto::congestion::CubicConfig;
 use noq_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use noq_proto::crypto::{CryptoError, HandshakeTokenKey};
 use noq_proto::{
-    ClientConfig, ConnectionId, ConnectionIdGenerator, Endpoint, EndpointConfig,
-    IdleTimeout, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore, ServerConfig,
-    TimeSource, TransportConfig, ValidationTokenConfig, VarInt,
+    ClientConfig, ConnectionIdGenerator, Endpoint, EndpointConfig, IdleTimeout,
+    MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore, ServerConfig, TimeSource,
+    TransportConfig, ValidationTokenConfig, VarInt,
 };
 use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
+use super::cid;
 use crate::Config;
-use crate::tls::Tls;
-
-/// The bytes in every connection ID this node issues: the shard, then random bytes.
-const ID_BYTES: usize = 8;
+use crate::tls::{Epoch, Tls};
 
 const QUIC_V1: u32 = 1;
 
-/// One shard's noq-proto settings. Every option that changes behavior is set by
-/// name, and every random value outside TLS comes from `Entropy`.
+/// The smallest datagram QUIC allows. Every datagram is this size until MTU
+/// discovery finds a larger one.
+const MTU_MIN: u16 = 1200;
+
+/// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
+/// node takes.
+const PAYLOAD_IPV4: u16 = 1472;
+
+/// Ethernet's 1500 bytes less the IPv6 and UDP headers: the largest datagram MTU
+/// discovery tries, so it fits both IP versions.
+const PAYLOAD_IPV6: u16 = 1452;
+
+/// What each dial from one shard needs.
 pub(super) struct Settings {
-    endpoint: Arc<EndpointConfig>,
-    server: Arc<ServerConfig>,
     transport: Arc<TransportConfig>,
     tls: Tls,
     entropy: Entropy,
 }
 
 impl Settings {
-    /// The settings of `shard`, whose connection IDs all start with `shard`.
+    /// The settings of `shard`, and its endpoint, which accepts connections. Every
+    /// connection ID the endpoint issues starts with `shard`.
     ///
     /// # Panics
     ///
     /// When `config.idle` is not positive.
-    pub(super) fn new(config: &Config, shard: u8) -> Self {
+    pub(super) fn new(config: &Config, shard: u8) -> (Self, Endpoint) {
         let transport = Arc::new(transport(config));
         let tls = Tls::new(&config.private_key);
-        Self {
-            endpoint: Arc::new(endpoint(config, shard)),
-            server: Arc::new(server(&tls, Arc::clone(&transport))),
+        let server = Arc::new(server(&tls, Arc::clone(&transport)));
+        // `true`: `env::net` sets don't-fragment, so MTU discovery may run.
+        #[expect(clippy::disallowed_methods, reason = "the config sets rng_seed")]
+        let endpoint =
+            Endpoint::new(Arc::new(endpoint(config, shard)), Some(server), true);
+        let settings = Self {
             transport,
             tls,
             entropy: config.entropy.clone(),
-        }
-    }
-
-    /// A new endpoint that accepts connections.
-    pub(super) fn endpoint(&self) -> Endpoint {
-        let server = Some(Arc::clone(&self.server));
-        Endpoint::new(Arc::clone(&self.endpoint), server, true)
+        };
+        (settings, endpoint)
     }
 
     /// The settings for a dial that expects `expected`.
@@ -63,16 +70,16 @@ impl Settings {
         let crypto = QuicClientConfig::try_from(self.tls.client(expected))
             .expect("invariant: the TLS suites include AES-128-GCM");
         let entropy = self.entropy.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the config sets the first destination ID and the token store"
+        )]
         let mut client = ClientConfig::new(Arc::new(crypto));
         client
             .transport_config(Arc::clone(&self.transport))
             .token_store(Arc::new(NoneTokenStore))
             .version(QUIC_V1)
-            .initial_dst_cid_provider(Arc::new(move || {
-                let mut id = [0; ID_BYTES];
-                entropy.fill(&mut id);
-                ConnectionId::new(&id)
-            }));
+            .initial_dst_cid_provider(Arc::new(move || cid::random(&entropy)));
         client
     }
 }
@@ -80,13 +87,17 @@ impl Settings {
 fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
     let mut rng = [0; 32];
     config.entropy.fill(&mut rng);
-    let issuer = Issuer {
+    let issuer = cid::Issuer {
         shard,
         entropy: config.entropy.clone(),
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the config sets the ID generator and rng_seed"
+    )]
     let mut endpoint = EndpointConfig::new(Arc::new(reset_key(&config.private_key)));
     endpoint
-        .max_udp_payload_size(1472)
+        .max_udp_payload_size(PAYLOAD_IPV4)
         .expect("invariant: QUIC allows 1200 to 65527")
         .cid_generator(Arc::new(move || -> Box<dyn ConnectionIdGenerator> {
             Box::new(issuer.clone())
@@ -103,11 +114,19 @@ fn server(tls: &Tls, transport: Arc<TransportConfig>) -> ServerConfig {
         .expect("invariant: the TLS suites include AES-128-GCM");
     let mut tokens = ValidationTokenConfig::default();
     tokens.sent(0).log(Arc::new(NoneTokenLog));
+    #[expect(clippy::disallowed_methods, reason = "the config sets the time source")]
     let mut server = ServerConfig::new(Arc::new(crypto), Arc::new(NoTokens));
+    // Each `Incoming` is accepted when it arrives, so none waits for a slot and
+    // none buffers a datagram.
     server
         .transport_config(transport)
         .validation_token_config(tokens)
         .migration(true)
+        .preferred_address_v4(None)
+        .preferred_address_v6(None)
+        .max_incoming(1)
+        .incoming_buffer_size(0)
+        .incoming_buffer_size_total(0)
         .time_source(Arc::new(Epoch));
     server
 }
@@ -117,7 +136,7 @@ fn transport(config: &Config) -> TransportConfig {
     let window = VarInt::try_from(config.window_bytes).unwrap_or(VarInt::MAX);
     let streams = VarInt::from_u32(config.streams_max.get());
     let mut mtu = MtuDiscoveryConfig::default();
-    mtu.upper_bound(1452)
+    mtu.upper_bound(PAYLOAD_IPV6)
         .interval(Duration::from_secs(600))
         .black_hole_cooldown(Duration::from_secs(60))
         .minimum_change(20);
@@ -137,8 +156,8 @@ fn transport(config: &Config) -> TransportConfig {
         .packet_threshold(3)
         .time_threshold(9.0 / 8.0)
         .persistent_congestion_threshold(3)
-        .initial_mtu(1200)
-        .min_mtu(1200)
+        .initial_mtu(MTU_MIN)
+        .min_mtu(MTU_MIN)
         .mtu_discovery_config(Some(mtu))
         .pad_to_mtu(false)
         .enable_segmentation_offload(true)
@@ -163,7 +182,7 @@ fn idle_ms(idle: Span) -> u64 {
     let nanos = u64::try_from(idle.nanos())
         .ok()
         .filter(|&nanos| nanos > 0)
-        .unwrap_or_else(|| panic!("idle must be positive, not {idle:?}"));
+        .expect("invariant: Transport::new refuses a non-positive idle");
     nanos.div_ceil(1_000_000)
 }
 
@@ -176,29 +195,6 @@ fn reset_key(private_key: &PrivateKey) -> hmac::Key {
         .expand(&[b"stateless reset".as_slice()], hmac::HMAC_SHA256)
         .expect("invariant: an HMAC key is shorter than HKDF's limit")
         .into()
-}
-
-/// Issues this shard's connection IDs.
-#[derive(Clone)]
-struct Issuer {
-    shard: u8,
-    entropy: Entropy,
-}
-
-impl ConnectionIdGenerator for Issuer {
-    fn generate_cid(&mut self) -> ConnectionId {
-        let mut id = [self.shard; ID_BYTES];
-        self.entropy.fill(&mut id[1..]);
-        ConnectionId::new(&id)
-    }
-
-    fn cid_len(&self) -> usize {
-        ID_BYTES
-    }
-
-    fn cid_lifetime(&self) -> Option<Duration> {
-        None
-    }
 }
 
 /// A token key for an endpoint that sends no tokens: Retry and `NEW_TOKEN` are off.
@@ -214,9 +210,6 @@ impl HandshakeTokenKey for NoTokens {
     }
 }
 
-/// The wall time for tokens, which are off. Nothing else in noq-proto reads it.
-struct Epoch;
-
 impl TimeSource for Epoch {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH
@@ -225,9 +218,69 @@ impl TimeSource for Epoch {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::net::SocketAddr;
+
+    use bytes::BytesMut;
     use noq_proto::crypto::HmacKey;
+    use noq_proto::{ConnectionError, DatagramEvent, Dir, Event, FourTuple};
 
     use super::*;
+    use crate::quic::testing::{self, CLIENT_SHARD, Pair, SERVER_SHARD, Side};
+
+    /// The link delay each way in [`dial`].
+    const DELAY: Duration = Duration::from_millis(10);
+
+    /// A dial with an idle of 1 s, after `span`.
+    fn dial(shard: &testing::Shard, span: Duration) -> Pair {
+        let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+        pair.run(span);
+        pair
+    }
+
+    fn connected(side: &Side) -> bool {
+        let mut events = side.events.iter();
+        events.any(|(_, event)| matches!(event, Event::Connected))
+    }
+
+    /// When and why `side`'s connection ended.
+    fn lost(side: &Side) -> Option<(Duration, &ConnectionError)> {
+        side.events.iter().find_map(|(at, event)| match event {
+            Event::ConnectionLost { reason } => Some((*at, reason)),
+            _ => None,
+        })
+    }
+
+    /// Sends "ping" from the client on a new stream, and gives what the server reads.
+    fn ping(pair: &mut Pair) -> Vec<u8> {
+        let client = pair.client.connection();
+        let stream = client.streams().open(Dir::Uni).expect("a stream");
+        client.send_stream(stream).write(b"ping").expect("written");
+        client.send_stream(stream).finish().expect("finished");
+        pair.run(Duration::from_millis(100));
+        let server = pair.server.connection();
+        let stream = server.streams().accept(Dir::Uni).expect("a stream");
+        let mut receive = server.recv_stream(stream);
+        let mut chunks = receive.read(true).expect("readable");
+        let chunk = chunks.next(usize::MAX).expect("read").expect("a chunk");
+        chunk.bytes.to_vec()
+    }
+
+    /// The destination ID of a datagram's first packet, and its source ID when the
+    /// header is long.
+    fn ids(datagram: &[u8]) -> (&[u8], Option<&[u8]>) {
+        match datagram {
+            [form, _, _, _, _, length, rest @ ..] if form & 0x80 != 0 => {
+                let (destination, rest) = rest.split_at(usize::from(*length));
+                let [length, rest @ ..] = rest else {
+                    panic!("no source ID: {datagram:02x?}");
+                };
+                (destination, Some(&rest[..usize::from(*length)]))
+            }
+            [_, rest @ ..] => (&rest[..cid::LEN], None),
+            [] => panic!("an empty datagram"),
+        }
+    }
 
     mod reset_key {
         use super::*;
@@ -271,118 +324,214 @@ mod tests {
         }
     }
 
-    mod handshake {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        use std::num::NonZeroUsize;
-
-        use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
-        use bytes::BytesMut;
-        use noq_proto::{DatagramEvent, FourTuple};
-
+    mod dial {
         use super::*;
-        use crate::quic::testing;
 
-        const CLIENT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
-        const SERVER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2);
-
-        /// The destination and source IDs of a QUIC v1 long-header packet.
-        fn ids(datagram: &[u8]) -> (&[u8], &[u8]) {
-            let [form, 0, 0, 0, 1, length, rest @ ..] = datagram else {
-                panic!("not QUIC v1: {datagram:02x?}");
-            };
-            assert_eq!(form & 0x80, 0x80, "a long header");
-            let (destination, rest) = rest.split_at(usize::from(*length));
-            let [length, rest @ ..] = rest else {
-                panic!("no source ID: {datagram:02x?}");
-            };
-            (destination, &rest[..usize::from(*length)])
+        #[test]
+        fn carries_stream_data() {
+            testing::run(1, |shard| {
+                let mut pair = dial(shard, Duration::from_millis(100));
+                assert!(connected(&pair.client) && connected(&pair.server));
+                assert_eq!(ping(&mut pair), b"ping");
+            });
         }
 
-        /// Starts a dial from shard 3 to shard 5 in a run made from `value`, and gives
-        /// each side's first datagram.
-        fn first_datagrams(value: u64) -> (Vec<u8>, Vec<u8>) {
-            testing::run(value, |shard| {
-                let now = shard.clock.epoch();
-                let one = NonZeroUsize::MIN;
-                let server_key = PrivateKey([2; 32]);
-                let pair = Ed25519KeyPair::from_seed_unchecked(&server_key.0)
-                    .expect("32 bytes");
-                let expected =
-                    PublicKey(pair.public_key().as_ref().try_into().expect("32 bytes"));
-                let near = Settings::new(&shard.config(PrivateKey([1; 32])), 3);
-                let far = Settings::new(&shard.config(server_key), 5);
+        #[test]
+        fn lets_the_peer_open_streams_max_streams_of_each_kind() {
+            testing::run(1, |shard| {
+                let mut pair = dial(shard, Duration::from_millis(100));
+                let mut streams = pair.client.connection().streams();
+                for dir in [Dir::Bi, Dir::Uni] {
+                    let opened = (0..=testing::STREAMS_MAX)
+                        .map_while(|_| streams.open(dir))
+                        .count();
+                    let max = usize::try_from(testing::STREAMS_MAX).expect("fits");
+                    assert_eq!(opened, max, "{dir:?}");
+                }
+            });
+        }
 
-                let (_, mut outbound) = near
-                    .endpoint()
-                    .connect(now, near.client(expected), SERVER, "foundation")
-                    .expect("the dial starts");
-                let mut initial = Vec::new();
-                let sent = outbound
-                    .poll_transmit(now, one, &mut initial)
-                    .expect("an Initial");
-                assert_eq!((sent.destination, sent.size), (SERVER, initial.len()));
+        #[test]
+        fn pads_the_first_initial_to_the_minimum_mtu() {
+            testing::run(1, |shard| {
+                let pair = dial(shard, Duration::ZERO);
+                let (_, _, initial) = pair.client.sent.first().expect("an Initial");
+                assert_eq!(initial.len(), usize::from(MTU_MIN));
+            });
+        }
 
-                let mut listener = far.endpoint();
-                let mut response = Vec::new();
-                let event = listener.handle(
-                    now,
-                    FourTuple::new(CLIENT, None),
-                    None,
-                    BytesMut::from(initial.as_slice()),
-                    &mut response,
-                );
-                let Some(DatagramEvent::NewConnection(incoming)) = event else {
-                    panic!("the Initial starts no connection");
+        #[test]
+        fn keeps_the_connection_when_the_client_address_changes() {
+            testing::run(1, |shard| {
+                let mut pair = dial(shard, Duration::from_millis(100));
+                let moved = SocketAddr::new(testing::CLIENT.ip(), 3);
+                pair.client.address = moved;
+                assert_eq!(ping(&mut pair), b"ping");
+                let (_, to, _) = pair.server.sent.last().expect("a datagram");
+                assert_eq!(*to, moved);
+            });
+        }
+    }
+
+    mod ids {
+        use super::*;
+
+        #[test]
+        fn are_eight_bytes_and_start_with_the_issuing_shard() {
+            testing::run(1, |shard| {
+                let pair = dial(shard, Duration::from_millis(100));
+                let mut longs = 0;
+                for (_, _, datagram) in pair.client.sent.iter().chain(&pair.server.sent)
+                {
+                    if let (destination, Some(source)) = ids(datagram) {
+                        assert_eq!([destination.len(), source.len()], [cid::LEN; 2]);
+                        longs += 1;
+                    }
+                }
+                assert!(longs > 0, "no long header");
+                let random = ids(&pair.client.sent[0].2).0;
+                let issued = |side: &Side| -> Vec<u8> {
+                    let ids = side.sent.iter().map(|(_, _, datagram)| ids(datagram).0);
+                    ids.filter(|&id| id != random).map(|id| id[0]).collect()
                 };
-                let (_, mut inbound) = listener
-                    .accept(incoming, now, &mut response, None)
-                    .expect("the server accepts");
-                let mut reply = Vec::new();
-                let sent = inbound
-                    .poll_transmit(now, one, &mut reply)
-                    .expect("a reply");
-                assert_eq!((sent.destination, sent.size), (CLIENT, reply.len()));
-                (initial, reply)
+                let (to_server, to_client) =
+                    (issued(&pair.client), issued(&pair.server));
+                assert!(!to_server.is_empty() && !to_client.is_empty());
+                assert!(to_server.iter().all(|&shard| shard == SERVER_SHARD));
+                assert!(to_client.iter().all(|&shard| shard == CLIENT_SHARD));
+            });
+        }
+
+        #[test]
+        fn stay_the_same_for_the_whole_connection() {
+            testing::run(1, |shard| {
+                let pair = dial(shard, Duration::from_secs(10));
+                let short = |side: &Side| {
+                    let sent = side.sent.iter().map(|(_, _, datagram)| ids(datagram));
+                    let short = sent.filter_map(|(destination, source)| {
+                        source.is_none().then_some(destination.to_vec())
+                    });
+                    short.collect::<BTreeSet<_>>()
+                };
+                let to_client = short(&pair.server);
+                assert_eq!(to_client.len(), 1, "{to_client:02x?}");
+                let mut sent = pair
+                    .server
+                    .sent
+                    .iter()
+                    .map(|(_, _, datagram)| ids(datagram));
+                let issued =
+                    sent.find_map(|(_, source)| source).expect("a long header");
+                assert_eq!(short(&pair.client), BTreeSet::from([issued.to_vec()]));
+            });
+        }
+    }
+
+    mod replay {
+        use super::*;
+
+        /// What a run made from `value` shows outside encryption. For each datagram:
+        /// the sender's shard, when, the size, the header bits that are not
+        /// protected, and the destination ID.
+        fn trace(value: u64) -> Vec<(u8, Duration, usize, u8, Vec<u8>)> {
+            testing::run(value, |shard| {
+                let pair = dial(shard, Duration::from_secs(2));
+                let sides =
+                    [(CLIENT_SHARD, &pair.client), (SERVER_SHARD, &pair.server)];
+                let datagrams = sides.into_iter().flat_map(|(shard, side)| {
+                    side.sent
+                        .iter()
+                        .map(move |(at, _, datagram)| (shard, *at, datagram))
+                });
+                datagrams
+                    .map(|(shard, at, datagram)| {
+                        let bits = datagram[0] & 0xe0;
+                        (shard, at, datagram.len(), bits, ids(datagram).0.to_vec())
+                    })
+                    .collect()
             })
         }
 
         #[test]
-        fn pads_the_initial_to_the_minimum_mtu() {
-            let (initial, _) = first_datagrams(1);
-            assert!(initial.len() >= 1200, "{} bytes", initial.len());
-        }
-
-        #[test]
-        fn gives_ids_of_eight_bytes_that_start_with_the_shard() {
-            let (initial, reply) = first_datagrams(1);
-            let (destination, source) = ids(&initial);
-            assert_eq!(destination.len(), ID_BYTES, "{destination:?}");
-            assert_eq!(source.len(), ID_BYTES, "{source:?}");
-            assert_eq!(source[0], 3, "{source:?}");
-            let (back, server) = ids(&reply);
-            assert_eq!(back, source);
-            assert_eq!(server.len(), ID_BYTES, "{server:?}");
-            assert_eq!(server[0], 5, "{server:?}");
+        fn gives_one_trace_for_one_value() {
+            assert_eq!(trace(1), trace(1));
         }
 
         #[test]
         fn draws_every_id_from_entropy() {
-            let id_sets = |value| {
-                let (initial, reply) = first_datagrams(value);
-                let (destination, source) = ids(&initial);
-                let (_, server) = ids(&reply);
-                [destination, source, server].map(<[u8]>::to_vec)
+            let ids = |value| {
+                let trace = trace(value).into_iter();
+                trace.map(|(.., id)| id).collect::<BTreeSet<_>>()
             };
-            assert_eq!(id_sets(1), id_sets(1));
-            let (one, two) = (id_sets(1), id_sets(2));
-            for (a, b) in one.iter().zip(&two) {
-                assert_ne!(a, b);
-            }
+            let (one, two) = (ids(1), ids(2));
+            assert!(one.is_disjoint(&two), "{one:?} {two:?}");
+        }
+    }
+
+    mod versions {
+        use super::*;
+
+        #[test]
+        fn offers_only_quic_v1_to_a_peer_of_another_version() {
+            let versions = testing::run(1, |shard| {
+                let config = shard.config(PrivateKey([2; 32]), Span::SECOND);
+                let (_, mut endpoint) = Settings::new(&config, SERVER_SHARD);
+                let draft_29 = [0xff, 0, 0, 0x1d];
+                let len = u8::try_from(cid::LEN).expect("fits");
+                let id = [[len].as_slice(), &[1; cid::LEN]].concat();
+                let mut initial = [[0xc0].as_slice(), &draft_29, &id, &id].concat();
+                initial.resize(usize::from(MTU_MIN), 0);
+                let mut reply = Vec::new();
+                let event = endpoint.handle(
+                    shard.epoch(),
+                    FourTuple::new(testing::CLIENT, None),
+                    None,
+                    BytesMut::from(initial.as_slice()),
+                    &mut reply,
+                );
+                assert!(matches!(event, Some(DatagramEvent::Response(_))));
+                let (_, Some(_)) = ids(&reply) else {
+                    panic!("not a long header: {reply:02x?}");
+                };
+                let versions = &reply[1 + 4 + 1 + cid::LEN + 1 + cid::LEN..];
+                let versions = versions.chunks(4).map(|version| {
+                    u32::from_be_bytes(version.try_into().expect("4 bytes"))
+                });
+                versions
+                    .filter(|version| version & 0x0f0f_0f0f != 0x0a0a_0a0a)
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(versions, [QUIC_V1]);
         }
     }
 
     mod idle {
         use super::*;
+
+        #[test]
+        fn closes_the_connection_within_four_thirds_idle_after_the_peer_stops() {
+            let (silence, reason) = testing::run(1, |shard| {
+                let mut pair = dial(shard, Duration::from_millis(100));
+                pair.server.silent = true;
+                pair.run(Duration::from_secs(3));
+                let &(last, ..) = pair.server.sent.last().expect("a datagram");
+                let (at, reason) = lost(&pair.client).expect("the connection ends");
+                let silence = at.checked_sub(last + DELAY).expect("after it arrives");
+                (silence, reason.clone())
+            });
+            assert_eq!(reason, ConnectionError::TimedOut);
+            let idle = Duration::from_secs(1);
+            assert!(idle <= silence && silence <= idle * 4 / 3, "{silence:?}");
+        }
+
+        #[test]
+        fn keeps_a_quiet_connection_open() {
+            testing::run(1, |shard| {
+                let pair = dial(shard, Duration::from_secs(10));
+                assert_eq!(lost(&pair.client), None);
+                assert_eq!(lost(&pair.server), None);
+            });
+        }
 
         #[test]
         fn rounds_up_to_a_whole_millisecond() {
@@ -393,9 +542,64 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "idle must be positive, not")]
+        #[should_panic(
+            expected = "invariant: Transport::new refuses a non-positive idle"
+        )]
         fn panics_when_not_positive() {
             idle_ms(Span::from_nanos(0));
+        }
+    }
+
+    mod loss {
+        use super::*;
+
+        #[test]
+        fn sends_a_lost_packet_again_nine_eighths_of_a_round_trip_after_it_left() {
+            let sent = testing::run(1, |shard| {
+                let idle = Span::from_nanos(10 * Span::SECOND.nanos());
+                let mut pair = Pair::new(shard, idle, ROUND_TRIP / 2);
+                pair.run(Duration::from_secs(1));
+                let before = pair.client.sent.len();
+                pair.client.drops = 1;
+                let mut streams = pair.client.connection().streams();
+                let stream = streams.open(Dir::Uni).expect("a stream");
+                for _ in 0..2 {
+                    let mut send = pair.client.connection().send_stream(stream);
+                    send.write(&[0; 100]).expect("written");
+                    pair.run(Duration::ZERO);
+                }
+                pair.run(Duration::from_secs(1));
+                let sent = pair.client.sent[before..].iter();
+                sent.map(|&(at, ..)| at).take(3).collect::<Vec<_>>()
+            });
+            let [lost, next, again] = sent[..] else {
+                panic!("{sent:?}");
+            };
+            assert_eq!(lost, next);
+            // The peer reports its ACK delay in 8 µs units, rounded down, so the
+            // smoothed round trip can be up to 8 µs too long.
+            let resend = again.checked_sub(lost).expect("after the loss");
+            let expected = ROUND_TRIP * 9 / 8;
+            let late = Duration::from_micros(9);
+            assert!(expected <= resend && resend < expected + late, "{resend:?}");
+        }
+
+        const ROUND_TRIP: Duration = Duration::from_millis(125);
+    }
+
+    mod restart {
+        use super::*;
+
+        #[test]
+        fn resets_the_old_connection_at_its_next_datagram() {
+            let reason = testing::run(1, |shard| {
+                let mut pair = dial(shard, Duration::from_millis(100));
+                pair.restart(shard);
+                pair.run(Duration::from_secs(1));
+                let (_, reason) = lost(&pair.client).expect("the connection ends");
+                reason.clone()
+            });
+            assert_eq!(reason, ConnectionError::Reset);
         }
     }
 }
