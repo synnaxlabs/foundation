@@ -247,4 +247,26 @@ mod tests {
             check(&error, "config idle must be positive");
         }
     }
+
+    mod source {
+        use std::error::Error as _;
+
+        use super::*;
+
+        #[test]
+        fn of_a_pool_error_is_the_pool_error() {
+            let pool = block::Error::Exhausted {
+                requested: 10,
+                available: 4,
+            };
+            let error = Error::from(pool.clone());
+            let source = error.source().map(ToString::to_string);
+            assert_eq!(source, Some(pool.to_string()));
+        }
+
+        #[test]
+        fn of_other_errors_is_none() {
+            assert!(Error::TimedOut.source().is_none());
+        }
+    }
 }
