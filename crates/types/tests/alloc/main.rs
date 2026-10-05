@@ -56,6 +56,7 @@ fn main() {
             Some([2; 16].as_slice()),
             "entry 2 reads back"
         );
+        assert_eq!(frame.body().len(), 32, "the body views both series");
         let range = copy.range(0).expect("group 0 is present");
         copy.iter()
             .flat_map(|(_, bytes)| bytes)

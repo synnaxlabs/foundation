@@ -504,6 +504,15 @@ impl<'a> Tokens<'a> {
     }
 }
 
+/// The kind of the word that all of `text` reads as: [`Kind::Identifier`] or
+/// [`Kind::Reference`]. `None` when `text` reads as any other token, or as more than
+/// one.
+pub(crate) fn word(text: &str) -> Option<Kind> {
+    let token = Tokens::new(Source(0), text).ok()?.next();
+    (matches!(token.kind, Kind::Identifier | Kind::Reference) && token.text == text)
+        .then_some(token.kind)
+}
+
 /// Reports whether `c` can start an identifier.
 pub(crate) fn identifier_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3396b8fbea34aace29c408f0b13a98368811000d95f2e15ea30ab11bd266cf7a # shrinks to document = Document { attributes: Map([Attribute { key: "a", key_span: None, value: Value { kind: Call(Call { function: "a", function_span: None, arguments: [] }), span: None } }]), blocks: [] }

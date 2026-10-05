@@ -1,4 +1,4 @@
-//! Reads HCL files as Documents.
+//! Reads HCL files as Documents, and writes Documents as HCL files.
 //!
 //! Files hold data only: booleans, numbers, strings, lists, objects, names, function
 //! calls, attributes, and blocks. Each other HCL form is an error.
@@ -14,17 +14,19 @@
 mod arbitrary;
 mod lex;
 mod parse;
+mod write;
 
 use std::fmt;
 
 use document::Span;
 use document::diagnostic::{Code, Diagnostic};
-use document::encoding::DEPTH_MAX;
+use document::encoding::{DEPTH_MAX, TooDeep};
 use types::name::{self, Name};
 
 pub use parse::read;
+pub use write::write;
 
-/// A problem in HCL text.
+/// A problem in HCL text, or a part of a Document that HCL text cannot hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The text breaks the grammar.
@@ -73,10 +75,17 @@ pub enum Error {
         /// The length of the file.
         bytes: usize,
     },
+    /// A part of a Document that HCL text cannot hold, from [`write`].
+    Unwritable {
+        /// Where the part is, or `None` for a Document with no spans.
+        span: Option<Span>,
+        /// The part.
+        part: Unwritable,
+    },
 }
 
 impl Error {
-    /// Where the problem starts, to sort problems in source order.
+    /// Where the problem starts, to sort the problems from `read` in source order.
     fn offset(&self) -> u32 {
         match self {
             Self::Syntax { span, .. }
@@ -92,6 +101,9 @@ impl Error {
                     .start()
                     .offset
             }
+            Self::Unwritable { .. } => {
+                unreachable!("invariant: read gives no Unwritable")
+            }
         }
     }
 }
@@ -100,20 +112,17 @@ impl Error {
 /// diagnostic for [`Error::Document`].
 impl From<&Error> for Diagnostic {
     fn from(error: &Error) -> Self {
-        let (code, span, message, fix): (_, _, String, String) = match error {
-            Error::Syntax { span, expected } => (
+        match error {
+            Error::Syntax { span, expected } => Self::new(
                 SYNTAX,
-                span,
+                Some(*span),
                 format!("the file needs {expected} here"),
                 "Write it here, or correct the text before it".into(),
             ),
-            Error::Form { span, form } => {
-                let (code, message, fix) = form.explain();
-                (code, span, message.into(), fix.into())
-            }
-            Error::Name { span, .. } => (
+            Error::Form { span, form } => form.diagnostic(*span),
+            Error::Name { span, .. } => Self::new(
                 NAME,
-                span,
+                Some(*span),
                 "the reference is not a valid name".into(),
                 format!(
                     "Use segments of ASCII letters, digits, `_`, and `-`, split by \
@@ -121,36 +130,36 @@ impl From<&Error> for Diagnostic {
                     Name::MAX_BYTES
                 ),
             ),
-            Error::Number { span } => (
+            Error::Number { span } => Self::new(
                 NUMBER,
-                span,
+                Some(*span),
                 "the number is out of range".into(),
                 "Use an integer that fits in 128 bits, or a float that fits in 64 bits"
                     .into(),
             ),
-            Error::Escape { span } => (
+            Error::Escape { span } => Self::new(
                 ESCAPE,
-                span,
+                Some(*span),
                 "the string has an escape that HCL does not have".into(),
                 "Use `\\n`, `\\r`, `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or \
                  `\\UNNNNNNNN`"
                     .into(),
             ),
-            Error::TooDeep { span } => (
+            Error::TooDeep { span } => Self::new(
                 TOO_DEEP,
-                span,
+                Some(*span),
                 format!("the file nests deeper than {DEPTH_MAX} levels"),
                 "Make it flatter".into(),
             ),
-            Error::Document(error) => return Self::from(error),
-            Error::TooLarge { span, bytes } => (
+            Error::Document(error) => Self::from(error),
+            Error::TooLarge { span, bytes } => Self::new(
                 TOO_LARGE,
-                span,
+                Some(*span),
                 format!("the file has {bytes} bytes, and the limit is {}", u32::MAX),
                 "Split it into smaller files".into(),
             ),
-        };
-        Self::new(code, Some(*span), message, fix)
+            Error::Unwritable { span, part } => part.diagnostic(*span),
+        }
     }
 }
 
@@ -171,6 +180,10 @@ const NUMBER: Code = Code::new("hcl.number");
 const ESCAPE: Code = Code::new("hcl.escape");
 const TOO_DEEP: Code = Code::new("hcl.too-deep");
 const TOO_LARGE: Code = Code::new("hcl.too-large");
+const UNWRITABLE_KEY: Code = Code::new("hcl.unwritable-key");
+const UNWRITABLE_KEYWORD: Code = Code::new("hcl.unwritable-keyword");
+const UNWRITABLE_FUNCTION: Code = Code::new("hcl.unwritable-function");
+const UNWRITABLE_REFERENCE: Code = Code::new("hcl.unwritable-reference");
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -210,9 +223,8 @@ pub enum Form {
 }
 
 impl Form {
-    /// The code, the message, and the fix.
-    const fn explain(self) -> (Code, &'static str, &'static str) {
-        match self {
+    fn diagnostic(self, span: Span) -> Diagnostic {
+        let (code, message, fix) = match self {
             Self::Null => (
                 NULL,
                 "`null` does not exist in Foundation files",
@@ -269,7 +281,56 @@ impl Form {
                  digits do not exist in Foundation files",
                 "Write the key as a quoted string",
             ),
-        }
+        };
+        Diagnostic::new(code, Some(span), message.into(), fix.into())
+    }
+}
+
+/// A part of a Document that no HCL text reads back as the same part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unwritable {
+    /// A key of a body that is not an identifier, such as `my key`. HCL has no quoted
+    /// key in a body. A key in a map value can be any text.
+    Key,
+    /// A block keyword that is not an identifier.
+    Keyword,
+    /// A function name that is not an identifier.
+    Function,
+    /// A name that HCL does not read as a reference, such as `true`, `null`, `7a`, or
+    /// `-a`.
+    Reference,
+    /// A block or a value nested deeper than [`document::encoding::DEPTH_MAX`], which
+    /// [`read`] refuses.
+    Depth,
+}
+
+impl Unwritable {
+    fn diagnostic(self, span: Option<Span>) -> Diagnostic {
+        let (code, message, fix) = match self {
+            Self::Key => (
+                UNWRITABLE_KEY,
+                "a key of a body must be an identifier, such as `retry_limit`",
+                "Rename the key, or move it into a map value",
+            ),
+            Self::Keyword => (
+                UNWRITABLE_KEYWORD,
+                "a block keyword must be an identifier, such as `channel`",
+                "Rename the keyword",
+            ),
+            Self::Function => (
+                UNWRITABLE_FUNCTION,
+                "a function name must be an identifier, such as `secret`",
+                "Rename the function",
+            ),
+            Self::Reference => (
+                UNWRITABLE_REFERENCE,
+                "the name does not read as a reference in HCL",
+                "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, \
+                 or `null`",
+            ),
+            Self::Depth => return Diagnostic::from(&TooDeep { span }),
+        };
+        Diagnostic::new(code, span, message.into(), fix.into())
     }
 }
 
@@ -524,6 +585,67 @@ mod tests {
         ];
         for (error, code, message, fix) in cases {
             check(&error, code, &message, fix);
+        }
+    }
+
+    #[test]
+    fn each_unwritable_part_has_its_code_and_fix() {
+        let cases = [
+            (
+                Unwritable::Key,
+                "hcl.unwritable-key",
+                "a key of a body must be an identifier, such as `retry_limit`",
+                "Rename the key, or move it into a map value",
+            ),
+            (
+                Unwritable::Keyword,
+                "hcl.unwritable-keyword",
+                "a block keyword must be an identifier, such as `channel`",
+                "Rename the keyword",
+            ),
+            (
+                Unwritable::Function,
+                "hcl.unwritable-function",
+                "a function name must be an identifier, such as `secret`",
+                "Rename the function",
+            ),
+            (
+                Unwritable::Reference,
+                "hcl.unwritable-reference",
+                "the name does not read as a reference in HCL",
+                "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, \
+                 or `null`",
+            ),
+        ];
+        for (part, code, message, fix) in cases {
+            let error = Error::Unwritable {
+                span: Some(span(7)),
+                part,
+            };
+            check(&error, code, message, fix);
+            let error = Error::Unwritable { span: None, part };
+            assert_eq!(Diagnostic::from(&error).span, None, "{part:?}");
+        }
+    }
+
+    #[test]
+    fn a_document_too_deep_to_write_keeps_documents_diagnostic() {
+        for span in [Some(span(7)), None] {
+            let error = Error::Unwritable {
+                span,
+                part: Unwritable::Depth,
+            };
+            let expected = Diagnostic::new(
+                Code::new("document.too-deep"),
+                span,
+                "the document nests deeper than 64 levels".into(),
+                "Make it flatter".into(),
+            );
+            assert_eq!(Diagnostic::from(&error), expected);
+            assert_eq!(
+                error.to_string(),
+                "the document nests deeper than 64 levels. Make it flatter"
+            );
         }
     }
 
