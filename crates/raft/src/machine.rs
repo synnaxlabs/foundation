@@ -317,8 +317,8 @@ impl Raft {
     ///
     /// - [`Error::Misrouted`] when the message is for another node.
     /// - [`Error::Loopback`] when the message names this node as its sender.
-    /// - [`Error::SecondLeader`] when this node leads the message's term and the
-    ///   message is a heartbeat or an append.
+    /// - [`Error::SecondLeader`] when the message is a heartbeat or an append of this
+    ///   node's term from a node other than the leader it knows.
     /// - [`Error::EntryOutOfOrder`] when an append's entries do not follow its `prev`.
     /// - [`Error::NoVoters`] when an append carries a configuration with an empty
     ///   `incoming` set.
@@ -428,7 +428,8 @@ impl Raft {
         };
         match body {
             Body::Heartbeat { .. } | Body::Append { .. }
-                if term == self.term && self.role == Role::Leader =>
+                if term == self.term
+                    && self.leader.is_some_and(|leader| leader != from) =>
             {
                 Err(Error::SecondLeader { term, from })
             }
@@ -1350,6 +1351,58 @@ mod tests {
         }
 
         #[test]
+        fn rejects_a_second_leader_in_the_term_of_the_leader_it_follows() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.step(message(2, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            sent(&mut raft);
+            let entry = Entry {
+                at: Position {
+                    term: Term(1),
+                    index: 1,
+                },
+                data: Data::Voters(Voters {
+                    incoming: [key(1)].into_iter().collect(),
+                    ..Voters::default()
+                }),
+            };
+            let append = Body::Append {
+                prev: Position::default(),
+                entries: vec![entry],
+                commit: 0,
+            };
+            for body in [Body::Heartbeat { commit: 0 }, append] {
+                let err = raft.step(message(3, 1, body)).unwrap_err();
+                assert_eq!(
+                    err,
+                    Error::SecondLeader {
+                        term: Term(1),
+                        from: key(3)
+                    }
+                );
+                assert_eq!(
+                    err.to_string(),
+                    "node 00000000000000000000000000000003 also claims to lead term 1"
+                );
+            }
+            assert_eq!((raft.role(), raft.leader()), (Role::Follower, Some(key(2))));
+            let ready = raft.ready();
+            assert_eq!((ready.messages, ready.entries), (vec![], vec![]));
+            assert_eq!(
+                raft.step(message(2, 1, Body::Heartbeat { commit: 0 })),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn follows_the_first_leader_of_a_term_it_is_in() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            raft.step(message(3, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            assert_eq!((raft.role(), raft.leader()), (Role::Follower, Some(key(3))));
+        }
+
+        #[test]
         fn does_not_campaign_past_the_last_term() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             raft.step(message(9, u64::MAX, Body::Heartbeat { commit: 0 }))
@@ -2198,6 +2251,24 @@ mod tests {
 
     mod config {
         use super::*;
+
+        #[test]
+        fn a_leader_keeps_its_lead_when_it_adds_voters_late_in_a_quorum_period() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            tick_times(&mut raft, 9);
+            for from in [2, 3] {
+                raft.step(message(from, 1, Body::HeartbeatReply)).unwrap();
+            }
+            let joint = Voters {
+                incoming: [1, 4, 5].into_iter().map(key).collect(),
+                outgoing: [1, 2, 3].into_iter().map(key).collect(),
+            };
+            raft.propose_entry(Data::Voters(joint));
+            // Nodes 4 and 5 had one tick to answer a leader they did not know.
+            tick_times(&mut raft, 1);
+            assert_eq!(raft.role(), Role::Leader);
+        }
 
         fn voters(ids: &[u8]) -> Voters {
             Voters {
