@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask"]
+members = ["crates/*", "xtask", "bench/*"]
 exclude = ["docs"]
 
 [workspace.package]
@@ -16,7 +16,10 @@ crc32c = "0.6.8"
 divan = "0.1.21"
 loom = { version = "0.7.2", features = ["futures"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+noq = { version = "1.3.0", default-features = false }
 rustls = { version = "0.23.45", default-features = false, features = ["std", "aws_lc_rs"] }
+tokio = { version = "1.53.2", default-features = false }
+tokio-rustls = { version = "0.26.6", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
