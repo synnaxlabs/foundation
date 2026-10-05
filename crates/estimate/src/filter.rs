@@ -18,7 +18,7 @@ const CAPACITY: usize = 8;
 /// assert_eq!(best.map(|m| m.error()), Some(Span::MILLISECOND));
 /// # Ok::<(), estimate::Error>(())
 /// ```
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct Filter {
     recent: [Option<Measurement>; CAPACITY],
     oldest: usize,

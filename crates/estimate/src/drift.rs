@@ -2,7 +2,7 @@
 /// billion. An error bound grows by this rate as its measurement ages.
 ///
 /// ```
-/// assert_eq!(estimate::Drift::default().ppb(), 200_000);
+/// assert_eq!(estimate::Drift::default(), estimate::Drift::from_ppb(200_000));
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Drift(u32);
@@ -12,12 +12,6 @@ impl Drift {
     #[must_use]
     pub const fn from_ppb(ppb: u32) -> Self {
         Self(ppb)
-    }
-
-    /// The rate in parts per billion.
-    #[must_use]
-    pub const fn ppb(self) -> u32 {
-        self.0
     }
 
     /// The most that an offset can move in `elapsed_ns`, rounded up.

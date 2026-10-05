@@ -46,11 +46,10 @@ pub fn combine(
     // A low edge sorts before a high edge at the same offset, so bounds that only
     // touch still share that offset.
     edges.sort_unstable();
-    let agreeing = most_covered(&edges);
+    let (agreeing, low, high) = most_covered(&edges);
     if 2 * agreeing <= sources {
         return Err(Error::NoMajority { sources, agreeing });
     }
-    let (low, high) = hull_covered(&edges, agreeing);
     let offset = (low + high).div_euclid(2);
     let error = (high - offset).max(offset - low);
     Measurement::new(now, saturate(offset), saturate(error))
@@ -62,49 +61,27 @@ enum Edge {
     High,
 }
 
-/// The most bounds that share one offset.
-fn most_covered(edges: &[(i128, Edge)]) -> usize {
-    let mut covered = 0_usize;
-    let mut most = 0;
-    for &(_, edge) in edges {
-        match edge {
-            Edge::Low => {
-                covered += 1;
-                most = most.max(covered);
-            }
-            Edge::High => covered -= 1,
-        }
-    }
-    most
-}
-
-/// The lowest and highest offsets inside `agreeing` bounds.
-fn hull_covered(edges: &[(i128, Edge)], agreeing: usize) -> (i128, i128) {
-    let mut covered = 0_usize;
-    let mut low = None;
-    let mut high = None;
+/// The most bounds that share one offset, and the lowest and highest offsets inside
+/// that many bounds.
+fn most_covered(edges: &[(i128, Edge)]) -> (usize, i128, i128) {
+    let (mut covered, mut most, mut low, mut high) = (0, 0, 0, 0);
     for &(offset, edge) in edges {
         match edge {
             Edge::Low => {
                 covered += 1;
-                if covered == agreeing && low.is_none() {
-                    low = Some(offset);
+                if covered > most {
+                    (most, low) = (covered, offset);
                 }
             }
             Edge::High => {
-                if covered == agreeing {
-                    high = Some(offset);
+                if covered == most {
+                    high = offset;
                 }
                 covered -= 1;
             }
         }
     }
-    let (Some(low), Some(high)) = (low, high) else {
-        unreachable!(
-            "{agreeing} bounds share an offset, so it has a low and a high edge"
-        )
-    };
-    (low, high)
+    (most, low, high)
 }
 
 fn saturate(nanos: i128) -> Span {
