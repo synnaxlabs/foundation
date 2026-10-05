@@ -97,7 +97,8 @@ impl Opener {
         SealKey::new(bytes).expect("invariant: X25519 maps no key to small order")
     }
 
-    /// Opens `sealed` for the secret `name` at `version`.
+    /// Opens `sealed` for the secret `name` at `version`. Pass the version stored
+    /// with `sealed` in region state, never one from another source.
     ///
     /// # Errors
     ///
