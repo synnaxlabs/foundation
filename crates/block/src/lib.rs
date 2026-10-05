@@ -248,9 +248,9 @@ impl Pool {
     ///
     /// - [`Error::TooLarge`] when no block of the pool holds `len` bytes. It never
     ///   succeeds later.
-    /// - [`Error::Exhausted`] when the budget has no room for the block now, or the
-    ///   system refused memory for it. The sizes it gave back to make room stay
-    ///   given back.
+    /// - [`Error::Exhausted`] when the budget has no room for the block now.
+    /// - [`Error::Refused`] when the system refused memory for the block. The sizes
+    ///   the pool gave back to make room stay given back.
     pub fn alloc(&self, len: usize) -> Result<Unique, Error> {
         let index = class_of(len);
         if index >= self.classes.len() {
@@ -274,10 +274,7 @@ impl Pool {
             }
             let offset = self.span_start(index) + class.carved.get();
             if let Err(Refused) = self.shared().memory.commit(offset, size) {
-                return Err(Error::Exhausted {
-                    requested: len,
-                    available: 0,
-                });
+                return Err(Error::Refused { requested: len });
             }
             let carved = class.carved.get() + size;
             class.carved.set(carved);
@@ -700,14 +697,20 @@ impl Drop for Block {
 /// An error from a [`Pool`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The pool has no room for the request now: its budget is full, or the system
-    /// refused memory. A later request may succeed.
+    /// The budget has no room for the request now. A request after a block frees may
+    /// succeed.
     Exhausted {
         /// Bytes asked for.
         requested: usize,
-        /// Bytes the pool can commit now: the budget not committed, or 0 when the
-        /// system refused memory. A block of `requested` bytes needs more.
+        /// Bytes of the budget not committed. A block of `requested` bytes needs
+        /// more.
         available: usize,
+    },
+    /// The system refused memory that the budget has room for. A request may succeed
+    /// when the system has memory again.
+    Refused {
+        /// Bytes asked for.
+        requested: usize,
     },
     /// No block of the pool is large enough. The request can never succeed.
     TooLarge {
@@ -727,6 +730,10 @@ impl fmt::Display for Error {
             } => write!(
                 f,
                 "pool is full: asked for {requested} bytes, {available} bytes free"
+            ),
+            Self::Refused { requested } => write!(
+                f,
+                "the system refused memory for a block of {requested} bytes"
             ),
             Self::TooLarge { requested, largest } => write!(
                 f,
@@ -913,6 +920,10 @@ mod tests {
             requested,
             available,
         }
+    }
+
+    fn refused(requested: usize) -> Error {
+        Error::Refused { requested }
     }
 
     fn too_large(requested: usize, largest: usize) -> Error {
@@ -1148,10 +1159,10 @@ mod tests {
             let (pool, watch) = create_watched_pool(256);
             watch.refusing.store(true, Relaxed);
             let error = pool.alloc(10).expect_err("the system refuses memory");
-            assert_eq!(error, exhausted(10, 0));
+            assert_eq!(error, refused(10));
             assert_eq!(
                 error.to_string(),
-                "pool is full: asked for 10 bytes, 0 bytes free"
+                "the system refused memory for a block of 10 bytes"
             );
             assert_eq!(pool.committed(), 0);
             watch.refusing.store(false, Relaxed);
@@ -1227,7 +1238,7 @@ mod tests {
             pool.reclaim();
             watch.refusing.store(true, Relaxed);
             let error = pool.alloc(128).expect_err("the system refuses memory");
-            assert_eq!(error, exhausted(128, 0));
+            assert_eq!(error, refused(128));
             assert_eq!(pool.committed(), 0, "the idle class went back first");
             watch.refusing.store(false, Relaxed);
             let block = pool.alloc(128).expect("the system has memory again");
@@ -1567,7 +1578,7 @@ mod tests {
                                 prop_assert_eq!(error, exhausted(len, available));
                             } else {
                                 prop_assert!(refusing, "{error} with {room} room");
-                                prop_assert_eq!(error, exhausted(len, 0));
+                                prop_assert_eq!(error, refused(len));
                             }
                         }
                     }
