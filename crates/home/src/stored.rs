@@ -208,7 +208,7 @@ mod tests {
     use types::frame::{Draft, Path};
 
     use super::*;
-    use crate::common::pool;
+    use crate::common::{interner, key, pool};
 
     const SCALARS: [Scalar; 14] = [
         Scalar::Bool,
@@ -226,21 +226,6 @@ mod tests {
         Scalar::Span,
         Scalar::Uuid,
     ];
-
-    /// A key with the slot number in its first and last byte.
-    fn key(slot: Slot) -> channel::Key {
-        let bits = u128::from(slot.get());
-        channel::Key::from_u128(bits << 120 | bits)
-    }
-
-    /// An interner where `key(slot)` has `slot`, for each slot below 16.
-    fn interner() -> Interner {
-        let mut interner = Interner::new();
-        for n in 0..16 {
-            interner.slots().assign(key(Slot::new(n)));
-        }
-        interner
-    }
 
     /// A live frame of `set` in `form` with each present entry and its bytes, in
     /// entry order.

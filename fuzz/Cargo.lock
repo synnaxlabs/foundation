@@ -133,6 +133,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-modbus"
+version = "0.0.0"
+
+[[package]]
 name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -191,6 +195,7 @@ dependencies = [
  "buffer",
  "codec",
  "config-hcl",
+ "connector-modbus",
  "crc32c",
  "document",
  "env",
