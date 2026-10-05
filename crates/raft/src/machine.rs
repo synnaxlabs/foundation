@@ -416,7 +416,7 @@ impl Raft {
             .iter()
             .filter(|&(&key, peer)| {
                 !self.voters.contains(key)
-                    && (!leader || key == self.key || peer.progress.matched() >= leave)
+                    && (!leader || peer.progress.matched() >= leave)
             })
             .map(|(&key, _)| key)
             .collect();
@@ -2392,6 +2392,26 @@ mod tests {
             assert_eq!(to(&messages), [key(3)]);
             assert_eq!(messages[0].body, probe(at(1, 3)));
             assert_eq!(raft.role(), Role::Leader);
+        }
+
+        // A node readmitted just before a quorum check counts as heard at it.
+        #[test]
+        fn a_readmitted_node_survives_the_next_quorum_check() {
+            let mut raft = leader();
+            raft.propose_voters(set(&[1, 2, 4])).unwrap();
+            accept(&mut raft, &[2], 2);
+            accept(&mut raft, &[2, 3], 3);
+            tick_times(&mut raft, 9);
+            sent(&mut raft);
+            let last = Position {
+                term: Term(1),
+                index: 3,
+            };
+            raft.step(message(3, 2, Body::PreVote { last })).unwrap();
+            assert_eq!(to(&sent(&mut raft)), [key(3)]);
+            raft.tick(0);
+            assert_eq!(raft.role(), Role::Leader);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4)]);
         }
 
         // A follower that released node 4 leaves its PreVote to the leader.

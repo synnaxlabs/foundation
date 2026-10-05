@@ -118,7 +118,9 @@ state on `main`.
   placement. Not built (`spec`).
 - `raft` does not check the sender of a request, by decision: the caller
   authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
-  built (`mesh`). `raft` trusts each field of a message. Open: #232.
+  built (`mesh`). `raft` trusts each field of a message. Open: #232. A leased leader
+  takes a `PreVote` at its next term from any sender as a removed node that lacks
+  the commit of its leave, and replicates its log to it (RAFT VOTERS).
 - `raft` counts a reply only from a voter. But it takes a higher term from any
   sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
   #352 (a reply from a node that is not a voter makes the leader step down; one
