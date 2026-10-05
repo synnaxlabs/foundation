@@ -1,6 +1,6 @@
 use document::{Position, Source, Span};
 
-use crate::{Error, Expected, Form};
+use crate::{Error, Expected, Form, Unclosed};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Token<'a> {
@@ -14,10 +14,8 @@ pub(crate) struct Token<'a> {
 pub(crate) enum Kind {
     /// An [`identifier_start`], then [`identifier_part`]s.
     Identifier,
-    /// A word with `.` or `@`, which only a reference can be: identifier parts, `@`,
-    /// and dots, which `types::name` checks.
-    Reference,
-    /// Digits, then an optional fraction and an optional exponent.
+    /// A digit, then digits, dots, and exponents, as HCL scans a number. It can be
+    /// text that is not a number, such as `1.2.3`.
     Number,
     /// A quoted string, with its escapes read.
     String(Box<str>),
@@ -151,7 +149,10 @@ impl<'a> Tokens<'a> {
                 self.number();
                 Kind::Number
             }
-            c if identifier_start(c) || c == '@' => self.word(c),
+            c if identifier_start(c) => {
+                self.eat_while(identifier_part);
+                Kind::Identifier
+            }
             _ => Kind::Other,
         };
         Ok(self.token(kind, rest, start))
@@ -273,80 +274,60 @@ impl<'a> Tokens<'a> {
 
     fn block_comment(&mut self) -> Result<(), Error> {
         let start = self.at;
-        let end = self.rest.get(2..).and_then(|body| body.find("*/"));
-        if let Some(len) = end.and_then(|end| end.checked_add(4)) {
+        self.skip_bytes(2);
+        let opener = self.span(start);
+        if let Some(len) = self.rest.find("*/") {
             self.skip_bytes(len);
+            self.skip_bytes(2);
             Ok(())
         } else {
             self.skip_bytes(self.rest.len());
-            Err(Error::Syntax {
-                span: self.span(start),
-                expected: Expected::CommentEnd,
+            Err(Error::Unclosed {
+                span: self.span(self.at),
+                opener,
+                part: Unclosed::Comment,
             })
         }
     }
 
-    /// Moves past the rest of a number after its first digit.
+    /// Moves past the rest of a number after its first digit: digits, dots, and
+    /// exponents such as `e5` or `E-5`, up to the last that is not a dot.
     fn number(&mut self) {
         let bytes = self.rest.as_bytes();
-        let digits = |from: usize| {
-            let run = bytes.get(from..).map_or(0, |rest| {
-                rest.iter().take_while(|b| b.is_ascii_digit()).count()
-            });
-            from.saturating_add(run)
-        };
-        let mut len = digits(0);
-        let fraction = len.saturating_add(1);
-        if bytes.get(len) == Some(&b'.') && digits(fraction) > fraction {
-            len = digits(fraction);
-        }
-        if matches!(bytes.get(len), Some(b'e' | b'E')) {
-            let sign = len.saturating_add(1);
-            let start = sign.saturating_add(usize::from(matches!(
-                bytes.get(sign),
-                Some(b'+' | b'-')
-            )));
-            if digits(start) > start {
-                len = digits(start);
+        let (mut at, mut end) = (0, 0);
+        // Each pass moves past a part or returns.
+        for _ in 0..=bytes.len() {
+            let rest = bytes.get(at..).unwrap_or_default();
+            let len = match rest {
+                [b'0'..=b'9' | b'.', ..] => 1,
+                [b'e' | b'E', b'0'..=b'9', ..] => 2,
+                [b'e' | b'E', b'+' | b'-', b'0'..=b'9', ..] => 3,
+                _ => {
+                    self.skip_bytes(end);
+                    return;
+                }
+            };
+            at = at.saturating_add(len);
+            if rest.first() != Some(&b'.') {
+                end = at;
             }
         }
-        self.skip_bytes(len);
-    }
-
-    /// Moves past the rest of a word after its first character, `first`.
-    fn word(&mut self, first: char) -> Kind {
-        let rest = self.rest;
-        // A dot is part of the word unless it starts a splat or an expansion.
-        let dot = |i: usize| {
-            let after = rest.get(i..).unwrap_or_default();
-            !after.starts_with(".*") && !after.starts_with("...")
-        };
-        let len = rest
-            .char_indices()
-            .find(|&(i, c)| !(identifier_part(c) || c == '@' || c == '.' && dot(i)))
-            .map_or(rest.len(), |(i, _)| i);
-        let word = rest
-            .get(..len)
-            .expect("invariant: a word ends on a character boundary");
-        self.skip_bytes(len);
-        if first == '@' || word.contains(['.', '@']) {
-            Kind::Reference
-        } else {
-            Kind::Identifier
-        }
+        unreachable!("invariant: each pass moves past a part")
     }
 
     /// Reads a quoted string after its opening quote at `start`.
     fn string(&mut self, start: Position) -> Result<Box<str>, Error> {
+        let opener = self.span(start);
         let mut text = String::new();
         // Each pass moves past a character or returns.
         for _ in 0..=self.rest.len() {
             let at = self.at;
             match self.peek_in_line() {
                 None => {
-                    return Err(Error::Syntax {
-                        span: self.span(start),
-                        expected: Expected::Quote,
+                    return Err(Error::Unclosed {
+                        span: self.span(self.at),
+                        opener,
+                        part: Unclosed::String,
                     });
                 }
                 Some('"') => {
@@ -401,9 +382,10 @@ impl<'a> Tokens<'a> {
     fn heredoc(&mut self, start: Position) -> Result<Box<str>, Error> {
         let indented = self.eat('-');
         let marker = self.marker();
+        let opener = self.span(start);
         if marker.is_empty() || !self.eat_newline() {
             return Err(Error::Syntax {
-                span: self.span(start),
+                span: opener,
                 expected: Expected::HeredocStart,
             });
         }
@@ -422,9 +404,10 @@ impl<'a> Tokens<'a> {
             }
             match self.bump() {
                 None => {
-                    return Err(Error::Syntax {
-                        span: self.span(start),
-                        expected: Expected::HeredocEnd,
+                    return Err(Error::Unclosed {
+                        span: self.span(self.at),
+                        opener,
+                        part: Unclosed::Heredoc,
                     });
                 }
                 Some(c @ ('$' | '%')) => self.sigil(c, at, &mut text)?,
@@ -521,13 +504,10 @@ impl<'a> Tokens<'a> {
     }
 }
 
-/// The kind of the word that all of `text` reads as: [`Kind::Identifier`] or
-/// [`Kind::Reference`]. `None` when `text` reads as any other token, or as more than
-/// one.
-pub(crate) fn word(text: &str) -> Option<Kind> {
-    let token = Tokens::new(Source(0), text).ok()?.next();
-    (matches!(token.kind, Kind::Identifier | Kind::Reference) && token.text == text)
-        .then_some(token.kind)
+/// Reports whether all of `text` reads as one [`Kind::Identifier`].
+pub(crate) fn identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(identifier_start) && chars.all(identifier_part)
 }
 
 /// Reports whether `c` can start an identifier. HCL uses `ID_Start`, and the
@@ -607,27 +587,63 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ends_a_line_comment_before_its_line_end() {
-        let text = "# a\r\n// b\r\n";
+    /// The kind and text of each token of `text` before the end, through the first
+    /// error.
+    fn tokens(text: &str) -> Vec<(Kind, &str)> {
         let mut tokens = Tokens::new(Source(0), text).unwrap();
         let mut found = Vec::new();
         for _ in 0..=text.len() {
             let token = tokens.next();
-            let end = token.kind == Kind::End;
-            found.push((token.kind, token.text));
-            if end {
-                break;
+            match token.kind {
+                Kind::End => return found,
+                Kind::Error(_) => {
+                    found.push((token.kind, token.text));
+                    return found;
+                }
+                kind => found.push((kind, token.text)),
             }
         }
-        assert_eq!(
-            found,
-            [
-                (Kind::Newline, "\r\n"),
-                (Kind::Newline, "\r\n"),
-                (Kind::End, "")
-            ]
-        );
+        panic!("more tokens than bytes in {text:?}")
+    }
+
+    #[test]
+    fn scans_a_number_as_hcl_does() {
+        use Kind::{Dot, Ellipsis, Identifier, Number, Operator};
+        let cases: [(&str, &[(Kind, &str)]); 16] = [
+            ("1.5e3", &[(Number, "1.5e3")]),
+            ("1E5", &[(Number, "1E5")]),
+            ("1.e5", &[(Number, "1.e5")]),
+            ("1.E+5", &[(Number, "1.E+5")]),
+            ("0.e-5", &[(Number, "0.e-5")]),
+            ("1.2.3", &[(Number, "1.2.3")]),
+            ("1e5e5", &[(Number, "1e5e5")]),
+            ("1..5", &[(Number, "1..5")]),
+            ("1.e5.e5", &[(Number, "1.e5.e5")]),
+            ("1.", &[(Number, "1"), (Dot, ".")]),
+            ("1e5.", &[(Number, "1e5"), (Dot, ".")]),
+            ("1...", &[(Number, "1"), (Ellipsis, "...")]),
+            ("1e", &[(Number, "1"), (Identifier, "e")]),
+            ("1.e", &[(Number, "1"), (Dot, "."), (Identifier, "e")]),
+            (
+                "1.e+",
+                &[
+                    (Number, "1"),
+                    (Dot, "."),
+                    (Identifier, "e"),
+                    (Operator, "+"),
+                ],
+            ),
+            ("1.ex", &[(Number, "1"), (Dot, "."), (Identifier, "ex")]),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(tokens(text), expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn ends_a_line_comment_before_its_line_end() {
+        let expected = [(Kind::Newline, "\r\n"), (Kind::Newline, "\r\n")];
+        assert_eq!(tokens("# a\r\n// b\r\n"), expected);
     }
 
     #[test]

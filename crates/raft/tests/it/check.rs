@@ -4,9 +4,11 @@
 
 use proptest::prelude::*;
 use proptest::sample::Index;
-use raft::{Body, Data, Entry, Message, Position, Ready, Term, Voters};
+use raft::{Body, Data, Entry, Message, Position, Raft, Ready, Term, Voters};
 
-use crate::network::{Network, run};
+use types::node;
+
+use crate::network::{Action, Network, run};
 
 const CASES: u32 = 2000;
 
@@ -51,39 +53,82 @@ fn body() -> impl Strategy<Value = Body> {
     ]
 }
 
+// The node at `to` after `run`, its last log position, and the key of `from`,
+// which ranges one past the nodes, so a stranger sends too.
+fn receiver(
+    (logs, actions): &(Vec<Position>, Vec<Action>),
+    to: Index,
+    from: Index,
+) -> Result<(Raft, Position, node::Key), TestCaseError> {
+    let mut network = Network::new(logs, 0);
+    for action in actions {
+        network.apply(action);
+    }
+    let nodes = network.nodes.len();
+    let (to, from) = (to.index(nodes), from.index(nodes + 1));
+    if from == to {
+        return Err(TestCaseError::reject("a node does not send to itself"));
+    }
+    let mut raft = network.nodes.swap_remove(to);
+    let pending = raft.ready().entries;
+    let last = pending
+        .last()
+        .map_or_else(|| network.disks[to].last(), |entry| entry.at);
+    Ok((raft, last, Network::key(from)))
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(CASES))]
 
-    // `from` ranges one past the nodes, so a stranger sends too.
     #[test]
     fn a_refused_message_changes_nothing(
-        (logs, actions) in run(),
+        run in run(),
         to in any::<Index>(),
         from in any::<Index>(),
         term in edge(),
         body in body(),
     ) {
-        let mut network = Network::new(&logs, 0);
-        for action in &actions {
-            network.apply(action);
-        }
-        let nodes = network.nodes.len();
-        let to = to.index(nodes);
-        let from = from.index(nodes + 1);
-        prop_assume!(from != to);
-        let raft = &mut network.nodes[to];
+        let (mut raft, _, from) = receiver(&run, to, from)?;
         let (hard, role, leader) = (raft.hard(), raft.role(), raft.leader());
-        let _pending = raft.ready();
-        let message = Message {
-            from: Network::key(from),
-            to: Network::key(to),
-            term: Term(term),
-            body,
-        };
+        let message = Message { from, to: raft.key(), term: Term(term), body };
         if raft.step(message).is_err() {
             let after = (raft.hard(), raft.role(), raft.leader());
             prop_assert_eq!(after, (hard, role, leader));
             prop_assert_eq!(raft.ready(), Ready::default());
+        }
+    }
+
+    // A `Ready` writes no entry above its `hard` term, so a crash between the two
+    // writes leaves the stored term at most one `Ready` behind the log. The append
+    // follows the node's log, and its entry terms rise from the last one.
+    #[test]
+    fn a_node_writes_no_entry_above_its_term(
+        run in run(),
+        to in any::<Index>(),
+        from in any::<Index>(),
+        ahead in 0..3u64,
+        rises in prop::collection::vec(0..3u64, 1..4),
+    ) {
+        let (mut raft, prev, from) = receiver(&run, to, from)?;
+        let mut at = prev;
+        let entries = rises
+            .iter()
+            .map(|rise| {
+                at = Position {
+                    term: Term(at.term.0.saturating_add(*rise).max(1)),
+                    index: at.index.saturating_add(1),
+                };
+                Entry { at, data: Data::Empty }
+            })
+            .collect();
+        let body = Body::Append { prev, entries, commit: 0 };
+        let term = Term(raft.term().0.saturating_add(ahead));
+        let message = Message { from, to: raft.key(), term, body };
+        if raft.step(message).is_ok() {
+            let term = raft.hard().term;
+            for entry in raft.ready().entries {
+                prop_assert!(entry.at.term <= term, "{entry:?} above term {term:?}");
+            }
         }
     }
 }

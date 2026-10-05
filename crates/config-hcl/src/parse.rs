@@ -4,18 +4,19 @@ use document::{Attribute, Block, Document, Label, Map, Source, Span};
 use types::name::Name;
 
 use crate::lex::{self, Token, Tokens};
-use crate::{Error, Expected, Form};
+use crate::{Error, Expected, Form, Number};
 
 /// Reads HCL text as a Document. Each key, keyword, label, function name, and value
-/// has a span in `source`. A heredoc's lines end in `\n`, whatever the file uses. An
-/// integer key in an object reads as HCL reads it: its digits without leading zeros,
-/// after a `-` if it has one.
+/// has a span in `source`. A number written with digits only reads as an exact
+/// integer, and any other number as a float. A heredoc's lines end in `\n`, whatever
+/// the file uses. An integer key in an object reads as HCL reads it: its digits
+/// without leading zeros, after a `-` if it has one.
 ///
 /// # Errors
 ///
-/// Returns each problem found, in source order. A syntax error, a string escape that
-/// HCL does not have, a template, or nesting past the limit stops reading, so it is
-/// the last one.
+/// Returns each problem found, in source order. A syntax error, an unclosed string,
+/// heredoc, or comment, a string escape that HCL does not have, a template, or nesting
+/// past the limit stops reading, so it is the last one.
 pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut tokens = Tokens::new(source, text).map_err(|error| vec![error])?;
     let token = tokens.next();
@@ -39,7 +40,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
 
 /// What ends an item, besides a close bracket at its level and the end of the text.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Ends {
+enum Ends {
     /// A `,` or a new line, as in a body or an object.
     Line,
     /// A `,`, as in a list or a call.
@@ -203,9 +204,7 @@ impl<'a> Parser<'a> {
         }
         let token = self.take()?;
         let kind = match token.kind {
-            lex::Kind::Identifier | lex::Kind::Reference => {
-                return self.word(&token, depth);
-            }
+            lex::Kind::Identifier => return self.identifier(&token, depth),
             lex::Kind::Number => return Ok(self.number(&token, None)),
             lex::Kind::Minus if self.token.kind == lex::Kind::Number => {
                 let digits = self.take()?;
@@ -231,7 +230,7 @@ impl<'a> Parser<'a> {
     fn leading_form(&self) -> Option<Form> {
         match self.token.kind {
             lex::Kind::Operator | lex::Kind::Star => Some(Form::Operator),
-            lex::Kind::Minus if self.after().kind != lex::Kind::Number => {
+            lex::Kind::Minus if self.second_past_lines().kind != lex::Kind::Number => {
                 Some(Form::Operator)
             }
             lex::Kind::OpenParenthesis => Some(Form::Parentheses),
@@ -247,11 +246,20 @@ impl<'a> Parser<'a> {
             }
             lex::Kind::Question => Some(Form::Conditional),
             lex::Kind::OpenBracket | lex::Kind::Dot
-                if self.after().kind == lex::Kind::Star =>
+                if self.second_past_lines().kind == lex::Kind::Star =>
             {
                 Some(Form::Splat)
             }
-            lex::Kind::OpenBracket | lex::Kind::Dot => Some(Form::Index),
+            lex::Kind::OpenBracket => Some(Form::Index),
+            // HCL reads a number after `.` as an index, and refuses any other token.
+            lex::Kind::Dot
+                if matches!(
+                    self.second().kind,
+                    lex::Kind::Identifier | lex::Kind::Number
+                ) =>
+            {
+                Some(Form::Index)
+            }
             lex::Kind::DoubleColon => Some(Form::Namespace),
             lex::Kind::Ellipsis => Some(Form::Expansion),
             _ => None,
@@ -260,23 +268,24 @@ impl<'a> Parser<'a> {
 
     /// Refuses a `for` expression at the start of a list or an object.
     fn refuse_for(&mut self) -> Result<(), Error> {
-        if matches!(
-            self.token.kind,
-            lex::Kind::Identifier | lex::Kind::Reference
-        ) && opens_for(self.token.text)
-        {
+        if self.token.kind == lex::Kind::Identifier && opens_for(self.token.text) {
             self.refuse(Form::For, Ends::Close)?;
         }
         Ok(())
     }
 
-    /// Keeps the problem of `form` at the next token, then moves past the rest of the
-    /// item to the token that ends it, and leaves that token.
+    /// Keeps the problem of `form` at the next token, then skips the item.
     fn refuse(&mut self, form: Form, ends: Ends) -> Result<(), Error> {
         self.errors.push(Error::Form {
             span: self.token.span,
             form,
         });
+        self.skip_item(ends)
+    }
+
+    /// Moves past the rest of the item to the token that ends it, and leaves that
+    /// token.
+    fn skip_item(&mut self, ends: Ends) -> Result<(), Error> {
         let mut depth = 0usize;
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
@@ -303,69 +312,79 @@ impl<'a> Parser<'a> {
         unreachable!("invariant: each pass takes a token")
     }
 
-    fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
-        if self.token.kind == lex::Kind::OpenParenthesis
-            && word.kind == lex::Kind::Identifier
-        {
-            return self.call(word, depth).map(Some);
+    /// Reads the value that starts with `first`: a call, a literal, or a reference.
+    fn identifier(
+        &mut self,
+        first: &Token<'a>,
+        depth: usize,
+    ) -> Result<Option<Value>, Error> {
+        if self.token.kind == lex::Kind::OpenParenthesis {
+            return self.call(first, depth).map(Some);
         }
         if self.token.kind == lex::Kind::DoubleColon {
             // A namespace, not a name: `value` refuses its form.
             return Ok(None);
         }
-        let kind = match literal(word.text) {
+        let kind = match literal(first.text) {
             Some(Literal::Bool(b)) => value::Kind::Bool(b),
             Some(Literal::Null) => {
                 self.errors.push(Error::Form {
-                    span: word.span,
+                    span: first.span,
                     form: Form::Null,
                 });
                 return Ok(None);
             }
-            None => match word.text.parse::<Name>() {
-                Ok(name) => value::Kind::Reference(name),
-                Err(error) => {
-                    self.errors.push(Error::Name {
-                        span: word.span,
-                        error,
-                    });
-                    return Ok(None);
-                }
-            },
+            None => return self.reference(first),
         };
         Ok(Some(Value {
             kind,
-            span: Some(word.span),
+            span: Some(first.span),
         }))
     }
 
+    /// Reads a reference from its first part: each `.` and identifier after it.
+    fn reference(&mut self, first: &Token<'a>) -> Result<Option<Value>, Error> {
+        let mut text = String::from(first.text);
+        let mut span = first.span;
+        // Each pass takes two tokens or returns.
+        for _ in 0..=self.len {
+            if self.token.kind != lex::Kind::Dot
+                || self.second().kind != lex::Kind::Identifier
+            {
+                return match text.parse::<Name>() {
+                    Ok(name) => Ok(Some(Value {
+                        kind: value::Kind::Reference(name),
+                        span: Some(span),
+                    })),
+                    Err(error) => {
+                        self.errors.push(Error::Name { span, error });
+                        Ok(None)
+                    }
+                };
+            }
+            self.take()?;
+            let part = self.take()?;
+            text.push('.');
+            text.push_str(part.text);
+            span = join(span, part.span);
+        }
+        unreachable!("invariant: each pass takes two tokens")
+    }
+
     /// Reads a number, after its minus sign if `minus` holds the sign's span. Returns
-    /// `None` when the number is out of range.
+    /// `None` when the number has a problem, after it keeps the problem.
     fn number(&mut self, digits: &Token<'a>, minus: Option<Span>) -> Option<Value> {
         let span = minus.map_or(digits.span, |minus| join(minus, digits.span));
-        let kind = if digits.text.bytes().all(|b| b.is_ascii_digit()) {
-            let magnitude = digits.text.parse::<u128>().ok();
-            magnitude
-                .and_then(|n| match minus {
-                    Some(_) => 0i128.checked_sub_unsigned(n),
-                    None => i128::try_from(n).ok(),
-                })
-                .map(value::Kind::Integer)
-        } else {
-            let float = digits.text.parse::<f64>().ok();
-            float
-                .filter(|&f| f != 0.0 || !significant(digits.text))
-                .map(|f| if minus.is_some() { -f } else { f })
-                .and_then(Float::new)
-                .map(value::Kind::Float)
-        };
-        if kind.is_none() {
-            self.errors.push(Error::Number { span });
+        match read_number(digits.text, minus.is_some()) {
+            Ok(kind) => Some(Value {
+                kind,
+                span: Some(span),
+            }),
+            Err(problem) => {
+                self.errors.push(Error::Number { span, problem });
+                None
+            }
         }
-        kind.map(|kind| Value {
-            kind,
-            span: Some(span),
-        })
     }
 
     fn list(&mut self, depth: usize) -> Result<Value, Error> {
@@ -466,8 +485,9 @@ impl<'a> Parser<'a> {
 
     /// Reads an object key, where no HCL form starts: a string, an identifier, or an
     /// integer, which reads as HCL reads it: its digits without leading zeros, after a
-    /// `-` if it has one. Returns `None` for a number that HCL rounds, after it keeps
-    /// the problem and moves past the entry. Any other token is `Expected::Key`.
+    /// `-` if it has one. Returns `None` for a number that HCL rounds or refuses, after
+    /// it keeps the problem and moves past the entry. Any other token is
+    /// `Expected::Key`.
     fn key(&mut self) -> Result<Option<(Box<str>, Span)>, Error> {
         if matches!(
             self.token.kind,
@@ -484,6 +504,16 @@ impl<'a> Parser<'a> {
         };
         if self.token.kind != lex::Kind::Number {
             return Err(self.syntax(Expected::Key));
+        }
+        if malformed(self.token.text) {
+            let span = self.token.span;
+            let span = minus.map_or(span, |minus| join(minus.span, span));
+            self.errors.push(Error::Number {
+                span,
+                problem: Number::Malformed,
+            });
+            self.skip_item(Ends::Line)?;
+            return Ok(None);
         }
         let Some(digits) = integer_key(self.token.text) else {
             self.refuse(Form::NumberKey, Ends::Line)?;
@@ -582,16 +612,17 @@ impl<'a> Parser<'a> {
             "invariant: no rule takes the end, at {:?}",
             self.token.span
         );
-        let next = if self.newlines_skipped {
-            self.tokens.next_past_lines()
-        } else {
-            self.tokens.next()
-        };
-        Ok(std::mem::replace(&mut self.token, next))
+        let token = next(&mut self.tokens, self.newlines_skipped);
+        Ok(std::mem::replace(&mut self.token, token))
+    }
+
+    /// The token after the next one, as [`Parser::take`] reads it.
+    fn second(&self) -> Token<'a> {
+        next(&mut self.tokens.clone(), self.newlines_skipped)
     }
 
     /// The first token after the next one that is not a new line.
-    fn after(&self) -> Token<'a> {
+    fn second_past_lines(&self) -> Token<'a> {
         self.tokens.clone().next_past_lines()
     }
 
@@ -607,22 +638,40 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// A word that reads as a value, not as a reference.
+/// The next token of `tokens`, past new lines when `newlines_skipped` holds.
+fn next<'a>(tokens: &mut Tokens<'a>, newlines_skipped: bool) -> Token<'a> {
+    if newlines_skipped {
+        tokens.next_past_lines()
+    } else {
+        tokens.next()
+    }
+}
+
+/// An identifier that reads as a value, not as a reference.
 pub(crate) enum Literal {
     Bool(bool),
     Null,
 }
 
-/// Reports whether HCL reads `word` after `[` or `{` as the start of a `for`
-/// expression. The lexer reads `for.x` as one word, and HCL decides on its first
-/// part.
-pub(crate) fn opens_for(word: &str) -> bool {
-    word.split('.').next() == Some("for")
+/// Reports whether HCL reads `identifier` after `[` or `{` as the start of a `for`
+/// expression.
+pub(crate) fn opens_for(identifier: &str) -> bool {
+    identifier == "for"
 }
 
-/// The value that `word` reads as by itself, or `None` for a reference.
-pub(crate) fn literal(word: &str) -> Option<Literal> {
-    match word {
+/// Reports whether HCL reads `name`, as written, as one reference: each segment is an
+/// identifier, and the first is not a literal.
+pub(crate) fn reference(name: &Name) -> bool {
+    let mut segments = name.segments();
+    segments
+        .next()
+        .is_some_and(|first| literal(first).is_none())
+        && name.segments().all(lex::identifier)
+}
+
+/// The value that `identifier` reads as by itself, or `None` for a reference.
+pub(crate) fn literal(identifier: &str) -> Option<Literal> {
+    match identifier {
         "true" => Some(Literal::Bool(true)),
         "false" => Some(Literal::Bool(false)),
         "null" => Some(Literal::Null),
@@ -660,6 +709,47 @@ fn text(token: Token<'_>) -> Box<str> {
     }
 }
 
+/// The value of a number token, negated when `negative`.
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`f64` parses each number token that is not malformed"
+)]
+fn read_number(text: &str, negative: bool) -> Result<value::Kind, Number> {
+    if malformed(text) {
+        return Err(Number::Malformed);
+    }
+    if text.bytes().all(|b| b.is_ascii_digit()) {
+        let magnitude = text.parse::<u128>().ok();
+        return magnitude
+            .and_then(|n| {
+                if negative {
+                    0i128.checked_sub_unsigned(n)
+                } else {
+                    i128::try_from(n).ok()
+                }
+            })
+            .map(value::Kind::Integer)
+            .ok_or(Number::Range);
+    }
+    let float: f64 = text
+        .parse()
+        .expect("invariant: a number token that is not malformed is a float");
+    Some(float)
+        .filter(|&f| f != 0.0 || !significant(text))
+        .map(|f| if negative { -f } else { f })
+        .and_then(Float::new)
+        .map(value::Kind::Float)
+        .ok_or(Number::Range)
+}
+
+/// Reports whether the text of a number token is not a number: it has two dots, two
+/// exponents, a dot in its exponent, or an exponent outside `i64`. HCL refuses each,
+/// even on zero.
+fn malformed(text: &str) -> bool {
+    let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
+    mantissa.matches('.').nth(1).is_some() || exponent.parse::<i64>().is_err()
+}
+
 /// Reports whether the digits of a float before its exponent are not all zero.
 fn significant(digits: &str) -> bool {
     digits
@@ -682,8 +772,9 @@ fn join(start: Span, end: Span) -> Span {
 mod tests {
     use super::*;
     use crate::arbitrary::document;
-    use crate::write;
+    use crate::{Unclosed, write};
     use document::Position;
+    use document::diagnostic::{Diagnostic, Note};
     use proptest::prelude::*;
 
     fn at(offset: u32, line: u32, column: u32) -> Position {
@@ -828,7 +919,9 @@ mod tests {
 
         #[test]
         fn reads_floats() {
-            let text = "a = 1.5\nb = -0.25\nc = 1e3\nd = 2.5E-3\ne = -0.0\nf = 1e+2\n";
+            let text = "a = 1.5\nb = -0.25\nc = 1e3\nd = 2.5E-3\ne = -0.0\nf = 1e+2\n\
+                        g = 1.e5\nh = 1.E+5\ni = 0.e5\nj = -1.e-2\n\
+                        k = 0e9223372036854775807\nl = 0.e-9223372036854775808\n";
             let expected = attributes(vec![
                 ("a", float(1.5)),
                 ("b", float(-0.25)),
@@ -836,6 +929,12 @@ mod tests {
                 ("d", float(0.0025)),
                 ("e", float(0.0)),
                 ("f", float(100.0)),
+                ("g", float(100_000.0)),
+                ("h", float(100_000.0)),
+                ("i", float(0.0)),
+                ("j", float(-0.01)),
+                ("k", float(0.0)),
+                ("l", float(0.0)),
             ]);
             assert_eq!(ok(text), expected);
         }
@@ -856,14 +955,39 @@ c = "°C # not a comment"
 
         #[test]
         fn reads_references() {
-            let text = "a = site_a.pt_1\nb = site_a.1\nc = @system.x\nd = a-b.c-d\n";
+            let text = "a = site_a.pt_1\nb = a-b.c-d\nc = x.true.for\n";
             let expected = attributes(vec![
                 ("a", reference("site_a.pt_1")),
-                ("b", reference("site_a.1")),
-                ("c", reference("@system.x")),
-                ("d", reference("a-b.c-d")),
+                ("b", reference("a-b.c-d")),
+                ("c", reference("x.true.for")),
             ]);
             assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_a_reference_past_spaces_and_bracketed_new_lines_as_hcl_does() {
+            let first = |document: Document| {
+                let value = document.attributes.iter().next().unwrap().value.clone();
+                match value.kind {
+                    value::Kind::List(items) => items.into_iter().next().unwrap(),
+                    value::Kind::Call(call) => {
+                        call.arguments.into_iter().next().unwrap()
+                    }
+                    _ => value,
+                }
+            };
+            let cases = [
+                ("a = x . b\n", on(4, 9)),
+                ("a = [x\n.b]\n", span(at(5, 0, 5), at(9, 1, 2))),
+                ("a = [x.\nb]\n", span(at(5, 0, 5), at(9, 1, 1))),
+                ("a = [x\n# c\n.\n\nb]\n", span(at(5, 0, 5), at(15, 4, 1))),
+                ("a = f(x.\nb)\n", span(at(6, 0, 6), at(10, 1, 1))),
+            ];
+            for (text, span) in cases {
+                let value = first(ok(text));
+                assert_eq!(value.kind, reference("x.b"), "{text:?}");
+                assert_eq!(value.span, Some(span), "{text:?}");
+            }
         }
 
         #[test]
@@ -1414,18 +1538,22 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn refuses_a_heredoc_that_does_not_end() {
+        fn points_an_unclosed_heredoc_at_the_end_of_the_text() {
             let cases = [
-                ("a = <<EOT\n", at(10, 1, 0)),
-                ("a = <<EOT\nx", at(11, 1, 1)),
-                ("a = <<EOT\nx\n", at(12, 2, 0)),
-                ("a = <<EOT\nEOTX\nEOT x\n", at(21, 3, 0)),
-                ("a = <<-EOT\n  x\n  eot\n", at(21, 3, 0)),
-                ("a = <<EOT\nx\nEOT\r", at(16, 2, 4)),
+                ("a = <<EOT\n", at(10, 1, 0), on(4, 9)),
+                ("a = <<EOT\nx", at(11, 1, 1), on(4, 9)),
+                ("a = <<EOT\nx\n", at(12, 2, 0), on(4, 9)),
+                ("a = <<EOT\nEOTX\nEOT x\n", at(21, 3, 0), on(4, 9)),
+                ("a = <<-EOT\n  x\n  eot\n", at(21, 3, 0), on(4, 10)),
+                ("a = <<EOT\nx\nEOT\r", at(16, 2, 4), on(4, 9)),
             ];
-            for (text, end) in cases {
-                let open = syntax(span(at(4, 0, 4), end), Expected::HeredocEnd);
-                check(text, &[(open, &needs(END))]);
+            for (text, end, opener) in cases {
+                let unclosed = Error::Unclosed {
+                    span: span(end, end),
+                    opener,
+                    part: Unclosed::Heredoc,
+                };
+                check(text, &[(unclosed, &needs(END))]);
             }
         }
 
@@ -1556,6 +1684,8 @@ c = "°C # not a comment"
                             most 255 bytes in all";
         const NUMBER: &str = "the number is out of range. Use an integer that fits \
                               in 128 bits, or a float that fits in 64 bits";
+        const MALFORMED: &str = "the number is not valid. Write a number such as \
+                                 `1.5e3`, or put the text in quotes to make a string";
         const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
                               give it a different key";
 
@@ -1620,10 +1750,10 @@ c = "°C # not a comment"
                 ("a = [for]\n", on(5, 8), Form::For),
                 ("a = [for, 1]\n", on(5, 8), Form::For),
                 ("a = [for(1)]\n", on(5, 8), Form::For),
-                ("a = [for.x]\n", on(5, 10), Form::For),
+                ("a = [for.x]\n", on(5, 8), Form::For),
                 ("a = { for = 1 }\n", on(6, 9), Form::For),
                 ("a = { for : 1 }\n", on(6, 9), Form::For),
-                ("a = { for.x = 1 }\n", on(6, 11), Form::For),
+                ("a = { for.x = 1 }\n", on(6, 9), Form::For),
                 (
                     "a = [\n  for x in y : x\n]\n",
                     span(at(8, 1, 2), at(11, 1, 5)),
@@ -1656,9 +1786,29 @@ c = "°C # not a comment"
                 ("a = { (k) = 1 }\n", on(6, 7), Form::Parentheses),
                 ("a = { 1.5 = 1 }\n", on(6, 9), Form::NumberKey),
                 ("a = { 1e3 = 1 }\n", on(6, 9), Form::NumberKey),
+                ("a = { 1.e5 = 1 }\n", on(6, 10), Form::NumberKey),
                 ("a = { -1.5 = 1 }\n", on(7, 10), Form::NumberKey),
                 ("a = { - = 1 }\n", on(6, 7), Form::Operator),
                 ("a = { -x = 1 }\n", on(6, 7), Form::Operator),
+            ];
+            for (text, span, form) in cases {
+                let message = refused(form);
+                check(text, &[(Error::Form { span, form }, &message)]);
+            }
+        }
+
+        #[test]
+        fn refuses_each_form_after_a_reference_or_a_keyword_at_its_token() {
+            let cases = [
+                ("a = true.f\n", on(8, 9), Form::Index),
+                ("a = false.x\n", on(9, 10), Form::Index),
+                ("a = b.0\n", on(5, 6), Form::Index),
+                ("a = site_a.1\n", on(10, 11), Form::Index),
+                ("a = b.1-2\n", on(5, 6), Form::Index),
+                ("a = b.0c\n", on(5, 6), Form::Index),
+                ("a = [kf1.5true]\n", on(8, 9), Form::Index),
+                ("a = b.c[0]\n", on(7, 8), Form::Index),
+                ("a = b.c.*\n", on(7, 8), Form::Splat),
             ];
             for (text, span, form) in cases {
                 let message = refused(form);
@@ -1723,6 +1873,22 @@ c = "°C # not a comment"
         }
 
         #[test]
+        fn refuses_null_and_the_index_after_it_as_hcl_does() {
+            let null = Error::Form {
+                span: on(4, 8),
+                form: Form::Null,
+            };
+            let index = Error::Form {
+                span: on(8, 9),
+                form: Form::Index,
+            };
+            check(
+                "a = null.x\n",
+                &[(null, NULL), (index, &refused(Form::Index))],
+            );
+        }
+
+        #[test]
         fn refuses_a_number_key_that_hcl_rounds_and_reads_on() {
             let message = refused(Form::NumberKey);
             let digits = "9".repeat(155);
@@ -1731,6 +1897,11 @@ c = "°C # not a comment"
                 form: Form::NumberKey,
             };
             check(&format!("a = {{ {digits} = 1 }}\n"), &[(long, &message)]);
+            let past = Error::Form {
+                span: on(6, 18),
+                form: Form::NumberKey,
+            };
+            check("a = { 1e3000000000 = 1 }\n", &[(past, &message)]);
             let key = Error::Form {
                 span: on(6, 9),
                 form: Form::NumberKey,
@@ -1746,23 +1917,40 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn refuses_a_string_that_does_not_end() {
+        fn points_an_unclosed_string_at_the_end_of_its_line() {
             let quote = &needs("`\"` to end the string");
-            check("s = \"abc", &[(syntax(on(4, 8), Expected::Quote), quote)]);
+            let unclosed = |end| Error::Unclosed {
+                span: on(end, end),
+                opener: on(4, 5),
+                part: Unclosed::String,
+            };
+            check("s = \"abc", &[(unclosed(8), quote)]);
             for text in ["s = \"ab\nc\"\n", "s = \"ab\r\nc\"\r\n"] {
-                check(text, &[(syntax(on(4, 7), Expected::Quote), quote)]);
+                check(text, &[(unclosed(7), quote)]);
             }
+            let errors = read(Source(0), "s = \"ab\nc\"\n").unwrap_err();
+            let note = Note {
+                span: on(4, 5),
+                text: "the string starts here".into(),
+            };
+            assert_eq!(Diagnostic::from(&errors[0]).notes, vec![note]);
         }
 
         #[test]
-        fn refuses_a_comment_that_does_not_end() {
-            check(
-                "a = 1 /* x",
-                &[(
-                    syntax(on(6, 10), Expected::CommentEnd),
-                    &needs("`*/` to end the comment"),
-                )],
-            );
+        fn points_an_unclosed_comment_at_the_end_of_the_text() {
+            let cases = [
+                ("a = 1 /* x", at(10, 0, 10)),
+                ("a = 1 /* x\ny", at(12, 1, 1)),
+                ("a = 1 /*/", at(9, 0, 9)),
+            ];
+            for (text, end) in cases {
+                let unclosed = Error::Unclosed {
+                    span: span(end, end),
+                    opener: on(6, 8),
+                    part: Unclosed::Comment,
+                };
+                check(text, &[(unclosed, &needs("`*/` to end the comment"))]);
+            }
         }
 
         #[test]
@@ -1790,8 +1978,8 @@ c = "°C # not a comment"
                 ("b { = }\n", on(4, 5), Expected::Key),
                 ("b { a 1 }\n", on(6, 7), Expected::Equals),
                 ("b { a {} }\n", on(6, 7), Expected::Equals),
-                ("b { a.b = 1 }\n", on(4, 7), Expected::Key),
-                ("b a.b {}\n", on(2, 5), Expected::AttributeOrBlock),
+                ("b { a.b = 1 }\n", on(5, 6), Expected::Equals),
+                ("b a.b {}\n", on(3, 4), Expected::BlockStart),
                 ("b {}  x\n", on(6, 7), Expected::Newline),
                 (
                     "b {\n  a = 1 }\n",
@@ -1800,7 +1988,21 @@ c = "°C # not a comment"
                 ),
                 ("b {\n", span(at(4, 1, 0), at(4, 1, 0)), Expected::Item),
                 ("}\n", on(0, 1), Expected::Item),
-                ("a.b = 1\n", on(0, 3), Expected::Item),
+                ("a.b = 1\n", on(1, 2), Expected::AttributeOrBlock),
+                ("@a = 1\n", on(0, 1), Expected::Item),
+                ("a = @system.x\n", on(4, 5), Expected::Value),
+                ("a = b.\n", on(5, 6), Expected::Newline),
+                ("a = x.\nb = 1\n", on(5, 6), Expected::Newline),
+                ("a = true.\n", on(8, 9), Expected::Newline),
+                ("a = b..c\n", on(5, 6), Expected::Newline),
+                ("a = b.-c\n", on(5, 6), Expected::Newline),
+                ("a = b.c.@d\n", on(7, 8), Expected::Newline),
+                ("a = [b.]\n", on(6, 7), Expected::ListEnd),
+                (
+                    "a = x\n.b\n",
+                    span(at(6, 1, 0), at(7, 1, 1)),
+                    Expected::Item,
+                ),
                 ("a = [1 2]\n", on(7, 8), Expected::ListEnd),
                 (
                     "a = [1, 2\n",
@@ -1808,7 +2010,7 @@ c = "°C # not a comment"
                     Expected::ListEnd,
                 ),
                 ("a = { = 1 }\n", on(6, 7), Expected::Key),
-                ("a = { k.j = 1 }\n", on(6, 9), Expected::Key),
+                ("a = { k.j = 1 }\n", on(7, 8), Expected::ObjectEquals),
                 ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
                 ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
                 ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
@@ -1884,23 +2086,6 @@ c = "°C # not a comment"
 
         #[test]
         fn refuses_a_reference_that_is_not_a_name() {
-            let error = "a.@".parse::<Name>().unwrap_err();
-            let name = Error::Name {
-                span: on(4, 7),
-                error,
-            };
-            check("r = a.@\n", &[(name, NAME)]);
-
-            for (text, name) in [("r = a.\n", "a."), ("r = a..b\n", "a..b")] {
-                let error = name.parse::<Name>().unwrap_err();
-                let end = u32::try_from(name.len()).unwrap() + 4;
-                let name = Error::Name {
-                    span: on(4, end),
-                    error,
-                };
-                check(text, &[(name, NAME)]);
-            }
-
             let long = "a".repeat(256);
             let error = long.parse::<Name>().unwrap_err();
             let name = Error::Name {
@@ -1956,12 +2141,9 @@ c = "°C # not a comment"
         #[test]
         fn refuses_a_number_out_of_range() {
             let number = |start, end| {
-                (
-                    Error::Number {
-                        span: on(start, end),
-                    },
-                    NUMBER,
-                )
+                let span = on(start, end);
+                let problem = Number::Range;
+                (Error::Number { span, problem }, NUMBER)
             };
             check(
                 "i = 170141183460469231731687303715884105728\n",
@@ -1979,6 +2161,41 @@ c = "°C # not a comment"
             check("f = -1e400\n", &[number(4, 10)]);
             check("f = 1e-400\n", &[number(4, 10)]);
             check("f = 2e-324\n", &[number(4, 10)]);
+            check("f = 1e2147483647\n", &[number(4, 16)]);
+            check("f = 1e-3000000000\n", &[number(4, 17)]);
+        }
+
+        #[test]
+        fn refuses_text_that_hcl_scans_as_a_number_but_cannot_read() {
+            let malformed = |start, end| {
+                let span = on(start, end);
+                let problem = Number::Malformed;
+                (Error::Number { span, problem }, MALFORMED)
+            };
+            let cases = [
+                ("a = 1.2.3\n", malformed(4, 9)),
+                ("a = 1e5e5\n", malformed(4, 9)),
+                ("a = 1..5\n", malformed(4, 8)),
+                ("a = 1.e5.e5\n", malformed(4, 11)),
+                ("a = -1.2.3\n", malformed(4, 10)),
+                ("a = [1.2.3, 2]\n", malformed(5, 10)),
+                ("a = 0e9223372036854775808\n", malformed(4, 25)),
+                ("a = 0E9223372036854775808\n", malformed(4, 25)),
+                ("a = 0.e9223372036854775808\n", malformed(4, 26)),
+                ("a = 0.e-9223372036854775809\n", malformed(4, 27)),
+                ("a = { -1.2.3 = 1 }\n", malformed(6, 12)),
+            ];
+            for (text, error) in cases {
+                check(text, &[error]);
+            }
+            let null = Error::Form {
+                span: on(21, 25),
+                form: Form::Null,
+            };
+            check(
+                "a = { 1.2.3 = 1, b = null }\n",
+                &[malformed(6, 11), (null, NULL)],
+            );
         }
 
         #[test]
@@ -2042,7 +2259,10 @@ c = "°C # not a comment"
             };
             let escape = Error::Escape { span: on(10, 12) };
             check(r#"a = null "\q""#, &[(null, NULL), (escape, ESCAPE)]);
-            let number = Error::Number { span: on(4, 9) };
+            let number = Error::Number {
+                span: on(4, 9),
+                problem: Number::Range,
+            };
             let escape = Error::Escape { span: on(11, 13) };
             check(r#"a = 1e400 "\q""#, &[(number, NUMBER), (escape, ESCAPE)]);
         }
@@ -2058,7 +2278,7 @@ c = "°C # not a comment"
 
         #[test]
         fn returns_every_problem_in_source_order() {
-            let text = "m = { a = 1, a = 2, b = null }\nr = a.@\nc = \n";
+            let text = "m = { a = 1, a = 2, b = null }\nr = é\nc = \n";
             let repeat = document::Error::DuplicateKey {
                 key: "a".into(),
                 first: Some(on(6, 7)),
@@ -2069,10 +2289,10 @@ c = "°C # not a comment"
                 form: Form::Null,
             };
             let name = Error::Name {
-                span: span(at(35, 1, 4), at(38, 1, 7)),
-                error: "a.@".parse::<Name>().unwrap_err(),
+                span: span(at(35, 1, 4), at(37, 1, 5)),
+                error: "é".parse::<Name>().unwrap_err(),
             };
-            let value = syntax(span(at(43, 2, 4), at(44, 3, 0)), Expected::Value);
+            let value = syntax(span(at(42, 2, 4), at(43, 3, 0)), Expected::Value);
             check(
                 text,
                 &[

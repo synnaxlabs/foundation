@@ -18,6 +18,13 @@ crlf accepted
 duplicate-attribute refused
 empty accepted
 expansion accepted hcl.expansion
+float-digits accepted
+float-near-largest-written accepted
+float-near-largest accepted
+float-near-smallest-written accepted
+float-near-smallest accepted
+float-near-tie-written accepted
+float-near-tie accepted
 float-past-f64 accepted
 float-to-zero accepted
 float-written accepted
@@ -62,7 +69,23 @@ negate-float accepted
 negate-space-written accepted
 negate-space accepted
 null accepted hcl.null
+number-binary-exponent-past-i32 refused
+number-dot-e accepted hcl.index
+number-dot-end refused
+number-dot-exponent-key accepted hcl.number-key
+number-dot-exponent-past-i64 refused
+number-dot-exponent-written accepted
+number-dot-exponent accepted
+number-dots refused
+number-expansion accepted hcl.expansion
+number-exponent-i64 accepted
+number-exponent-past-i64 refused
+number-exponent-twice refused
+number-key-binary-exponent-past-i32 refused
 number-key accepted hcl.number-key
+number-malformed-key refused
+number-malformed refused
+number-zero-written accepted
 object-bool-key-string-written accepted
 object-bool-key-string accepted
 object-colon accepted
@@ -91,6 +114,19 @@ operator-negate-reference accepted hcl.operator
 operator-not accepted hcl.operator
 operator accepted hcl.operator
 parentheses accepted hcl.parentheses
+reference-at-start refused
+reference-bracket-lines-written accepted
+reference-bracket-lines accepted
+reference-digit-part refused
+reference-dot-end refused
+reference-keyword-first accepted hcl.index
+reference-keyword-parts accepted
+reference-line-before-dot refused
+reference-null-first accepted hcl.index hcl.null
+reference-number-part accepted hcl.index
+reference-reserved refused
+reference-spaces-written accepted
+reference-spaces accepted
 reference-unicode accepted
 reference accepted
 splat-attribute accepted hcl.splat
