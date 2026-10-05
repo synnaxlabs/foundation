@@ -5,12 +5,10 @@
 #![expect(unsafe_code, reason = "the allocator implements `GlobalAlloc`")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::fmt;
+use std::mem::ManuallyDrop;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize};
-
-/// The longest needle [`Allocator::freed_holding`] takes.
-const NEEDLE: usize = 32;
+use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize};
+use std::{fmt, hint, ptr, slice};
 
 /// An allocator that gets its memory from [`System`] and counts the allocations. Each
 /// `alloc`, `alloc_zeroed`, and `realloc` that succeeds counts as one; a failed one and
@@ -26,7 +24,6 @@ const NEEDLE: usize = 32;
 ///     assert_eq!((sum, allocations), (4, 0));
 /// }
 /// ```
-#[derive(Default)]
 pub struct Allocator {
     allocations: AtomicU64,
     scan: Scan,
@@ -38,11 +35,7 @@ impl Allocator {
     pub const fn new() -> Self {
         Self {
             allocations: AtomicU64::new(0),
-            scan: Scan {
-                len: AtomicUsize::new(0),
-                needle: [const { AtomicU8::new(0) }; NEEDLE],
-                found: AtomicU64::new(0),
-            },
+            scan: Scan::new(),
         }
     }
 
@@ -58,20 +51,20 @@ impl Allocator {
 
     /// Runs `f` and returns its result and the number of blocks freed through this
     /// allocator while it ran, on every thread, that held `needle` when freed. The old
-    /// block of a `realloc` counts too. As the global allocator, run it in a binary
-    /// with no test harness, like [`Self::count`]. Under Miri, a freed block that
-    /// holds a byte the program never wrote, such as padding, stops the run.
+    /// block of a `realloc` counts too. A free on another thread that starts while `f`
+    /// runs counts, and the call waits for it to end. As the global allocator, run it
+    /// in a binary with no test harness, like [`Self::count`]. A freed block can hold
+    /// bytes the program never wrote, such as padding or the spare capacity of a
+    /// `Vec`. Rust does not define a read of such a byte on any target, and Miri stops
+    /// at one.
     ///
     /// # Panics
     ///
-    /// If `needle` is empty or longer than 32 bytes, or if another call runs.
+    /// If `needle` is empty, or if another call runs.
     pub fn freed_holding<T>(&self, needle: &[u8], f: impl FnOnce() -> T) -> (T, u64) {
-        let before = self.scan.found.load(Relaxed);
         let running = self.scan.start(needle);
         let value = f();
-        drop(running);
-        let after = self.scan.found.load(Relaxed);
-        (value, after.strict_sub(before))
+        (value, running.end())
     }
 
     /// Counts `ptr` unless it is null, and returns it.
@@ -80,6 +73,12 @@ impl Allocator {
             self.allocations.fetch_add(1, Relaxed);
         }
         ptr
+    }
+}
+
+impl Default for Allocator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -92,37 +91,57 @@ impl fmt::Debug for Allocator {
 }
 
 /// The state of [`Allocator::freed_holding`].
-#[derive(Default)]
 struct Scan {
-    /// The length of the needle while a call runs, [`WRITING`] while one writes the
-    /// needle, else 0.
+    /// The phase in the bits of [`PHASE`], and the number of frees in [`Scan::check`]
+    /// as a multiple of [`SCANNER`].
+    state: AtomicUsize,
+    /// The caller's needle, which lives until the phase leaves [`RUNNING`] and no free
+    /// scans.
+    needle: AtomicPtr<u8>,
     len: AtomicUsize,
-    /// A copy, because a free on another thread can read it after the call returns.
-    needle: [AtomicU8; NEEDLE],
     found: AtomicU64,
 }
 
-/// The length of the needle while a call writes it.
-const WRITING: usize = usize::MAX;
+/// No call runs.
+const IDLE: usize = 0;
+/// A call runs, and frees scan for its needle.
+const RUNNING: usize = 1;
+/// A call starts or ends, and frees do not scan.
+const BUSY: usize = 2;
+const PHASE: usize = 3;
+const SCANNER: usize = 4;
 
 impl Scan {
-    fn start(&self, needle: &[u8]) -> Running<'_> {
-        assert!(
-            (1..=NEEDLE).contains(&needle.len()),
-            "a needle holds 1 to {NEEDLE} bytes, not {}",
-            needle.len()
-        );
-        assert!(
-            self.len
-                .compare_exchange(0, WRITING, Relaxed, Relaxed)
-                .is_ok(),
-            "calls to `freed_holding` do not overlap"
-        );
-        for (byte, value) in self.needle.iter().zip(needle) {
-            byte.store(*value, Relaxed);
+    const fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(IDLE),
+            needle: AtomicPtr::new(ptr::null_mut()),
+            len: AtomicUsize::new(0),
+            found: AtomicU64::new(0),
         }
-        self.len.store(needle.len(), Release);
+    }
+
+    fn start<'a>(&'a self, needle: &'a [u8]) -> Running<'a> {
+        assert!(!needle.is_empty(), "a needle holds at least one byte");
+        let idle = self.state.fetch_update(Acquire, Relaxed, |state| {
+            (state & PHASE == IDLE).then_some(state + BUSY)
+        });
+        assert!(idle.is_ok(), "calls to `freed_holding` do not overlap");
+        self.needle.store(needle.as_ptr().cast_mut(), Relaxed);
+        self.len.store(needle.len(), Relaxed);
+        self.state.fetch_sub(BUSY - RUNNING, Release);
         Running(self)
+    }
+
+    /// Stops new scans, waits for the running ones, and returns the blocks found.
+    fn end(&self) -> u64 {
+        self.state.fetch_add(BUSY - RUNNING, Relaxed);
+        while self.state.load(Acquire) != BUSY {
+            hint::spin_loop();
+        }
+        let found = self.found.swap(0, Relaxed);
+        self.state.fetch_sub(BUSY, Release);
+        found
     }
 
     /// Counts the block of `size` bytes at `block` if a call runs and the block holds
@@ -132,39 +151,50 @@ impl Scan {
     ///
     /// `block` is valid for reads of `size` bytes.
     unsafe fn check(&self, block: *const u8, size: usize) {
-        let len = self.len.load(Acquire);
-        if !(1..=NEEDLE).contains(&len) {
+        if self.state.load(Relaxed) & PHASE != RUNNING {
             return;
         }
-        let mut needle = [0; NEEDLE];
-        for (byte, value) in needle.iter_mut().zip(&self.needle) {
-            *byte = value.load(Relaxed);
+        if self.state.fetch_add(SCANNER, Acquire) & PHASE == RUNNING {
+            // SAFETY: the call that set the needle holds its borrow until `end`, which
+            // waits for this scan.
+            let needle = unsafe {
+                slice::from_raw_parts(self.needle.load(Relaxed), self.len.load(Relaxed))
+            };
+            let holds = size.checked_sub(needle.len()).is_some_and(|last| {
+                (0..=last).any(|start| {
+                    needle.iter().zip(start..).all(|(value, index)| {
+                        let byte = block.wrapping_add(index);
+                        // SAFETY: `index` is below `size`, so `byte` is in the block.
+                        // Rust does not define a read of a byte the program never
+                        // wrote, such as padding. A volatile read is one load that the
+                        // compiler cannot remove or assume a value for, which is as
+                        // close as Rust allows.
+                        unsafe { byte.read_volatile() == *value }
+                    })
+                })
+            });
+            if holds {
+                self.found.fetch_add(1, Relaxed);
+            }
         }
-        let Some(last) = size.checked_sub(len) else {
-            return;
-        };
-        let holds = (0..=last).any(|start| {
-            needle.iter().take(len).zip(start..).all(|(value, index)| {
-                let byte = block.wrapping_add(index);
-                // SAFETY: `index` is below `size`, so `byte` is in the block. Rust
-                // does not define a read of a byte the program never wrote, such as
-                // padding. A volatile read is one load that the compiler cannot
-                // remove or assume a value for, which is as close as Rust allows.
-                unsafe { byte.read_volatile() == *value }
-            })
-        });
-        if holds {
-            self.found.fetch_add(1, Relaxed);
-        }
+        self.state.fetch_sub(SCANNER, Release);
     }
 }
 
-/// Ends a scan when dropped, also when the closure panics.
+/// Ends a scan, also when the closure panics, because a free on another thread can
+/// still read the caller's needle.
 struct Running<'a>(&'a Scan);
+
+impl Running<'_> {
+    /// Ends the scan in place of the drop, and returns the blocks found.
+    fn end(self) -> u64 {
+        ManuallyDrop::new(self).0.end()
+    }
+}
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
-        self.0.len.store(0, Release);
+        self.0.end();
     }
 }
 
@@ -194,7 +224,7 @@ unsafe impl GlobalAlloc for Allocator {
 
 #[cfg(test)]
 mod tests {
-    use std::{panic, slice};
+    use std::{panic, thread};
 
     use super::*;
 
@@ -213,23 +243,32 @@ mod tests {
         assert_eq!(frees, 0, "a free does not count");
     }
 
-    /// A block of `layout` from `allocator` that holds zeros, then `bytes` at its end.
-    fn block(allocator: &Allocator, layout: Layout, bytes: &[u8]) -> *mut u8 {
+    /// A zeroed block of `layout` from `allocator`, with `bytes` from `start`.
+    fn block(
+        allocator: &Allocator,
+        layout: Layout,
+        start: usize,
+        bytes: &[u8],
+    ) -> *mut u8 {
         // SAFETY: the layout is not empty.
         let ptr = unsafe { allocator.alloc_zeroed(layout) };
         assert!(!ptr.is_null(), "the system has no memory for {layout:?}");
         // SAFETY: `ptr` holds `layout.size()` initialized bytes, and nothing else uses
         // them while the slice lives.
         let block = unsafe { slice::from_raw_parts_mut(ptr, layout.size()) };
-        let start = block.len().strict_sub(bytes.len());
-        block.split_at_mut(start).1.copy_from_slice(bytes);
+        block[start..start.strict_add(bytes.len())].copy_from_slice(bytes);
         ptr
     }
 
-    /// Frees `ptr`, which `allocator` returned for `layout`, and returns whether the
-    /// block held [`SECRET`].
-    fn found(allocator: &Allocator, ptr: *mut u8, layout: Layout) -> u64 {
-        let ((), found) = allocator.freed_holding(&SECRET, || {
+    /// Frees `ptr`, which `allocator` returned for `layout`, and returns the count of
+    /// blocks that held `needle`.
+    fn found(
+        allocator: &Allocator,
+        needle: &[u8],
+        ptr: *mut u8,
+        layout: Layout,
+    ) -> u64 {
+        let ((), found) = allocator.freed_holding(needle, || {
             // SAFETY: `allocator` returned `ptr` for `layout`, and nothing uses it
             // after.
             unsafe { allocator.dealloc(ptr, layout) }
@@ -311,39 +350,85 @@ mod tests {
     }
 
     #[test]
-    fn counts_a_freed_block_that_ends_with_the_needle() {
+    fn counts_a_freed_block_that_holds_the_needle_at_any_offset() {
         let allocator = Allocator::new();
-        let ptr = block(&allocator, LAYOUT, &SECRET);
-        assert_eq!(found(&allocator, ptr, LAYOUT), 1);
+        for start in 0..=32 {
+            let ptr = block(&allocator, LAYOUT, start, &SECRET);
+            assert_eq!(found(&allocator, &SECRET, ptr, LAYOUT), 1, "at {start}");
+        }
+    }
+
+    #[test]
+    fn counts_a_needle_of_one_byte_and_of_the_whole_block() {
+        let allocator = Allocator::new();
+        let ptr = block(&allocator, LAYOUT, 63, &[0xff]);
+        assert_eq!(found(&allocator, &[0xff], ptr, LAYOUT), 1);
+        let needle = [SECRET, SECRET].concat();
+        let ptr = block(&allocator, LAYOUT, 0, &needle);
+        assert_eq!(found(&allocator, &needle, ptr, LAYOUT), 1);
     }
 
     #[test]
     fn does_not_count_a_block_that_holds_part_of_the_needle() {
         let allocator = Allocator::new();
-        let ptr = block(&allocator, LAYOUT, &SECRET[..31]);
-        assert_eq!(found(&allocator, ptr, LAYOUT), 0);
+        let ptr = block(&allocator, LAYOUT, 33, &SECRET[..31]);
+        assert_eq!(found(&allocator, &SECRET, ptr, LAYOUT), 0);
     }
 
     #[test]
     fn does_not_count_a_block_shorter_than_the_needle() {
         let allocator = Allocator::new();
         let layout = Layout::new::<[u8; 16]>();
-        let ptr = block(&allocator, layout, &SECRET[..16]);
-        assert_eq!(found(&allocator, ptr, layout), 0);
+        let ptr = block(&allocator, layout, 0, &SECRET[..16]);
+        assert_eq!(found(&allocator, &SECRET, ptr, layout), 0);
     }
 
     #[test]
     fn does_not_count_a_block_freed_outside_the_call() {
         let allocator = Allocator::new();
-        let ptr = block(&allocator, LAYOUT, &SECRET);
+        let ptr = block(&allocator, LAYOUT, 32, &SECRET);
         free(&allocator, ptr, LAYOUT);
         assert_eq!(allocator.freed_holding(&SECRET, || ()), ((), 0));
+    }
+
+    /// A free on another thread that starts while the closure runs counts in that
+    /// call, also when it ends after the closure returns.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a thread test; `counting` has no `env`"
+    )]
+    fn counts_a_free_on_another_thread_that_ends_after_the_closure() {
+        let allocator = Allocator::new();
+        // Under Miri, a block small enough to scan in time. Elsewhere, one that takes
+        // far longer to scan than the closure takes to return.
+        let size = if cfg!(miri) { 64 } else { 8 << 20 };
+        let layout = Layout::from_size_align(size, 8).expect("a layout");
+        let ptr =
+            AtomicPtr::new(block(&allocator, layout, size.strict_sub(32), &SECRET));
+        thread::scope(|scope| {
+            let (freer, found) = allocator.freed_holding(&SECRET, || {
+                let freer = scope.spawn(|| {
+                    // SAFETY: `allocator` returned `ptr` for `layout`, and nothing
+                    // uses it after.
+                    unsafe { allocator.dealloc(ptr.load(Relaxed), layout) }
+                });
+                while allocator.scan.state.load(Relaxed) < SCANNER
+                    && !freer.is_finished()
+                {
+                    hint::spin_loop();
+                }
+                freer
+            });
+            freer.join().expect("the free does not panic");
+            assert_eq!(found, 1);
+        });
     }
 
     #[test]
     fn counts_the_old_block_of_a_reallocation() {
         let allocator = Allocator::new();
-        let ptr = block(&allocator, LAYOUT, &SECRET);
+        let ptr = block(&allocator, LAYOUT, 32, &SECRET);
         let ((ptr, found), allocations) = allocator.count(|| {
             allocator.freed_holding(&SECRET, || {
                 // SAFETY: `allocator` returned `ptr` for `LAYOUT`, and 128 rounded up
@@ -369,20 +454,14 @@ mod tests {
             allocator.freed_holding(&SECRET, || panic!("the closure"))
         })
         .expect_err("the closure panics");
-        let ptr = block(&allocator, LAYOUT, &SECRET);
-        assert_eq!(found(&allocator, ptr, LAYOUT), 1);
+        let ptr = block(&allocator, LAYOUT, 32, &SECRET);
+        assert_eq!(found(&allocator, &SECRET, ptr, LAYOUT), 1);
     }
 
     #[test]
-    #[should_panic(expected = "a needle holds 1 to 32 bytes, not 0")]
+    #[should_panic(expected = "a needle holds at least one byte")]
     fn panics_on_an_empty_needle() {
         Allocator::new().freed_holding(&[], || ());
-    }
-
-    #[test]
-    #[should_panic(expected = "a needle holds 1 to 32 bytes, not 33")]
-    fn panics_on_a_needle_over_32_bytes() {
-        Allocator::new().freed_holding(&[0; 33], || ());
     }
 
     #[test]
