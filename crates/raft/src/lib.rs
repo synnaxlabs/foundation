@@ -142,7 +142,9 @@ impl fmt::Display for Error {
                 f,
                 "applied index {applied} is past the last log index {last}"
             ),
-            Self::NotLeader { leader: Some(leader) } => write!(
+            Self::NotLeader {
+                leader: Some(leader),
+            } => write!(
                 f,
                 "this node does not lead; node {:032x} does",
                 leader.as_u128()

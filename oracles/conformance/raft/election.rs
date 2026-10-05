@@ -138,8 +138,9 @@ impl Network {
             let Some(peer) = self.peers.get_mut(&message.to) else {
                 continue;
             };
+            let to = message.to;
             peer.step(message).unwrap();
-            queue.extend(self.take(message.to));
+            queue.extend(self.take(to));
         }
     }
 
@@ -155,7 +156,7 @@ fn heartbeat(from: u8, to: u8, term: Term) -> Message {
         from: key(from),
         to: key(to),
         term,
-        body: Body::Heartbeat,
+        body: Body::Heartbeat { commit: 0 },
     }
 }
 
@@ -362,15 +363,21 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
                 body: request(last),
             })
             .unwrap();
-            let [reply] = drain(&mut raft)[..] else {
+            let [reply] = &drain(&mut raft)[..] else {
                 panic!("expected one reply");
             };
-            match reply.body {
-                Body::VoteReply { granted } | Body::PreVoteReply { granted } => granted,
+            match &reply.body {
+                Body::VoteReply { granted } | Body::PreVoteReply { granted } => {
+                    *granted
+                }
                 Body::Vote { .. }
                 | Body::PreVote { .. }
-                | Body::Heartbeat
-                | Body::HeartbeatReply => panic!("expected a reply, got {reply:?}"),
+                | Body::Heartbeat { .. }
+                | Body::HeartbeatReply
+                | Body::Append { .. }
+                | Body::AppendReply { .. } => {
+                    panic!("expected a reply, got {reply:?}")
+                }
             }
         })
         .collect()
@@ -600,8 +607,8 @@ fn leader_superseding_with_check_quorum() {
 /// heartbeat makes the leader step down and take the higher term.
 ///
 /// etcd runs this without PreVote, where node 3 raises its term with failed
-/// campaigns. With PreVote, a failed campaign raises no term, so node 3 starts with
-/// the higher term on disk.
+/// campaigns after it holds the leader's first entry. With PreVote, a failed campaign
+/// raises no term, so node 3 starts with the higher term and that entry on disk.
 #[test]
 fn free_stuck_candidate_with_check_quorum() {
     let voters = [1, 2, 3];
@@ -609,10 +616,14 @@ fn free_stuck_candidate_with_check_quorum() {
         term: Term(3),
         vote: Some(key(3)),
     };
+    let first = Position {
+        term: Term(1),
+        index: 1,
+    };
     let mut network = Network::new([
         build(1, &voters, ELECTION, Hard::default(), Position::default()),
         build(2, &voters, ELECTION, Hard::default(), Position::default()),
-        build(3, &voters, ELECTION, stuck, Position::default()),
+        build(3, &voters, ELECTION, stuck, first),
     ]);
     network.isolate(3);
     network.campaign(&[1]);

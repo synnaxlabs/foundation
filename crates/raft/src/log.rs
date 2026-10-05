@@ -95,18 +95,17 @@ impl Log {
 
     // Appends the leader's entries after `prev` as a follower. Entries already in
     // the log stay; the first entry that differs replaces it and all after it.
-    // Returns the index of the last entry the leader sent, or an error with the
-    // follower's hint for the next `prev`: its last index, or the index before a
-    // `prev` it does not have.
-    //
-    // # Panics
-    //
-    // Panics when a committed entry would change: a correct leader never asks it.
+    // Returns the index of the last entry the leader sent, or the commit index when
+    // `prev` is below it, or an error with the follower's hint for the next `prev`:
+    // its last index, or the index before a `prev` it does not have.
     pub(crate) fn append(
         &mut self,
         prev: Position,
         entries: Vec<Entry>,
     ) -> Result<u64, u64> {
+        if prev.index < self.committed {
+            return Ok(self.committed);
+        }
         if self.at(prev.index) != Some(prev) {
             return Err(prev.index.saturating_sub(1).min(self.last().index));
         }
@@ -118,10 +117,6 @@ impl Log {
             return Ok(last);
         };
         let from = entries[first].at.index;
-        assert!(
-            from > self.committed,
-            "invariant: the leader rewrites committed entry {from}"
-        );
         self.entries
             .truncate(usize::try_from(from - 1).unwrap_or(usize::MAX));
         self.stable = self.stable.min(from - 1);
@@ -336,11 +331,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: the leader rewrites committed entry 2")]
-    fn refuses_to_rewrite_a_committed_entry() {
-        let mut log = log(&[1, 1]);
+    fn answers_an_append_below_its_commit_index_with_that_index() {
+        let mut log = log(&[1, 1, 2]);
         log.commit_to(2);
-        let _ = log.append(position(1, 1), vec![entry(2, 2)]);
+        assert_eq!(log.append(position(1, 1), vec![entry(2, 2)]), Ok(2));
+        assert_eq!(log.append(Position::default(), vec![]), Ok(2));
+        assert_eq!(terms(&log), [1, 1, 2]);
     }
 
     #[test]
