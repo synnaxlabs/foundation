@@ -1,9 +1,12 @@
 //! A node that a change removes gets the leave and its commit before the leader
-//! forgets it, so it stops campaigning.
+//! releases it, so it stops campaigning. A node that misses its release campaigns
+//! until the caller tells it that it is out.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use raft::{Config, Data, Entry, Hard, Message, Raft, Role, Start, Term, Voters};
+use raft::{
+    Body, Config, Data, Entry, Hard, Message, Position, Raft, Role, Start, Term, Voters,
+};
 use types::node;
 
 const ELECTION: u32 = 10;
@@ -39,6 +42,15 @@ fn node(id: u8, voters: &[u8]) -> Raft {
 fn run(
     nodes: &mut BTreeMap<node::Key, Raft>,
 ) -> (BTreeMap<node::Key, Vec<Entry>>, Vec<Message>) {
+    run_holding(nodes, &mut Vec::new(), |_| false)
+}
+
+// `run`, except that the messages `held` picks wait in `late`.
+fn run_holding(
+    nodes: &mut BTreeMap<node::Key, Raft>,
+    late: &mut Vec<Message>,
+    mut held: impl FnMut(&Message) -> bool,
+) -> (BTreeMap<node::Key, Vec<Entry>>, Vec<Message>) {
     let mut committed: BTreeMap<node::Key, Vec<Entry>> = BTreeMap::new();
     let mut sent = Vec::new();
     let mut queue: VecDeque<Message> = VecDeque::new();
@@ -50,6 +62,10 @@ fn run(
         queue.extend(ready.messages);
     }
     while let Some(message) = queue.pop_front() {
+        if held(&message) {
+            late.push(message);
+            continue;
+        }
         let to = message.to;
         nodes.get_mut(&to).unwrap().step(message).unwrap();
         let ready = nodes.get_mut(&to).unwrap().ready();
@@ -58,6 +74,51 @@ fn run(
         queue.extend(ready.messages);
     }
     (committed, sent)
+}
+
+fn tick(nodes: &mut BTreeMap<node::Key, Raft>) {
+    for node in nodes.values_mut() {
+        node.tick(0);
+    }
+}
+
+// A message and the round in which it was sent.
+type Sent = (u32, Message);
+
+fn sent(round: u32, from: u8, to: u8, term: u64, body: Body) -> Sent {
+    let (from, to, term) = (key(from), key(to), Term(term));
+    (
+        round,
+        Message {
+            from,
+            to,
+            term,
+            body,
+        },
+    )
+}
+
+// The `PreVote`s that node `from` sends to each node of `to` when it campaigns.
+fn campaign(round: u32, from: u8, to: &[u8], term: u64, end: Position) -> Vec<Sent> {
+    to.iter()
+        .map(|&id| sent(round, from, id, term, Body::PreVote { last: end }))
+        .collect()
+}
+
+// Ticks every node and delivers every message, for `rounds` rounds. Returns what was
+// sent to or from node `id`.
+fn watch(nodes: &mut BTreeMap<node::Key, Raft>, rounds: u32, id: u8) -> Vec<Sent> {
+    let mut seen = Vec::new();
+    for round in 0..rounds {
+        tick(nodes);
+        let (_, sent) = run(nodes);
+        seen.extend(
+            sent.into_iter()
+                .filter(|m| m.from == key(id) || m.to == key(id))
+                .map(|m| (round, m)),
+        );
+    }
+    seen
 }
 
 fn configs(entries: &[Entry]) -> Vec<Voters> {
@@ -97,9 +158,7 @@ fn a_removed_node_gets_the_leave_and_its_commit_then_stops_campaigning() {
 
     // The leader heartbeats the voters alone, and node 3 never campaigns.
     for _ in 0..3 * ELECTION {
-        for node in nodes.values_mut() {
-            node.tick(0);
-        }
+        tick(&mut nodes);
         let (_, sent) = run(&mut nodes);
         assert!(
             sent.iter()
@@ -110,6 +169,175 @@ fn a_removed_node_gets_the_leave_and_its_commit_then_stops_campaigning() {
     assert_eq!(nodes[&key(1)].role(), Role::Leader);
     assert_eq!(nodes[&key(3)].role(), Role::Follower);
     assert_eq!(nodes[&key(3)].leader(), Some(key(1)));
+}
+
+// Node 1 wins term 1 with node 2's vote while every message of node 3 is held, and
+// removes node 3. Returns the nodes and the held messages, in order.
+fn remove_node_3_while_held() -> (BTreeMap<node::Key, Raft>, Vec<Message>) {
+    let mut nodes: BTreeMap<node::Key, Raft> =
+        (1..=3).map(|id| (key(id), node(id, &[1, 2, 3]))).collect();
+    let mut held = Vec::new();
+    nodes.get_mut(&key(1)).unwrap().campaign();
+    run_holding(&mut nodes, &mut held, |m| m.from == key(3));
+    assert_eq!(nodes[&key(1)].role(), Role::Leader);
+    nodes
+        .get_mut(&key(1))
+        .unwrap()
+        .propose_voters(set(&[1, 2]))
+        .unwrap();
+    run_holding(&mut nodes, &mut held, |m| m.from == key(3));
+    let new = Voters {
+        incoming: set(&[1, 2]),
+        outgoing: BTreeSet::new(),
+    };
+    assert_eq!(nodes[&key(1)].voters(), &new);
+    (nodes, held)
+}
+
+// Node 3's answers arrive after its removal. Node 3 holds the leader's log up to its
+// answer to the first append, so it must still get the leave and its commit.
+#[test]
+fn a_removed_node_whose_answers_are_late_gets_the_leave_and_its_commit() {
+    let (mut nodes, late) = remove_node_3_while_held();
+    let new = Voters {
+        incoming: set(&[1, 2]),
+        outgoing: BTreeSet::new(),
+    };
+
+    // The late answers arrive, with everything they cause.
+    for message in late {
+        let to = message.to;
+        nodes.get_mut(&to).unwrap().step(message).unwrap();
+        run(&mut nodes);
+    }
+    assert_eq!(nodes[&key(3)].voters(), &new);
+    for _ in 0..3 * ELECTION {
+        tick(&mut nodes);
+        let (_, sent) = run(&mut nodes);
+        assert!(sent.iter().all(|m| m.to != key(3)), "{sent:?}");
+    }
+    assert_eq!(nodes[&key(3)].role(), Role::Follower);
+}
+
+// Node 3 never answers. The leader removes it, and releases it when the first quorum
+// check finds it silent, so it does not send to it for good.
+#[test]
+fn a_removed_node_that_stays_silent_is_released_at_a_quorum_check() {
+    let (mut nodes, mut lost) = remove_node_3_while_held();
+    let mut to_3 = Vec::new();
+    for round in 0..3 * ELECTION {
+        tick(&mut nodes);
+        let (_, sent) = run_holding(&mut nodes, &mut lost, |m| m.from == key(3));
+        to_3.extend(sent.iter().filter(|m| m.to == key(3)).map(|_| round));
+    }
+    assert_eq!(nodes[&key(1)].role(), Role::Leader);
+    assert_eq!(to_3, (0..ELECTION - 1).collect::<Vec<u32>>());
+}
+
+// Removes node `count` from nodes 1 to `count`, led by node 1. The answers of the
+// other voters are late, so the removed node holds the leave before it commits, and
+// the one heartbeat that brings it the commit is lost.
+fn lose_the_release(count: u8) -> BTreeMap<node::Key, Raft> {
+    let ids: Vec<u8> = (1..=count).collect();
+    let (removed, kept) = (key(count), &ids[..ids.len() - 1]);
+    let mut nodes: BTreeMap<node::Key, Raft> =
+        ids.iter().map(|&id| (key(id), node(id, &ids))).collect();
+    nodes.get_mut(&key(1)).unwrap().campaign();
+    run(&mut nodes);
+    assert_eq!(nodes[&key(1)].role(), Role::Leader);
+    let slow = |m: &Message| m.from != key(1) && m.from != removed;
+    let mut late = Vec::new();
+    nodes
+        .get_mut(&key(1))
+        .unwrap()
+        .propose_voters(set(kept))
+        .unwrap();
+    run_holding(&mut nodes, &mut late, slow);
+    let release = Body::Heartbeat { commit: 3 };
+    let mut lost = Vec::new();
+    while !late.is_empty() {
+        for message in std::mem::take(&mut late) {
+            let to = message.to;
+            nodes.get_mut(&to).unwrap().step(message).unwrap();
+            run_holding(&mut nodes, &mut late, |m| {
+                slow(m) || m.to == removed && m.body == release
+            });
+        }
+        let (to_removed, rest): (Vec<Message>, Vec<Message>) =
+            late.drain(..).partition(|m| m.to == removed);
+        lost.extend(to_removed);
+        late = rest;
+    }
+    assert_eq!(
+        lost,
+        [Message {
+            from: key(1),
+            to: removed,
+            term: Term(1),
+            body: release,
+        }]
+    );
+    let new = Voters {
+        incoming: set(kept),
+        outgoing: BTreeSet::new(),
+    };
+    assert_eq!(nodes[&key(1)].voters(), &new);
+    assert_eq!(nodes[&removed].voters(), &new);
+    nodes
+}
+
+// Node 3 misses its release. It campaigns at each election timeout, and the voters,
+// which hold the leader's lease, drop each campaign.
+#[test]
+fn leased_voters_drop_the_campaign_of_a_removed_node() {
+    let mut nodes = lose_the_release(3);
+    let with_3 = watch(&mut nodes, 3 * ELECTION, 3);
+    let end = Position {
+        term: Term(1),
+        index: 3,
+    };
+    let campaigns: Vec<Sent> = (1..=3)
+        .flat_map(|n| campaign(n * ELECTION - 1, 3, &[1, 2], 2, end))
+        .collect();
+    assert_eq!(with_3, campaigns);
+    assert_eq!(
+        (nodes[&key(1)].role(), nodes[&key(1)].term()),
+        (Role::Leader, Term(1))
+    );
+    assert_eq!(nodes[&key(3)].role(), Role::PreCandidate);
+}
+
+// A known gap until #483: once no voter has a lease, the voters elect a removed node
+// that missed its release. Node 4 holds the leave without its commit, so it
+// campaigns, and its log is as long as theirs. After leader 1 fails, node 4 wins,
+// commits an entry of its term, and steps down. Voters 2 and 3 follow it until their
+// election timeout. #483 drops a message from a node outside the configuration.
+#[test]
+fn the_voters_elect_a_removed_node_once_the_leader_fails() {
+    let mut nodes = lose_the_release(4);
+    // Node 4 times out first, and node 3 before node 2.
+    let random = [(2, 6), (3, 3), (4, 0)];
+    let mut gone = Vec::new();
+    let mut history = Vec::new();
+    for round in 0..4 * ELECTION {
+        for (id, random) in random {
+            nodes.get_mut(&key(id)).unwrap().tick(random);
+        }
+        run_holding(&mut nodes, &mut gone, |m| m.to == key(1));
+        let state = |id| (nodes[&key(id)].term(), nodes[&key(id)].leader());
+        let now = (state(2), state(3), nodes[&key(4)].role());
+        if history.last().is_none_or(|(_, last)| *last != now) {
+            history.push((round, now));
+        }
+    }
+    let follow = |term, id| {
+        let state = (Term(term), Some(key(id)));
+        (state, state, Role::Follower)
+    };
+    assert_eq!(
+        history,
+        [(0, follow(1, 1)), (9, follow(2, 4)), (22, follow(3, 3))]
+    );
 }
 
 // Delivers every message between `a` and `b` until none remains, and records what
@@ -213,4 +441,90 @@ fn a_removed_leader_that_restarts_before_the_leave_commits_finishes_the_change()
     };
     assert_eq!(a.voters(), &new);
     assert_eq!(b.voters(), &new);
+}
+
+// Whether a message crosses between the sides {1, 4} and {2, 3}.
+fn crosses(message: &Message) -> bool {
+    let side = |at: node::Key| at == key(1) || at == key(4);
+    side(message.from) != side(message.to)
+}
+
+// Node 4 is removed. It holds the leave and an entry after it that only leader 1
+// sent it, while nodes 2 and 3 hold the leave but not its commit. Node 2 then wins
+// term 2 with node 3's vote, so node 4's last position is not in the new leader's
+// log. After the network mends, node 4 campaigns. The leased voters refuse it once
+// at their term, then drop its campaigns, and node 2 keeps the lead.
+#[test]
+fn leased_voters_refuse_a_removed_node_with_an_entry_the_leader_lacks() {
+    let mut nodes: BTreeMap<node::Key, Raft> = (1..=4)
+        .map(|id| (key(id), node(id, &[1, 2, 3, 4])))
+        .collect();
+    let mut lost = Vec::new();
+    nodes.get_mut(&key(1)).unwrap().campaign();
+    run(&mut nodes);
+    assert_eq!(nodes[&key(1)].role(), Role::Leader);
+    nodes
+        .get_mut(&key(1))
+        .unwrap()
+        .propose_voters(set(&[1, 2, 3]))
+        .unwrap();
+    // Nodes 2 and 3 take the leave, but their answers are lost, so the leave does
+    // not commit. Node 4 takes the leave too.
+    let (committed, _) = run_holding(&mut nodes, &mut lost, |m| {
+        m.from != key(4) && m.body == Body::AppendReply { last: 3 }
+    });
+    assert_eq!(lost.len(), 2);
+    // The joint entry is committed; the leave is not.
+    assert_eq!(committed[&key(1)].len(), 1);
+    assert_eq!(committed[&key(1)][0].at.index, 2);
+    let new = Voters {
+        incoming: set(&[1, 2, 3]),
+        outgoing: BTreeSet::new(),
+    };
+    for id in 1..=4 {
+        assert_eq!(nodes[&key(id)].voters(), &new, "node {id}");
+    }
+    lost.clear();
+
+    // The network splits: {1, 4} and {2, 3}. Leader 1 proposes an entry that only
+    // node 4 gets.
+    nodes.get_mut(&key(1)).unwrap().propose(vec![7]).unwrap();
+    run_holding(&mut nodes, &mut lost, crosses);
+    assert_eq!(lost.len(), 2, "{lost:?}");
+    lost.clear();
+
+    // Nodes 2 and 3 time out and elect node 2 in term 2, which commits the leave.
+    for _ in 0..3 * ELECTION {
+        nodes.get_mut(&key(2)).unwrap().tick(0);
+        nodes.get_mut(&key(3)).unwrap().tick(3);
+        run_holding(&mut nodes, &mut lost, crosses);
+    }
+    assert_eq!(
+        (nodes[&key(2)].role(), nodes[&key(2)].term()),
+        (Role::Leader, Term(2))
+    );
+    assert_eq!(nodes[&key(3)].leader(), Some(key(2)));
+
+    // The network mends.
+    // Leader 1 heartbeats node 4 once before it learns of term 2.
+    let with_4 = watch(&mut nodes, 8 * ELECTION, 4);
+    let end = Position {
+        term: Term(1),
+        index: 4,
+    };
+    let refuse = |id| sent(ELECTION, id, 4, 2, Body::PreVoteReply { granted: false });
+    let mut expected = vec![
+        sent(0, 1, 4, 1, Body::Heartbeat { commit: 2 }),
+        sent(0, 4, 1, 1, Body::HeartbeatReply),
+    ];
+    expected.extend(campaign(ELECTION, 4, &[1, 2, 3], 2, end));
+    expected.extend([1, 2, 3].map(refuse));
+    expected.extend((2..8).flat_map(|n| campaign(n * ELECTION, 4, &[1, 2, 3], 3, end)));
+    assert_eq!(with_4, expected);
+    assert_eq!(
+        (nodes[&key(2)].role(), nodes[&key(2)].term()),
+        (Role::Leader, Term(2))
+    );
+    assert_eq!(nodes[&key(1)].leader(), Some(key(2)));
+    assert_eq!(nodes[&key(4)].role(), Role::PreCandidate);
 }
