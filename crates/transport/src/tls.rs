@@ -188,17 +188,25 @@ pub(crate) fn peer(
     if protocol != Some(ALPN) {
         return Err(rustls::Error::NoApplicationProtocol);
     }
-    Ok(match certificates.and_then(<[_]>::first) {
+    Ok(match certificates.and_then(<[_]>::split_first) {
         None => Peer::Client,
-        Some(certificate) => Peer::Node(
-            key(certificate).expect("invariant: a verifier accepted this certificate"),
+        Some((end_entity, intermediates)) => Peer::Node(
+            key(end_entity, intermediates)
+                .expect("invariant: a verifier accepted this chain"),
         ),
     })
 }
 
-/// The node key that `certificate` carries.
-fn key(certificate: &CertificateDer<'_>) -> Result<PublicKey, rustls::Error> {
-    let parsed = ParsedCertificate::try_from(certificate)?;
+/// The node key that a chain carries. A node's chain is `end_entity` alone, so any
+/// `intermediates` refuse it.
+fn key(
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+) -> Result<PublicKey, rustls::Error> {
+    if !intermediates.is_empty() {
+        return Err(CertificateError::ApplicationVerificationFailure.into());
+    }
+    let parsed = ParsedCertificate::try_from(end_entity)?;
     parsed
         .subject_public_key_info()
         .strip_prefix(SPKI)
@@ -218,12 +226,12 @@ impl ServerCertVerifier for Pinned {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
+        intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        if key(end_entity)? == self.expected {
+        if key(end_entity, intermediates)? == self.expected {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(CertificateError::ApplicationVerificationFailure.into())
@@ -271,10 +279,10 @@ impl ClientCertVerifier for AnyKey {
     fn verify_client_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
+        intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        key(end_entity).map(|_| ClientCertVerified::assertion())
+        key(end_entity, intermediates).map(|_| ClientCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -341,8 +349,13 @@ mod tests {
             .expect("aws-lc makes no key of small order")
     }
 
-    /// Moves every pending TLS record from `from` to `to`.
-    fn pass(from: &mut Connection, to: &mut Connection) {
+    /// Moves every pending TLS record from `from` to `to`, and has `to` process
+    /// each part as it reads it, because its read buffer is smaller than a flight.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a Vec and a slice give no I/O error; the Result is the peer's"
+    )]
+    fn pass(from: &mut Connection, to: &mut Connection) -> Result<(), rustls::Error> {
         let mut wire = Vec::new();
         while from.wants_write() {
             from.write_tls(&mut wire).expect("writes to a Vec");
@@ -350,7 +363,9 @@ mod tests {
         let mut rest = wire.as_slice();
         while !rest.is_empty() {
             to.read_tls(&mut rest).expect("reads from a slice");
+            to.process_new_packets()?;
         }
+        Ok(())
     }
 
     /// Joins `client` and `server` in memory until both finish the handshake and the
@@ -364,10 +379,8 @@ mod tests {
         let mut client = Connection::from(ClientConnection::new(client, name)?);
         let mut server = Connection::from(ServerConnection::new(server)?);
         for _ in 0..8 {
-            pass(&mut client, &mut server);
-            server.process_new_packets()?;
-            pass(&mut server, &mut client);
-            client.process_new_packets()?;
+            pass(&mut client, &mut server)?;
+            pass(&mut server, &mut client)?;
             if !client.is_handshaking() && !server.is_handshaking() {
                 let (Connection::Client(client), Connection::Server(server)) =
                     (client, server)
@@ -427,6 +440,13 @@ mod tests {
             certified(certificate).cert.clone(),
             Arc::clone(&certified(signer).key),
         ))
+    }
+
+    /// TLS that presents `tls`'s certificate, then 54 kB of junk certificates.
+    fn chained(tls: &Tls) -> Tls {
+        let mut chain = certified(tls).cert.clone();
+        chain.extend((0..6).map(|_| CertificateDer::from(vec![0xa5; 9_000])));
+        Tls::with(CertifiedKey::new(chain, Arc::clone(&certified(tls).key)))
     }
 
     /// TLS with an ECDSA P-256 certificate, that signs with ECDSA whatever schemes
@@ -593,6 +613,32 @@ mod tests {
         }
 
         #[test]
+        fn when_client_chain_has_more_certificates_the_server_refuses() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let peers = handshake(
+                chained(&Tls::new(&a)).client(public(&b)),
+                Tls::new(&b).server(),
+            );
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_server_chain_has_more_certificates_the_client_refuses() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let peers = handshake(
+                Tls::new(&a).client(public(&b)),
+                chained(&Tls::new(&b)).server(),
+            );
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
         fn when_client_key_is_ecdsa_the_server_refuses() {
             let b = PrivateKey([2; 32]);
             let peers = handshake(ecdsa().client(public(&b)), Tls::new(&b).server());
@@ -747,7 +793,7 @@ mod tests {
             // 1.3.101.112 (Ed25519) becomes 1.3.101.110 (X25519).
             der[at + 8] = 0x6e;
             assert_eq!(
-                key(&CertificateDer::from(der)),
+                key(&CertificateDer::from(der), &[]),
                 Err(CertificateError::ApplicationVerificationFailure.into())
             );
         }
@@ -755,7 +801,7 @@ mod tests {
         #[test]
         fn refuses_bytes_that_are_not_der() {
             assert_eq!(
-                key(&CertificateDer::from(vec![1, 2, 3])),
+                key(&CertificateDer::from(vec![1, 2, 3]), &[]),
                 Err(CertificateError::BadEncoding.into())
             );
         }
@@ -769,7 +815,7 @@ mod tests {
             fn carries_the_public_key(bytes: [u8; 32]) {
                 let private_key = PrivateKey(bytes);
                 let certificate = certificate(&Tls::new(&private_key));
-                prop_assert_eq!(key(&certificate), Ok(public(&private_key)));
+                prop_assert_eq!(key(&certificate, &[]), Ok(public(&private_key)));
             }
         }
 

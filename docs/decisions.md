@@ -654,8 +654,10 @@ How to read this record:
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
   the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
-  issuer are not checked. A node sends its certificate when it dials; an SDK client
-  sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
+  issuer are not checked. A peer's chain is that one certificate: a longer chain is
+  refused, so a peer cannot make the node hold more certificates for a session
+  (#299). A node sends its certificate when it dials; an SDK client sends none and
+  pins the node key the same way. ALPN is `foundation/1`, and a new
   session protocol gets a new name. A session that agrees no ALPN, or another name,
   ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
   ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
