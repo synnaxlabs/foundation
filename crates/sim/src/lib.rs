@@ -167,10 +167,9 @@ impl Sim {
     }
 
     /// A hash of every scheduler pick, every packet event, and every end of a file
-    /// call so far: the time, addresses, length, and fate of a datagram, the same and
-    /// the kind of a TCP segment, and the time, kind, and success of a call, never the
-    /// bytes. In one build, the same
-    /// seed and the same calls give the same digest.
+    /// call so far: the time, addresses, length, and fate of a packet, the kind of a
+    /// TCP segment, and the time, kind, and success of a call, never the bytes. In
+    /// one build, the same seed and the same calls give the same digest.
     #[must_use]
     pub fn digest(&self) -> u64 {
         lock(&self.shared).digest()
