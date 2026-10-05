@@ -790,3 +790,73 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
     ];
     assert_eq!(results, expected);
 }
+
+/// The values of bytes 0 to 100 and 100 to 200 of a file after the writes of `order`
+/// (offset, length, and value), each started when the one before it ended or, when
+/// `spawned`, at once with it.
+fn writes_in_order(value: u64, order: [(u64, usize, u8, bool); 3]) -> (u8, u8) {
+    let bytes = run(value, MIB, move |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 512).await);
+        let pool = pool();
+        for (offset, len, byte, spawned) in order {
+            let (writer, parts) = (Rc::clone(&file), [block(&pool, &vec![byte; len])]);
+            let write = async move { writer.write_at(offset, &parts).await.unwrap() };
+            if spawned {
+                tasks.spawn(write);
+            } else {
+                write.await;
+            }
+        }
+        node.clock().sleep(Span::MILLISECOND).await;
+        read(&file, &pool, 0, 200).await
+    });
+    let (first, second) = bytes.split_at(100);
+    assert!(first.iter().all(|&byte| byte == first[0]), "{first:?}");
+    assert!(second.iter().all(|&byte| byte == second[0]), "{second:?}");
+    (first[0], second[0])
+}
+
+#[test]
+fn three_writes_in_flight_over_nested_bytes_leave_the_result_of_an_order() {
+    let writes = [(0, 200, 1, true), (0, 100, 2, true), (0, 200, 3, false)];
+    let results: BTreeSet<(u8, u8)> = (0..256)
+        .map(|value| writes_in_order(value, writes))
+        .collect();
+    let orders = BTreeSet::from([(1, 1), (2, 1), (2, 3), (3, 3)]);
+    assert_eq!(results, orders);
+}
+
+#[test]
+fn a_write_in_flight_over_two_in_turn_keeps_their_order() {
+    let writes = [(0, 200, 1, true), (0, 100, 2, false), (100, 100, 3, false)];
+    let results: BTreeSet<(u8, u8)> = (0..256)
+        .map(|value| writes_in_order(value, writes))
+        .collect();
+    let orders = BTreeSet::from([(1, 1), (1, 3), (2, 3)]);
+    assert_eq!(results, orders);
+}
+
+/// The bytes of a one-sector file after writes of 1, 2, and 3, with a sync started
+/// after each of the first two and still in flight.
+fn syncs_in_flight(value: u64) -> Vec<u8> {
+    run(value, MIB, |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 512).await);
+        let pool = pool();
+        for byte in 1..=3 {
+            file.write_at(0, &[block(&pool, &[byte; 512])])
+                .await
+                .unwrap();
+            let syncer = Rc::clone(&file);
+            tasks.spawn(async move { syncer.sync().await.unwrap() });
+        }
+        node.clock().sleep(Span::MILLISECOND).await;
+        read(&file, &pool, 0, 512).await
+    })
+}
+
+#[test]
+fn syncs_in_flight_end_in_any_order() {
+    for value in 0..64 {
+        assert_eq!(syncs_in_flight(value), vec![3; 512], "value {value}");
+    }
+}
