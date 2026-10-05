@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::tasks::{Task, Tasks};
-use crate::threads::{self, Error, Handle};
+use crate::threads::{Error, Handle};
 
 /// A shard's main function as a driver receives it.
 ///
@@ -68,8 +68,7 @@ impl Shards {
     ///
     /// # Errors
     ///
-    /// - [`Error::Start`] when the thread or its executor cannot start, or when the
-    ///   name holds a NUL byte.
+    /// - [`Error::Start`] when the thread or its executor cannot start.
     /// - [`Error::Pin`] when the thread cannot pin to `config.core`.
     ///
     /// ```
@@ -88,7 +87,6 @@ impl Shards {
     where
         F: Future<Output = ()> + 'static,
     {
-        threads::check_name(&config.name)?;
         self.0
             .start(config, Box::new(|tasks| Box::pin(main(tasks))))
     }
@@ -125,61 +123,12 @@ pub trait Driver: Send + Sync {
     fn cores(&self) -> NonZeroUsize;
 
     /// Starts a thread with a task executor, makes [`Tasks`] for it, and runs
-    /// `main(tasks)` on it, with the rules of [`Shards::start`]. `config.name` holds no
-    /// NUL byte. Dropping the shard drops every task, also one that holds a clone of
-    /// its [`Tasks`].
+    /// `main(tasks)` on it, with the rules of [`Shards::start`]. `config.name` may hold
+    /// any character; `os` gives the OS the part before the first NUL byte. Dropping
+    /// the shard drops every task, also one that holds a clone of its [`Tasks`].
     ///
     /// # Errors
     ///
     /// As [`Shards::start`].
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A driver that starts every shard at once.
-    struct Started;
-
-    impl Driver for Started {
-        fn cores(&self) -> NonZeroUsize {
-            NonZeroUsize::MIN
-        }
-
-        fn start(&self, _: Config, _: Main) -> Result<Handle, Error> {
-            Ok(Handle::new(|| Ok(())))
-        }
-    }
-
-    fn start(name: &str) -> Result<Handle, Error> {
-        let config = Config {
-            name: name.into(),
-            core: None,
-        };
-        Shards::new(Started).start(config, |_tasks| async {})
-    }
-
-    #[test]
-    fn a_name_without_a_nul_byte_reaches_the_driver() {
-        let Ok(handle) = start("shard-0") else {
-            panic!("shard-0 did not start");
-        };
-        assert_eq!(handle.join(), Ok(()));
-    }
-
-    #[test]
-    fn a_name_with_a_nul_byte_cannot_start() {
-        let Err(e) = start("shard-0\0") else {
-            panic!("a name with a NUL byte started");
-        };
-        let reason = "the name holds a NUL byte".into();
-        assert_eq!(
-            e,
-            Error::Start {
-                name: "shard-0\0".into(),
-                reason
-            }
-        );
-    }
 }
