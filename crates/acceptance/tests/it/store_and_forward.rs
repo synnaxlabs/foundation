@@ -11,9 +11,10 @@ const WRITTEN: u64 = RATE * 3600;
 /// what the Influx out connector stored and the seqs written.
 fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
     let mut lab = Lab::new(1);
-    let cloud = lab.start("cloud", 1 << 40);
-    let bytes = lab.budget(RATE, budget);
-    let edge = lab.start("edge", bytes);
+    let cloud = lab.start("cloud");
+    let edge = lab.start("edge");
+    let bytes = lab.bytes(RATE, budget);
+    lab.limit(edge, bytes);
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
     lab.influx(cloud, "influx");
@@ -32,7 +33,7 @@ fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
 }
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #295: buffer budget"]
 fn a_budget_for_the_hour_delivers_every_sample_in_seq_order() {
     let (stored, written) = check(HOUR);
     assert_eq!(stored.samples, WRITTEN, "count");
@@ -42,7 +43,7 @@ fn a_budget_for_the_hour_delivers_every_sample_in_seq_order() {
 }
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #295: buffer budget"]
 fn a_budget_for_half_the_hour_delivers_one_gap_of_the_trimmed_samples() {
     let (stored, written) = check(HOUR / 2);
     let [Gap { after: 0, count }] = stored.gaps[..] else {

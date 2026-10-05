@@ -3,11 +3,11 @@ use std::time::Duration;
 use crate::lab::Lab;
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #295: mesh join"]
 fn two_nodes_join_by_ticket_and_agree_on_the_spec() {
     let mut lab = Lab::new(1);
-    let cloud = lab.start("cloud", 1 << 30);
-    let edge = lab.start("edge", 1 << 30);
+    let cloud = lab.start("cloud");
+    let edge = lab.start("edge");
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
     let before = lab.spec(cloud);

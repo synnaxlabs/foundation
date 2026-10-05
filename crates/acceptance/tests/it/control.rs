@@ -3,10 +3,10 @@ use std::time::Duration;
 use crate::lab::{Lab, Protocol};
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #295: connector kinds"]
 fn a_subject_without_authority_cannot_command_and_the_audit_records_who_did() {
     let mut lab = Lab::new(1);
-    let edge = lab.start("edge", 1 << 30);
+    let edge = lab.start("edge");
     lab.device(edge, Protocol::ModbusTcp, "dev");
     lab.apply(edge, include_str!("fixtures/modbus_tcp.hcl"));
     lab.apply(edge, include_str!("fixtures/control.hcl"));

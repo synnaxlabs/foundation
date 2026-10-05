@@ -1,17 +1,29 @@
 //! A simulated mesh for the scenarios: nodes from `node` on `sim` seams, links that
 //! can be cut, simulated devices and stores, and the operator's front ends. Each
-//! method waits on the surface named in its `todo!`.
+//! method with a `todo!` waits on the surface it names.
 
 use std::ops::Range;
 use std::time::Duration;
 
+use types::time::Span;
+
 /// A whole mesh on one deterministic simulation.
 #[derive(Debug)]
-pub(crate) struct Lab;
+pub(crate) struct Lab {
+    sim: sim::Sim,
+    members: Vec<Member>,
+}
 
-/// One node in a [`Lab`].
+#[derive(Debug)]
+struct Member {
+    name: String,
+    host: sim::node::Node,
+    node: node::Node,
+}
+
+/// One node in a [`Lab`]: its index in `members`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Node;
+pub(crate) struct Node(usize);
 
 /// A join ticket. It is a secret, never written to a file.
 #[derive(Debug)]
@@ -65,19 +77,40 @@ pub(crate) struct Command {
 
 impl Lab {
     /// Builds an empty mesh whose run replays from `key`.
-    pub(crate) fn new(_key: u64) -> Self {
-        todo!("waits on #212")
+    pub(crate) fn new(key: u64) -> Self {
+        let sim = sim::Sim::new(sim::Config {
+            seed: key,
+            ..sim::Config::default()
+        });
+        Self {
+            sim,
+            members: Vec::new(),
+        }
     }
 
-    /// Starts a node named `name` with a disk budget of `budget` bytes.
-    pub(crate) fn start(&mut self, _name: &str, _budget: u64) -> Node {
-        todo!("waits on #212")
+    /// Starts a node named `name` on a new simulated host.
+    pub(crate) fn start(&mut self, name: &str) -> Node {
+        let host = self.sim.node(sim::node::Config::default());
+        let node = node::Node::start(node::Config {
+            shards: host.shards(),
+        });
+        self.members.push(Member {
+            name: name.into(),
+            host,
+            node,
+        });
+        Node(self.members.len() - 1)
+    }
+
+    /// Sets the disk budget of `node` to `bytes`.
+    pub(crate) fn limit(&mut self, _node: Node, _bytes: u64) {
+        todo!("waits on the buffer budget in node")
     }
 
     /// The disk budget that holds `span` of one `f64` channel at `rate` samples per
     /// second, as `buffer` stores it.
-    pub(crate) fn budget(&self, _rate: u64, _span: Duration) -> u64 {
-        todo!("waits on buffer")
+    pub(crate) fn bytes(&self, _rate: u64, _span: Duration) -> u64 {
+        todo!("waits on the buffer budget in node")
     }
 
     /// Creates a single-use join ticket on `admin`.
@@ -210,17 +243,66 @@ impl Lab {
     }
 
     /// Cuts every link between `a` and `b`.
-    pub(crate) fn cut(&mut self, _a: Node, _b: Node) {
-        todo!("waits on sim network #113")
+    pub(crate) fn cut(&mut self, a: Node, b: Node) {
+        let config = sim::link::Config {
+            loss: 1.0,
+            ..sim::link::Config::default()
+        };
+        self.link(a, b, config);
     }
 
     /// Restores every link between `a` and `b`.
-    pub(crate) fn heal(&mut self, _a: Node, _b: Node) {
-        todo!("waits on sim network #113")
+    pub(crate) fn heal(&mut self, a: Node, b: Node) {
+        self.link(a, b, sim::link::Config::default());
+    }
+
+    fn link(&mut self, a: Node, b: Node, config: sim::link::Config) {
+        let (a, b) = (&self.members[a.0].host, &self.members[b.0].host);
+        self.sim.link(a, b, config);
+        self.sim.link(b, a, config);
     }
 
     /// Runs the simulation for `span` of simulated time.
-    pub(crate) fn run(&mut self, _span: Duration) {
-        todo!("waits on #212")
+    ///
+    /// # Panics
+    ///
+    /// When a task panics or the run takes too many steps.
+    pub(crate) fn run(&mut self, span: Duration) {
+        let nanos = i64::try_from(span.as_nanos()).expect("span fits in a Span");
+        if let Err(e) = self.sim.run_for(Span::from_nanos(nanos)) {
+            panic!("{e}");
+        }
     }
+
+    /// Stops every node and runs the simulation until each has ended.
+    ///
+    /// # Panics
+    ///
+    /// When the run fails, or a node ends with an error.
+    pub(crate) fn stop(mut self) {
+        for member in &self.members {
+            member.node.stop();
+        }
+        if let Err(e) = self.sim.run() {
+            panic!("{e}");
+        }
+        for member in self.members {
+            if let Err(e) = member.node.join() {
+                panic!("{}: {e}", member.name);
+            }
+        }
+    }
+}
+
+#[test]
+fn nodes_start_run_and_stop() {
+    let mut lab = Lab::new(1);
+    let cloud = lab.start("cloud");
+    let edge = lab.start("edge");
+    lab.run(Duration::from_secs(1));
+    lab.cut(edge, cloud);
+    lab.run(Duration::from_secs(1));
+    lab.heal(edge, cloud);
+    lab.run(Duration::from_secs(1));
+    lab.stop();
 }
