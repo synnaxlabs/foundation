@@ -33,6 +33,17 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     Err(errors)
 }
 
+/// What ends an item, besides a close bracket at its level and the end of the text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ends {
+    /// A `,` or a new line, as in a body or an object.
+    Line,
+    /// A `,`, as in a list or a call, where new lines do not end an item.
+    Comma,
+    /// Only the close bracket, as in a `for` expression.
+    Close,
+}
+
 struct Parser<'a> {
     tokens: Tokens<'a>,
     /// The next token, not yet taken.
@@ -77,7 +88,7 @@ impl<'a> Parser<'a> {
             let name = self.take()?;
             if self.token.kind == lex::Kind::Equals {
                 self.take()?;
-                let value = self.value(depth)?;
+                let value = self.value(depth, Ends::Line)?;
                 self.end_line()?;
                 attributes.extend(value.map(|value| attribute(name, value)));
             } else {
@@ -136,7 +147,8 @@ impl<'a> Parser<'a> {
                 return Err(self.syntax(Expected::Equals));
             }
             self.take()?;
-            attributes.extend(self.value(depth)?.map(|value| attribute(key, value)));
+            let value = self.value(depth, Ends::Line)?;
+            attributes.extend(value.map(|value| attribute(key, value)));
             if self.token.kind != lex::Kind::CloseBrace {
                 return Err(self.syntax(Expected::BlockEnd));
             }
@@ -149,9 +161,26 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Reads a value. Returns `None` when the value has a problem that does not stop
-    /// reading.
-    fn value(&mut self, depth: usize) -> Result<Option<Value>, Error> {
+    /// Reads a value in an item that `ends` ends. Returns `None` when the value has a
+    /// problem that does not stop reading.
+    fn value(&mut self, depth: usize, ends: Ends) -> Result<Option<Value>, Error> {
+        if let Some(form) = self.leading_form() {
+            self.refuse(form, ends)?;
+            return Ok(None);
+        }
+        let value = self.term(depth)?;
+        if ends == Ends::Comma {
+            self.skip_newlines()?;
+        }
+        if let Some(form) = self.trailing_form() {
+            self.refuse(form, ends)?;
+            return Ok(None);
+        }
+        Ok(value)
+    }
+
+    /// Reads a value that starts with no HCL form.
+    fn term(&mut self, depth: usize) -> Result<Option<Value>, Error> {
         if self.token.kind == lex::Kind::End {
             return Err(self.syntax(Expected::Value));
         }
@@ -165,7 +194,6 @@ impl<'a> Parser<'a> {
                 let digits = self.take()?;
                 return Ok(self.number(&digits, Some(token.span)));
             }
-            lex::Kind::Minus => return Err(self.syntax(Expected::Value)),
             lex::Kind::String(text) => value::Kind::String(text),
             lex::Kind::OpenBracket => return self.list(&token, depth).map(Some),
             lex::Kind::OpenBrace => return self.object(&token, depth).map(Some),
@@ -180,6 +208,79 @@ impl<'a> Parser<'a> {
             kind,
             span: Some(token.span),
         }))
+    }
+
+    /// The HCL form that the next token starts, where a value must start.
+    fn leading_form(&self) -> Option<Form> {
+        match self.token.kind {
+            lex::Kind::Operator | lex::Kind::Star => Some(Form::Operator),
+            lex::Kind::Minus if self.after().kind != lex::Kind::Number => {
+                Some(Form::Operator)
+            }
+            lex::Kind::OpenParenthesis => Some(Form::Parentheses),
+            _ => None,
+        }
+    }
+
+    /// The HCL form that the next token starts, after a value.
+    fn trailing_form(&self) -> Option<Form> {
+        match self.token.kind {
+            lex::Kind::Operator | lex::Kind::Minus | lex::Kind::Star => {
+                Some(Form::Operator)
+            }
+            lex::Kind::Question => Some(Form::Conditional),
+            lex::Kind::OpenBracket | lex::Kind::Dot
+                if self.after().kind == lex::Kind::Star =>
+            {
+                Some(Form::Splat)
+            }
+            lex::Kind::OpenBracket | lex::Kind::Dot => Some(Form::Index),
+            lex::Kind::DoubleColon => Some(Form::Namespace),
+            lex::Kind::Ellipsis => Some(Form::Expansion),
+            _ => None,
+        }
+    }
+
+    /// Refuses a `for` expression at the start of a list or an object.
+    fn refuse_for(&mut self) -> Result<(), Error> {
+        self.skip_newlines()?;
+        if self.token.kind == lex::Kind::Identifier
+            && self.token.text == "for"
+            && self.after().kind == lex::Kind::Identifier
+        {
+            self.refuse(Form::For, Ends::Close)?;
+        }
+        Ok(())
+    }
+
+    /// Keeps the problem of `form` at the next token, then moves past the rest of the
+    /// item to the token that ends it, and leaves that token.
+    fn refuse(&mut self, form: Form, ends: Ends) -> Result<(), Error> {
+        self.errors.push(Error::Form {
+            span: self.token.span,
+            form,
+        });
+        let mut depth = 0usize;
+        loop {
+            match self.token.kind {
+                lex::Kind::End => return Ok(()),
+                lex::Kind::OpenBrace
+                | lex::Kind::OpenBracket
+                | lex::Kind::OpenParenthesis => depth = depth.saturating_add(1),
+                lex::Kind::CloseBrace
+                | lex::Kind::CloseBracket
+                | lex::Kind::CloseParenthesis => match depth.checked_sub(1) {
+                    Some(outer) => depth = outer,
+                    None => return Ok(()),
+                },
+                lex::Kind::Comma if depth == 0 && ends != Ends::Close => return Ok(()),
+                lex::Kind::Newline if depth == 0 && ends == Ends::Line => {
+                    return Ok(());
+                }
+                _ => {}
+            }
+            self.take()?;
+        }
     }
 
     fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
@@ -246,13 +347,14 @@ impl<'a> Parser<'a> {
 
     fn list(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
         let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
+        self.refuse_for()?;
         let mut items = Vec::new();
         let close = loop {
             self.skip_newlines()?;
             if self.token.kind == lex::Kind::CloseBracket {
                 break self.take()?;
             }
-            items.extend(self.value(depth)?);
+            items.extend(self.value(depth, Ends::Comma)?);
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::Comma => {
@@ -285,19 +387,26 @@ impl<'a> Parser<'a> {
         attributes: &mut Vec<Attribute>,
         depth: usize,
     ) -> Result<Token<'a>, Error> {
+        self.refuse_for()?;
         loop {
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::CloseBrace => return self.take(),
-                lex::Kind::String(_) | lex::Kind::Identifier => {}
+                lex::Kind::OpenParenthesis => {
+                    self.refuse(Form::Parentheses, Ends::Line)?;
+                }
+                lex::Kind::String(_) | lex::Kind::Identifier => {
+                    let key = self.take()?;
+                    if !matches!(self.token.kind, lex::Kind::Equals | lex::Kind::Colon)
+                    {
+                        return Err(self.syntax(Expected::ObjectEquals));
+                    }
+                    self.take()?;
+                    let value = self.value(depth, Ends::Line)?;
+                    attributes.extend(value.map(|value| attribute(key, value)));
+                }
                 _ => return Err(self.syntax(Expected::Key)),
             }
-            let key = self.take()?;
-            if !matches!(self.token.kind, lex::Kind::Equals | lex::Kind::Colon) {
-                return Err(self.syntax(Expected::ObjectEquals));
-            }
-            self.take()?;
-            attributes.extend(self.value(depth)?.map(|value| attribute(key, value)));
             match self.token.kind {
                 lex::Kind::Comma | lex::Kind::Newline => {
                     self.take()?;
@@ -319,7 +428,7 @@ impl<'a> Parser<'a> {
             if self.token.kind == lex::Kind::CloseParenthesis {
                 break self.take()?;
             }
-            arguments.extend(self.value(depth)?);
+            arguments.extend(self.value(depth, Ends::Comma)?);
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::Comma => {
@@ -384,6 +493,11 @@ impl<'a> Parser<'a> {
         );
         let next = self.tokens.next();
         Ok(std::mem::replace(&mut self.token, next))
+    }
+
+    /// The first token after the next one that is not a new line.
+    fn after(&self) -> Token<'a> {
+        self.tokens.clone().next_past_lines()
     }
 
     /// The problem at the next token: the lexer's error, or `expected`.
@@ -634,6 +748,15 @@ c = "°C # not a comment"
                 ),
             ]);
             assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_for_as_a_word_when_no_identifier_follows() {
+            let expected = attributes(vec![
+                ("a", value::Kind::List(vec![value(reference("for"))])),
+                ("b", value::Kind::Map(map(vec![("for", integer(1))]))),
+            ]);
+            assert_eq!(ok("a = [for]\nb = { for = 1 }\n"), expected);
         }
 
         #[test]
@@ -889,6 +1012,111 @@ c = "°C # not a comment"
         }
 
         #[test]
+        fn refuses_each_form_at_the_token_that_shows_it() {
+            let cases = [
+                ("a = 1 + 2\n", on(6, 7), Form::Operator),
+                ("a = 1 - 2\n", on(6, 7), Form::Operator),
+                ("a = b * c\n", on(6, 7), Form::Operator),
+                ("a = 1 / 2\n", on(6, 7), Form::Operator),
+                ("a = 7 % 2\n", on(6, 7), Form::Operator),
+                ("a = 1 == 2\n", on(6, 8), Form::Operator),
+                ("a = 1 != 2\n", on(6, 8), Form::Operator),
+                ("a = 1 < 2\n", on(6, 7), Form::Operator),
+                ("a = 1 <= 2\n", on(6, 8), Form::Operator),
+                ("a = 1 > 2\n", on(6, 7), Form::Operator),
+                ("a = 1 >= 2\n", on(6, 8), Form::Operator),
+                ("a = b && c\n", on(6, 8), Form::Operator),
+                ("a = b || c\n", on(6, 8), Form::Operator),
+                ("a = !b\n", on(4, 5), Form::Operator),
+                ("a = -b\n", on(4, 5), Form::Operator),
+                ("a = *b\n", on(4, 5), Form::Operator),
+                ("a = /x\n", on(4, 5), Form::Operator),
+                ("a = b ? 1 : 2\n", on(6, 7), Form::Conditional),
+                ("a = [for x in y : x]\n", on(5, 8), Form::For),
+                ("a = { for k, v in m : k => v }\n", on(6, 9), Form::For),
+                (
+                    "a = [\n  for x in y : x\n]\n",
+                    span(at(8, 1, 2), at(11, 1, 5)),
+                    Form::For,
+                ),
+                ("a = b[0]\n", on(5, 6), Form::Index),
+                ("a = f(1).b\n", on(8, 9), Form::Index),
+                ("a = 1.x\n", on(5, 6), Form::Index),
+                ("a = [1][0]\n", on(7, 8), Form::Index),
+                ("a = b[*].c\n", on(5, 6), Form::Splat),
+                ("a = b[ * ]\n", on(5, 6), Form::Splat),
+                ("a = b.*.c\n", on(5, 6), Form::Splat),
+                ("a = (1)\n", on(4, 5), Form::Parentheses),
+                ("a = provider::aws::f(1)\n", on(12, 14), Form::Namespace),
+                ("a = f(xs...)\n", on(8, 11), Form::Expansion),
+                ("a = [1 + 2]\n", on(7, 8), Form::Operator),
+                ("a = { k = 1 + 2 }\n", on(12, 13), Form::Operator),
+                ("a = f(1 + 2)\n", on(8, 9), Form::Operator),
+                ("b { k = 1 + 2 }\n", on(10, 11), Form::Operator),
+                (
+                    "b {\n  k = 1 + 2\n}\n",
+                    span(at(12, 1, 8), at(13, 1, 9)),
+                    Form::Operator,
+                ),
+                ("a = { (k) = 1 }\n", on(6, 7), Form::Parentheses),
+            ];
+            for (text, span, form) in cases {
+                let message = form.to_string();
+                check(text, &[(Error::Form { span, form }, &message)]);
+            }
+        }
+
+        #[test]
+        fn refuses_a_form_after_a_new_line_inside_brackets() {
+            let cases = [
+                (
+                    "a = [\n  1\n  + 2\n]\n",
+                    span(at(12, 2, 2), at(13, 2, 3)),
+                    Form::Operator,
+                ),
+                (
+                    "a = f(\n  1\n  + 2\n)\n",
+                    span(at(13, 2, 2), at(14, 2, 3)),
+                    Form::Operator,
+                ),
+                (
+                    "a = [\n  b\n  ? 1 : 2\n]\n",
+                    span(at(12, 2, 2), at(13, 2, 3)),
+                    Form::Conditional,
+                ),
+                ("a = [for\n  x in y : x]\n", on(5, 8), Form::For),
+                ("a = { for\n  k, v in m : k => v }\n", on(6, 9), Form::For),
+                (
+                    "a = {\n  for k, v in m : k => v\n}\n",
+                    span(at(8, 1, 2), at(11, 1, 5)),
+                    Form::For,
+                ),
+                ("a = b[\n  *\n]\n", on(5, 6), Form::Splat),
+            ];
+            for (text, span, form) in cases {
+                let message = form.to_string();
+                check(text, &[(Error::Form { span, form }, &message)]);
+            }
+        }
+
+        #[test]
+        fn keeps_a_problem_before_a_form() {
+            let null = Error::Form {
+                span: on(4, 8),
+                form: Form::Null,
+            };
+            let operator = Error::Form {
+                span: span(at(15, 1, 6), at(16, 1, 7)),
+                form: Form::Operator,
+            };
+            let message = Form::Operator.to_string();
+            check(
+                "a = null\nb = 1 + 2\n",
+                &[(null, NULL), (operator, &message)],
+            );
+        }
+
+        #[test]
         fn refuses_a_string_that_does_not_end() {
             let quote = "the file needs `\"` to end the string here";
             check("s = \"abc", &[(syntax(on(4, 8), Expected::Quote), quote)]);
@@ -916,10 +1144,10 @@ c = "°C # not a comment"
                 ("a = $\n", on(4, 5), Expected::Value),
                 ("a =", on(3, 3), Expected::Value),
                 ("a = [", on(5, 5), Expected::Value),
-                ("a = -x\n", on(5, 6), Expected::Value),
-                ("a = /x\n", on(4, 5), Expected::Value),
+                ("a = ?\n", on(4, 5), Expected::Value),
+                ("a = .5\n", on(4, 5), Expected::Value),
+                ("a = -\n7\n", on(4, 5), Expected::Value),
                 ("a = 1\rb = 2\n", on(5, 6), Expected::Newline),
-                ("a = 1.x\n", on(5, 6), Expected::Newline),
                 ("a = 1ex\n", on(5, 7), Expected::Newline),
                 ("a = 1 b = 2\n", on(6, 7), Expected::Newline),
                 ("a 1\n", on(2, 3), Expected::AttributeOrBlock),
@@ -958,6 +1186,53 @@ c = "°C # not a comment"
         }
 
         #[test]
+        fn keeps_reading_after_a_form() {
+            let form = |span, form: Form| {
+                let message = form.to_string();
+                (Error::Form { span, form }, message)
+            };
+            let null = |span| Error::Form {
+                span,
+                form: Form::Null,
+            };
+            let cases = [
+                (
+                    "a = 1 + 2\nb = null\n",
+                    form(on(6, 7), Form::Operator),
+                    span(at(14, 1, 4), at(18, 1, 8)),
+                ),
+                (
+                    "a = [1 +\n  2, null]\n",
+                    form(on(7, 8), Form::Operator),
+                    span(at(14, 1, 5), at(18, 1, 9)),
+                ),
+                (
+                    "a = [for x, y in z : x]\nb = null\n",
+                    form(on(5, 8), Form::For),
+                    span(at(28, 1, 4), at(32, 1, 8)),
+                ),
+                (
+                    "a = 1 + [2, [3]]\nb = null\n",
+                    form(on(6, 7), Form::Operator),
+                    span(at(21, 1, 4), at(25, 1, 8)),
+                ),
+                (
+                    "a = 1 + {\n  x = 2\n}\nb = null\n",
+                    form(on(6, 7), Form::Operator),
+                    span(at(24, 3, 4), at(28, 3, 8)),
+                ),
+                (
+                    "a = { (k) = 1, j = null }\n",
+                    form(on(6, 7), Form::Parentheses),
+                    on(19, 23),
+                ),
+            ];
+            for (text, (error, message), at) in cases {
+                check(text, &[(error, &message), (null(at), NULL)]);
+            }
+        }
+
+        #[test]
         fn refuses_a_reference_that_is_not_a_name() {
             let error = "a.@".parse::<Name>().unwrap_err();
             let name = Error::Name {
@@ -965,6 +1240,17 @@ c = "°C # not a comment"
                 error,
             };
             check("r = a.@\n", &[(name, NAME)]);
+
+            for (text, name) in [("r = a.\n", "a."), ("r = a..b\n", "a..b")] {
+                let error = name.parse::<Name>().unwrap_err();
+                let message = format!("the reference is not a valid name: {error}");
+                let end = u32::try_from(name.len()).unwrap() + 4;
+                let name = Error::Name {
+                    span: on(4, end),
+                    error,
+                };
+                check(text, &[(name, &message)]);
+            }
 
             let long = "a".repeat(256);
             let error = long.parse::<Name>().unwrap_err();
@@ -1254,8 +1540,19 @@ c = "°C # not a comment"
                         Err(vec![Error::TooDeep { span }])
                     );
                 }
-                let text = format!("a = {}1", "-".repeat(100_000));
-                let expected = syntax(on(5, 6), Expected::Value);
+                for prefix in ["-", "!"] {
+                    let text = format!("a = {}1", prefix.repeat(100_000));
+                    let expected = Error::Form {
+                        span: on(4, 5),
+                        form: Form::Operator,
+                    };
+                    assert_eq!(read(Source(0), &text), Err(vec![expected]));
+                }
+                let text = format!("a = 1 + {}", "[".repeat(100_000));
+                let expected = Error::Form {
+                    span: on(6, 7),
+                    form: Form::Operator,
+                };
                 assert_eq!(read(Source(0), &text), Err(vec![expected]));
             });
         }
