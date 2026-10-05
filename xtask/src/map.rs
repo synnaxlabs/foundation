@@ -218,6 +218,11 @@ pub(crate) const CRATES: &[Crate] = &[
         layer: 4,
         deps: Deps::Any,
     },
+    Crate {
+        name: "acceptance",
+        layer: 4,
+        deps: Deps::Any,
+    },
 ];
 
 /// Every connector kind crate, named `connector-<kind>`.
