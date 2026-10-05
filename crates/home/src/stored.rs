@@ -4,7 +4,7 @@
 use block::Block;
 use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
-use types::frame::{self, Form, Frame};
+use types::frame::{self, Frame};
 use types::sample::{Scalar, Type};
 
 /// Bytes of the series count that starts a body.
@@ -27,24 +27,13 @@ mod at {
 /// # Errors
 ///
 /// [`block::Error`] when `pool` has no block for the header.
-///
-/// # Panics
-///
-/// If `frame` is not encoded, not of `set`, or of more than one group.
 pub(crate) fn body(
     pool: &block::Pool,
     frame: &Frame,
     set: &KeySet,
     key: impl Fn(Slot) -> channel::Key,
 ) -> Result<[Block; 2], block::Error> {
-    assert_eq!(frame.form(), Form::Encoded, "the frame is not encoded");
-    assert_eq!(
-        frame.key_set(),
-        set.key(),
-        "the frame is not of the key set"
-    );
     let entries = set.entries();
-    let group = frame.ends().next().map(|(entry, _)| entries[entry].group);
     let count = frame.ends().count();
     let mut head = pool.alloc(COUNT + DESCRIPTOR * count)?;
     let (start, descriptors) = head.split_at_mut(COUNT);
@@ -52,11 +41,6 @@ pub(crate) fn body(
     let (descriptors, _) = descriptors.as_chunks_mut::<DESCRIPTOR>();
     for (descriptor, (entry, end)) in descriptors.iter_mut().zip(frame.ends()) {
         let entry = &entries[entry];
-        assert_eq!(
-            Some(entry.group),
-            group,
-            "the frame has more than one group"
-        );
         let (kind, element, n) = codes(entry.data_type);
         let channel = key(entry.slot).as_u128().to_le_bytes();
         descriptor[..at::KIND].copy_from_slice(&channel);
@@ -205,7 +189,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use types::frame::key_set::{Group, Interner};
-    use types::frame::{Draft, Path};
+    use types::frame::{Draft, Form, Path};
 
     use super::*;
     use crate::common::pool;
@@ -233,25 +217,16 @@ mod tests {
         channel::Key::from_u128(bits << 120 | bits)
     }
 
-    /// A live frame of `set` in `form` with each present entry and its bytes, in
-    /// entry order.
-    fn draft(
-        pool: &block::Pool,
-        set: &KeySet,
-        form: Form,
-        series: &[(usize, &[u8])],
-    ) -> Frame {
+    /// An encoded live frame of `set` with each present entry and its bytes, in entry
+    /// order.
+    fn frame(pool: &block::Pool, set: &KeySet, series: &[(usize, &[u8])]) -> Frame {
         let lens: Vec<_> = series.iter().map(|&(e, bytes)| (e, bytes.len())).collect();
-        let mut draft = Draft::new(pool, set, form, &lens).expect("a valid frame");
+        let mut draft =
+            Draft::new(pool, set, Form::Encoded, &lens).expect("a valid frame");
         for ((_, to), (_, from)) in draft.iter_mut().zip(series) {
             to.copy_from_slice(from);
         }
         draft.freeze(Path::Live)
-    }
-
-    /// An encoded live frame of `set` with each present entry and its bytes.
-    fn frame(pool: &block::Pool, set: &KeySet, series: &[(usize, &[u8])]) -> Frame {
-        draft(pool, set, Form::Encoded, series)
     }
 
     /// The two parts of a stored body, joined as the buffer reads them back.
@@ -391,49 +366,6 @@ mod tests {
                 error.to_string(),
                 format!("pool is full: asked for 30 bytes, {available} bytes free")
             );
-        }
-
-        mod when_misused {
-            use super::*;
-
-            #[test]
-            #[should_panic(expected = "the frame is not encoded")]
-            fn panics_on_a_raw_frame() {
-                let set = Interner::new().intern(&[Group {
-                    index: Slot::new(1),
-                    data: &[],
-                }]);
-                let pool = pool(4096);
-                let frame = draft(&pool, &set, Form::Raw, &[(0, &[0; 8])]);
-                drop(body(&pool, &frame, &set, key));
-            }
-
-            #[test]
-            #[should_panic(expected = "the frame is not of the key set")]
-            fn panics_on_a_frame_of_another_key_set() {
-                let mut interner = Interner::new();
-                let [of, other] = [1, 2].map(|slot| {
-                    interner.intern(&[Group {
-                        index: Slot::new(slot),
-                        data: &[],
-                    }])
-                });
-                let pool = pool(4096);
-                let frame = frame(&pool, &of, &[(0, &[0; 8])]);
-                drop(body(&pool, &frame, &other, key));
-            }
-
-            #[test]
-            #[should_panic(expected = "the frame has more than one group")]
-            fn panics_on_a_frame_of_two_groups() {
-                let set = Interner::new().intern(&[1, 2].map(|slot| Group {
-                    index: Slot::new(slot),
-                    data: &[],
-                }));
-                let pool = pool(4096);
-                let frame = frame(&pool, &set, &[(0, &[0; 8]), (1, &[0; 8])]);
-                drop(body(&pool, &frame, &set, key));
-            }
         }
     }
 
