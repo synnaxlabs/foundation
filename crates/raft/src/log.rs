@@ -1,4 +1,4 @@
-use crate::{Error, Position};
+use crate::{Error, Position, Term};
 
 /// One entry of the replicated log. A leader appends an entry with no data when its
 /// term starts; the caller applies nothing for it.
@@ -10,7 +10,8 @@ pub struct Entry {
     pub data: Vec<u8>,
 }
 
-// The log in memory. Entry `i` has index `i + 1`, and terms never decrease.
+// The log in memory. Entry `i` has index `i + 1`, and terms start above zero and
+// never decrease.
 #[derive(Debug)]
 pub(crate) struct Log {
     entries: Vec<Entry>,
@@ -20,7 +21,11 @@ impl Log {
     pub(crate) fn new(entries: Vec<Entry>, applied: u64) -> Result<Self, Error> {
         let mut before = Position::default();
         for entry in &entries {
-            if entry.at.index != before.index + 1 || entry.at.term < before.term {
+            let term = entry.at.term;
+            if entry.at.index != before.index + 1
+                || term < before.term
+                || term == Term(0)
+            {
                 return Err(Error::EntryOutOfOrder {
                     at: entry.at,
                     before,
@@ -47,7 +52,6 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Term;
 
     fn entry(term: u64, index: u64) -> Entry {
         Entry {
@@ -98,6 +102,16 @@ mod tests {
         assert_eq!(err, out_of_order(&entry(1, 3), entry(1, 1).at));
         let err = Log::new(vec![entry(2, 1), entry(1, 2)], 0).unwrap_err();
         assert_eq!(err, out_of_order(&entry(1, 2), entry(2, 1).at));
+    }
+
+    #[test]
+    fn rejects_an_entry_in_term_zero() {
+        let err = Log::new(vec![entry(0, 1)], 0).unwrap_err();
+        assert_eq!(err, out_of_order(&entry(0, 1), Position::default()));
+        assert_eq!(
+            err.to_string(),
+            "log entry at index 1 in term 0 does not follow index 0 in term 0"
+        );
     }
 
     #[test]

@@ -539,6 +539,22 @@ mod tests {
         }
 
         #[test]
+        fn gives_the_hard_state_when_only_the_vote_changes() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            assert_eq!(raft.ready().hard, None);
+            let vote = Body::Vote {
+                last: Position::default(),
+            };
+            raft.step(message(2, 1, vote)).unwrap();
+            let hard = Hard {
+                term: Term(1),
+                vote: Some(key(2)),
+            };
+            assert_eq!(raft.ready().hard, Some(hard));
+            assert_eq!(raft.ready().hard, None);
+        }
+
+        #[test]
         fn gives_each_message_once() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             raft.campaign();
@@ -618,6 +634,49 @@ mod tests {
             assert_eq!(
                 err.to_string(),
                 "node 00000000000000000000000000000002 is in the voter list twice"
+            );
+        }
+
+        #[test]
+        fn rejects_a_log_that_is_out_of_order() {
+            let start = Start {
+                entries: entries(&[(1, 1), (1, 3)]),
+                ..start(&[1], at_term(1))
+            };
+            let err = Raft::new(CONFIG, start).unwrap_err();
+            let position = |term, index| Position {
+                term: Term(term),
+                index,
+            };
+            let out_of_order = Error::EntryOutOfOrder {
+                at: position(1, 3),
+                before: position(1, 1),
+            };
+            assert_eq!(err, out_of_order);
+            assert_eq!(
+                err.to_string(),
+                "log entry at index 3 in term 1 does not follow index 1 in term 1"
+            );
+        }
+
+        #[test]
+        fn rejects_an_applied_index_past_the_log() {
+            let start = Start {
+                entries: entries(&[(1, 1)]),
+                applied: 2,
+                ..start(&[1], at_term(1))
+            };
+            let err = Raft::new(CONFIG, start).unwrap_err();
+            assert_eq!(
+                err,
+                Error::AppliedPastLog {
+                    applied: 2,
+                    last: 1
+                }
+            );
+            assert_eq!(
+                err.to_string(),
+                "applied index 2 is past the last log index 1"
             );
         }
 

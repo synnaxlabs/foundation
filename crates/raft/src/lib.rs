@@ -77,7 +77,7 @@ pub enum Error {
         last: Position,
     },
     /// A log entry does not follow the one before it: its index is not the next
-    /// index, or its term is lower.
+    /// index, or its term is lower or zero.
     EntryOutOfOrder {
         /// The position of the entry.
         at: Position,
