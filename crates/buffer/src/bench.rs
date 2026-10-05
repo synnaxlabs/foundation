@@ -18,6 +18,7 @@ pub fn crc(bytes: &[u8]) -> u32 {
 pub struct Ring {
     layout: Layout,
     writer: Writer,
+    tail: Position,
     area: Vec<u8>,
     records: u64,
 }
@@ -46,6 +47,7 @@ impl Ring {
         let mut ring = Self {
             layout,
             writer,
+            tail: start,
             area: vec![0; at(area)],
             records: 0,
         };
@@ -53,8 +55,8 @@ impl Ring {
         ring
     }
 
-    /// Plans one record of `body` and frees it at once, so the ring stays empty.
-    /// Nothing is written to the area.
+    /// Plans one record of `body` and frees it and every record before it, so the
+    /// ring stays empty. Nothing is written to the area.
     ///
     /// # Panics
     ///
@@ -65,6 +67,7 @@ impl Ring {
             .append(&[body])
             .expect("an empty ring takes a record");
         self.writer.release(plan.next);
+        self.tail = plan.next;
     }
 
     /// Writes one record of `body` to the area. Returns `false` when the ring is
@@ -84,16 +87,15 @@ impl Ring {
         self.records
     }
 
-    /// Walks the ring from its start as recovery does and returns the number of
-    /// data records found.
+    /// Walks the live records from the tail as recovery does and returns the number
+    /// of data records found.
     ///
     /// # Panics
     ///
     /// When a record follows the chain but cannot be read.
     #[must_use]
     pub fn walk(&self) -> u64 {
-        let start = Position::new(0, Self::START).expect("offset 0 is aligned");
-        let mut cursor = Cursor::new(self.layout, start);
+        let mut cursor = Cursor::new(self.layout, self.tail);
         let mut found = 0;
         loop {
             let Window { place, len } = cursor.window();
@@ -148,6 +150,20 @@ mod tests {
         assert_eq!(written, 15, "16 blocks less the restart record");
         assert_eq!(ring.records(), 15);
         assert_eq!(ring.walk(), 15);
+    }
+
+    #[test]
+    fn the_walk_crosses_the_end_of_the_area() {
+        let mut ring = Ring::new(1 << 16, 8183);
+        for _ in 0..10 {
+            ring.plan(&[0xA5; 4087]);
+        }
+        let mut written = 0;
+        while ring.write(&[0xA5; 8183]) {
+            written += 1;
+        }
+        assert_eq!(written, 7, "two before the wrap record and five after it");
+        assert_eq!(ring.walk(), 7);
     }
 
     #[test]
