@@ -10,10 +10,12 @@ fn two_nodes_join_by_ticket_and_agree_on_the_spec() {
     let edge = lab.start("edge", 1 << 30);
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
-    lab.apply(cloud, "channel \"site.temp\" { data_type = \"f64\" }");
+    let before = lab.spec(cloud);
+    lab.apply(cloud, include_str!("fixtures/site.hcl"));
     lab.run(Duration::from_secs(5));
     for node in [cloud, edge] {
         assert_eq!(lab.members(node), ["cloud", "edge"], "{node:?}");
     }
-    assert_eq!(lab.spec(edge), lab.spec(cloud), "spec hash");
+    assert_ne!(lab.spec(cloud), before, "apply changed the spec");
+    assert_eq!(lab.spec(edge), lab.spec(cloud), "edge holds the new spec");
 }

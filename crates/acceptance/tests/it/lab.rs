@@ -1,7 +1,8 @@
 //! A simulated mesh for the scenarios: nodes from `node` on `sim` seams, links that
-//! can be cut, and the operator's front ends. Each method waits on the surface named
-//! in its `todo!`; it fills in when that surface merges.
+//! can be cut, simulated devices and stores, and the operator's front ends. Each
+//! method waits on the surface named in its `todo!`.
 
+use std::ops::Range;
 use std::time::Duration;
 
 /// A whole mesh on one deterministic simulation.
@@ -16,9 +17,9 @@ pub(crate) struct Node;
 #[derive(Debug)]
 pub(crate) struct Ticket;
 
-/// A protocol simulator for one device that a connector talks to.
+/// The protocol of a simulated device.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Device {
+pub(crate) enum Protocol {
     OpcUa,
     ModbusTcp,
     ModbusRtu,
@@ -26,25 +27,32 @@ pub(crate) enum Device {
     Ni,
 }
 
-/// What a reader receives, in order.
-#[expect(dead_code, reason = "the harness builds events once readers merge")]
+/// What a reader received on one channel, folded as it arrives, so an hour at full
+/// rate needs no memory per sample.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Event {
-    Sample(Sample),
-    /// Samples the buffer no longer has.
-    Gap {
-        count: u64,
-    },
+pub(crate) struct Received {
+    pub samples: u64,
+    /// The seqs of the first and last samples.
+    pub seqs: Option<Range<u64>>,
+    /// Each sample's seq is one more than the one before it, or than the end of the
+    /// gap before it.
+    pub contiguous: bool,
+    pub gaps: Vec<Gap>,
 }
 
-/// One received sample.
-#[derive(Debug, Clone, PartialEq)]
+/// An explicit gap: samples the buffer no longer had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Gap {
+    /// Samples received before the gap.
+    pub after: u64,
+    pub count: u64,
+}
+
+/// One sample of a channel.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Sample {
-    pub seq: u64,
     pub ns: i64,
     pub value: f64,
-    /// The time error bound, in nanoseconds.
-    pub error_ns: Option<u64>,
 }
 
 /// A command and the acknowledgment the connector wrote for it.
@@ -56,14 +64,20 @@ pub(crate) struct Command {
 }
 
 impl Lab {
-    /// Builds an empty mesh whose run replays from `seed`.
-    pub(crate) fn new(_seed: u64) -> Self {
+    /// Builds an empty mesh whose run replays from `key`.
+    pub(crate) fn new(_key: u64) -> Self {
         todo!("waits on #212")
     }
 
     /// Starts a node named `name` with a disk budget of `budget` bytes.
     pub(crate) fn start(&mut self, _name: &str, _budget: u64) -> Node {
         todo!("waits on #212")
+    }
+
+    /// The disk budget that holds `span` of one `f64` channel at `rate` samples per
+    /// second, as `buffer` stores it.
+    pub(crate) fn budget(&self, _rate: u64, _span: Duration) -> u64 {
+        todo!("waits on buffer")
     }
 
     /// Creates a single-use join ticket on `admin`.
@@ -86,39 +100,49 @@ impl Lab {
         todo!("waits on mesh spec")
     }
 
-    /// Runs `plan` then `apply` of `hcl` on `node` through the JSON CLI, and returns
-    /// the plan's JSON.
-    pub(crate) fn apply(&mut self, _node: Node, _hcl: &str) -> String {
-        todo!("waits on ops plan and apply")
+    /// Runs `plan` of `hcl` on `node` through the JSON CLI and returns the names of
+    /// the changed definitions.
+    pub(crate) fn plan(&mut self, _node: Node, _hcl: &str) -> Vec<String> {
+        todo!("waits on ops plan")
     }
 
-    /// Runs one CLI command with `--json` on `node` and returns its output.
-    pub(crate) fn cli(&mut self, _node: Node, _args: &[&str]) -> String {
-        todo!("waits on ops CLI")
+    /// Runs `plan` then `apply` of `hcl` on `node` through the JSON CLI.
+    pub(crate) fn apply(&mut self, _node: Node, _hcl: &str) {
+        todo!("waits on ops apply")
     }
 
-    /// Calls one MCP tool on `node` and returns its JSON result.
-    pub(crate) fn mcp(&mut self, _node: Node, _tool: &str, _args: &str) -> String {
+    /// Runs the MCP `plan` tool on `node` and returns the plan and the names of the
+    /// changed definitions.
+    pub(crate) fn mcp_plan(
+        &mut self,
+        _node: Node,
+        _hcl: &str,
+    ) -> (String, Vec<String>) {
+        todo!("waits on ops MCP")
+    }
+
+    /// Runs the MCP `apply` tool on `node` with a plan from [`Lab::mcp_plan`].
+    pub(crate) fn mcp_apply(&mut self, _node: Node, _plan: &str) {
         todo!("waits on ops MCP")
     }
 
     /// Attaches a simulated device to `node` at `address`.
-    pub(crate) fn device(&mut self, _node: Node, _kind: Device, _address: &str) {
+    pub(crate) fn device(&mut self, _node: Node, _protocol: Protocol, _address: &str) {
         todo!("waits on connector kinds")
     }
 
-    /// The value the device at `address` holds at `point`.
-    pub(crate) fn device_value(&self, _address: &str, _point: &str) -> f64 {
+    /// Attaches a simulated Influx store to `node` at `address`.
+    pub(crate) fn influx(&mut self, _node: Node, _address: &str) {
+        todo!("waits on connector-influx")
+    }
+
+    /// The value of `point` on the device at `address`.
+    pub(crate) fn point(&self, _address: &str, _point: &str) -> f64 {
         todo!("waits on connector kinds")
     }
 
-    /// Sets the value the device at `address` reads at `point`.
-    pub(crate) fn set_device_value(
-        &mut self,
-        _address: &str,
-        _point: &str,
-        _value: f64,
-    ) {
+    /// Sets the value of `point` on the device at `address`.
+    pub(crate) fn set_point(&mut self, _address: &str, _point: &str, _value: f64) {
         todo!("waits on connector kinds")
     }
 
@@ -131,6 +155,16 @@ impl Lab {
         _rate: u64,
         _count: u64,
     ) {
+        todo!("waits on hub writers")
+    }
+
+    /// The seqs that the home gave the samples written to `channel`.
+    pub(crate) fn written(&self, _channel: &str) -> Range<u64> {
+        todo!("waits on hub writers")
+    }
+
+    /// The true simulated time of each sample written to `channel`, in order.
+    pub(crate) fn truth(&self, _channel: &str) -> Vec<i64> {
         todo!("waits on hub writers")
     }
 
@@ -151,7 +185,17 @@ impl Lab {
         _node: Node,
         _subject: &str,
         _channel: &str,
-    ) -> Vec<Event> {
+    ) -> Received {
+        todo!("waits on hub readers")
+    }
+
+    /// Reads every sample of `channel` on `node`, as `subject`. For short runs only.
+    pub(crate) fn samples(
+        &mut self,
+        _node: Node,
+        _subject: &str,
+        _channel: &str,
+    ) -> Vec<Sample> {
         todo!("waits on hub readers")
     }
 
@@ -160,8 +204,8 @@ impl Lab {
         todo!("waits on hub readers")
     }
 
-    /// What the Influx simulator received for `measurement`, in arrival order.
-    pub(crate) fn influx(&self, _measurement: &str) -> Vec<Event> {
+    /// What the Influx store at `address` received for `measurement`.
+    pub(crate) fn stored(&self, _address: &str, _measurement: &str) -> Received {
         todo!("waits on connector-influx")
     }
 

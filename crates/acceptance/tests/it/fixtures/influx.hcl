@@ -1,8 +1,7 @@
-channel "edge.value" { data_type = "f64" }
-
 connector "influx" {
   kind = "influx"
   node = "cloud"
+  address = "influx"
   select = "edge.*"
   reader {
     name = "influx"

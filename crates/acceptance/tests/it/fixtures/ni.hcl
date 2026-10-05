@@ -1,13 +1,20 @@
-channel "dev.p" { data_type = "f64" }
-channel "dev.p_cmd" { data_type = "f64" }
+channel "dev.time" { kind = "index" }
+channel "dev.p" {
+  data_type = "f64"
+  index = "dev.time"
+}
+channel "dev.q" {
+  data_type = "f64"
+  index = "dev.time"
+}
 
 connector "dev" {
   kind = "ni"
   address = "dev"
-  read "p" {
+  read "dev.p" {
     physical = "Dev1/ai0"
   }
-  command "p_cmd" {
-    physical = "Dev1/ai0"
+  command "dev.q" {
+    physical = "Dev1/ao0"
   }
 }

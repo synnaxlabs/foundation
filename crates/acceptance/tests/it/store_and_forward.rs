@@ -1,61 +1,67 @@
 use std::time::Duration;
 
-use crate::lab::{Event, Lab};
+use crate::lab::{Gap, Lab, Received};
 
 const RATE: u64 = 1_000_000;
-const HOUR: u64 = 3600;
-/// Bytes one buffered sample costs on disk, as an upper bound for the budget.
-const SAMPLE_BYTES: u64 = 16;
+const HOUR: Duration = Duration::from_secs(3600);
+const WRITTEN: u64 = RATE * 3600;
 
 /// Writes at `RATE` on an edge node for one hour while its link to the cloud is cut,
-/// with a disk budget for `budget_secs` of samples, heals the link, and returns what
-/// the Influx out connector received.
-fn check(budget_secs: u64) -> Vec<Event> {
+/// with a disk budget that holds `budget` of samples, heals the link, and returns
+/// what the Influx out connector stored and the seqs written.
+fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
     let mut lab = Lab::new(1);
     let cloud = lab.start("cloud", 1 << 40);
-    let edge = lab.start("edge", budget_secs * RATE * SAMPLE_BYTES);
+    let bytes = lab.budget(RATE, budget);
+    let edge = lab.start("edge", bytes);
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
-    lab.apply(cloud, include_str!("fixtures/store_and_forward.hcl"));
+    lab.influx(cloud, "influx");
+    lab.apply(cloud, include_str!("fixtures/edge.hcl"));
+    lab.apply(cloud, include_str!("fixtures/influx.hcl"));
     lab.run(Duration::from_secs(5));
     lab.cut(edge, cloud);
-    lab.write(edge, "edge.value", RATE, RATE * HOUR);
-    lab.run(Duration::from_secs(HOUR));
+    lab.write(edge, "edge.value", RATE, WRITTEN);
+    lab.run(HOUR);
     lab.heal(edge, cloud);
-    lab.run(Duration::from_secs(HOUR));
-    lab.influx("edge.value")
+    lab.run(HOUR);
+    (
+        lab.stored("influx", "edge.value"),
+        lab.written("edge.value"),
+    )
 }
 
 #[test]
 #[ignore = "waits on #212"]
 fn a_budget_for_the_hour_delivers_every_sample_in_seq_order() {
-    let events = check(HOUR);
-    let seqs: Vec<u64> = events
-        .iter()
-        .map(|e| match e {
-            Event::Sample(s) => s.seq,
-            Event::Gap { count } => panic!("gap of {count}"),
-        })
-        .collect();
-    assert_eq!(seqs.len() as u64, RATE * HOUR, "count");
-    assert!(
-        seqs.iter().zip(1..).all(|(&s, i)| s == seqs[0] + i - 1),
-        "seq order"
-    );
+    let (stored, written) = check(HOUR);
+    assert_eq!(stored.samples, WRITTEN, "count");
+    assert_eq!(stored.seqs, Some(written), "seqs");
+    assert!(stored.contiguous, "seq order");
+    assert_eq!(stored.gaps, [], "gaps");
 }
 
 #[test]
 #[ignore = "waits on #212"]
 fn a_budget_for_half_the_hour_delivers_one_gap_of_the_trimmed_samples() {
-    let events = check(HOUR / 2);
-    let gaps: Vec<u64> = events
-        .iter()
-        .filter_map(|e| match e {
-            Event::Gap { count } => Some(*count),
-            Event::Sample(_) => None,
-        })
-        .collect();
-    let samples = events.len() as u64 - gaps.len() as u64;
-    assert_eq!(gaps.len(), 1, "gaps {gaps:?}");
-    assert_eq!(gaps[0], RATE * HOUR - samples, "gap count");
+    let (stored, written) = check(HOUR / 2);
+    let [Gap { after: 0, count }] = stored.gaps[..] else {
+        panic!("one gap before every sample, got {:?}", stored.gaps);
+    };
+    assert_eq!(
+        count + stored.samples,
+        WRITTEN,
+        "gap count is the trimmed samples"
+    );
+    assert!(
+        stored.samples >= WRITTEN / 2,
+        "kept {} of {WRITTEN}",
+        stored.samples
+    );
+    assert_eq!(
+        stored.seqs,
+        Some(written.start + count..written.end),
+        "newest kept"
+    );
+    assert!(stored.contiguous, "seq order");
 }

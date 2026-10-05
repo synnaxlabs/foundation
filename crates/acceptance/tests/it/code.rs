@@ -1,25 +1,52 @@
-use crate::lab::Lab;
+use std::time::Duration;
 
-const HCL: &str = "channel \"site.temp\" { data_type = \"f64\" }";
+use crate::lab::{Lab, Node};
+
+const HCL: &str = include_str!("fixtures/site.hcl");
+
+#[derive(Clone, Copy)]
+enum Front {
+    Cli,
+    Mcp,
+}
+
+fn plan_and_apply(lab: &mut Lab, node: Node, front: Front) -> Vec<String> {
+    match front {
+        Front::Cli => {
+            let changes = lab.plan(node, HCL);
+            lab.apply(node, HCL);
+            changes
+        }
+        Front::Mcp => {
+            let (plan, changes) = lab.mcp_plan(node, HCL);
+            lab.mcp_apply(node, &plan);
+            changes
+        }
+    }
+}
+
+/// Checks that a plan of the site names its channels, that the apply built them so a
+/// sample written to `site.temp` reads back, and that the next plan has no changes.
+fn check(front: Front) {
+    let mut lab = Lab::new(1);
+    let node = lab.start("cloud", 1 << 30);
+    let changes = plan_and_apply(&mut lab, node, front);
+    assert_eq!(changes, ["site.temp", "site.time"], "first plan");
+    lab.write(node, "site.temp", 1, 1);
+    lab.run(Duration::from_secs(2));
+    assert_eq!(lab.read(node, "admin", "site.temp").samples, 1, "applied");
+    let changes = plan_and_apply(&mut lab, node, front);
+    assert_eq!(changes, Vec::<String>::new(), "second plan");
+}
 
 #[test]
 #[ignore = "waits on #212"]
 fn plan_and_apply_from_hcl_through_the_json_cli() {
-    let mut lab = Lab::new(1);
-    let node = lab.start("cloud", 1 << 30);
-    let plan = lab.apply(node, HCL);
-    assert!(plan.contains("\"site.temp\""), "plan {plan}");
-    let again = lab.cli(node, &["plan", "--json"]);
-    assert!(again.contains("\"changes\":[]"), "second plan {again}");
+    check(Front::Cli);
 }
 
 #[test]
 #[ignore = "waits on #212"]
 fn plan_and_apply_through_mcp() {
-    let mut lab = Lab::new(1);
-    let node = lab.start("cloud", 1 << 30);
-    let plan = lab.mcp(node, "plan", &format!("{{\"hcl\":{HCL:?}}}"));
-    assert!(plan.contains("\"site.temp\""), "plan {plan}");
-    let applied = lab.mcp(node, "apply", &plan);
-    assert!(applied.contains("\"applied\":true"), "apply {applied}");
+    check(Front::Mcp);
 }
