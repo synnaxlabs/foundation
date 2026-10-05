@@ -87,4 +87,15 @@ fn main() {
     });
     assert_eq!(allocations, 0, "the pressure path allocated");
     assert_eq!(pool.committed(), 128, "the idle large size gave its budget");
+
+    let allocations = count(|| {
+        assert_eq!(
+            pool.purge(),
+            0,
+            "the small size returned a block this interval"
+        );
+        assert_eq!(pool.purge(), 128, "the small size stayed idle");
+    });
+    assert_eq!(allocations, 0, "the purge path allocated");
+    assert_eq!(pool.committed(), 0, "each idle size gave its pages back");
 }

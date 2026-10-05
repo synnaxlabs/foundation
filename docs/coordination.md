@@ -159,6 +159,10 @@ worktree.
 Never share `CARGO_TARGET_DIR` between worktrees. Cargo gives a path crate the same hash
 in each, so a stale build of another worktree's code can pass or fail a gate.
 
+Delete a scratch copy of the repo, with its `target`, when its job ends: a review copy,
+a breaker worktree, or a cargo-mutants copy. Each takes 1 to 9 GiB. On 2026-10-05 stale
+copies filled the disk, and Bash failed in every local session.
+
 ## Issues
 
 Every task is a GitHub issue. An issue states its goal, the crates it owns, the tests
