@@ -655,6 +655,30 @@ fn an_entry_below_the_tail_is_a_broken_invariant() {
 }
 
 #[test]
+fn an_entry_past_the_last_seq_is_a_broken_invariant() {
+    let (mut sim, _handle) = start(11, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        drop(buffer.append(&[entry(1, a, Path::Live, u64::MAX, 1, None, &[])]));
+    });
+    assert_eq!(
+        sim.run(),
+        Err(sim::Error::Panicked {
+            thread: DIR.into(),
+            message: "invariant: an entry of index \
+                      00000000-0000-0000-0000-000000000001 on path Live starts at \
+                      18446744073709551615 with 1 samples, past the last seq"
+                .into(),
+            seed: 11,
+        })
+    );
+}
+
+#[test]
 fn a_zeroed_file_of_another_length_is_not_made_into_a_ring() {
     run(10, Memory::default(), |shard| async move {
         shard.zeroed(AREA_START + AREA + BLOCK).await;

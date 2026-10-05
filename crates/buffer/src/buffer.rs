@@ -373,8 +373,9 @@ impl Buffer {
     /// # Panics
     ///
     /// When a `first` is below the tail of its path, with the index, the path,
-    /// `first`, and the tail. When the entries together hold more than `body_max`
-    /// bytes, or more than 1023 entries or parts.
+    /// `first`, and the tail, or when `first + len` passes `u64::MAX`. When the
+    /// entries together hold more than `body_max` bytes, or more than 1023 entries
+    /// or parts.
     pub fn append(&self, entries: &[Entry<'_>]) -> Result<(), Error> {
         let shared = &*self.shared;
         let mut guard = shared.state.borrow_mut();
