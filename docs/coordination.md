@@ -163,6 +163,20 @@ Delete a scratch copy of the repo, with its `target`, when its job ends: a revie
 a breaker worktree, or a cargo-mutants copy. Each takes 1 to 9 GiB. On 2026-10-05 stale
 copies filled the disk, and Bash failed in every local session.
 
+## Heavy runs on the laptop
+
+The laptop sessions share 16 cores. A benchmark, a stress loop, or a local
+`cargo mutants` run takes one lock, so only one runs at a time. Run it in the
+background, because it waits for the lock:
+
+```sh
+lockf -k ~/.cache/foundation-heavy.lock <command>
+```
+
+A benchmark starts only when `uptime` shows a load under 8, and its PR names the load.
+Builds and the PR gates do not take the lock. On 2026-10-05 the load reached 170, and a
+stress run and two benchmarks gave results that no one could use.
+
 ## Issues
 
 Every task is a GitHub issue. An issue states its goal, the crates it owns, the tests
