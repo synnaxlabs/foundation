@@ -472,23 +472,6 @@ impl Raft {
         }
     }
 
-    // Takes back a removed node that campaigns at this leader's term: it did not
-    // learn the commit of its leave. The node is a peer again, probed from the end
-    // of its log or of this one, whichever is shorter, so replication brings it the
-    // leave and `release_removed` releases it.
-    fn readmit(&mut self, from: node::Key, term: Term, last: Position) {
-        if self.role != Role::Leader
-            || Some(term) != self.term.next()
-            || self.peers.contains_key(&from)
-        {
-            return;
-        }
-        let mut peer = Peer::new(last.index.min(self.log.last().index));
-        peer.active = true;
-        self.peers.insert(from, peer);
-        self.send_appends(from..=from);
-    }
-
     // A follower commits what the heartbeat says, so it names only entries the
     // follower is known to hold.
     fn send_heartbeat(&mut self, to: node::Key) {
@@ -670,11 +653,9 @@ impl Raft {
             match body {
                 // A voter that heard from a leader within the election timeout does
                 // not help to replace it.
-                Body::PreVote { last } if self.leased() => {
-                    self.readmit(from, term, *last);
+                Body::PreVote { .. } | Body::Vote { .. } if self.leased() => {
                     return false;
                 }
-                Body::Vote { .. } if self.leased() => return false,
                 // A PreVote, or its grant, carries a term that no node is in yet.
                 Body::PreVote { .. } | Body::PreVoteReply { granted: true } => {}
                 Body::Heartbeat { .. } | Body::Append { .. } => {
@@ -2522,76 +2503,29 @@ mod tests {
             assert_eq!(to(&raft.ready().messages), [key(2), key(4)]);
         }
 
-        // Node 3 was released, but what it got last was lost, so it campaigns. The
-        // leader takes it back and probes it from the end of node 3's log, or of
-        // its own when node 3's is longer. Node 3 holds the leave, so its answer
-        // brings the commit and the release.
+        // Node 3 missed its release, so it campaigns. The leader sends it nothing:
+        // the caller tells it that it is out.
         #[test]
-        fn a_removed_node_that_campaigns_gets_what_it_missed() {
+        fn a_leader_sends_nothing_to_a_removed_node_that_campaigns() {
             let mut raft = leader();
             raft.propose_voters(set(&[1, 2, 4])).unwrap();
             accept(&mut raft, &[2], 2);
             accept(&mut raft, &[2, 3], 3);
-            sent(&mut raft);
-            let at = |term, index| Position {
-                term: Term(term),
-                index,
-            };
-            let probe = |prev| Body::Append {
-                prev,
-                entries: Vec::new(),
-                commit: 3,
-            };
-            raft.step(message(3, 2, Body::PreVote { last: at(1, 3) }))
-                .unwrap();
-            let messages = sent(&mut raft);
-            assert_eq!(to(&messages), [key(3)]);
-            assert_eq!(messages[0].term, Term(1));
-            assert_eq!(messages[0].body, probe(at(1, 3)));
-            accept(&mut raft, &[3], 3);
-            let messages = sent(&mut raft);
-            assert_eq!(to(&messages), [key(3)]);
-            assert_eq!(messages[0].body, Body::Heartbeat { commit: 3 });
-            // A PreVote from another term and a voter's disruptive PreVote get
-            // nothing.
-            raft.step(message(3, 3, Body::PreVote { last: at(1, 3) }))
-                .unwrap();
-            raft.step(message(2, 2, Body::PreVote { last: at(1, 3) }))
-                .unwrap();
-            assert_eq!(sent(&mut raft), []);
-            // A longer log, from a leader this one replaced, is probed from the end
-            // of this log.
-            raft.step(message(3, 2, Body::PreVote { last: at(2, 5) }))
-                .unwrap();
-            let messages = sent(&mut raft);
-            assert_eq!(to(&messages), [key(3)]);
-            assert_eq!(messages[0].body, probe(at(1, 3)));
-            assert_eq!(raft.role(), Role::Leader);
-        }
-
-        // A node readmitted just before a quorum check counts as heard at it.
-        #[test]
-        fn a_readmitted_node_survives_the_next_quorum_check() {
-            let mut raft = leader();
-            raft.propose_voters(set(&[1, 2, 4])).unwrap();
-            accept(&mut raft, &[2], 2);
-            accept(&mut raft, &[2, 3], 3);
-            tick_times(&mut raft, 9);
             sent(&mut raft);
             let last = Position {
                 term: Term(1),
                 index: 3,
             };
             raft.step(message(3, 2, Body::PreVote { last })).unwrap();
-            assert_eq!(to(&sent(&mut raft)), [key(3)]);
+            assert_eq!(sent(&mut raft), []);
             raft.tick(0);
             assert_eq!(raft.role(), Role::Leader);
-            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4)]);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(4)]);
         }
 
-        // A follower that released node 4 leaves its PreVote to the leader.
+        // A follower that released node 4 drops its PreVote.
         #[test]
-        fn a_follower_does_not_take_back_a_removed_node() {
+        fn a_follower_sends_nothing_to_a_removed_node_that_campaigns() {
             let mut raft = raft(&[1, 2, 3, 4], Hard::default());
             let mut entries = entries(&[(1, 1)]);
             entries.push(config(1, 2, voters(&[1, 2, 3], &[1, 2, 3, 4])));

@@ -879,14 +879,17 @@ How to read this record:
   only from a voter of the newest configuration in this node's log, and a node whose
   committed configuration lacks the sender answers `removed`. The removed node takes
   that answer only from a voter of its own region, and stops its `raft` group for that
-  region. `raft` sends nothing to a node outside its configuration; until `mesh` sends
-  the answer, such a node campaigns with no effect. Readmit in `raft` (#414) lost: it
-  sent the log to a sender that `raft` cannot check. The person decided on 2026-10-05
-  ("Ok B is fine", #193). A leader outside the committed final set sends the commit
-  and steps down. A node outside an uncommitted
-  configuration still campaigns: the entry may be truncated, and a removed leader that
-  lost its lead before the leave reached a peer is the only node that can win the
-  election that commits it.
+  region. `raft` sends such a node no entries, only answers. A voter with a lease drops
+  its campaign or refuses it with a `PreVoteReply { granted: false }` at the voter's
+  term. Until `mesh` sends the answer, the node campaigns. While a voter has a lease,
+  this has no effect. Once no voter has a lease, as after the leader fails, the voters
+  can elect the node: it commits an entry of its term, which commits the leave, and
+  steps down, and the voters follow it until their election timeout (#483). Readmit in
+  `raft` (#414) lost: it sent the log to a sender that `raft` cannot check. The person
+  decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set
+  sends the commit and steps down. A node outside an uncommitted configuration still
+  campaigns: the entry may be truncated, and a removed leader that lost its lead before
+  the leave reached a peer is the only node that can win the election that commits it.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
