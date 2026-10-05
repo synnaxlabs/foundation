@@ -1415,4 +1415,202 @@ mod tests {
             assert_eq!(sent(&mut raft).len(), 1);
         }
     }
+
+    mod replication {
+        use super::*;
+
+        fn position(term: u64, index: u64) -> Position {
+            Position {
+                term: Term(term),
+                index,
+            }
+        }
+
+        fn append(prev: Position, entries: Vec<Entry>, commit: u64) -> Body {
+            Body::Append {
+                prev,
+                entries,
+                commit,
+            }
+        }
+
+        fn accepted(index: u64) -> Body {
+            Body::AppendReply {
+                index,
+                rejected: false,
+            }
+        }
+
+        // A leader of 1, 2, and 3 at term 2 over the log `positions`, after its
+        // first messages.
+        fn leader_over(positions: &[(u64, u64)]) -> Raft {
+            let start = Start {
+                entries: entries(positions),
+                ..start(&[1, 2, 3], at_term(1))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            elect(&mut raft, &[2]);
+            raft
+        }
+
+        #[test]
+        fn a_follower_refuses_a_proposal_and_names_the_leader_it_knows() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let error = raft.propose(vec![1]).unwrap_err();
+            assert_eq!(error, Error::NotLeader { leader: None });
+            assert_eq!(
+                error.to_string(),
+                "this node does not lead, and knows no leader"
+            );
+            raft.step(message(2, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            let error = raft.propose(vec![1]).unwrap_err();
+            assert_eq!(
+                error,
+                Error::NotLeader {
+                    leader: Some(key(2))
+                }
+            );
+            assert_eq!(
+                error.to_string(),
+                "this node does not lead; node 00000000000000000000000000000002 does"
+            );
+        }
+
+        #[test]
+        fn a_new_leader_writes_an_empty_entry_of_its_term_and_probes() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            raft.campaign();
+            let term = Term(2);
+            let granted = Body::PreVoteReply { granted: true };
+            raft.step(message(2, 2, granted)).unwrap();
+            sent(&mut raft);
+            raft.step(message(2, 2, Body::VoteReply { granted: true }))
+                .unwrap();
+            let ready = raft.ready();
+            let empty = Entry {
+                at: position(2, 1),
+                data: Vec::new(),
+            };
+            assert_eq!(ready.entries, [empty.clone()]);
+            assert_eq!(ready.committed, []);
+            let probe = |to| Message {
+                from: key(1),
+                to: key(to),
+                term,
+                body: append(Position::default(), vec![empty.clone()], 0),
+            };
+            assert_eq!(ready.messages, [probe(2), probe(3)]);
+        }
+
+        #[test]
+        fn a_proposal_takes_the_next_index_and_goes_out_in_the_ready() {
+            let mut raft = leader_over(&[]);
+            raft.step(message(2, 2, accepted(1))).unwrap();
+            sent(&mut raft);
+            let at = raft.propose(vec![7]).unwrap();
+            assert_eq!(at, position(2, 2));
+            let ready = raft.ready();
+            let entry = Entry { at, data: vec![7] };
+            assert_eq!(ready.entries, [entry.clone()]);
+            let to_2 = Message {
+                from: key(1),
+                to: key(2),
+                term: Term(2),
+                body: append(position(2, 1), vec![entry], 1),
+            };
+            assert_eq!(ready.messages, [to_2]);
+        }
+
+        #[test]
+        fn a_leader_alone_commits_what_it_proposes() {
+            let mut raft = raft(&[1], Hard::default());
+            raft.campaign();
+            sent(&mut raft);
+            let at = raft.propose(vec![7]).unwrap();
+            let ready = raft.ready();
+            assert_eq!(ready.committed, [Entry { at, data: vec![7] }]);
+            assert_eq!(ready.messages, []);
+        }
+
+        #[test]
+        fn commits_only_with_a_quorum_and_only_from_its_own_term() {
+            let mut raft = leader_over(&[(1, 1)]);
+            raft.step(message(2, 2, accepted(1))).unwrap();
+            assert_eq!(raft.ready().committed, []);
+            raft.step(message(3, 2, accepted(2))).unwrap();
+            let committed = raft.ready().committed;
+            let at: Vec<Position> = committed.iter().map(|entry| entry.at).collect();
+            assert_eq!(at, [position(1, 1), position(2, 2)]);
+        }
+
+        #[test]
+        fn sends_from_the_hint_after_a_rejection() {
+            let mut raft = leader_over(&[(1, 1), (1, 2)]);
+            raft.step(message(
+                2,
+                2,
+                Body::AppendReply {
+                    index: 0,
+                    rejected: true,
+                },
+            ))
+            .unwrap();
+            let [message] = &sent(&mut raft)[..] else {
+                panic!();
+            };
+            let expected =
+                append(Position::default(), entries(&[(1, 1), (1, 2), (2, 3)]), 0);
+            assert_eq!((message.to, &message.body), (key(2), &expected));
+        }
+
+        #[test]
+        fn a_heartbeat_names_only_entries_the_follower_holds() {
+            let mut raft = leader_over(&[]);
+            raft.step(message(2, 2, accepted(1))).unwrap();
+            sent(&mut raft);
+            raft.tick(0);
+            let commits: Vec<(node::Key, u64)> = sent(&mut raft)
+                .iter()
+                .map(|message| match message.body {
+                    Body::Heartbeat { commit } => (message.to, commit),
+                    ref body => panic!("{body:?}"),
+                })
+                .collect();
+            assert_eq!(commits, [(key(2), 1), (key(3), 0)]);
+        }
+
+        #[test]
+        fn answers_an_append_from_a_lower_term_with_its_own_term() {
+            let mut raft = raft(&[1, 2, 3], at_term(5));
+            let body = append(Position::default(), entries(&[(4, 1)]), 1);
+            raft.step(message(2, 4, body)).unwrap();
+            let reply = Message {
+                from: key(1),
+                to: key(2),
+                term: Term(5),
+                body: Body::HeartbeatReply,
+            };
+            assert_eq!(sent(&mut raft), [reply]);
+            assert_eq!(raft.ready().entries, []);
+        }
+
+        #[test]
+        fn a_follower_takes_the_leader_of_an_append() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let body = append(Position::default(), entries(&[(1, 1)]), 1);
+            raft.step(message(2, 1, body)).unwrap();
+            assert_eq!(raft.leader(), Some(key(2)));
+            let ready = raft.ready();
+            assert_eq!(ready.entries, entries(&[(1, 1)]));
+            assert_eq!(ready.committed, entries(&[(1, 1)]));
+            let reply = Message {
+                from: key(1),
+                to: key(2),
+                term: Term(1),
+                body: accepted(1),
+            };
+            assert_eq!(ready.messages, [reply]);
+        }
+    }
 }

@@ -1,13 +1,19 @@
 //! Election scenarios ported from the tests of etcd/raft (Copyright 2015 The etcd
 //! Authors, Apache License 2.0, see `LICENSE`). This file is modified from the etcd
-//! source: `README.md` lists each source and the changes.
+//! source: `README.md` lists each source and the changes. `replication.rs` holds
+//! the replication scenarios on the same network.
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
+#[path = "replication.rs"]
+mod replication;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use raft::{Body, Config, Entry, Hard, Message, Position, Raft, Role, Start, Term};
+use raft::{Body, Entry, Hard, Message, Position, Raft, Role, Term};
+
+use replication::{Disk, start};
 use types::node;
 
 const ELECTION: u32 = 10;
@@ -23,13 +29,14 @@ fn at_term(term: u64) -> Hard {
     }
 }
 
-fn build(id: u8, voters: &[u8], election: u32, hard: Hard, last: Position) -> Raft {
-    let config = Config {
-        key: key(id),
-        election_ticks: election,
-        heartbeat_ticks: 1,
-    };
-    // A log of `last.index` entries, all in `last.term`, ends at `last`.
+/// Node `id` with a log of `last.index` entries, all in `last.term`, and its disk.
+fn build(
+    id: u8,
+    voters: &[u8],
+    election: u32,
+    hard: Hard,
+    last: Position,
+) -> (Raft, Disk) {
     let entries = (1..=last.index)
         .map(|index| Entry {
             at: Position {
@@ -39,13 +46,7 @@ fn build(id: u8, voters: &[u8], election: u32, hard: Hard, last: Position) -> Ra
             data: Vec::new(),
         })
         .collect();
-    let start = Start {
-        hard,
-        voters: voters.iter().copied().map(key).collect(),
-        entries,
-        applied: 0,
-    };
-    Raft::new(config, start).unwrap()
+    start(id, voters, election, hard, entries, 0)
 }
 
 fn drain(raft: &mut Raft) -> Vec<Message> {
@@ -56,13 +57,22 @@ fn drain(raft: &mut Raft) -> Vec<Message> {
 /// with no peer never answers.
 struct Network {
     peers: BTreeMap<node::Key, Raft>,
+    disks: BTreeMap<node::Key, Disk>,
     cuts: BTreeSet<(node::Key, node::Key)>,
 }
 
 impl Network {
-    fn new(peers: impl IntoIterator<Item = Raft>) -> Self {
+    fn new(peers: impl IntoIterator<Item = (Raft, Disk)>) -> Self {
+        let (peers, disks) = peers
+            .into_iter()
+            .map(|(peer, disk)| {
+                let key = peer.key();
+                ((key, peer), (key, disk))
+            })
+            .unzip();
         Self {
-            peers: peers.into_iter().map(|peer| (peer.key(), peer)).collect(),
+            peers,
+            disks,
             cuts: BTreeSet::new(),
         }
     }
@@ -128,7 +138,8 @@ impl Network {
     }
 
     fn take(&mut self, id: node::Key) -> Vec<Message> {
-        let mut messages = drain(self.peers.get_mut(&id).unwrap());
+        let ready = self.peers.get_mut(&id).unwrap().ready();
+        let mut messages = self.disks.get_mut(&id).unwrap().store(ready);
         messages.retain(|message| !self.cuts.contains(&(message.from, message.to)));
         messages
     }
@@ -209,7 +220,7 @@ fn single_node() {
 /// Node 1 at term 1 in `role`, with voters 1, 2, and 3, and an empty outbox. A
 /// candidate and a leader are at term 2, because a campaign advances the term.
 fn in_role(role: Role) -> Raft {
-    let mut raft = build(1, &[1, 2, 3], ELECTION, at_term(1), Position::default());
+    let (mut raft, _) = build(1, &[1, 2, 3], ELECTION, at_term(1), Position::default());
     let reply = |body| Message {
         from: key(3),
         to: key(1),
@@ -351,7 +362,7 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
                 term,
                 vote: vote.map(key),
             };
-            let mut raft = build(1, &[1], ELECTION, hard, own);
+            let (mut raft, _) = build(1, &[1], ELECTION, hard, own);
             let last = Position {
                 term: Term(log_term),
                 index,
@@ -537,7 +548,7 @@ fn prevote_checkquorum() {
 /// Node 1 at term 1 as the leader of voters 1, 2, and 3, with an election timeout
 /// of 5 ticks.
 fn leader_of_three() -> Raft {
-    let mut raft = build(1, &[1, 2, 3], 5, Hard::default(), Position::default());
+    let (mut raft, _) = build(1, &[1, 2, 3], 5, Hard::default(), Position::default());
     raft.campaign();
     for body in [
         Body::PreVoteReply { granted: true },
