@@ -1,16 +1,20 @@
 # Security
 
 The threat model of Foundation. The `red-team` session owns this file and updates it
-when a surface lands. `docs/decisions.md` wins where they differ. A finding is a
-GitHub issue with the `security` label and a failing test.
+when a surface lands. `docs/decisions.md` wins where they differ. A defect that an
+attacker can use is a GitHub issue with the `security` label and a failing test.
 
 ## What we protect
 
-- **Commands.** A wrong or forged command moves a real machine. This is the worst
-  case.
-- **Telemetry in motion and in the buffer.** Its loss, change, or disclosure.
-- **The spec.** It decides who may do what, and where each connector runs.
-- **Secrets.** Device and store credentials, and each node's private key.
+- **Commands.** A wrong, forged, late, or replayed command moves a real machine. This
+  is the worst case. A command expires at a deadline and is never replayed after an
+  outage (D2).
+- **Telemetry in motion and in the buffer.** Its loss, change, or disclosure, and the
+  truth of its timestamps.
+- **The spec.** It decides who may do what, and where each connector and index runs.
+- **The audit record.** It names the subject and the forwarding node of each action.
+- **Secrets.** Device and store credentials, join tickets, and each node's Ed25519
+  private key and X25519 seal key (S8).
 - **Availability.** A node that stops also stops the data and control paths through
   it.
 
@@ -19,16 +23,24 @@ GitHub issue with the `security` label and a failing test.
 | Attacker | Can | Cannot |
 | --- | --- | --- |
 | Network peer | Reach a node's UDP and TCP port; read, drop, change, replay, and delay packets | Hold a node key or a subject key |
+| Relay | Drop or delay what it carries | Read or change it: it sees only ciphertext |
 | Unknown client | Open a TLS session with no certificate (`Peer::Client`) | Sign a hello for a subject in the spec |
 | Subject | Sign hellos and session opens with a key in the spec | Go past its `access` allows |
-| Member node | Hold a node key in the spec; forward for others; vote, if a voter | Hold another node's key |
+| Member node | Act as itself and as the connectors placed on it; read and change the traffic of subjects connected through it; use their open sessions until the hello expires; drop or delay what it forwards | Hold another node's key; change the spec |
+| Home of an index | Write any data into the index, run its gate, lie to its readers | Act outside its placement |
+| Voter | Vote and stall its region | Forge a spec change or move a home outside placement |
+| Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
-| Local user | Read and write the node's files | Read memory of the process |
+| Local user | Read and write the node's files, and so hold its keys and cached secrets and become that member node | Read memory of the process |
+| Agent host | Use the key of the agent's subject, which the MCP process holds | Go past that subject's allows |
 | Dependency | Ship hostile or defective code in a crate we build | |
 
-Out of scope in v1: a voter that lies in consensus (Raft is not Byzantine), a hostile
-operating system or hardware, and end-to-end integrity of frames across forwarding
-nodes (BQ12).
+The reach of each node role is from BQ12. Placement is the trust decision: the home
+of an index is the authority for it.
+
+Accepted in v1 (BQ12): no end-to-end integrity of frames, so a member node can change
+what it forwards, commands included. Out of scope: a hostile operating system or
+hardware.
 
 ## Trust boundaries and their state
 
@@ -37,26 +49,32 @@ state on `main`.
 
 ### Network to `transport`
 
-- TLS 1.3 only, ALPN `foundation/1`, no resumption, no 0-RTT (NODE KEY TLS). A peer is
-  the Ed25519 key in its leaf certificate. Names, dates, and the issuer are not
-  checked. Landed in `tls`; the carriers are not built (#55, #68).
-- `transport` accepts every key and every client with no certificate. Admission is
-  the caller's job. Until `node` admits a peer, the peer must not make the node hold
-  memory or do work out of proportion to the bytes it sent.
+- Every carrier but the diode runs TLS 1.3 only, with ALPN `foundation/1`, no
+  resumption, and no 0-RTT (NODE KEY TLS). A peer is the Ed25519 key in its leaf
+  certificate. Names, dates, and the issuer are not checked. Landed in `tls`; the
+  carriers are not built (#55, #68).
+- TLS ends at the far node. A relay carries ciphertext and admits only known keys
+  (R5, BQ12).
+- The diode carrier is UDP with Noise K and no TLS. Commands, Raft, and clock exchange
+  cannot cross it. Not built.
+- `transport` accepts every Ed25519 key, and every client with no certificate.
+  Admission is the caller's job. Until `node` admits a peer, the peer must not make
+  the node hold memory or do work out of proportion to the bytes it sent.
 - A message on a stream is a length and then bytes. The length is the peer's choice,
   up to `message_bytes_max`.
 - Open: #227 (a key of small order needs no private key), #228 (length prefixes hold
   and fragment the shard's pool).
-- Not decided: whether TLS ends at a relay or at the far node. If it ends at the
-  relay, the relay can claim any `Peer::Node`. No limit on handshakes before
-  admission is decided either; each costs one ML-KEM operation and one signature
-  check.
+- Not decided: a limit on handshakes before admission. Each one costs the node a key
+  exchange and one signature, and one signature check more when the peer sends a
+  certificate.
 
 ### `transport` to protocols
 
 - The first message of a stream, and each datagram, starts with a `wire` header
-  (PROTOCOL HEADER). `node` stops a stream whose header is not valid. A client opens
-  only hub streams. `wire::header` landed; the dispatch table in `node` is not built.
+  (PROTOCOL HEADER). `node` stops a stream whose header is not valid, and drops and
+  counts such a datagram. A client opens only hub streams; `node` refuses the other
+  protocols from a client. `wire::header` landed; the dispatch table in `node` is not
+  built.
 
 ### Subject to owner
 
@@ -65,16 +83,23 @@ state on `main`.
   spec (BQ12). A node acts only as itself or as a connector placed on it. Not built
   (`access`, `hub`).
 - To attack when it lands: a replayed hello, a hello for another gateway, a session
-  open with no fresh signature, a forwarding node that swaps the subject, and any
-  read or write path that does not reach `access`.
+  open with no fresh signature, a forwarding node that swaps the subject, a command
+  after its deadline or replayed after an outage, and any read or write path that does
+  not reach `access`.
 
 ### Node to node
 
-- Node-to-node traffic is authorized by role (BQ12). `raft` does not check that the
-  sender of a message is a voter, because a voter change can be in flight. So the
-  mesh protocol must prove that a sender is a member of the group before its message
-  reaches `Raft::step`. Not built (`mesh`).
-- `raft` trusts each field of a message. Open: #232.
+- Node-to-node traffic is authorized by role (BQ12). A new node joins only with a
+  signed ticket, and voters record membership (BQ11a). Not built (`mesh`).
+- `apply` signs the plan hash, and every node checks every change record (BQ12). So
+  a voter that lies can stall its region, and cannot change access, keys, or
+  placement. Not built (`spec`).
+- `raft` checks that the sender of a reply is a voter. It does not check the sender
+  of a request (`PreVote`, `Vote`, `Heartbeat`, `Append`), and it trusts each field of
+  a message. Open: #232, which also asks who proves that a sender is in the group.
+- The `clock`, `replica`, and `blob` protocols are not built. To attack when they
+  land: a time source that reports a small bound to steer the clocks that follow it
+  (R6), and a binary that a peer serves under a hash it does not match (C9d).
 
 ### Files to the spec
 
@@ -88,7 +113,8 @@ state on `main`.
 - The disk can tear, cut, flip, or zero bytes, and can hold records from an older lap
   of the ring. A chained CRC32C finds these. It does not stop a local user who writes
   the file: the CRC is not a secret, and a header block has no tie to its ring.
-- Open: #234. The engine is not built (#161).
+- The engine is not built (#161). #234 is a robustness defect of this boundary: it
+  needs a writer of the file, so it does not have the `security` label.
 
 ### Device to connector
 
@@ -107,8 +133,14 @@ state on `main`.
   and no equality. The TLS configs do not write key bytes in `Debug`.
 - Open hardening: `PrivateKey` is `Clone` with a public field, and neither it nor the
   PKCS#8 copy in `tls` is cleared when dropped.
-- A secret value is sealed to each node that may use it, and only `ctx.secret(name)`
-  reads it (BQ16, SECRET STORES AS ADAPTERS). Not built (`secret`).
+- Node key material is on the node's local disk. A local user who reads it is that
+  node.
+- `ctx.secret(name)` is the only path to a secret value (SECRET STORES AS ADAPTERS).
+  The built-in store seals each value to the X25519 seal key of each node that may
+  use it (BQ16, S8). The other adapters (an environment variable or a file, and the
+  external stores) do not. An external adapter authenticates with the node key, and
+  may cache values sealed to it, which delays revocation. Not built (`secret`).
+- A join ticket is a secret (BQ11a).
 - Rule for every crate: no secret value in a log, a status channel, an error, or
   plan output.
 
@@ -120,11 +152,14 @@ state on `main`.
 - `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
   `counting`) run under Miri in CI.
 - The `fuzz/` crate has its own lock file, which `cargo deny` does not read (#252).
+- A node fetches the signed binary of a release by hash from a nearby peer (C9d). The
+  signing key and its check are not built.
 
 ## Fuzz targets
 
-One target for each decoder of outside input (`docs/claude/testing.md`). Inputs are
-in `oracles/fuzz/<target>/`. The crate is in #241; its CI job is #252.
+The rule is one target for each decoder of outside input
+(`docs/claude/testing.md`). Inputs are in `oracles/fuzz/<target>/`. The crate is in
+#241; its CI job is #252.
 
 | Target | Reads | Checks besides "no panic" |
 | --- | --- | --- |
