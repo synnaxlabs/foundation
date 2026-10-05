@@ -66,8 +66,8 @@ Most of the cost is context size per turn, so keep each context small:
 | `network` | Opus | `transport` |
 | `advisor` | Opus | Answers design questions; writes no code here |
 
-Not owned yet: `access` (after `spec`), `hub`, `secret`, `connector` (after the `hub`
-and `connector` surfaces), `ops`, and `node`.
+Not owned yet: `access` (after `spec`), `hub`, `secret`, `connector` and each
+`connector-<kind>` (after the `hub` and `connector` surfaces), `ops`, and `node`.
 
 Two first surfaces have a named reviewer besides the coordinator: `consensus` reviews
 `document`, because `spec` uses it; `simulation` reviews `transport`, because `sim`

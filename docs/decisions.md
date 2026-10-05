@@ -587,8 +587,8 @@ How to read this record:
   brief): `write-path`, `storage` (Fable), `time`, `config`, and `network`. Builders
   file the issues for their own crates; the coordinator keeps interfaces, decisions,
   and the merge queue. Ownership: `docs/coordination.md`.
-- **C9b** Work loop: a planning session splits a phase into tasks that own crates; one
-  agent per task in its own worktree; machine gates (build, lints, layer and stand-alone
+- **C9b** Work loop: a planning session splits a phase into tasks that own crates
+  (amended by NINE BUILDERS: each builder splits its own phase); one agent per task in its own worktree; machine gates (build, lints, layer and stand-alone
   checks, unit and property tests, thousands of simulation runs, short fuzz, the 5%
   benchmark gate, mutation testing on the diff); two fresh adversarial reviewers; a
   person reads and merges; cleanup agents follow.
