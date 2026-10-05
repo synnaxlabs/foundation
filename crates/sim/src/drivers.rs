@@ -9,7 +9,7 @@ use std::mem;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -66,6 +66,40 @@ impl Node {
             "{what} of node {node} runs on a thread of node {on}"
         );
         thread
+    }
+}
+
+/// The sim thread that a handle of a node binds to at its first poll.
+struct Owner {
+    /// The handle, in a panic.
+    what: &'static str,
+    thread: OnceLock<u64>,
+}
+
+impl Owner {
+    /// The owner of a handle that `what` names in a panic.
+    fn new(what: &'static str) -> Self {
+        Self {
+            what,
+            thread: OnceLock::new(),
+        }
+    }
+
+    /// Binds the handle to the sim thread of `node` that polls it first.
+    ///
+    /// # Panics
+    ///
+    /// As [`Node::running`], and on a thread other than the first.
+    fn check(&self, node: &Node) {
+        let thread = node.running(self.what);
+        let first = *self.thread.get_or_init(|| thread);
+        if first != thread {
+            let name = lock(&node.shared).name(first);
+            panic!(
+                "{} polls only on thread {name:?} of its first poll",
+                self.what
+            );
+        }
     }
 }
 
