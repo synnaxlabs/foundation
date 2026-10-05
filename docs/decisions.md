@@ -256,13 +256,15 @@ How to read this record:
   refused one; frames from catch-up spend credit too. A frame costs its charge,
   `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
   `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
-  just past a class costs about twice its length, and a frame with only empty series
-  still costs its headers. The charge depends only on the frame's length, so the home
-  and the `hub` compute the same charge for the same frame. A remote complete reader
-  gets only the series of its view (M2): the home sends a frame of those series, and
-  both ends charge that frame. The person chose this on 2026-10-05 ("B is approved ...
-  send only partial frames"), #267. The charge is part of the wire contract: a change to
-  `block`'s header or size classes needs a new wire version (C9d). The window counts
+  costs its length plus the header and at most 64 bytes or a quarter of its length
+  more, and a frame with only empty series still costs its headers. The charge depends
+  only on the frame's length, so the home and the `hub` compute the same charge for
+  the same frame. A remote complete reader gets only the series of its view (M2): the
+  home sends a frame of those series, and both ends charge that frame. The person
+  chose this on 2026-10-05 ("B is approved ... send only partial frames"), #267. The
+  charge is part of the wire contract: a change to `block`'s header or size classes
+  needs a new wire version (C9d). The classes changed to four per doubling under wire
+  version 1 (#188), because no release carries that version. The window counts
   charges, not wire bytes. Per-connection framing in `wire` (X35) pins no pool memory
   and does not count. Credits apply only to complete delivery, which is reliable: a lost
   frame would leak credit. The `hub` raises the limit only after it releases a frame,
@@ -1309,10 +1311,12 @@ How to read this record:
   pages back on a timer that the shard owns (#2).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
-  `{ header, start: u32, len: u32 }`, 16 bytes, so a pool has at most 26 size classes
-  and the largest block holds 2 GiB; a budget above that gives more blocks, not larger
-  ones. `slice(&self, range)` lost: it clones the count for every view, and nothing
-  needs a range yet. Decided by `memory`.
+  `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
+  budget above that gives more blocks, not larger ones. A pool has at most 96 size
+  classes, four per doubling, so a payload is at most 64 bytes or a quarter above its
+  length (#188; 26 power-of-two classes wasted up to 100%). `slice(&self, range)`
+  lost: it clones the count for every view, and nothing needs a range yet. Decided
+  by `memory`.
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
