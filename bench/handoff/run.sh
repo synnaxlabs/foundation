@@ -6,7 +6,8 @@
 #
 # <host> is an ssh destination with passwordless sudo (Ubuntu 24.04). The script
 # installs the build tools, builds there, records the host, and runs the matrix.
-# It changes no host setting. It exits non-zero when a run failed.
+# It changes no host setting. It exits non-zero when a run failed. commit.txt holds
+# the commit and any local changes that were built.
 #
 # Environment, with defaults:
 #   HANDOFF_SSH=ssh     the ssh command, for example "ssh -i key.pem"
@@ -15,17 +16,18 @@
 #                       after them
 #   PACE=10000          frames per second per producer in the paced runs
 
-set -u
+set -euo pipefail
+HOST=${1:?usage: run.sh <host> [reps]}
+REPS=${2:-3}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 OUT=$HERE/results/$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p "$OUT"
 CTL=$(mktemp -d /tmp/handoff.XXXXXX)
+trap 'rm -rf "$CTL"' EXIT
 SSH="${HANDOFF_SSH:-ssh} -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
 -o ControlMaster=auto -o ControlPath=$CTL/%C -o ControlPersist=600"
 BIN=foundation/target/release/handoff
-HOST=${1:?usage: run.sh <host> [reps]}
-REPS=${2:-3}
 SECS=${SECS:-10}
 CPU=${CPU:-1}
 PACE=${PACE:-10000}
@@ -73,10 +75,19 @@ for key in instance-type placement/availability-zone; do
   echo
 done
 cat /sys/devices/system/clocksource/clocksource0/current_clocksource
-cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+cat /sys/devices/system/cpu/cpuidle/current_driver
+for state in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
+  echo "$(cat "$state/name") disable=$(cat "$state/disable")" \
+    "latency=$(cat "$state/latency")us"
+done
 uptime
-~/.cargo/bin/rustc --version
+cd foundation && ~/.cargo/bin/rustc --version
 RECORD
+  {
+    git -C "$ROOT" rev-parse HEAD
+    git -C "$ROOT" status --short
+  } >"$OUT/commit.txt"
 }
 
 # Runs one configuration REPS times and appends each table line to results.md.
@@ -102,18 +113,17 @@ on "$BIN columns" >"$OUT/results.md"
 
 for work in 1 8; do
   for shards in 4 8; do
-    run handoff producers=8 shards=$shards work=$work
+    run ring producers=8 shards=$shards work=$work
   done
   run inline shards=8 work=$work
 done
 for work in 1 8; do
   for shards in 4 8; do
-    run handoff producers=8 shards=$shards work=$work pace=$PACE
+    run ring producers=8 shards=$shards work=$work pace=$PACE
   done
   run inline shards=8 work=$work pace=$PACE
 done
-run handoff producers=8 shards=8 work=1 pace=$PACE spin=20000
+run ring producers=8 shards=8 work=1 pace=$PACE spin=20000
 
-rm -rf "$CTL"
 log "done: $FAILED failed, results in $OUT"
 exit $((FAILED > 0))
