@@ -406,6 +406,8 @@ mod tests {
     const BLOCKS: u64 = 8;
     const AREA: u64 = BLOCKS * 4096;
     const BODY_MAX: usize = 3 * ALIGN;
+    /// The unit a crash keeps or loses of an unsynced write.
+    const SECTOR: usize = 512;
 
     const START: Position = Position {
         offset: 0,
@@ -942,31 +944,47 @@ mod tests {
                 prop_assert_eq!(cursor.at, ring.writer.head());
             }
 
+            /// A crash leaves any subset of the 512-byte sectors of the last
+            /// write. The record is live when every sector it wrote survives;
+            /// lost padding does not count. A flipped bit in it drops it.
             #[test]
-            fn drops_a_last_record_that_is_torn_or_damaged(
+            fn keeps_a_last_record_only_when_its_sectors_survive(
                 ops in ops(),
                 last in body(),
-                kept in any::<[bool; 8]>(),
+                kept in prop::collection::vec(any::<bool>(), index(AREA) / SECTOR),
+                damaged in any::<bool>(),
                 flip in any::<prop::sample::Index>(),
                 after in body(),
             ) {
                 let mut ring = Ring::new();
                 run(&mut ring, &ops);
                 let before = ring.area.clone();
-                let mut expected = ring.data();
                 let Ok(plan) = ring.append(&last) else {
                     return Err(TestCaseError::reject("the ring is full"));
                 };
-                ring.live.pop_back();
-                let whole = ring.area.clone();
-                for (block, _) in kept.iter().enumerate().filter(|(_, kept)| !**kept) {
-                    let block = block * ALIGN..(block + 1) * ALIGN;
-                    ring.area[block.clone()].copy_from_slice(&before[block]);
+                let mut sectors = Vec::new();
+                for (place, len) in plan
+                    .wrap
+                    .map(|wrap| (wrap.place, HEADER_LEN))
+                    .into_iter()
+                    .chain([(plan.record.place, HEADER_LEN + last.len())])
+                {
+                    let first = index(place) / SECTOR;
+                    sectors.extend(first..=(index(place) + len - 1) / SECTOR);
                 }
-                if ring.area == whole {
+                for (sector, _) in kept.iter().enumerate().filter(|(_, kept)| !**kept) {
+                    let bytes = sector * SECTOR..(sector + 1) * SECTOR;
+                    ring.area[bytes.clone()].copy_from_slice(&before[bytes]);
+                }
+                let whole = sectors.iter().all(|sector| kept[*sector]);
+                if whole && damaged {
                     let written = HEADER_LEN + last.len();
                     ring.area[index(plan.record.place) + flip.index(written)] ^= 1;
                 }
+                if !whole || damaged {
+                    ring.live.pop_back();
+                }
+                let mut expected = ring.data();
                 let found = ring.reopen(1);
                 prop_assume!(found.is_ok());
                 prop_assert_eq!(found, Ok(expected.clone()));
