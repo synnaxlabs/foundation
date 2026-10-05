@@ -30,7 +30,9 @@ behavior and whether it can be written.
 Run every one, in order.
 
 1. **Complexity cost.** Count the lines added and removed and the public items added
-   and removed. Then ask whether the growth is justified. For each new public item,
+   and removed. Then ask whether the growth is justified: is each module deep, does the
+   common case stay simple, and did complexity move down into the module or up onto
+   its callers? For each new public item,
    field, and parameter, ask why it deserves to exist and to be independent. When
    callers repeat the same steps, the surface asked them for the wrong thing: fix the
    surface, do not add a helper.
@@ -38,9 +40,10 @@ Run every one, in order.
    `channel::ChannelKey`. A compound name that repeats a responsibility
    (`home::ControlGate`) means a module wants to split; propose the split and the
    simpler names. Keys, never IDs. Booleans are adjectives.
-3. **Anti-patterns and standards.** Read `CLAUDE.md`, `docs/claude/rust.md`,
-   `docs/claude/testing.md`, and `docs/claude/lessons.md` before this lens. Check the
-   work against each rule it touches.
+3. **Anti-patterns and standards.** Read `CLAUDE.md`, `docs/claude/design.md`,
+   `docs/claude/rust.md`, `docs/claude/testing.md`, and `docs/claude/lessons.md`
+   before this lens. Check the work against each rule it touches, and check each of
+   the 14 red flags in `docs/claude/design.md` by name.
 4. **Hacks.** Type erasure (`dyn Any`, downcasts, `Box<dyn>` where an enum fits),
    `as` casts that can truncate, `clone()` to quiet the borrow checker, needless
    `unsafe`, an `#[expect]` that hides a real problem, strings where a type belongs,
@@ -60,8 +63,9 @@ Run every one, in order.
    when the behavior breaks. Errors are asserted by exact variant and message. Pure
    logic gets property tests; anything with I/O gets a simulation test.
 9. **Robustness.** Is this the production-grade path? Name the alternatives you
-   considered and why each lost. Take the best architecture, not the cheapest change
-   that passes, and do not use a tactical fix as a step toward it.
+   considered, at least one of them very different, and why each lost. Take the best
+   architecture, not the cheapest change that passes, and do not use a tactical fix as
+   a step toward it.
 
 ## What to do with a finding
 

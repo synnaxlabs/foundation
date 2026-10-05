@@ -18,6 +18,7 @@
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask layers
+cargo xtask oracles
 cargo test --workspace
 cargo bench -p <crate>
 ```
@@ -169,3 +170,6 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 Doc comments speak to the caller. Use `# Errors`, `# Panics`, and `# Safety` sections
 when they apply. State which thread may call a function and whether it blocks, when
 that matters for correctness. Keep each doc comment short.
+
+Write the doc comment of a public item before its body. When it cannot be short, the
+abstraction is wrong: fix the design, not the comment.
