@@ -535,6 +535,31 @@ fn the_digest_holds_each_poll() {
 }
 
 #[test]
+fn the_digest_holds_the_order_of_the_picks() {
+    let digest = |seed| {
+        let mut sim = sim(seed);
+        let node = sim.node(node::Config::default());
+        let handles: Vec<_> = (["a", "b"].into_iter())
+            .map(|name| {
+                let start = node.shards().start(shard(name), |_| async {
+                    for _ in 0..3 {
+                        yield_now().await;
+                    }
+                });
+                start.unwrap()
+            })
+            .collect();
+        sim.run().unwrap();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        sim.digest()
+    };
+    let digests: BTreeSet<_> = (0..8).map(digest).collect();
+    assert!(digests.len() > 1, "{digests:?}");
+}
+
+#[test]
 fn dropping_the_sim_drops_waiting_tasks_and_unstarted_threads() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
