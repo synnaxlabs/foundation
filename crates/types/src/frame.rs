@@ -333,12 +333,10 @@ impl Frame {
         })
     }
 
-    /// The bytes the frame's block takes from its pool: the credit that sending the
-    /// frame to a reader spends. It depends only on the frame, so the home and a
-    /// reader's `hub` compute the same charge.
+    /// The credit that sending the frame to a reader spends: the bytes a block of the
+    /// frame's length takes from its pool. It depends only on that length.
     #[must_use]
     pub fn charge(&self) -> u64 {
-        // Only `Draft::freeze` makes a frame, so the block has the length `alloc` gave.
         to_u64(block::footprint(self.0.len()))
     }
 }
@@ -573,36 +571,26 @@ mod tests {
     #[test]
     fn charges_the_bytes_its_block_takes() {
         let set = two_groups();
-        let cases: [&[(usize, usize)]; 5] = [
-            &[],
-            &[(0, 0)],
-            &[(0, 0), (2, 0)],
-            &[(0, 1)],
-            &[(0, 8), (1, 8), (2, 4000)],
+        // Fixed values: nodes of two versions must agree on a charge.
+        let cases: [(&[(usize, usize)], u64); 7] = [
+            (&[], 128),
+            (&[(0, 0)], 128),
+            (&[(0, 0), (2, 0)], 128),
+            (&[(0, 24)], 128),
+            (&[(0, 25)], 192),
+            (&[(0, 89)], 320),
+            (&[(0, 8), (1, 8), (2, 4000)], 4160),
         ];
-        for series in cases {
+        for (series, charge) in cases {
             let pool = pool(1 << 16);
             let before = pool.committed();
             let draft =
                 Draft::new(&pool, &set, Label::Live, Form::Raw, series).unwrap();
             let taken = to_u64(pool.committed() - before);
-            assert!(taken > 0, "{series:?}");
-            assert_eq!(draft.freeze().charge(), taken, "{series:?}");
-        }
-    }
-
-    #[test]
-    fn charges_the_same_in_any_pool() {
-        let set = two_groups();
-        let (small, large) = (pool(1 << 10), pool(1 << 20));
-        let charges = [&small, &large].map(|pool| {
-            let draft =
-                Draft::new(pool, &set, Label::Live, Form::Raw, &[(0, 100)]).unwrap();
             let frame = draft.freeze();
-            assert_eq!(frame.clone().charge(), frame.charge());
-            frame.charge()
-        });
-        assert_eq!(charges[0], charges[1]);
+            assert_eq!(frame.charge(), charge, "{series:?}");
+            assert_eq!(frame.charge(), taken, "{series:?}");
+        }
     }
 
     #[test]
