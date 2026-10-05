@@ -49,8 +49,8 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   files, sockets, `process::exit`), the std blocking waits (`park`, `Condvar`,
   `Barrier`, `mpsc` receive), std `HashMap`, `HashSet`, `RandomState`, `thread_local!`,
   and `env::wall::Wall::now` outside `clock`. Only `os` implements the `env` seams and
-  calls the OS clock, files, randomness, and threads. `transport` owns its sockets. Only
-  `node` reads arguments and exits. Each such call carries one `#[expect]`.
+  calls the OS clock, files, sockets, randomness, and threads. Only `node` reads
+  arguments and exits. Each such call carries one `#[expect]`.
 - A crate's `[lints]` table cannot add to the workspace set, so stricter lints go at
   the top of `lib.rs` as `#![deny(...)]` (r16 63):
   - Decoders of outside input (`codec`, `wire`, `document`, `config-hcl`, and each
@@ -145,7 +145,8 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - Hash iteration order never decides behavior. Sort, or use a `BTreeMap` (r16 44).
 - Never print a pointer. Addresses change from run to run (r16 45).
 - No mutable globals: no `thread_local!` and no `static` with interior mutability
-  (r16 46).
+  (r16 46). The one exception is a counting `#[global_allocator]` in a test or
+  benchmark binary, never in a library or the `node` binary.
 
 ## Async and threads
 
@@ -168,3 +169,6 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 Doc comments speak to the caller. Use `# Errors`, `# Panics`, and `# Safety` sections
 when they apply. State which thread may call a function and whether it blocks, when
 that matters for correctness. Keep each doc comment short.
+
+Write the doc comment of a public item before its body. When it cannot be short, the
+abstraction is wrong: fix the design, not the comment.
