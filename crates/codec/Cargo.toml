@@ -15,6 +15,7 @@ proptest.workspace = true
 [[bench]]
 name = "series"
 harness = false
+test = true
 
 [lints]
 workspace = true
