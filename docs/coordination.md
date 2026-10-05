@@ -303,7 +303,10 @@ from the person's account. Fix a dependency with a local patch
 ## Escalate to the person when
 
 Ask in a few short, plain sentences: what breaks, why, the fix, and your default. Never
-use a multi-select dropdown.
+use a multi-select dropdown. Ask one question at a time, and the next only after the
+person answers. End with a question the person can answer yes or no, or by a letter.
+Say whether each option is a patch or the long-term path. On 2026-10-05 the person
+said: "I need questions asked simply and one at a time".
 
 - a change touches a locked decision, a contract, or an oracle;
 - two sessions still disagree after one exchange;
