@@ -282,4 +282,21 @@ mod tests {
             assert_eq!(entry.allows(dep), allowed, "`{name}` on `{dep}`");
         }
     }
+
+    #[test]
+    fn describes_the_allowed_dependencies() {
+        for (name, text) in [
+            ("counting", "no workspace crates"),
+            ("sim", "env, types, block"),
+            ("secret", "any layer 1 crate that is not test-only"),
+            (
+                "connector",
+                "any layer 1 crate that is not test-only, hub, secret",
+            ),
+            ("node", "any crate that is not test-only"),
+        ] {
+            let entry = find(name).expect("in the map");
+            assert_eq!(entry.describe(), text, "`{name}`");
+        }
+    }
 }
