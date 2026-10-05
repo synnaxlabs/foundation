@@ -841,6 +841,11 @@ How to read this record:
   compositions (polled, clocked, pushed, cyclic, out, calc). The kind's `&self` holds
   process-lifetime parts that `node` injects; `ctx` holds one run's capabilities.
   Group-based parts need revision (X5).
+- **PACE (2026-10-05)** `pace::Timer` ticks on a grid of deadlines at `start + n /
+  rate`, from a `types::time::Rate`, and skips and counts the ticks a stall missed.
+  It has one async `tick(&cancel::Token)`, with no blocking wait and no sleep, hybrid,
+  or spin mode: precision belongs to the clock driver in `os`. Replaces r12 A.3's
+  `pace` (#237).
 
 ### 1.11 Config as code
 
