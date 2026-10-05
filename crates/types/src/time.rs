@@ -65,9 +65,12 @@ impl Add<Span> for Stamp {
     /// # Panics
     ///
     /// On overflow. Values from outside use [`Stamp::checked_add`].
+    #[track_caller]
     fn add(self, span: Span) -> Self {
-        self.checked_add(span)
-            .unwrap_or_else(|| panic!("stamp overflow: {} ns + {} ns", self.0, span.0))
+        let Some(stamp) = self.checked_add(span) else {
+            panic!("stamp overflow: {} ns + {} ns", self.0, span.0)
+        };
+        stamp
     }
 }
 
@@ -77,9 +80,12 @@ impl Sub<Span> for Stamp {
     /// # Panics
     ///
     /// On overflow. Values from outside use [`Stamp::checked_sub`].
+    #[track_caller]
     fn sub(self, span: Span) -> Self {
-        self.checked_sub(span)
-            .unwrap_or_else(|| panic!("stamp overflow: {} ns - {} ns", self.0, span.0))
+        let Some(stamp) = self.checked_sub(span) else {
+            panic!("stamp overflow: {} ns - {} ns", self.0, span.0)
+        };
+        stamp
     }
 }
 
@@ -89,9 +95,12 @@ impl Sub for Stamp {
     /// # Panics
     ///
     /// On overflow. Values from outside use [`Stamp::checked_since`].
+    #[track_caller]
     fn sub(self, other: Self) -> Span {
-        self.checked_since(other)
-            .unwrap_or_else(|| panic!("span overflow: {} ns - {} ns", self.0, other.0))
+        let Some(span) = self.checked_since(other) else {
+            panic!("span overflow: {} ns - {} ns", self.0, other.0)
+        };
+        span
     }
 }
 
@@ -455,6 +464,75 @@ pub struct Interval {
 /// It never goes backwards, and it means nothing on another node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Monotonic(pub u64);
+
+impl Monotonic {
+    /// Adds a span, or returns `None` when the result is outside `u64`. Use it for
+    /// values from outside.
+    #[must_use]
+    pub const fn checked_add(self, span: Span) -> Option<Self> {
+        match self.0.checked_add_signed(span.0) {
+            Some(n) => Some(Self(n)),
+            None => None,
+        }
+    }
+
+    /// Subtracts a span, or returns `None` when the result is outside `u64`. Use it
+    /// for values from outside.
+    #[must_use]
+    pub const fn checked_sub(self, span: Span) -> Option<Self> {
+        match self.0.checked_sub_signed(span.0) {
+            Some(n) => Some(Self(n)),
+            None => None,
+        }
+    }
+}
+
+impl Add<Span> for Monotonic {
+    type Output = Self;
+
+    /// # Panics
+    ///
+    /// When the result is outside `u64`. Values from outside use
+    /// [`Monotonic::checked_add`].
+    #[track_caller]
+    fn add(self, span: Span) -> Self {
+        let Some(reading) = self.checked_add(span) else {
+            panic!("monotonic overflow: {} ns + {} ns", self.0, span.0)
+        };
+        reading
+    }
+}
+
+impl Sub<Span> for Monotonic {
+    type Output = Self;
+
+    /// # Panics
+    ///
+    /// When the result is outside `u64`. Values from outside use
+    /// [`Monotonic::checked_sub`].
+    #[track_caller]
+    fn sub(self, span: Span) -> Self {
+        let Some(reading) = self.checked_sub(span) else {
+            panic!("monotonic overflow: {} ns - {} ns", self.0, span.0)
+        };
+        reading
+    }
+}
+
+impl Sub for Monotonic {
+    type Output = Span;
+
+    /// # Panics
+    ///
+    /// When the difference is outside `i64`.
+    #[track_caller]
+    fn sub(self, other: Self) -> Span {
+        let Some(nanos) = self.0.checked_signed_diff(other.0) else {
+            panic!("span overflow: {} ns - {} ns", self.0, other.0)
+        };
+        Span(nanos)
+    }
+}
 
 /// A sample rate in samples per second, kept as an exact reduced fraction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -841,6 +919,122 @@ mod tests {
                     Err(error(text, SPAN_RANGE)),
                     "{text}"
                 );
+            }
+        }
+    }
+
+    mod monotonic {
+        use super::*;
+
+        const MAX: u64 = u64::MAX;
+        const HALF: u64 = 1 << 63;
+
+        mod checked {
+            use super::*;
+
+            fn check(start: u64, span: i64, sum: Option<u64>, difference: Option<u64>) {
+                let (reading, span) = (Monotonic(start), Span::from_nanos(span));
+                assert_eq!(
+                    reading.checked_add(span),
+                    sum.map(Monotonic),
+                    "{start} + {span}"
+                );
+                assert_eq!(
+                    reading.checked_sub(span),
+                    difference.map(Monotonic),
+                    "{start} - {span}"
+                );
+            }
+
+            #[test]
+            fn moves_by_a_span_of_either_sign() {
+                check(10, 5, Some(15), Some(5));
+                check(10, -5, Some(5), Some(15));
+                check(10, 0, Some(10), Some(10));
+            }
+
+            #[test]
+            fn returns_none_outside_u64() {
+                check(MAX, 1, None, Some(MAX - 1));
+                check(MAX, -1, Some(MAX - 1), None);
+                check(0, 1, Some(1), None);
+                check(0, -1, None, Some(1));
+                check(0, i64::MIN, None, Some(HALF));
+                check(HALF, i64::MIN, Some(0), None);
+                check(HALF - 1, i64::MIN, None, Some(MAX));
+                check(HALF + 1, i64::MIN, Some(1), None);
+            }
+
+            proptest! {
+                #[test]
+                fn matches_exact_math(start in any::<u64>(), span in any::<i64>()) {
+                    let exact = |n: i128| u64::try_from(n).ok().map(Monotonic);
+                    let (reading, wide) = (Monotonic(start), i128::from(start));
+                    let span = Span::from_nanos(span);
+                    let nanos = i128::from(span.nanos());
+                    prop_assert_eq!(reading.checked_add(span), exact(wide + nanos));
+                    prop_assert_eq!(reading.checked_sub(span), exact(wide - nanos));
+                    if let Some(sum) = reading.checked_add(span) {
+                        prop_assert_eq!(sum - reading, span);
+                        prop_assert_eq!(sum - span, reading);
+                    }
+                }
+            }
+        }
+
+        mod operators {
+            use super::*;
+
+            #[test]
+            fn subtract_readings_to_the_i64_limits() {
+                for (a, b, span) in [
+                    (15, 10, 5),
+                    (10, 15, -5),
+                    (MAX, HALF, i64::MAX),
+                    (0, HALF, i64::MIN),
+                ] {
+                    assert_eq!(Monotonic(a) - Monotonic(b), Span::from_nanos(span));
+                }
+            }
+
+            #[test]
+            #[should_panic(expected = "monotonic overflow: 0 ns + -1 ns")]
+            fn panic_when_a_sum_passes_zero() {
+                std::hint::black_box(Monotonic(0) + Span::from_nanos(-1));
+            }
+
+            #[test]
+            #[should_panic(
+                expected = "monotonic overflow: 18446744073709551615 ns + 1 ns"
+            )]
+            fn panic_when_a_sum_passes_the_maximum() {
+                std::hint::black_box(Monotonic(MAX) + Span::NANOSECOND);
+            }
+
+            #[test]
+            #[should_panic(expected = "monotonic overflow: 0 ns - 1 ns")]
+            fn panic_when_a_difference_passes_zero() {
+                std::hint::black_box(Monotonic(0) - Span::NANOSECOND);
+            }
+
+            #[test]
+            #[should_panic(
+                expected = "monotonic overflow: 18446744073709551615 ns - -1 ns"
+            )]
+            fn panic_when_a_difference_passes_the_maximum() {
+                std::hint::black_box(Monotonic(MAX) - Span::from_nanos(-1));
+            }
+
+            #[test]
+            #[should_panic(expected = "span overflow: 18446744073709551615 ns - 0 ns")]
+            fn panic_when_a_reading_is_too_far_ahead() {
+                std::hint::black_box(Monotonic(MAX) - Monotonic(0));
+            }
+
+            #[test]
+            #[should_panic(expected = "span overflow: 0 ns - 9223372036854775809 ns")]
+            fn panic_when_a_reading_is_too_far_behind() {
+                std::hint::black_box(Monotonic(0) - Monotonic(HALF + 1));
             }
         }
     }
