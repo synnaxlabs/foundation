@@ -319,7 +319,7 @@ impl Pool {
     /// since the previous `purge` call. The shard calls it on its own timer: a size
     /// keeps its pages for one to two timer intervals after its last block returned,
     /// and `alloc` carves it again on demand. It takes back returned blocks first, as
-    /// `reclaim` does. Returns the bytes given back.
+    /// `reclaim` does. Returns the bytes of the budget given back.
     pub fn purge(&self) -> usize {
         self.reclaim();
         let purges = self.purges.get();
