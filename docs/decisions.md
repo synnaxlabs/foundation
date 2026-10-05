@@ -696,6 +696,15 @@ How to read this record:
   once, after it is written. Batch size (64 entries) and the number of appends in flight
   per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
   `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
+- **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
+  the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
+  set a joint phase replaces, else empty. An election, a commit, and a leader's
+  quorum check need a majority of each non-empty set. Each set is a `BTreeSet`, so
+  a duplicate cannot exist and the order is fixed. An empty `incoming` with an
+  `outgoing` is `Error::EmptyIncoming`; both empty is a node that only follows.
+  etcd's quorum tables are the oracle for the quorum math
+  (`oracles/conformance/raft/quorum/`). A node only in `outgoing` still campaigns, so
+  a leader keeps its lead through its own removal.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
