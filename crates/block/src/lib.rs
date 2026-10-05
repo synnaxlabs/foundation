@@ -378,7 +378,8 @@ unsafe fn payload(header: NonNull<Header>) -> NonNull<u8> {
     unsafe { header.cast::<u8>().add(HEADER) }
 }
 
-/// A block with one owner, which may write to it.
+/// A block with one owner, which may write to it. It moves between threads, and its
+/// drop on any thread returns the block to its pool.
 pub struct Unique {
     header: NonNull<Header>,
     len: usize,
@@ -446,7 +447,9 @@ impl Drop for Unique {
     }
 }
 
-/// An immutable block shared by reference count. Cloning it adds one reference.
+/// An immutable block shared by reference count. Cloning it adds one reference. It
+/// moves between threads, and the last drop on any thread returns the block to its
+/// pool.
 pub struct Block {
     header: NonNull<Header>,
     len: usize,
@@ -833,6 +836,20 @@ mod tests {
             block.block().refs.store(usize::MAX / 2, Relaxed);
             let _clone = ManuallyDrop::new(block.clone());
             drop(reset);
+        }
+    }
+
+    mod send {
+        use super::*;
+
+        const fn assert_send_and_sync<T: Send + Sync>() {}
+        const fn assert_send<T: Send>() {}
+
+        #[test]
+        fn blocks_and_the_pool_cross_threads() {
+            const { assert_send_and_sync::<Unique>() };
+            const { assert_send_and_sync::<Block>() };
+            const { assert_send::<Pool>() };
         }
     }
 
