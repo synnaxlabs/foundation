@@ -165,10 +165,10 @@ mod tests {
         use super::*;
 
         #[test]
-        fn names_the_thread() {
-            let e = Panicked {
+        fn is_an_error_that_names_the_thread() {
+            let e: Box<dyn std::error::Error> = Box::new(Panicked {
                 name: "shard-3".into(),
-            };
+            });
             assert_eq!(e.to_string(), "thread shard-3 panicked");
         }
     }

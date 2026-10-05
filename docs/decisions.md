@@ -1417,7 +1417,7 @@ How to read this record:
   `thread::Handle` and `thread::Error`, which `Shards` and `Threads` both return (#129).
   A `thread::Error` comes from a start, and a `thread::Panicked` from a join (#153).
   When a shard's main future completes, the shard drops its other tasks. A panic in any
-  task ends its shard, and its `Handle::join` returns `Panicked`. A dropped
+  task ends its shard, and its `Handle::join` returns `thread::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
   scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
