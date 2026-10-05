@@ -808,3 +808,18 @@ mod model {
         });
     }
 }
+
+#[cfg(test)]
+mod loom_break {
+    #[cfg(all(
+        loom,
+        not(miri),
+        not(shuttle),
+        not(fuzzing),
+        target_pointer_width = "64"
+    ))]
+    #[test]
+    fn fails_under_loom() {
+        panic!("deliberate break: a loom test whose cfg rustfmt splits");
+    }
+}
