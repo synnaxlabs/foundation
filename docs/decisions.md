@@ -644,7 +644,11 @@ How to read this record:
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
   source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
-  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314.
+  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` adds
+  the OS bound to the error of its own read, so the error is never less than the OS
+  bound. An error over 36500 days reads as unknown, the same as no bound (the
+  coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
+  lint denies it elsewhere (BQ20).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
