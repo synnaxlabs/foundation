@@ -171,15 +171,15 @@ mod tests {
 
     const SECOND_NS: u64 = 1_000_000_000;
 
-    /// One reading for a test: its local time and its edges.
+    /// One push: its local time and its edges.
     #[derive(Clone, Copy, Debug)]
-    enum Reading {
+    enum Push {
         Both(u64, i64, i64),
         Low(u64, i64),
         High(u64, i64),
     }
 
-    impl Reading {
+    impl Push {
         fn at(self) -> u64 {
             match self {
                 Self::Both(at, ..) | Self::Low(at, _) | Self::High(at, _) => at,
@@ -208,12 +208,12 @@ mod tests {
         Span::from_nanos(n)
     }
 
-    /// A two-sided reading: within `error` of `offset`.
-    fn m(at: u64, offset: i64, error: i64) -> Reading {
-        Reading::Both(at, offset - error, offset + error)
+    /// A push of both edges: within `error` of `offset`.
+    fn m(at: u64, offset: i64, error: i64) -> Push {
+        Push::Both(at, offset - error, offset + error)
     }
 
-    fn overlap(ppb: u32, pushes: &[Reading]) -> Result<Overlap, Error> {
+    fn overlap(ppb: u32, pushes: &[Push]) -> Result<Overlap, Error> {
         let mut overlap = Overlap::new(Drift::from_ppb(ppb)?);
         for &reading in pushes {
             reading.push(&mut overlap)?;
@@ -226,7 +226,7 @@ mod tests {
     }
 
     /// The overlap of `pushes` at `now` as `(offset, error)`, with `ppb` of drift.
-    fn check(ppb: u32, pushes: &[Reading], now: u64) -> Result<(i64, i64), Error> {
+    fn check(ppb: u32, pushes: &[Push], now: u64) -> Result<(i64, i64), Error> {
         overlap(ppb, pushes)?.at(Monotonic(now)).map(pair)
     }
 
@@ -234,7 +234,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn gives_one_measurement_as_it_is() {
+        fn gives_one_reading_as_it_is() {
             assert_eq!(check(0, &[m(5, 7, 3)], 5), Ok((7, 3)));
         }
 
@@ -256,23 +256,23 @@ mod tests {
 
         #[test]
         fn narrows_only_the_top_with_a_high_edge() {
-            let pushes = [m(0, 0, 10), Reading::High(0, 4)];
+            let pushes = [m(0, 0, 10), Push::High(0, 4)];
             assert_eq!(check(0, &pushes, 0), Ok((-3, 7)));
-            let wider = [m(0, 0, 10), Reading::High(0, 12)];
+            let wider = [m(0, 0, 10), Push::High(0, 12)];
             assert_eq!(check(0, &wider, 0), Ok((0, 10)));
         }
 
         #[test]
         fn narrows_only_the_bottom_with_a_low_edge() {
-            let pushes = [m(0, 0, 10), Reading::Low(0, -4)];
+            let pushes = [m(0, 0, 10), Push::Low(0, -4)];
             assert_eq!(check(0, &pushes, 0), Ok((3, 7)));
-            let wider = [m(0, 0, 10), Reading::Low(0, -12)];
+            let wider = [m(0, 0, 10), Push::Low(0, -12)];
             assert_eq!(check(0, &wider, 0), Ok((0, 10)));
         }
 
         #[test]
         fn joins_a_low_edge_and_a_high_edge() {
-            let pushes = [Reading::Low(0, 4), Reading::High(0, 14)];
+            let pushes = [Push::Low(0, 4), Push::High(0, 14)];
             assert_eq!(check(0, &pushes, 0), Ok((9, 5)));
         }
     }
@@ -330,16 +330,16 @@ mod tests {
 
         #[test]
         fn bounds_a_sample_between_a_start_and_a_read() {
-            let start = Reading::Low(0, 0);
-            let read = [start, Reading::High(2 * SECOND_NS, 4_000)];
+            let start = Push::Low(0, 0);
+            let read = [start, Push::High(2 * SECOND_NS, 4_000)];
             assert_eq!(check(1_000, &read, SECOND_NS), Ok((2_000, 3_000)));
-            let later = [read[0], read[1], Reading::High(3 * SECOND_NS, 2_000)];
+            let later = [read[0], read[1], Push::High(3 * SECOND_NS, 2_000)];
             assert_eq!(check(1_000, &later, SECOND_NS), Ok((1_500, 2_500)));
         }
 
         #[test]
         fn keeps_the_other_edge_of_each_kept_reading() {
-            let pushes = [m(0, 0, 100), Reading::High(10 * SECOND_NS, 9_000)];
+            let pushes = [m(0, 0, 100), Push::High(10 * SECOND_NS, 9_000)];
             assert_eq!(check(1_000, &pushes, 0), Ok((0, 100)));
         }
 
@@ -356,16 +356,16 @@ mod tests {
         #[test]
         fn moves_a_center_past_a_span_inside_it() {
             let (min, max) = (i64::MIN, i64::MAX);
-            let low = [Reading::Low(0, min), Reading::High(SECOND_NS, min)];
+            let low = [Push::Low(0, min), Push::High(SECOND_NS, min)];
             assert_eq!(check(1_000, &low, SECOND_NS), Ok((min, 1_000)));
-            let high = [Reading::High(0, max), Reading::Low(SECOND_NS, max)];
+            let high = [Push::High(0, max), Push::Low(SECOND_NS, max)];
             assert_eq!(check(1_000, &high, SECOND_NS), Ok((max, 1_000)));
         }
 
         #[test]
         fn fails_with_the_largest_span_for_a_wider_error() {
             let error = Span::from_nanos(i64::MAX);
-            let all = [Reading::Both(0, i64::MIN, i64::MAX)];
+            let all = [Push::Both(0, i64::MIN, i64::MAX)];
             assert_eq!(check(0, &all, 0), Err(Error::Bound { error }));
         }
     }
@@ -384,13 +384,13 @@ mod tests {
 
         #[test]
         fn fails_with_only_low_edges() {
-            let pushes = [Reading::Low(0, 4), Reading::Low(5, 6)];
+            let pushes = [Push::Low(0, 4), Push::Low(5, 6)];
             assert_eq!(check(0, &pushes, 5), Err(Error::Open));
         }
 
         #[test]
         fn fails_with_only_high_edges() {
-            let pushes = [Reading::High(0, 4), Reading::High(5, 6)];
+            let pushes = [Push::High(0, 4), Push::High(5, 6)];
             assert_eq!(check(0, &pushes, 5), Err(Error::Open));
         }
     }
@@ -406,7 +406,7 @@ mod tests {
             assert_eq!(overlap.at(Monotonic(5)).map(pair), Ok((2, 3)));
             assert_eq!(
                 Error::Disjoint.to_string(),
-                "measurement shares no offset with the overlap"
+                "reading shares no offset with the overlap"
             );
         }
 
@@ -426,17 +426,17 @@ mod tests {
         #[test]
         fn fails_on_a_low_edge_above_its_high_edge() {
             let mut overlap = overlap(0, &[]).expect("valid");
-            let crossed = Reading::Both(0, 5, 4);
+            let crossed = Push::Both(0, 5, 4);
             assert_eq!(crossed.push(&mut overlap), Err(Error::Disjoint));
             assert_eq!(overlap.at(Monotonic(0)), Err(Error::Open));
         }
 
         #[test]
         fn fails_on_one_edge_past_the_other_side() {
-            let mut overlap = overlap(0, &[Reading::Low(0, 5)]).expect("valid");
-            let below = Reading::High(0, 4);
+            let mut overlap = overlap(0, &[Push::Low(0, 5)]).expect("valid");
+            let below = Push::High(0, 4);
             assert_eq!(below.push(&mut overlap), Err(Error::Disjoint));
-            assert_eq!(Reading::High(0, 5).push(&mut overlap), Ok(()));
+            assert_eq!(Push::High(0, 5).push(&mut overlap), Ok(()));
             assert_eq!(overlap.at(Monotonic(0)).map(pair), Ok((5, 0)));
         }
     }
@@ -458,20 +458,20 @@ mod tests {
             assert_eq!(overlap.at(Monotonic(10)).map(pair), Ok((0, 5)));
             assert_eq!(
                 backwards(9, 10).to_string(),
-                "measurement at 9ns is older than the newest at 10ns"
+                "reading at 9ns is older than the newest at 10ns"
             );
         }
 
         #[test]
         fn fails_on_a_one_sided_reading() {
-            let mut overlap = overlap(0, &[Reading::Low(10, 0)]).expect("valid");
-            let late = Reading::High(9, 5);
+            let mut overlap = overlap(0, &[Push::Low(10, 0)]).expect("valid");
+            let late = Push::High(9, 5);
             assert_eq!(late.push(&mut overlap), Err(backwards(9, 10)));
             assert_eq!(overlap.at(Monotonic(10)), Err(Error::Open));
         }
 
         #[test]
-        fn counts_a_measurement_that_narrows_nothing() {
+        fn counts_a_reading_that_narrows_nothing() {
             let pushes = [m(0, 0, 5), m(10, 0, 100), m(5, 0, 5)];
             assert_eq!(check(0, &pushes, 5), Err(backwards(5, 10)));
         }
@@ -508,9 +508,20 @@ mod tests {
         use super::*;
         use crate::world::{TIME_NS, World, agreeing};
 
+        /// A world, readings that hold its true offset, and the side each is open on.
+        fn agreeing_readings() -> impl Strategy<Value = (World, Vec<Push>)> {
+            agreeing().prop_flat_map(|(w, measurements)| {
+                let sides = vec(0..3_u8, measurements.len());
+                (
+                    Just(w),
+                    sides.prop_map(move |s| readings(&measurements, &s)),
+                )
+            })
+        }
+
         /// `measurements` as readings in time order, open above for a side of 0, open
         /// below for 1, and closed for 2.
-        fn readings(measurements: &[Measurement], sides: &[u8]) -> Vec<Reading> {
+        fn readings(measurements: &[Measurement], sides: &[u8]) -> Vec<Push> {
             let mut readings: Vec<_> = measurements
                 .iter()
                 .zip(sides)
@@ -521,8 +532,8 @@ mod tests {
                         measurement.error().nanos(),
                     );
                     match side {
-                        0 => Reading::Low(at, offset - error),
-                        1 => Reading::High(at, offset + error),
+                        0 => Push::Low(at, offset - error),
+                        1 => Push::High(at, offset + error),
                         _ => m(at, offset, error),
                     }
                 })
@@ -531,13 +542,13 @@ mod tests {
             readings
         }
 
-        fn closed(readings: &[Reading]) -> bool {
+        fn closed(readings: &[Push]) -> bool {
             let edges = || readings.iter().map(|r| r.edges());
             edges().any(|e| e.0.is_some()) && edges().any(|e| e.1.is_some())
         }
 
         impl World {
-            fn overlap(self, readings: &[Reading]) -> Overlap {
+            fn overlap(self, readings: &[Push]) -> Overlap {
                 let mut overlap = Overlap::new(self.drift);
                 for reading in readings {
                     reading
@@ -549,12 +560,12 @@ mod tests {
         }
 
         /// 1 to 9 readings at any time, with any edges, either side open.
-        fn any_readings() -> impl Strategy<Value = Vec<Reading>> {
+        fn any_readings() -> impl Strategy<Value = Vec<Push>> {
             let one = (any::<u64>(), any::<i64>(), any::<i64>(), 0..3_u8).prop_map(
                 |(at, low, high, side)| match side {
-                    0 => Reading::Low(at, low),
-                    1 => Reading::High(at, high),
-                    _ => Reading::Both(at, low, high),
+                    0 => Push::Low(at, low),
+                    1 => Push::High(at, high),
+                    _ => Push::Both(at, low, high),
                 },
             );
             vec(one, 1..10)
@@ -563,11 +574,9 @@ mod tests {
         proptest! {
             #[test]
             fn holds_the_truth_at_any_time(
-                (w, measurements) in agreeing(),
-                sides in vec(0..3_u8, 9),
+                (w, readings) in agreeing_readings(),
                 t in any::<u64>(),
             ) {
-                let readings = readings(&measurements, &sides);
                 let now = w.overlap(&readings).at(Monotonic(t));
                 if closed(&readings) {
                     let now = now.expect("narrow");
@@ -580,11 +589,9 @@ mod tests {
 
             #[test]
             fn is_the_overlap_of_every_reading_from_the_newest_on(
-                (w, measurements) in agreeing(),
-                sides in vec(0..3_u8, 9),
+                (w, readings) in agreeing_readings(),
                 later in 0..TIME_NS,
             ) {
-                let readings = readings(&measurements, &sides);
                 let newest = readings.last().expect("one or more").at();
                 let now = newest + later;
                 let (mut low, mut high) = (None, None);

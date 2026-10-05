@@ -44,14 +44,14 @@ pub enum Error {
         /// The rate in parts per billion.
         ppb: u32,
     },
-    /// A measurement is older than the newest one in an [`Overlap`].
+    /// A reading is older than the newest one in an [`Overlap`].
     Backwards {
-        /// The local time of the measurement.
+        /// The local time of the reading.
         at: Monotonic,
-        /// The local time of the newest measurement in the overlap.
+        /// The local time of the newest reading in the overlap.
         newest: Monotonic,
     },
-    /// A measurement shares no offset with an [`Overlap`].
+    /// A reading shares no offset with an [`Overlap`].
     Disjoint,
     /// There are no measurements to combine.
     NoSources,
@@ -79,12 +79,10 @@ impl fmt::Display for Error {
             }
             Self::Backwards { at, newest } => write!(
                 f,
-                "measurement at {}ns is older than the newest at {}ns",
+                "reading at {}ns is older than the newest at {}ns",
                 at.0, newest.0
             ),
-            Self::Disjoint => {
-                f.write_str("measurement shares no offset with the overlap")
-            }
+            Self::Disjoint => f.write_str("reading shares no offset with the overlap"),
             Self::NoSources => f.write_str("no time sources to combine"),
             Self::NoMajority { sources, agreeing } => write!(
                 f,

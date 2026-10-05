@@ -70,14 +70,12 @@ impl Measurement {
         (offset - error, offset + error)
     }
 
-    /// The measurement at `at` that covers every offset from `low` to `high`, rounded
-    /// outward. Its offset is the midpoint, or the nearest span when the midpoint is
-    /// past a span's range.
+    /// The measurement at `at` that covers every offset from `low` to `high`, with its
+    /// offset and error saturated to a span.
     ///
     /// # Errors
     ///
-    /// [`Error::Bound`] when the error is more than 36500 days. An error past a span's
-    /// range reads as the largest span.
+    /// [`Error::Bound`] when the error is more than 36500 days.
     pub(crate) fn between(at: Monotonic, low: i128, high: i128) -> Result<Self, Error> {
         let offset = saturated((low + high).div_euclid(2));
         let center = i128::from(offset.nanos());

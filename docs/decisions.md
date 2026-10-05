@@ -403,7 +403,9 @@ How to read this record:
 - **TIME ADAPTERS** Neutral model `Measurement { at: local monotonic, offset, error }`.
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
-  same estimator serves device clocks in the connector library.
+  same estimator serves device clocks in the connector library. Amended by ESTIMATE FIT:
+  a device clock gives `Overlap` readings with a low edge, a high edge, or both, not
+  `Measurement`s.
 - **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about one local clock (the node's
   monotonic clock, or a device's sample clock in nanoseconds, #84): its offset is mesh
   time minus the local reading at `at`, and its error is a half-width from 0 to 36500
@@ -416,7 +418,7 @@ How to read this record:
   half of them. This reads C6's "follows the smallest measured bound": when sources
   agree, the result is never wider than the narrowest. The result holds the true offset
   when the bounds that hold it are a majority and every other bound misses them. Decided
-  by the `time` builder (#49). A device's measurements go to the oscillator fit
+  by the `time` builder (#49). A device's readings go to the oscillator fit
   (`Overlap`), never to `combine`. Node sources keep `Filter`, not `Overlap`: a network
   exchange puts the true offset at about the same place in each bracket, so an overlap
   gains little, and a broken drift bound would stay wrong for the life of an overlap,
