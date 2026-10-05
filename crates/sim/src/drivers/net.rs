@@ -3,13 +3,12 @@
 use std::io::IoSliceMut;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 use env::net::udp::{self, Meta, Transmit, sender};
 use env::net::{Connect, Error, listener, tcp};
 
-use super::Node;
+use super::{Node, Owner};
 use crate::net::Bound;
 use crate::state::lock;
 
@@ -19,7 +18,7 @@ impl env::net::Driver for Node {
         Ok(Box::new(Socket {
             node: self.clone(),
             bound,
-            thread: OnceLock::new(),
+            owner: Owner::new(HALF),
         }))
     }
 
@@ -32,27 +31,14 @@ impl env::net::Driver for Node {
     }
 }
 
-/// Binds a socket half of `node` to the sim thread that polls it first.
-///
-/// # Panics
-///
-/// Outside a thread that the sim started, on a thread of another node, and on a
-/// thread other than the first.
-fn own(node: &Node, owner: &OnceLock<u64>) {
-    let thread = node.running("a socket");
-    let first = *owner.get_or_init(|| thread);
-    assert!(
-        first == thread,
-        "a socket half polls only on the sim thread of its first poll"
-    );
-}
+/// A socket or sender clone, in a panic.
+const HALF: &str = "a socket half";
 
 /// One UDP socket. A drop closes it.
 struct Socket {
     node: Node,
     bound: Bound,
-    /// The thread of the first receive.
-    thread: OnceLock<u64>,
+    owner: Owner,
 }
 
 impl udp::Driver for Socket {
@@ -72,7 +58,7 @@ impl udp::Driver for Socket {
         Box::new(Sender {
             node: self.node.clone(),
             key: self.bound.key,
-            thread: OnceLock::new(),
+            owner: Owner::new(HALF),
         })
     }
 
@@ -82,7 +68,7 @@ impl udp::Driver for Socket {
         buffers: &mut [IoSliceMut<'_>],
         meta: &mut [Meta],
     ) -> Poll<Result<usize, Error>> {
-        own(&self.node, &self.thread);
+        self.owner.check(&self.node);
         let waker = cx.waker().clone();
         let (poll, unused) =
             lock(&self.node.shared).recv(self.bound.key, waker, buffers, meta);
@@ -102,7 +88,7 @@ impl Drop for Socket {
 struct Sender {
     node: Node,
     key: u64,
-    thread: OnceLock<u64>,
+    owner: Owner,
 }
 
 impl sender::Driver for Sender {
@@ -111,7 +97,7 @@ impl sender::Driver for Sender {
         _: &mut Context<'_>,
         transmit: &Transmit<'_>,
     ) -> Poll<Result<(), Error>> {
-        own(&self.node, &self.thread);
+        self.owner.check(&self.node);
         Poll::Ready(lock(&self.node.shared).send(self.key, transmit))
     }
 }

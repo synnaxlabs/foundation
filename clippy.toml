@@ -46,6 +46,7 @@ disallowed-methods = [
   { path = "std::sync::mpsc::Receiver::recv", reason = "await a future" },
   { path = "std::sync::mpsc::Receiver::recv_timeout", reason = "await a future" },
   { path = "env::wall::Wall::now", reason = "only clock reads it" },
+  { path = "clock::source::Wall::measure", reason = "read mesh time from clock" },
   # rustls: its default provider is a process global and its default time the OS
   # clock. `transport::tls` builds every config, with `builder_with_details`.
   { path = "rustls::ClientConfig::builder", reason = "use tls" },

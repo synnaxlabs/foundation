@@ -375,7 +375,7 @@ impl std::error::Error for Error {}
 )]
 mod tests {
     use proptest::prelude::*;
-    use types::channel::Slot;
+    use types::channel;
     use types::frame::key_set::{Group, Interner};
     use types::frame::{Draft, Form, Path};
 
@@ -422,7 +422,7 @@ mod tests {
     /// its one group, when the writer did not call `set_count`.
     fn uncounted(form: Form, bytes: &[u8]) -> (usize, Vec<u8>) {
         let set = Interner::new().intern(&[Group {
-            index: Slot::new(1),
+            index: channel::Key::from_u128(1),
             data: &[],
         }]);
         let config = block::Config { budget: 1 << 16 };

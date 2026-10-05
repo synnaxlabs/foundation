@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc ae4c663e27d81e2306e69536e4aebf4c5c3bb45aba25764daa098c8a21c02efc # shrinks to (w, sources) = (World { drift: Drift(672248), rate: -6595, start: -565402877386395400, now: 1007076794322 }, [Measurement { at: Monotonic(1118140724), offset: Span(2588197122611704364), error: Span(3153599999998107139) }, Measurement { at: Monotonic(1054850245922), offset: Span(2588197122583071382), error: Span(3153599999976423520) }])
+cc 34d2d88d85f59bc5d7cdd48bd667018dec87e5687578137ffc2f93680a2bb2ba # shrinks to (w, sources) = (World { drift: Drift(780415), rate: -425770, start: -281424463196918755, now: 839622415254 }, [Measurement { at: Monotonic(43), offset: Span(-281424463196918718), error: Span(793072232) }]), empty = 3

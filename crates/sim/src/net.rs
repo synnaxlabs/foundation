@@ -12,6 +12,7 @@ use env::net::{Ecn, Error};
 use env::rng::Rng;
 use types::time::{Monotonic, Span};
 
+use crate::chance::roll;
 use crate::link;
 
 /// `10.0.0.0`: node `k` has `10.0.0.0` plus `k + 1`.
@@ -314,10 +315,11 @@ impl Network {
         } else {
             V6_HEADERS
         };
-        if datagram.contents.len() + header > link.mtu || self.chance(link.loss) {
+        if datagram.contents.len() + header > link.mtu || roll(&mut self.rng, link.loss)
+        {
             return Fate::Lost;
         }
-        let duplicated = self.chance(link.duplication);
+        let duplicated = roll(&mut self.rng, link.duplication);
         if duplicated {
             let copy = Datagram {
                 contents: datagram.contents.clone(),
@@ -346,13 +348,6 @@ impl Network {
             let key = self.key();
             self.flights.insert((at, key), datagram);
         }
-    }
-
-    /// Whether a draw falls under `chance`, from 0 to 1.
-    fn chance(&mut self, chance: f64) -> bool {
-        let draw = u32::try_from(self.rng.next_u64() >> 32)
-            .expect("invariant: the high half of a u64 fits u32");
-        under(draw, chance)
     }
 
     /// The true time of the first arrival.
@@ -415,12 +410,6 @@ impl Network {
         }
         (Poll::Ready(count), Some(waker))
     }
-}
-
-/// Whether `draw`, uniform over `u32`, falls under `chance`, from 0 to 1. A chance of
-/// 0 never holds a draw, and a chance of 1 holds every draw.
-pub(crate) fn under(draw: u32, chance: f64) -> bool {
-    f64::from(draw) < chance * 2f64.powi(32)
 }
 
 /// The source and destination addresses of the datagrams of `transmit` from a

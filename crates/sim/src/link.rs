@@ -2,6 +2,8 @@
 
 use types::time::Span;
 
+use crate::chance;
+
 /// One direction of a path between two nodes. Build it with `..Config::default()`:
 /// fields get added.
 ///
@@ -42,7 +44,7 @@ impl Config {
         let spans = [self.delay, self.jitter];
         let chances = [self.loss, self.duplication];
         let valid = spans.iter().all(|&span| span >= Span::ZERO)
-            && chances.iter().all(|chance| (0.0..=1.0).contains(chance));
+            && chances.into_iter().all(chance::valid);
         assert!(
             valid,
             "{self:?} has a negative span or a chance outside 0 to 1"
