@@ -7,6 +7,7 @@ use std::pin::Pin;
 use document::Document;
 use document::diagnostic::{Code, Diagnostic};
 use env::clock::Clock;
+use env::entropy::Entropy;
 use env::rng::Rng;
 use types::name::Name;
 
@@ -73,7 +74,12 @@ impl fmt::Display for Error {
         match self {
             Self::Config(diagnostics) => {
                 write!(f, "the config cannot work")?;
-                diagnostics.iter().try_for_each(|d| write!(f, ": {d}"))
+                let mut separator = ": ";
+                for diagnostic in diagnostics {
+                    write!(f, "{separator}{diagnostic}")?;
+                    separator = "; ";
+                }
+                Ok(())
             }
             Self::Device(source) => write!(f, "the device is in a bad state: {source}"),
             Self::Retry(source) => write!(f, "an attempt failed: {source}"),
@@ -96,7 +102,7 @@ pub struct Context<C> {
     config: C,
     cancel: cancel::Token,
     clock: Clock,
-    rng: Rng,
+    entropy: Entropy,
 }
 
 impl<C> Context<C> {
@@ -106,14 +112,14 @@ impl<C> Context<C> {
         config: C,
         cancel: cancel::Token,
         clock: Clock,
-        rng: Rng,
+        entropy: Entropy,
     ) -> Self {
         Self {
             name,
             config,
             cancel,
             clock,
-            rng,
+            entropy,
         }
     }
 
@@ -141,9 +147,10 @@ impl<C> Context<C> {
         &self.clock
     }
 
-    /// A random source that simulation replays.
-    pub fn rng(&mut self) -> &mut Rng {
-        &mut self.rng
+    /// A new random source, seeded from the node's entropy, that simulation replays.
+    #[must_use]
+    pub fn rng(&self) -> Rng {
+        self.entropy.rng()
     }
 }
 
@@ -201,6 +208,8 @@ impl Table {
     /// # Errors
     ///
     /// The kind's error, or [`Error::Config`] with `connector.unknown-kind`.
+    ///
+    /// The future is not `Send`: call it on a shard.
     pub async fn discover(
         &self,
         kind: &str,
@@ -215,11 +224,16 @@ impl Table {
     fn get(&self, kind: &str) -> Result<&dyn Erased, Vec<Diagnostic>> {
         let erased = self.kinds.get(kind).ok_or_else(|| {
             let names: Vec<_> = self.kinds.keys().copied().collect();
+            let fix = if names.is_empty() {
+                "Use a build that has connector kinds".into()
+            } else {
+                format!("Use one of {names:?}")
+            };
             vec![Diagnostic::new(
                 UNKNOWN_KIND,
                 None,
                 format!("this build has no connector kind {kind:?}"),
-                format!("Use one of {names:?}"),
+                fix,
             )]
         })?;
         Ok(erased.as_ref())
@@ -262,12 +276,19 @@ mod tests {
     use document::value::{self, Value};
     use document::{Attribute, Map};
 
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
     use crate::cancel::Token;
     use crate::common::run;
 
     const MISSING: Code = Code::new("test.missing");
     const RANGE: Code = Code::new("test.range");
+
+    fn ms(n: i64) -> types::time::Span {
+        types::time::Span::from_nanos(n * 1_000_000)
+    }
 
     fn name(text: &str) -> Name {
         text.parse().expect("a valid name")
@@ -383,14 +404,14 @@ mod tests {
     #[test]
     fn discovers_through_its_kind() {
         let found =
-            run(|_, _| async { table().discover("counter", &Token::new()).await });
+            run(|_, _, _| async { table().discover("counter", &Token::new()).await });
         assert_eq!(found.expect("found"), [config(2)]);
     }
 
     #[test]
     fn returns_the_unknown_kind_from_discover_as_a_config_error() {
         let found =
-            run(|_, _| async { table().discover("modbus", &Token::new()).await });
+            run(|_, _, _| async { table().discover("modbus", &Token::new()).await });
         let Err(Error::Config(diagnostics)) = found else {
             panic!("a config error: {found:?}");
         };
@@ -398,23 +419,54 @@ mod tests {
     }
 
     #[test]
+    fn says_an_empty_table_has_no_kinds() {
+        let result = Table::new().check("modbus", &config(1));
+        let expected = Diagnostic::new(
+            UNKNOWN_KIND,
+            None,
+            "this build has no connector kind \"modbus\"".into(),
+            "Use a build that has connector kinds".into(),
+        );
+        assert_eq!(result, Err(vec![expected]));
+    }
+
+    #[test]
     fn runs_until_cancelled_with_its_context() {
-        let (out, kind_name, n) = run(|clock, _| async move {
+        let (early, late, out, ctx_name, n) = run(|clock, tasks, entropy| async move {
             let token = Token::new();
             let ctx = Context::new(
                 name("plant.counter"),
                 3,
                 token.clone(),
-                clock,
-                Rng::from_seed(1),
+                clock.clone(),
+                entropy,
             );
-            let kind_name = ctx.name().clone();
-            let n = *ctx.config();
+            let (ctx_name, n) = (ctx.name().clone(), *ctx.config());
+            let out = Rc::new(RefCell::new(None));
+            let slot = Rc::clone(&out);
+            tasks.spawn(async move {
+                *slot.borrow_mut() = Some(Counter.run(ctx).await);
+            });
+            clock.sleep(ms(50)).await;
+            let early = out.borrow().is_some();
             token.cancel();
-            (Counter.run(ctx).await, kind_name, n)
+            clock.sleep(ms(1)).await;
+            let late = out.borrow_mut().take();
+            (early, late.is_some(), late, ctx_name, n)
         });
-        out.expect("stops when cancelled");
-        assert_eq!((kind_name, n), (name("plant.counter"), 3));
+        assert!(!early, "runs until cancelled");
+        assert!(late, "returns after the cancel");
+        out.expect("returned").expect("stops cleanly");
+        assert_eq!((ctx_name, n), (name("plant.counter"), 3));
+    }
+
+    #[test]
+    fn gives_a_new_random_source_on_each_call() {
+        let (a, b) = run(|clock, _, entropy| async move {
+            let ctx = Context::new(name("a"), (), Token::new(), clock, entropy);
+            (ctx.rng().next_u64(), ctx.rng().next_u64())
+        });
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -424,10 +476,24 @@ mod tests {
             device.to_string(),
             "the device is in a bad state: no reply from unit 4"
         );
-        let config = Error::Config(vec![diagnostic(RANGE, "n is over 8")]);
+        let source = std::error::Error::source(&device).map(ToString::to_string);
+        assert_eq!(source.as_deref(), Some("no reply from unit 4"));
+        let retry = Error::Retry("timed out".into());
+        assert_eq!(retry.to_string(), "an attempt failed: timed out");
+        let source = std::error::Error::source(&retry).map(ToString::to_string);
+        assert_eq!(source.as_deref(), Some("timed out"));
+    }
+
+    #[test]
+    fn shows_every_diagnostic_of_a_config_error() {
+        let config = Error::Config(vec![
+            diagnostic(RANGE, "n is over 8"),
+            diagnostic(MISSING, "no integer n"),
+        ]);
         assert_eq!(
             config.to_string(),
-            "the config cannot work: n is over 8. Fix it"
+            "the config cannot work: n is over 8. Fix it; no integer n. Fix it"
         );
+        assert!(std::error::Error::source(&config).is_none());
     }
 }

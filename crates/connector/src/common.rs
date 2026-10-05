@@ -3,10 +3,13 @@
 use std::sync::{Arc, Mutex};
 
 use env::clock::Clock;
+use env::entropy::Entropy;
 use env::tasks::Tasks;
 
 /// Runs `main` on a shard of one simulated node and returns its output.
-pub(crate) fn run<T, F>(main: impl FnOnce(Clock, Tasks) -> F + Send + 'static) -> T
+pub(crate) fn run<T, F>(
+    main: impl FnOnce(Clock, Tasks, Entropy) -> F + Send + 'static,
+) -> T
 where
     T: Send + 'static,
     F: Future<Output = T> + 'static,
@@ -14,6 +17,7 @@ where
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     let clock = node.clock();
+    let entropy = node.entropy();
     let out = Arc::new(Mutex::new(None));
     let slot = Arc::clone(&out);
     let config = env::shards::Config {
@@ -23,7 +27,7 @@ where
     let handle = node
         .shards()
         .start(config, move |tasks| async move {
-            let value = main(clock, tasks).await;
+            let value = main(clock, tasks, entropy).await;
             *slot.lock().expect("no panic under the lock") = Some(value);
         })
         .expect("the shard starts");

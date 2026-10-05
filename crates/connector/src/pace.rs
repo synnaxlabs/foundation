@@ -99,7 +99,7 @@ mod tests {
     /// Calls `tick` after each stall and returns each tick with its time from the
     /// start.
     fn ticks(rate: Rate, stalls: Vec<Span>) -> Vec<(Tick, Span)> {
-        run(move |clock, _| async move {
+        run(move |clock, _, _| async move {
             let token = Token::new();
             let start = clock.now();
             let mut timer = Timer::new(&clock, rate);
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn returns_none_at_once_when_cancelled_during_the_wait() {
-        let (first, second, elapsed) = run(|clock, tasks| async move {
+        let (first, second, elapsed) = run(|clock, tasks, _| async move {
             let token = Token::new();
             let canceller = token.clone();
             let sleeper = clock.clone();
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn returns_none_before_tick_zero_when_already_cancelled() {
-        let tick = run(|clock, _| async move {
+        let tick = run(|clock, _, _| async move {
             let token = Token::new();
             token.cancel();
             Timer::new(&clock, rate(1, 1)).tick(&token).await
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn returns_at_once_on_the_grid_when_the_first_call_is_late() {
-        let first = run(|clock, _| async move {
+        let first = run(|clock, _, _| async move {
             let mut timer = Timer::new(&clock, rate(10, 1));
             clock.sleep(ms(250)).await;
             timer.tick(&Token::new()).await
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn keeps_the_grid_after_a_cancelled_wait() {
-        let (stopped, resumed, elapsed) = run(|clock, tasks| async move {
+        let (stopped, resumed, elapsed) = run(|clock, tasks, _| async move {
             let token = Token::new();
             let canceller = token.clone();
             let sleeper = clock.clone();
