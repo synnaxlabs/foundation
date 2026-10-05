@@ -2,7 +2,9 @@
 
 Election scenarios ported from the tests of etcd/raft
 (<https://github.com/etcd-io/raft>, commit `1c0011d2c6b7`, Copyright 2015 The etcd
-Authors, Apache License 2.0). `crates/raft` runs them as its `conformance` test:
+Authors, Apache License 2.0). `crates/raft` runs them as its `conformance` test. The
+`[[test]]` entry in `crates/raft/Cargo.toml` is part of this oracle: to remove it is
+to weaken the oracle.
 
 ```sh
 cargo test -p raft --test conformance
@@ -33,7 +35,12 @@ cargo test -p raft --test conformance
 | `prevote_checkquorum` | `testdata/prevote_checkquorum.txt` |
 | `leader_stepdown_when_quorum_active` | `TestLeaderStepdownWhenQuorumActive` |
 | `leader_stepdown_when_quorum_lost` | `TestLeaderStepdownWhenQuorumLost` |
-| `leader_superseding_with_check_quorum` | `TestLeaderSupersedingWithCheckQuorum`, `TestLeaderElectionWithCheckQuorum` |
+| `leader_superseding_with_check_quorum` | `TestLeaderSupersedingWithCheckQuorum` |
 | `free_stuck_candidate_with_check_quorum` | `TestFreeStuckCandidateWithCheckQuorum` |
 | `non_promotable_voter_with_check_quorum` | `TestNonPromotableVoterWithCheckQuorum` |
 | `disruptive_follower_prevote` | `TestDisruptiveFollowerPreVote` |
+
+Not ported: etcd tests that need log replication, learners, or leader transfer, and
+tests that set private state. The unit tests in `crates/raft` cover the single-node
+cases (`TestCandidateConcede`, `TestStepIgnoreOldTermMsg`, `TestAllServerStepdown`,
+`TestCampaignWhileLeader`, `TestPastElectionTimeout`).
