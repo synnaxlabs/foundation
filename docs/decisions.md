@@ -397,6 +397,15 @@ How to read this record:
   `Client` (an SDK, proved by its signed hello above). Callers admit peers, dispatch
   streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM NETWORK.
   Proposed by `network` in #45; approved by the coordinator on PR #53.
+- **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
+  is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
+  from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
+  the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
+  issuer are not checked. A node sends its certificate when it dials; an SDK client
+  sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
+  session protocol gets a new name. Resumption and 0-RTT are off, so rustls gets a
+  fixed time and never reads the OS clock. Randomness inside TLS comes from aws-lc
+  (TLS RANDOMNESS). Decided by `network` in #54.
 
 ### 1.8 Consensus, regions, and the spec
 
