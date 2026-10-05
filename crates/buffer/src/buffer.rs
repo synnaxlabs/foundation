@@ -54,12 +54,15 @@ pub struct Config {
 /// Why a call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The ring has no room for the batch. The caller records a gap.
+    /// The ring has no room for the batch. The caller records a gap. Room returns
+    /// at a commit, or never when the offsets left before their end are under
+    /// `needed`.
     Full {
         /// Bytes of the area that the batch's record needs, with the rest of the
         /// area it must skip.
         needed: u64,
-        /// Bytes of the area not in use.
+        /// Bytes the record may take: the area not in use, or the offsets left
+        /// before their end, whichever is less.
         free: u64,
     },
     /// The pool has no block for a record header or a recovery read.

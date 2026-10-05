@@ -360,8 +360,8 @@ How to read this record:
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
   is the offset modulo the area length. The area is at least twice the largest record
-  less one block, so an empty ring takes any record. A body is at most `u32::MAX`
-  bytes.
+  less one block, so an empty ring takes any record. A ring whose head reaches the
+  end of the offsets is full for good. A body is at most `u32::MAX` bytes.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
