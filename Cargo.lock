@@ -687,10 +687,13 @@ name = "home"
 version = "0.0.0"
 dependencies = [
  "block",
+ "buffer",
  "codec",
  "control",
  "delivery",
+ "env",
  "proptest",
+ "sim",
  "types",
 ]
 

@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc ab61b31a556fd2d9086c43fbcbd2e20a02166b895c465c1c857475b8dc70d1a1
+cc 95cd6c5b54952bb90f96aed08ac9858fe5eba35f006bab6e67d9c49c95b227b7 # shrinks to (logs, actions) = ([Position { term: Term(0), index: 0 }], [Campaign { node: 0 }, Crash { node: 0, kept: Hard }, ChangeVoters { node: 0, voters: [true] }])
+cc 98e56e3cd59813547bf722709219c24f0cdd1f7c62826acd0266ebc60d631e25 # shrinks to (logs, actions) = ([Position { term: Term(0), index: 0 }], [Campaign { node: 0 }, Crash { node: 0, kept: Hard }, ChangeVoters { node: 0, voters: [true] }]), random = 0

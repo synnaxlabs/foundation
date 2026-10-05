@@ -17,6 +17,8 @@ mod index;
     expect(dead_code, reason = "the frame path is the first user")
 )]
 mod order;
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
+mod shard;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the frame path is the first user")
@@ -27,12 +29,11 @@ mod split;
     expect(dead_code, reason = "the frame path is the first user")
 )]
 mod stored;
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
+mod writer;
 
 /// Why the home refused a group of a writer's frame.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the frame path is the first user")
-)]
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Refusal {
     /// The gate refused the write.

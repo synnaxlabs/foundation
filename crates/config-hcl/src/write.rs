@@ -5,7 +5,7 @@ use document::value::{Call, Kind, Value};
 use document::{Attribute, Block, Document, Map, Span};
 
 use crate::lex;
-use crate::parse::{Ends, literal, opens_for};
+use crate::parse::{literal, opens_for};
 use crate::{Error, Unwritable};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
@@ -13,6 +13,18 @@ const WIDTH: usize = 88;
 
 /// What each level of a body or a value goes in by.
 pub(crate) const INDENT: &str = "  ";
+
+/// What follows a value on its line. In a list, a map, or a call, it is what follows
+/// when each item is on its own line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum After {
+    /// A line end, so the value can be a heredoc.
+    Line,
+    /// A `,`, which counts in the width of the line.
+    Comma,
+    /// A comment, so the value is not a heredoc.
+    Other,
+}
 
 /// Writes `document` as HCL text that [`read`](crate::read) reads as an equal
 /// Document.
@@ -132,7 +144,7 @@ impl<'a> Writer<'a> {
             }
             self.out.push_str(&attribute.key);
             self.out.push_str(" = ");
-            self.value(&attribute.value, indent, Ends::Line);
+            self.value(&attribute.value, indent, After::Line);
             self.out.push('\n');
             written = true;
         }
@@ -177,13 +189,13 @@ impl<'a> Writer<'a> {
     /// Writes a value on one line when the line fits, and otherwise with each item on
     /// its own line. A line with a heredoc in it is more than one line, so it does not
     /// fit.
-    pub(crate) fn value(&mut self, value: &Value, indent: usize, ends: Ends) {
+    pub(crate) fn value(&mut self, value: &Value, indent: usize, after: After) {
         let Some(items) = Items::of(&value.kind) else {
-            return self.line(value, ends);
+            return self.line(value, after);
         };
         let mut line = Self::default();
-        line.line(value, ends);
-        let comma = usize::from(ends == Ends::Comma);
+        line.line(value, after);
+        let comma = usize::from(after == After::Comma);
         let width = self
             .column()
             .saturating_add(line.out.chars().count())
@@ -204,7 +216,7 @@ impl<'a> Writer<'a> {
                     self.pad(inner);
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.value(&attribute.value, inner, Ends::Line);
+                    self.value(&attribute.value, inner, After::Line);
                 }
             }
         }
@@ -220,13 +232,13 @@ impl<'a> Writer<'a> {
         for item in values {
             self.out.push('\n');
             self.pad(indent);
-            self.value(item, indent, Ends::Comma);
+            self.value(item, indent, After::Comma);
             self.out.push(',');
         }
     }
 
     /// Writes a value on one line, except a heredoc.
-    fn line(&mut self, value: &Value, ends: Ends) {
+    fn line(&mut self, value: &Value, after: After) {
         let items = match &value.kind {
             Kind::Bool(b) => {
                 return self.out.push_str(if *b { "true" } else { "false" });
@@ -241,7 +253,7 @@ impl<'a> Writer<'a> {
                 return write!(self.out, "{:?}", float.get())
                     .expect("invariant: a String takes any text");
             }
-            Kind::String(text) if ends == Ends::Line && whole_lines(text) => {
+            Kind::String(text) if after == After::Line && whole_lines(text) => {
                 return heredoc(&mut self.out, text);
             }
             Kind::String(text) => return quoted(&mut self.out, text),
@@ -265,7 +277,7 @@ impl<'a> Writer<'a> {
                     self.out.push_str(if i == 0 { " " } else { ", " });
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.line(&attribute.value, Ends::Line);
+                    self.line(&attribute.value, After::Line);
                 }
                 if items.len() > 0 {
                     self.out.push(' ');
@@ -280,7 +292,7 @@ impl<'a> Writer<'a> {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            self.line(item, Ends::Comma);
+            self.line(item, After::Comma);
         }
     }
 
