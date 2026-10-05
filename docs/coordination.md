@@ -267,6 +267,9 @@ from the person's account. Fix a dependency with a local patch
 
 ## Escalate to the person when
 
+Ask in a few short, plain sentences: what breaks, why, the fix, and your default. Never
+use a multi-select dropdown.
+
 - a change touches a locked decision, a contract, or an oracle;
 - two sessions still disagree after one exchange;
 - a PR adds a third-party dependency (record it in `docs/dependencies.md`);
