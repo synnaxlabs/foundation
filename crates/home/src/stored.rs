@@ -82,8 +82,8 @@ pub(crate) struct Series<'a> {
 /// # Panics
 ///
 /// If `body` is shorter than its header. The iterator panics on an unknown kind or
-/// scalar, and on an end outside the series bytes. The ring's CRC finds a damaged
-/// record before this.
+/// scalar, and on ends that do not fit the series bytes. The ring's CRC finds a
+/// damaged record before this.
 pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
     let Some(count) = body.first_chunk() else {
         panic!("the stored body of {} bytes has no count", body.len());
@@ -98,15 +98,12 @@ pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
     let (names, _) = head[COUNT..].as_chunks::<NAME>();
     let ends = names
         .iter()
-        .map(|name| to_usize(u32::from_le_bytes(field(name, at::END))));
-    names
-        .iter()
-        .zip(frame::series(series, ends))
-        .map(|(name, bytes)| Series {
-            channel: channel::Key::from_u128(u128::from_le_bytes(field(name, 0))),
-            data_type: data_type(name),
-            bytes,
-        })
+        .map(|name| (name, to_usize(u32::from_le_bytes(field(name, at::END)))));
+    frame::series(series, ends).map(|(name, bytes)| Series {
+        channel: channel::Key::from_u128(u128::from_le_bytes(field(name, 0))),
+        data_type: data_type(name),
+        bytes,
+    })
 }
 
 /// The kind, element, and `n` of `data_type`.
@@ -471,10 +468,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the end 9 is outside 0..=8")]
+    #[should_panic(expected = "the end 9 is past the body of 8 bytes")]
     fn panics_on_an_end_past_the_series_bytes() {
         let mut body = stored();
         body[COUNT + at::END] = 9;
+        read(&body).for_each(drop);
+    }
+
+    #[test]
+    #[should_panic(expected = "the last end 8 is not the end of the body of 9 bytes")]
+    fn panics_on_bytes_after_the_last_series() {
+        let mut body = stored();
+        body.push(0);
         read(&body).for_each(drop);
     }
 
