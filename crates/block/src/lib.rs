@@ -273,8 +273,9 @@ impl Pool {
                 });
             }
             let offset = self.span_start(index) + class.carved.get();
+            let mut idle = self.idle(index);
             while let Err(Refused) = self.shared().memory.commit(offset, size) {
-                let Some(other) = self.idle(index).next() else {
+                let Some(other) = idle.next() else {
                     return Err(Error::Refused { requested: len });
                 };
                 self.release(other);
@@ -384,11 +385,9 @@ impl Pool {
         available
     }
 
-    /// The idle classes in the order a carve of class `index` takes their pages:
-    /// the classes above `index` first, smallest first, so one purge covers the
-    /// need, then the classes below it, largest first. The walk starts at `index`
-    /// itself: it has no free block, so it has nothing idle, and the range reads
-    /// the same for the mutation check either way.
+    /// Idle classes above `index` smallest first, so one release covers the
+    /// need, then those below largest first. Class `index` is never idle here:
+    /// callers reach it with no free block.
     fn idle(&self, index: usize) -> impl Iterator<Item = usize> {
         let above = index..self.classes.len();
         let below = (0..index).rev();
@@ -756,7 +755,6 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod fixture {
     use std::collections::BTreeSet;
-    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -771,10 +769,8 @@ mod fixture {
     /// What a pool did with its memory.
     pub(crate) struct Watch {
         pub(crate) drops: AtomicUsize,
-        /// The system has no memory: each `commit` refuses.
-        pub(crate) refusing: AtomicBool,
         /// Bytes the system can hold committed after the header. A purge gives
-        /// its bytes back to the system.
+        /// its bytes back to the system. Zero refuses each commit.
         pub(crate) limit: AtomicUsize,
         charged: Mutex<BTreeSet<usize>>,
         calls: Mutex<Vec<Call>>,
@@ -784,7 +780,6 @@ mod fixture {
         fn default() -> Self {
             Self {
                 drops: AtomicUsize::new(0),
-                refusing: AtomicBool::new(false),
                 limit: AtomicUsize::new(usize::MAX),
                 charged: Mutex::default(),
                 calls: Mutex::default(),
@@ -840,7 +835,7 @@ mod fixture {
 
         fn commit(&self, offset: usize, len: usize) -> Result<(), Refused> {
             self.watch.record(Call::Commit { offset, len });
-            if self.watch.refusing.load(Relaxed) || !self.watch.charge(offset, len) {
+            if !self.watch.charge(offset, len) {
                 return Err(Refused);
             }
             self.heap.commit(offset, len)
@@ -1199,7 +1194,7 @@ mod tests {
         #[test]
         fn fails_while_the_system_refuses_memory() {
             let (pool, watch) = create_watched_pool(256);
-            watch.refusing.store(true, Relaxed);
+            watch.limit.store(0, Relaxed);
             let error = pool.alloc(10).expect_err("the system refuses memory");
             assert_eq!(error, refused(10));
             assert_eq!(
@@ -1207,7 +1202,7 @@ mod tests {
                 "the system refused memory for a block of 10 bytes"
             );
             assert_eq!(pool.committed(), 0);
-            watch.refusing.store(false, Relaxed);
+            watch.limit.store(usize::MAX, Relaxed);
             let block = pool.alloc(10).expect("the system has memory again");
             assert_eq!(block.len(), 10);
             assert_eq!(pool.committed(), 128);
@@ -1278,11 +1273,11 @@ mod tests {
             let (pool, watch) = create_watched_pool(256);
             drop(pool.alloc(64).expect("the budget has room"));
             pool.reclaim();
-            watch.refusing.store(true, Relaxed);
+            watch.limit.store(0, Relaxed);
             let error = pool.alloc(128).expect_err("the system refuses memory");
             assert_eq!(error, refused(128));
             assert_eq!(pool.committed(), 0, "the idle class went back first");
-            watch.refusing.store(false, Relaxed);
+            watch.limit.store(usize::MAX, Relaxed);
             let block = pool.alloc(128).expect("the system has memory again");
             assert_eq!(pool.committed(), 192);
             let carve = Commit {
@@ -1312,7 +1307,7 @@ mod tests {
         fn gives_back_only_what_it_carved_after_a_refusal() {
             let (pool, watch) = create_watched_pool(256);
             let held = pool.alloc(64).expect("the budget has room");
-            watch.refusing.store(true, Relaxed);
+            watch.limit.store(0, Relaxed);
             let error = pool.alloc(64).expect_err("the system refuses memory");
             assert_eq!(error, refused(64));
             drop(held);
@@ -1380,7 +1375,7 @@ mod tests {
             drop(pool.alloc(64).expect("the budget has room"));
             drop(pool.alloc(128).expect("the budget has room"));
             pool.reclaim();
-            watch.refusing.store(true, Relaxed);
+            watch.limit.store(0, Relaxed);
             let error = pool.alloc(192).expect_err("the system refuses memory");
             assert_eq!(error, refused(192));
             assert_eq!(pool.committed(), 0, "each idle size went back");
@@ -1688,7 +1683,8 @@ mod tests {
                 let mut lent = 0;
                 let steps = steps.into_iter().zip(refusals).zip(1_u8..);
                 for (((len, dropped), refusing), fill) in steps {
-                    watch.refusing.store(refusing, Relaxed);
+                    let limit = if refusing { 0 } else { usize::MAX };
+                    watch.limit.store(limit, Relaxed);
                     let calls = watch.calls().len();
                     match pool.alloc(len) {
                         Ok(mut block) => {

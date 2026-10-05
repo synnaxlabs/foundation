@@ -510,10 +510,10 @@ How to read this record:
   keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
   wait in a follow-up issue. When the system refuses to commit pages, the pool gives
-  back one idle size at a time, in the order a short budget uses, and tries the
-  commit again; after the last idle size the allocation fails with `Error::Refused`,
-  a separate error from a full pool (the person on 2026-10-05: "I approve the
-  separate error"). The carve counts do not change, the sizes given back stay given
+  back one idle size at a time, in the order a purge for room in the budget uses,
+  and tries the commit again; after the last idle size the allocation fails with
+  `Error::Refused`, a separate error from a full pool (the person on 2026-10-05: "I
+  approve the separate error"). The carve counts do not change, the sizes given back
   back, and a later allocation may succeed (#475, #542).
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
