@@ -18,6 +18,13 @@ crlf accepted
 duplicate-attribute refused
 empty accepted
 expansion accepted hcl.expansion
+float-digits accepted
+float-near-largest-written accepted
+float-near-largest accepted
+float-near-smallest-written accepted
+float-near-smallest accepted
+float-near-tie-written accepted
+float-near-tie accepted
 float-past-f64 accepted
 float-to-zero accepted
 float-written accepted

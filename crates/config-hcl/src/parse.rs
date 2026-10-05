@@ -7,9 +7,10 @@ use crate::lex::{self, Token, Tokens};
 use crate::{Error, Expected, Form};
 
 /// Reads HCL text as a Document. Each key, keyword, label, function name, and value
-/// has a span in `source`. A heredoc's lines end in `\n`, whatever the file uses. An
-/// integer key in an object reads as HCL reads it: its digits without leading zeros,
-/// after a `-` if it has one.
+/// has a span in `source`. A number written with digits only reads as an exact
+/// integer, and any other number as a float. A heredoc's lines end in `\n`, whatever
+/// the file uses. An integer key in an object reads as HCL reads it: its digits
+/// without leading zeros, after a `-` if it has one.
 ///
 /// # Errors
 ///
