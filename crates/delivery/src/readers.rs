@@ -184,11 +184,11 @@ impl Readers {
         credit.limit_bytes = credit.limit_bytes.max(limit_bytes);
     }
 
-    /// Spends credit on one frame of `bytes`: the length of its encoded series. A frame
-    /// costs at least one byte, so the limit also bounds the frames sent. Returns
-    /// `true` and spends when the session has spent less than its limit; the frame may
-    /// take it past the limit. Otherwise returns `false` and spends nothing. After a
-    /// refusal, send the session no later frame until it has the refused one.
+    /// Spends credit on one frame whose charge is `bytes`: the bytes its pool block
+    /// pins. Returns `true` and spends when the session has spent less than its limit;
+    /// the frame may take it past the limit. Otherwise returns `false` and spends
+    /// nothing. After a refusal, send the session no later frame until it has the
+    /// refused one.
     ///
     /// # Panics
     ///
@@ -200,7 +200,7 @@ impl Readers {
         if credit.spent_bytes >= credit.limit_bytes {
             return false;
         }
-        credit.spent_bytes += bytes.max(1);
+        credit.spent_bytes += bytes;
         true
     }
 
@@ -929,15 +929,6 @@ mod tests {
         }
 
         #[test]
-        fn is_at_least_one_byte_per_frame() {
-            let (mut readers, key) = opened();
-            readers.grant(key, 2);
-            assert!(readers.spend(key, 0));
-            assert!(readers.spend(key, 0));
-            assert!(!readers.spend(key, 0));
-        }
-
-        #[test]
         fn is_kept_per_session() {
             let mut readers = Readers::new();
             let a = readers.open(Reader::Unnamed, Start::At(live(0))).key;
@@ -1297,7 +1288,7 @@ mod tests {
                         let accepted = readers.spend(keys[i], bytes);
                         assert_eq!(accepted, spent < limit);
                         if accepted {
-                            frames[i].push(bytes.max(1));
+                            frames[i].push(bytes);
                         }
                     }
                 }
