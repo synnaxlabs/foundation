@@ -5,7 +5,7 @@ use document::value::{Call, Kind, Value};
 use document::{Attribute, Block, Document, Map, Span};
 
 use crate::lex;
-use crate::parse::{Ends, literal, opens_for};
+use crate::parse::{opens_for, reference};
 use crate::{Error, Unwritable};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
@@ -13,6 +13,19 @@ const WIDTH: usize = 88;
 
 /// What each level of a body or a value goes in by.
 pub(crate) const INDENT: &str = "  ";
+
+/// What follows a value on its line. In a list, a map, or a call, it is what follows
+/// when each item is on its own line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum After {
+    /// A line end, so the value can be a heredoc.
+    Line,
+    /// A `,`, which counts in the width of the line.
+    Comma,
+    /// A comment, or the end of a text with no line end, so the value is not a
+    /// heredoc. A comment does not count in the width of the line.
+    Other,
+}
 
 /// Writes `document` as HCL text that [`read`](crate::read) reads as an equal
 /// Document.
@@ -127,12 +140,12 @@ impl<'a> Writer<'a> {
         let mut written = preceded;
         for attribute in attributes {
             self.pad(indent);
-            if lex::word(&attribute.key) != Some(lex::Kind::Identifier) {
+            if !lex::identifier(&attribute.key) {
                 self.refuse(attribute.key_span, Unwritable::Key);
             }
             self.out.push_str(&attribute.key);
             self.out.push_str(" = ");
-            self.value(&attribute.value, indent, Ends::Line);
+            self.value(&attribute.value, indent, After::Line);
             self.out.push('\n');
             written = true;
         }
@@ -150,7 +163,7 @@ impl<'a> Writer<'a> {
     /// Writes a block from its keyword to its `}`, with its inner lines `indent`
     /// levels in.
     pub(crate) fn block(&mut self, block: &Block, indent: usize) {
-        if lex::word(&block.keyword) != Some(lex::Kind::Identifier) {
+        if !lex::identifier(&block.keyword) {
             self.refuse(block.keyword_span, Unwritable::Keyword);
         }
         self.out.push_str(&block.keyword);
@@ -177,13 +190,13 @@ impl<'a> Writer<'a> {
     /// Writes a value on one line when the line fits, and otherwise with each item on
     /// its own line. A line with a heredoc in it is more than one line, so it does not
     /// fit.
-    pub(crate) fn value(&mut self, value: &Value, indent: usize, ends: Ends) {
+    pub(crate) fn value(&mut self, value: &Value, indent: usize, after: After) {
         let Some(items) = Items::of(&value.kind) else {
-            return self.line(value, ends);
+            return self.line(value, after);
         };
         let mut line = Self::default();
-        line.line(value, ends);
-        let comma = usize::from(ends == Ends::Comma);
+        line.line(value, after);
+        let comma = usize::from(after == After::Comma);
         let width = self
             .column()
             .saturating_add(line.out.chars().count())
@@ -204,7 +217,7 @@ impl<'a> Writer<'a> {
                     self.pad(inner);
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.value(&attribute.value, inner, Ends::Line);
+                    self.value(&attribute.value, inner, After::Line);
                 }
             }
         }
@@ -220,13 +233,13 @@ impl<'a> Writer<'a> {
         for item in values {
             self.out.push('\n');
             self.pad(indent);
-            self.value(item, indent, Ends::Comma);
+            self.value(item, indent, After::Comma);
             self.out.push(',');
         }
     }
 
     /// Writes a value on one line, except a heredoc.
-    fn line(&mut self, value: &Value, ends: Ends) {
+    fn line(&mut self, value: &Value, after: After) {
         let items = match &value.kind {
             Kind::Bool(b) => {
                 return self.out.push_str(if *b { "true" } else { "false" });
@@ -241,16 +254,15 @@ impl<'a> Writer<'a> {
                 return write!(self.out, "{:?}", float.get())
                     .expect("invariant: a String takes any text");
             }
-            Kind::String(text) if ends == Ends::Line && whole_lines(text) => {
+            Kind::String(text) if after == After::Line && whole_lines(text) => {
                 return heredoc(&mut self.out, text);
             }
             Kind::String(text) => return quoted(&mut self.out, text),
             Kind::Reference(name) => {
-                let name = name.as_str();
-                if lex::word(name).is_none() || literal(name).is_some() {
+                if !reference(name) {
                     self.refuse(value.span, Unwritable::Reference);
                 }
-                return self.out.push_str(name);
+                return self.out.push_str(name.as_str());
             }
             Kind::List(values) => Items::List(values),
             Kind::Call(call) => Items::Call(call),
@@ -265,7 +277,7 @@ impl<'a> Writer<'a> {
                     self.out.push_str(if i == 0 { " " } else { ", " });
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.line(&attribute.value, Ends::Line);
+                    self.line(&attribute.value, After::Line);
                 }
                 if items.len() > 0 {
                     self.out.push(' ');
@@ -280,7 +292,7 @@ impl<'a> Writer<'a> {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            self.line(item, Ends::Comma);
+            self.line(item, After::Comma);
         }
     }
 
@@ -294,7 +306,7 @@ impl<'a> Writer<'a> {
                 self.out.push('[');
             }
             Items::Call(call) => {
-                if lex::word(&call.function) != Some(lex::Kind::Identifier) {
+                if !lex::identifier(&call.function) {
                     self.refuse(call.function_span, Unwritable::Function);
                 }
                 self.out.push_str(&call.function);
@@ -312,7 +324,9 @@ impl<'a> Writer<'a> {
     /// after `[` as the start of a `for` expression.
     fn refuse_for(&mut self, item: &Value) {
         let span = match &item.kind {
-            Kind::Reference(name) if opens_for(name.as_str()) => item.span,
+            Kind::Reference(name) if name.segments().next().is_some_and(opens_for) => {
+                item.span
+            }
             // A call such as `for.x(1)` is refused for its function.
             Kind::Call(call) if &*call.function == "for" => call.function_span,
             Kind::Reference(_)
@@ -351,7 +365,7 @@ impl<'a> Writer<'a> {
 /// Writes a map key: bare when it is an identifier, and quoted when not. `for` is
 /// quoted, because HCL reads `{ for` as a `for` expression.
 fn key(out: &mut String, key: &str) {
-    if lex::word(key) == Some(lex::Kind::Identifier) && !opens_for(key) {
+    if lex::identifier(key) && !opens_for(key) {
         out.push_str(key);
     } else {
         quoted(out, key);
@@ -422,6 +436,7 @@ mod tests {
     use document::value::Float;
     use document::{Label, Position, Source};
     use proptest::prelude::*;
+    use types::name::Name;
 
     use super::*;
     use crate::arbitrary::document;
@@ -506,11 +521,33 @@ mod tests {
         text
     }
 
+    /// Any name, with segments that start with a digit, `-`, or `@`, and a first
+    /// segment that may be a literal.
+    fn any_name() -> impl Strategy<Value = Name> {
+        "(true|null|@?[a-z0-9_-]{1,3})(\\.@?[a-z0-9_-]{1,3}){0,2}"
+            .prop_map(|name| name.parse().unwrap())
+    }
+
     proptest! {
         #[test]
         fn reads_what_it_writes(document in document()) {
             let text = write(&document).unwrap();
             prop_assert_eq!(read(Source(0), &text), Ok(document), "{}", text);
+        }
+
+        #[test]
+        fn writes_a_name_exactly_when_it_reads_back(name in any_name()) {
+            let document = attributes(vec![("a", Kind::Reference(name.clone()))]);
+            let text = format!("a = {name}\n");
+            let expected = if read(Source(0), &text).as_ref() == Ok(&document) {
+                Ok(text)
+            } else {
+                Err(vec![Error::Unwritable {
+                    span: None,
+                    part: Unwritable::Reference,
+                }])
+            };
+            prop_assert_eq!(write(&document), expected);
         }
     }
 
@@ -579,7 +616,7 @@ mod tests {
             ("large", float(1e300)),
             ("zero", float(-0.0)),
             ("string", string("\"q\" \\ ${a} %{b} $c\t\r\u{1}é")),
-            ("reference", reference("@a.7b")),
+            ("reference", reference("a_1.b-c.true")),
             ("words", list(vec![reference("a-b"), reference("for")])),
             (
                 "map",
@@ -609,7 +646,7 @@ mod tests {
              map = { \"7\" = 4, \"a b\" = 3, \"a\u{200b}\" = 6, \"for\" = 2, x = 1, \
              été = 5 }\n\
              one = 1.0\n\
-             reference = @a.7b\n\
+             reference = a_1.b-c.true\n\
              small = -1e-7\n\
              string = \"\\\"q\\\" \\\\ $${a} %%{b} $c\\t\\r\\u0001é\"\n\
              température = é()\n\
@@ -777,6 +814,22 @@ mod tests {
                 unwritable(None, Unwritable::Keyword),
             ])
         );
+    }
+
+    #[test]
+    fn refuses_a_reference_that_hcl_reads_as_another_form() {
+        let names = ["@a.b", "a.@b", "a.7b", "a.-b", "true.x", "null.x"];
+        for name in names {
+            let document = attributes(vec![("a", reference(name))]);
+            assert_eq!(
+                write(&document),
+                Err(vec![Error::Unwritable {
+                    span: None,
+                    part: Unwritable::Reference,
+                }]),
+                "{name:?}"
+            );
+        }
     }
 
     #[test]

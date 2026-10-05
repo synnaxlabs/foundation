@@ -62,11 +62,12 @@ pub enum Error {
         /// Why the name is not valid.
         error: name::Error,
     },
-    /// An integer outside `i128`, or a float that an `f64` cannot hold: one past the
-    /// largest, or one that rounds to zero from digits that are not all zero.
+    /// A number that a Document cannot hold, or text that is not a number.
     Number {
-        /// Where the number is.
+        /// Where the number is, with its `-`.
         span: Span,
+        /// What is wrong with it.
+        problem: Number,
     },
     /// A string escape that HCL does not have.
     Escape {
@@ -105,7 +106,7 @@ impl Error {
             | Self::Unclosed { span, .. }
             | Self::Form { span, .. }
             | Self::Name { span, .. }
-            | Self::Number { span }
+            | Self::Number { span, .. }
             | Self::Escape { span }
             | Self::TooDeep { span }
             | Self::TooLarge { span, .. } => span.start().offset,
@@ -140,13 +141,7 @@ impl From<&Error> for Diagnostic {
                     Name::MAX_BYTES
                 ),
             ),
-            Error::Number { span } => Self::new(
-                NUMBER,
-                Some(*span),
-                "the number is out of range".into(),
-                "Use an integer that fits in 128 bits, or a float that fits in 64 bits"
-                    .into(),
-            ),
+            Error::Number { span, problem } => problem.diagnostic(*span),
             Error::Escape { span } => Self::new(
                 ESCAPE,
                 Some(*span),
@@ -223,7 +218,8 @@ pub enum Form {
     /// A `for` expression, such as `[for x in xs : x]`. HCL reads a list or an object
     /// that starts with the word `for` as one, such as `[for]` or `{ for = 1 }`.
     For,
-    /// An index or an attribute access after a value, such as `a[0]` or `f().b`.
+    /// An index or an attribute access after a value, such as `a[0]`, `a.0`, or
+    /// `f().b`.
     Index,
     /// A splat, such as `a[*].b` or `a.*.b`.
     Splat,
@@ -303,6 +299,35 @@ impl Form {
     }
 }
 
+/// What is wrong with a number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Number {
+    /// A number that a Document cannot hold: an integer outside `i128`, or a float
+    /// that an `f64` cannot hold, past the largest or rounded to zero from digits that
+    /// are not all zero.
+    Range,
+    /// Text that HCL scans as one number but that is not a number: it has two dots,
+    /// two exponents, a dot in its exponent, or an exponent outside `i64`.
+    Malformed,
+}
+
+impl Number {
+    fn diagnostic(self, span: Span) -> Diagnostic {
+        let (message, fix) = match self {
+            Self::Range => (
+                "the number is out of range",
+                "Use an integer that fits in 128 bits, or a float that fits in 64 bits",
+            ),
+            Self::Malformed => (
+                "the number is not valid",
+                "Write a number such as `1.5e3`, or put the text in quotes to make a \
+                 string",
+            ),
+        };
+        Diagnostic::new(NUMBER, Some(span), message.into(), fix.into())
+    }
+}
+
 /// A part of a Document that no HCL text reads back as the same part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unwritable {
@@ -313,8 +338,9 @@ pub enum Unwritable {
     Keyword,
     /// A function name that is not an identifier.
     Function,
-    /// A name that HCL does not read as a reference, such as `true`, `null`, `7a`, or
-    /// `-a`.
+    /// A name that HCL does not read as a reference: a segment does not start with a
+    /// letter or `_`, or the first segment is `true`, `false`, or `null`, such as
+    /// `a.7b`, `site_a.@changes`, or `true.x`.
     Reference,
     /// A list whose first item starts with the word `for`, such as the reference `for`
     /// or `for.x`, or the call `for(1)`. HCL reads `[for` as a `for` expression.
@@ -345,8 +371,8 @@ impl Unwritable {
             Self::Reference => (
                 UNWRITABLE_REFERENCE,
                 "the name does not read as a reference in HCL",
-                "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, \
-                 or `null`",
+                "Start each segment with a letter or `_`, and do not make `true`, \
+                 `false`, or `null` the first segment",
             ),
             Self::For => (
                 UNWRITABLE_FOR,
@@ -669,10 +695,23 @@ mod tests {
                  with at most 255 bytes in all",
             ),
             (
-                Error::Number { span: span(7) },
+                Error::Number {
+                    span: span(7),
+                    problem: Number::Range,
+                },
                 "hcl.number",
                 "the number is out of range",
                 "Use an integer that fits in 128 bits, or a float that fits in 64 bits",
+            ),
+            (
+                Error::Number {
+                    span: span(7),
+                    problem: Number::Malformed,
+                },
+                "hcl.number",
+                "the number is not valid",
+                "Write a number such as `1.5e3`, or put the text in quotes to make \
+                 a string",
             ),
             (
                 Error::Escape { span: span(7) },
@@ -727,8 +766,8 @@ mod tests {
             Unwritable::Reference,
             "hcl.unwritable-reference",
             "the name does not read as a reference in HCL",
-            "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, or \
-             `null`",
+            "Start each segment with a letter or `_`, and do not make `true`, \
+             `false`, or `null` the first segment",
         ),
         (
             Unwritable::For,
@@ -818,7 +857,14 @@ mod tests {
                 span: span(7),
                 error: "a.@".parse::<Name>().unwrap_err(),
             },
-            Error::Number { span: span(7) },
+            Error::Number {
+                span: span(7),
+                problem: Number::Range,
+            },
+            Error::Number {
+                span: span(7),
+                problem: Number::Malformed,
+            },
             Error::Escape { span: span(7) },
             Error::TooDeep { span: span(7) },
             Error::Document(document::Error::DuplicateKey {
@@ -879,6 +925,7 @@ mod tests {
                 Error::Syntax { .. } | Error::Unclosed { .. } => {
                     assert_eq!(code, "hcl.syntax");
                 }
+                Error::Number { .. } => assert_eq!(code, "hcl.number"),
                 Error::TooDeep { .. }
                 | Error::Document(_)
                 | Error::Unwritable {

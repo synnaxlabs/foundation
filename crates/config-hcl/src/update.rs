@@ -4,8 +4,7 @@ use std::ops::Range;
 use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
-use crate::parse::Ends;
-use crate::write::{INDENT, Writer};
+use crate::write::{After, INDENT, Writer};
 use crate::{Error, read, write};
 
 /// Changes `text` so that [`read`] reads it as `document`, and returns the new text.
@@ -162,10 +161,11 @@ impl<'a> File<'a> {
         start..end
     }
 
-    /// The end of the line at `start` when that line is blank.
-    fn blank_below(&self, start: usize) -> Option<usize> {
-        let mark = self.mark(self.token(start));
-        (mark.newline && self.blank(start, mark.start)).then_some(mark.end)
+    /// The end of the line at `at` when only spaces are between `at` and the line
+    /// end. `None` at the end of a text with no line end.
+    fn blank_below(&self, at: usize) -> Option<usize> {
+        let mark = self.mark(self.token(at));
+        (mark.newline && self.blank(at, mark.start)).then_some(mark.end)
     }
 
     /// The start of the line that ends at `end` when that line is blank.
@@ -392,15 +392,13 @@ impl Diff<'_, '_> {
     fn value(&mut self, old: &Attribute, new: &Attribute) {
         let file = self.file;
         let (start, end) = offsets(old.value.span);
-        // A heredoc needs a line end after its marker, so a value with a comment or
-        // the end of the text after it is quoted, as in a list.
-        let ends = if file.blank_below(end).is_some() {
-            Ends::Line
+        let after = if file.blank_below(end).is_some() {
+            After::Line
         } else {
-            Ends::Comma
+            After::Other
         };
         let mut writer = Writer::new(file.margin(old.key_span), column(old.value.span));
-        writer.value(&new.value, 0, ends);
+        writer.value(&new.value, 0, after);
         self.edits.push(Edit {
             range: start..end,
             text: written(writer),
@@ -936,6 +934,14 @@ mod tests {
         assert_eq!(updated("a = 1", "a = \"x\\n\""), "a = \"x\\n\"");
         assert_eq!(updated("a = 1  ", "a = \"x\\n\""), "a = \"x\\n\"  ");
         assert_eq!(updated("a = 1\n", "a = \"x\\n\""), "a = <<EOT\nx\nEOT\n");
+    }
+
+    #[test]
+    fn keeps_a_value_that_fits_on_one_line_before_a_comment_or_the_end() {
+        let line = format!("a = [\"{}\"]", "x".repeat(80));
+        assert_eq!(line.chars().count(), 88);
+        assert_eq!(updated("a = 1", &line), line);
+        assert_eq!(updated("a = 1 # c\n", &line), format!("{line} # c\n"));
     }
 
     #[test]

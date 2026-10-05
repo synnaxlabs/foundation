@@ -34,6 +34,9 @@ cargo test -p raft --lib voters
   the log and the applied entries that etcd reads from `raftLog`.
 - A message that etcd hands to a handler directly carries the term the handler
   expects.
+- etcd takes an append with an entry above the message's term. Here it is
+  `Error::TermBehindLog`, so the scenario asserts that error for etcd's message,
+  then sends the append at the term of its last entry.
 - etcd applies a configuration when the caller applies its entry, and the caller
   writes each phase of a change. Here a node uses a configuration from the time it
   writes the entry, and the leader writes the leave on its own, so a change scenario

@@ -12,7 +12,7 @@ use crate::code::Code;
 /// use transport::{Code, Error};
 ///
 /// fn superseded(error: &Error) -> bool {
-///     *error == Error::Reset { code: Code(1) }
+///     *error == Error::Reset { code: Code(16) }
 /// }
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]

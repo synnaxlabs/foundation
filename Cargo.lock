@@ -263,9 +263,12 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 name = "clock"
 version = "0.0.0"
 dependencies = [
+ "counting",
+ "divan",
  "env",
  "estimate",
  "proptest",
+ "ring 0.0.0",
  "sim",
  "types",
 ]
@@ -684,10 +687,13 @@ name = "home"
 version = "0.0.0"
 dependencies = [
  "block",
+ "buffer",
  "codec",
  "control",
  "delivery",
+ "env",
  "proptest",
+ "sim",
  "types",
 ]
 
@@ -1275,6 +1281,7 @@ name = "secret"
 version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
+ "counting",
  "env",
  "proptest",
  "sim",
