@@ -288,10 +288,16 @@ impl<T> fmt::Debug for Consumer<T> {
 pub struct Full<T>(pub T);
 
 #[cfg(test)]
+fn config(capacity: usize) -> Config {
+    Config {
+        capacity: NonZeroUsize::new(capacity).unwrap(),
+    }
+}
+
+#[cfg(test)]
 #[cfg(not(loom))]
 mod tests {
     use std::collections::VecDeque;
-    use std::num::NonZeroUsize;
     use std::pin::pin;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
@@ -300,7 +306,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{Config, Consumer, Full, Producer, new, with_origin};
+    use super::{Consumer, Full, Producer, config, new, with_origin};
 
     /// Counts the wakes it gets.
     #[derive(Default)]
@@ -321,12 +327,6 @@ mod tests {
     fn create_waker() -> (Arc<Tally>, Waker) {
         let tally = Arc::new(Tally::default());
         (Arc::clone(&tally), Waker::from(tally))
-    }
-
-    fn config(capacity: usize) -> Config {
-        Config {
-            capacity: NonZeroUsize::new(capacity).unwrap(),
-        }
     }
 
     /// Polls a new `pop` one time, then drops it.
@@ -778,7 +778,6 @@ mod tests {
 #[cfg(test)]
 #[cfg(loom)]
 mod model {
-    use std::num::NonZeroUsize;
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
 
@@ -786,13 +785,7 @@ mod model {
     use loom::model::Builder;
     use loom::thread;
 
-    use super::{Config, Full, new};
-
-    fn config(capacity: usize) -> Config {
-        Config {
-            capacity: NonZeroUsize::new(capacity).unwrap(),
-        }
-    }
+    use super::{Full, config, new};
 
     /// Checks schedules with at most five forced thread switches. The models with
     /// more steps are too large to check in full.
