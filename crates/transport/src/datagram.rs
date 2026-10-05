@@ -48,9 +48,8 @@ impl Sender {
         todo!("#68")
     }
 
-    /// The largest datagram the session sends now. It changes with the path. A
-    /// carrier with no datagrams of its own emulates them up to its chunk size, so a
-    /// datagram is never too large to drop.
+    /// The largest datagram the session sends now. It changes with the path and the
+    /// carrier, and it is never so large that a datagram cannot drop.
     ///
     /// ```
     /// fn fits(sender: &transport::datagram::Sender, frame: &block::Block) -> bool {
