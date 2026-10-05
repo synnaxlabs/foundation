@@ -4,7 +4,7 @@
 use block::Block;
 use types::channel;
 use types::frame::key_set::KeySet;
-use types::frame::{self, Frame};
+use types::frame::{self, Form, Frame};
 use types::sample::{Scalar, Type};
 
 /// Bytes of the series count that starts a body.
@@ -20,9 +20,9 @@ mod at {
     pub(super) const END: usize = 22;
 }
 
-/// The stored body of `frame`, as the two parts of one buffer entry: a header block
-/// from `pool`, then [`Frame::body`]. `channels` holds the channel of each entry of
-/// `set`, in entry order. Copies no series byte.
+/// The stored body of `frame`, an encoded index frame of `set`, as the two parts of
+/// one buffer entry: a header block from `pool`, then [`Frame::body`]. `channels`
+/// holds the channel of each entry of `set`, in entry order. Copies no series byte.
 ///
 /// # Errors
 ///
@@ -30,13 +30,15 @@ mod at {
 ///
 /// # Panics
 ///
-/// If `frame` is not of `set`, or `channels` is not as long as `set`'s entries.
+/// If `frame` is not encoded or not of `set`, or `channels` is not as long as `set`'s
+/// entries.
 pub(crate) fn body(
     pool: &block::Pool,
     frame: &Frame,
     set: &KeySet,
     channels: &[channel::Key],
 ) -> Result<[Block; 2], block::Error> {
+    assert_eq!(frame.form(), Form::Encoded, "the frame is not encoded");
     assert_eq!(
         frame.key_set(),
         set.key(),
@@ -70,7 +72,7 @@ pub(crate) struct Series<'a> {
     pub(crate) channel: channel::Key,
     /// The layout of its samples when it was written.
     pub(crate) data_type: Type,
-    /// Its bytes, in the form of its frame.
+    /// Its bytes, as `codec` encodes them.
     pub(crate) bytes: &'a [u8],
 }
 
@@ -201,7 +203,7 @@ mod tests {
     use proptest::prelude::*;
     use types::channel::Slot;
     use types::frame::key_set::{Group, Interner};
-    use types::frame::{Draft, Form, Path};
+    use types::frame::{Draft, Path};
 
     use super::*;
 
@@ -232,15 +234,25 @@ mod tests {
         channel::Key::from_u128(bits)
     }
 
-    /// A raw live frame of `set` with each present entry and its bytes, in entry
-    /// order.
-    fn frame(pool: &block::Pool, set: &KeySet, series: &[(usize, &[u8])]) -> Frame {
+    /// A live frame of `set` in `form` with each present entry and its bytes, in
+    /// entry order.
+    fn draft(
+        pool: &block::Pool,
+        set: &KeySet,
+        form: Form,
+        series: &[(usize, &[u8])],
+    ) -> Frame {
         let lens: Vec<_> = series.iter().map(|&(e, bytes)| (e, bytes.len())).collect();
-        let mut draft = Draft::new(pool, set, Form::Raw, &lens).expect("a valid frame");
+        let mut draft = Draft::new(pool, set, form, &lens).expect("a valid frame");
         for ((_, to), (_, from)) in draft.iter_mut().zip(series) {
             to.copy_from_slice(from);
         }
         draft.freeze(Path::Live)
+    }
+
+    /// An encoded live frame of `set` with each present entry and its bytes.
+    fn frame(pool: &block::Pool, set: &KeySet, series: &[(usize, &[u8])]) -> Frame {
+        draft(pool, set, Form::Encoded, series)
     }
 
     /// The two parts of a stored body, joined as the buffer reads them back.
@@ -364,6 +376,18 @@ mod tests {
             error.to_string(),
             format!("pool is full: asked for 30 bytes, {available} bytes free")
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "the frame is not encoded")]
+    fn panics_on_a_raw_frame() {
+        let set = Interner::new().intern(&[Group {
+            index: Slot::new(1),
+            data: &[],
+        }]);
+        let pool = pool(4096);
+        let frame = draft(&pool, &set, Form::Raw, &[(0, &[0; 8])]);
+        drop(body(&pool, &frame, &set, &[key(1)]));
     }
 
     #[test]
