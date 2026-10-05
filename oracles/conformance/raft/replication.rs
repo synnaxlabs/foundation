@@ -26,7 +26,7 @@ fn entry(term: u64, index: u64, data: &[u8]) -> Entry {
 }
 
 /// A leader's first entry of its term; etcd's noop entry.
-fn noop(term: u64, index: u64) -> Entry {
+pub(crate) fn noop(term: u64, index: u64) -> Entry {
     Entry {
         at: Position {
             term: Term(term),
@@ -38,7 +38,7 @@ fn noop(term: u64, index: u64) -> Entry {
 
 /// Elects node 1 with the votes of `others`. The leader's first `Ready` is left for
 /// the caller. etcd's tests call `becomeLeader` and send nothing.
-fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
+pub(crate) fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
     let term = Term(raft.term().0 + 1);
     raft.campaign();
     disk.store(raft.ready());
@@ -64,7 +64,7 @@ fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
 }
 
 /// Node 1 at term 1 as the leader of `size` voters, with its first `Ready` left.
-fn leader(size: u8) -> (Raft, Disk) {
+pub(crate) fn leader(size: u8) -> (Raft, Disk) {
     let voters: Vec<u8> = (1..=size).collect();
     let others: Vec<u8> = (2..=size / 2 + 1).collect();
     let (mut raft, mut disk) = start(1, &voters, ELECTION, Hard::default(), vec![], 0);
@@ -88,7 +88,7 @@ fn accept(message: &Message) -> Message {
 }
 
 /// Every follower accepts each `Append` until the leader sends none.
-fn accept_all(raft: &mut Raft, disk: &mut Disk) {
+pub(crate) fn accept_all(raft: &mut Raft, disk: &mut Disk) {
     loop {
         let messages = disk.store(raft.ready());
         let appends: Vec<&Message> = messages
@@ -137,7 +137,7 @@ fn append(term: u64, prev: Position, entries: Vec<Entry>, commit: u64) -> Messag
     )
 }
 
-fn position(term: u64, index: u64) -> Position {
+pub(crate) fn position(term: u64, index: u64) -> Position {
     Position {
         term: Term(term),
         index,
