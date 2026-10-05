@@ -104,6 +104,14 @@ impl Layout {
             _ => Err(Unfit { area, body_max }),
         }
     }
+
+    pub(crate) fn area(self) -> u64 {
+        self.area
+    }
+
+    pub(crate) fn body_max(self) -> usize {
+        self.body_max
+    }
 }
 
 /// The ring has no room for a record. Space returns with [`Writer::release`].
