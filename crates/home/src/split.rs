@@ -255,7 +255,7 @@ impl Split<'_> {
         for ((_, out), series) in index.iter_mut().zip(series) {
             let bytes = match &mut self.draft {
                 Some(draft) => draft
-                    .series(series.entry)
+                    .series_mut(series.entry)
                     .expect("invariant: a checked series is in the frame"),
                 None => &mut scratch.bytes[series.start..series.start + series.len],
             };

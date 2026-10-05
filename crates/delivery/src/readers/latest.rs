@@ -136,7 +136,7 @@ mod tests {
         fn make(&self, n: u64) -> Result<Frame, types::frame::Error> {
             let series = [(0, 8)];
             let mut draft = Draft::new(&self.pool, &self.set, Form::Raw, &series)?;
-            let bytes = draft.series(0).expect("the index is present");
+            let bytes = draft.series_mut(0).expect("the index is present");
             bytes.copy_from_slice(&n.to_le_bytes());
             Ok(draft.freeze(Path::Live))
         }
