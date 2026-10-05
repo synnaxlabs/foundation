@@ -849,9 +849,11 @@ How to read this record:
   refuses every byte string that `encode` cannot write. Both refuse nesting past 64
   levels, and front ends refuse files that nest deeper. `encode` returns `TooDeep` and
   `decode` returns `Error`: two error types, by the coordinator's ruling under R16-6.
-  `spec` stores and hashes these bytes. Pinned bytes are an oracle in
-  `oracles/conformance/document/`. A new format takes a new version byte. Decided by
-  the `config` builder; approved by the coordinator (#62).
+  `check` refuses the same Documents as `encode` without writing, so another writer
+  (`config-hcl`) uses the same limit (#287). `spec` stores and hashes these bytes.
+  Pinned bytes are an oracle in `oracles/conformance/document/`. A new format takes a
+  new version byte. Decided by the `config` builder; approved by the coordinator
+  (#62).
 - **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
