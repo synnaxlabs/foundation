@@ -9,16 +9,16 @@ use types::time::Stamp;
 
 use crate::entry::Header;
 
-/// Where one path of an index stands: the seq of the next entry and the newest stamp
-/// on the path.
+/// Where one path of an index stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Tail {
+    /// The seq of the next entry.
     pub(crate) seq: u64,
+    /// The `last` of the newest entry that has one, or `None` before it.
     pub(crate) stamp: Option<Stamp>,
 }
 
-/// The tail of every path the log holds. The buffer keeps two: one for the queued
-/// entries and one for the durable ones.
+/// The tail of every path the log holds.
 #[derive(Debug, Default)]
 pub(crate) struct Tails(hash::Map<(channel::Key, Path), Tail>);
 
@@ -35,7 +35,7 @@ impl Tails {
     /// # Panics
     ///
     /// When `first` is below the tail, with the index, the path, `first`, and the
-    /// tail.
+    /// tail. When `first + len` does not fit in a `u64`.
     pub(crate) fn advance(&mut self, header: &Header) {
         let tail = self.0.entry((header.index, header.path)).or_default();
         assert!(
@@ -50,7 +50,13 @@ impl Tails {
         tail.seq = header
             .first
             .checked_add(u64::from(header.len))
-            .expect("invariant: a seq fits in u64");
+            .unwrap_or_else(|| {
+                panic!(
+                    "invariant: an entry of index {} on path {:?} starts at {} with {} \
+                 samples, past the last seq",
+                    header.index, header.path, header.first, header.len
+                )
+            });
         if let Some(last) = header.last {
             tail.stamp = Some(last);
         }
@@ -114,29 +120,49 @@ mod tests {
             })
     }
 
+    /// The entries of one path, in log order.
+    fn on(
+        entries: &[Header],
+        index: u128,
+        path: Path,
+    ) -> impl Iterator<Item = &Header> {
+        entries
+            .iter()
+            .filter(move |header| header.index == key(index) && header.path == path)
+    }
+
+    /// The seq past the newest entry of one path: zero before its first entry.
+    fn end(entries: &[Header], index: u128, path: Path) -> u64 {
+        on(entries, index, path)
+            .map(|header| header.first + u64::from(header.len))
+            .max()
+            .unwrap_or(0)
+    }
+
     proptest! {
         #[test]
         fn follows_a_model_per_index_and_path(log in prop::collection::vec(next(), 0..40)) {
             let mut tails = Tails::default();
-            let mut model: Vec<((u128, Path), Tail)> = Vec::new();
+            let mut entries: Vec<Header> = Vec::new();
             for next in log {
-                let slot = (next.index, next.path);
-                let at = model.iter().position(|(key, _)| *key == slot);
-                let tail = at.map_or(Tail::default(), |at| model[at].1);
-                let first = tail.seq + next.skip;
-                tails.advance(&header(next.index, next.path, first, next.len, next.last));
+                let first = end(&entries, next.index, next.path) + next.skip;
+                let entry = header(next.index, next.path, first, next.len, next.last);
+                tails.advance(&entry);
+                entries.push(entry);
+                let stamps: Vec<Stamp> =
+                    on(&entries, next.index, next.path).filter_map(|header| header.last).collect();
                 let expected = Tail {
-                    seq: first + u64::from(next.len),
-                    stamp: next.last.map(Stamp::from_nanos).or(tail.stamp),
+                    seq: end(&entries, next.index, next.path),
+                    stamp: stamps.last().copied(),
                 };
-                match at {
-                    Some(at) => model[at].1 = expected,
-                    None => model.push((slot, expected)),
-                }
                 prop_assert_eq!(tails.get(key(next.index), next.path), expected);
             }
-            for &((index, path), tail) in &model {
-                prop_assert_eq!(tails.get(key(index), path), tail);
+            for index in 0..3 {
+                for path in [Path::Live, Path::Backfill] {
+                    if on(&entries, index, path).next().is_none() {
+                        prop_assert_eq!(tails.get(key(index), path), Tail::default());
+                    }
+                }
             }
         }
     }
@@ -145,7 +171,6 @@ mod tests {
     fn a_new_path_stands_at_seq_zero_with_no_stamp() {
         let tails = Tails::default();
         assert_eq!(tails.get(key(1), Path::Live), Tail::default());
-        assert_eq!(tails.get(key(1), Path::Live).seq, 0);
     }
 
     #[test]
@@ -207,5 +232,16 @@ mod tests {
         let mut tails = Tails::default();
         tails.advance(&header(1, Path::Live, 0, 3, None));
         tails.advance(&header(1, Path::Live, 2, 1, None));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: an entry of index 00000000-0000-0000-0000-000000000001 on \
+                    path Live starts at 18446744073709551615 with 1 samples, past the \
+                    last seq"
+    )]
+    fn an_entry_past_the_last_seq_is_a_broken_invariant() {
+        let mut tails = Tails::default();
+        tails.advance(&header(1, Path::Live, u64::MAX, 1, None));
     }
 }
