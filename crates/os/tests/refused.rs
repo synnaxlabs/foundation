@@ -1,7 +1,8 @@
 //! A commit past the data limit of the process. It sets a limit on the whole process,
 //! so it runs in a test binary of its own.
 
-#![cfg(target_os = "linux")]
+// Lets Clippy treat the helpers as test code.
+#![cfg(all(test, target_os = "linux"))]
 
 use block::Memory as _;
 use os::memory::Memory;
