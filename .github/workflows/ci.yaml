@@ -49,6 +49,7 @@ jobs:
               - 'crates/ring/**'
               - 'crates/block/**'
               - 'crates/counting/**'
+              - 'crates/os/**'
               - 'crates/node/**'
               - 'xtask/**'
               - 'Cargo.lock'

@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+block = { path = "../block" }
+rustix = { workspace = true }
 
 [lints]
 workspace = true
