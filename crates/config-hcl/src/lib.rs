@@ -20,7 +20,7 @@ use std::fmt;
 
 use document::Span;
 use document::diagnostic::{Code, Diagnostic};
-use document::encoding::{DEPTH_MAX, TooDeep};
+use document::encoding::TooDeep;
 use types::name::{self, Name};
 
 pub use parse::read;
@@ -109,7 +109,7 @@ impl Error {
 }
 
 /// Gives each problem a diagnostic with a stable `hcl.*` code, or `document`'s own
-/// diagnostic for [`Error::Document`].
+/// diagnostic for [`Error::Document`] and for nesting past the depth limit.
 impl From<&Error> for Diagnostic {
     fn from(error: &Error) -> Self {
         match error {
@@ -117,7 +117,7 @@ impl From<&Error> for Diagnostic {
                 SYNTAX,
                 Some(*span),
                 format!("the file needs {expected} here"),
-                "Write it here, or correct the text before it".into(),
+                "Write it here, or correct the text here or before it".into(),
             ),
             Error::Form { span, form } => form.diagnostic(*span),
             Error::Name { span, .. } => Self::new(
@@ -145,12 +145,7 @@ impl From<&Error> for Diagnostic {
                  `\\UNNNNNNNN`"
                     .into(),
             ),
-            Error::TooDeep { span } => Self::new(
-                TOO_DEEP,
-                Some(*span),
-                format!("the file nests deeper than {DEPTH_MAX} levels"),
-                "Make it flatter".into(),
-            ),
+            Error::TooDeep { span } => Self::from(&TooDeep { span: Some(*span) }),
             Error::Document(error) => Self::from(error),
             Error::TooLarge { span, bytes } => Self::new(
                 TOO_LARGE,
@@ -178,7 +173,6 @@ const NUMBER_KEY: Code = Code::new("hcl.number-key");
 const NAME: Code = Code::new("hcl.name");
 const NUMBER: Code = Code::new("hcl.number");
 const ESCAPE: Code = Code::new("hcl.escape");
-const TOO_DEEP: Code = Code::new("hcl.too-deep");
 const TOO_LARGE: Code = Code::new("hcl.too-large");
 const UNWRITABLE_KEY: Code = Code::new("hcl.unwritable-key");
 const UNWRITABLE_KEYWORD: Code = Code::new("hcl.unwritable-keyword");
@@ -398,6 +392,8 @@ impl fmt::Display for Expected {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use document::diagnostic::Note;
     use document::{Position, Source};
@@ -418,36 +414,56 @@ mod tests {
         assert_eq!(error.to_string(), format!("{message}. {fix}"), "{error:?}");
     }
 
+    const EXPECTED: [(Expected, &str); 16] = [
+        (Expected::Item, "a key, a block, or the end of the body"),
+        (
+            Expected::AttributeOrBlock,
+            "`=`, a label, or `{` after the name",
+        ),
+        (Expected::Equals, "`=` after the key"),
+        (Expected::BlockStart, "a label or `{`"),
+        (Expected::BlockEnd, "`}` to end the one-line block"),
+        (Expected::Value, "a value"),
+        (Expected::Newline, "a new line"),
+        (Expected::ListEnd, "`,` or `]`"),
+        (Expected::Key, "a key or `}`"),
+        (Expected::ObjectEquals, "`=` or `:` after the key"),
+        (Expected::ObjectEnd, "`,`, a new line, or `}`"),
+        (Expected::ArgumentsEnd, "`,` or `)`"),
+        (Expected::Quote, "`\"` to end the string"),
+        (
+            Expected::HeredocStart,
+            "a marker, such as `EOT`, and a new line to start the heredoc",
+        ),
+        (
+            Expected::HeredocEnd,
+            "the marker on a line of its own to end the heredoc",
+        ),
+        (Expected::CommentEnd, "`*/` to end the comment"),
+    ];
+
     #[test]
     fn each_expected_has_its_message() {
-        let cases = [
-            (Expected::Item, "a key, a block, or the end of the body"),
-            (
-                Expected::AttributeOrBlock,
-                "`=`, a label, or `{` after the name",
-            ),
-            (Expected::Equals, "`=` after the key"),
-            (Expected::BlockStart, "a label or `{`"),
-            (Expected::BlockEnd, "`}` to end the one-line block"),
-            (Expected::Value, "a value"),
-            (Expected::Newline, "a new line"),
-            (Expected::ListEnd, "`,` or `]`"),
-            (Expected::Key, "a key or `}`"),
-            (Expected::ObjectEquals, "`=` or `:` after the key"),
-            (Expected::ObjectEnd, "`,`, a new line, or `}`"),
-            (Expected::ArgumentsEnd, "`,` or `)`"),
-            (Expected::Quote, "`\"` to end the string"),
-            (
-                Expected::HeredocStart,
-                "a marker, such as `EOT`, and a new line to start the heredoc",
-            ),
-            (
-                Expected::HeredocEnd,
-                "the marker on a line of its own to end the heredoc",
-            ),
-            (Expected::CommentEnd, "`*/` to end the comment"),
-        ];
-        for (expected, phrase) in cases {
+        for (expected, phrase) in EXPECTED {
+            // A new variant fails this match, so it joins `EXPECTED`.
+            match expected {
+                Expected::Item
+                | Expected::AttributeOrBlock
+                | Expected::Equals
+                | Expected::BlockStart
+                | Expected::BlockEnd
+                | Expected::Value
+                | Expected::Newline
+                | Expected::ListEnd
+                | Expected::Key
+                | Expected::ObjectEquals
+                | Expected::ObjectEnd
+                | Expected::ArgumentsEnd
+                | Expected::Quote
+                | Expected::HeredocStart
+                | Expected::HeredocEnd
+                | Expected::CommentEnd => {}
+            }
             let error = Error::Syntax {
                 span: span(7),
                 expected,
@@ -456,7 +472,7 @@ mod tests {
                 &error,
                 "hcl.syntax",
                 &format!("the file needs {phrase} here"),
-                "Write it here, or correct the text before it",
+                "Write it here, or correct the text here or before it",
             );
         }
     }
@@ -534,6 +550,20 @@ mod tests {
     #[test]
     fn each_form_has_its_code_and_fix() {
         for (form, code, message, fix) in FORMS {
+            // A new variant fails this match, so it joins `FORMS`.
+            match form {
+                Form::Null
+                | Form::Template
+                | Form::Operator
+                | Form::Conditional
+                | Form::For
+                | Form::Index
+                | Form::Splat
+                | Form::Parentheses
+                | Form::Namespace
+                | Form::Expansion
+                | Form::NumberKey => {}
+            }
             let error = Error::Form {
                 span: span(7),
                 form,
@@ -551,73 +581,85 @@ mod tests {
                     error: "a.@".parse::<Name>().unwrap_err(),
                 },
                 "hcl.name",
-                "the reference is not a valid name".to_owned(),
+                "the reference is not a valid name",
                 "Use segments of ASCII letters, digits, `_`, and `-`, split by dots, \
                  with at most 255 bytes in all",
             ),
             (
                 Error::Number { span: span(7) },
                 "hcl.number",
-                "the number is out of range".to_owned(),
+                "the number is out of range",
                 "Use an integer that fits in 128 bits, or a float that fits in 64 bits",
             ),
             (
                 Error::Escape { span: span(7) },
                 "hcl.escape",
-                "the string has an escape that HCL does not have".to_owned(),
+                "the string has an escape that HCL does not have",
                 "Use `\\n`, `\\r`, `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or `\\UNNNNNNNN`",
-            ),
-            (
-                Error::TooDeep { span: span(7) },
-                "hcl.too-deep",
-                "the file nests deeper than 64 levels".to_owned(),
-                "Make it flatter",
-            ),
-            (
-                Error::TooLarge {
-                    span: span(7),
-                    bytes: 4_294_967_296,
-                },
-                "hcl.too-large",
-                "the file has 4294967296 bytes, and the limit is 4294967295".to_owned(),
-                "Split it into smaller files",
             ),
         ];
         for (error, code, message, fix) in cases {
-            check(&error, code, &message, fix);
+            check(&error, code, message, fix);
         }
     }
 
     #[test]
+    fn too_large_has_its_code_and_fix_at_the_start_of_the_file() {
+        let error = Error::TooLarge {
+            span: span(0),
+            bytes: 4_294_967_296,
+        };
+        let message = "the file has 4294967296 bytes, and the limit is 4294967295";
+        let fix = "Split it into smaller files";
+        let expected = Diagnostic::new(
+            Code::new("hcl.too-large"),
+            Some(span(0)),
+            message.into(),
+            fix.into(),
+        );
+        assert_eq!(Diagnostic::from(&error), expected);
+        assert_eq!(error.to_string(), format!("{message}. {fix}"));
+    }
+
+    const UNWRITABLE: [(Unwritable, &str, &str, &str); 4] = [
+        (
+            Unwritable::Key,
+            "hcl.unwritable-key",
+            "a key of a body must be an identifier, such as `retry_limit`",
+            "Rename the key, or move it into a map value",
+        ),
+        (
+            Unwritable::Keyword,
+            "hcl.unwritable-keyword",
+            "a block keyword must be an identifier, such as `channel`",
+            "Rename the keyword",
+        ),
+        (
+            Unwritable::Function,
+            "hcl.unwritable-function",
+            "a function name must be an identifier, such as `secret`",
+            "Rename the function",
+        ),
+        (
+            Unwritable::Reference,
+            "hcl.unwritable-reference",
+            "the name does not read as a reference in HCL",
+            "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, or \
+             `null`",
+        ),
+    ];
+
+    #[test]
     fn each_unwritable_part_has_its_code_and_fix() {
-        let cases = [
-            (
-                Unwritable::Key,
-                "hcl.unwritable-key",
-                "a key of a body must be an identifier, such as `retry_limit`",
-                "Rename the key, or move it into a map value",
-            ),
-            (
-                Unwritable::Keyword,
-                "hcl.unwritable-keyword",
-                "a block keyword must be an identifier, such as `channel`",
-                "Rename the keyword",
-            ),
-            (
-                Unwritable::Function,
-                "hcl.unwritable-function",
-                "a function name must be an identifier, such as `secret`",
-                "Rename the function",
-            ),
-            (
-                Unwritable::Reference,
-                "hcl.unwritable-reference",
-                "the name does not read as a reference in HCL",
-                "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, \
-                 or `null`",
-            ),
-        ];
-        for (part, code, message, fix) in cases {
+        for (part, code, message, fix) in UNWRITABLE {
+            // A new variant fails this match, so it joins `UNWRITABLE`.
+            match part {
+                Unwritable::Key
+                | Unwritable::Keyword
+                | Unwritable::Function
+                | Unwritable::Reference => {}
+                Unwritable::Depth => unreachable!("`Depth` has its own test"),
+            }
             let error = Error::Unwritable {
                 span: Some(span(7)),
                 part,
@@ -629,19 +671,24 @@ mod tests {
     }
 
     #[test]
-    fn a_document_too_deep_to_write_keeps_documents_diagnostic() {
-        for span in [Some(span(7)), None] {
-            let error = Error::Unwritable {
-                span,
-                part: Unwritable::Depth,
-            };
+    fn too_deep_keeps_documents_diagnostic() {
+        let read = Error::TooDeep { span: span(7) };
+        let write = |span| Error::Unwritable {
+            span,
+            part: Unwritable::Depth,
+        };
+        for (error, span) in [
+            (read, Some(span(7))),
+            (write(Some(span(7))), Some(span(7))),
+            (write(None), None),
+        ] {
             let expected = Diagnostic::new(
                 Code::new("document.too-deep"),
                 span,
                 "the document nests deeper than 64 levels".into(),
                 "Make it flatter".into(),
             );
-            assert_eq!(Diagnostic::from(&error), expected);
+            assert_eq!(Diagnostic::from(&error), expected, "{error:?}");
             assert_eq!(
                 error.to_string(),
                 "the document nests deeper than 64 levels. Make it flatter"
@@ -668,7 +715,91 @@ mod tests {
             text: "the earlier key".into(),
         });
         assert_eq!(Diagnostic::from(&error), expected);
-        assert_eq!(Diagnostic::from(&error), Diagnostic::from(&document));
+        assert_eq!(Diagnostic::from(&document), expected);
         assert_eq!(error.to_string(), document.to_string());
+    }
+
+    /// One error of each variant, each `Expected`, each `Form`, and each `Unwritable`
+    /// part.
+    fn every() -> Vec<Error> {
+        let mut every = vec![
+            Error::Name {
+                span: span(7),
+                error: "a.@".parse::<Name>().unwrap_err(),
+            },
+            Error::Number { span: span(7) },
+            Error::Escape { span: span(7) },
+            Error::TooDeep { span: span(7) },
+            Error::Document(document::Error::DuplicateKey {
+                key: "a".into(),
+                first: Some(span(2)),
+                second: Some(span(7)),
+            }),
+            Error::TooLarge {
+                span: span(0),
+                bytes: 4_294_967_296,
+            },
+            Error::Unwritable {
+                span: None,
+                part: Unwritable::Depth,
+            },
+        ];
+        every.extend(EXPECTED.map(|(expected, _)| Error::Syntax {
+            span: span(7),
+            expected,
+        }));
+        every.extend(FORMS.map(|(form, ..)| Error::Form {
+            span: span(7),
+            form,
+        }));
+        every.extend(
+            UNWRITABLE.map(|(part, ..)| Error::Unwritable { span: None, part }),
+        );
+        for error in &every {
+            // A new variant fails this match, so it joins `every`.
+            match error {
+                Error::Syntax { .. }
+                | Error::Form { .. }
+                | Error::Name { .. }
+                | Error::Number { .. }
+                | Error::Escape { .. }
+                | Error::TooDeep { .. }
+                | Error::Document(_)
+                | Error::TooLarge { .. }
+                | Error::Unwritable { .. } => {}
+            }
+        }
+        every
+    }
+
+    #[test]
+    fn each_kind_of_error_has_its_own_code() {
+        let mut codes = BTreeSet::new();
+        for error in every() {
+            let code = Diagnostic::from(&error).code.as_str();
+            let new = codes.insert(code);
+            match error {
+                Error::Syntax { .. } => assert_eq!(code, "hcl.syntax"),
+                Error::TooDeep { .. }
+                | Error::Document(_)
+                | Error::Unwritable {
+                    part: Unwritable::Depth,
+                    ..
+                } => assert!(code.starts_with("document."), "{code}"),
+                _ => assert!(new, "{code} repeats: {error:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn each_message_is_a_clause_and_each_fix_a_sentence() {
+        for error in every() {
+            let diagnostic = Diagnostic::from(&error);
+            let (message, fix) = (&diagnostic.message, &diagnostic.fix);
+            assert!(!message.ends_with('.'), "{message}");
+            assert!(!fix.ends_with('.'), "{fix}");
+            assert!(!message.starts_with(char::is_uppercase), "{message}");
+            assert!(fix.starts_with(char::is_uppercase), "{fix}");
+        }
     }
 }

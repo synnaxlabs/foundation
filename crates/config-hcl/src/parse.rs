@@ -735,7 +735,8 @@ mod tests {
     /// The text of a syntax error that needs `phrase`.
     fn needs(phrase: impl std::fmt::Display) -> String {
         format!(
-            "the file needs {phrase} here. Write it here, or correct the text before it"
+            "the file needs {phrase} here. Write it here, or correct the text here or \
+             before it"
         )
     }
 
@@ -1987,7 +1988,7 @@ c = "°C # not a comment"
             assert_eq!(errors, vec![Error::TooDeep { span: spans[64] }]);
             assert_eq!(
                 errors[0].to_string(),
-                "the file nests deeper than 64 levels. Make it flatter"
+                "the document nests deeper than 64 levels. Make it flatter"
             );
         }
 
