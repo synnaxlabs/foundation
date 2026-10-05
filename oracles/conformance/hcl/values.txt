@@ -71,6 +71,11 @@ object-number-key {"a" = {"1" = 1}}
 object-one-line {"a" = {"b" = 1, "c" = 2}}
 object-written {"a" = {"b" = 1, "c" = 2}, "b" = {}}
 object {"a" = {"b" = 1, "c" = 2}, "b" = {}}
+reference-bracket-lines-written {"a" = [$x.b]}
+reference-bracket-lines {"a" = [$x.b]}
+reference-keyword-parts {"a" = $x.true.for}
+reference-spaces-written {"a" = $x.b}
+reference-spaces {"a" = $x.b}
 reference-unicode {"a" = $température}
 reference {"a" = $b, "c" = $d.e-f.g_h}
 string-escapes-written {"a" = "\u{a}\u{d}\u{9}\"\\\u{e9}\u{1f600}"}
