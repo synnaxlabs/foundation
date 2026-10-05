@@ -495,22 +495,43 @@ mod tests {
     }
 
     /// Polls `f` to the end on this thread, parked between wakes.
+    ///
+    /// # Panics
+    ///
+    /// When `f` is pending and no wake comes for 5 s: a lost wake fails the test,
+    /// never hangs it.
     fn block_on<F: Future>(f: F) -> F::Output {
-        struct Unpark(std::thread::Thread);
+        struct Unpark {
+            thread: std::thread::Thread,
+            woken: std::sync::atomic::AtomicBool,
+        }
         impl std::task::Wake for Unpark {
             fn wake(self: Arc<Self>) {
-                self.0.unpark();
+                self.woken.store(true, Relaxed);
+                self.thread.unpark();
             }
         }
-        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+        let unpark = Arc::new(Unpark {
+            thread: std::thread::current(),
+            woken: std::sync::atomic::AtomicBool::new(false),
+        });
+        let waker = Waker::from(Arc::clone(&unpark));
         let mut cx = std::task::Context::from_waker(&waker);
         let mut f = std::pin::pin!(f);
         loop {
             if let Poll::Ready(out) = f.as_mut().poll(&mut cx) {
                 return out;
             }
-            #[expect(clippy::disallowed_methods, reason = "a test owns its threads")]
-            std::thread::park();
+            let mut parks = 0;
+            while !unpark.woken.swap(false, Relaxed) {
+                assert!(parks < 500, "a wake was lost");
+                parks += 1;
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "a test owns its threads"
+                )]
+                std::thread::park_timeout(std::time::Duration::from_millis(10));
+            }
         }
     }
 
@@ -592,7 +613,8 @@ mod tests {
         fn drop(&mut self) {
             self.closing.send(()).expect("the waiter listens");
             let end = self.end.lock().expect("one close");
-            end.recv().expect("the waiter lets the close end");
+            end.recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the waiter lets the close end");
         }
     }
 
@@ -611,7 +633,9 @@ mod tests {
         let p = Arc::clone(&ports);
         #[expect(clippy::disallowed_methods, reason = "a test owns its threads")]
         let waiter = std::thread::spawn(move || {
-            at_close.recv().expect("the close starts");
+            at_close
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the close starts");
             let count = Arc::new(Count::default());
             let waker = Waker::from(Arc::clone(&count));
             let open = |(): &()| future::ready(Err(Error::Device("unused".into())));
@@ -621,7 +645,9 @@ mod tests {
                 "the slot is busy"
             );
             let_end.send(()).expect("the close waits");
-            at_closed.recv().expect("the close ends");
+            at_closed
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the close ends");
             assert_eq!(count.wakes(), 1);
             assert!(matches!(
                 poll(acquire.as_mut(), &waker),
