@@ -110,8 +110,8 @@ fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
         .rng_seed(Some(rng))
         .supported_versions(VERSIONS.to_vec())
         .grease_quic_bit(true)
-        // `Endpoint` limits resets for each ID: one shared limit lets one address
-        // take every reset.
+        // `Endpoint` limits resets for each group of IDs: one shared limit lets one
+        // address take every reset.
         .min_reset_interval(Duration::ZERO);
     endpoint
 }
@@ -667,7 +667,7 @@ mod tests {
 
     mod restart {
         use super::*;
-        use crate::quic::reset::{INTERVAL, Limit};
+        use crate::quic::stateless::INTERVAL;
 
         #[test]
         fn resets_the_old_connection_at_its_next_datagram() {
@@ -758,7 +758,7 @@ mod tests {
             let resets = testing::run(1, |shard| {
                 let (stale, _) = stale(shard);
                 let (forged, mut endpoint) = stranger(shard);
-                assert_ne!(Limit::slot(&stale), Limit::slot(&forged));
+                assert_ne!(cid::group(&stale), cid::group(&forged));
                 let attacker = SocketAddr::new(testing::CLIENT.ip(), 9);
                 let mut resets = 0;
                 for ms in 0..1_000 {
