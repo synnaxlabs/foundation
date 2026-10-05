@@ -139,7 +139,7 @@ mod tests {
 
     use control::{Handoff, Lease, Writer};
     use types::authority::Authority;
-    use types::channel::Slot;
+    use types::channel::{self, Slots};
     use types::frame::key_set::{Group, Interner, KeySet};
     use types::frame::{self, Form};
     use types::time::{Span, Stamp};
@@ -157,12 +157,12 @@ mod tests {
             let config = block::Config { budget: 4096 };
             let memory = block::Heap::new(config.reservation());
             let index = Group {
-                index: Slot::new(1),
+                index: channel::Key::from_u128(1),
                 data: &[],
             };
             Self {
                 pool: block::Pool::new(config, memory),
-                set: Interner::new().intern(&[index]),
+                set: Interner::new().intern(&mut Slots::new(), &[index]),
             }
         }
 

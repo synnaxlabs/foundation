@@ -430,8 +430,9 @@ How to read this record:
   Raspberry Pi 4 with 1 GB: idle under 50 MB, start under 1 s. A regression over 5% on
   the dedicated machine blocks a merge.
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
-  (slots plus types, R9-D1). Frames point at the key set id. Supersedes: S1 frame
-  struct.
+  (slots, keys, and types, R9-D1). The interner assigns each new key its slot. Frames
+  point at the key set id. Supersedes: S1 frame struct. Approved by the coordinator
+  (#390).
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
   home routes by key set.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
