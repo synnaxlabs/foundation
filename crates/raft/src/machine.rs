@@ -1492,7 +1492,7 @@ mod tests {
                 at: position(2, 1),
                 data: Vec::new(),
             };
-            assert_eq!(ready.entries, [empty.clone()]);
+            assert_eq!(ready.entries, std::slice::from_ref(&empty));
             assert_eq!(ready.committed, []);
             let probe = |to| Message {
                 from: key(1),
@@ -1512,7 +1512,7 @@ mod tests {
             assert_eq!(at, position(2, 2));
             let ready = raft.ready();
             let entry = Entry { at, data: vec![7] };
-            assert_eq!(ready.entries, [entry.clone()]);
+            assert_eq!(ready.entries, std::slice::from_ref(&entry));
             let to_2 = Message {
                 from: key(1),
                 to: key(2),
@@ -1572,9 +1572,11 @@ mod tests {
             raft.tick(0);
             let commits: Vec<(node::Key, u64)> = sent(&mut raft)
                 .iter()
-                .map(|message| match message.body {
-                    Body::Heartbeat { commit } => (message.to, commit),
-                    ref body => panic!("{body:?}"),
+                .map(|message| {
+                    let Body::Heartbeat { commit } = message.body else {
+                        panic!("{:?}", message.body);
+                    };
+                    (message.to, commit)
                 })
                 .collect();
             assert_eq!(commits, [(key(2), 1), (key(3), 0)]);

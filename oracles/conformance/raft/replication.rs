@@ -377,13 +377,14 @@ fn follower_check_msg_app() {
 
 #[test]
 fn follower_append_entries() {
-    let cases: [(Position, Vec<Entry>, &[u64], Vec<Entry>); 4] = [
-        (position(2, 2), log3(&[3]), &[1, 2, 3], log3(&[3])),
-        (position(1, 1), log2(&[3, 4]), &[1, 3, 4], log2(&[3, 4])),
-        (position(0, 0), log(&[1]), &[1, 2], vec![]),
-        (position(0, 0), log(&[3]), &[3], log(&[3])),
+    let cases: [(Position, Vec<Entry>, &[u64], bool); 4] = [
+        (position(2, 2), log3(&[3]), &[1, 2, 3], true),
+        (position(1, 1), log2(&[3, 4]), &[1, 3, 4], true),
+        (position(0, 0), log(&[1]), &[1, 2], false),
+        (position(0, 0), log(&[3]), &[3], true),
     ];
     for (i, (prev, entries, terms, unstable)) in cases.into_iter().enumerate() {
+        let unstable = if unstable { entries.clone() } else { vec![] };
         let (mut raft, mut disk) =
             start(1, &[1, 2, 3], ELECTION, at_term(2), log(&[1, 2]), 0);
         raft.step(append(2, prev, entries, 0)).unwrap();
@@ -588,21 +589,21 @@ fn leader_only_commits_log_from_current_term() {
 /// their lease, short of their own timeout, before node 2 campaigns.
 #[test]
 fn log_replication() {
-    let second = |network: &mut Network| {
-        for id in [2, 3] {
-            network.tick(id, 1, ELECTION);
-        }
-        network.campaign(&[2]);
-        network.propose(2, b"somedata");
-        vec![b"somedata".to_vec(), b"somedata".to_vec()]
-    };
-    let cases: [(fn(&mut Network) -> Vec<Vec<u8>>, u64); 2] =
-        [(|_| vec![b"somedata".to_vec()], 2), (second, 4)];
-    for (i, (steps, committed)) in cases.into_iter().enumerate() {
+    for (i, (second_leader, committed)) in
+        [(false, 2), (true, 4)].into_iter().enumerate()
+    {
         let mut network = Network::of(3, &[1, 2, 3], Hard::default());
         network.campaign(&[1]);
         network.propose(1, b"somedata");
-        let proposed = steps(&mut network);
+        let mut proposed = vec![b"somedata".to_vec()];
+        if second_leader {
+            for id in [2, 3] {
+                network.tick(id, 1, ELECTION);
+            }
+            network.campaign(&[2]);
+            network.propose(2, b"somedata");
+            proposed.push(b"somedata".to_vec());
+        }
         for id in [1, 2, 3] {
             let disk = network.disk(id);
             assert_eq!(disk.committed(), committed, "#{i}.{id}");
