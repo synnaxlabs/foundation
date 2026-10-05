@@ -65,9 +65,18 @@ null accepted hcl.null
 number-dot-e accepted hcl.index
 number-dot-end refused
 number-dot-exponent-key accepted hcl.number-key
+number-dot-exponent-past-i64 refused
 number-dot-exponent-written accepted
 number-dot-exponent accepted
+number-dots refused
+number-expansion accepted hcl.expansion
+number-exponent-i64 accepted
+number-exponent-past-i64 refused
+number-exponent-twice refused
 number-key accepted hcl.number-key
+number-malformed-key refused
+number-malformed refused
+number-zero-written accepted
 object-bool-key-string-written accepted
 object-bool-key-string accepted
 object-colon accepted
