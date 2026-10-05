@@ -879,6 +879,8 @@ name = "types"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "block",
+ "divan",
  "proptest",
 ]
 

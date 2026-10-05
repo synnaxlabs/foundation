@@ -378,6 +378,15 @@ How to read this record:
 - **M4** Each shard owns a pool that `node` injects. A release returns the block to the
   owner shard. No global pool.
 - **M5** Blocks hold offsets, never pointers.
+- **FRAME LAYOUT (refines M3, X8)** `types::frame`, little-endian, offsets from the start
+  of the payload. A 24-byte header: key set key, entry count, group count, and present
+  group count (each u32), then form and path (each u8). Then a group mask (one bit per
+  group, in u64 words), then `{ seq: u64, count: u32 }` in 16 bytes for each present
+  group, then the presence mask over entries, then `{ offset: u32, len: u32 }` for each
+  present series, then the series, each at a multiple of 8. A group is present when its
+  index is, and a present series needs its index. Only present groups and series take
+  space, so a writer with many private indexes (A7) pays per frame only for what it
+  sends. A frame is at most `u32::MAX` bytes.
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -1109,7 +1118,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Frame | Memory: one pool block with a header (key set id, presence mask, sample count and seq per index group, X8) and descriptors `{ offset, len }`. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
+| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, path, form), the seq and count of each present index group (X8), a presence mask, and descriptors `{ offset, len }`. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
 | View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |

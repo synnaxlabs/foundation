@@ -13,6 +13,10 @@ use crate::sample::{Scalar, Type};
 pub struct Key(u32);
 
 impl Key {
+    pub(super) const fn new(n: u32) -> Self {
+        Self(n)
+    }
+
     /// The key set number.
     #[must_use]
     pub const fn get(self) -> u32 {
@@ -149,7 +153,7 @@ impl Interner {
         let n =
             u32::try_from(self.sets.len()).expect("a node holds at most 2^32 key sets");
         let set = Arc::new(KeySet {
-            key: Key(n),
+            key: Key::new(n),
             entries: Arc::clone(&shape.0),
             groups: Arc::clone(&shape.1),
         });
