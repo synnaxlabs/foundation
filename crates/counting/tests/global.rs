@@ -17,6 +17,10 @@ fn main() {
     let (sum, allocations) = ALLOCATOR.count(|| black_box(2_u64) + 2);
     assert_eq!((sum, allocations), (4, 0), "arithmetic does not allocate");
     counts_other_threads();
+    let needle = [0xab; 32];
+    let ((), found) =
+        ALLOCATOR.freed_holding(&needle, || drop(black_box(Box::new(needle))));
+    assert_eq!(found, 1, "a freed box that holds the needle counts");
 }
 
 /// One box made on a thread that started before the count counts once.
