@@ -1,5 +1,6 @@
 //! Tests of a simulated run through the `env` handles that production code gets.
 
+mod files;
 mod net;
 mod shards;
 

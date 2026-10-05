@@ -437,10 +437,12 @@ How to read this record:
   live frame, with no reader open and no cap. A smaller copy is a 5.3 tunable. The
   person decided on 2026-10-05: "Accept it" (#139). The budget counts what stays
   resident. A purge of a block smaller than a page gives no page back, so it frees no
-  budget. When every carved block of a size class is free, the pool gives back the
-  class's whole carved range and its budget; at most two partial pages per class stay
-  resident, and `Config::budget` states that slack. A class that a reader keeps partly
-  in use keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
+  budget. When an allocation finds no room, the pool gives back the whole carved range
+  and budget of size classes whose carved blocks are all free, until the allocation
+  fits. Under this pressure, at most two partial pages per class stay resident, and
+  `Config::budget` states that slack. An idle class that no allocation presses keeps
+  its pages until the purge after idle. A class that a reader keeps partly in use
+  keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
   wait in a follow-up issue.
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No

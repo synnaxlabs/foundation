@@ -3,6 +3,7 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
+use std::path::Path;
 
 use types::time::{Monotonic, Span, Stamp};
 
@@ -91,6 +92,42 @@ impl Node {
         env::net::Net::new(self.0.clone())
     }
 
+    /// The node's disk: [`Config::disk_bytes`] bytes, with an empty data directory.
+    ///
+    /// - Each call takes up to 100 us of true time and takes effect when it ends.
+    ///   A file call panics outside the node's threads.
+    /// - A directory takes 4 KiB, and a file its length, until it is removed and no
+    ///   descriptor or call in flight uses it.
+    /// - Where calls in flight at the same time overlap, each 512-byte sector of a
+    ///   read gives the old bytes or the bytes of one of the writes, and each sector
+    ///   keeps the bytes of one write. A write whose future dropped still ends, with
+    ///   any subset of its sectors.
+    /// - A failure gives the code that Linux gives: 20 (`ENOTDIR`) for a path
+    ///   through a file, 21 (`EISDIR`) for a file call on a directory, and 17
+    ///   (`EEXIST`) for `create_dir` on a file.
+    #[must_use]
+    pub fn files(&self) -> env::files::Files {
+        env::files::Files::new(self.0.clone())
+    }
+
+    /// Makes the next call of `operation` on `path` on the node fail with
+    /// `Error::Io` and code 5 (`EIO`). The call does not touch the disk. Faults on
+    /// one path and operation fire in turn, one per call.
+    ///
+    /// # Panics
+    ///
+    /// When `operation` is `Free` and `path` is not empty: `free` has no path.
+    pub fn fail_file(&self, path: &Path, operation: env::files::Operation) {
+        let free = operation == env::files::Operation::Free;
+        assert!(
+            !free || path.as_os_str().is_empty(),
+            "free has no path; aim a fault at it with an empty path"
+        );
+        lock(&self.0.shared)
+            .files()
+            .fail(self.0.node, path, operation);
+    }
+
     /// The node's IPv4 and IPv6 addresses, in that order: node `k`, from 0 in the
     /// order of [`Sim::node`](crate::Sim::node), has `10.0.0.0` and `fd00::`, each
     /// plus `k + 1`.
@@ -160,17 +197,20 @@ pub struct Config {
     /// The error bound that the OS gives with each wall reading, or `None` when it
     /// gives none.
     pub wall_error: Option<Span>,
+    /// The bytes of the node's disk.
+    pub disk_bytes: u64,
 }
 
 impl Default for Config {
     /// Four cores, one hour after boot, at 2026-01-01T00:00:00Z, with a wall error
-    /// of 10 ms.
+    /// of 10 ms and a disk of 64 GiB.
     fn default() -> Self {
         Self {
             cores: NonZeroUsize::new(4).expect("four is not zero"),
             monotonic: Monotonic::default() + Span::HOUR,
             wall: Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos()),
             wall_error: Some(Span::from_nanos(10 * Span::MILLISECOND.nanos())),
+            disk_bytes: 64 << 30,
         }
     }
 }
