@@ -30,7 +30,7 @@ impl Memory {
     ///
     /// # Errors
     ///
-    /// [`Error`] when the OS gives no range of `len` bytes.
+    /// [`Error`] when the OS fails the reserve of `len` bytes.
     ///
     /// # Panics
     ///
@@ -44,11 +44,30 @@ impl Memory {
                 code: errno.raw_os_error(),
             })?;
         let base = NonNull::new(base.cast()).expect("invariant: a mapping is not null");
-        Ok(Self {
+        let memory = Self {
             base,
             len,
             page: rustix::param::page_size(),
-        })
+        };
+        #[cfg(all(target_os = "linux", not(miri)))]
+        no_huge_pages(base, len).map_err(|errno| Error::Reserve {
+            len,
+            code: errno.raw_os_error(),
+        })?;
+        Ok(memory)
+    }
+}
+
+/// Turns off huge pages in the range: the first touch of one byte of a huge page
+/// takes all of it, past the pool's budget. A kernel with no huge pages gives
+/// `EINVAL`, and has nothing to turn off.
+#[cfg(all(target_os = "linux", not(miri)))]
+fn no_huge_pages(at: NonNull<u8>, len: usize) -> rustix::io::Result<()> {
+    let advice = mm::Advice::LinuxNoHugepage;
+    // SAFETY: the advice changes no byte of the mapping.
+    match unsafe { mm::madvise(at.as_ptr().cast(), len, advice) } {
+        Ok(()) | Err(rustix::io::Errno::INVAL) => Ok(()),
+        Err(errno) => Err(errno),
     }
 }
 
@@ -141,7 +160,7 @@ impl Drop for Memory {
 /// A failure to get memory from the OS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The OS gave no range of `len` bytes of address space.
+    /// The OS failed the reserve of `len` bytes of address space.
     Reserve {
         /// The bytes asked for.
         len: usize,
@@ -198,6 +217,33 @@ mod tests {
         };
         assert_eq!(code, 0, "mincore failed");
         vec.iter().map(|byte| byte & 1 == 1).collect()
+    }
+
+    /// The flags of the mapping that holds `at`, from `/proc/self/smaps`.
+    #[cfg(target_os = "linux")]
+    fn flags(at: NonNull<u8>) -> Vec<String> {
+        let at = at.as_ptr().addr();
+        let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+        let mut holds = false;
+        for line in smaps.lines() {
+            if let Some(flags) = line.strip_prefix("VmFlags:")
+                && holds
+            {
+                return flags.split_whitespace().map(str::to_owned).collect();
+            }
+            let range = line
+                .split_once(' ')
+                .and_then(|(range, _)| range.split_once('-'));
+            if let Some((start, end)) = range
+                && let (Ok(start), Ok(end)) = (
+                    usize::from_str_radix(start, 16),
+                    usize::from_str_radix(end, 16),
+                )
+            {
+                holds = (start..end).contains(&at);
+            }
+        }
+        panic!("no mapping holds the address");
     }
 
     /// The bytes of `memory`.
@@ -281,8 +327,33 @@ mod tests {
         assert_eq!(resident(base, pages.clone()), vec![true; pages.len()]);
         drop(unique);
         pool.purge();
-        assert!(pool.purge() >= 1 << 19, "the idle block was not purged");
+        assert_eq!(pool.purge(), block::footprint(1 << 19));
         assert_eq!(resident(base, pages.clone()), vec![false; pages.len()]);
+    }
+
+    #[test]
+    #[should_panic(expected = "purge of 1 bytes at 100 ends past 100 bytes")]
+    fn a_purge_past_the_end_panics() {
+        Memory::new(100).unwrap().purge(100, 1);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[cfg_attr(miri, ignore = "Miri has no /proc")]
+    fn a_reserve_has_no_huge_pages_and_no_commit_charge() {
+        let memory = Memory::new(1 << 22).unwrap();
+        let flags = flags(memory.base());
+        let has = |flag: &str| flags.iter().any(|on| on == flag);
+        let huge = std::path::Path::new("/sys/kernel/mm/transparent_hugepage").exists();
+        let overcommit = std::fs::read_to_string("/proc/sys/vm/overcommit_memory");
+        let strict = overcommit.unwrap().trim() == "2";
+        assert_eq!(has("nh"), huge, "huge pages are on: {flags:?}");
+        // Strict overcommit ignores `MAP_NORESERVE`.
+        assert_eq!(
+            has("nr"),
+            !strict,
+            "the reserve is in the commit count: {flags:?}"
+        );
     }
 
     #[test]

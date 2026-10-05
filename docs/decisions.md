@@ -1365,8 +1365,9 @@ How to read this record:
   pages back on a timer that the shard owns (#2). `os::memory::Memory` is one
   `MAP_NORESERVE` mapping, read and write, so `commit` does nothing. A purge is
   `MADV_DONTNEED` on Linux and a `MAP_FIXED` remap on macOS, which has no discard
-  advice in rustix. Under strict overcommit on Linux, the reserve (up to 96 times the
-  budget) counts in full and can fail. A `PROT_NONE` reserve with an `mprotect`
+  advice in rustix. On Linux the reserve has no huge pages (`MADV_NOHUGEPAGE`): the
+  first touch of a huge page takes 2 MiB, past the budget. Under strict overcommit on
+  Linux, the reserve (up to 96 times the budget) counts in full and can fail. A `PROT_NONE` reserve with an `mprotect`
   commit lost: it needs a fallible `commit`, a syscall per carve, and Miri runs none
   of it (#66).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
