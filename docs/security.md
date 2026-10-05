@@ -259,7 +259,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 | `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
-| `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version |
+| `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
