@@ -72,6 +72,7 @@ impl Clock {
     /// # Panics
     ///
     /// On a thread that `env` did not start. Make and poll the future on one thread.
+    /// When `now` plus `span` is past the end of `Monotonic`.
     ///
     /// ```
     /// async fn pause(clock: &env::clock::Clock) {
@@ -79,6 +80,7 @@ impl Clock {
     /// }
     /// ```
     #[must_use]
+    #[track_caller]
     pub fn sleep(&self, span: Span) -> Sleep {
         self.sleep_until(self.now() + span.max(Span::ZERO))
     }
@@ -275,6 +277,15 @@ mod tests {
             assert_eq!(
                 clock.sleep(Span::from_nanos(-20)).deadline(),
                 Monotonic(100)
+            );
+        }
+
+        #[test]
+        fn ends_now_for_a_negative_span_longer_than_the_clock_has_run() {
+            let (clock, _) = clock_at(0);
+            assert_eq!(
+                clock.sleep(Span::from_nanos(i64::MIN)).deadline(),
+                Monotonic(0)
             );
         }
 
