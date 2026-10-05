@@ -159,6 +159,15 @@ How to read this record:
   once per handoff. A writer asks for authority at open, capped by access. Authority 255
   cannot be taken. The control lease is an optional writer setting. There is no control
   policy.
+- **GATE RULES (write-path, 2026-10-04)** Writers that do not hold control wait. When
+  the holder closes or its control lease runs out, the waiter with the highest
+  authority takes control; on a tie, the one that opened first. Each accepted write
+  renews the control lease. A writer whose control lease ran out stays out of the gate
+  until it reopens. Lease and grace times are the home's monotonic time, and the X18
+  grace is a positive span like a control lease. During the grace the recorded holder
+  ranks first: the first writer of its subject takes its place, and a higher authority
+  takes control. A handoff is recorded only when the
+  holder's subject or authority changes. Basis: S11, X18, r8 trace (d).
 - **S13 + BQ13** Quality is an ordinary channel of type `Quality` (OPC UA 32-bit status
   codes) that data channels point at. One quality channel can serve many channels. It
   may sit on its own index (written on change; a value holds until the next) or share
@@ -410,6 +419,20 @@ How to read this record:
   RANDOMNESS"), from `network`'s proposal on #54.
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
+- **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and
+  accepts; the node's sockets and relays sit in one node-level part (ONE PORT PER
+  NODE). A `Session` goes to one peer over one path, direct or relayed, fixed for its
+  life, and runs every class on one carrier. A second carrier for some classes waits
+  for the measurement in TRANSPORT SHAPE LOCKED, which must show that `Latest` p99
+  holds while `CatchUp` runs on the other carrier. Streams carry whole messages in
+  pool blocks, not bytes; the QUIC carrier benchmark decides whether decode reads
+  chunks in place instead. A stream reaches the peer with its first message, and a
+  `Sender` dropped without `finish` resets it. Each stream has a `Class` (`Command`,
+  `Latest`, `Complete`, `CatchUp`) that sets its priority and preferred carrier. A
+  peer is a node key or a `Client` (an SDK, proved by its signed hello above).
+  Callers admit peers, dispatch streams (STREAM DISPATCH), and cancel stale latest
+  frames. Builds on SIM NETWORK. Proposed by `network` in #45; approved by the
+  coordinator on PR #53.
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -766,11 +789,13 @@ How to read this record:
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
   other way to count allocations. Never in a library or the `node` binary. The
   `xtask globals` check allows only this case.
-- **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake
-  protocol can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner
-  always on" and said "I have tons of AWS credits". The runner is `foundation-arm-1`,
-  an AWS c7g.2xlarge in us-east-1 with no inbound ports, tagged
-  `project=foundation-ci`, outside BENCH SPEND. The coordinator owns it.
+- **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
+  can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
+  said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
+  share one AWS m7g.2xlarge (8 vCPU, 32 GiB) in us-east-1 with no inbound ports, tagged
+  `project=foundation-ci`, outside BENCH SPEND. One runner queued 9 runs while its host
+  used about 30% CPU, so the person asked: "can we have multiple runners on a single
+  machine?" ARM skips docs-only changes. The coordinator owns it.
 
 ### 1.15 Releases
 

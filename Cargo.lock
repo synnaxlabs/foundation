@@ -144,6 +144,11 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "control"
 version = "0.0.0"
+dependencies = [
+ "divan",
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -161,6 +166,31 @@ dependencies = [
  "divan",
  "proptest",
  "types",
+]
+
+[[package]]
+name = "divan"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a405457ec78b8fe08b0e32b4a3570ab5dff6dd16eb9e76a5ee0a9d9cbd898933"
+dependencies = [
+ "cfg-if",
+ "clap",
+ "condtype",
+ "divan-macros",
+ "libc",
+ "regex-lite",
+]
+
+[[package]]
+name = "divan-macros"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9556bc800956545d6420a640173e5ba7dfa82f38d3ea5a167eb555bc69ac3323"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -493,6 +523,7 @@ version = "0.0.0"
 name = "ring"
 version = "0.0.0"
 dependencies = [
+ "divan",
  "loom",
  "proptest",
 ]
@@ -690,6 +721,11 @@ dependencies = [
 [[package]]
 name = "transport"
 version = "0.0.0"
+dependencies = [
+ "block",
+ "env",
+ "types",
+]
 
 [[package]]
 name = "types"
