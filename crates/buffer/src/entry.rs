@@ -222,6 +222,8 @@ pub(crate) fn write_table(headers: &[Header], into: &mut [u8]) -> usize {
 pub(crate) enum Invalid {
     /// The body ends before the table or the bytes it names.
     Truncated,
+    /// A count of entries over [`ENTRIES_MAX`].
+    Count(u32),
     /// A path byte that is not live or backfill.
     Path(u8),
     /// A `last` presence byte that is not 0 or 1.
@@ -238,7 +240,8 @@ pub(crate) enum Invalid {
 /// # Errors
 ///
 /// [`Invalid::Truncated`] when `start` holds no count or fewer headers than the
-/// count. Each header checks its own fields and that the body holds its bytes.
+/// count, and [`Invalid::Count`] when the count is over [`ENTRIES_MAX`]. Each header
+/// checks its own fields and that the body holds its bytes.
 ///
 /// # Panics
 ///
@@ -249,8 +252,9 @@ pub(crate) fn parse(start: &[u8], len: usize) -> Result<Headers<'_>, Invalid> {
     let count = u32::from_le_bytes(*count);
     let headers_len = usize::try_from(count)
         .ok()
-        .and_then(|count| count.checked_mul(HEADER_LEN))
-        .ok_or(Invalid::Truncated)?;
+        .filter(|&entries| entries <= ENTRIES_MAX)
+        .and_then(|entries| entries.checked_mul(HEADER_LEN))
+        .ok_or(Invalid::Count(count))?;
     let (headers, rest) = rest
         .split_at_checked(headers_len)
         .ok_or(Invalid::Truncated)?;
@@ -397,6 +401,18 @@ mod tests {
             assert_eq!(result, Err(Invalid::Truncated), "cut at {cut}");
         }
         assert_eq!(parsed(&whole).map(|entries| entries.len()), Ok(2));
+    }
+
+    #[test]
+    fn refuses_a_count_over_the_most_entries() {
+        let over = u32::try_from(ENTRIES_MAX + 1).expect("fits");
+        let mut whole = over.to_le_bytes().to_vec();
+        whole.resize(table_len(ENTRIES_MAX + 1), 0);
+        assert_eq!(parsed(&whole), Err(Invalid::Count(over)));
+        assert_eq!(
+            parsed(&u32::MAX.to_le_bytes()),
+            Err(Invalid::Count(u32::MAX))
+        );
     }
 
     #[test]

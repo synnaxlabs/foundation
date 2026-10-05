@@ -376,8 +376,10 @@ How to read this record:
   little-endian, fixed width; `last` is a presence byte (0 or 1) then the stamp,
   which is 0 and not read under presence 0. The entries' bytes follow the table in
   order, each `bytes` long, so one table block and the callers' blocks make one
-  vectored write with no copy and no block per entry. A body that ends early, an
-  unknown path or presence byte, or bytes after the last entry is a wrong shape.
+  vectored write with no copy and no block per entry. A body holds at most 1023
+  entries, so that write stays within `IOV_MAX`. A body that ends early, a count
+  over 1023, an unknown path or presence byte, or bytes after the last entry is a
+  wrong shape.
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
