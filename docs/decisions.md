@@ -768,7 +768,9 @@ How to read this record:
   crosses the wire as text, and no reader makes a `Code` from it. Lost: a `Diagnose`
   trait behind `Box<dyn>` (not `Clone`, and a fix is optional); number codes (a
   central registry, and unreadable); one span only (the first producer has two
-  places). Decided by the `config` builder; approved by the coordinator (#137).
+  places). Codes go into `oracles/conformance/document/` at the first stable release;
+  the person decided on 2026-10-05 ("At the first release"). Decided by the `config`
+  builder; approved by the coordinator (#137).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
