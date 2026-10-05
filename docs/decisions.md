@@ -659,6 +659,24 @@ How to read this record:
   bound. An error over 36500 days reads as unknown, the same as no bound (the
   coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
   lint denies it elsewhere (BQ20).
+- **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its
+  OS reading and its OS bound. Cold nodes then vote with each other's OS clocks, and
+  each waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown
+  bound (an unknown estimate, or an OS clock with no bound) says "unknown" and carries
+  its offset. The asking node pushes a `Measurement::unknown` that it builds itself,
+  so the answer cannot narrow into a known bound. A peer that never answers counts
+  against a majority, and `node` removes no source. Lost: a node with no time does
+  not answer, because then a mesh that starts cold never syncs; an answer of "no
+  time" that takes the source out of the vote, because a node with a bad OS clock then
+  syncs on itself; `node` removes a silent source after a timeout, a patch that puts
+  time policy in layer 4. The person decided on 2026-10-05 ("Yeah that's fine"), #145.
+  So a node that starts while no peer answers stays unsynced, even with a good OS
+  bound. Its samples keep their local monotonic reading, and the node stamps them in
+  mesh time when the first estimate comes, with the error of that estimate at each
+  reading (200 ppm: 0.72 s after 1 h). The buffer holds the samples until then, and a
+  node that never syncs fills it. Lost: drop the samples, a patch that loses data;
+  stamp them with OS time at once, a patch that writes a time the clock refused and
+  cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
