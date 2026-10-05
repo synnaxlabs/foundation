@@ -24,20 +24,7 @@ pub(crate) struct Log {
 
 impl Log {
     pub(crate) fn new(entries: Vec<Entry>, applied: u64) -> Result<Self, Error> {
-        let mut before = Position::default();
-        for entry in &entries {
-            let term = entry.at.term;
-            if entry.at.index != before.index + 1
-                || term < before.term
-                || term == Term(0)
-            {
-                return Err(Error::EntryOutOfOrder {
-                    at: entry.at,
-                    before,
-                });
-            }
-            before = entry.at;
-        }
+        let before = check(&entries, Position::default())?;
         if applied > before.index {
             return Err(Error::AppliedPastLog {
                 applied,
@@ -72,7 +59,7 @@ impl Log {
     }
 
     // Up to `max` entries from `index`, cloned for a message.
-    pub(crate) fn from(&self, index: u64, max: usize) -> Vec<Entry> {
+    pub(crate) fn slice(&self, index: u64, max: usize) -> Vec<Entry> {
         let from = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
         self.entries
             .get(from..)
@@ -93,11 +80,12 @@ impl Log {
         at
     }
 
-    // Appends the leader's entries after `prev` as a follower. Entries already in
-    // the log stay; the first entry that differs replaces it and all after it.
-    // Returns the index of the last entry the leader sent, or the commit index when
-    // `prev` is below it, or an error with the follower's hint for the next `prev`:
-    // its last index, or the index before a `prev` it does not have.
+    // Appends the leader's entries after `prev` as a follower. The caller checked
+    // that they follow `prev`. Entries already in the log stay; the first entry that
+    // differs replaces it and all after it. Returns the index of the last entry the
+    // leader sent, or the commit index when `prev` is below it, or an error with the
+    // follower's hint for the next `prev`: its last index, or the index before a
+    // `prev` it does not have.
     pub(crate) fn append(
         &mut self,
         prev: Position,
@@ -124,14 +112,22 @@ impl Log {
         Ok(last)
     }
 
-    // Raises the commit index to `index`, but never past the end and never lower.
+    // Raises the commit index to `index`; a lower `index` changes nothing.
+    //
+    // Panics when `index` is past the end: a leader names only entries the
+    // follower holds, and a leader commits only its own entries.
     pub(crate) fn commit_to(&mut self, index: u64) {
-        self.committed = self.committed.max(index.min(self.last().index));
+        let last = self.last().index;
+        assert!(
+            index <= last,
+            "invariant: commit index {index} is past the last log index {last}"
+        );
+        self.committed = self.committed.max(index);
     }
 
     // The entries no `Ready` has given to write yet.
-    pub(crate) fn unstable(&mut self) -> Vec<Entry> {
-        let entries = self.from(self.stable + 1, usize::MAX);
+    pub(crate) fn take_unstable(&mut self) -> Vec<Entry> {
+        let entries = self.slice(self.stable + 1, usize::MAX);
         self.stable = self.last().index;
         entries
     }
@@ -140,10 +136,29 @@ impl Log {
     pub(crate) fn take_committed(&mut self) -> Vec<Entry> {
         let count =
             usize::try_from(self.committed - self.applied).unwrap_or(usize::MAX);
-        let entries = self.from(self.applied + 1, count);
+        let entries = self.slice(self.applied + 1, count);
         self.applied = self.committed;
         entries
     }
+}
+
+// Checks that `entries` follow `before`: indexes in sequence, terms non-decreasing
+// and not zero. Returns the last position, or `before` with no entries.
+pub(crate) fn check(
+    entries: &[Entry],
+    mut before: Position,
+) -> Result<Position, Error> {
+    for entry in entries {
+        let term = entry.at.term;
+        if entry.at.index != before.index + 1 || term < before.term || term == Term(0) {
+            return Err(Error::EntryOutOfOrder {
+                at: entry.at,
+                before,
+            });
+        }
+        before = entry.at;
+    }
+    Ok(before)
 }
 
 #[cfg(test)]
@@ -187,7 +202,7 @@ mod tests {
         assert_eq!(log.last(), Position::default());
         assert_eq!(log.at(0), Some(Position::default()));
         assert_eq!(log.at(1), None);
-        assert_eq!(log.unstable(), vec![]);
+        assert_eq!(log.take_unstable(), vec![]);
         assert_eq!(log.take_committed(), vec![]);
     }
 
@@ -248,7 +263,7 @@ mod tests {
         let entries = vec![entry(1, 1), entry(1, 2), entry(3, 3)];
         let mut log = Log::new(entries, 2).unwrap();
         assert_eq!(log.committed(), 2);
-        assert_eq!(log.unstable(), vec![]);
+        assert_eq!(log.take_unstable(), vec![]);
         assert_eq!(log.take_committed(), vec![]);
         log.commit_to(3);
         assert_eq!(log.take_committed(), vec![entry(3, 3)]);
@@ -262,14 +277,14 @@ mod tests {
             at: position(2, 2),
             data: vec![9],
         };
-        assert_eq!(log.unstable(), vec![pushed]);
-        assert_eq!(log.unstable(), vec![]);
+        assert_eq!(log.take_unstable(), vec![pushed]);
+        assert_eq!(log.take_unstable(), vec![]);
     }
 
     #[test]
-    fn commits_in_order_and_never_past_the_end_or_backwards() {
+    fn commits_in_order_and_never_backwards() {
         let mut log = log(&[1, 1, 2]);
-        log.commit_to(5);
+        log.commit_to(3);
         assert_eq!(log.committed(), 3);
         log.commit_to(1);
         assert_eq!(log.committed(), 3);
@@ -281,33 +296,39 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "invariant: commit index 4 is past the last log index 3")]
+    fn refuses_to_commit_past_the_end() {
+        log(&[1, 1, 2]).commit_to(4);
+    }
+
+    #[test]
     fn appends_after_a_matching_prev() {
         let mut log = log(&[1, 2]);
-        log.unstable();
+        log.take_unstable();
         let result = log.append(position(2, 2), vec![entry(3, 3)]);
         assert_eq!(result, Ok(3));
         assert_eq!(terms(&log), [1, 2, 3]);
-        assert_eq!(log.unstable(), vec![entry(3, 3)]);
+        assert_eq!(log.take_unstable(), vec![entry(3, 3)]);
     }
 
     #[test]
     fn replaces_the_first_entry_that_differs_and_all_after_it() {
         let mut log = log(&[1, 2, 2, 2]);
-        log.unstable();
+        log.take_unstable();
         let result = log.append(position(1, 1), vec![entry(3, 2), entry(4, 3)]);
         assert_eq!(result, Ok(3));
         assert_eq!(terms(&log), [1, 3, 4]);
-        assert_eq!(log.unstable(), vec![entry(3, 2), entry(4, 3)]);
+        assert_eq!(log.take_unstable(), vec![entry(3, 2), entry(4, 3)]);
     }
 
     #[test]
     fn keeps_entries_it_already_has() {
         let mut log = log(&[1, 2]);
-        log.unstable();
+        log.take_unstable();
         let result = log.append(Position::default(), vec![entry(1, 1)]);
         assert_eq!(result, Ok(1));
         assert_eq!(terms(&log), [1, 2]);
-        assert_eq!(log.unstable(), vec![]);
+        assert_eq!(log.take_unstable(), vec![]);
     }
 
     #[test]
@@ -342,8 +363,8 @@ mod tests {
     #[test]
     fn gives_entries_from_an_index_up_to_a_limit() {
         let log = log(&[1, 1, 2, 2]);
-        assert_eq!(log.from(2, 2), vec![entry(1, 2), entry(2, 3)]);
-        assert_eq!(log.from(4, 10), vec![entry(2, 4)]);
-        assert_eq!(log.from(5, 10), vec![]);
+        assert_eq!(log.slice(2, 2), vec![entry(1, 2), entry(2, 3)]);
+        assert_eq!(log.slice(4, 10), vec![entry(2, 4)]);
+        assert_eq!(log.slice(5, 10), vec![]);
     }
 }

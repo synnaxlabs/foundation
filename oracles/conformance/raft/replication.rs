@@ -148,8 +148,7 @@ fn accept(message: &Message) -> Message {
         to: message.from,
         term: message.term,
         body: Body::AppendReply {
-            index: prev.index + count(entries.len()),
-            rejected: false,
+            last: prev.index + count(entries.len()),
         },
     }
 }
@@ -351,17 +350,18 @@ fn follower_commit_entry() {
     }
 }
 
-/// A rejection carries the hint in `index`, where etcd has a `RejectHint` field.
+/// A rejection is its own body with the hint, where etcd has a `Reject` flag and a
+/// `RejectHint` field.
 #[test]
 fn follower_check_msg_app() {
     let cases = [
-        (position(0, 0), 1, false),
-        (position(1, 1), 1, false),
-        (position(2, 2), 2, false),
-        (position(1, 2), 1, true),
-        (position(3, 3), 2, true),
+        (position(0, 0), Body::AppendReply { last: 1 }),
+        (position(1, 1), Body::AppendReply { last: 1 }),
+        (position(2, 2), Body::AppendReply { last: 2 }),
+        (position(1, 2), Body::AppendReject { hint: 1 }),
+        (position(3, 3), Body::AppendReject { hint: 2 }),
     ];
-    for (i, (prev, index, rejected)) in cases.into_iter().enumerate() {
+    for (i, (prev, body)) in cases.into_iter().enumerate() {
         let (mut raft, mut disk) =
             start(1, &[1, 2, 3], ELECTION, at_term(2), log(&[1, 2]), 1);
         raft.step(append(2, prev, vec![], 0)).unwrap();
@@ -369,7 +369,7 @@ fn follower_check_msg_app() {
             from: key(1),
             to: key(2),
             term: Term(2),
-            body: Body::AppendReply { index, rejected },
+            body,
         };
         assert_eq!(disk.store(raft.ready()), [expected], "#{i}");
     }
@@ -475,9 +475,7 @@ fn handle_msg_app() {
         let [message] = &messages[..] else {
             panic!("#{i}: {messages:?}");
         };
-        let Body::AppendReply { rejected: got, .. } = message.body else {
-            panic!("#{i}: {:?}", message.body);
-        };
+        let got = matches!(message.body, Body::AppendReject { .. });
         assert_eq!(got, rejected, "#{i}");
     }
 }
@@ -528,15 +526,8 @@ fn handle_heartbeat_resp() {
 fn msg_app_resp_wait_reset() {
     let (mut raft, mut disk) = leader(3);
     disk.store(raft.ready());
-    raft.step(reply(
-        2,
-        1,
-        Body::AppendReply {
-            index: 1,
-            rejected: false,
-        },
-    ))
-    .unwrap();
+    raft.step(reply(2, 1, Body::AppendReply { last: 1 }))
+        .unwrap();
     disk.store(raft.ready());
     assert_eq!(disk.committed(), 1);
     raft.propose(vec![]).unwrap();
@@ -551,15 +542,8 @@ fn msg_app_resp_wait_reset() {
         };
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].at.index, 2);
-        raft.step(reply(
-            3,
-            1,
-            Body::AppendReply {
-                index: 1,
-                rejected: false,
-            },
-        ))
-        .unwrap();
+        raft.step(reply(3, 1, Body::AppendReply { last: 1 }))
+            .unwrap();
     }
 }
 
@@ -571,15 +555,8 @@ fn leader_only_commits_log_from_current_term() {
         elect(&mut raft, &mut disk, &[2]);
         raft.propose(vec![]).unwrap();
         disk.store(raft.ready());
-        raft.step(reply(
-            2,
-            3,
-            Body::AppendReply {
-                index,
-                rejected: false,
-            },
-        ))
-        .unwrap();
+        raft.step(reply(2, 3, Body::AppendReply { last: index }))
+            .unwrap();
         disk.store(raft.ready());
         assert_eq!(disk.committed(), committed, "#{i}");
     }

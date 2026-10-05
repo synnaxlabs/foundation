@@ -11,7 +11,7 @@ mod config;
 mod log;
 mod machine;
 mod message;
-mod tracker;
+mod progress;
 
 use std::fmt;
 

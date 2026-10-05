@@ -1,17 +1,13 @@
 use std::collections::VecDeque;
 
-// Entries in one `Append`.
-pub(crate) const BATCH: usize = 64;
 // `Append` messages a leader keeps in flight to one follower before it waits.
-pub(crate) const INFLIGHT: usize = 8;
+const INFLIGHT: usize = 8;
 
 // What a leader knows about one follower's log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Progress {
-    // The index of the next entry to send.
-    pub(crate) next: u64,
-    // The last index the follower is known to hold.
-    pub(crate) matched: u64,
+    next: u64,
+    matched: u64,
     state: State,
 }
 
@@ -30,6 +26,21 @@ impl Progress {
             matched: 0,
             state: State::Probe { waiting: false },
         }
+    }
+
+    // The index of the next entry to send.
+    pub(crate) fn next(&self) -> u64 {
+        self.next
+    }
+
+    // The last index the follower is known to hold.
+    pub(crate) fn matched(&self) -> u64 {
+        self.matched
+    }
+
+    // Whether the follower lacks entries of a log that ends at `last`.
+    pub(crate) fn behind(&self, last: u64) -> bool {
+        self.next <= last
     }
 
     // Whether the leader waits for a reply before it sends more.
@@ -79,8 +90,11 @@ impl Progress {
     }
 
     // Records that the follower did not have `prev`. `hint` is the follower's guess
-    // at the last index the two logs share.
+    // at the last index the two logs share. A hint below `matched` is stale.
     pub(crate) fn rejected(&mut self, hint: u64) {
+        if hint < self.matched {
+            return;
+        }
         self.next = (hint + 1).min(self.next.saturating_sub(1)).max(1);
         self.state = State::Probe { waiting: false };
     }
@@ -142,6 +156,17 @@ mod tests {
         assert_eq!(progress.next, 1);
         progress.rejected(0);
         assert_eq!(progress.next, 1);
+    }
+
+    #[test]
+    fn ignores_a_stale_rejection_below_the_match() {
+        let mut progress = Progress::new(0);
+        progress.sent(0);
+        progress.accepted(3);
+        progress.sent(5);
+        progress.rejected(2);
+        assert_eq!((progress.next, progress.matched), (6, 3));
+        assert!(!progress.paused());
     }
 
     #[test]

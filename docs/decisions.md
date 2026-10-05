@@ -595,8 +595,9 @@ How to read this record:
   `Position`, or `Error::NotLeader { leader }` with the leader it knows. A new leader
   writes an empty entry of its term first, so it can commit what came before. It
   replicates with `Body::Append { prev, entries, commit }`, answered by
-  `Body::AppendReply { index, rejected }`: the last index the follower holds, or its
-  hint for the next `prev`. `Body::Heartbeat { commit }` carries the commit index,
+  `Body::AppendReply { last }` (the last index the follower holds of what was sent)
+  or `Body::AppendReject { hint }` (its hint for the next `prev`). A malformed
+  `Append` (entries that do not follow `prev`) is `Error::EntryOutOfOrder`. `Body::Heartbeat { commit }` carries the commit index,
   capped at what that follower is known to hold. A leader commits an index only when
   a quorum holds it and its entry is of the leader's own term. A follower commits no
   further than the last entry the leader sent it. `Ready.committed` gives each

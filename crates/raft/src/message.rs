@@ -49,20 +49,23 @@ pub enum Body {
     /// Entries after `prev`, from the leader. An empty list probes the receiver's
     /// log or carries a new commit index.
     Append {
-        /// The position the entries follow. The receiver must hold it.
+        /// The position the entries follow. The receiver takes them only when it
+        /// holds it.
         prev: Position,
         /// The entries, in order from `prev.index + 1`.
         entries: Vec<Entry>,
         /// The leader's commit index.
         commit: u64,
     },
-    /// Answers a [`Body::Append`].
+    /// Answers a [`Body::Append`] whose entries the receiver took.
     AppendReply {
-        /// When accepted, the index of the last entry the leader sent, which the
-        /// receiver now holds. When rejected, the receiver's hint for the next
-        /// `prev`: the last index its log may share with the leader's.
-        index: u64,
-        /// Whether the receiver did not hold `prev`.
-        rejected: bool,
+        /// The index of the last entry the leader sent, which the receiver holds.
+        last: u64,
+    },
+    /// Answers a [`Body::Append`] whose `prev` the receiver did not hold.
+    AppendReject {
+        /// The receiver's hint for the next `prev`: the last index its log may
+        /// share with the leader's.
+        hint: u64,
     },
 }

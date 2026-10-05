@@ -1,7 +1,8 @@
 use types::node;
 
+use crate::log;
 use crate::log::Log;
-use crate::tracker::{BATCH, Progress};
+use crate::progress::Progress;
 use crate::{Body, Config, Entry, Error, Hard, Message, Position, Start, Term};
 
 /// What a node is doing in its term.
@@ -16,6 +17,9 @@ pub enum Role {
     /// Leads its term.
     Leader,
 }
+
+// Entries in one `Append`.
+const BATCH: usize = 64;
 
 /// What the caller must do after an input, in this order: write `hard` and `entries`
 /// to disk, send `messages`, then apply `committed`.
@@ -39,7 +43,7 @@ pub struct Ready {
 #[derive(Debug)]
 pub struct Raft {
     key: node::Key,
-    // Sorted. `votes` and `active` are parallel to it.
+    // Sorted. `votes`, `active`, and `progress` are parallel to it.
     voters: Vec<node::Key>,
     election_ticks: u64,
     heartbeat_ticks: u64,
@@ -168,7 +172,7 @@ impl Raft {
         self.given = hard;
         Ready {
             hard: changed.then_some(hard),
-            entries: self.log.unstable(),
+            entries: self.log.take_unstable(),
             committed: self.log.take_committed(),
             messages: std::mem::take(&mut self.outbox),
         }
@@ -274,12 +278,13 @@ impl Raft {
             }
             Body::Heartbeat { commit } => self.heartbeat(from, commit)?,
             Body::HeartbeatReply => {
-                if self.role == Role::Leader
-                    && let Ok(voter) = self.voters.binary_search(&from)
-                {
-                    self.active[voter] = true;
+                if let Some(voter) = self.heard_from(from) {
                     self.progress[voter].heard();
-                    self.send_append(voter, false);
+                    // A follower that lacks entries gets an append even when every
+                    // entry is in flight: a lost append is found this way.
+                    if self.progress[voter].matched() < self.log.last().index {
+                        self.send_append(voter);
+                    }
                 }
             }
             Body::Append {
@@ -287,15 +292,15 @@ impl Raft {
                 entries,
                 commit,
             } => {
+                log::check(&entries, prev)?;
                 self.follow(from)?;
                 self.append(from, prev, entries, commit);
             }
-            Body::AppendReply { index, rejected } => {
-                if self.role == Role::Leader
-                    && let Ok(voter) = self.voters.binary_search(&from)
-                {
-                    self.active[voter] = true;
-                    self.track(voter, index, rejected);
+            Body::AppendReply { last } => self.accepted(from, last),
+            Body::AppendReject { hint } => {
+                if let Some(voter) = self.heard_from(from) {
+                    self.progress[voter].rejected(hint);
+                    self.catch_up(voter);
                 }
             }
         }
@@ -319,33 +324,37 @@ impl Raft {
         commit: u64,
     ) {
         let reply = match self.log.append(prev, entries) {
-            Ok(index) => {
-                self.log.commit_to(commit.min(index));
-                Body::AppendReply {
-                    index,
-                    rejected: false,
-                }
+            Ok(last) => {
+                self.log.commit_to(commit.min(last));
+                Body::AppendReply { last }
             }
-            Err(index) => Body::AppendReply {
-                index,
-                rejected: true,
-            },
+            Err(hint) => Body::AppendReject { hint },
         };
         self.send(leader, self.term, reply);
     }
 
-    // Records a follower's answer to an append as the leader and sends what follows.
-    fn track(&mut self, voter: usize, index: u64, rejected: bool) {
-        if rejected {
-            self.progress[voter].rejected(index);
-            self.send_append(voter, false);
-        } else if self.progress[voter].accepted(index) {
+    // Records that a follower holds the leader's log up to `last`, as the leader.
+    fn accepted(&mut self, from: node::Key, last: u64) {
+        if let Some(voter) = self.heard_from(from)
+            && self.progress[voter].accepted(last)
+        {
             if self.commit() {
                 self.replicate();
             } else {
-                self.send_append(voter, false);
+                self.catch_up(voter);
             }
         }
+    }
+
+    // Notes that a voter answered this leader. `None` when this node does not lead
+    // or `from` is not a voter.
+    fn heard_from(&mut self, from: node::Key) -> Option<usize> {
+        if self.role != Role::Leader {
+            return None;
+        }
+        let voter = self.voters.binary_search(&from).ok()?;
+        self.active[voter] = true;
+        Some(voter)
     }
 
     // Commits the highest index that a quorum holds, when an entry of the leader's
@@ -359,7 +368,7 @@ impl Raft {
                 if voter == self.key {
                     self.log.last().index
                 } else {
-                    progress.matched
+                    progress.matched()
                 }
             })
             .collect();
@@ -376,26 +385,30 @@ impl Raft {
     // Sends each follower the entries it lacks and the commit index.
     fn replicate(&mut self) {
         for voter in 0..self.voters.len() {
-            self.send_append(voter, true);
+            self.send_append(voter);
         }
     }
 
-    // Sends one follower the entries from its `next`, unless the leader waits for
-    // its reply. With `even_empty`, a follower that lacks nothing gets the commit
-    // index alone.
-    fn send_append(&mut self, voter: usize, even_empty: bool) {
+    // Sends one follower the entries it lacks, when it lacks any.
+    fn catch_up(&mut self, voter: usize) {
+        if self.progress[voter].behind(self.log.last().index) {
+            self.send_append(voter);
+        }
+    }
+
+    // Sends one follower the entries from its `next` and the commit index, unless
+    // the leader waits for its reply.
+    fn send_append(&mut self, voter: usize) {
         let to = self.voters[voter];
-        let progress = &self.progress[voter];
-        let behind = progress.next <= self.log.last().index;
-        if to == self.key || progress.paused() || !(behind || even_empty) {
+        if to == self.key || self.progress[voter].paused() {
             return;
         }
-        let next = progress.next;
+        let next = self.progress[voter].next();
         let prev = self
             .log
             .at(next - 1)
             .expect("invariant: a follower's next entry follows the leader's log");
-        let entries = self.log.from(next, BATCH);
+        let entries = self.log.slice(next, BATCH);
         let last = entries.last().map_or(prev.index, |entry| entry.at.index);
         self.progress[voter].sent(last);
         let commit = self.log.committed();
@@ -429,7 +442,8 @@ impl Raft {
                 | Body::PreVoteReply { granted: false }
                 | Body::VoteReply { .. }
                 | Body::HeartbeatReply
-                | Body::AppendReply { .. } => self.become_follower(term, None),
+                | Body::AppendReply { .. }
+                | Body::AppendReject { .. } => self.become_follower(term, None),
             }
         } else if term < self.term {
             match body {
@@ -445,7 +459,8 @@ impl Raft {
                 | Body::PreVoteReply { .. }
                 | Body::VoteReply { .. }
                 | Body::HeartbeatReply
-                | Body::AppendReply { .. } => {}
+                | Body::AppendReply { .. }
+                | Body::AppendReject { .. } => {}
             }
             return false;
         }
@@ -475,7 +490,8 @@ impl Raft {
             for voter in 0..self.voters.len() {
                 let to = self.voters[voter];
                 if to != self.key {
-                    let commit = self.log.committed().min(self.progress[voter].matched);
+                    let commit =
+                        self.log.committed().min(self.progress[voter].matched());
                     self.send(to, self.term, Body::Heartbeat { commit });
                 }
             }
@@ -1434,11 +1450,8 @@ mod tests {
             }
         }
 
-        fn accepted(index: u64) -> Body {
-            Body::AppendReply {
-                index,
-                rejected: false,
-            }
+        fn accepted(last: u64) -> Body {
+            Body::AppendReply { last }
         }
 
         // A leader of 1, 2, and 3 at term 2 over the log `positions`, after its
@@ -1547,21 +1560,44 @@ mod tests {
         #[test]
         fn sends_from_the_hint_after_a_rejection() {
             let mut raft = leader_over(&[(1, 1), (1, 2)]);
-            raft.step(message(
-                2,
-                2,
-                Body::AppendReply {
-                    index: 0,
-                    rejected: true,
-                },
-            ))
-            .unwrap();
+            raft.step(message(2, 2, Body::AppendReject { hint: 0 }))
+                .unwrap();
             let [message] = &sent(&mut raft)[..] else {
                 panic!();
             };
             let expected =
                 append(Position::default(), entries(&[(1, 1), (1, 2), (2, 3)]), 0);
             assert_eq!((message.to, &message.body), (key(2), &expected));
+        }
+
+        #[test]
+        fn resends_after_a_heartbeat_reply_when_an_append_was_lost() {
+            let mut raft = leader_over(&[]);
+            raft.step(message(2, 2, accepted(1))).unwrap();
+            sent(&mut raft);
+            raft.propose(vec![7]).unwrap();
+            // The append with entry 2 is lost.
+            sent(&mut raft);
+            raft.step(message(2, 2, Body::HeartbeatReply)).unwrap();
+            let [sent_message] = &sent(&mut raft)[..] else {
+                panic!("no append after the heartbeat reply");
+            };
+            let Body::Append { prev, entries, .. } = &sent_message.body else {
+                panic!("{:?}", sent_message.body);
+            };
+            assert_eq!(
+                (sent_message.to, *prev, entries.len()),
+                (key(2), position(2, 2), 0)
+            );
+            raft.step(message(2, 2, Body::AppendReject { hint: 1 }))
+                .unwrap();
+            let [sent_message] = &sent(&mut raft)[..] else {
+                panic!("no append after the rejection");
+            };
+            let Body::Append { prev, entries, .. } = &sent_message.body else {
+                panic!("{:?}", sent_message.body);
+            };
+            assert_eq!((*prev, entries.len()), (position(2, 1), 1));
         }
 
         #[test]

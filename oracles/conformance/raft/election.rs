@@ -386,7 +386,8 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
                 | Body::Heartbeat { .. }
                 | Body::HeartbeatReply
                 | Body::Append { .. }
-                | Body::AppendReply { .. } => {
+                | Body::AppendReply { .. }
+                | Body::AppendReject { .. } => {
                     panic!("expected a reply, got {reply:?}")
                 }
             }
@@ -669,8 +670,8 @@ fn non_promotable_voter_with_check_quorum() {
 /// A follower whose election times out just before a late heartbeat arrives does
 /// not make the leader step down.
 ///
-/// In etcd, node 3 is also behind in the log. This phase has no log replication, so
-/// all logs are equal, and the leases alone protect the leader.
+/// In etcd, node 3 is also behind in the log. Here all logs are equal, so the leases
+/// alone protect the leader.
 #[test]
 fn disruptive_follower_prevote() {
     let mut network = Network::of(3, &[1, 2, 3], at_term(1));
