@@ -74,8 +74,8 @@ impl Node {
     ///
     /// - Each call takes up to 100 us of true time and takes effect when it ends.
     ///   A file call panics outside the node's threads.
-    /// - A directory takes 4 KiB, and a file its length, until it is removed and
-    ///   its last descriptor closes.
+    /// - A directory takes 4 KiB, and a file its length, until it is removed and no
+    ///   descriptor or call in flight uses it.
     /// - Where calls in flight at the same time overlap, each 512-byte sector of a
     ///   read gives the old bytes or the bytes of one of the writes, and each sector
     ///   keeps the bytes of one write. A write whose future dropped still ends, with
@@ -89,20 +89,20 @@ impl Node {
     }
 
     /// Makes the next call of `operation` on `path` on the node fail with
-    /// `Error::Io` and code 5 (`EIO`), with no effect. A failed `sync` poisons the
-    /// file. Faults on one path and operation fire in turn, one per call.
+    /// `Error::Io` and code 5 (`EIO`). The call does not touch the disk. Faults on
+    /// one path and operation fire in turn, one per call.
     ///
     /// # Panics
     ///
     /// When `operation` is `Free` and `path` is not empty: `free` has no path.
-    pub fn fail(&self, path: &Path, operation: env::files::Operation) {
+    pub fn fail_file(&self, path: &Path, operation: env::files::Operation) {
         let free = operation == env::files::Operation::Free;
         assert!(
             !free || path.as_os_str().is_empty(),
             "free has no path; aim a fault at it with an empty path"
         );
         lock(&self.0.shared)
-            .disks()
+            .files()
             .fail(self.0.node, path, operation);
     }
 

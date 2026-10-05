@@ -302,9 +302,9 @@ fn a_fault_fails_the_next_call_on_its_path_once() {
         let (files, pool) = (node.files(), pool());
         let a = create(&node, "a", 4_096).await;
         let b = create(&node, "b", 4_096).await;
-        node.fail(Path::new("a"), Operation::Sync);
-        node.fail(Path::new("./d"), Operation::CreateDir);
-        node.fail(Path::new(""), Operation::Free);
+        node.fail_file(Path::new("a"), Operation::Sync);
+        node.fail_file(Path::new("./d"), Operation::CreateDir);
+        node.fail_file(Path::new(""), Operation::Free);
         let parts = [block(&pool, &[1; 512])];
         vec![
             b.sync().await,
@@ -337,7 +337,7 @@ fn a_fault_fails_the_next_call_on_its_path_once() {
 fn a_fault_on_free_with_a_path_panics() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
-    node.fail(Path::new("a"), Operation::Free);
+    node.fail_file(Path::new("a"), Operation::Free);
 }
 
 /// The sectors that a read of two sectors gives while a write of 0xab over them is
@@ -462,4 +462,190 @@ fn a_file_call_on_a_thread_of_another_node_panics() {
     let message = "a file call of node 0 runs on a thread of node 1";
     assert!(matches!(e, crate::Error::Panicked { message: m, .. } if m == message));
     drop(handle.join());
+}
+
+#[test]
+fn a_zero_length_write_races_no_write() {
+    let reads: BTreeSet<Vec<u8>> = (0..64)
+        .map(|seed| {
+            run(seed, MIB, |node, tasks| async move {
+                let file = Rc::new(create(&node, "a", 1_024).await);
+                let pool = pool();
+                let (writer, parts) = (Rc::clone(&file), [block(&pool, &[1; 1_024])]);
+                tasks.spawn(async move { writer.write_at(0, &parts).await.unwrap() });
+                file.write_at(100, &[]).await.unwrap();
+                node.clock().sleep(Span::MILLISECOND).await;
+                sectors(&read(&file, &pool, 0, 1_024).await)
+            })
+        })
+        .collect();
+    assert_eq!(reads, BTreeSet::from([vec![1, 1]]));
+}
+
+#[test]
+fn a_read_may_take_the_bytes_of_a_write_still_in_flight() {
+    let reads: Vec<(bool, Vec<u8>)> = (0..64).map(read_over_write).collect();
+    let taken = reads
+        .iter()
+        .any(|(ended, sectors)| !*ended && sectors.contains(&0xab));
+    assert!(taken, "{reads:?}");
+}
+
+/// The sectors that a read of two sectors gives while a write of 0xab over the
+/// second is in flight.
+fn read_beside_write(seed: u64) -> Vec<u8> {
+    run(seed, MIB, |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 1_024).await);
+        let pool = Rc::new(pool());
+        let (writer, parts) = (Rc::clone(&file), [block(&pool, &[0xab; 512])]);
+        tasks.spawn(async move { writer.write_at(512, &parts).await.unwrap() });
+        sectors(&read(&file, &pool, 0, 1_024).await)
+    })
+}
+
+#[test]
+fn a_read_sees_a_write_in_flight_only_where_they_overlap() {
+    let reads: BTreeSet<Vec<u8>> = (0..64).map(read_beside_write).collect();
+    assert_eq!(reads, BTreeSet::from([vec![0, 0], vec![0, 0xab]]));
+}
+
+/// The sectors that a read of file `a` gives while a write of 0xab over file `b` is
+/// in flight.
+fn read_beside_other_file(seed: u64) -> Vec<u8> {
+    run(seed, MIB, |node, tasks| async move {
+        let a = create(&node, "a", 1_024).await;
+        let b = create(&node, "b", 1_024).await;
+        let pool = Rc::new(pool());
+        let parts = [block(&pool, &[0xab; 1_024])];
+        tasks.spawn(async move { b.write_at(0, &parts).await.unwrap() });
+        sectors(&read(&a, &pool, 0, 1_024).await)
+    })
+}
+
+#[test]
+fn a_read_never_sees_a_write_in_flight_on_another_file() {
+    for seed in 0..64 {
+        assert_eq!(read_beside_other_file(seed), [0, 0], "seed {seed}");
+    }
+}
+
+/// The sectors that a read gives while a write that a fault fails is in flight over
+/// them.
+fn read_over_failed_write(seed: u64) -> Vec<u8> {
+    run(seed, MIB, |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 1_024).await);
+        let pool = Rc::new(pool());
+        node.fail_file(Path::new("a"), Operation::WriteAt);
+        let (writer, parts) = (Rc::clone(&file), [block(&pool, &[0xab; 1_024])]);
+        tasks.spawn(async move {
+            let failed = Err(io("a", Operation::WriteAt, 5));
+            assert_eq!(writer.write_at(0, &parts).await, failed);
+        });
+        sectors(&read(&file, &pool, 0, 1_024).await)
+    })
+}
+
+#[test]
+fn a_read_never_sees_a_write_that_a_fault_fails() {
+    for seed in 0..64 {
+        assert_eq!(read_over_failed_write(seed), [0, 0], "seed {seed}");
+    }
+}
+
+/// The span of one `free`, with or without a 1 ns sleep in flight on another task.
+fn free_span(seed: u64, sleep: bool) -> Span {
+    run(seed, MIB, move |node, tasks| async move {
+        let (files, clock) = (node.files(), node.clock());
+        if sleep {
+            let clock = node.clock();
+            tasks.spawn(async move { clock.sleep(Span::from_nanos(1)).await });
+        }
+        let start = clock.now();
+        files.free().await.unwrap();
+        clock.now() - start
+    })
+}
+
+#[test]
+fn a_call_ends_at_its_own_time_whatever_else_is_due() {
+    for seed in 0..16 {
+        assert_eq!(free_span(seed, false), free_span(seed, true), "seed {seed}");
+    }
+}
+
+/// The sectors after two writes were in flight at once over two sectors that a
+/// write of 9 filled before.
+fn writes_over_filled_sectors(seed: u64) -> Vec<u8> {
+    run(seed, MIB, |node, tasks| async move {
+        let file = Rc::new(create(&node, "a", 1_024).await);
+        let pool = pool();
+        file.write_at(0, &[block(&pool, &[9; 1_024])])
+            .await
+            .unwrap();
+        let (writer, parts) = (Rc::clone(&file), [block(&pool, &[1; 1_024])]);
+        tasks.spawn(async move { writer.write_at(0, &parts).await.unwrap() });
+        file.write_at(0, &[block(&pool, &[2; 1_024])])
+            .await
+            .unwrap();
+        node.clock().sleep(Span::MILLISECOND).await;
+        sectors(&read(&file, &pool, 0, 1_024).await)
+    })
+}
+
+#[test]
+fn writes_in_flight_over_filled_sectors_leave_either_bytes() {
+    let writes: BTreeSet<Vec<u8>> = (0..64).map(writes_over_filled_sectors).collect();
+    let both = BTreeSet::from([vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]]);
+    assert_eq!(writes, both);
+}
+
+/// The free bytes after an open that makes a 64 KiB file is polled once, its future
+/// drops before or after the call ends, and the file is removed.
+fn free_after_dropped_open(ended: bool) -> u64 {
+    run(0, MIB, move |node, _| async move {
+        let (files, clock) = (node.files(), node.clock());
+        let mut open =
+            Box::pin(files.open(Path::new("a"), Mode::Create { len: 64 * KIB }));
+        poll_fn(|cx| {
+            assert!(open.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        if ended {
+            clock.sleep(Span::MILLISECOND).await;
+            drop(open);
+        } else {
+            drop(open);
+            clock.sleep(Span::MILLISECOND).await;
+        }
+        files.remove(Path::new("a")).await.unwrap();
+        files.free().await.unwrap()
+    })
+}
+
+#[test]
+fn a_dropped_open_releases_its_file() {
+    assert_eq!(free_after_dropped_open(false), MIB, "dropped in flight");
+    assert_eq!(free_after_dropped_open(true), MIB, "dropped after the end");
+}
+
+/// The digest of a run with one `free`, which a fault fails or not.
+fn free_digest(failed: bool) -> u64 {
+    let mut sim = sim(3);
+    let node = sim.node(node::Config::default());
+    if failed {
+        node.fail_file(Path::new(""), Operation::Free);
+    }
+    let handle = node.shards().start(shard("d"), move |_| async move {
+        drop(node.files().free().await);
+    });
+    sim.run().unwrap();
+    handle.unwrap().join().unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_digest_holds_the_result_of_each_file_call() {
+    assert_eq!(free_digest(false), free_digest(false));
+    assert_ne!(free_digest(false), free_digest(true));
 }

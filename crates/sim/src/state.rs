@@ -5,6 +5,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::IoSliceMut;
 use std::mem;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Poll, Wake, Waker};
 use std::time::Instant;
@@ -17,7 +18,7 @@ use env::thread::Error;
 use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
-use crate::disk::{Disks, Held};
+use crate::files::{Call, Files, Held};
 use crate::net::{Bound, Network};
 use crate::{link, node};
 
@@ -51,7 +52,7 @@ pub(crate) struct State {
     epoch: Instant,
     next: u64,
     net: Network,
-    disks: Disks,
+    files: Files,
     /// A hash of every pick, every datagram event, and every end of a file call, in
     /// order.
     digest: DefaultHasher,
@@ -91,8 +92,8 @@ struct Thread {
 pub(crate) enum Next {
     /// Poll a ready task.
     Poll,
-    /// Move true time to the first timer, the first arrival, or the first end of a
-    /// pause that holds a ready task.
+    /// Move true time to the first timer, arrival, or end of a file call, or to the
+    /// first end of a pause that holds a ready task.
     Advance(Monotonic),
 }
 
@@ -112,7 +113,7 @@ pub(crate) enum Start {
 }
 
 impl State {
-    pub(crate) fn new(epoch: Instant, net: Network, disks: Disks) -> Self {
+    pub(crate) fn new(epoch: Instant, net: Network, files: Files) -> Self {
         Self {
             now: Monotonic::default(),
             nodes: Vec::new(),
@@ -125,7 +126,7 @@ impl State {
             epoch,
             next: 0,
             net,
-            disks,
+            files,
             digest: DefaultHasher::new(),
         }
     }
@@ -153,7 +154,7 @@ impl State {
             entropy,
         };
         self.nodes.push(node);
-        self.disks.add(config.disk_bytes);
+        self.files.add(config.disk_bytes);
         self.nodes.len() - 1
     }
 
@@ -300,13 +301,19 @@ impl State {
         self.net.recv(socket, waker, buffers, meta)
     }
 
-    /// True time now.
-    pub(crate) fn now(&self) -> Monotonic {
-        self.now
+    /// Starts `call` of `node` on `path` now, as [`Files::submit`].
+    pub(crate) fn submit(
+        &mut self,
+        node: usize,
+        path: &Path,
+        call: Call,
+        held: Option<Held>,
+    ) -> u64 {
+        self.files.submit(self.now, node, path, call, held)
     }
 
-    pub(crate) fn disks(&mut self) -> &mut Disks {
-        &mut self.disks
+    pub(crate) fn files(&mut self) -> &mut Files {
+        &mut self.files
     }
 
     pub(crate) fn digest(&self) -> u64 {
@@ -366,7 +373,7 @@ impl State {
         let at = timer
             .into_iter()
             .chain(self.net.first())
-            .chain(self.disks.first())
+            .chain(self.files.first())
             .chain(pauses)
             .filter(|&at| at <= last)
             .min();
@@ -450,7 +457,7 @@ impl State {
             wakers.push(timer.remove());
         }
         wakers.extend(self.net.deliver(at, &mut self.digest));
-        let (ended, orphans) = self.disks.end(at, &mut self.digest);
+        let (ended, orphans) = self.files.end(at, &mut self.digest);
         wakers.extend(ended);
         (wakers, orphans)
     }

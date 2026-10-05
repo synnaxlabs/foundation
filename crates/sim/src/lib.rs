@@ -3,8 +3,8 @@
 //!
 //! One [`Sim`] runs every node of a mesh on the calling thread. A seeded scheduler
 //! polls one ready task at a time, and true time moves only when no task is ready: to
-//! the next timer or datagram arrival. Datagrams cross [`link`]s with delay and
-//! faults. The same seed and the same calls give the same run.
+//! the next timer, datagram arrival, or end of a file call. Datagrams cross [`link`]s
+//! with delay and faults. The same seed and the same calls give the same run.
 //!
 //! A task panic becomes [`Error::Panicked`] only in a build that unwinds on panic, as
 //! tests do. A build with `panic = "abort"` ends the process at the panic.
@@ -14,6 +14,7 @@ pub mod node;
 
 mod disk;
 mod drivers;
+mod files;
 mod net;
 mod state;
 #[cfg(test)]
@@ -31,7 +32,7 @@ use std::time::Instant;
 use env::rng::Rng;
 use types::time::{Monotonic, Span};
 
-use crate::disk::Disks;
+use crate::files::Files;
 use crate::net::Network;
 use crate::node::Node;
 use crate::state::{Futures, Next, Shared, Start, State, lock};
@@ -46,7 +47,8 @@ pub struct Config {
     /// The replay value: the same seed and the same calls give the same run.
     pub seed: u64,
     /// The most steps in one call to [`Sim::run`] or [`Sim::run_for`]. A step polls
-    /// one task, or moves true time to the next timer, arrival, or end of a pause.
+    /// one task, or moves true time to the next timer, arrival, end of a file call, or
+    /// end of a pause.
     pub steps_max: u64,
     /// The link from each node to each node, itself too, until [`Sim::link`] sets
     /// another.
@@ -106,8 +108,8 @@ impl Sim {
         let mut streams = Rng::from_seed(config.seed);
         let scheduler = Rng::from_seed(streams.next_u64());
         let net = Network::new(config.link, Rng::from_seed(streams.next_u64()));
-        let disks = Disks::new(Rng::from_seed(streams.next_u64()));
-        let state = State::new(Instant::now(), net, disks);
+        let files = Files::new(Rng::from_seed(streams.next_u64()));
+        let state = State::new(Instant::now(), net, files);
         Self {
             config,
             shared: Arc::new(Mutex::new(state)),
@@ -159,8 +161,8 @@ impl Sim {
     ///   [`env::thread::Error::Panicked`].
     /// - [`Error::Steps`] past [`Config::steps_max`] steps.
     /// - [`Error::Stuck`] when threads remain but nothing can run again: no task is
-    ///   ready on a node that runs, and no timer, arrival, or pause ends before true
-    ///   time.
+    ///   ready on a node that runs, and no timer, arrival, file call, or pause ends
+    ///   before the end of true time.
     pub fn run(&mut self) -> Result<(), Error> {
         self.drive(None)
     }
