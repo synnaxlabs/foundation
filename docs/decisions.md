@@ -396,13 +396,19 @@ How to read this record:
 - **PROTOCOL HEADER (#75)** The header of STREAM DISPATCH is 3 bytes: the wire
   version (`u16`, little-endian), then the protocol number (`u8`): clock 1, mesh 2,
   replica 3, blob 4, hub 5. It starts the first message of each stream and each
-  datagram. The version comes first and is checked first, so a later version can
-  change what follows it. A node reads only `wire::VERSION` until version 2 exists;
-  then it also reads the version before it (C9d). A header that is not valid resets
-  the stream with code 1 (`wire::protocol::REJECTED`). Reset codes 1 to 15 belong to
-  the header; each protocol numbers its own codes from 16. Rejected: the version once
-  per session (the diode carrier cannot negotiate, and each stream must decode by
-  itself) and a session per protocol (`transport` stays blind to protocols).
+  datagram, and its version covers every message on that stream, encoded series
+  included: each wire version fixes one codec version (wire 1 carries codec 1). The
+  version comes first and is checked first, so a later version can change what
+  follows it. A node reads only `wire::VERSION` until version 2 exists; then it also
+  reads the version before it (C9d), and writers take the version from the format
+  flag. `node` stops a stream whose header is not valid with code 1
+  (`wire::header::REJECTED`) and resets its reply half, if it has one, with the same
+  code; a datagram whose header is not valid drops and counts in a status channel.
+  Stop and reset codes 1 to 15 belong to the header; each protocol numbers its own
+  from 16. Rejected: a version agreed once per session (the format flag's flip reaches
+  nodes at different times, so one session can carry streams of two versions) and a
+  session per protocol (`transport` stays blind to protocols, and it costs five
+  handshakes per peer pair).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
   however many shards it runs, so each site's firewall needs one known port per
   conduit. Each QUIC connection belongs to one shard, and every connection ID a node
