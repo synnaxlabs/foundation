@@ -630,14 +630,13 @@ impl Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use env::files::SECTOR;
     use proptest::prelude::*;
     use std::collections::VecDeque;
 
     const BLOCKS: u64 = 8;
     const AREA: u64 = BLOCKS * 4096;
     const BODY_MAX: usize = 3 * ALIGN;
-    /// The unit a crash keeps or loses of an unsynced write.
-    const SECTOR: usize = 512;
 
     /// The smallest piece the test reader holds. Every record of the fixture
     /// fits in it; the long fixture below does not.
