@@ -23,6 +23,9 @@ use crate::record::{
 /// The body of a restart record: one chain value.
 const RESTART_LEN: usize = 4;
 
+/// Bytes of the whole blocks that hold a restart record.
+const RESTART: usize = (HEADER_LEN + RESTART_LEN).next_multiple_of(ALIGN);
+
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
 
@@ -92,9 +95,10 @@ impl Layout {
     ///
     /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
     /// under the table of one entry or over `u32::MAX`, when `area` is less than
-    /// twice the largest record, or when the ring file (two header blocks and the
-    /// area) does not fit in a `u64`. A ring of that length that holds only its
-    /// restart record takes any record, wherever the restart record is.
+    /// twice the largest record (a 9-byte header and `body_max`, in whole 4096-byte
+    /// blocks), or when the ring file (two header blocks and the area) does not fit
+    /// in a `u64`. A ring of that length that holds only its restart record takes
+    /// any record, wherever the restart record is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         let window = HEADER_LEN
             .checked_add(body_max)
@@ -107,7 +111,9 @@ impl Layout {
                 if body.contains(&body_max)
                     && area.is_multiple_of(BLOCK)
                     && area <= u64::MAX - AREA_START
-                    && window.saturating_mul(2) <= area =>
+                    // The restart record, the skip of less than a record before
+                    // the end of the area, then the record.
+                    && to_u64(RESTART) + (window - BLOCK) + window <= area =>
             {
                 Ok(Self {
                     area,
@@ -881,7 +887,7 @@ mod tests {
                     8 * block,
                     entry::table_len(1) - 1,
                 ),
-                ("an area under two records less a block", 2 * block, 4088),
+                ("an area of one record of two blocks", 2 * block, 4088),
                 ("an area of one record of one block", block, 4087),
                 ("an area of two records less a block", 3 * block, 4088),
                 ("a body over u32::MAX", u64::MAX - 4095, usize::MAX),
@@ -928,12 +934,12 @@ mod tests {
                 body_max in entry::table_len(1)..=3 * ALIGN - HEADER_LEN,
                 tail in 0..64u64,
             ) {
-                let window = to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN));
-                let under = 2 * window - 4096;
+                let record = to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN));
+                let under = 2 * record - 4096;
                 let unfit = Unfit { area: under, body_max };
                 prop_assert_eq!(Layout::new(under, body_max), Err(unfit));
                 let layout =
-                    Layout::new(2 * window, body_max).expect("the smallest area");
+                    Layout::new(2 * record, body_max).expect("the smallest area");
                 let mut cursor = Cursor::new(layout, at(tail, 0), PIECE);
                 let zeros = vec![0; cursor.window().len];
                 prop_assert_eq!(cursor.next(&zeros), Ok(Step::End));
