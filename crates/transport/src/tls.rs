@@ -138,13 +138,14 @@ impl Tls {
 }
 
 /// aws-lc with its TLS 1.3 suites and groups in a fixed order, so a rustls feature
-/// that another crate turns on cannot change them.
+/// that another crate turns on cannot change them. Nodes agree the cheapest:
+/// AES-128-GCM where the CPU has AES instructions, and X25519.
 fn provider() -> CryptoProvider {
     use rustls::crypto::aws_lc_rs::{cipher_suite, default_provider, kx_group};
     CryptoProvider {
         cipher_suites: vec![
-            cipher_suite::TLS13_AES_256_GCM_SHA384,
             cipher_suite::TLS13_AES_128_GCM_SHA256,
+            cipher_suite::TLS13_AES_256_GCM_SHA384,
             cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
         ],
         kx_groups: vec![
@@ -311,6 +312,7 @@ mod tests {
     };
     use proptest::prelude::*;
     use rustls::client::ResolvesClientCert;
+    use rustls::crypto::aws_lc_rs::default_provider;
     use rustls::crypto::aws_lc_rs::sign::any_ecdsa_type;
     use rustls::pki_types::PrivateKeyDer;
     use rustls::sign::{Signer, SigningKey};
@@ -381,8 +383,8 @@ mod tests {
     }
 
     /// A client like an SDK: it pins the server's key and has no certificate.
-    fn anonymous(expected: PublicKey) -> Arc<ClientConfig> {
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    fn anonymous(provider: CryptoProvider, expected: PublicKey) -> Arc<ClientConfig> {
+        let provider = Arc::new(provider);
         let algorithms = provider.signature_verification_algorithms;
         #[expect(clippy::disallowed_methods, reason = "it passes the fixed time")]
         let mut config = ClientConfig::builder_with_details(provider, Arc::new(Epoch))
@@ -421,8 +423,15 @@ mod tests {
     fn ecdsa() -> Tls {
         const P256: &[u8] = b"\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\
             \x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00";
+        let sec1 = [
+            b"\x30\x31\x02\x01\x01\x04\x20".as_slice(),
+            &[1; 32],
+            b"\xa0\x0a\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07",
+        ]
+        .concat();
         let pair =
-            EcdsaKeyPair::generate(&ECDSA_P256_SHA256_ASN1_SIGNING).expect("a key");
+            EcdsaKeyPair::from_private_key_der(&ECDSA_P256_SHA256_ASN1_SIGNING, &sec1)
+                .expect("a P-256 key");
         let mut tbs = b"\x30\x81\xba\xa0\x03\x02\x01\x02\x02\x01\x01".to_vec();
         for part in [
             ED25519,
@@ -439,8 +448,7 @@ mod tests {
         for part in [&tbs[..], ED25519, SIGNATURE, &[0; 64]] {
             der.extend_from_slice(part);
         }
-        let pkcs8 = pair.to_pkcs8v1().expect("PKCS#8").as_ref().to_vec();
-        let key = any_ecdsa_type(&PrivateKeyDer::Pkcs8(pkcs8.into())).expect("ECDSA");
+        let key = any_ecdsa_type(&PrivateKeyDer::Sec1(sec1.into())).expect("ECDSA");
         Tls::with(CertifiedKey::new(vec![der.into()], Arc::new(Ecdsa(key))))
     }
 
@@ -487,7 +495,10 @@ mod tests {
         #[test]
         fn when_client_has_no_certificate_the_server_sees_a_client() {
             let b = PrivateKey([2; 32]);
-            let peers = handshake(anonymous(public(&b)), Tls::new(&b).server());
+            let peers = handshake(
+                anonymous(default_provider(), public(&b)),
+                Tls::new(&b).server(),
+            );
             assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Client)));
         }
 
@@ -507,7 +518,7 @@ mod tests {
         #[test]
         fn when_client_is_an_sdk_it_does_not_resume() {
             let b = PrivateKey([2; 32]);
-            let client = anonymous(public(&b));
+            let client = anonymous(default_provider(), public(&b));
             let server = Tls::new(&b).server();
             for _ in 0..2 {
                 let peers = handshake(Arc::clone(&client), Arc::clone(&server));
@@ -540,7 +551,7 @@ mod tests {
         }
 
         #[test]
-        fn when_both_are_nodes_they_agree_aes_256_gcm_and_x25519() {
+        fn when_both_are_nodes_they_agree_aes_128_gcm_and_x25519() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let (client, _) =
                 connect(Tls::new(&a).client(public(&b)), Tls::new(&b).server())
@@ -554,10 +565,34 @@ mod tests {
             assert_eq!(
                 agreed,
                 (
-                    Some(CipherSuite::TLS13_AES_256_GCM_SHA384),
+                    Some(CipherSuite::TLS13_AES_128_GCM_SHA256),
                     Some(NamedGroup::X25519)
                 )
             );
+        }
+
+        #[test]
+        fn when_an_sdk_offers_one_suite_and_group_the_server_agrees() {
+            let b = PrivateKey([2; 32]);
+            let server = Tls::new(&b).server();
+            let all = default_provider();
+            let suites = all
+                .cipher_suites
+                .iter()
+                .filter(|suite| suite.tls13().is_some());
+            for suite in suites {
+                for group in &all.kx_groups {
+                    let provider = CryptoProvider {
+                        cipher_suites: vec![*suite],
+                        kx_groups: vec![*group],
+                        ..default_provider()
+                    };
+                    let client = anonymous(provider, public(&b));
+                    let peers = handshake(client, Arc::clone(&server));
+                    let expected = Ok((Peer::Node(public(&b)), Peer::Client));
+                    assert_eq!(peers, expected, "{suite:?} {group:?}");
+                }
+            }
         }
 
         #[test]
@@ -581,7 +616,7 @@ mod tests {
         #[test]
         fn when_client_offers_no_protocol_the_server_refuses() {
             let b = PrivateKey([2; 32]);
-            let mut config = (*anonymous(public(&b))).clone();
+            let mut config = (*anonymous(default_provider(), public(&b))).clone();
             config.alpn_protocols.clear();
             let (_, server) = connect(Arc::new(config), Tls::new(&b).server())
                 .expect("rustls finishes a handshake over TCP with no protocol");
