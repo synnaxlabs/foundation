@@ -1,4 +1,4 @@
-use types::time::{Monotonic, Span};
+use types::time::{Interval, Monotonic, Span, Stamp};
 
 use crate::Drift;
 
@@ -57,6 +57,19 @@ impl Measurement {
     #[must_use]
     pub fn error_at(self, now: Monotonic, drift: Drift) -> Span {
         capped(self.grown(now, drift))
+    }
+
+    /// Mesh time at [`Measurement::at`]: `at` plus the offset, within the error. An
+    /// edge past the range of a stamp stops at the nearest stamp.
+    #[must_use]
+    pub fn interval(self) -> Interval {
+        let time = i128::from(self.at.0) + i128::from(self.offset.nanos());
+        let error = i128::from(self.error.nanos());
+        let stamp = |nanos| Stamp::from_nanos(saturated(nanos).nanos());
+        Interval {
+            earliest: stamp(time - error),
+            latest: stamp(time + error),
+        }
     }
 
     /// The lowest and highest true offset at `now`, in nanoseconds. Unlike
@@ -289,8 +302,56 @@ mod tests {
         }
     }
 
+    mod interval {
+        use types::time::{Interval, Stamp};
+
+        use super::*;
+
+        fn interval(at: u64, offset: i64, error: i64) -> Interval {
+            let m = Measurement::new(
+                Monotonic(at),
+                Span::from_nanos(offset),
+                Span::from_nanos(error),
+            );
+            m.expect("valid").interval()
+        }
+
+        fn stamps(earliest: i64, latest: i64) -> Interval {
+            Interval {
+                earliest: Stamp::from_nanos(earliest),
+                latest: Stamp::from_nanos(latest),
+            }
+        }
+
+        #[test]
+        fn is_at_plus_the_offset_within_the_error() {
+            assert_eq!(interval(1_000, 300, 20), stamps(1_280, 1_320));
+            assert_eq!(interval(1_000, -300, 20), stamps(680, 720));
+            assert_eq!(interval(1_000, 0, 0), stamps(1_000, 1_000));
+        }
+
+        #[test]
+        fn stops_at_the_latest_stamp() {
+            let top = i64::MAX.unsigned_abs();
+            assert_eq!(interval(top - 2, 0, 5), stamps(i64::MAX - 7, i64::MAX));
+            assert_eq!(interval(u64::MAX, 0, 5), stamps(i64::MAX, i64::MAX));
+        }
+
+        #[test]
+        fn stops_at_the_earliest_stamp() {
+            let widest = MAX_ERROR.nanos();
+            assert_eq!(interval(2, i64::MIN, 5), stamps(i64::MIN, i64::MIN + 7));
+            assert_eq!(
+                interval(0, i64::MIN, widest),
+                stamps(i64::MIN, i64::MIN + widest)
+            );
+        }
+    }
+
     mod properties {
         use proptest::prelude::*;
+
+        use types::time::Interval;
 
         use super::*;
         use crate::world::any_measurements;
@@ -306,6 +367,25 @@ mod tests {
                 for m in measurements {
                     let error = m.error_at(Monotonic(now), drift);
                     prop_assert!(m.error() <= error && error <= MAX_ERROR);
+                }
+            }
+
+            #[test]
+            fn interval_holds_at_plus_the_offset(
+                measurements in any_measurements(i64::MAX, MAX_ERROR.nanos()),
+            ) {
+                for m in measurements {
+                    let Interval { earliest, latest } = m.interval();
+                    let (low, high) = (earliest.nanos(), latest.nanos());
+                    let time = i128::from(m.at().0) + i128::from(m.offset().nanos());
+                    prop_assert!(low <= high);
+                    if let Ok(time) = i64::try_from(time) {
+                        prop_assert!(low <= time && time <= high);
+                    }
+                    if low != i64::MIN && high != i64::MAX {
+                        let width = i128::from(high) - i128::from(low);
+                        prop_assert_eq!(width, 2 * i128::from(m.error().nanos()));
+                    }
                 }
             }
         }
