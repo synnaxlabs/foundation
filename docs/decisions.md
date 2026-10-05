@@ -298,16 +298,15 @@ How to read this record:
   never landed, and the home applies it to the live path. When no sample exists and the
   data fits A6, it applies as backfill. Anything else is an error: some samples stored
   and some not, a stored timestamp with other values, data that fits neither path, or a
-  range below the buffer's floor. When the indexes of one resend land on different
-  paths, the home splits it into frames of one path each and drops the repeats. It
-  confirms the resend when every part has landed or was dropped. Only a mixed resend
-  pays this copy; `home` measures it when it builds the split. Live and backfill frames
-  pay no check. Values are compared decoded, not as bytes. Writers assign no numbers: a
-  resend comes in a new session, and the writer never learned them. The person decided
-  on 2026-10-05: "By timestamp + same values" (#148), then "A `resend` label" (#168),
-  then the split, a resend of every unconfirmed frame, and no session path: "as long as
-  you've evaluated the performance costs of your decision against correctness then I'm
-  ok with this" (#243).
+  range below the buffer's floor. The home checks a resend per index frame (INDEX
+  FRAMES): each one lands on one path or is dropped as a repeat, with no second split.
+  It confirms the resend when every index frame has landed or was dropped. Live and
+  backfill frames pay no check. Values are compared decoded, not as bytes. Writers
+  assign no numbers: a resend comes in a new session, and the writer never learned
+  them. The person decided on 2026-10-05: "By timestamp + same values" (#148), then "A
+  `resend` label" (#168), then the split, a resend of every unconfirmed frame, and no
+  session path: "as long as you've evaluated the performance costs of your decision
+  against correctness then I'm ok with this" (#243).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -402,8 +401,9 @@ How to read this record:
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later
-  gives it to readers. B7, the log, the seq, and reader positions are per index.
-  Decided by the `write-path` builder; approved by the coordinator (#191).
+  gives it to readers. B7, the log, the seq, and reader positions are per index. A
+  write with more than one present group pays one copy of its series into the index
+  frames. Decided by the `write-path` builder; approved by the coordinator (#191).
 - **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
   of the index frame in entry order, then the frame's encoded series bytes,
@@ -538,12 +538,18 @@ How to read this record:
   its last 8 measurements and offers the one with the smallest bound now. This reads R6
   TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
   fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
-  offsets inside the most bounds (Marzullo). It fails when no offset is inside more than
-  half of the bounds that vote. This reads C6's "follows the smallest measured bound":
-  when sources agree, the result is never wider than the narrowest. The result holds the
-  true offset when the bounds that hold it are a majority of the bounds that vote, and
-  every other bound that votes misses them. Decided by the `time` builder (#49). A
-  device's readings go to the oscillator fit (`Overlap`), never to `combine`. Node
+  offsets inside the most bounds (Marzullo). It fails when no offset is inside the
+  bounds of more than half of the sources that vote. This reads C6's "follows the
+  smallest measured bound": when sources agree, the result is never wider than the
+  narrowest. The result holds the true offset when the bounds that hold it are a
+  majority of the sources that vote, and every other bound that votes misses them.
+  Decided by the `time` builder (#49). Each
+  source votes: a source with no measurement agrees with no offset, and it votes beside
+  the known bounds, or beside the unknown bounds when no bound is known. So before its
+  first estimate a clock waits until more than half of its sources agree, and one
+  source that answers first cannot set mesh time. The person decided on 2026-10-05
+  ("clock question si approved at whatever path you think"), #488. A device's readings
+  go to the oscillator fit (`Overlap`), never to `combine`. Node
   sources keep `Filter`, not `Overlap`: a network exchange puts the true offset at about
   the same place in each bracket, so an overlap gains little, and a broken drift bound
   would stay wrong for the life of an overlap, not for 8 exchanges. Decided by the
@@ -585,7 +591,11 @@ How to read this record:
   with nine fraction digits; input needs an offset, takes up to nine fraction digits,
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
-  trips; input rejects an end before the start.
+  trips; input rejects an end before the start. A byte size follows the span rules: one
+  number and one unit with no space (`200GiB`), and a decimal fraction only when it
+  gives whole bytes (`1.5GiB`). Its type lives in `types` beside `time::Span`, and the
+  `document` reader is an adapter over it. The person decided on 2026-10-05 ("A yes I
+  approve", #479).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -753,21 +763,24 @@ How to read this record:
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
   the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
-  issuer are not checked. A node sends its certificate when it dials; an SDK client
-  sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
-  session protocol gets a new name. A session that agrees no ALPN, or another name,
-  ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
-  ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
-  dialing node offers them in that order, and the client's order decides, so nodes
-  agree AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between
-  nodes and "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so
-  an SDK may offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
-  reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS).
-  Decided by `network` in #54; the ALPN check, suites, and groups in #108. A key of
-  small order is not a node key: a signature for it passes with no private key, so
-  every Ed25519 check refuses it (BQ12). `types::node::PublicKey` refuses such a key
-  when it is built, so no check site needs its own test. The person decided on
-  2026-10-05 ("Yeah that's fine"), #227, #277.
+  issuer are not checked. A peer's chain is one certificate of at most 1 KiB; any other
+  chain is refused, so a peer cannot make the node hold more for a session (#299). The
+  limit is part of `foundation/1`: a certificate over it needs a new ALPN. The person
+  approved it on 2026-10-05 ("approve"), #383. A node sends its certificate when it
+  dials; an SDK client sends none and pins the node key the same way. ALPN is
+  `foundation/1`, and a new session protocol gets a new name. A session that agrees no
+  ALPN, or another name, ends on every carrier. The suites are AES-128-GCM, AES-256-GCM,
+  and ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
+  dialing node offers them in that order, and the client's order decides, so nodes agree
+  AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between nodes and
+  "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so an SDK may
+  offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
+  reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS). Decided
+  by `network` in #54; the ALPN check, suites, and groups in #108. A key of small order
+  is not a node key: a signature for it passes with no private key, so every Ed25519
+  check refuses it (BQ12). `types::node::PublicKey` refuses such a key when it is built,
+  so no check site needs its own test. The person decided on 2026-10-05 ("Yeah that's
+  fine"), #227, #277.
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -801,14 +814,20 @@ How to read this record:
   empty entry of its term first, so it can commit what came before. It replicates with
   `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
   (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
-  (its hint for the next `prev`). A malformed `Append` (entries that do not follow
-  `prev`) is `Error::EntryOutOfOrder`. `Body::Heartbeat { commit }` carries the commit
-  index, capped at what that follower is known to hold. A leader commits an index only
-  when a quorum holds it and its entry is of the leader's own term. A follower commits
-  no further than the last entry the leader sent it. `Ready.committed` gives each entry
-  once, after it is written. Batch size (64 entries) and the number of appends in flight
-  per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
-  `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
+  (its hint for the next `prev`). `step` checks every index a message names, and the
+  order of an append's entries, against the log before it changes state: entries that
+  do not follow `prev` are `Error::EntryOutOfOrder`, and an index past the log is
+  `Error::IndexPastLog`. An `Append` with an entry whose term is above the message's
+  term is `Error::TermBehindLog`: no leader sends one, and a follower that wrote it
+  could not restart. The conformance oracle changed to match; the person decided on
+  2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
+  is known to hold. A leader commits an index only when a quorum holds it and its
+  entry is of the leader's own term. A follower commits no further than the last
+  entry the leader sent it. `Ready.committed` gives each entry once, after it is
+  written. Batch size (64 entries) and the number of appends in flight per follower
+  (8) are constants, not `Config` fields: nothing measured asks for a knob. `Message`
+  and `Body` are `Clone`, not `Copy`, because an append carries entries.
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
@@ -832,10 +851,15 @@ How to read this record:
   releases it, so the node learns it is out and never campaigns. A removed node that
   answered nothing over a whole quorum check period is released at that check instead.
   A follower releases the removed nodes when the leave commits. A removed node that
-  campaigns at the leader's term did not learn the commit: the leader takes it back
-  as a peer and probes it from the end of its log, so it gets the leave and is
-  released again. A leader outside the
-  committed final set sends the commit and steps down. A node outside an uncommitted
+  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
+  only from a voter of the newest configuration in this node's log, and a node whose
+  committed configuration lacks the sender answers `removed`. The removed node takes
+  that answer only from a voter of its own region, and stops its `raft` group for that
+  region. `raft` sends nothing to a node outside its configuration; until `mesh` sends
+  the answer, such a node campaigns with no effect. Readmit in `raft` (#414) lost: it
+  sent the log to a sender that `raft` cannot check. The person decided on 2026-10-05
+  ("Ok B is fine", #193). A leader outside the committed final set sends the commit
+  and steps down. A node outside an uncommitted
   configuration still campaigns: the entry may be truncated, and a removed leader that
   lost its lead before the leave reached a peer is the only node that can win the
   election that commits it.
@@ -1050,7 +1074,11 @@ How to read this record:
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
   ended the process, `hcl-primitives` read `-18446744073709551615` as 1, and its errors
   had no fix-it hints. The reader refuses nesting past the Document limit, reads
-  integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
+  integers exactly, refuses a float that an `f64` cannot hold (past the largest, or
+  rounded to zero from digits that are not all zero), refuses an object key that is a
+  number with a fraction, an exponent, or more than 154 digits (HCL can change such a
+  key when it makes a string of it), and gives each unsupported HCL form an error with
+  a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
 - **HCL IDENTIFIERS (2026-10-05)** The reader accepts identifiers outside ASCII as HCL
@@ -1066,6 +1094,20 @@ How to read this record:
   hand-kept list of the 23; own tables generated from HCL's Unicode version; and
   `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
   `ID_Start` and `ID_Continue`.
+- **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
+  the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
+  small Go program next to the texts lists the diagnostic code that `read` gives for
+  each form outside data in it, such as `hcl.null`. A test checks that `read` accepts
+  exactly the accepted texts with no code, refuses each other accepted text only with
+  `Error::Form` of the codes listed for it, and refuses each refused text.
+  `differences.txt` lists each text where `read` differs from HCL on purpose, with its
+  outcome and the decision behind it, and the test checks that outcome instead. For
+  each text that reads, `write` must give the bytes of a text in the directory that is
+  accepted with no code and is not in `differences.txt`, and those bytes must read as
+  the same Document. The program records the HCL
+  version. A person runs it by hand when the texts change; CI does not run it and
+  needs no Go. It is the only Go code in the repo. The person decided on 2026-10-05
+  ("Yeah that's fine", #460); the coordinator approved the plan on #460.
 - **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
   a new Document. Each attribute and block that keeps its value and its place keeps its
   bytes, comments, and blank lines. A changed value and a changed block on one line
@@ -1122,7 +1164,7 @@ How to read this record:
   settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
   SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
-  that selects node names: `node_settings { select = "site-a/*" disk = "200 GiB" }`.
+  that selects node names: `node_settings { select = "site-a/*" disk = "200GiB" }`.
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
@@ -1349,6 +1391,12 @@ How to read this record:
   (#37) gives files under one data directory, with owned blocks and a sync that
   poisons the file on failure (S4). `env::net` (#44) gives UDP sockets that move GSO
   and GRO batches with ECN and the local address, TCP streams, and listeners.
+  `env::serial` (#431) gives serial ports that move bytes at the line rate, with 8
+  data bits, a parity, and stop bits. Framing belongs to the protocol: a USB adapter
+  hides the gap between frames, so a seam that split frames would act differently
+  on `os` and `sim`. A socket, listener, or port may move to another thread before its
+  first poll. The first poll binds it to its thread, and a poll on another thread
+  panics.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -2114,10 +2162,11 @@ Rules:
 6. Upward flow goes only through values the upper crate pulls (watches, streams).
    Seams that lower crates define and upper crates implement (`env` traits) are
    injected downward.
-7. Only `os` touches the real clock, files, network, randomness, and threads, through
-   the `env` seams it implements. Only `clock` reads wall time through `env`; everyone
-   else asks `clock`. Only `node` builds real seams, and only `sim` builds simulated
-   ones. Below `hub`, only `home` writes channels, and only its companion samples.
+7. Only `os` touches the real clock, files, network, serial ports, randomness, and
+   threads, through the `env` seams it implements. Only `clock` reads wall time
+   through `env`; everyone else asks `clock`. Only `node` builds real seams, and only
+   `sim` builds simulated ones. Below `hub`, only `home` writes channels, and only its
+   companion samples.
 
 Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
 `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
@@ -2131,7 +2180,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, and holds the one `unsafe impl GlobalAlloc`. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
-| 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
+| 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
 | 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits, and slews mesh time. | `types` |
@@ -2141,7 +2190,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |

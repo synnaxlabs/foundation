@@ -275,6 +275,11 @@ Sessions message each other with `SendMessage`, by name. Find names with
   docs first, then send the link.
 - An idle session wakes when a message arrives. Do not send a message to check if a
   session is alive.
+- **A question for the person** states the problem, the fix, its cost, and a
+  recommendation. For each option, it says whether it is a patch or the long-term
+  path; for a patch, it names the long-term fix. The person decided on 2026-10-05:
+  "whenever you present thes, you need to tell me hwether its a patch and not a long
+  term fix or the long term path".
 
 ## Before a session stops
 

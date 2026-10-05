@@ -4,6 +4,7 @@
 #![cfg(test)]
 
 mod change;
+mod check;
 mod config;
 mod election;
 mod network;
