@@ -6,13 +6,13 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+env = { path = "../env" }
+types = { path = "../types" }
 
 [dev-dependencies]
 counting = { path = "../counting" }
-env = { path = "../env" }
 proptest = { workspace = true }
 sim = { path = "../sim" }
-types = { path = "../types" }
 
 [[test]]
 name = "alloc"
