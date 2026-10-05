@@ -382,10 +382,13 @@ How to read this record:
   `first + len` passes `u64::MAX`. The restart record needs one free block: an open
   of a full ring first moves records at the tail to a segment.
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
-  u64][tail chain: u32][seq: u64][zero padding][crc32c: u32]`, one 4096-byte block,
-  magic `FNDNRING`, version 1. The CRC is the last four bytes and covers the rest.
-  The magic, the version, and the place of the CRC are the same in every version, so
-  an older build reads a newer block and reports its version. Two blocks at the
+  u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
+  magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and
+  covers the rest of the first 512-byte sector, so a checkpoint is in one sector
+  and a crash keeps it whole or old. The magic, the version, and the place of the
+  CRC are the same in every version, and a later version puts its fields after the
+  CRC in the same sector, so an older build reads a newer block and reports its
+  version. Bytes past the first sector are not read. Two blocks at the
   start of the ring hold the last two checkpoints: checkpoint `n` goes to block `n
   mod 2`. Open takes the whole block whose `seq` comes after the other's, wrapped
   as the writer wraps it (on a tie, the first); one torn block leaves the other. No

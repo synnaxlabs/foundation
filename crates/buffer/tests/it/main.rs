@@ -35,7 +35,8 @@ const RING: &str = "shard-0/ring";
 /// Where a header block keeps its version, its `body_max`, and its CRC.
 const VERSION_AT: usize = 8;
 const BODY_MAX_AT: usize = 18;
-const CRC_AT: usize = 4092;
+const CRC_AT: usize = 42;
+const SECTOR: usize = 512;
 
 /// What one test gets on its shard.
 struct Shard {
@@ -86,7 +87,8 @@ impl Shard {
             let mut block = file[place..place + to_usize(BLOCK)].to_vec();
             block[at..at + bytes.len()].copy_from_slice(bytes);
             let crc = crc32c::crc32c(&block[..CRC_AT]);
-            block[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
+            let crc = crc32c::crc32c_append(crc, &block[CRC_AT + 4..SECTOR]);
+            block[CRC_AT..CRC_AT + 4].copy_from_slice(&crc.to_le_bytes());
             self.memory.put(RING, place, &block);
         }
     }
@@ -738,6 +740,25 @@ fn a_file_with_no_header_is_missing() {
         shard.memory.put(RING, 0, b"not a ring");
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
+    });
+}
+
+/// The first write of the header goes to both blocks in one write. A crash keeps
+/// any set of its sectors; a checkpoint is in one sector, so each block is whole or
+/// zero, and the ring opens as new when no record landed.
+#[test]
+fn a_ring_whose_first_header_write_was_torn_opens_as_new() {
+    run(102, Memory::default(), |shard| async move {
+        let ring = layout(AREA, BODY_MAX);
+        drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
+        let len = to_usize(AREA_START + AREA);
+        let block = to_usize(BLOCK);
+        shard.memory.put(RING, SECTOR, &vec![0; block - SECTOR]);
+        shard
+            .memory
+            .put(RING, block + SECTOR, &vec![0; len - block - SECTOR]);
+        let opened = shard.open(ring, &mut Slots::new()).await;
+        assert_eq!(opened.map(|buffer| buffer.layout()), Ok(ring));
     });
 }
 
