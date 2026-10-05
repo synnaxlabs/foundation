@@ -135,7 +135,7 @@ impl std::error::Error for Error {}
 pub enum Form {
     /// `null`.
     Null,
-    /// An interpolation `${` or a directive `%{` in a string.
+    /// An interpolation `${` or a directive `%{` in a string or a heredoc.
     Template,
     /// An operator, such as `+`, `==`, `!`, or `-` before a value that is not a
     /// number.
@@ -227,6 +227,10 @@ pub enum Expected {
     ArgumentsEnd,
     /// `"` at the end of a string.
     Quote,
+    /// A marker, such as `EOT`, and a new line after `<<` or `<<-`.
+    HeredocStart,
+    /// The marker on a line of its own at the end of a heredoc.
+    HeredocEnd,
     /// `*/` at the end of a comment.
     CommentEnd,
 }
@@ -247,6 +251,10 @@ impl fmt::Display for Expected {
             Self::ObjectEnd => "`,`, a new line, or `}`",
             Self::ArgumentsEnd => "`,` or `)`",
             Self::Quote => "`\"` to end the string",
+            Self::HeredocStart => {
+                "a marker, such as `EOT`, and a new line to start the heredoc"
+            }
+            Self::HeredocEnd => "the marker on a line of its own to end the heredoc",
             Self::CommentEnd => "`*/` to end the comment",
         })
     }
@@ -285,6 +293,14 @@ mod tests {
             (Expected::ObjectEnd, "`,`, a new line, or `}`"),
             (Expected::ArgumentsEnd, "`,` or `)`"),
             (Expected::Quote, "`\"` to end the string"),
+            (
+                Expected::HeredocStart,
+                "a marker, such as `EOT`, and a new line to start the heredoc",
+            ),
+            (
+                Expected::HeredocEnd,
+                "the marker on a line of its own to end the heredoc",
+            ),
             (Expected::CommentEnd, "`*/` to end the comment"),
         ];
         for (expected, phrase) in cases {

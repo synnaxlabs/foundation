@@ -19,6 +19,10 @@ loom = { workspace = true }
 name = "ring"
 harness = false
 
+[[bench]]
+name = "latest"
+harness = false
+
 [[test]]
 name = "alloc"
 harness = false

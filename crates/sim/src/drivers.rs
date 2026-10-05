@@ -14,7 +14,7 @@ use env::shards::{Config, Main};
 use env::tasks::Task;
 use env::thread::{Error, Handle};
 use env::threads::Body;
-use types::time::{Monotonic, Stamp};
+use types::time::Monotonic;
 
 use crate::state::{Due, Futures, Shared, Start, lock};
 
@@ -81,7 +81,7 @@ impl env::clock::Driver for Node {
 }
 
 impl env::wall::Driver for Node {
-    fn now(&self) -> Stamp {
+    fn now(&self) -> env::wall::Reading {
         lock(&self.shared).wall(self.node)
     }
 }
