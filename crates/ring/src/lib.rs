@@ -112,16 +112,13 @@ pub struct Producer<T> {
 }
 
 impl<T: Send> Producer<T> {
-    /// Adds a value without waiting, and wakes a parked consumer. It is [`stage`]
-    /// then [`publish`]. It succeeds when the consumer is gone; the value drops with
-    /// the ring.
+    /// Adds a value without waiting, and wakes a parked consumer. It also shows the
+    /// staged values. It succeeds when the consumer is gone; the value drops with the
+    /// ring.
     ///
     /// # Errors
     ///
     /// [`Full`] holds the value when the ring has no room.
-    ///
-    /// [`stage`]: Self::stage
-    /// [`publish`]: Self::publish
     pub fn push(&mut self, value: T) -> Result<(), Full<T>> {
         self.stage(value)?;
         self.publish();
@@ -175,9 +172,7 @@ impl<T: Send> Producer<T> {
 
 impl<T> Drop for Producer<T> {
     fn drop(&mut self) {
-        if self.tail != self.published {
-            self.shared.tail.0.store(self.tail, Release);
-        }
+        self.shared.tail.0.store(self.tail, Release);
         self.shared.closed.store(true, Release);
         self.shared.parker.wake();
     }
@@ -252,7 +247,7 @@ impl<T: Send> Consumer<T> {
     /// Looks at the producer's side. It is ready with the next value, or with `None`
     /// when the producer is gone and the ring is empty.
     fn look(&mut self) -> Poll<Option<T>> {
-        // `closed` first: the producer's last push comes before its close, so a ring
+        // `closed` first: the producer's last publish comes before its close, so a ring
         // that reads closed and then empty is empty for good.
         let closed = self.shared.closed.load(Acquire);
         self.tail = self.shared.tail.0.load(Acquire);
@@ -311,7 +306,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{Config, Consumer, Full, new, with_origin};
+    use super::{Config, Consumer, Full, Producer, new, with_origin};
 
     /// Counts the wakes it gets.
     #[derive(Default)]
@@ -450,15 +445,25 @@ mod tests {
         use super::*;
 
         #[test]
+        fn shows_the_staged_values_through_push() {
+            let (mut producer, mut consumer) = new(config(4));
+            assert_eq!(producer.stage(1), Ok(()));
+            assert_eq!(consumer.try_pop(), None);
+            assert_eq!(producer.push(2), Ok(()));
+            assert_eq!(consumer.try_pop(), Some(1));
+            assert_eq!(consumer.try_pop(), Some(2));
+        }
+
+        #[test]
         fn wakes_a_parked_consumer_one_time_for_many_values() {
             let (mut producer, mut consumer) = new(config(4));
             let (tally, waker) = create_waker();
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
             assert_eq!(producer.stage(1), Ok(()));
             assert_eq!(producer.stage(2), Ok(()));
-            assert_eq!(tally.0.load(Relaxed), 0);
+            assert_eq!(tally.count(), 0);
             producer.publish();
-            assert_eq!(tally.0.load(Relaxed), 1);
+            assert_eq!(tally.count(), 1);
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(1)));
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(2)));
         }
@@ -469,7 +474,7 @@ mod tests {
             let (tally, waker) = create_waker();
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
             producer.publish();
-            assert_eq!(tally.0.load(Relaxed), 0);
+            assert_eq!(tally.count(), 0);
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
         }
     }
@@ -712,7 +717,6 @@ mod tests {
         use std::time::Duration;
 
         use super::*;
-        use crate::Producer;
 
         struct Unpark(Thread);
 
@@ -722,23 +726,25 @@ mod tests {
             }
         }
 
+        /// Drives `future` on this thread. It panics after `POLLS` polls that each
+        /// waited up to `WAIT`, so a lost wake fails the test in place of a hang.
         #[expect(
             clippy::disallowed_methods,
             reason = "this test drives the future on a real thread; `ring` has no `env`"
         )]
-        /// Drives `future` on this thread. It panics when no wake comes for seconds,
-        /// so a lost wake fails the test in place of a hang.
         fn block_on<F: Future>(future: F) -> F::Output {
+            const POLLS: u32 = 100;
+            const WAIT: Duration = Duration::from_millis(100);
             let waker = Waker::from(Arc::new(Unpark(thread::current())));
             let mut cx = Context::from_waker(&waker);
             let mut future = pin!(future);
-            for _ in 0..100 {
+            for _ in 0..POLLS {
                 if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
                     return output;
                 }
-                thread::park_timeout(Duration::from_millis(100));
+                thread::park_timeout(WAIT);
             }
-            panic!("no wake came in 10 seconds");
+            panic!("no result after {POLLS} polls");
         }
 
         /// Pushes `value`, and yields while the ring is full. It panics when the ring
@@ -860,6 +866,23 @@ mod model {
             assert_eq!(block_on(consumer.pop()), Some(1));
             assert_eq!(block_on(consumer.pop()), Some(2));
             drop(publishes.join().unwrap());
+        });
+    }
+
+    #[test]
+    fn loses_no_wakeup_when_the_producer_goes_with_a_staged_value() {
+        bounded(|| {
+            let (mut producer, mut consumer) = new(Config {
+                capacity: 1,
+                spins: 0,
+            });
+            let goes = thread::spawn(move || {
+                producer.stage(1).unwrap();
+                drop(producer);
+            });
+            assert_eq!(block_on(consumer.pop()), Some(1));
+            assert_eq!(block_on(consumer.pop()), None);
+            goes.join().unwrap();
         });
     }
 
