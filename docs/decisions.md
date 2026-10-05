@@ -306,6 +306,12 @@ How to read this record:
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
   same estimator serves device clocks in the connector library.
+- **ESTIMATE COMBINE (2026-10-04)** A `Measurement` offset is mesh time minus the
+  local monotonic reading at `at`; its error is a half-width. A bound grows by the
+  drift bound (default 200 ppm) times the time from `at`, in both directions. Each
+  source keeps its last 8 measurements and offers the one with the smallest bound now.
+  `combine` returns the hull of the offsets inside the most bounds, and fails when no
+  offset is inside more than half of them. Decided by the `time` builder (#TBD).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
