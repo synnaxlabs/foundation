@@ -1,9 +1,11 @@
-//! Polling a registered wait or race allocates nothing. This binary has no test harness: the
-//! count covers each thread, and a harness allocates on its own thread at any time.
+//! Polling a registered wait or race allocates nothing. This binary has no test
+//! harness: the count covers each thread, and a harness allocates on its own thread at
+//! any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use std::pin::pin;
+use std::future::{self, Future};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
@@ -36,32 +38,29 @@ fn main() {
         Waker::from(Arc::new(Tally::default())),
         Waker::from(Arc::new(Tally::default())),
     ];
-    let mut wait = pin!(token.wait());
-    let mut cx = Context::from_waker(&wakers[0]);
-    assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending, "live token");
-    let ((), allocations) = ALLOCATOR.count(|| {
-        for waker in wakers.iter().cycle().take(64) {
-            let mut cx = Context::from_waker(waker);
-            assert_eq!(wait.as_mut().poll(&mut cx), Poll::Pending, "live token");
-        }
-        assert!(!token.cancelled(), "the token is live");
-    });
-    assert_eq!(
-        allocations, 0,
-        "polling a registered wait allocates nothing"
+    check(pin!(token.wait()), &token, &wakers, "wait");
+    check(
+        pin!(token.race(future::pending::<()>())),
+        &token,
+        &wakers,
+        "race",
     );
+}
 
-    let mut race = pin!(token.race(std::future::pending::<()>()));
+/// Polls `f` once to register it, then checks that 64 more polls with alternating
+/// wakers allocate nothing.
+fn check<F: Future>(mut f: Pin<&mut F>, token: &Token, wakers: &[Waker], name: &str) {
     let mut cx = Context::from_waker(&wakers[0]);
-    assert_eq!(race.as_mut().poll(&mut cx), Poll::Pending, "live token");
+    assert!(f.as_mut().poll(&mut cx).is_pending(), "{name}: live token");
     let ((), allocations) = ALLOCATOR.count(|| {
         for waker in wakers.iter().cycle().take(64) {
             let mut cx = Context::from_waker(waker);
-            assert_eq!(race.as_mut().poll(&mut cx), Poll::Pending, "live token");
+            assert!(f.as_mut().poll(&mut cx).is_pending(), "{name}: live token");
         }
+        assert!(!token.cancelled(), "{name}: the token is live");
     });
     assert_eq!(
         allocations, 0,
-        "polling a registered race allocates nothing"
+        "{name}: a registered poll allocates nothing"
     );
 }

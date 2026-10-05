@@ -116,15 +116,16 @@ impl Token {
     pub fn wait(&self) -> Wait {
         Wait {
             node: Arc::clone(&self.0),
-            key: None,
+            slot: None,
         }
     }
 
     /// Runs `f` until it completes or this token is cancelled. Returns `None` when the
     /// token is cancelled first, also when it already is. Checks the token before
     /// each poll of `f`, so a cancel wins over an `f` that is ready at the same
-    /// time. The first poll may allocate a slot in the token; later polls allocate
-    /// nothing.
+    /// time. On `None`, `f` is dropped, and what it did before the cancel stays done.
+    /// The first poll may allocate a slot in the token; later polls allocate
+    /// nothing, and a poll with the same waker as the last one takes no lock.
     ///
     /// ```
     /// async fn read(cancel: &connector::cancel::Token) -> Option<u8> {
@@ -198,8 +199,8 @@ impl fmt::Debug for Token {
 #[must_use = "a future does nothing unless it is awaited"]
 pub struct Wait {
     node: Arc<Node>,
-    /// The waker's slot in `node`, from the first poll on.
-    key: Option<usize>,
+    /// The waker's slot in `node` and a copy of that waker, from the first poll on.
+    slot: Option<(usize, Waker)>,
 }
 
 impl Future for Wait {
@@ -208,22 +209,28 @@ impl Future for Wait {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = &mut *self;
         if this.node.cancelled.load(Acquire) {
-            this.key = None;
+            this.slot = None;
             return Poll::Ready(());
+        }
+        if let Some((_, last)) = &this.slot
+            && last.will_wake(cx.waker())
+        {
+            return Poll::Pending;
         }
         // Waker clones and drops run executor code, so they happen outside the lock.
         let waker = cx.waker().clone();
         let mut state = this.node.lock();
         if this.node.cancelled.load(Relaxed) {
             drop(state);
-            this.key = None;
+            this.slot = None;
             return Poll::Ready(());
         }
         let mut old = None;
-        if let Some(key) = this.key {
-            old = Some(mem::replace(state.wakers.get_mut(key), waker));
+        if let Some((key, last)) = this.slot.take() {
+            old = Some((mem::replace(state.wakers.get_mut(key), waker.clone()), last));
+            this.slot = Some((key, waker));
         } else {
-            this.key = Some(state.wakers.insert(waker));
+            this.slot = Some((state.wakers.insert(waker.clone()), waker));
         }
         drop(state);
         drop(old);
@@ -233,8 +240,8 @@ impl Future for Wait {
 
 impl Drop for Wait {
     fn drop(&mut self) {
-        if let Some(key) = self.key {
-            drop(self.node.remove(key, |state| &mut state.wakers));
+        if let Some((key, _)) = &self.slot {
+            drop(self.node.remove(*key, |state| &mut state.wakers));
         }
     }
 }
@@ -405,8 +412,8 @@ mod tests {
         }
     }
 
-    fn poll(wait: Pin<&mut Wait>, waker: &Waker) -> Poll<()> {
-        wait.poll(&mut Context::from_waker(waker))
+    fn poll<F: Future>(f: Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
+        f.poll(&mut Context::from_waker(waker))
     }
 
     /// Counts how often a hook runs.
@@ -652,17 +659,13 @@ mod tests {
             (f, polls, drops)
         }
 
-        fn step<F: Future>(f: Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
-            f.poll(&mut Context::from_waker(waker))
-        }
-
         #[test]
         fn returns_the_output_when_the_future_completes_first() {
             let token = Token::new();
             let (f, _, _) = probe(true);
             let (_, waker) = Tally::waker();
             let race = pin!(token.race(f));
-            assert_eq!(step(race, &waker), Poll::Ready(Some(7)), "f won");
+            assert_eq!(poll(race, &waker), Poll::Ready(Some(7)), "f won");
         }
 
         #[test]
@@ -671,10 +674,10 @@ mod tests {
             let (f, polls, drops) = probe(false);
             let (tally, waker) = Tally::waker();
             let mut race = pin!(token.race(f));
-            assert_eq!(step(race.as_mut(), &waker), Poll::Pending, "both wait");
+            assert_eq!(poll(race.as_mut(), &waker), Poll::Pending, "both wait");
             token.cancel();
             assert_eq!(tally.wakes(), 1, "cancel wakes the race");
-            assert_eq!(step(race.as_mut(), &waker), Poll::Ready(None), "cancelled");
+            assert_eq!(poll(race.as_mut(), &waker), Poll::Ready(None), "cancelled");
             assert_eq!(polls.load(SeqCst), 1, "f is not polled after cancel");
             assert_eq!(drops.load(SeqCst), 1, "f is dropped on return");
         }
@@ -686,7 +689,7 @@ mod tests {
             let (f, polls, _) = probe(true);
             let (_, waker) = Tally::waker();
             let race = pin!(token.race(f));
-            assert_eq!(step(race, &waker), Poll::Ready(None), "cancelled");
+            assert_eq!(poll(race, &waker), Poll::Ready(None), "cancelled");
             assert_eq!(polls.load(SeqCst), 0, "f is never polled");
         }
 
@@ -697,10 +700,10 @@ mod tests {
             let ready = Arc::clone(&f.ready);
             let (_, waker) = Tally::waker();
             let mut race = pin!(token.race(f));
-            assert_eq!(step(race.as_mut(), &waker), Poll::Pending, "both wait");
+            assert_eq!(poll(race.as_mut(), &waker), Poll::Pending, "both wait");
             ready.store(true, SeqCst);
             token.cancel();
-            assert_eq!(step(race, &waker), Poll::Ready(None), "cancel wins");
+            assert_eq!(poll(race, &waker), Poll::Ready(None), "cancel wins");
             assert_eq!(polls.load(SeqCst), 1, "f is not polled again");
         }
 
@@ -710,7 +713,7 @@ mod tests {
             let (f, _, _) = probe(false);
             let (_, waker) = Tally::waker();
             let mut race = Box::pin(token.race(f));
-            assert_eq!(step(race.as_mut(), &waker), Poll::Pending, "both wait");
+            assert_eq!(poll(race.as_mut(), &waker), Poll::Pending, "both wait");
             assert_eq!(entries(&token), (1, 0, 0), "the race waits");
             drop(race);
             assert_eq!(entries(&token), (0, 0, 0), "the race left");
@@ -768,6 +771,17 @@ mod tests {
             drop(owner);
             assert_eq!(poll(outer.as_mut(), &plain), Poll::Pending, "no deadlock");
             assert_eq!(entries(&token), (1, 0, 0), "the inner wait left");
+        }
+
+        #[test]
+        fn takes_no_lock_when_polled_again_with_the_same_waker() {
+            let token = Token::new();
+            let (_, waker) = Tally::waker();
+            let mut wait = pin!(token.wait());
+            assert_eq!(poll(wait.as_mut(), &waker), Poll::Pending, "live token");
+            let state = token.0.lock();
+            assert_eq!(poll(wait.as_mut(), &waker), Poll::Pending, "no deadlock");
+            drop(state);
         }
 
         #[test]
