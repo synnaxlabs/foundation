@@ -23,4 +23,7 @@ exclude_re = [
   'crates/sim/src/disk\.rs:.*replace > with >= in File::write',
   # The coin is fair: either side gives the same set of outcomes.
   'crates/sim/src/disk\.rs:.*replace == with != in File::write',
+  # The bits never overlap: no function code has bit 7 set, and a shifted byte has
+  # bit 0 clear. So `|` and `^` give the same result.
+  'crates/connector-modbus/src/pdu\.rs:.*replace \| with \^ in (Request::decode_reply|pack)',
 ]
