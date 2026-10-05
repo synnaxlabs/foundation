@@ -453,7 +453,6 @@ impl<'a> Parser<'a> {
                 return Ok((values, self.take()?));
             }
             values.extend(self.value(depth, Ends::Comma)?);
-            self.skip_newlines()?;
             match &self.token.kind {
                 lex::Kind::Comma => {
                     self.take()?;
@@ -1198,6 +1197,20 @@ c = "°C # not a comment"
                 ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
                 ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
                 ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
+            ];
+            for (text, span, expected) in cases {
+                let message = format!("the file needs {expected} here");
+                check(text, &[(syntax(span, expected), &message)]);
+            }
+        }
+
+        #[test]
+        fn refuses_the_close_of_another_bracket() {
+            let cases = [
+                ("a = [1)\n", on(6, 7), Expected::ListEnd),
+                ("a = [)\n", on(5, 6), Expected::Value),
+                ("a = f(1]\n", on(7, 8), Expected::ArgumentsEnd),
+                ("a = f(]\n", on(6, 7), Expected::Value),
             ];
             for (text, span, expected) in cases {
                 let message = format!("the file needs {expected} here");
