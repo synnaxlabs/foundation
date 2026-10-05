@@ -7,7 +7,7 @@
 //! it does not fit in the rest, a wrap record goes there and the record goes to the
 //! start. Each open of the ring walks it with a [`Cursor`], which then gives the
 //! [`Writer`] and its restart record; the chain continues from the random value in
-//! that record.
+//! that record. A ring whose head reaches the end of the offsets is full for good.
 
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
@@ -117,12 +117,14 @@ impl Layout {
     }
 }
 
-/// The ring has no room for a record. Space returns with [`Writer::release`].
+/// The ring has no room for a record. Space returns with [`Writer::release`], or
+/// never when the offsets left before the end are under `needed`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Full {
     /// Bytes of the area that the record needs, with the rest it must skip.
     pub(crate) needed: u64,
-    /// Bytes of the area not in use.
+    /// Bytes the record may take: the area not in use, or the offsets left before
+    /// the end, whichever is less.
     pub(crate) free: u64,
 }
 
@@ -225,7 +227,8 @@ impl Writer {
         let area = self.layout.area;
         let rest = area - self.head.offset % area;
         let skipped = if size > rest { rest } else { 0 };
-        let free = area - (self.head.offset - self.tail);
+        let live = self.head.offset - self.tail;
+        let free = (area - live).min(u64::MAX - self.head.offset);
         let needed = skipped + size;
         if needed > free {
             return Err(Full { needed, free });
@@ -289,8 +292,9 @@ pub(crate) enum Step<'a> {
 }
 
 /// A record that follows the chain but that this version cannot read: a kind it
-/// does not know, or a wrap or restart record of the wrong shape. The ring is from
-/// another version or a defect wrote it, so it must not be written to.
+/// does not know, a wrap or restart record of the wrong shape, or a record that
+/// ends past the end of the offsets. The ring is from another version or a defect
+/// wrote it, so it must not be written to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Invalid {
     pub(crate) offset: u64,
@@ -346,9 +350,13 @@ impl Cursor {
     fn bound(&self) -> Window {
         let area = self.layout.area;
         let place = self.at.offset % area;
-        let unread = area - (self.at.offset - self.tail);
-        let len = self.layout.window.min(area - place).min(unread);
+        let len = self.layout.window.min(area - place).min(self.unread());
         Window { place, len }
+    }
+
+    /// Bytes of the area between the head and the tail one lap later.
+    fn unread(&self) -> u64 {
+        self.layout.area - (self.at.offset - self.tail)
     }
 
     /// Reads the record at the start of `bytes`, the bytes of the last
@@ -382,26 +390,23 @@ impl Cursor {
             return Ok(Step::End);
         };
         let offset = self.at.offset;
-        let read = offset - self.tail;
+        let kind = record.kind;
+        let unread = self.unread();
         let rest = self.layout.area - place;
-        let (moved, chain, step) = match (Kind::decode(record.kind), record.body) {
+        let (moved, chain, step) = match (Kind::decode(kind), record.body) {
             (Some(Kind::Data), body) => {
                 (to_u64(record.size), record.crc, Step::Data(body))
             }
-            (Some(Kind::Wrap), []) if read + rest < self.layout.area => {
-                (rest, record.crc, Step::Moved)
-            }
+            (Some(Kind::Wrap), []) if rest < unread => (rest, record.crc, Step::Moved),
             (Some(Kind::Restart), &[c0, c1, c2, c3]) => {
                 let chain = u32::from_le_bytes([c0, c1, c2, c3]);
                 (to_u64(record.size), chain, Step::Moved)
             }
-            _ => {
-                let kind = record.kind;
-                return Err(Invalid { offset, kind });
-            }
+            _ => return Err(Invalid { offset, kind }),
         };
+        let next = offset.checked_add(moved).ok_or(Invalid { offset, kind })?;
         self.at = Position {
-            offset: offset + moved,
+            offset: next,
             chain,
         };
         Ok(step)
@@ -414,7 +419,8 @@ impl Cursor {
     /// # Errors
     ///
     /// [`Full`] when the restart record does not fit before `tail`. Move the
-    /// records at the tail to a segment and call again with the later tail.
+    /// records at the tail to a segment and call again with the later tail. No tail
+    /// helps when the head is at the end of the offsets: the ring is full for good.
     ///
     /// # Panics
     ///
@@ -765,6 +771,51 @@ mod tests {
             assert_eq!((plan.record.place, plan.next.offset), (0, 10 * 4096));
         }
 
+        /// The writer of an empty ring with its tail at `offset`, after its restart
+        /// record of one block.
+        fn opened(layout: Layout, offset: u64) -> Writer {
+            let tail = Position::new(offset, 9).expect("aligned");
+            let mut cursor = Cursor::new(layout, tail);
+            let zeros = vec![0; index(cursor.window().len)];
+            assert_eq!(cursor.next(&zeros), Ok(Step::End));
+            cursor.writer(tail, 9).expect("the restart record fits").0
+        }
+
+        #[test]
+        fn is_full_at_the_end_of_the_offsets() {
+            let mut writer = opened(layout(), u64::MAX - 12287);
+            let plan = writer.append([[7; 8].as_slice()]);
+            assert_eq!(plan.map(|plan| plan.next.offset), Ok(u64::MAX - 4095));
+            let full = Full {
+                needed: 4096,
+                free: 4095,
+            };
+            assert_eq!(writer.append([[7; 8].as_slice()]), Err(full));
+        }
+
+        #[test]
+        fn is_full_when_the_wrap_passes_the_end_of_the_offsets() {
+            let small = Layout::new(3 * 4096, 4088).expect("the sizes make a ring");
+            let mut writer = opened(small, u64::MAX - 12287);
+            let full = Full {
+                needed: 3 * 4096,
+                free: 8191,
+            };
+            assert_eq!(writer.append([[7; 4088].as_slice()]), Err(full));
+            let plan = writer.append([[7; 8].as_slice()]);
+            assert_eq!(plan.map(|plan| plan.next.offset), Ok(u64::MAX - 4095));
+        }
+
+        #[test]
+        fn wraps_before_the_end_of_the_offsets() {
+            let mut writer = opened(layout(), u64::MAX - 40959);
+            let plan = writer.append([[7; ALIGN].as_slice()]).expect("fits");
+            let wrap = plan.wrap.map(|wrap| wrap.place);
+            assert_eq!(wrap, Some(28672));
+            assert_eq!(plan.record.place, 0);
+            assert_eq!(plan.next.offset, u64::MAX - 24575);
+        }
+
         #[test]
         fn refuses_a_record_that_does_not_fit_before_the_tail() {
             let mut writer = writer(1, 7);
@@ -931,6 +982,65 @@ mod tests {
             put(&mut area, 0, START.chain, Kind::Restart.byte(), b"abc");
             let invalid = Invalid { offset: 0, kind: 3 };
             assert_eq!(walk(&area, START).map(drop), Err(invalid));
+        }
+
+        #[test]
+        fn opens_an_empty_ring_from_any_header_that_decodes() {
+            use crate::header::Header;
+            let tail = Position::new(u64::MAX - 4095, 7).expect("aligned");
+            let block = Header::new(layout(), 7).next(tail).encode();
+            let header = Header::decode(&block, &[0; ALIGN]).expect("a whole block");
+            let area = vec![0; index(AREA)];
+            let (data, cursor) =
+                walk(&area, header.tail).expect("a zeroed area is valid");
+            assert_eq!(data, Vec::<Vec<u8>>::new());
+            let full = Full {
+                needed: 4096,
+                free: 4095,
+            };
+            assert_eq!(cursor.writer(header.tail, 1).map(drop), Err(full));
+        }
+
+        #[test]
+        fn reports_a_record_that_passes_the_end_of_the_offsets() {
+            let mut area = vec![0; index(AREA)];
+            let chain = put(&mut area, 6, 5, Kind::Data.byte(), b"x");
+            put(&mut area, 7, chain, Kind::Data.byte(), b"y");
+            let tail = Position::new(u64::MAX - 8191, 5).expect("aligned");
+            let invalid = Invalid {
+                offset: u64::MAX - 4095,
+                kind: 1,
+            };
+            assert_eq!(walk(&area, tail).map(drop), Err(invalid));
+        }
+
+        #[test]
+        fn reports_a_wrap_record_at_the_tail_in_the_largest_area() {
+            let area = u64::MAX - 4095;
+            let layout = Layout::new(area, BODY_MAX).expect("the sizes make a ring");
+            let tail = Position::new(area - 4096, 7).expect("aligned");
+            let mut blocks = vec![0; 2 * ALIGN];
+            let chain = put(&mut blocks, 0, 7, Kind::Data.byte(), b"x");
+            put(&mut blocks, 1, chain, Kind::Wrap.byte(), &[]);
+            let mut cursor = Cursor::new(layout, tail);
+            let first = Window {
+                place: area - 4096,
+                len: 4096,
+            };
+            assert_eq!(cursor.window(), first);
+            assert_eq!(cursor.next(&blocks[..ALIGN]), Ok(Step::Data(b"x")));
+            assert_eq!(
+                cursor.window(),
+                Window {
+                    place: 0,
+                    len: 4096
+                }
+            );
+            let invalid = Invalid {
+                offset: area,
+                kind: 2,
+            };
+            assert_eq!(cursor.next(&blocks[ALIGN..]), Err(invalid));
         }
 
         /// No writer puts a wrap record where the skip ends at or after the tail's
