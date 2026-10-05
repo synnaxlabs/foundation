@@ -8,7 +8,7 @@ use std::path::Path;
 use types::time::{Monotonic, Span, Stamp};
 
 use crate::state::lock;
-use crate::{drivers, net};
+use crate::{drivers, net, shard};
 
 /// One simulated node: the `env` handles that its code gets. Clones refer to the same
 /// node.
@@ -46,6 +46,28 @@ impl Node {
         env::shards::Shards::new(self.0.clone())
     }
 
+    /// Makes the next shard start on `core` of the node get `fault`. Faults on one
+    /// core fire in turn, one per start. A shard with no core gets none.
+    ///
+    /// # Panics
+    ///
+    /// When `core` is not below [`Config::cores`].
+    pub fn fail_shard(&self, core: usize, fault: shard::Fault) {
+        let cores = lock(&self.0.shared).cores(self.0.node);
+        assert!(
+            core < cores.get(),
+            "a shard fault aims at core {core} of {cores}"
+        );
+        lock(&self.0.shared).shards(self.0.node).fail(core, fault);
+    }
+
+    /// The config of each shard start on the node, in order, with the ones that a
+    /// fault failed.
+    #[must_use]
+    pub fn shard_starts(&self) -> Vec<env::shards::Config> {
+        lock(&self.0.shared).shards(self.0.node).configs()
+    }
+
     /// Starts dedicated threads on the node.
     #[must_use]
     pub fn threads(&self) -> env::threads::Threads {
@@ -58,12 +80,15 @@ impl Node {
     /// - A bind or a send from an address that is not the node's gives `Error::Io`
     ///   with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free port from
     ///   49152.
-    /// - A send to the other family than the socket's gives `Error::Unreachable`.
+    /// - A socket on IPv6 takes `::ffff:a.b.c.d` as `a.b.c.d`, in the destination and
+    ///   the source of a send. A send to the other family than the socket's gives
+    ///   `Error::Unreachable` with the destination as given.
     /// - Each socket draws its send and receive batch maxes from 1, 8, and 64.
     /// - A datagram is lost when it is over the link's
     ///   [`mtu`](crate::link::Config::mtu), when nothing is bound at its
-    ///   destination, or when it would fill the receive queue past
-    ///   `recv_buffer_bytes`. The send buffer never fills.
+    ///   destination, or when its receive queue takes more than `recv_buffer_bytes`,
+    ///   in which each datagram takes its length plus 768 bytes. The send buffer
+    ///   never fills.
     /// - A socket half panics when it polls outside the node's threads.
     #[must_use]
     pub fn net(&self) -> env::net::Net {
@@ -74,8 +99,9 @@ impl Node {
     ///
     /// - Each call takes up to 100 us of true time and takes effect when it ends.
     ///   A file call panics outside the node's threads.
-    /// - A directory takes 4 KiB, and a file its length, until it is removed and no
-    ///   descriptor or call in flight uses it.
+    /// - A directory takes 4 KiB. A file takes its length until it is removed, a
+    ///   `sync_dir` makes the removal durable, and no descriptor or call in flight
+    ///   uses it.
     /// - Where calls in flight at the same time overlap, each 512-byte sector of a
     ///   read gives the old bytes or the bytes of one of the writes, and each sector
     ///   keeps the bytes of one write. A write whose future dropped still ends, with
@@ -89,8 +115,11 @@ impl Node {
     }
 
     /// Makes the next call of `operation` on `path` on the node fail with
-    /// `Error::Io` and code 5 (`EIO`). The call does not touch the disk. Faults on
-    /// one path and operation fire in turn, one per call.
+    /// `Error::Io` and code 5 (`EIO`). Faults on one path and operation fire in
+    /// turn, one per call. The call does not touch the disk, except a sync: each
+    /// sector keeps its durable bytes or the bytes of one write that the sync
+    /// covers. These bytes are then durable, and a read sees them unless a later
+    /// write covers the sector.
     ///
     /// # Panics
     ///

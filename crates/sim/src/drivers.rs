@@ -4,6 +4,8 @@ mod files;
 mod net;
 
 use std::cell::RefCell;
+use std::future::poll_fn;
+use std::mem;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -17,7 +19,8 @@ use env::thread::{Error, Handle};
 use env::threads::Body;
 use types::time::Monotonic;
 
-use crate::state::{Due, Futures, Shared, Start, lock};
+use crate::shard::Fault;
+use crate::state::{Due, Futures, Outcome, Shared, Start, lock};
 
 /// Drives every seam of one node.
 #[derive(Clone)]
@@ -30,14 +33,20 @@ impl Node {
     /// Adds a thread that runs when the scheduler picks its first task.
     fn thread(&self, name: String, start: Start) -> Handle {
         let thread = lock(&self.shared).start(self.node, name, start);
-        let shared = Arc::clone(&self.shared);
+        let (shared, node) = (Arc::clone(&self.shared), self.node);
         Handle::new(move || {
             let state = lock(&shared);
             let (outcome, name) = (state.outcome(thread), state.name(thread));
             drop(state);
-            outcome.unwrap_or_else(|| {
-                panic!("thread {name} has not ended; run the sim until it ends")
-            })
+            match outcome {
+                Some(Outcome::Done(result)) => result,
+                Some(Outcome::Crashed) => {
+                    panic!("thread {name} ended in a crash of node {node}")
+                }
+                None => {
+                    panic!("thread {name} has not ended; run the sim until it ends")
+                }
+            }
         })
     }
 
@@ -99,8 +108,40 @@ impl env::shards::Driver for Node {
     }
 
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error> {
-        Ok(self.thread(config.name, Start::Shard(main)))
+        let fault = lock(&self.shared).shards(self.node).record(&config);
+        let name = config.name;
+        let main = match fault {
+            None => main,
+            Some((_, Fault::Start)) => {
+                let reason = "injected".into();
+                return Err(Error::Start { name, reason });
+            }
+            Some((core, Fault::Pin)) => return Err(Error::Pin { name, core }),
+            Some((_, Fault::Panic)) => Box::new(|tasks: env::tasks::Tasks| -> Task {
+                tasks.spawn(async { panic!("injected") });
+                let main = main(tasks);
+                Box::pin(async move {
+                    yield_now().await;
+                    main.await;
+                    panic!("injected");
+                })
+            }),
+        };
+        Ok(self.thread(name, Start::Shard(main)))
     }
+}
+
+/// Pending at its first poll, with its task woken, so the scheduler picks the next
+/// task to run.
+pub(crate) fn yield_now() -> impl Future<Output = ()> {
+    let mut yielded = false;
+    poll_fn(move |cx| {
+        if mem::replace(&mut yielded, true) {
+            return Poll::Ready(());
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
 }
 
 impl env::threads::Driver for Node {

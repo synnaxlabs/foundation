@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::fmt;
+use std::future::poll_fn;
 use std::mem;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -23,7 +24,7 @@ use types::frame::Path;
 use types::time::Span;
 
 use crate::entry::{self, Entry};
-use crate::group::{Closed, Group, META_LEN, Rejected};
+use crate::group::{Closed, Group, META_LEN, Rejected, Sealed};
 use crate::header::{self, AREA_START, Header};
 use crate::record::{self, ALIGN};
 use crate::tails::{Tail, Tails};
@@ -54,12 +55,15 @@ pub struct Config {
 /// Why a call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The ring has no room for the batch. The caller records a gap.
+    /// The ring has no room for the batch. The caller records a gap. Room returns
+    /// at a commit, or never when the offsets left before their end are under
+    /// `needed`.
     Full {
         /// Bytes of the area that the batch's record needs, with the rest of the
         /// area it must skip.
         needed: u64,
-        /// Bytes of the area not in use.
+        /// Bytes the record may take: the area not in use, or the offsets left
+        /// before their end, whichever is less.
         free: u64,
     },
     /// The pool has no block for a record header or a recovery read.
@@ -171,8 +175,9 @@ impl From<header::Error> for Error {
 }
 
 /// One shard's logs. It lives on its shard: the commit task runs on the shard's
-/// `tasks`, and a drop ends the task at its next deadline. Entries queued and not
-/// yet committed at the drop are not written.
+/// `tasks`. The task idles while nothing is queued and nothing waits on a commit.
+/// A drop ends the task at once when it idles, else at its next deadline. Entries
+/// queued and not yet committed at the drop are not written.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -205,16 +210,37 @@ struct State {
     /// How many deadlines synced what they took.
     commits: u64,
     wakers: Vec<Waker>,
+    /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
+    parked: Option<Waker>,
+    /// Whether the handle dropped. The task ends when it next decides.
+    closed: bool,
     /// The error that ended the task.
     failed: Option<Error>,
 }
 
 impl State {
+    /// Whether nothing is queued and nothing waits on a commit.
+    fn idle(&self) -> bool {
+        self.open.is_empty() && self.queue.is_empty() && self.wakers.is_empty()
+    }
+
     /// Closes the open group into the queue and opens a spare.
     fn close_open(&mut self) {
         let spare = self.spares.pop().unwrap_or_default();
         let full = mem::replace(&mut self.open, spare);
         self.queue.push(full.close(&mut self.writer));
+    }
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        let mut state = self.shared.state.borrow_mut();
+        state.closed = true;
+        let parked = state.parked.take();
+        drop(state);
+        if let Some(waker) = parked {
+            waker.wake();
+        }
     }
 }
 
@@ -275,8 +301,8 @@ impl Buffer {
             }
         }
         let chain = random(&entropy);
-        let (writer, plan) = cursor.writer(header.tail, chain)?;
-        write_restart(&file, &pool, plan, chain).await?;
+        let (writer, sealed) = cursor.writer(header.tail.offset(), chain)?;
+        write_restart(&file, &pool, sealed, chain).await?;
         let shared = Rc::new(Shared {
             file,
             pool,
@@ -291,10 +317,12 @@ impl Buffer {
                 taken: 0,
                 commits: 0,
                 wakers: Vec::new(),
+                parked: None,
+                closed: false,
                 failed: None,
             }),
         });
-        tasks.spawn(run(Rc::clone(&shared), clock, commit));
+        tasks.spawn(run(Rc::clone(&shared), clock, commit, chain));
         Ok(Self { shared })
     }
 
@@ -337,8 +365,8 @@ impl Buffer {
     /// bytes, or more than 1023 entries or parts.
     pub fn append(&self, entries: &[Entry<'_>]) -> Result<(), Error> {
         let shared = &*self.shared;
-        let mut state = shared.state.borrow_mut();
-        let state = &mut *state;
+        let mut guard = shared.state.borrow_mut();
+        let state = &mut *guard;
         if let Some(error) = &state.failed {
             return Err(error.clone());
         }
@@ -355,6 +383,11 @@ impl Buffer {
         }
         for entry in entries {
             state.tails.advance(entry.slot, &entry.header());
+        }
+        let parked = state.parked.take();
+        drop(guard);
+        if let Some(waker) = parked {
+            waker.wake();
         }
         Ok(())
     }
@@ -445,19 +478,19 @@ fn recover(
     Ok(())
 }
 
-/// Writes the restart record of `plan`, whose body is `chain`.
+/// Writes the restart record `sealed`, whose body is `chain`.
 async fn write_restart(
     file: &File,
     pool: &Pool,
-    plan: wal::Plan,
+    sealed: wal::Sealed,
     chain: u32,
 ) -> Result<(), Error> {
     assert!(
-        plan.wrap.is_none(),
+        sealed.wrap.is_none(),
         "invariant: a restart record is one block and never wraps"
     );
-    let block = small_record(pool, &plan.record.header, &chain.to_le_bytes())?;
-    file.write_at(AREA_START + plan.record.place, slice::from_ref(&block))
+    let block = small_record(pool, &sealed.record.header, &chain.to_le_bytes())?;
+    file.write_at(AREA_START + sealed.record.place, slice::from_ref(&block))
         .await?;
     Ok(())
 }
@@ -480,37 +513,64 @@ fn small_record(
     Ok(block.freeze().skip(start))
 }
 
-/// The commit task. Each deadline takes the closed groups and the open one,
-/// writes them, syncs once, and wakes the waiters. A failed file call ends the
-/// task with its error.
-async fn run(shared: Rc<Shared>, clock: Clock, commit: Span) {
+/// The commit task. It parks while the state idles; a push, a `Commit` poll, or
+/// the drop wakes it. Each deadline takes the closed groups and the open one,
+/// seals them in order from `chain`, the value of the restart record, writes
+/// them, syncs once, and wakes the waiters. A failed file call or the drop ends
+/// the task.
+async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
+    let mut chain = chain;
     let mut taken: Vec<Closed> = Vec::new();
+    let mut sealed: Vec<Sealed> = Vec::new();
     let mut woken: Vec<Waker> = Vec::new();
     let mut sleep = clock.sleep(commit);
     loop {
-        (&mut sleep).await;
-        sleep.reset(clock.now() + commit);
-        if Rc::strong_count(&shared) == 1 {
+        let ended = poll_fn(|cx| {
+            let mut state = shared.state.borrow_mut();
+            if state.closed {
+                return Poll::Ready(true);
+            }
+            if !state.idle() {
+                return Poll::Ready(false);
+            }
+            state.parked = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+        if ended {
             return;
         }
+        if sleep.deadline() < clock.now() {
+            sleep.reset(clock.now() + commit);
+        }
+        (&mut sleep).await;
+        sleep.reset(clock.now() + commit);
         {
             let mut state = shared.state.borrow_mut();
+            if state.closed {
+                return;
+            }
             state.taken += 1;
             if !state.open.is_empty() {
                 state.close_open();
             }
             mem::swap(&mut state.queue, &mut taken);
         }
-        let result = write(&shared, &taken).await;
+        for closed in taken.drain(..) {
+            let (record, next) = closed.seal(chain);
+            chain = next;
+            sealed.push(record);
+        }
+        let result = write(&shared, &sealed).await;
         let failed = result.is_err();
         let mut state = shared.state.borrow_mut();
         match result {
             Ok(()) => {
-                for closed in taken.drain(..) {
-                    for (&slot, header) in closed.slots().iter().zip(closed.headers()) {
+                for record in sealed.drain(..) {
+                    for (&slot, header) in record.slots().iter().zip(record.headers()) {
                         state.durable.advance(slot, header);
                     }
-                    state.spares.push(closed.clear());
+                    state.spares.push(record.clear());
                 }
                 state.commits += 1;
             }
@@ -527,13 +587,13 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span) {
     }
 }
 
-/// Writes each closed group's records and syncs once.
-async fn write(shared: &Shared, taken: &[Closed]) -> Result<(), files::Error> {
-    if taken.is_empty() {
+/// Writes each sealed group's records and syncs once.
+async fn write(shared: &Shared, sealed: &[Sealed]) -> Result<(), files::Error> {
+    if sealed.is_empty() {
         return Ok(());
     }
-    for closed in taken {
-        for (place, blocks) in closed.writes() {
+    for record in sealed {
+        for (place, blocks) in record.writes() {
             shared.file.write_at(AREA_START + place, blocks).await?;
         }
     }
@@ -560,6 +620,11 @@ impl Future for Commit<'_> {
         }
         if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
             state.wakers.push(cx.waker().clone());
+        }
+        let parked = state.parked.take();
+        drop(state);
+        if let Some(waker) = parked {
+            waker.wake();
         }
         Poll::Pending
     }

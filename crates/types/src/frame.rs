@@ -6,7 +6,7 @@
 
 pub mod key_set;
 
-use std::{fmt, mem};
+use std::{fmt, iter, mem};
 
 use key_set::KeySet;
 
@@ -28,6 +28,12 @@ mod at {
     pub(super) const SERIES: usize = 8;
     pub(super) const FORM: usize = 12;
     pub(super) const PATH: usize = 13;
+
+    /// Offsets of a range's fields after its group, which is at 0.
+    pub(super) mod range {
+        pub(in crate::frame) const COUNT: usize = 4;
+        pub(in crate::frame) const SEQ: usize = 8;
+    }
 }
 
 /// One of an index's two write paths, each with its own seq. Backfill is late data
@@ -102,6 +108,18 @@ pub struct Range {
     pub seq: u64,
     /// How many samples each series of the group holds.
     pub count: u32,
+}
+
+impl Range {
+    /// The range of `group` in the frame `bytes`, or `None` when it is absent.
+    fn find(bytes: &[u8], group: u32) -> Option<Self> {
+        let (ranges, ..) = split(bytes);
+        let range = &ranges[search(ranges, group)?];
+        Some(Self {
+            seq: u64::from_le_bytes(get(range, at::range::SEQ)),
+            count: u32::from_le_bytes(get(range, at::range::COUNT)),
+        })
+    }
 }
 
 /// Why [`Draft::new`] refused a frame.
@@ -205,7 +223,7 @@ impl Draft {
             .filter(|&entry| set.index(entry) == entry);
         for (range, index) in ranges.iter_mut().zip(indexes) {
             put(range, 0, &set.entries()[index].group.to_le_bytes());
-            range[4..].fill(0);
+            range[at::range::COUNT..].fill(0);
         }
         for &(entry, _) in series {
             if search(ranges, set.entries()[entry].group).is_none() {
@@ -237,28 +255,50 @@ impl Draft {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut [u8])> {
         let (_, descriptors, mut body) = split_mut(&mut self.0);
         let mut offset = 0_usize;
-        descriptors.iter().map(move |descriptor| {
-            let start = offset.next_multiple_of(SERIES_ALIGN);
-            let end = end_of(*descriptor);
+        spans(ends(descriptors)).map(move |(entry, start, end)| {
             let (_, rest) = mem::take(&mut body).split_at_mut(start - offset);
             let (series, rest) = rest.split_at_mut(end - start);
             (body, offset) = (rest, end);
-            (to_usize(lead(descriptor)), series)
+            (entry, series)
         })
     }
 
-    /// Sets the samples of group `group`.
+    /// The samples of group `group`, or `None` when its index is absent. Time is
+    /// logarithmic in the number of present groups.
+    #[must_use]
+    pub fn range(&self, group: u32) -> Option<Range> {
+        Range::find(&self.0, group)
+    }
+
+    /// Sets how many samples each series of group `group` holds.
     ///
     /// # Panics
     ///
     /// If `group` is absent from the frame.
-    pub fn set_range(&mut self, group: u32, range: Range) {
+    pub fn set_count(&mut self, group: u32, count: u32) {
+        put(
+            self.record_mut(group),
+            at::range::COUNT,
+            &count.to_le_bytes(),
+        );
+    }
+
+    /// Sets the seq of the first sample of group `group`, on the path the frame
+    /// freezes on.
+    ///
+    /// # Panics
+    ///
+    /// If `group` is absent from the frame.
+    pub fn set_seq(&mut self, group: u32, seq: u64) {
+        put(self.record_mut(group), at::range::SEQ, &seq.to_le_bytes());
+    }
+
+    fn record_mut(&mut self, group: u32) -> &mut [u8; RANGE] {
         let (ranges, ..) = split_mut(&mut self.0);
         let Some(n) = search(ranges, group) else {
             panic!("group {group} is absent from the frame");
         };
-        put(&mut ranges[n], 4, &range.count.to_le_bytes());
-        put(&mut ranges[n], 8, &range.seq.to_le_bytes());
+        &mut ranges[n]
     }
 
     /// The finished frame on `path`, the path whose seq its ranges count on.
@@ -296,12 +336,7 @@ impl Frame {
     /// logarithmic in the number of present groups.
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
-        let (ranges, ..) = split(&self.0);
-        let range = &ranges[search(ranges, group)?];
-        Some(Range {
-            seq: u64::from_le_bytes(get(range, 8)),
-            count: u32::from_le_bytes(get(range, 4)),
-        })
+        Range::find(&self.0, group)
     }
 
     /// The series bytes of `entry`, or `None` when it is absent. Time is logarithmic
@@ -316,14 +351,8 @@ impl Frame {
 
     /// Each present entry and its series bytes, in entry order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        let (_, descriptors, body) = split(&self.0);
-        let mut start = 0;
-        descriptors.iter().map(move |descriptor| {
-            let end = end_of(*descriptor);
-            let series = &body[start..end];
-            start = end.next_multiple_of(SERIES_ALIGN);
-            (to_usize(lead(descriptor)), series)
-        })
+        let (_, _, body) = split(&self.0);
+        series(body, self.ends())
     }
 
     /// The credit that sending the frame to a reader spends: the bytes a block of the
@@ -334,8 +363,8 @@ impl Frame {
     }
 
     /// The series bytes of every present entry, as one view that shares the frame's
-    /// block, from the first series to the end. The end of each series in the
-    /// descriptors is an offset into this view. Copies nothing. Until it drops, the
+    /// block, from the first series to the end. [`Frame::ends`] gives where each
+    /// series ends in this view. Copies nothing. Until it drops, the
     /// view keeps the whole block in use: [`Frame::charge`] bytes of the pool, not its
     /// length.
     #[must_use]
@@ -343,6 +372,146 @@ impl Frame {
         let (ranges, series) = counts(&self.0);
         self.0.clone().skip(body_start(ranges, series))
     }
+
+    /// Each present entry and the end of its series, as `(entry, end)`, in the order
+    /// of [`Frame::iter`]. `end` counts from the start of [`Frame::body`], and
+    /// [`series`] reads each series back from the body and these ends.
+    pub fn ends(&self) -> impl Iterator<Item = (usize, usize)> {
+        let (_, descriptors, _) = split(&self.0);
+        ends(descriptors)
+    }
+}
+
+/// Each series in `body`, a frame's [`Frame::body`], with its tag. `ends` gives a tag
+/// and the end of each series, in order, as [`Frame::ends`] gives them. Copies nothing.
+///
+/// # Panics
+///
+/// The iterator panics where [`check`] refuses `body` and `ends`. The body and ends of
+/// one frame never panic. Run [`check`] once on a body and ends from another node
+/// before the first read.
+pub fn series<T>(
+    body: &[u8],
+    ends: impl IntoIterator<Item = (T, usize)>,
+) -> impl Iterator<Item = (T, &[u8])> {
+    let (mut spans, mut last) = (spans(ends), 0);
+    iter::from_fn(move || {
+        let Some((tag, start, end)) = spans.next() else {
+            last_fits(last, body.len()).unwrap_or_else(|error| panic!("{error}"));
+            return None;
+        };
+        last = end;
+        match cut(body, start, end) {
+            Ok(series) => Some((tag, series)),
+            Err(error) => panic!("{error}"),
+        }
+    })
+}
+
+/// Checks that `ends` fit `body`, so that [`series`] reads them without a panic.
+///
+/// # Errors
+///
+/// Returns the first [`BadEnd`] in the order of `ends`.
+pub fn check<T>(
+    body: &[u8],
+    ends: impl IntoIterator<Item = (T, usize)>,
+) -> Result<(), BadEnd> {
+    let mut last = 0;
+    for (_, start, end) in spans(ends) {
+        cut(body, start, end)?;
+        last = end;
+    }
+    last_fits(last, body.len())
+}
+
+/// Why [`check`] refused the ends of a body of series.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BadEnd {
+    /// An end is past the body.
+    Past {
+        /// The end.
+        end: usize,
+        /// The bytes of the body.
+        len: usize,
+    },
+    /// An end is before the start of its series, the end before it rounded up to 8.
+    Before {
+        /// The end.
+        end: usize,
+        /// The start of its series.
+        start: usize,
+    },
+    /// The last end is not the end of the body.
+    Short {
+        /// The last end, or 0 when there is none.
+        last: usize,
+        /// The bytes of the body.
+        len: usize,
+    },
+}
+
+impl fmt::Display for BadEnd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Past { end, len } => {
+                write!(f, "the end {end} is past the body of {len} bytes")
+            }
+            Self::Before { end, start } => {
+                write!(
+                    f,
+                    "the end {end} is before {start}, the start of its series"
+                )
+            }
+            Self::Short { last, len } => write!(
+                f,
+                "the last end {last} is not the end of the body of {len} bytes"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BadEnd {}
+
+/// The entry and the end of each descriptor's series.
+fn ends(descriptors: &[[u8; DESCRIPTOR]]) -> impl Iterator<Item = (usize, usize)> + '_ {
+    descriptors
+        .iter()
+        .map(|descriptor| (to_usize(lead(descriptor)), end_of(*descriptor)))
+}
+
+/// The tag, start, and end of each series in a frame's series bytes, from the tag and
+/// end of each.
+fn spans<T>(
+    ends: impl IntoIterator<Item = (T, usize)>,
+) -> impl Iterator<Item = (T, usize, usize)> {
+    let mut last = 0_usize;
+    ends.into_iter().map(move |(tag, end)| {
+        let start = last.next_multiple_of(SERIES_ALIGN);
+        last = end;
+        (tag, start, end)
+    })
+}
+
+/// Checks that `last`, the last end, is the end of `len` bytes of series.
+fn last_fits(last: usize, len: usize) -> Result<(), BadEnd> {
+    if last == len {
+        Ok(())
+    } else {
+        Err(BadEnd::Short { last, len })
+    }
+}
+
+/// The series from `start` to `end` in `body`, or why it does not fit.
+fn cut(body: &[u8], start: usize, end: usize) -> Result<&[u8], BadEnd> {
+    body.get(start..end).ok_or_else(|| {
+        let len = body.len();
+        if end > len {
+            BadEnd::Past { end, len }
+        } else {
+            BadEnd::Before { end, start }
+        }
+    })
 }
 
 /// The present groups of a frame of `series`, and the bytes of its series with the
@@ -521,7 +690,8 @@ mod tests {
         let mut draft = Draft::new(&pool, &set, Form::Encoded, &series).unwrap();
         draft.series(0).unwrap().copy_from_slice(&[0xaa; 3]);
         draft.series(2).unwrap().copy_from_slice(&[1, 2]);
-        draft.set_range(0, Range { seq: 7, count: 2 });
+        draft.set_count(0, 2);
+        draft.set_seq(0, 7);
         let frame = draft.freeze(Path::Backfill);
         let mut expected = Vec::new();
         for n in [3_u32, 1, 2] {
@@ -623,6 +793,92 @@ mod tests {
     }
 
     #[test]
+    fn gives_each_end_and_reads_the_series_back_from_the_view() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        let lens = [(0, 3), (1, 0), (2, 9)];
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &lens).unwrap();
+        draft.series(0).unwrap().fill(1);
+        draft.series(2).unwrap().fill(2);
+        let frame = draft.freeze(Path::Live);
+        let ends: Vec<_> = frame.ends().collect();
+        assert_eq!(ends, [(0, 3), (1, 8), (2, 17)]);
+        let body = frame.body();
+        assert_eq!(check(&body, ends.iter().copied()), Ok(()));
+        let read: Vec<_> = series(&body, ends).collect();
+        assert_eq!(read, [(0, [1; 3].as_slice()), (1, &[]), (2, &[2; 9])]);
+        let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
+        let empty = empty.freeze(Path::Live);
+        assert_eq!(empty.ends().count(), 0);
+        assert_eq!(check(&empty.body(), empty.ends()), Ok(()));
+        assert_eq!(series(&empty.body(), empty.ends()).count(), 0);
+    }
+
+    /// Tags `ends` with their positions.
+    fn tagged(ends: &[usize]) -> impl Iterator<Item = (usize, usize)> + '_ {
+        ends.iter().copied().enumerate()
+    }
+
+    #[test]
+    fn refuses_an_end_past_the_body() {
+        let error = check(&[0; 4], tagged(&[5])).unwrap_err();
+        assert_eq!(error, BadEnd::Past { end: 5, len: 4 });
+        assert_eq!(error.to_string(), "the end 5 is past the body of 4 bytes");
+    }
+
+    #[test]
+    fn refuses_an_end_before_the_start_of_its_series() {
+        let error = check(&[0; 16], tagged(&[3, 2])).unwrap_err();
+        assert_eq!(error, BadEnd::Before { end: 2, start: 8 });
+        assert_eq!(
+            error.to_string(),
+            "the end 2 is before 8, the start of its series"
+        );
+    }
+
+    #[test]
+    fn refuses_an_end_inside_the_padding() {
+        let error = check(&[0; 4], tagged(&[3, 4])).unwrap_err();
+        assert_eq!(error, BadEnd::Before { end: 4, start: 8 });
+    }
+
+    #[test]
+    fn refuses_ends_that_stop_before_the_body() {
+        let error = check(&[1; 17], tagged(&[3, 8])).unwrap_err();
+        assert_eq!(error, BadEnd::Short { last: 8, len: 17 });
+        assert_eq!(
+            error.to_string(),
+            "the last end 8 is not the end of the body of 17 bytes"
+        );
+        let error = check(&[1; 16], tagged(&[])).unwrap_err();
+        assert_eq!(error, BadEnd::Short { last: 0, len: 16 });
+    }
+
+    #[test]
+    fn refuses_the_first_bad_end() {
+        let error = check(&[0; 4], tagged(&[9, 2])).unwrap_err();
+        assert_eq!(error, BadEnd::Past { end: 9, len: 4 });
+    }
+
+    #[test]
+    #[should_panic(expected = "the end 5 is past the body of 4 bytes")]
+    fn panics_on_an_end_past_the_body() {
+        series(&[0; 4], tagged(&[5])).for_each(drop);
+    }
+
+    #[test]
+    #[should_panic(expected = "the end 2 is before 8, the start of its series")]
+    fn panics_on_an_end_before_the_start_of_its_series() {
+        series(&[0; 16], tagged(&[3, 2])).for_each(drop);
+    }
+
+    #[test]
+    #[should_panic(expected = "the last end 8 is not the end of the body of 17 bytes")]
+    fn panics_when_the_ends_stop_before_the_body() {
+        series(&[1; 17], tagged(&[3, 8])).for_each(drop);
+    }
+
+    #[test]
     fn gives_the_block_back_when_the_frame_and_view_drop() {
         let set = two_groups();
         let pool = pool(1 << 16);
@@ -662,7 +918,8 @@ mod tests {
                 .unwrap()
                 .fill(u8::try_from(seq).unwrap());
             let group = u32::try_from(entry).unwrap();
-            draft.set_range(group, Range { seq, count: 1 });
+            draft.set_count(group, 1);
+            draft.set_seq(group, seq);
         }
         let frame = draft.freeze(Path::Live);
         assert_eq!(frame.range(64), Some(Range { seq: 2, count: 1 }));
@@ -771,12 +1028,40 @@ mod tests {
     }
 
     #[test]
+    fn sets_count_and_seq_apart() {
+        let pool = pool(1 << 16);
+        let series = [(0, 8), (2, 8)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        assert_eq!(draft.range(0), Some(Range::default()));
+        draft.set_count(0, 5);
+        assert_eq!(draft.range(0), Some(Range { seq: 0, count: 5 }));
+        draft.set_seq(0, 9);
+        assert_eq!(draft.range(0), Some(Range { seq: 9, count: 5 }));
+        draft.set_seq(1, 4);
+        draft.set_count(1, 3);
+        draft.set_count(0, 6);
+        assert_eq!(draft.range(2), None);
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.range(0), Some(Range { seq: 9, count: 6 }));
+        assert_eq!(frame.range(1), Some(Range { seq: 4, count: 3 }));
+    }
+
+    #[test]
     #[should_panic(expected = "group 1 is absent from the frame")]
-    fn refuses_a_range_for_an_absent_group() {
+    fn refuses_a_count_for_an_absent_group() {
         let pool = pool(1 << 16);
         let series = [(0, 1)];
         let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
-        draft.set_range(1, Range::default());
+        draft.set_count(1, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "group 1 is absent from the frame")]
+    fn refuses_a_seq_for_an_absent_group() {
+        let pool = pool(1 << 16);
+        let series = [(0, 1)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        draft.set_seq(1, 1);
     }
 
     #[derive(Clone, Debug)]
@@ -789,7 +1074,8 @@ mod tests {
         present: Vec<bool>,
         /// Each entry's series length, by entry position.
         lens: Vec<usize>,
-        ranges: Vec<(u64, u32)>,
+        /// Each group's seq and count, and whether the seq is set first.
+        ranges: Vec<(u64, u32, bool)>,
         path: Path,
         form: Form,
         /// Whether the draft is filled through `iter_mut` or by entry.
@@ -806,7 +1092,7 @@ mod tests {
                     vec(any::<bool>(), n),
                     vec(any::<bool>(), n * 41),
                     vec(0_usize..40, n * 41),
-                    vec(any::<(u64, u32)>(), n),
+                    vec(any::<(u64, u32, bool)>(), n),
                     prop_oneof![Just(Path::Live), Just(Path::Backfill)],
                     prop_oneof![Just(Form::Raw), Just(Form::Encoded)],
                     any::<bool>(),
@@ -904,13 +1190,18 @@ mod tests {
         let taken = to_u64(pool.committed() - before);
         fill(&mut draft, &series, entries, case.in_order)?;
         let mut ranges = Vec::new();
-        for ((group, &(seq, count)), &present) in
+        for ((group, &(seq, count, seq_first)), &present) in
             (0_u32..).zip(&case.ranges).zip(&case.groups)
         {
             let range = present.then_some(Range { seq, count });
-            if let Some(range) = range {
-                draft.set_range(group, range);
+            if present && seq_first {
+                draft.set_seq(group, seq);
+                draft.set_count(group, count);
+            } else if present {
+                draft.set_count(group, count);
+                draft.set_seq(group, seq);
             }
+            prop_assert_eq!(draft.range(group), range);
             ranges.push(range);
         }
         ranges.push(None);
@@ -942,6 +1233,12 @@ mod tests {
             body.extend(bytes);
         }
         prop_assert_eq!(&*frame.body(), body.as_slice());
+        let view = frame.body();
+        prop_assert_eq!(check(&view, frame.ends()), Ok(()));
+        let from_ends: Vec<(usize, Vec<u8>)> = super::series(&view, frame.ends())
+            .map(|(entry, bytes)| (entry, bytes.to_vec()))
+            .collect();
+        prop_assert_eq!(&from_ends, &written);
         prop_assert_eq!(read, written);
         Ok(())
     }

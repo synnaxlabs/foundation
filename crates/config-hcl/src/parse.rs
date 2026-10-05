@@ -53,7 +53,7 @@ struct Parser<'a> {
     /// The next token, not yet taken.
     token: Token<'a>,
     /// Inside `[` or `(`, where HCL skips new lines, so `take` never returns one.
-    /// Only [`Parser::enclosed`] sets it.
+    /// Only [`Parser::level`] sets it.
     newlines_skipped: bool,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
@@ -111,8 +111,7 @@ impl<'a> Parser<'a> {
 
     fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
         let labels = self.labels()?;
-        let depth = enter(depth).ok_or(Error::TooDeep { span: keyword.span })?;
-        let (body, span) = self.enclosed(|parser| {
+        let (body, span) = self.level(keyword.span, depth, |parser, depth| {
             if parser.token.kind != lex::Kind::Newline {
                 return parser.one_line(depth);
             }
@@ -128,7 +127,7 @@ impl<'a> Parser<'a> {
             keyword_span: Some(keyword.span),
             labels,
             body,
-            span: Some(join(keyword.span, span)),
+            span: Some(span),
         })
     }
 
@@ -309,6 +308,10 @@ impl<'a> Parser<'a> {
         {
             return self.call(word, depth).map(Some);
         }
+        if self.token.kind == lex::Kind::DoubleColon {
+            // A namespace, not a name: `value` refuses its form.
+            return Ok(None);
+        }
         let kind = match literal(word.text) {
             Some(Literal::Bool(b)) => value::Kind::Bool(b),
             Some(Literal::Null) => {
@@ -365,10 +368,7 @@ impl<'a> Parser<'a> {
     }
 
     fn list(&mut self, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep {
-            span: self.token.span,
-        })?;
-        let (items, span) = self.enclosed(|parser| {
+        let (items, span) = self.level(self.token.span, depth, |parser, depth| {
             parser.refuse_for()?;
             parser.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)
         })?;
@@ -379,10 +379,7 @@ impl<'a> Parser<'a> {
     }
 
     fn object(&mut self, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep {
-            span: self.token.span,
-        })?;
-        let (map, span) = self.enclosed(|parser| {
+        let (map, span) = self.level(self.token.span, depth, |parser, depth| {
             let mut attributes = Vec::new();
             let entries = parser.entries(&mut attributes, depth);
             let map = parser.map(attributes);
@@ -394,13 +391,19 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Takes the open bracket, reads the inside with `inner` up to the close, and
-    /// takes the close. Inside `[` or `(`, `take` skips new lines. Returns what
-    /// `inner` read and the span from the open to the close.
-    fn enclosed<T>(
+    /// Reads one level of nesting that starts at `start`, the keyword, function name,
+    /// or open bracket before the open bracket: takes the open bracket, reads the
+    /// inside with `inner` at the depth inside, and takes the close. Inside `[` or `(`,
+    /// `take` skips new lines. Returns what `inner` read and the span from `start` to
+    /// the close, or [`Error::TooDeep`] at `start` when the level is past
+    /// [`DEPTH_MAX`].
+    fn level<T>(
         &mut self,
-        inner: impl FnOnce(&mut Self) -> Result<T, Error>,
+        start: Span,
+        depth: usize,
+        inner: impl FnOnce(&mut Self, usize) -> Result<T, Error>,
     ) -> Result<(T, Span), Error> {
+        let depth = enter(depth).ok_or(Error::TooDeep { span: start })?;
         let skipped = match self.token.kind {
             lex::Kind::OpenBracket | lex::Kind::OpenParenthesis => true,
             lex::Kind::OpenBrace => false,
@@ -409,11 +412,11 @@ impl<'a> Parser<'a> {
         // The mode changes before each bracket is taken, because `take` reads the
         // token after it.
         let outer = std::mem::replace(&mut self.newlines_skipped, skipped);
-        let open = self.take()?;
-        let inside = inner(self)?;
+        self.take()?;
+        let inside = inner(self, depth)?;
         self.newlines_skipped = outer;
         let close = self.take()?;
-        Ok((inside, join(open.span, close.span)))
+        Ok((inside, join(start, close.span)))
     }
 
     /// Reads the entries of an object after its `{`, and leaves the `}`.
@@ -493,10 +496,7 @@ impl<'a> Parser<'a> {
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep {
-            span: function.span,
-        })?;
-        let (arguments, span) = self.enclosed(|parser| {
+        let (arguments, span) = self.level(function.span, depth, |parser, depth| {
             parser.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)
         })?;
         Ok(Value {
@@ -505,7 +505,7 @@ impl<'a> Parser<'a> {
                 function_span: Some(function.span),
                 arguments,
             }),
-            span: Some(join(function.span, span)),
+            span: Some(span),
         })
     }
 
@@ -661,7 +661,7 @@ fn significant(digits: &str) -> bool {
 }
 
 /// The depth inside one more level, or `None` past [`DEPTH_MAX`].
-pub(crate) fn enter(depth: usize) -> Option<usize> {
+fn enter(depth: usize) -> Option<usize> {
     depth.checked_add(1).filter(|&inner| inner <= DEPTH_MAX)
 }
 
@@ -935,6 +935,36 @@ c = "°C # not a comment"
                 ok("a = \"température\"\nb = { \"température\" = 1 }\n"),
                 expected
             );
+        }
+
+        #[test]
+        fn reads_identifiers_outside_ascii_as_hcl_does() {
+            let text =
+                "température = 1\n_é-1 = é(2)\nx = { e\u{301}t = 3 }\nétape {\n}\n";
+            let call = value::Kind::Call(Call {
+                function: "é".into(),
+                function_span: None,
+                arguments: vec![value(integer(2))],
+            });
+            let mut expected = attributes(vec![
+                ("température", integer(1)),
+                ("_é-1", call),
+                ("x", value::Kind::Map(map(vec![("e\u{301}t", integer(3))]))),
+            ]);
+            expected
+                .blocks
+                .push(block("étape", &[], Document::default()));
+            let document = ok(text);
+            assert_eq!(document, expected);
+
+            let key = document.attributes.get("température").unwrap();
+            assert_eq!(key.key_span, Some(span(at(0, 0, 0), at(12, 0, 11))));
+            let x = document.attributes.get("x").unwrap();
+            let value::Kind::Map(object) = &x.value.kind else {
+                panic!("not a map: {x:?}");
+            };
+            let key = object.get("e\u{301}t").unwrap();
+            assert_eq!(key.key_span, Some(span(at(37, 2, 6), at(41, 2, 9))));
         }
 
         #[test]
@@ -1227,6 +1257,8 @@ c = "°C # not a comment"
                 ("<<EOT\nx\nEOT", "x\n"),
                 ("<<END-1_a\nx\nEND-1_a\n", "x\n"),
                 ("<<_\nx\n_\n", "x\n"),
+                ("<<ÉOT\nx\nÉOT\n", "x\n"),
+                ("<<EOT\nx\nEOT\u{301}\nEOT\n", "x\nEOT\u{301}\n"),
                 ("<<EOT\n°C\nEOT\n", "°C\n"),
                 (
                     "<<EOT\n\\n \\\" # a // b /* c \"\nEOT\n",
@@ -1337,6 +1369,7 @@ c = "°C # not a comment"
                 ("a = <<EOT x\nx\nEOT\n", 9),
                 ("a = <<EOT # c\nx\nEOT\n", 9),
                 ("a = <<EOT", 9),
+                ("a = <<\u{301}EOT\n", 6),
             ];
             for (text, end) in cases {
                 let start = syntax(on(4, end), Expected::HeredocStart);
@@ -1561,6 +1594,11 @@ c = "°C # not a comment"
                 ("a = b.*.c\n", on(5, 6), Form::Splat),
                 ("a = (1)\n", on(4, 5), Form::Parentheses),
                 ("a = provider::aws::f(1)\n", on(12, 14), Form::Namespace),
+                (
+                    "a = é::f()\n",
+                    span(at(6, 0, 5), at(8, 0, 7)),
+                    Form::Namespace,
+                ),
                 ("a = f(xs...)\n", on(8, 11), Form::Expansion),
                 ("a = [1 + 2]\n", on(7, 8), Form::Operator),
                 ("a = { k = 1 + 2 }\n", on(12, 13), Form::Operator),
@@ -1816,6 +1854,49 @@ c = "°C # not a comment"
                 error,
             };
             check(&format!("r = {long}"), &[(name, NAME)]);
+        }
+
+        #[test]
+        fn refuses_each_reference_outside_ascii() {
+            let name = |text: &str, span| {
+                let error = text.parse::<Name>().unwrap_err();
+                (Error::Name { span, error }, NAME)
+            };
+            check(
+                "a = x.température\nb = [é]\nc = f(x.é)\n",
+                &[
+                    name("x.température", span(at(4, 0, 4), at(18, 0, 17))),
+                    name("é", span(at(24, 1, 5), at(26, 1, 6))),
+                    name("x.é", span(at(34, 2, 6), at(38, 2, 9))),
+                ],
+            );
+        }
+
+        #[test]
+        fn refuses_a_character_that_no_identifier_holds() {
+            let cases = [
+                (
+                    "\u{200b}a = 1\n",
+                    span(at(0, 0, 0), at(3, 0, 1)),
+                    Expected::Item,
+                ),
+                (
+                    "a\u{200b} = 1\n",
+                    span(at(1, 0, 1), at(4, 0, 2)),
+                    Expected::AttributeOrBlock,
+                ),
+            ];
+            for (text, span, expected) in cases {
+                let message = needs(expected);
+                check(text, &[(syntax(span, expected), &message)]);
+            }
+        }
+
+        #[test]
+        fn refuses_a_compatibility_character_that_hcl_reads() {
+            let span = span(at(0, 0, 0), at(2, 0, 1));
+            let message = needs(Expected::Item);
+            check("\u{37a} = 1\n", &[(syntax(span, Expected::Item), &message)]);
         }
 
         #[test]

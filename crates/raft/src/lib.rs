@@ -19,7 +19,7 @@ use std::fmt;
 use types::node;
 
 pub use config::{Config, Start};
-pub use log::Entry;
+pub use log::{Data, Entry};
 pub use machine::{Raft, Ready, Role};
 pub use message::{Body, Message};
 pub use voters::Voters;
@@ -70,8 +70,17 @@ pub enum Error {
         /// The configured heartbeat ticks.
         heartbeat: u32,
     },
-    /// The incoming voter set is empty while the outgoing set is not.
+    /// The incoming voter set of `Start.voters` is empty while the outgoing set is
+    /// not.
     EmptyIncoming,
+    /// A configuration has an empty incoming voter set.
+    NoVoters,
+    /// A configuration change is in progress: the configuration entry at `at` is not
+    /// committed yet.
+    ChangePending {
+        /// The position of the last configuration entry in the log.
+        at: Position,
+    },
     /// The stored term is lower than the term of the last log entry.
     TermBehindLog {
         /// The stored term.
@@ -133,6 +142,14 @@ impl fmt::Display for Error {
                     "the incoming voter set is empty while the outgoing set is not"
                 )
             }
+            Self::NoVoters => {
+                write!(f, "a configuration has an empty incoming voter set")
+            }
+            Self::ChangePending { at } => write!(
+                f,
+                "a configuration change at index {} in term {} is pending",
+                at.index, at.term
+            ),
             Self::TermBehindLog { term, last } => write!(
                 f,
                 "stored term {term} is lower than term {} of the last log entry",

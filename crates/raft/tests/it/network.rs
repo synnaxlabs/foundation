@@ -2,12 +2,13 @@
 //! messages, with nodes that restart from a modeled disk. It checks the safety
 //! properties of Raft after every input.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 use proptest::sample::Index;
+use proptest::strategy::Union;
 use raft::{
-    Body, Config, Entry, Error, Hard, Message, Position, Raft, Role, Start, Term,
+    Body, Config, Data, Entry, Error, Hard, Message, Position, Raft, Role, Start, Term,
     Voters,
 };
 use types::node;
@@ -26,24 +27,59 @@ pub(crate) enum Action {
     Lose { pick: Index },
     Cut { node: usize },
     Mend,
+    // A proposal to `node` of the flagged nodes as the voters.
+    ChangeVoters { node: usize, voters: Vec<bool> },
 }
 
-fn action(nodes: usize) -> impl Strategy<Value = Action> {
+// The actions of a group of `nodes`. With `fixed`, the voters do not change.
+fn action(nodes: usize, fixed: bool) -> impl Strategy<Value = Action> {
     let node = 0..nodes;
     let pick = any::<Index>;
-    prop_oneof![
-        4 => (node.clone(), any::<u64>())
-            .prop_map(|(node, random)| Action::Tick { node, random }),
-        1 => node.clone().prop_map(|node| Action::Campaign { node }),
-        3 => node.clone().prop_map(|node| Action::Propose { node }),
-        1 => node.clone().prop_map(|node| Action::Restart { node }),
-        6 => prop::collection::vec(pick(), 1..8)
-            .prop_map(|picks| Action::Deliver { picks }),
-        1 => pick().prop_map(|pick| Action::Repeat { pick }),
-        1 => pick().prop_map(|pick| Action::Lose { pick }),
-        1 => node.prop_map(|node| Action::Cut { node }),
-        1 => Just(Action::Mend),
-    ]
+    let mut arms: Vec<(u32, BoxedStrategy<Action>)> = vec![
+        (
+            4,
+            (node.clone(), any::<u64>())
+                .prop_map(|(node, random)| Action::Tick { node, random })
+                .boxed(),
+        ),
+        (
+            1,
+            node.clone()
+                .prop_map(|node| Action::Campaign { node })
+                .boxed(),
+        ),
+        (
+            3,
+            node.clone()
+                .prop_map(|node| Action::Propose { node })
+                .boxed(),
+        ),
+        (
+            1,
+            node.clone()
+                .prop_map(|node| Action::Restart { node })
+                .boxed(),
+        ),
+        (
+            6,
+            prop::collection::vec(pick(), 1..8)
+                .prop_map(|picks| Action::Deliver { picks })
+                .boxed(),
+        ),
+        (1, pick().prop_map(|pick| Action::Repeat { pick }).boxed()),
+        (1, pick().prop_map(|pick| Action::Lose { pick }).boxed()),
+        (
+            1,
+            node.clone().prop_map(|node| Action::Cut { node }).boxed(),
+        ),
+        (1, Just(Action::Mend).boxed()),
+    ];
+    if !fixed {
+        let change = (node, prop::collection::vec(any::<bool>(), nodes))
+            .prop_map(|(node, voters)| Action::ChangeVoters { node, voters });
+        arms.push((1, change.boxed()));
+    }
+    Union::new_weighted(arms)
 }
 
 // An empty log ends at the zero position; any other ends in a term above zero.
@@ -55,24 +91,30 @@ fn position() -> impl Strategy<Value = Position> {
     prop_oneof![1 => Just(Position::default()), 3 => filled]
 }
 
-/// The last log position of each node, and the actions to run.
+/// The last log position of each node, and the actions to run, with changes to the
+/// voters.
 pub(crate) fn run() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
     let nodes = prop_oneof![1 => 1..=2_usize, 5 => Just(3), 1 => Just(4), 4 => Just(5)];
-    run_of(nodes)
+    run_of(nodes, false)
 }
 
-/// A run of a group that keeps a quorum when one node is cut off.
+/// A run of a group that keeps a quorum when one node is cut off. The voters do not
+/// change.
 pub(crate) fn run_of_many() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
-    run_of(prop_oneof![5 => Just(3_usize), 1 => Just(4), 4 => Just(5)])
+    run_of(
+        prop_oneof![5 => Just(3_usize), 1 => Just(4), 4 => Just(5)],
+        true,
+    )
 }
 
 fn run_of(
     nodes: impl Strategy<Value = usize>,
+    fixed: bool,
 ) -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
-    nodes.prop_flat_map(|nodes| {
+    nodes.prop_flat_map(move |nodes| {
         (
             prop::collection::vec(position(), nodes),
-            prop::collection::vec(action(nodes), 0..400),
+            prop::collection::vec(action(nodes, fixed), 0..400),
         )
     })
 }
@@ -125,7 +167,7 @@ impl Network {
                             term: last.term,
                             index,
                         },
-                        data: Vec::new(),
+                        data: Data::Empty,
                     })
                     .collect(),
                 applied: 0,
@@ -215,8 +257,64 @@ impl Network {
             Action::Repeat { .. } | Action::Lose { .. } => {}
             Action::Cut { node } => self.cut[*node] = true,
             Action::Mend => self.cut.fill(false),
+            Action::ChangeVoters { node, voters } => {
+                self.change_voters(*node, voters);
+            }
         }
         self.collect();
+    }
+
+    fn change_voters(&mut self, node: usize, flags: &[bool]) {
+        let voters: BTreeSet<node::Key> = (0..flags.len())
+            .filter(|&at| flags[at])
+            .map(Self::key)
+            .collect();
+        let pending = self.pending(node);
+        let raft = &mut self.nodes[node];
+        let before = raft.voters().clone();
+        let result = raft.propose_voters(voters.clone());
+        let (role, term) = (raft.role(), raft.term());
+        match (role, result) {
+            (Role::Leader, Ok(at)) => {
+                assert!(!voters.is_empty());
+                assert_eq!(pending, None);
+                assert!(
+                    before.outgoing.is_empty(),
+                    "a leader in a settled joint phase"
+                );
+                assert_eq!(at.term, term);
+                let disk = &self.disks[node];
+                assert_eq!(at.index, u64::try_from(disk.entries.len()).unwrap() + 1);
+                self.collect();
+                let joint = Voters {
+                    incoming: voters,
+                    outgoing: before.incoming,
+                };
+                let index = usize::try_from(at.index - 1).unwrap();
+                let written = self.disks[node].entries.get(index).map(|e| &e.data);
+                assert_eq!(written, Some(&Data::Voters(joint)), "the joint entry");
+            }
+            (role, Err(Error::NotLeader { leader })) if role != Role::Leader => {
+                assert_eq!(leader, self.nodes[node].leader());
+            }
+            (Role::Leader, Err(Error::NoVoters)) => assert!(voters.is_empty()),
+            (Role::Leader, Err(Error::ChangePending { at })) => {
+                assert_eq!(pending, Some(at));
+            }
+            (role, result) => panic!("a {role:?} answered a change with {result:?}"),
+        }
+    }
+
+    // The position of the last configuration entry on the disk of `node` when it is
+    // not committed.
+    fn pending(&self, node: usize) -> Option<Position> {
+        let disk = &self.disks[node];
+        disk.entries
+            .iter()
+            .rev()
+            .find(|entry| matches!(entry.data, Data::Voters(_)))
+            .filter(|entry| entry.at.index > disk.applied)
+            .map(|entry| entry.at)
     }
 
     /// Proposes a new value to `node`. Returns its position when the node leads.
@@ -319,6 +417,17 @@ impl Network {
 
     // A vote goes only to a candidate whose log is at least as new as the voter's.
     fn note(&mut self, at: usize, message: &Message) {
+        if matches!(message.body, Body::PreVote { .. } | Body::Vote { .. }) {
+            let node = &self.nodes[at];
+            let voters = node.voters();
+            let key = node.key();
+            assert!(
+                voters.incoming.contains(&key)
+                    || voters.outgoing.contains(&key)
+                    || self.pending(at).is_some(),
+                "node {at} campaigns outside its committed configuration"
+            );
+        }
         let prevote = match message.body {
             Body::PreVote { last } => {
                 let key = (message.from, message.term, true);
@@ -347,6 +456,10 @@ impl Network {
     // a leader must hold only the entries committed in a term below its own.
     fn check_leader(&mut self, at: usize) {
         let node = &self.nodes[at];
+        assert!(
+            node.voters().incoming.contains(&node.key()) || self.pending(at).is_some(),
+            "node {at} leads outside its committed configuration"
+        );
         let term = node.term();
         if let Some(leader) = self.leaders.get(&term) {
             assert_eq!(*leader, node.key(), "two leaders in term {term:?}");
@@ -378,22 +491,33 @@ impl Network {
         }
     }
 
-    /// The leader and its term, when one node leads and every other node follows it
-    /// in its term.
+    /// The leader and its term, when one node leads and every other node in its
+    /// configuration follows it in its term. A node that a change removed gets no
+    /// more messages from the leader, so its term and leader can lag.
     pub(crate) fn agreed(&self) -> Option<(usize, Term)> {
         let at = self
             .nodes
             .iter()
             .position(|node| node.role() == Role::Leader)?;
         let leader = &self.nodes[at];
-        let agreed = self.nodes.iter().all(|node| {
+        let agreed = self.voters(at).all(|node| {
+            let node = &self.nodes[node];
             node.term() == leader.term() && node.leader() == Some(leader.key())
         });
         agreed.then_some((at, leader.term()))
     }
 
-    /// Runs the actions, mends the network, and runs rounds until the nodes agree
-    /// on one leader for two election timeouts.
+    /// The nodes in the configuration of `node`, in order.
+    pub(crate) fn voters(&self, node: usize) -> impl Iterator<Item = usize> {
+        let voters = self.nodes[node].voters();
+        (0..self.nodes.len()).filter(move |&at| {
+            let key = Self::key(at);
+            voters.incoming.contains(&key) || voters.outgoing.contains(&key)
+        })
+    }
+
+    /// Runs the actions, mends the network, and runs rounds until the leader's
+    /// voters agree on it for two election timeouts.
     pub(crate) fn settle(
         &mut self,
         actions: &[Action],
@@ -418,5 +542,16 @@ impl Network {
             }
         }
         Err(TestCaseError::fail("no leader after 100 election timeouts"))
+    }
+
+    /// Runs rounds, up to four election timeouts, until every one of `nodes` has
+    /// applied `index`.
+    pub(crate) fn apply_until(&mut self, nodes: &[usize], index: u64) {
+        for _ in 0..4 * ELECTION {
+            if nodes.iter().all(|&node| self.disks[node].applied >= index) {
+                return;
+            }
+            self.round();
+        }
     }
 }
