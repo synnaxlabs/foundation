@@ -112,13 +112,17 @@ fn now_beside_a_writer(bencher: Bencher<'_, '_>, pause: Duration) {
     push(&mut clock, source, &monotonic);
     let stopped = AtomicBool::new(false);
     thread::scope(|scope| {
+        let (stopped, monotonic) = (&stopped, &monotonic);
         #[expect(
             clippy::disallowed_methods,
             reason = "a benchmark paces its writer with a real clock"
         )]
-        scope.spawn(|| {
+        scope.spawn(move || {
+            // The writer owns the clock, as `run` does on its shard. A clock on the
+            // reader's stack can share a cache line with the reader.
+            let mut clock = clock;
             while !stopped.load(Relaxed) {
-                push(&mut clock, source, &monotonic);
+                push(&mut clock, source, monotonic);
                 if !pause.is_zero() {
                     thread::sleep(pause);
                 }
