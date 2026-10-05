@@ -73,11 +73,13 @@ state on `main`.
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
   byte arrives), #298 (datagrams that are not valid, from one address, stop every
-  stateless reset; a small datagram of an unknown version gets a reply), #299 (a
-  peer makes the node hold certificates that are not valid for a session).
+  stateless reset; a small datagram of an unknown version gets a reply).
+- Fixed: #299 (a peer made the node hold certificates that are not valid for a
+  session). A chain is one certificate of at most 1 KiB.
 - Not decided: a limit on handshakes before admission. Each one costs the node a key
   exchange and one signature, and one signature check more when the peer sends a
-  certificate.
+  certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
+  timeout (#563).
 
 ### `transport` to protocols
 
@@ -178,8 +180,10 @@ state on `main`.
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
 - Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
-  reported durable or cannot open). Fixed: #393 (two CRC-valid fields stopped the
-  node at open); the `area` and `below_tail` inputs hold both.
+  reported durable or cannot open), #553 (a power cut after the first open loses
+  the new ring: its directory is not synced in its parent). Fixed: #393 (two
+  CRC-valid fields stopped the node at open); the `area` and `below_tail` inputs
+  hold both.
 
 ### Device to connector
 
