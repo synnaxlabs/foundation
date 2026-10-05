@@ -354,7 +354,7 @@ impl Raft {
     }
 
     // Applies a message that `check` and `meet` passed: one of this term, a PreVote
-    // for the next one, or a granted PreVoteReply for the next one.
+    // for a later one, or a granted PreVoteReply for a later one.
     fn handle(&mut self, from: node::Key, term: Term, body: Body) {
         match body {
             Body::PreVote { last } => {
