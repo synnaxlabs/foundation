@@ -713,7 +713,8 @@ How to read this record:
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
   enters only through `tick`: a node draws its election timeout on the first tick
   after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
-  its own voter list votes and follows, but never campaigns. `step` does not check
+  its own voter list votes and follows, but never campaigns while that configuration
+  is committed. `step` does not check
   that a sender is a voter (a voter can learn late that a peer joined), so the caller
   authenticates the sender and decides which nodes may send.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
@@ -743,7 +744,15 @@ How to read this record:
   its log from the time it writes it; `Start.voters` is the configuration before
   `Start.entries`. A `Voters` entry with an empty `incoming` set, in `Start.entries`
   or in an `Append`, is `Error::NoVoters`: a group with no voter can never commit or
-  elect.
+  elect. A leader changes the voters with `Raft::propose_voters(set)`: it writes the
+  joint configuration (`incoming` the new set, `outgoing` the current one) and, when
+  that entry commits, the leave (`incoming` alone). One change at a time: while the
+  last configuration entry is not committed, a proposal is `Error::ChangePending`.
+  The leader sends a node the change removed the leave and its commit, then drops
+  it. A leader outside the committed final set sends the commit and steps down. A
+  node outside an uncommitted configuration still campaigns: the entry may be
+  truncated, and a removed leader that lost its lead before the leave reached a peer
+  is the only node that can win the election that commits it.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
