@@ -8,10 +8,17 @@ publish.workspace = true
 [dependencies]
 block = { path = "../block" }
 crc32c = { workspace = true }
+env = { path = "../env" }
 types = { path = "../types" }
+
+[dev-dependencies]
+counting = { path = "../counting" }
+proptest = { workspace = true }
+sim = { path = "../sim" }
+
+[[test]]
+name = "alloc"
+harness = false
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-proptest = { workspace = true }

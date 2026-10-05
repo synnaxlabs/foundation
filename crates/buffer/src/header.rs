@@ -23,6 +23,7 @@ use crate::wal::{Layout, Position, Unaligned, Unfit};
 
 const MAGIC: [u8; 8] = *b"FNDNRING";
 const VERSION: u16 = 1;
+#[cfg(test)]
 const FIELDS: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
 const CRC: usize = ALIGN - 4;
 
@@ -80,6 +81,7 @@ impl Header {
     }
 
     /// The checkpoint after this one, with the tail moved to `tail`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "trimming moves the tail"))]
     pub(crate) fn next(self, tail: Position) -> Self {
         Self {
             tail,
@@ -90,6 +92,7 @@ impl Header {
 
     /// The byte offset in the ring file of the block that holds this checkpoint:
     /// the two checkpoints alternate between the first two blocks.
+    #[cfg_attr(not(test), expect(dead_code, reason = "trimming moves the tail"))]
     pub(crate) fn place(&self) -> u64 {
         if self.seq.is_multiple_of(2) { 0 } else { BLOCK }
     }
