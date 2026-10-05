@@ -639,7 +639,11 @@ How to read this record:
   nodes and "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so
   an SDK may offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
   reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS).
-  Decided by `network` in #54; the ALPN check, suites, and groups in #108.
+  Decided by `network` in #54; the ALPN check, suites, and groups in #108. A key of
+  small order is not a node key: a signature for it passes with no private key, so
+  every Ed25519 check refuses it (BQ12). `types::node::PublicKey` refuses such a key
+  when it is built, so no check site needs its own test. The person decided on
+  2026-10-05 ("Yeah that's fine"), #227, #277.
 
 ### 1.8 Consensus, regions, and the spec
 
