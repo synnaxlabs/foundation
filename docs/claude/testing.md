@@ -29,9 +29,11 @@ behavior. Never print a pointer. No `thread_local!` state.
 | 8 | Hardware in the loop with real devices | Nightly and release |
 
 Benchmarks run on a dedicated machine. Mutation testing (`cargo mutants --in-diff`)
-checks on each PR that agent-written tests catch real changes. `.cargo/mutants.toml`
-lists the few functions it skips, each with its reason. Miri and cargo-fuzz run on one
-pinned nightly, named in `rust-toolchain-nightly`, that only those gates use.
+checks on each PR that agent-written tests catch real changes. A missed mutant fails
+CI. A mutant that makes a test hang (a timeout) counts as caught.
+`.cargo/mutants.toml` lists the few functions it skips, each with its reason. Miri and
+cargo-fuzz run on one pinned nightly, named in `rust-toolchain-nightly`, that only
+those gates use.
 
 ## Fuzzing
 

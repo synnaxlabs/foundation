@@ -646,6 +646,16 @@ How to read this record:
   from 0); SDK and spec documents have none (section 2.1, kind config). `==` never
   reads spans, so a Document from a file equals the same Document from the spec.
   Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
+- **DOCUMENT ENCODING (2026-10-04)** `document::encoding` gives each Document exactly
+  one byte string, with no spans: a version byte, then tagged values, blocks in the
+  producer's order, keys in byte order, and fixed-width little-endian integers (`u64`
+  counts and lengths, `i128` integers, and `f64` floats as their bits). `decode`
+  refuses every byte string that `encode` cannot write. Both refuse nesting past 64
+  levels, and front ends refuse files that nest deeper. `encode` returns `TooDeep` and
+  `decode` returns `Error`: two error types, by the coordinator's ruling under R16-6.
+  `spec` stores and hashes these bytes. Pinned bytes are an oracle in
+  `oracles/conformance/document/`. A new format takes a new version byte. Decided by
+  the `config` builder; approved by the coordinator (#62).
 - **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
@@ -1576,7 +1586,7 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
-| 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, and shared value readers. | `types` |
+| 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
 | 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |

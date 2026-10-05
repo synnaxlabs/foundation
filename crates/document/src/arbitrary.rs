@@ -41,7 +41,7 @@ fn value() -> impl Strategy<Value = Value> {
         any::<f64>()
             .prop_filter_map("finite", Float::new)
             .prop_map(Kind::Float),
-        "[a-z ]{0,8}".prop_map(|s| Kind::String(s.into())),
+        "\\PC{0,8}".prop_map(|s| Kind::String(s.into())),
         "[a-z]{1,4}(\\.[a-z]{1,4}){0,2}"
             .prop_map(|s| Kind::Reference(s.parse().unwrap())),
     ];
@@ -68,7 +68,7 @@ fn value() -> impl Strategy<Value = Value> {
 }
 
 fn label() -> impl Strategy<Value = Label> {
-    ("[a-z_.]{0,8}", span()).prop_map(|(text, span)| Label {
+    ("\\PC{0,8}", span()).prop_map(|(text, span)| Label {
         text: text.into(),
         span,
     })
