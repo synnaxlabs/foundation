@@ -53,6 +53,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "config_hcl_update"
+path = "fuzz_targets/config_hcl_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "config_hcl_write"
 path = "fuzz_targets/config_hcl_write.rs"
 test = false
