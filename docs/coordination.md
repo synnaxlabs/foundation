@@ -176,6 +176,12 @@ A benchmark starts only when `uptime` shows a load under 8, and its PR names the
 Builds and the PR gates do not take the lock. On 2026-10-05 the load reached 170, and a
 stress run and two benchmarks gave results that no one could use.
 
+The sessions also share 48 GiB of RAM. A local build or test names its crates with
+`-p`: the crates you changed, plus the crates that use a public item you changed.
+Never run `--workspace`, `cargo xtask miri`, `loom`, or `shuttle` on the laptop; CI
+runs them. On 2026-10-05 the person said: "You agents need to be careful about how they
+use memory" (RAM).
+
 ## Issues
 
 Every task is a GitHub issue. An issue states its goal, the crates it owns, the tests

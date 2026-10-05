@@ -35,14 +35,17 @@ You own a set of crates. Your session name is your owner label (`owner:<name>`).
    codecs and pure logic, and simulation tests for anything with I/O.
 4. Implement until the tests pass. Keep the PR to a few hundred lines. When it grows
    past that or a second idea appears, stop and split.
-5. Run the gates locally:
+5. Run the gates locally on the crates you changed, plus the crates that use a public
+   item you changed. Never `--workspace` on the laptop, because the sessions share its
+   RAM; CI runs the whole workspace ("Heavy runs on the laptop" in
+   `docs/coordination.md`).
    ```sh
    cargo fmt --check
-   cargo clippy --workspace --all-targets -- -D warnings
+   cargo clippy -p <crate>... --all-targets -- -D warnings
    cargo xtask layers
    cargo xtask globals
    cargo xtask oracles
-   cargo test --workspace
+   cargo test -p <crate>...
    ```
 6. If the change touches a hot path, run its benchmarks and answer the six questions
    in `docs/claude/performance.md`.

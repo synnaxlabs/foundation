@@ -633,14 +633,13 @@ impl Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use env::files::SECTOR;
     use proptest::prelude::*;
     use std::collections::VecDeque;
 
     const BLOCKS: u64 = 8;
     const AREA: u64 = BLOCKS * 4096;
     const BODY_MAX: usize = 3 * ALIGN;
-    /// The unit a crash keeps or loses of an unsynced write.
-    const SECTOR: usize = 512;
 
     /// The smallest piece the test reader holds. Every record of the fixture
     /// fits in it; the long fixture below does not.
@@ -1531,7 +1530,7 @@ mod tests {
                 prop_assert_eq!(cursor.at.offset, ring.writer.head());
             }
 
-            /// A crash leaves any subset of the 512-byte sectors of the last
+            /// A crash leaves any subset of the sectors of the last
             /// write. The record is live when every sector it wrote survives;
             /// lost padding does not count. A flipped bit in it drops it.
             #[test]
