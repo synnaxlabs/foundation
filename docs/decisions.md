@@ -588,10 +588,11 @@ How to read this record:
   file the issues for their own crates; the coordinator keeps interfaces, decisions,
   and the merge queue. Ownership: `docs/coordination.md`.
 - **C9b** Work loop: a planning session splits a phase into tasks that own crates
-  (amended by NINE BUILDERS: each builder splits its own phase); one agent per task in its own worktree; machine gates (build, lints, layer and stand-alone
-  checks, unit and property tests, thousands of simulation runs, short fuzz, the 5%
-  benchmark gate, mutation testing on the diff); two fresh adversarial reviewers; a
-  person reads and merges; cleanup agents follow.
+  (amended by NINE BUILDERS: each builder splits its own phase); one agent per task in
+  its own worktree; machine gates (build, lints, layer and stand-alone checks, unit and
+  property tests, thousands of simulation runs, short fuzz, the 5% benchmark gate,
+  mutation testing on the diff); two fresh adversarial reviewers; a person reads and
+  merges; cleanup agents follow.
 - **C9b2** A quality crew of six single-job agents (code quality, tests, architecture,
   performance, failure triage, drift), each with a person-owned rulebook. One command
   starts the daily run.
