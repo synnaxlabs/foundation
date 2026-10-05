@@ -35,7 +35,8 @@ impl Clock {
         Self(Arc::new(driver))
     }
 
-    /// Reads the clock. It never goes backwards, and it means nothing on another node.
+    /// Reads the clock. It never goes backwards, it counts time while the machine
+    /// sleeps, and it means nothing on another node.
     ///
     /// ```
     /// fn read(clock: &env::clock::Clock) -> types::time::Monotonic {
@@ -49,7 +50,8 @@ impl Clock {
 
     /// The std [`Instant`] at `Monotonic(0)`, for sans-I/O libraries that take a std
     /// [`Instant`]. Only differences between instants mean anything. Never compare
-    /// one with a real `Instant::now`: under `sim` the two clocks are not related.
+    /// one with a real `Instant::now`: under `sim` the two clocks are not related,
+    /// and under `os` an `Instant` may stop while the machine sleeps.
     ///
     /// ```
     /// use std::time::{Duration, Instant};
@@ -117,7 +119,8 @@ impl fmt::Debug for Clock {
 /// }
 /// ```
 pub trait Driver: Send + Sync {
-    /// Reads the clock. Reads on any thread never go backwards.
+    /// Reads the clock. Reads on any thread never go backwards, and the clock
+    /// counts time while the machine sleeps.
     fn now(&self) -> Monotonic;
 
     /// The std [`Instant`] at `Monotonic(0)`. It never changes.

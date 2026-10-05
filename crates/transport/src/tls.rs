@@ -70,16 +70,9 @@ impl Tls {
     pub(crate) fn new(private_key: &PrivateKey) -> Self {
         let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
             .expect("invariant: any 32 bytes are an Ed25519 private key");
-        let key = pair.public_key().as_ref();
-        let mut tbs = Vec::with_capacity(TBS_BYTES);
-        for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, key] {
-            tbs.extend_from_slice(part);
-        }
-        let signature = pair.sign(&tbs);
-        let mut certificate = Vec::with_capacity(CERTIFICATE_BYTES);
-        for part in [CERTIFICATE, &tbs, ED25519, SIGNATURE, signature.as_ref()] {
-            certificate.extend_from_slice(part);
-        }
+        let certificate = issue(pair.public_key().as_ref(), |tbs| {
+            pair.sign(tbs).as_ref().to_vec()
+        });
         let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
         let key = any_eddsa_type(&pkcs8)
             .expect("invariant: the PKCS#8 template holds an Ed25519 key");
@@ -158,6 +151,21 @@ fn provider() -> CryptoProvider {
     }
 }
 
+/// The template certificate for `key`, with the signature `sign` gives for its
+/// to-be-signed part.
+fn issue(key: &[u8], sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
+    let mut tbs = Vec::with_capacity(TBS_BYTES);
+    for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, key] {
+        tbs.extend_from_slice(part);
+    }
+    let signature = sign(&tbs);
+    let mut certificate = Vec::with_capacity(CERTIFICATE_BYTES);
+    for part in [CERTIFICATE, &tbs, ED25519, SIGNATURE, &signature] {
+        certificate.extend_from_slice(part);
+    }
+    certificate
+}
+
 /// The peer of a finished handshake, from the protocol it agreed and the
 /// certificates a verifier here accepted.
 ///
@@ -168,7 +176,7 @@ fn provider() -> CryptoProvider {
 ///
 /// # Panics
 ///
-/// When the certificate carries no Ed25519 key, which the verifiers refuse.
+/// When the certificate carries no node key, which the verifiers refuse.
 #[expect(
     clippy::unwrap_in_result,
     reason = "another key here is a verifier defect, not a peer error"
@@ -188,15 +196,63 @@ pub(crate) fn peer(
     })
 }
 
-/// The node key that `certificate` carries.
+/// The node key that `certificate` carries. A key of small order is not a node key:
+/// a signature for it passes with no private key.
 fn key(certificate: &CertificateDer<'_>) -> Result<PublicKey, rustls::Error> {
     let parsed = ParsedCertificate::try_from(certificate)?;
     parsed
         .subject_public_key_info()
         .strip_prefix(SPKI)
         .and_then(|key| <[u8; 32]>::try_from(key).ok())
+        .filter(|key| !small_order(*key))
         .map(PublicKey)
         .ok_or_else(|| CertificateError::ApplicationVerificationFailure.into())
+}
+
+/// The y of each Ed25519 point of small order, and p and p + 1, which aws-lc's
+/// portable decoder reads as 0 and 1.
+const SMALL_ORDER: [[u8; 32]; 7] = [
+    // 0 and p: order 4.
+    [0; 32],
+    [
+        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+    ],
+    // 1 and p + 1: the identity.
+    [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ],
+    [
+        0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+    ],
+    // p - 1: order 2.
+    [
+        0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+    ],
+    // Order 8.
+    [
+        0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4, 0x89, 0xf2,
+        0xef, 0x98, 0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6, 0x33, 0x39, 0xb1, 0x38,
+        0x02, 0x88, 0x6d, 0x53, 0xfc, 0x05,
+    ],
+    [
+        0xc7, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d,
+        0x10, 0x67, 0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7,
+        0xfd, 0x77, 0x92, 0xac, 0x03, 0x7a,
+    ],
+];
+
+/// Whether `key` encodes a point of small order, with either sign of x.
+fn small_order(mut key: [u8; 32]) -> bool {
+    key[31] &= 0x7f;
+    SMALL_ORDER.contains(&key)
 }
 
 /// Accepts a server only when it proves the key the caller dialed.
@@ -292,10 +348,11 @@ impl ClientCertVerifier for AnyKey {
     }
 }
 
-/// rustls reads wall time on each handshake, and its default reads the OS clock.
-/// Nothing here uses the time: the verifiers ignore dates and resumption is off.
+/// The wall time this crate gives a library that asks for one: `UNIX_EPOCH`. The
+/// defaults read the OS clock. Nothing here uses the time: the verifiers ignore
+/// dates, and resumption, Retry, and `NEW_TOKEN` are off.
 #[derive(Debug)]
-struct Epoch;
+pub(crate) struct Epoch;
 
 impl TimeProvider for Epoch {
     fn current_time(&self) -> Option<UnixTime> {
@@ -466,6 +523,46 @@ mod tests {
         fn algorithm(&self) -> SignatureAlgorithm {
             self.0.algorithm()
         }
+    }
+
+    /// The identity point of Ed25519: a public key that has no private key.
+    const IDENTITY: [u8; 32] = {
+        let mut point = [0; 32];
+        point[0] = 1;
+        point
+    };
+
+    /// Signs every message with `R = identity, S = 0`, with no private key.
+    #[derive(Debug)]
+    struct Forged;
+
+    impl SigningKey for Forged {
+        fn choose_scheme(&self, _: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+            Some(Box::new(Self))
+        }
+
+        fn algorithm(&self) -> SignatureAlgorithm {
+            SignatureAlgorithm::ED25519
+        }
+    }
+
+    impl Signer for Forged {
+        fn sign(&self, _: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+            Ok([IDENTITY, [0; 32]].concat())
+        }
+
+        fn scheme(&self) -> SignatureScheme {
+            SignatureScheme::ED25519
+        }
+    }
+
+    /// TLS for `key`, a point of small order, made with no private key.
+    fn keyless(key: [u8; 32]) -> Tls {
+        let certificate = issue(&key, |_| vec![0; 64]);
+        Tls::with(CertifiedKey::new(
+            vec![certificate.into()],
+            Arc::new(Forged),
+        ))
     }
 
     mod handshake {
@@ -640,6 +737,43 @@ mod tests {
             );
             assert_eq!(peers, Err(CertificateError::BadSignature.into()));
         }
+
+        #[test]
+        fn when_client_key_is_the_identity_point_the_server_refuses() {
+            let b = PrivateKey([2; 32]);
+            let peers =
+                handshake(keyless(IDENTITY).client(public(&b)), Tls::new(&b).server());
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_server_key_is_the_identity_point_the_client_refuses() {
+            let a = PrivateKey([1; 32]);
+            let peers = handshake(
+                Tls::new(&a).client(PublicKey(IDENTITY)),
+                keyless(IDENTITY).server(),
+            );
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_dialed_key_is_all_zero_no_keyless_server_passes() {
+            let a = PrivateKey([1; 32]);
+            let client = Tls::new(&a).client(PublicKey([0; 32]));
+            let server = keyless([0; 32]).server();
+            for _ in 0..64 {
+                assert_eq!(
+                    handshake(Arc::clone(&client), Arc::clone(&server)),
+                    Err(CertificateError::ApplicationVerificationFailure.into())
+                );
+            }
+        }
     }
 
     mod alpn {
@@ -697,6 +831,37 @@ mod tests {
                 key(&CertificateDer::from(vec![1, 2, 3])),
                 Err(CertificateError::BadEncoding.into())
             );
+        }
+
+        #[test]
+        fn refuses_each_encoding_of_a_point_of_small_order() {
+            for hex in [
+                "0100000000000000000000000000000000000000000000000000000000000000",
+                "0100000000000000000000000000000000000000000000000000000000000080",
+                "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+                "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "0000000000000000000000000000000000000000000000000000000000000080",
+                "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+                "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+                "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+                "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+            ] {
+                let mut encoding = [0; 32];
+                for (byte, pair) in encoding.iter_mut().zip(hex.as_bytes().chunks(2)) {
+                    let pair = std::str::from_utf8(pair).expect("ASCII");
+                    *byte = u8::from_str_radix(pair, 16).expect("hex");
+                }
+                assert_eq!(
+                    key(&certificate(&keyless(encoding))),
+                    Err(CertificateError::ApplicationVerificationFailure.into()),
+                    "{hex}"
+                );
+            }
         }
     }
 

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7899477935ee9e71efd0e2f7b58b713b15921a4aa387528aa7e687fa118a7bfc # shrinks to mut lines = [], line = "a", at = Index(0), indent = ""
+cc a6ef8a95e8ca6da56bf09522ee9f47aded116af18c6440f77430925f2ae6db3c # shrinks to document = Document { attributes: Map([]), blocks: [Block { keyword: "a", keyword_span: None, labels: [], body: Document { attributes: Map([Attribute { key: "a", key_span: None, value: Value { kind: List([Value { kind: String("\n"), span: None }]), span: None } }]), blocks: [] }, span: None }] }

@@ -20,6 +20,10 @@ fn main() {
 }
 
 /// One box made on a thread that started before the count counts once.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a thread test; `counting` has no `env`"
+)]
 fn counts_other_threads() {
     let [ready, go, done] = [const { AtomicBool::new(false) }; 3];
     let wait = |flag: &AtomicBool| {

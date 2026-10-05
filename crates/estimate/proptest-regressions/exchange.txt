@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 2352ef4ac0115393fc9fc0216b78a14bf1069d8c0d153495a8c47847aca7a6c6 # shrinks to local = [0, 11799973308251006792], mesh = [0, -3035335736947495082, -3682555568035127430, 0], ppb = 0
+cc bd8c0dc1fc05273eebc10b74fbed52556fd8c258a6bec266c632d6f694568aa5 # shrinks to w = World { drift: Drift(0), rate: 0, start: 0, now: 0 }, sent = 0, delays = [0, 0, 674869027], widths = [6307200000366108138, 0, 6307200000000000000, 0]
