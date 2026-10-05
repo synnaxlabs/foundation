@@ -927,6 +927,7 @@ How to read this record:
   `threads::Threads`: dedicated threads for blocking code. Each runs one future, and it
   waits for an event only by awaiting a future, so simulation controls every wait. A
   lint denies the std blocking waits (`park`, `Condvar`, `Barrier`, `mpsc` receive).
+  `thread::Handle` and `thread::Error`, which `Shards` and `Threads` both return (#129).
   When a shard's main future completes, the shard drops its other tasks. A panic in any
   task ends its shard, and its `Handle::join` returns `Error::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a

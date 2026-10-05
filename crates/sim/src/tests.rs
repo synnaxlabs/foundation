@@ -851,7 +851,7 @@ fn log_after(
     name: &'static str,
     span: Span,
     log: &Arc<Mutex<Vec<(&'static str, Monotonic)>>>,
-) -> env::threads::Handle {
+) -> env::thread::Handle {
     let clock = node.clock();
     let log = Arc::clone(log);
     let handle = node.shards().start(shard(name), move |_| async move {
