@@ -641,6 +641,8 @@ mod tests {
             let now = pair.now();
             let read = drain(&mut pair.server, now, &mut incoming.receiver);
             assert_eq!(read, (messages.to_vec(), true));
+            let read = next(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, Ok(Poll::Ready(None)));
             let mut reply = incoming.sender.expect("a two-way stream");
             let replies = [vec![1; 10], vec![2; 20]];
             let blocks = replies.each_ref().map(|reply| shard.block(reply));
@@ -994,6 +996,25 @@ mod tests {
             });
             assert!(quiet, "{events:?}");
             assert!(pair.server.endpoint.accept(key(&pair.server)).is_none());
+        });
+    }
+
+    #[test]
+    fn that_end_before_the_class_byte_leave_the_other_streams_alone() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.server));
+            let sender = pair.server.endpoint.open_sender(now, key, Class::Complete);
+            let mut sender = sender.expect("a stream");
+            write(&mut pair.server, now, &mut sender, &[shard.block(b"a")]);
+            end_before_the_class_byte(&mut pair, Dir::Bi, None);
+            let now = pair.now();
+            assert_eq!(pair.server.endpoint.finish(now, &mut sender), Ok(()));
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.client);
+            let now = pair.now();
+            let read = drain(&mut pair.client, now, &mut incoming.receiver);
+            assert_eq!(read, (vec![b"a".to_vec()], true));
         });
     }
 
