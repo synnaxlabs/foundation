@@ -90,10 +90,10 @@ pub struct Reader<const N: usize> {
 }
 
 impl<const N: usize> Reader<N> {
-    /// Runs `f` on the newest value and returns its result. `f` gets only a value a
-    /// writer wrote. While an update is in progress, it waits, and when an update
-    /// overlaps `f`, `f` runs again on the new value. So `f` must have no effect
-    /// other than its result. Only the last result comes out.
+    /// Runs `f` on the newest value, never a torn one, and returns its result. While
+    /// an update is in progress, it waits, and when an update overlaps `f`, `f` runs
+    /// again on the new value. So `f` must have no effect other than its result. Only
+    /// the last result comes out.
     ///
     /// A read that returns the old value took a clock reading in `f` no later than
     /// the update that replaced it took one in its `f`, when `f` orders its clock read
@@ -112,7 +112,8 @@ impl<const N: usize> Reader<N> {
                 continue;
             }
             let result = f(value);
-            fence(Acquire);
+            // The check after `f` keeps only the clock order: an `f` that orders its
+            // clock read must not return a value an update replaced.
             if self.shared.seq.load(Relaxed) == before {
                 return result;
             }
