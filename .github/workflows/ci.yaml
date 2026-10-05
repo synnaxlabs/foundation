@@ -66,13 +66,15 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Layers
         run: cargo xtask layers
+      - name: Globals
+        run: cargo xtask globals
       - name: Oracles
         run: cargo xtask oracles
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
 
   features:
     needs: changes

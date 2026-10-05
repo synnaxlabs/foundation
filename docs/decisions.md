@@ -268,8 +268,14 @@ How to read this record:
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
 - **B7** A frame applies whole or not at all, per index. Live writes are never retried.
-  Backfill frames carry numbers, and the home drops repeats. A writer may resend
-  unconfirmed live data as backfill.
+  A writer may resend unconfirmed live data as backfill. The home finds a repeat by
+  timestamp: it checks a backfill frame that starts at or before the last backfill
+  stamp against the index on both paths. When every sample exists with the same
+  values, the frame is a repeat, and the home drops and confirms it. When no sample
+  exists, the frame is out of order. Some samples stored and some not, a stored
+  timestamp with other values, or a range below the buffer's floor is an error. Writers
+  assign no numbers: a resend comes in a new session, and the writer never learned
+  them. The person decided on 2026-10-05 ("By timestamp + same values"), #148.
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -459,6 +465,24 @@ How to read this record:
   on 2026-10-05 ('#1 is fine'). The person accepted one-sided readings on 2026-10-05
   ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper
   bounds).
+- **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
+  a reader gets no mesh time. After it, when `combine` fails (no majority, a bound too
+  wide, or no sources after a remove), the clock holds over: it keeps its last estimate
+  and its error grows by drift. It never follows the largest group or one side of a tie.
+  `push` returns the holdover and its cause, and `node` publishes it. The next majority
+  ends the holdover. Decided by the `time` builder (#142).
+- **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
+  OS error bound with each reading where the OS has one (`adjtimex` on Linux,
+  `ntp_adjtime` on macOS). Where it has none (Windows), the reading has the largest
+  error, 36500 days: a node alone still gets OS time, with an error that says
+  "unknown", and in a mesh the reading adds a vote but does not move the estimate. A
+  fixed invented error lost: a wrong value gives a bound that is not true. Amends ENV
+  SEAMS. The person decided on 2026-10-05 ("Use it, error 'unknown'"), #144.
+- **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
+  Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
+  drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
+  suspend lost: mesh time would fall behind by the time asleep, outside its bound.
+  Amends ENV SEAMS. The person decided on 2026-10-05 ("Count time asleep"), #144.
 
 ### 1.7 Transport
 
@@ -563,18 +587,21 @@ How to read this record:
   prolly tree keyed by full name, about 4 KiB chunks, BLAKE3. Each change record lists
   its new chunks. A region's voters sit on one LAN. A node fetches only the regions and
   ranges it uses.
-- **RAFT SURFACE (#5)** `raft::Raft::new(Config, Start)` builds a follower. `Config`
-  holds the fixed inputs (key, tick counts). `Start` holds what the node had on disk:
-  `hard` (term and vote), `voters`, and `last`, the last log position, which stands in
-  for the log until replication lands. `Raft` takes `tick(random)`, `step(message)`,
-  and `campaign()`, and gives `hard()` and `messages()`. The caller writes `hard()` to
-  disk before it sends `messages()`, so a candidate counts its own vote at once.
-  Randomness enters only through `tick`: a node draws its election timeout on the
-  first tick after a reset. PreVote and CheckQuorum have no off switch. Until
-  replication lands, a new leader announces itself with a heartbeat. A node that is
-  not in its own voter list votes and follows, but never campaigns. `step` does not
-  check that a sender is a voter (a voter can learn late that a peer joined), so the
-  caller authenticates the sender and decides which nodes may send.
+- **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
+  `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
+  on disk: `hard` (term and vote), `voters`, `entries` (the log from index 1), and
+  `applied` (the last index the caller applied). `Raft` takes `tick(random)`,
+  `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
+  when it changed), `entries` to write, `committed` entries to apply, and `messages`
+  to send. The caller writes, then sends, then applies, as etcd does: to apply first
+  only delays the next round trip. A candidate counts its own vote at once because
+  the write comes before the send. `hard()` stays a getter like `term()`. Randomness
+  enters only through `tick`: a node draws its election timeout on the first tick
+  after a reset. PreVote and CheckQuorum have no off switch. Until replication lands,
+  a new leader announces itself with a heartbeat. A node that is not in its own voter
+  list votes and follows, but never campaigns. `step` does not check that a sender is
+  a voter (a voter can learn late that a peer joined), so the caller authenticates
+  the sender and decides which nodes may send.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -834,7 +861,12 @@ How to read this record:
   starts the daily run.
 - **C9c** Oracles are enforced by visibility. A script writes an oracle section at the
   top of each PR summary and flags weakening. Each flagged change gets its own
-  adversarial reviewer. A person merges every PR. Supersedes: T2 enforcement level.
+  adversarial reviewer. A person merges every PR, except routine PRs (MERGE RULE).
+  Supersedes: T2 enforcement level.
+- **MERGE RULE (2026-10-05)** The coordinator merges a routine PR that the person has
+  not merged 30 minutes after `ready`, and then tells the person; `docs/coordination.md`
+  defines routine. It lets builders go on while the person is away. The person decided
+  on 2026-10-05 ("Yes, that narrow set").
 - **AGENT REQUIREMENT** Every task must be easy to do with agents. C7 carries it.
 - **R16-1 (2026-10-04)** Release builds keep integer overflow checks
   (`overflow-checks = true`), so R9-D10 holds in release too. An intended wrap uses
@@ -904,6 +936,7 @@ How to read this record:
   `threads::Threads`: dedicated threads for blocking code. Each runs one future, and it
   waits for an event only by awaiting a future, so simulation controls every wait. A
   lint denies the std blocking waits (`park`, `Condvar`, `Barrier`, `mpsc` receive).
+  `thread::Handle` and `thread::Error`, which `Shards` and `Threads` both return (#129).
   When a shard's main future completes, the shard drops its other tasks. A panic in any
   task ends its shard, and its `Handle::join` returns `Error::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
@@ -952,6 +985,12 @@ How to read this record:
 - **BQ18** The desired version is in the spec. Nodes report versions with lease
   renewals. A rollout lock upgrades one node at a time. Finalize when all report.
   Multi-region scope: 5.1.
+- **CPU BASELINE (2026-10-05)** Builds assume x86-64-v2 on x86-64 (every CPU since
+  2009) and the CRC instruction on aarch64 Linux (Raspberry Pi 3 and later, Graviton;
+  Apple chips have it already). `.cargo/config.toml` sets both, so tests, benchmarks,
+  and releases build the same code. A binary fails on an older CPU. Without the flags,
+  the `crc32c` kernels ran 2x slower (#140). The person decided on 2026-10-05 ("Raise
+  the minimum").
 
 ### 1.16 Retired entries
 
@@ -1018,8 +1057,9 @@ Storage classes used in the table:
 | Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers. Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
-| `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's interner when the node learns a channel (owner: X42) | `hub`, `home`, `delivery` | `types` (value) |
+| `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery` | `types` (value) |
 | Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
+| Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one | The writer; backfill is its label for late data | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
 | Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (meaning) |
 | Enum and flags definitions | Files, then Spec as named types with fingerprints | People, `discover` | Sinks, SDK code generation, `plan` | `spec` |
@@ -1540,9 +1580,10 @@ Basis: BQ7, B7.
 Conflict: M1 needs one node-wide slot table and key set interner. `hub` opens sessions,
 but `home` (below `hub`) routes by key set and writes companion samples, so a
 `hub`-owned table would point upward.
-Resolution (memory delegation): the interner is a layer-1 data structure
-(`types::frame::Interner`). `node` constructs one instance per node and injects it into
-`hub` and `home`. Interning happens at session open; each shard reads a snapshot.
+Resolution (memory delegation): both tables are layer-1 data structures, the slot table
+(`types::channel::Slots`) and the interner (`types::frame::key_set::Interner`). `node`
+constructs one of each per node and injects them into `hub` and `home`. Interning
+happens at session open; each shard reads a snapshot.
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
@@ -1671,7 +1712,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags |
-| 4 | `config-hcl` | Reads and writes HCL files as Documents and keeps formatting. | `document` |
+| 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
 | 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |

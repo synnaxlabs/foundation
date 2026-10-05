@@ -44,6 +44,25 @@ disallowed-methods = [
   { path = "std::sync::mpsc::Receiver::recv", reason = "await a future" },
   { path = "std::sync::mpsc::Receiver::recv_timeout", reason = "await a future" },
   { path = "env::wall::Wall::now", reason = "only clock reads it" },
+  # rustls: its default provider is a process global and its default time the OS
+  # clock. `transport::tls` builds every config, with `builder_with_details`.
+  { path = "rustls::ClientConfig::builder", reason = "use tls" },
+  { path = "rustls::ServerConfig::builder", reason = "use tls" },
+  { path = "rustls::ClientConfig::builder_with_protocol_versions", reason = "use tls" },
+  { path = "rustls::ServerConfig::builder_with_protocol_versions", reason = "use tls" },
+  { path = "rustls::ClientConfig::builder_with_provider", reason = "use tls" },
+  { path = "rustls::ServerConfig::builder_with_provider", reason = "use tls" },
+  { path = "rustls::ClientConfig::builder_with_details", reason = "use tls" },
+  { path = "rustls::ServerConfig::builder_with_details", reason = "use tls" },
+  { path = "rustls::client::WebPkiServerVerifier::builder", reason = "use tls" },
+  { path = "rustls::server::WebPkiClientVerifier::builder", reason = "use tls" },
+  { path = "rustls::crypto::CryptoProvider::install_default", reason = "use tls" },
+  { path = "rustls::crypto::CryptoProvider::get_default", reason = "use tls" },
+  { path = "rustls::crypto::aws_lc_rs::Ticketer::new", reason = "reads the OS clock" },
+  { path = "rustls::TicketRotator::new", reason = "reads the OS clock" },
+  { path = "rustls::TicketSwitcher::new", reason = "reads the OS clock" },
+  { path = "rustls::pki_types::UnixTime::now", reason = "use the injected clock" },
+  { path = "rustls::KeyLogFile::new", reason = "configuration is an input" },
 ]
 disallowed-types = [
   { path = "std::collections::HashMap", reason = "use types::hash::Map" },
@@ -52,6 +71,7 @@ disallowed-types = [
 ]
 disallowed-macros = [
   { path = "std::thread_local", reason = "no mutable globals" },
+  { path = "std::prelude::v1::global_allocator", reason = "only a test or benchmark root lifts this (COUNTING ALLOCATOR)" },
 ]
 
 doc-valid-idents = ["UUIDv7", "PreVote", "CheckQuorum", "OpenSSH", ".."]

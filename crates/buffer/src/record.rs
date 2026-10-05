@@ -20,7 +20,7 @@
     clippy::string_slice
 )]
 
-use crate::crc32c::Crc32c;
+use crate::crc32c;
 
 /// Every record starts at a multiple of this many bytes.
 pub(crate) const ALIGN: usize = 4096;
@@ -97,12 +97,10 @@ pub(crate) fn header(
         .expect("invariant: a record holds at most u32::MAX bytes");
     let [l0, l1, l2, l3] = len.to_le_bytes();
     let kind = kind.byte();
-    let mut crc = Crc32c::resume(chain);
-    crc.update(&[l0, l1, l2, l3, kind]);
+    let mut crc = crc32c::append(chain, &[l0, l1, l2, l3, kind]);
     for part in body {
-        crc.update(part);
+        crc = crc32c::append(crc, part);
     }
-    let crc = crc.finish();
     let [c0, c1, c2, c3] = crc.to_le_bytes();
     ([l0, l1, l2, l3, c0, c1, c2, c3, kind], crc)
 }
@@ -143,10 +141,7 @@ pub(crate) fn read(bytes: &[u8], chain: u32) -> Option<Record<'_>> {
     }
     let len = usize::try_from(u32::from_le_bytes([l0, l1, l2, l3])).ok()?;
     let body = rest.get(..len)?;
-    let mut crc = Crc32c::resume(chain);
-    crc.update(&[l0, l1, l2, l3, kind]);
-    crc.update(body);
-    let crc = crc.finish();
+    let crc = crc32c::append(crc32c::append(chain, &[l0, l1, l2, l3, kind]), body);
     if crc != u32::from_le_bytes([c0, c1, c2, c3]) {
         return None;
     }
@@ -271,18 +266,15 @@ mod tests {
 
         #[test]
         fn rejects_a_zero_kind_with_its_right_crc() {
-            let mut crc = Crc32c::resume(1);
-            crc.update(&[0; 5]);
+            let crc = crc32c::append(1, &[0; 5]);
             let mut image = vec![0; ALIGN];
-            image[4..8].copy_from_slice(&crc.finish().to_le_bytes());
+            image[4..8].copy_from_slice(&crc.to_le_bytes());
             assert_eq!(read(&image, 1), None);
         }
 
         #[test]
         fn reads_a_record_with_no_body_and_a_kind_it_does_not_know() {
-            let mut crc = Crc32c::resume(1);
-            crc.update(&[0, 0, 0, 0, 9]);
-            let crc = crc.finish();
+            let crc = crc32c::append(1, &[0, 0, 0, 0, 9]);
             let mut image = vec![0; ALIGN];
             image[4..8].copy_from_slice(&crc.to_le_bytes());
             image[8] = 9;

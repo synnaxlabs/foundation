@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use proptest::prelude::*;
 use proptest::sample::Index;
-use raft::{Config, Hard, Message, Position, Raft, Role, Start, Term};
+use raft::{Config, Entry, Hard, Message, Position, Raft, Role, Start, Term};
 use types::node;
 
 const ELECTION: u32 = 5;
@@ -40,11 +40,13 @@ fn action(nodes: usize) -> impl Strategy<Value = Action> {
     ]
 }
 
+// An empty log ends at the zero position; any other ends in a term above zero.
 fn position() -> impl Strategy<Value = Position> {
-    (0..3u64, 0..3u64).prop_map(|(term, index)| Position {
+    let filled = (1..3u64, 1..3u64).prop_map(|(term, index)| Position {
         term: Term(term),
         index,
-    })
+    });
+    prop_oneof![1 => Just(Position::default()), 3 => filled]
 }
 
 /// The last log position of each node, and the actions to run.
@@ -72,6 +74,8 @@ fn run_of(
 struct Network {
     logs: Vec<Position>,
     nodes: Vec<Raft>,
+    // The hard state on each node's disk.
+    hards: Vec<Hard>,
     // A message between a node that is cut off and one that is not is lost.
     cut: Vec<bool>,
     flight: Vec<Message>,
@@ -84,6 +88,7 @@ impl Network {
     fn new(logs: Vec<Position>, random: u64) -> Self {
         let mut network = Self {
             nodes: Vec::new(),
+            hards: Vec::new(),
             cut: vec![false; logs.len()],
             flight: Vec::new(),
             leaders: BTreeMap::new(),
@@ -97,6 +102,7 @@ impl Network {
             };
             let raft = network.build(node, hard);
             network.nodes.push(raft);
+            network.hards.push(hard);
         }
         network
     }
@@ -118,10 +124,21 @@ impl Network {
             election_ticks: ELECTION,
             heartbeat_ticks: HEARTBEAT,
         };
+        let last = self.logs[node];
+        let entries = (1..=last.index)
+            .map(|index| Entry {
+                at: Position {
+                    term: last.term,
+                    index,
+                },
+                data: Vec::new(),
+            })
+            .collect();
         let start = Start {
             hard,
             voters: (0..self.logs.len()).map(Self::key).collect(),
-            last: self.logs[node],
+            entries,
+            applied: 0,
         };
         Raft::new(config, start).unwrap()
     }
@@ -137,10 +154,9 @@ impl Network {
         match action {
             Action::Tick { node, random } => self.nodes[*node].tick(*random),
             Action::Campaign { node } => self.nodes[*node].campaign(),
-            // Every message leaves a node after its hard state is stored, so a
-            // restart keeps exactly the hard state.
+            // A restart keeps the hard state that the last `Ready` said to write.
             Action::Restart { node } => {
-                self.nodes[*node] = self.build(*node, self.nodes[*node].hard());
+                self.nodes[*node] = self.build(*node, self.hards[*node]);
             }
             Action::Deliver { picks } => {
                 for pick in picks {
@@ -168,7 +184,11 @@ impl Network {
     /// Moves each node's messages into the network and checks each leader.
     fn collect(&mut self) {
         for (at, node) in self.nodes.iter_mut().enumerate() {
-            self.flight.extend(node.messages());
+            let ready = node.ready();
+            if let Some(hard) = ready.hard {
+                self.hards[at] = hard;
+            }
+            self.flight.extend(ready.messages);
             if node.role() == Role::Leader {
                 let leader = *self.leaders.entry(node.term()).or_insert(node.key());
                 assert_eq!(leader, node.key(), "two leaders in term {}", node.term());

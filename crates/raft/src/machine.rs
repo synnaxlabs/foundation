@@ -1,6 +1,7 @@
 use types::node;
 
-use crate::{Body, Config, Error, Hard, Message, Position, Start, Term};
+use crate::log::Log;
+use crate::{Body, Config, Entry, Error, Hard, Message, Start, Term};
 
 /// What a node is doing in its term.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -15,11 +16,25 @@ pub enum Role {
     Leader,
 }
 
+/// What the caller must do after an input, in this order: write `hard` and `entries`
+/// to disk, send `messages`, then apply `committed`.
+#[must_use = "a dropped Ready loses its messages and its hard state"]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ready {
+    /// The hard state, if it changed since the last `Ready`.
+    pub hard: Option<Hard>,
+    /// Entries to write, in place of any entry at or after the first one's index.
+    pub entries: Vec<Entry>,
+    /// Entries that a quorum holds, in order, each given once.
+    pub committed: Vec<Entry>,
+    /// Messages to send after the write, in the order the node made them.
+    pub messages: Vec<Message>,
+}
+
 /// One node's election state machine. PreVote and CheckQuorum are always on.
 ///
 /// After each call to [`tick`](Self::tick), [`step`](Self::step), or
-/// [`campaign`](Self::campaign), write [`hard`](Self::hard) to disk if it changed, and
-/// only then send [`messages`](Self::messages).
+/// [`campaign`](Self::campaign), take [`ready`](Self::ready) and do what it says.
 #[derive(Debug)]
 pub struct Raft {
     key: node::Key,
@@ -29,7 +44,9 @@ pub struct Raft {
     heartbeat_ticks: u64,
     term: Term,
     vote: Option<node::Key>,
-    last: Position,
+    // The hard state that the last `Ready` gave.
+    given: Hard,
+    log: Log,
     role: Role,
     leader: Option<node::Key>,
     election_elapsed: u64,
@@ -50,7 +67,10 @@ impl Raft {
     /// - [`Error::Ticks`] when `heartbeat_ticks` is 0 or `election_ticks` is not
     ///   greater than `heartbeat_ticks`.
     /// - [`Error::DuplicateVoter`] when `voters` names a node twice.
-    /// - [`Error::TermBehindLog`] when `hard.term` is lower than `last.term`.
+    /// - [`Error::EntryOutOfOrder`] when `entries` do not run from index 1 with
+    ///   terms that never decrease.
+    /// - [`Error::AppliedPastLog`] when `applied` is past the last entry.
+    /// - [`Error::TermBehindLog`] when `hard.term` is lower than the last entry's term.
     pub fn new(config: Config, start: Start) -> Result<Self, Error> {
         let Config {
             key,
@@ -60,7 +80,8 @@ impl Raft {
         let Start {
             hard,
             mut voters,
-            last,
+            entries,
+            applied,
         } = start;
         if heartbeat_ticks == 0 || election_ticks <= heartbeat_ticks {
             return Err(Error::Ticks {
@@ -73,6 +94,8 @@ impl Raft {
         if let Some((&twice, _)) = pairs.find(|(a, b)| a == b) {
             return Err(Error::DuplicateVoter(twice));
         }
+        let log = Log::new(entries, applied)?;
+        let last = log.last();
         if hard.term < last.term {
             return Err(Error::TermBehindLog {
                 term: hard.term,
@@ -83,14 +106,14 @@ impl Raft {
             key,
             votes: vec![None; voters.len()],
             active: vec![false; voters.len()],
-            // One campaign sends one message to each other voter.
-            outbox: Vec::with_capacity(voters.len()),
+            outbox: Vec::new(),
             voters,
             election_ticks: u64::from(election_ticks),
             heartbeat_ticks: u64::from(heartbeat_ticks),
             term: hard.term,
             vote: hard.vote,
-            last,
+            given: hard,
+            log,
             role: Role::Follower,
             leader: None,
             election_elapsed: 0,
@@ -124,7 +147,8 @@ impl Raft {
         self.leader
     }
 
-    /// The state that must be on disk before [`messages`](Self::messages) are sent.
+    /// The term and vote that must be on disk before a message of this term leaves.
+    /// [`Ready::hard`] says when to write it.
     #[must_use]
     pub fn hard(&self) -> Hard {
         Hard {
@@ -133,10 +157,17 @@ impl Raft {
         }
     }
 
-    /// Takes the messages to send, in the order the node made them. To drop the
-    /// iterator early discards the rest.
-    pub fn messages(&mut self) -> impl Iterator<Item = Message> + '_ {
-        self.outbox.drain(..)
+    /// Takes what the caller must do since the last call.
+    pub fn ready(&mut self) -> Ready {
+        let hard = self.hard();
+        let changed = hard != self.given;
+        self.given = hard;
+        Ready {
+            hard: changed.then_some(hard),
+            entries: Vec::new(),
+            committed: Vec::new(),
+            messages: std::mem::take(&mut self.outbox),
+        }
     }
 
     /// Moves the node's time forward by one tick. `random` is a fresh, uniformly
@@ -195,13 +226,13 @@ impl Raft {
         }
         match body {
             Body::PreVote { last } => {
-                let granted =
-                    (term > self.term || self.free_for(from)) && last >= self.last;
+                let granted = (term > self.term || self.free_for(from))
+                    && last >= self.log.last();
                 let reply = if granted { term } else { self.term };
                 self.send(from, reply, Body::PreVoteReply { granted });
             }
             Body::Vote { last } => {
-                let granted = self.free_for(from) && last >= self.last;
+                let granted = self.free_for(from) && last >= self.log.last();
                 if granted {
                     self.election_elapsed = 0;
                     self.vote = Some(from);
@@ -317,7 +348,12 @@ impl Raft {
         self.votes.fill(None);
         self.leader = None;
         self.role = Role::PreCandidate;
-        self.broadcast(next, Body::PreVote { last: self.last });
+        self.broadcast(
+            next,
+            Body::PreVote {
+                last: self.log.last(),
+            },
+        );
         self.poll(self.key, true);
     }
 
@@ -329,7 +365,12 @@ impl Raft {
         self.reset(next);
         self.vote = Some(self.key);
         self.role = Role::Candidate;
-        self.broadcast(self.term, Body::Vote { last: self.last });
+        self.broadcast(
+            self.term,
+            Body::Vote {
+                last: self.log.last(),
+            },
+        );
         self.poll(self.key, true);
     }
 
@@ -425,6 +466,7 @@ impl Raft {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Position;
 
     fn key(id: u8) -> node::Key {
         node::Key::from_u128(u128::from(id))
@@ -440,8 +482,20 @@ mod tests {
         Start {
             hard,
             voters: voters.iter().copied().map(key).collect(),
-            last: Position::default(),
+            entries: Vec::new(),
+            applied: 0,
         }
+    }
+
+    fn entries(positions: &[(u64, u64)]) -> Vec<Entry> {
+        let entry = |&(term, index)| Entry {
+            at: Position {
+                term: Term(term),
+                index,
+            },
+            data: Vec::new(),
+        };
+        positions.iter().map(entry).collect()
     }
 
     fn raft(voters: &[u8], hard: Hard) -> Raft {
@@ -458,7 +512,78 @@ mod tests {
     }
 
     fn sent(raft: &mut Raft) -> Vec<Message> {
-        raft.messages().collect()
+        raft.ready().messages
+    }
+
+    mod ready {
+        use super::*;
+
+        #[test]
+        fn is_empty_after_a_start() {
+            let mut raft = raft(&[1, 2, 3], at_term(2));
+            assert_eq!(raft.ready(), Ready::default());
+        }
+
+        #[test]
+        fn gives_the_hard_state_once_when_it_changes() {
+            let mut raft = raft(&[1], Hard::default());
+            raft.campaign();
+            let hard = Hard {
+                term: Term(1),
+                vote: Some(key(1)),
+            };
+            assert_eq!((raft.role(), raft.ready().hard), (Role::Leader, Some(hard)));
+            assert_eq!(raft.ready().hard, None);
+            raft.tick(0);
+            assert_eq!(raft.ready().hard, None);
+        }
+
+        #[test]
+        fn gives_the_hard_state_when_only_the_vote_changes() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            assert_eq!(raft.ready().hard, None);
+            let vote = Body::Vote {
+                last: Position::default(),
+            };
+            raft.step(message(2, 1, vote)).unwrap();
+            let hard = Hard {
+                term: Term(1),
+                vote: Some(key(2)),
+            };
+            assert_eq!(raft.ready().hard, Some(hard));
+            assert_eq!(raft.ready().hard, None);
+        }
+
+        #[test]
+        fn gives_each_message_once() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.campaign();
+            let ready = raft.ready();
+            assert_eq!(ready.hard, None);
+            assert_eq!(ready.messages.len(), 2);
+            assert_eq!(raft.ready(), Ready::default());
+        }
+
+        #[test]
+        fn campaigns_with_the_last_position_of_the_log_from_disk() {
+            let start = Start {
+                entries: entries(&[(1, 1), (2, 2), (2, 3)]),
+                ..start(&[1, 2], at_term(5))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            raft.campaign();
+            let last = Position {
+                term: Term(2),
+                index: 3,
+            };
+            let prevote = Message {
+                from: key(1),
+                to: key(2),
+                term: Term(6),
+                body: Body::PreVote { last },
+            };
+            assert_eq!(raft.ready().messages, [prevote]);
+        }
     }
 
     mod new {
@@ -513,6 +638,49 @@ mod tests {
         }
 
         #[test]
+        fn rejects_a_log_that_is_out_of_order() {
+            let start = Start {
+                entries: entries(&[(1, 1), (1, 3)]),
+                ..start(&[1], at_term(1))
+            };
+            let err = Raft::new(CONFIG, start).unwrap_err();
+            let position = |term, index| Position {
+                term: Term(term),
+                index,
+            };
+            let out_of_order = Error::EntryOutOfOrder {
+                at: position(1, 3),
+                before: position(1, 1),
+            };
+            assert_eq!(err, out_of_order);
+            assert_eq!(
+                err.to_string(),
+                "log entry at index 3 in term 1 does not follow index 1 in term 1"
+            );
+        }
+
+        #[test]
+        fn rejects_an_applied_index_past_the_log() {
+            let start = Start {
+                entries: entries(&[(1, 1)]),
+                applied: 2,
+                ..start(&[1], at_term(1))
+            };
+            let err = Raft::new(CONFIG, start).unwrap_err();
+            assert_eq!(
+                err,
+                Error::AppliedPastLog {
+                    applied: 2,
+                    last: 1
+                }
+            );
+            assert_eq!(
+                err.to_string(),
+                "applied index 2 is past the last log index 1"
+            );
+        }
+
+        #[test]
         fn rejects_a_term_behind_the_log() {
             let hard = Hard {
                 term: Term(2),
@@ -523,7 +691,15 @@ mod tests {
                 index: 7,
             };
             let start = Start {
-                last,
+                entries: entries(&[
+                    (1, 1),
+                    (3, 2),
+                    (3, 3),
+                    (3, 4),
+                    (3, 5),
+                    (3, 6),
+                    (3, 7),
+                ]),
                 ..start(&[1], hard)
             };
             let err = Raft::new(CONFIG, start).unwrap_err();
@@ -943,12 +1119,8 @@ mod tests {
 
         #[test]
         fn takes_the_term_of_a_vote_it_rejects() {
-            let last = Position {
-                term: Term(1),
-                index: 5,
-            };
             let start = Start {
-                last,
+                entries: entries(&[(1, 1), (1, 2), (1, 3), (1, 4), (1, 5)]),
                 ..start(&[1, 2, 3], at_term(1))
             };
             let mut raft = Raft::new(CONFIG, start).unwrap();

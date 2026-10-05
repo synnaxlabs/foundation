@@ -5,7 +5,8 @@ together. When this file and a message disagree, this file wins.
 
 ## Roles
 
-**The person** owns contracts and oracles, merges every PR, and answers escalations.
+**The person** owns contracts and oracles, merges every PR that is not routine
+(below), and answers escalations.
 
 **The coordinator** (session `coordinator`) owns:
 
@@ -13,7 +14,8 @@ together. When this file and a message disagree, this file wins.
 - `docs/decisions.md`;
 - the issue board: it assigns crates to builders and checks that no two open issues
   own one crate;
-- the merge queue: it checks each PR's gates and asks the person to merge.
+- the merge queue: it checks each PR's gates, asks the person to merge, and merges
+  routine PRs that wait (below).
 
 The coordinator does not build crates.
 
@@ -115,6 +117,9 @@ git -C ~/Desktop/synnaxlabs/foundation worktree add \
 A builder makes a branch per issue inside its worktree. Never work in another session's
 worktree.
 
+Never share `CARGO_TARGET_DIR` between worktrees. Cargo gives a path crate the same hash
+in each, so a stale build of another worktree's code can pass or fail a gate.
+
 ## Issues
 
 Every task is a GitHub issue. An issue states its goal, the crates it owns, the tests
@@ -156,6 +161,12 @@ next issue for a crate early, labeled `blocked` with a link to the open one.
   instead, and only the coordinator adds `ready`.
 - **Merge:** the coordinator tells the person about each new `ready` PR, one line
   each. The person merges with a squash.
+- **Routine merge:** when the person has not merged a routine PR 30 minutes after it
+  got `ready`, the coordinator reads every check on its current head again and merges
+  it the way the person does, then tells the person. A PR is routine when it adds,
+  removes, or changes no `pub` item, has no `interface` label, and touches nothing in
+  `oracles/`, `docs/decisions.md`, `docs/coordination.md`, `CLAUDE.md`, `.github/`,
+  `.claude/`, `.cargo/`, `xtask/`, `clippy.toml`, or any `Cargo.toml`.
 
 ## Interface changes
 

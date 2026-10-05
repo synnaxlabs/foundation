@@ -6,6 +6,7 @@ mod build;
 mod cfg;
 mod field;
 mod files;
+mod globals;
 mod map;
 mod miri;
 mod oracles;
@@ -24,11 +25,12 @@ fn main() -> ExitCode {
     #[expect(clippy::disallowed_methods, reason = "a dev tool reads its arguments")]
     let result = match std::env::args().nth(1).as_deref() {
         Some("layers") => layers(root),
+        Some("globals") => globals::check(root),
         Some("oracles") => oracles::check(root),
         Some(name @ ("loom" | "shuttle")) => cfg::test(root, name),
         Some("miri") => miri::run(root),
         _ => {
-            eprintln!("usage: cargo xtask <layers|oracles|loom|shuttle|miri>");
+            eprintln!("usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>");
             return ExitCode::FAILURE;
         }
     };
@@ -145,7 +147,7 @@ mod tests {
         };
         assert_eq!(
             layers(&fixture()),
-            Err(vec![missing("a"), missing("model")])
+            Err(vec![missing("a"), missing("globals"), missing("model")])
         );
     }
 
