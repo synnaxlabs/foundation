@@ -229,6 +229,8 @@ next issue for a crate early, labeled `blocked` with a link to the open one.
   removes, or changes no `pub` item, has no `interface` label, and touches nothing in
   `oracles/`, `docs/decisions.md`, `docs/coordination.md`, `CLAUDE.md`, `.github/`,
   `.claude/`, `.cargo/`, `xtask/`, `clippy.toml`, or any `Cargo.toml`.
+- **Stale:** every 30 minutes the coordinator lists each open PR with no update for 2
+  hours and asks its owner what it waits on. A cancelled CI job gets a rerun.
 
 ## Interface changes
 
