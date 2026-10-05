@@ -12,10 +12,10 @@ pub(crate) struct Token<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    /// Letters, digits, `_`, and `-`, after a letter or `_`.
+    /// An [`identifier_start`], then [`identifier_part`]s.
     Identifier,
-    /// A word with `.` or `@`, which only a reference can be: letters, digits, `_`,
-    /// `-`, `@`, and dots, which `types::name` checks.
+    /// A word with `.` or `@`, which only a reference can be: identifier parts, `@`,
+    /// and dots, which `types::name` checks.
     Reference,
     /// Digits, then an optional fraction and an optional exponent.
     Number,
@@ -513,13 +513,13 @@ pub(crate) fn word(text: &str) -> Option<Kind> {
         .then_some(token.kind)
 }
 
-/// Reports whether `c` can start an identifier: `XID_Start` or `_`.
+/// Reports whether `c` can start an identifier. HCL uses `ID_Start`, and the
+/// compatibility characters outside `XID_Start` are refused on purpose.
 pub(crate) fn identifier_start(c: char) -> bool {
     unicode_ident::is_xid_start(c) || c == '_'
 }
 
-/// Reports whether `c` can follow the first character of an identifier:
-/// `XID_Continue` or `-`.
+/// Reports whether `c` can follow the first character of an identifier.
 pub(crate) fn identifier_part(c: char) -> bool {
     unicode_ident::is_xid_continue(c) || c == '-'
 }

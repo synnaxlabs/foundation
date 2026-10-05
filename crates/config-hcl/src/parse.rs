@@ -308,6 +308,10 @@ impl<'a> Parser<'a> {
         {
             return self.call(word, depth).map(Some);
         }
+        if self.token.kind == lex::Kind::DoubleColon {
+            // A namespace, not a name: `value` refuses its form.
+            return Ok(None);
+        }
         let kind = match literal(word.text) {
             Some(Literal::Bool(b)) => value::Kind::Bool(b),
             Some(Literal::Null) => {
@@ -1187,6 +1191,8 @@ c = "°C # not a comment"
                 ("<<EOT\nx\nEOT", "x\n"),
                 ("<<END-1_a\nx\nEND-1_a\n", "x\n"),
                 ("<<_\nx\n_\n", "x\n"),
+                ("<<ÉOT\nx\nÉOT\n", "x\n"),
+                ("<<EOT\nx\nEOT\u{301}\nEOT\n", "x\nEOT\u{301}\n"),
                 ("<<EOT\n°C\nEOT\n", "°C\n"),
                 (
                     "<<EOT\n\\n \\\" # a // b /* c \"\nEOT\n",
@@ -1297,6 +1303,7 @@ c = "°C # not a comment"
                 ("a = <<EOT x\nx\nEOT\n", 9),
                 ("a = <<EOT # c\nx\nEOT\n", 9),
                 ("a = <<EOT", 9),
+                ("a = <<\u{301}EOT\n", 6),
             ];
             for (text, end) in cases {
                 let start = syntax(on(4, end), Expected::HeredocStart);
@@ -1521,6 +1528,11 @@ c = "°C # not a comment"
                 ("a = b.*.c\n", on(5, 6), Form::Splat),
                 ("a = (1)\n", on(4, 5), Form::Parentheses),
                 ("a = provider::aws::f(1)\n", on(12, 14), Form::Namespace),
+                (
+                    "a = é::f()\n",
+                    span(at(6, 0, 5), at(8, 0, 7)),
+                    Form::Namespace,
+                ),
                 ("a = f(xs...)\n", on(8, 11), Form::Expansion),
                 ("a = [1 + 2]\n", on(7, 8), Form::Operator),
                 ("a = { k = 1 + 2 }\n", on(12, 13), Form::Operator),
@@ -1806,17 +1818,18 @@ c = "°C # not a comment"
                     span(at(1, 0, 1), at(4, 0, 2)),
                     Expected::AttributeOrBlock,
                 ),
-                // In `ID_Start` but not `XID_Start`: HCL reads it.
-                (
-                    "\u{37a} = 1\n",
-                    span(at(0, 0, 0), at(2, 0, 1)),
-                    Expected::Item,
-                ),
             ];
             for (text, span, expected) in cases {
                 let message = needs(expected);
                 check(text, &[(syntax(span, expected), &message)]);
             }
+        }
+
+        #[test]
+        fn refuses_a_compatibility_character_that_hcl_reads() {
+            let span = span(at(0, 0, 0), at(2, 0, 1));
+            let message = needs(Expected::Item);
+            check("\u{37a} = 1\n", &[(syntax(span, Expected::Item), &message)]);
         }
 
         #[test]
