@@ -138,8 +138,8 @@ impl Tls {
 }
 
 /// aws-lc's TLS 1.3 suites and groups in a fixed order, so no rustls feature changes
-/// them. The dialer's order decides, so nodes agree AES-128-GCM and X25519 on every
-/// CPU. A FIPS build must drop `ChaCha20`.
+/// them. The dialer's order decides, so nodes agree AES-128-GCM and X25519MLKEM768 on
+/// every CPU. A FIPS build must drop `ChaCha20`.
 fn provider() -> CryptoProvider {
     use rustls::crypto::aws_lc_rs::{cipher_suite, default_provider, kx_group};
     CryptoProvider {
@@ -149,10 +149,10 @@ fn provider() -> CryptoProvider {
             cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
         ],
         kx_groups: vec![
+            kx_group::X25519MLKEM768,
             kx_group::X25519,
             kx_group::SECP256R1,
             kx_group::SECP384R1,
-            kx_group::X25519MLKEM768,
         ],
         ..default_provider()
     }
@@ -553,7 +553,7 @@ mod tests {
         }
 
         #[test]
-        fn when_both_are_nodes_they_agree_aes_128_gcm_and_x25519() {
+        fn when_both_are_nodes_they_agree_aes_128_gcm_and_the_hybrid() {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let (client, _) =
                 connect(Tls::new(&a).client(public(&b)), Tls::new(&b).server())
@@ -568,7 +568,7 @@ mod tests {
                 agreed,
                 (
                     Some(CipherSuite::TLS13_AES_128_GCM_SHA256),
-                    Some(NamedGroup::X25519)
+                    Some(NamedGroup::X25519MLKEM768)
                 )
             );
         }
@@ -585,10 +585,10 @@ mod tests {
         /// The groups of NODE KEY TLS, in the order a node offers them.
         fn groups() -> [&'static dyn SupportedKxGroup; 4] {
             [
+                kx_group::X25519MLKEM768,
                 kx_group::X25519,
                 kx_group::SECP256R1,
                 kx_group::SECP384R1,
-                kx_group::X25519MLKEM768,
             ]
         }
 

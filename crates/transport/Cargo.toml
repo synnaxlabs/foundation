@@ -14,9 +14,6 @@ types = { path = "../types" }
 
 [dev-dependencies]
 proptest = { workspace = true }
-# rustls's default features put the post-quantum group first. The tests turn it on to
-# show that `tls` ignores it. It reaches every crate in a workspace test build.
-rustls = { workspace = true, features = ["prefer-post-quantum"] }
 
 [lints]
 workspace = true
