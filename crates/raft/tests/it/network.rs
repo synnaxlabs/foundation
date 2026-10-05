@@ -269,25 +269,33 @@ impl Network {
             .filter(|&at| flags[at])
             .map(Self::key)
             .collect();
+        let pending = self.pending(node);
         let raft = &mut self.nodes[node];
+        let before = raft.voters().clone();
         let result = raft.propose_voters(voters.clone());
-        let disk = &self.disks[node];
-        let pending = disk
-            .entries
-            .iter()
-            .rev()
-            .find(|entry| matches!(entry.data, Data::Voters(_)))
-            .filter(|entry| entry.at.index > disk.applied)
-            .map(|entry| entry.at);
-        match (raft.role(), result) {
+        let (role, term) = (raft.role(), raft.term());
+        match (role, result) {
             (Role::Leader, Ok(at)) => {
                 assert!(!voters.is_empty());
                 assert_eq!(pending, None);
-                assert_eq!(at.term, raft.term());
+                assert!(
+                    before.outgoing.is_empty(),
+                    "a leader in a settled joint phase"
+                );
+                assert_eq!(at.term, term);
+                let disk = &self.disks[node];
                 assert_eq!(at.index, u64::try_from(disk.entries.len()).unwrap() + 1);
+                self.collect();
+                let joint = Voters {
+                    incoming: voters,
+                    outgoing: before.incoming,
+                };
+                let index = usize::try_from(at.index - 1).unwrap();
+                let written = self.disks[node].entries.get(index).map(|e| &e.data);
+                assert_eq!(written, Some(&Data::Voters(joint)), "the joint entry");
             }
             (role, Err(Error::NotLeader { leader })) if role != Role::Leader => {
-                assert_eq!(leader, raft.leader());
+                assert_eq!(leader, self.nodes[node].leader());
             }
             (Role::Leader, Err(Error::NoVoters)) => assert!(voters.is_empty()),
             (Role::Leader, Err(Error::ChangePending { at })) => {
@@ -295,6 +303,18 @@ impl Network {
             }
             (role, result) => panic!("a {role:?} answered a change with {result:?}"),
         }
+    }
+
+    // The position of the last configuration entry on the disk of `node` when it is
+    // not committed.
+    fn pending(&self, node: usize) -> Option<Position> {
+        let disk = &self.disks[node];
+        disk.entries
+            .iter()
+            .rev()
+            .find(|entry| matches!(entry.data, Data::Voters(_)))
+            .filter(|entry| entry.at.index > disk.applied)
+            .map(|entry| entry.at)
     }
 
     /// Proposes a new value to `node`. Returns its position when the node leads.
@@ -397,6 +417,17 @@ impl Network {
 
     // A vote goes only to a candidate whose log is at least as new as the voter's.
     fn note(&mut self, at: usize, message: &Message) {
+        if matches!(message.body, Body::PreVote { .. } | Body::Vote { .. }) {
+            let node = &self.nodes[at];
+            let voters = node.voters();
+            let key = node.key();
+            assert!(
+                voters.incoming.contains(&key)
+                    || voters.outgoing.contains(&key)
+                    || self.pending(at).is_some(),
+                "node {at} campaigns outside its committed configuration"
+            );
+        }
         let prevote = match message.body {
             Body::PreVote { last } => {
                 let key = (message.from, message.term, true);
@@ -425,6 +456,10 @@ impl Network {
     // a leader must hold only the entries committed in a term below its own.
     fn check_leader(&mut self, at: usize) {
         let node = &self.nodes[at];
+        assert!(
+            node.voters().incoming.contains(&node.key()) || self.pending(at).is_some(),
+            "node {at} leads outside its committed configuration"
+        );
         let term = node.term();
         if let Some(leader) = self.leaders.get(&term) {
             assert_eq!(*leader, node.key(), "two leaders in term {term:?}");

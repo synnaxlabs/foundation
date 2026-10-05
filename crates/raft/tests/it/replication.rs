@@ -50,6 +50,7 @@ proptest! {
         let voters: Vec<usize> = network.voters(leader).collect();
         network.apply_until(&voters, at.index);
         let configuration = network.nodes[leader].voters().clone();
+        prop_assert!(configuration.outgoing.is_empty(), "{configuration:?}");
         for &node in &voters {
             prop_assert_eq!(network.nodes[node].voters(), &configuration);
             prop_assert!(network.disks[node].applied >= at.index, "node {node}");
