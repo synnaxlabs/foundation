@@ -504,19 +504,25 @@ How to read this record:
   file, HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, and
   Kubernetes Secrets. A policy picks the store per name. External adapters authenticate
   with the node key and may cache values sealed to it (this delays revocation).
-- **BQ12 (open, r15)** Identity across forwarding nodes. r15 recommends that a remote
-  subject signs a short-lived hello and each session open, the gateway forwards the
-  signatures, and the owner verifies them. A node acts only as itself or as connectors
-  placed on it. Node-to-node traffic is authorized by role. r15 decisions 2 to 10 are
-  decided (session opens signed, a key list per subject in OpenSSH format, `apply`
-  signs the plan hash, every node checks every change record, audit records the
-  subject and the forwarding node, MCP runs beside the agent, the caller seals secret
-  values, no end-to-end frame integrity in v1). Decision 1 waits for the person.
+- **BQ12 (locked 2026-10-04)** Identity across forwarding nodes. The person adopted
+  r15 in full (sections 4 and 6). A remote subject signs a short-lived hello and each
+  session open, the gateway forwards the signatures, and the owner verifies them
+  against the subject's keys in the spec. A node acts only as itself or as connectors
+  placed on it. Node-to-node traffic is authorized by role. r15 decisions 2 to 10 hold
+  as written there (session opens signed, a key list per subject in OpenSSH format,
+  `apply` signs the plan hash, every node checks every change record, audit records
+  the subject and the forwarding node, MCP runs beside the agent, the caller seals
+  secret values, no end-to-end frame integrity in v1).
 
 ### 1.13 Operations, agents, and the factory
 
 - **Factory constraint** Two people, each on an individual Max plan. The factory runs in
   attended, locally started sessions, not as an unattended daemon.
+- **BENCH SPEND (2026-10-04)** Linux benchmarks that need real machines run on rented
+  AWS machines. The person: "you're welcome to provision AWS machines. SET STRICT COST
+  LIMITS. I don't want more than $100 spent". The limit is 100 USD in total, across
+  all benchmarks, until the person raises it. Only the coordinator provisions, by the
+  procedure in `docs/coordination.md`.
 - **C7** One operation table (typed input and output, error codes, read-only and
   destructive flags) generates the CLI (`--json`), annotated MCP tools, and docs
   embedded in the binary. Every error has a stable code and a fix-it hint. Status is
@@ -1213,8 +1219,8 @@ Conflict: BQ5's lock text says "hub and home enforce the rules (... access)". r8
 and r12 enforce access only at the owner. BQ12 found that "authenticate at `hub`,
 authorize at the owner" lets a forwarding node impersonate a subject.
 Resolution: enforcement only at owners (`home` for data; region voters for apply,
-secret, admin), with no check in `hub` or `ctx`. BQ12 decides how the owner learns the
-true subject. Basis: root "no defense in depth", r12 table.
+secret, admin), with no check in `hub` or `ctx`. The owner learns the true subject
+from the signatures it verifies (BQ12). Basis: root "no defense in depth", r12 table.
 
 ### 3.4 Terms used two ways
 
@@ -1322,33 +1328,32 @@ SDKs hand-write their data path against golden vectors (D12).
 
 Shapes that need the person:
 
-1. **BQ12, identity across forwarding.** Decision 1 of r15 (see 1.12).
-2. **Calculation engine design.** Language, windows, state, placement, quality
+1. **Calculation engine design.** Language, windows, state, placement, quality
    propagation, and whether a large program lives in its own file. Its guarantees are
    locked (C5 + KINDS OWN).
 
 Measured before they lock:
 
-3. **C2, thread model.** The working assumption is in 1.5. The `memory` builder
-   measures the handoff on Linux first.
-4. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
+2. **C2, thread model.** The working assumption is in 1.5. The `memory` builder
+   measures the handoff on Linux first (#9).
+3. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
 
 Parameters and later choices, recorded and not asked:
 
-5. Struct template storage: whether the spec stores templates and instance records for
+4. Struct template storage: whether the spec stores templates and instance records for
    SDK code generation and `export`.
-6. Per-node settings (disk budget, pool budget, data directory): node-local config or a
+5. Per-node settings (disk budget, pool budget, data directory): node-local config or a
    policy that selects node names.
-7. The transmission policy target: links, indexes, or both (B6).
-8. Upgrades across regions: which region holds the desired version and the format
+6. The transmission policy target: links, indexes, or both (B6).
+7. Upgrades across regions: which region holds the desired version and the format
    flag, and how finalization waits for every region (BQ18, C9d).
-9. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
+8. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
    path.
-10. A20: whether a channel may carry a default max age.
-11. A3: partial-segment wildcards.
-12. A13: bounded lists.
-13. D3: license, free tier, monetization.
-14. D5: a plugin system.
+9. A20: whether a channel may carry a default max age.
+10. A3: partial-segment wildcards.
+11. A13: bounded lists.
+12. D3: license, free tier, monetization.
+13. D5: a plugin system.
 
 ### 5.2 Settled under a delegation
 
