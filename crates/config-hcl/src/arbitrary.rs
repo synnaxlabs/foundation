@@ -6,12 +6,17 @@ use document::value::{Call, Float, Kind, Value};
 use document::{Attribute, Block, Document, Label, Map};
 use proptest::prelude::*;
 
+use crate::lex;
+
 fn identifier() -> impl Strategy<Value = String> {
     "[a-z_][a-z0-9_-]{0,6}"
 }
 
 fn text() -> impl Strategy<Value = String> {
-    prop_oneof!["\\PC{0,8}", "[\"\\\\$%{}\n\r\t\u{1}a]{0,8}"]
+    prop_oneof![
+        "\\PC{0,8}",
+        "[\"\\\\$%{}\n\r\t\u{1}\u{b}\u{3000} aEOT]{0,8}"
+    ]
 }
 
 fn name() -> impl Strategy<Value = Kind> {
@@ -129,6 +134,9 @@ fn value_text(out: &mut String, value: &Value) {
         Kind::Bool(b) => write!(out, "{b}").unwrap(),
         Kind::Integer(n) => write!(out, "{n}").unwrap(),
         Kind::Float(float) => write!(out, "{:?}", float.get()).unwrap(),
+        Kind::String(text) if text.ends_with('\n') && !text.contains("\r\n") => {
+            heredoc(out, text);
+        }
         Kind::String(text) => quoted(out, text),
         Kind::Reference(name) => out.push_str(name.as_str()),
         Kind::List(items) => {
@@ -139,7 +147,12 @@ fn value_text(out: &mut String, value: &Value) {
         Kind::Map(map) => {
             out.push('{');
             for (i, attribute) in map.iter().enumerate() {
-                out.push_str(if i == 0 { " " } else { ", " });
+                // The new line after a heredoc ends its entry.
+                if i == 0 {
+                    out.push(' ');
+                } else if !out.ends_with('\n') {
+                    out.push_str(", ");
+                }
                 if identifier_text(&attribute.key) {
                     out.push_str(&attribute.key);
                 } else {
@@ -170,10 +183,28 @@ fn values(out: &mut String, values: &[Value]) {
 
 fn identifier_text(text: &str) -> bool {
     let mut chars = text.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    chars.next().is_some_and(lex::identifier_start) && chars.all(lex::identifier_part)
+}
+
+/// Writes `text`, which ends in `\n` and has no `\r\n`, as a heredoc and a new line.
+fn heredoc(out: &mut String, text: &str) {
+    let mut marker = String::from("EOT");
+    while text
+        .split('\n')
+        .any(|line| line.trim_matches(lex::space) == marker)
+    {
+        marker.push('_');
+    }
+    writeln!(out, "<<{marker}").unwrap();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if matches!(c, '$' | '%') && chars.peek() == Some(&'{') {
+            out.push(c);
+        }
+    }
+    out.push_str(&marker);
+    out.push('\n');
 }
 
 fn quoted(out: &mut String, text: &str) {
