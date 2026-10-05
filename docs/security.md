@@ -171,8 +171,8 @@ state on `main`.
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
 - Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
-  reported durable or cannot open) and #393 (two CRC-valid fields abort the node
-  at open; the target finds them, so its long runs wait on the fix).
+  reported durable or cannot open). Fixed: #393 (two CRC-valid fields stopped the
+  node at open); the `area` and `below_tail` inputs hold both.
 
 ### Device to connector
 
