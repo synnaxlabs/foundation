@@ -1136,7 +1136,11 @@ How to read this record:
   outcome and the decision behind it, and the test checks that outcome instead. For
   each text that reads, `write` must give the bytes of a text in the directory that is
   accepted with no code and is not in `differences.txt`, and those bytes must read as
-  the same Document. The program records the HCL
+  the same Document. The program also writes the values HCL reads from each text with
+  only data, in a small text form. For each such text that reads and is not in
+  `differences.txt`, the test prints the Document in the same form, and the two must
+  be equal (#497). An integer is a number written with digits only, and the test
+  compares each float by its `f64` bits. The program records the HCL
   version. A person runs it by hand when the texts change; CI does not run it and
   needs no Go. It is the only Go code in the repo. The person decided on 2026-10-05
   ("Yeah that's fine", #460); the coordinator approved the plan on #460.

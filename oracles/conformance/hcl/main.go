@@ -1,11 +1,13 @@
 // Command verdicts writes verdicts.txt: the verdict of the pinned HCL version on each
-// text in texts/, and the codes of the forms outside data in each accepted text. Run
-// it in this directory with `go run .`.
+// text in texts/, and the codes of the forms outside data in each accepted text. It
+// also writes values.txt: the values HCL reads from each text with only data. Run it
+// in this directory with `go run .`.
 package main
 
 import (
 	"fmt"
 	"log"
+	"maps"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -25,17 +27,34 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var out strings.Builder
-	fmt.Fprintf(&out, "# %s %s. Made by main.go; do not edit.\n", module, version())
+	var verdicts, read strings.Builder
+	for _, out := range []*strings.Builder{&verdicts, &read} {
+		fmt.Fprintf(out, "# %s %s. Made by main.go; do not edit.\n", module, version())
+	}
 	for _, path := range paths {
 		src, err := os.ReadFile(path)
 		if err != nil {
 			log.Fatal(err)
 		}
 		name := strings.TrimSuffix(filepath.Base(path), ".hcl")
-		fmt.Fprintf(&out, "%s %s\n", name, verdict(name, src))
+		file, diags := hclsyntax.ParseConfig(src, name, hcl.InitialPos)
+		if diags.HasErrors() {
+			fmt.Fprintf(&verdicts, "%s refused\n", name)
+			continue
+		}
+		body := file.Body.(*hclsyntax.Body)
+		found := codes(name, src, body)
+		fmt.Fprintf(&verdicts, "%s %s\n", name, strings.Join(slices.Concat([]string{"accepted"}, found), " "))
+		if len(found) == 0 {
+			fmt.Fprintf(&read, "%s %s\n", name, values(name, src, body))
+		}
 	}
-	if err := os.WriteFile("verdicts.txt", []byte(out.String()), 0o644); err != nil {
+	write("verdicts.txt", verdicts.String())
+	write("values.txt", read.String())
+}
+
+func write(path, text string) {
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -55,13 +74,8 @@ func version() string {
 	return ""
 }
 
-// verdict is "refused", "accepted", or "accepted" and the sorted codes of the forms
-// outside data.
-func verdict(name string, src []byte) string {
-	file, diags := hclsyntax.ParseConfig(src, name, hcl.InitialPos)
-	if diags.HasErrors() {
-		return "refused"
-	}
+// codes are the sorted codes of the forms outside data in body.
+func codes(name string, src []byte, body *hclsyntax.Body) []string {
 	codes := map[string]bool{}
 	visit := func(node hclsyntax.Node) hcl.Diagnostics {
 		for _, code := range forms(name, src, node) {
@@ -69,16 +83,8 @@ func verdict(name string, src []byte) string {
 		}
 		return nil
 	}
-	hclsyntax.VisitAll(file.Body.(*hclsyntax.Body), visit)
-	if len(codes) == 0 {
-		return "accepted"
-	}
-	sorted := make([]string, 0, len(codes))
-	for code := range codes {
-		sorted = append(sorted, code)
-	}
-	slices.Sort(sorted)
-	return "accepted " + strings.Join(sorted, " ")
+	hclsyntax.VisitAll(body, visit)
+	return slices.Sorted(maps.Keys(codes))
 }
 
 // forms are the diagnostic codes of the forms outside data that node shows, or none

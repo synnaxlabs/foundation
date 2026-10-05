@@ -1,16 +1,20 @@
-//! The verdict of the pinned HCL version on each text in `texts/`, and what `read` and
-//! `write` must do with each text. `README.md` tells how to add a text.
+//! The verdict of the pinned HCL version on each text in `texts/`, the values it reads
+//! from each text with only data, and what `read` and `write` must do with each text.
+//! `README.md` tells how to add a text.
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
+use std::iter::once;
 use std::path::PathBuf;
 
 use config_hcl::{read, write};
-use document::Source;
 use document::diagnostic::Diagnostic;
+use document::value::{Kind, Value};
+use document::{Attribute, Document, Source};
 
 /// What HCL does with a text.
 enum Verdict {
@@ -95,6 +99,34 @@ fn differences() -> Vec<(String, Outcome)> {
         .collect()
 }
 
+/// Each line of `values.txt` as a name and the values HCL reads, in file order.
+fn values() -> Vec<(String, String)> {
+    lines("values.txt")
+        .iter()
+        .map(|line| {
+            let (name, values) = line
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("values.txt: {line:?} has no values"));
+            (name.to_owned(), values.to_owned())
+        })
+        .collect()
+}
+
+/// The names of the texts that HCL accepts with no code and that are not in
+/// `differences.txt`.
+fn data() -> BTreeSet<String> {
+    let differences: BTreeSet<_> =
+        differences().into_iter().map(|(name, _)| name).collect();
+    verdicts()
+        .into_iter()
+        .filter(|(name, verdict)| {
+            matches!(verdict, Verdict::Accepted(forms) if forms.is_empty())
+                && !differences.contains(name)
+        })
+        .map(|(name, _)| name)
+        .collect()
+}
+
 fn outcome(text: &str) -> Outcome {
     read(Source(0), text).map(drop).map_err(|errors| {
         errors
@@ -130,6 +162,88 @@ fn join(codes: &BTreeSet<String>) -> String {
         .join(" ")
 }
 
+/// The failures of `read` against `values.txt`: each text in `data` that `read` reads
+/// must give the values HCL reads.
+fn value_failures(read: impl Fn(&str) -> Option<Document>) -> Vec<String> {
+    let texts = texts();
+    let values: BTreeMap<_, _> = values().into_iter().collect();
+    let mut failures = Vec::new();
+    for name in data() {
+        let Some(document) = texts.get(&name).and_then(|text| read(text)) else {
+            continue;
+        };
+        let ours = body(&document);
+        match values.get(&name) {
+            None => failures.push(format!("{name}: has no values; run `go run .`")),
+            Some(hcl) if *hcl != ours => {
+                failures
+                    .push(format!("{name}: read gives {ours}, and HCL reads {hcl}"));
+            }
+            Some(_) => {}
+        }
+    }
+    failures
+}
+
+/// The form of `values.txt` for a document. `README.md` tells the form.
+fn body(document: &Document) -> String {
+    let attributes = document.attributes.iter().map(attribute);
+    let blocks = document.blocks.iter().map(|block| {
+        once(block.keyword.to_string())
+            .chain(block.labels.iter().map(|label| quote(&label.text)))
+            .chain(once(body(&block.body)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    format!(
+        "{{{}}}",
+        attributes.chain(blocks).collect::<Vec<_>>().join(", ")
+    )
+}
+
+fn attribute(attribute: &Attribute) -> String {
+    format!("{} = {}", quote(&attribute.key), value(&attribute.value))
+}
+
+fn value(value: &Value) -> String {
+    let join = |values: &[Value]| {
+        values
+            .iter()
+            .map(self::value)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match &value.kind {
+        Kind::Bool(bool) => bool.to_string(),
+        Kind::Integer(integer) => integer.to_string(),
+        Kind::Float(float) => format!("{:e}", float.get()),
+        Kind::String(text) => quote(text),
+        Kind::Reference(name) => name.to_string(),
+        Kind::List(values) => format!("[{}]", join(values)),
+        Kind::Map(map) => format!(
+            "{{{}}}",
+            map.iter().map(attribute).collect::<Vec<_>>().join(", ")
+        ),
+        Kind::Call(call) => format!("{}({})", call.function, join(&call.arguments)),
+    }
+}
+
+fn quote(text: &str) -> String {
+    let mut quoted = String::from('"');
+    for c in text.chars() {
+        match c {
+            '"' | '\\' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            ' '..='~' => quoted.push(c),
+            _ => write!(quoted, "\\u{{{:x}}}", u32::from(c)).unwrap(),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 fn fail(failures: &[String]) {
     assert!(
         failures.is_empty(),
@@ -162,6 +276,15 @@ fn each_text_has_one_verdict() {
         }
         if !listed.insert(name.clone()) {
             failures.push(format!("{name}: is in differences.txt twice"));
+        }
+    }
+    let mut valued = BTreeSet::new();
+    for (name, _) in values() {
+        if !texts.contains_key(&name) {
+            failures.push(format!("{name}: is in values.txt but has no text"));
+        }
+        if !valued.insert(name.clone()) {
+            failures.push(format!("{name}: is in values.txt twice"));
         }
     }
     fail(&failures);
@@ -206,15 +329,9 @@ fn reads_as_hcl_does() {
 #[test]
 fn writes_text_hcl_accepts() {
     let texts = texts();
-    let differences: BTreeSet<_> =
-        differences().into_iter().map(|(name, _)| name).collect();
-    let data: BTreeSet<&str> = verdicts()
+    let data: BTreeSet<&str> = data()
         .iter()
-        .filter(|(name, verdict)| {
-            matches!(verdict, Verdict::Accepted(forms) if forms.is_empty())
-                && !differences.contains(name)
-        })
-        .filter_map(|(name, _)| texts.get(name).map(String::as_str))
+        .filter_map(|name| texts.get(name).map(String::as_str))
         .collect();
     let mut failures = Vec::new();
     for (name, text) in &texts {
@@ -239,4 +356,30 @@ fn writes_text_hcl_accepts() {
         }
     }
     fail(&failures);
+}
+
+#[test]
+fn reads_the_values_hcl_reads() {
+    fail(&value_failures(|text| read(Source(0), text).ok()));
+}
+
+#[test]
+fn finds_a_read_that_gives_empty_documents() {
+    let failures =
+        value_failures(|text| read(Source(0), text).ok().map(|_| Document::default()));
+    let expected = r#"attribute: read gives {}, and HCL reads {"a" = 1}"#;
+    assert!(
+        failures.iter().any(|failure| failure == expected),
+        "{failures:#?}"
+    );
+}
+
+#[test]
+fn finds_a_read_that_takes_an_escape_wrong() {
+    let failures =
+        value_failures(|text| read(Source(0), &text.replace(r"\t", "t")).ok());
+    let ours = r#"{"a" = "\u{a}\u{d}t\"\\\u{e9}\u{1f600}"}"#;
+    let hcl = r#"{"a" = "\u{a}\u{d}\u{9}\"\\\u{e9}\u{1f600}"}"#;
+    let expected = format!("string-escapes: read gives {ours}, and HCL reads {hcl}");
+    assert!(failures.contains(&expected), "{failures:#?}");
 }
