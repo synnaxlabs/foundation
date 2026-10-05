@@ -70,7 +70,7 @@ impl Default for Config {
 
 /// A deterministic run of one or more nodes on the calling thread. Make nodes with
 /// [`Sim::node`], start their shards and threads through the `env` handles, then
-/// drive the run with [`Sim::run`] or [`Sim::run_for`].
+/// drive the run with [`Sim::run`], [`Sim::run_for`], or [`Sim::run_on`].
 ///
 /// ```
 /// use types::time::{Monotonic, Span};
@@ -186,6 +186,60 @@ impl Sim {
     ///   before the end of true time.
     pub fn run(&mut self) -> Result<(), Error> {
         self.drive(None)
+    }
+
+    /// Starts a shard named `run_on`, with no core, on `node` that runs `body`, runs
+    /// until every thread of every node has ended, and returns what `body` gave.
+    /// `body` gets the node and the shard's tasks. Every call names its shard
+    /// `run_on`.
+    ///
+    /// ```
+    /// let mut sim = sim::Sim::new(sim::Config::default());
+    /// let node = sim.node(sim::node::Config::default());
+    /// let now = sim.run_on(&node, |node, _tasks| async move { node.clock().now() });
+    /// assert_eq!(now, Ok(sim::node::Config::default().monotonic));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Sim::run`]. [`Error::Panicked`] with thread `run_on` when `body` panics.
+    ///
+    /// # Panics
+    ///
+    /// When `node` belongs to another run.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a shard with no core gets no fault, and the run ends after the shard"
+    )]
+    pub fn run_on<T, F>(
+        &mut self,
+        node: &Node,
+        body: impl FnOnce(Node, env::tasks::Tasks) -> F + Send + 'static,
+    ) -> Result<T, Error>
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + 'static,
+    {
+        self.own(node);
+        let out = Arc::new(Mutex::new(None));
+        let (slot, own) = (Arc::clone(&out), node.clone());
+        let config = env::shards::Config {
+            name: "run_on".into(),
+            core: None,
+        };
+        let start = node.shards().start(config, move |tasks| async move {
+            let value = body(own, tasks).await;
+            *slot
+                .lock()
+                .expect("invariant: nothing panics under the lock") = Some(value);
+        });
+        drop(start.expect("invariant: a shard with no core gets no fault"));
+        self.run()?;
+        let value = out
+            .lock()
+            .expect("invariant: nothing panics under the lock")
+            .take();
+        Ok(value.expect("invariant: the run ends after its first task"))
     }
 
     /// Runs until true time has moved by `span`; a negative span runs as zero. Threads
