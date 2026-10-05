@@ -2,7 +2,7 @@
 //! etcd Authors, Apache License 2.0, see `LICENSE`). This file is modified from the
 //! etcd source: `README.md` lists each source and the changes.
 
-use raft::{Body, Entry, Hard, Message, Position, Raft, Role, Term};
+use raft::{Body, Data, Entry, Hard, Message, Position, Raft, Role, Term};
 
 use crate::common::{Disk, ELECTION, Network, at_term, count, key, start};
 
@@ -11,7 +11,7 @@ fn log(terms: &[u64]) -> Vec<Entry> {
     terms
         .iter()
         .zip(1..)
-        .map(|(&term, index)| entry(term, index, b""))
+        .map(|(&term, index)| noop(term, index))
         .collect()
 }
 
@@ -21,7 +21,18 @@ fn entry(term: u64, index: u64, data: &[u8]) -> Entry {
             term: Term(term),
             index,
         },
-        data: data.to_vec(),
+        data: Data::Bytes(data.to_vec()),
+    }
+}
+
+/// A leader's first entry of its term; etcd's noop entry.
+fn noop(term: u64, index: u64) -> Entry {
+    Entry {
+        at: Position {
+            term: Term(term),
+            index,
+        },
+        data: Data::Empty,
     }
 }
 
@@ -99,7 +110,7 @@ fn commit_noop(raft: &mut Raft, disk: &mut Disk) {
         let Body::Append { entries, .. } = &message.body else {
             panic!("not a message to append noop entry");
         };
-        assert!(entries.len() == 1 && entries[0].data.is_empty());
+        assert!(entries.len() == 1 && entries[0].data == Data::Empty);
         raft.step(accept(&message)).unwrap();
     }
     disk.store(raft.ready());
@@ -225,7 +236,7 @@ fn leader_commit_preceding_entries() {
         accept_all(&mut raft, &mut disk);
         let li = count(terms.len());
         let mut expected = log(terms);
-        expected.push(entry(3, li + 1, b""));
+        expected.push(noop(3, li + 1));
         expected.push(entry(3, li + 2, b"some data"));
         assert_eq!(disk.committed, expected, "#{i}");
     }
@@ -317,7 +328,7 @@ fn log_from(index: u64, terms: &[u64]) -> Vec<Entry> {
     terms
         .iter()
         .zip(index..)
-        .map(|(&term, index)| entry(term, index, b""))
+        .map(|(&term, index)| noop(term, index))
         .collect()
 }
 
@@ -497,8 +508,10 @@ fn log_replication() {
             let data: Vec<&Vec<u8>> = disk
                 .committed
                 .iter()
-                .filter(|entry| !entry.data.is_empty())
-                .map(|entry| &entry.data)
+                .filter_map(|entry| match &entry.data {
+                    Data::Bytes(data) => Some(data),
+                    Data::Empty | Data::Voters(_) => None,
+                })
                 .collect();
             assert_eq!(data, proposed.iter().collect::<Vec<_>>(), "#{i}.{id}");
         }
