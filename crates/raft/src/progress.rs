@@ -65,8 +65,8 @@ impl Progress {
         }
     }
 
-    // Records that the follower holds every entry up to `index`. Returns whether
-    // that is news.
+    // Records that the follower holds every entry up to `index`, at most the
+    // leader's last index: `Raft::check` ran first. Returns whether that is news.
     pub(crate) fn accepted(&mut self, index: u64) -> bool {
         let news = index > self.matched;
         if news {
@@ -90,7 +90,8 @@ impl Progress {
     }
 
     // Records that the follower did not have `prev`. `hint` is the follower's guess
-    // at the last index the two logs share. A hint below `matched` is stale.
+    // at the last index the two logs share, at most the leader's last index:
+    // `Raft::check` ran first. A hint below `matched` is stale.
     pub(crate) fn rejected(&mut self, hint: u64) {
         if hint < self.matched {
             return;
