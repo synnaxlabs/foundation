@@ -75,6 +75,12 @@ pub enum Error {
     EmptyIncoming,
     /// A configuration entry has an empty incoming voter set.
     NoVoters,
+    /// A configuration change is in progress: the configuration entry at `at` is not
+    /// committed yet, or it is a joint configuration whose leave is not committed yet.
+    ChangePending {
+        /// The position of the last configuration entry in the log.
+        at: Position,
+    },
     /// The stored term is lower than the term of the last log entry.
     TermBehindLog {
         /// The stored term.
@@ -139,6 +145,11 @@ impl fmt::Display for Error {
             Self::NoVoters => {
                 write!(f, "a configuration entry has an empty incoming voter set")
             }
+            Self::ChangePending { at } => write!(
+                f,
+                "a configuration change at index {} in term {} is pending",
+                at.index, at.term
+            ),
             Self::TermBehindLog { term, last } => write!(
                 f,
                 "stored term {term} is lower than term {} of the last log entry",
