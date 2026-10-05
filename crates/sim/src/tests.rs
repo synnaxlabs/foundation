@@ -5,6 +5,7 @@ mod crash;
 mod files;
 mod net;
 mod shards;
+mod tcp;
 
 use std::collections::BTreeSet;
 use std::future::pending;

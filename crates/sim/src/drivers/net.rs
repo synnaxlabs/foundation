@@ -1,16 +1,44 @@
 //! The `env::net` drivers of a simulated node.
 
-use std::io::IoSliceMut;
+use std::future::poll_fn;
+use std::io::{IoSlice, IoSliceMut};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use env::net::udp::{self, Meta, Transmit, sender};
 use env::net::{Connect, Error, listener, tcp};
+use types::time::Monotonic;
 
 use super::{Node, Owner};
+use crate::net::node;
+use crate::net::tcp::{Key, Tcp};
 use crate::net::udp::Bound;
 use crate::state::lock;
+
+const DELAYED: &str = "sim does not simulate delayed TCP sends yet";
+const NO_NODE: &str = "sim does not simulate TCP to an address with no node yet";
+
+impl Node {
+    /// Runs `call` on the TCP sockets with the true time now. Drops the wakers that
+    /// it gives after the lock.
+    ///
+    /// # Panics
+    ///
+    /// When the call meets a case that sim does not simulate yet.
+    fn tcp<T, W>(&self, call: impl FnOnce(&mut Tcp<'_>, Monotonic) -> (T, W)) -> T {
+        let mut state = lock(&self.shared);
+        let now = state.now();
+        let (value, wakers) = call(&mut state.net().tcp(), now);
+        let yet = state.net().yet();
+        drop(state);
+        drop(wakers);
+        if let Some(yet) = yet {
+            panic!("{yet}");
+        }
+        value
+    }
+}
 
 impl env::net::Driver for Node {
     fn udp(&self, config: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
@@ -22,12 +50,133 @@ impl env::net::Driver for Node {
         }))
     }
 
-    fn connect<'a>(&'a self, _: &'a tcp::Config) -> Connect<'a> {
-        panic!("sim does not simulate TCP yet")
+    fn connect<'a>(&'a self, config: &'a tcp::Config) -> Connect<'a> {
+        let (remote, options) = (config.remote, config.options);
+        assert!(!options.delayed, "{DELAYED}");
+        assert!(node(remote.ip()).is_some(), "{NO_NODE}");
+        Box::pin(async move {
+            let connect =
+                |tcp: &mut Tcp<'_>, now| tcp.connect(self.node, now, remote, options);
+            let key = self.tcp(|tcp, now| (connect(tcp, now), ()))?;
+            let stream: Box<dyn tcp::Driver> = Box::new(Stream::new(self.clone(), key));
+            poll_fn(|cx| self.tcp(|tcp, _| tcp.connected(key, cx.waker()))).await?;
+            Ok(stream)
+        })
     }
 
-    fn listen(&self, _: &tcp::Listen) -> Result<Box<dyn listener::Driver>, Error> {
-        panic!("sim does not simulate TCP yet")
+    fn listen(&self, config: &tcp::Listen) -> Result<Box<dyn listener::Driver>, Error> {
+        assert!(!config.options.delayed, "{DELAYED}");
+        let (key, local) = self.tcp(|tcp, _| (tcp.listen(self.node, config), ()))?;
+        Ok(Box::new(Listener {
+            node: self.clone(),
+            key,
+            local,
+            owner: Owner::new(LISTENER),
+        }))
+    }
+}
+
+/// A listener, in a panic.
+const LISTENER: &str = "a TCP listener";
+/// A stream, in a panic.
+const STREAM: &str = "a TCP stream";
+
+/// One TCP listener. A drop resets the streams that it did not accept.
+struct Listener {
+    node: Node,
+    key: u64,
+    local: SocketAddr,
+    owner: Owner,
+}
+
+impl listener::Driver for Listener {
+    fn local(&self) -> SocketAddr {
+        self.local
+    }
+
+    fn poll_accept(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Box<dyn tcp::Driver>, Error>> {
+        self.owner.check(&self.node);
+        let key = ready!(self.node.tcp(|tcp, _| tcp.accept(self.key, cx.waker())));
+        Poll::Ready(Ok(Box::new(Stream::new(self.node.clone(), key))))
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        let mut state = lock(&self.node.shared);
+        let now = state.now();
+        let waker = state.net().tcp().unlisten(now, self.key);
+        drop(state);
+        drop(waker);
+    }
+}
+
+/// One end of a TCP stream. A drop resets the peer, or lets the bytes and the FIN go
+/// after a close.
+struct Stream {
+    node: Node,
+    key: Key,
+    owner: Owner,
+}
+
+impl Stream {
+    fn new(node: Node, key: Key) -> Self {
+        Self {
+            node,
+            key,
+            owner: Owner::new(STREAM),
+        }
+    }
+}
+
+impl tcp::Driver for Stream {
+    fn local(&self) -> SocketAddr {
+        self.key.local
+    }
+
+    fn peer(&self) -> SocketAddr {
+        self.key.peer
+    }
+
+    fn poll_read(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<Result<usize, Error>> {
+        self.owner.check(&self.node);
+        let key = self.key;
+        (self.node).tcp(|tcp, now| tcp.read(now, key, cx.waker(), buffer))
+    }
+
+    fn poll_write(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffers: &[IoSlice<'_>],
+    ) -> Poll<Result<usize, Error>> {
+        self.owner.check(&self.node);
+        let key = self.key;
+        (self.node).tcp(|tcp, now| tcp.write(now, key, cx.waker(), buffers))
+    }
+
+    fn poll_close(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        self.owner.check(&self.node);
+        let key = self.key;
+        Poll::Ready(self.node.tcp(|tcp, now| (tcp.close(now, key), ())))
+    }
+}
+
+impl Drop for Stream {
+    /// Leaves a case that sim does not simulate yet for the run to raise, since a
+    /// drop never panics.
+    fn drop(&mut self) {
+        let mut state = lock(&self.node.shared);
+        let now = state.now();
+        let wakers = state.net().tcp().drop(now, self.key);
+        drop(state);
+        drop(wakers);
     }
 }
 

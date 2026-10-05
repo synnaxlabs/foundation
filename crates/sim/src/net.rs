@@ -1,6 +1,7 @@
 //! The network of a run: node addresses, the wire between them, and a module for each
 //! protocol.
 
+pub(crate) mod tcp;
 pub(crate) mod udp;
 mod wire;
 
@@ -11,7 +12,7 @@ use env::rng::Rng;
 use types::time::Monotonic;
 
 use crate::link;
-use wire::Wire;
+use wire::{Packet, Wire};
 
 /// `10.0.0.0`: node `k` has `10.0.0.0` plus `k + 1`.
 const V4: u32 = 0x0a00_0000;
@@ -41,7 +42,7 @@ pub(crate) fn addresses(node: usize) -> [IpAddr; 2] {
 }
 
 /// The node whose address is `ip`, if `ip` is an address that a node can have.
-fn node(ip: IpAddr) -> Option<usize> {
+pub(crate) fn node(ip: IpAddr) -> Option<usize> {
     let host = match ip {
         IpAddr::V4(ip) => u128::from(ip.to_bits()).checked_sub(u128::from(V4)),
         IpAddr::V6(ip) => ip.to_bits().checked_sub(V6),
@@ -59,7 +60,7 @@ fn covers(local: IpAddr, ip: IpAddr) -> bool {
         || (local == IpAddr::V4(Ipv4Addr::UNSPECIFIED) && ip.is_ipv4())
 }
 
-/// What happens to a datagram, for the digest.
+/// What happens to a packet, for the digest.
 #[derive(Clone, Copy, Hash)]
 enum Fate {
     /// The link lost it, or it was over the MTU.
@@ -72,12 +73,15 @@ enum Fate {
     Queued,
     /// It arrived where nothing is bound, or at a full queue.
     Dropped,
+    /// It arrived at a TCP end or listener.
+    Arrived,
 }
 
 /// The network of a run.
 pub(crate) struct Network {
     wire: Wire,
     udp: udp::Sockets,
+    tcp: tcp::Sockets,
 }
 
 impl Network {
@@ -85,6 +89,7 @@ impl Network {
         Self {
             wire: Wire::new(default, rng),
             udp: udp::Sockets::default(),
+            tcp: tcp::Sockets::default(),
         }
     }
 
@@ -98,6 +103,16 @@ impl Network {
         udp::Udp::new(&mut self.udp, &mut self.wire)
     }
 
+    /// The TCP streams and listeners.
+    pub(crate) fn tcp(&mut self) -> tcp::Tcp<'_> {
+        tcp::Tcp::new(&mut self.tcp, &mut self.wire)
+    }
+
+    /// Takes the first case met that sim does not simulate yet.
+    pub(crate) fn yet(&mut self) -> Option<&'static str> {
+        self.tcp.yet()
+    }
+
     /// The true time of the first arrival.
     pub(crate) fn first(&self) -> Option<Monotonic> {
         self.wire.first()
@@ -107,8 +122,15 @@ impl Network {
     /// the ends that receive them.
     pub(crate) fn deliver(&mut self, at: Monotonic) -> Vec<Waker> {
         let mut wakers = Vec::new();
-        while let Some(datagram) = self.wire.pop(at) {
-            wakers.extend(self.udp().queue(at, datagram));
+        while let Some(packet) = self.wire.pop(at) {
+            match packet {
+                Packet::Datagram(datagram) => {
+                    wakers.extend(self.udp().queue(at, datagram));
+                }
+                Packet::Segment(segment) => {
+                    wakers.extend(self.tcp().arrive(at, segment));
+                }
+            }
         }
         wakers
     }

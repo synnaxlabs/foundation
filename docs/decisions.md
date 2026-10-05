@@ -1505,6 +1505,20 @@ How to read this record:
   The error gives every panic, the first one first: a drop that panics is a defect of
   its own, even when an earlier panic caused the drop. `Sim::crash` panics with the
   same messages after the crash ends. Built by `simulation` in #548.
+- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
+  segment is never lost or duplicated. It arrives after the delay and a jitter draw of
+  its link, and never before an earlier segment in its direction, so each direction
+  keeps its order. A connect is ready after one round trip and its accept after one
+  and a half. The receive buffer sets the window, the send buffer holds the bytes that
+  the peer has not received, and a write waits while `unsent_bytes_max` bytes are not
+  sent. A drop before close, or with bytes unread, sends an RST; a drop after close
+  sends the bytes and the FIN. A process crash drops each stream. A power cut sends
+  nothing, so the peer gets an RST only when it sends. A case that `sim` does not
+  model panics with "sim does not simulate ... yet": a link with loss, `delayed`
+  sends, a connect to an address with no node, a full backlog, and a SYN to a live
+  stream. Rejected: retransmission over a lossy link (a full TCP state machine to
+  test before a carrier needs it), and a pipe of bytes with no segments (no window,
+  so no test of a writer that a slow reader stops). Built by `simulation` in #113.
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
