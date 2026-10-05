@@ -1,5 +1,5 @@
 //! Keeps each reader's state per index: positions, holds, floors, position records,
-//! credits, latest mailbox, masks.
+//! credits, live frames for complete readers, latest mailbox, masks.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 

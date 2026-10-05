@@ -52,21 +52,31 @@ impl Connection {
         key: Key,
         inner: noq_proto::Connection,
         expected: PublicKey,
+        streams: Streams,
     ) -> Self {
-        Self::new(key, inner, State::Dialing { expected })
+        Self::new(key, inner, State::Dialing { expected }, streams)
     }
 
     /// A connection a peer dialed.
-    pub(super) fn accepted(key: Key, inner: noq_proto::Connection) -> Self {
-        Self::new(key, inner, State::Accepting)
+    pub(super) fn accepted(
+        key: Key,
+        inner: noq_proto::Connection,
+        streams: Streams,
+    ) -> Self {
+        Self::new(key, inner, State::Accepting, streams)
     }
 
-    fn new(key: Key, inner: noq_proto::Connection, state: State) -> Self {
+    fn new(
+        key: Key,
+        inner: noq_proto::Connection,
+        state: State,
+        streams: Streams,
+    ) -> Self {
         Self {
             key,
             inner,
             queued: false,
-            streams: Streams::default(),
+            streams,
             state,
         }
     }

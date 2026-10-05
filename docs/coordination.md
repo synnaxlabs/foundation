@@ -176,6 +176,12 @@ A benchmark starts only when `uptime` shows a load under 8, and its PR names the
 Builds and the PR gates do not take the lock. On 2026-10-05 the load reached 170, and a
 stress run and two benchmarks gave results that no one could use.
 
+The sessions also share 48 GiB of RAM. A local build or test names its crates with
+`-p`: the crates you changed, plus the crates that use a public item you changed.
+Never run `--workspace`, `cargo xtask miri`, `loom`, or `shuttle` on the laptop; CI
+runs them. On 2026-10-05 the person said: "You agents need to be careful about how they
+use memory" (RAM).
+
 ## Issues
 
 Every task is a GitHub issue. An issue states its goal, the crates it owns, the tests
@@ -275,6 +281,11 @@ Sessions message each other with `SendMessage`, by name. Find names with
   docs first, then send the link.
 - An idle session wakes when a message arrives. Do not send a message to check if a
   session is alive.
+- **A question for the person** states the problem, the fix, its cost, and a
+  recommendation. For each option, it says whether it is a patch or the long-term
+  path; for a patch, it names the long-term fix. The person decided on 2026-10-05:
+  "whenever you present thes, you need to tell me hwether its a patch and not a long
+  term fix or the long term path".
 
 ## Before a session stops
 

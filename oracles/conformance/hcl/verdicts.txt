@@ -1,0 +1,146 @@
+# github.com/hashicorp/hcl/v2 v2.25.0. Made by main.go; do not edit.
+attribute accepted
+bad-escape refused
+block-labels-written accepted
+block-labels accepted
+block-one-line accepted
+block accepted
+blocks-nested-written accepted
+blocks-nested accepted
+bool accepted
+call accepted
+comment-block accepted
+comment-hash accepted
+comment-slash accepted
+conditional accepted hcl.conditional
+crlf-written accepted
+crlf accepted
+duplicate-attribute refused
+empty accepted
+expansion accepted hcl.expansion
+float-digits accepted
+float-near-largest-written accepted
+float-near-largest accepted
+float-near-smallest-written accepted
+float-near-smallest accepted
+float-near-tie-written accepted
+float-near-tie accepted
+float-past-f64 accepted
+float-to-zero accepted
+float-written accepted
+float-zero-written accepted
+float-zero accepted
+float accepted
+for-after-dash accepted
+for-after-item-written accepted
+for-after-item accepted
+for-alone refused
+for-first-item refused
+for-in-block-written accepted
+for-in-block accepted
+for-item-line refused
+for-key-colon refused
+for-key-first refused
+for-key-line refused
+for-key-traversal refused
+for-list accepted hcl.for
+for-namespace refused
+for-nested refused
+for-object accepted hcl.for
+for-quoted-key accepted
+heredoc-indented-written accepted
+heredoc-indented accepted
+heredoc accepted
+identifier-dash accepted
+identifier-unicode accepted
+index-attribute-call accepted hcl.index
+index accepted hcl.index
+integer-limits accepted
+integer-past-i128 accepted
+integer-written accepted
+integer accepted
+keyword-attributes accepted
+list-lines-written accepted
+list-lines accepted
+list accepted
+missing-value refused
+namespace accepted hcl.namespace
+negate-float accepted
+negate-space-written accepted
+negate-space accepted
+null accepted hcl.null
+number-binary-exponent-past-i32 refused
+number-dot-e accepted hcl.index
+number-dot-end refused
+number-dot-exponent-key accepted hcl.number-key
+number-dot-exponent-past-i64 refused
+number-dot-exponent-written accepted
+number-dot-exponent accepted
+number-dots refused
+number-expansion accepted hcl.expansion
+number-exponent-i64 accepted
+number-exponent-past-i64 refused
+number-exponent-twice refused
+number-key-binary-exponent-past-i32 refused
+number-key accepted hcl.number-key
+number-malformed-key refused
+number-malformed refused
+number-zero-written accepted
+object-bool-key-string-written accepted
+object-bool-key-string accepted
+object-colon accepted
+object-duplicate-key accepted
+object-integer-key-154-written accepted
+object-integer-key-154 accepted
+object-key-155-digits accepted
+object-key-leading-zeros accepted
+object-keyword-keys-written accepted
+object-keyword-keys accepted
+object-lines accepted
+object-long-integer-key accepted hcl.number-key
+object-negative-fraction-key accepted hcl.number-key
+object-negative-key-written accepted
+object-negative-key accepted
+object-null-key-parentheses accepted hcl.null hcl.parentheses
+object-number-key-written accepted
+object-number-key accepted
+object-one-line accepted
+object-parentheses-key accepted hcl.parentheses
+object-template-key accepted hcl.template
+object-template-wrap-key accepted hcl.template
+object-written accepted
+object accepted
+operator-negate-reference accepted hcl.operator
+operator-not accepted hcl.operator
+operator accepted hcl.operator
+parentheses accepted hcl.parentheses
+reference-at-start refused
+reference-bracket-lines-written accepted
+reference-bracket-lines accepted
+reference-digit-part refused
+reference-dot-end refused
+reference-keyword-first accepted hcl.index
+reference-keyword-parts accepted
+reference-line-before-dot refused
+reference-null-first accepted hcl.index hcl.null
+reference-number-part accepted hcl.index
+reference-reserved refused
+reference-spaces-written accepted
+reference-spaces accepted
+reference-unicode accepted
+reference accepted
+splat-attribute accepted hcl.splat
+splat accepted hcl.splat
+string-escapes-written accepted
+string-escapes accepted
+string-template-escapes accepted
+string accepted
+template-alone accepted hcl.template
+template-directive accepted hcl.conditional hcl.template
+template-heredoc-number accepted hcl.template
+template-heredoc accepted hcl.template
+template-number accepted hcl.template
+template accepted hcl.template
+two-attributes-one-line refused
+unclosed-block refused
+unclosed-string refused

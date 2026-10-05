@@ -7,12 +7,16 @@ publish.workspace = true
 
 [dependencies]
 block = { path = "../block" }
+buffer = { path = "../buffer" }
+codec = { path = "../codec" }
 control = { path = "../control" }
 delivery = { path = "../delivery" }
+env = { path = "../env" }
 types = { path = "../types" }
 
 [dev-dependencies]
 proptest = { workspace = true }
+sim = { path = "../sim" }
 
 [lints]
 workspace = true

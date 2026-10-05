@@ -2,12 +2,14 @@
 //! `committed` reported durable is what a reopen gives.
 //!
 //! Input: batches that the production path writes, then edits on the file bytes.
-//! Two edits seal a CRC: a header block (over its first 4092 bytes) and a record
-//! (over `len`, `kind`, and the body, continued from the chain the block before
-//! leaves: the header's chain field, a restart record's body, or a record's CRC).
-//! They restate the formats in `header.rs` and `record.rs` of `buffer`; when
-//! either moves, the edits stop reaching the walk and coverage drops without a
-//! failed replay.
+//! Two edits seal a CRC: a header block (at offset 42, over its first 512-byte
+//! sector less the CRC) and a record (over `len`, `kind`, and the body, continued
+//! from the chain the block before leaves: the header's chain field, a restart
+//! record's body, or a record's CRC).
+//! They restate the formats in `header.rs` and `record.rs` of `buffer`. When the
+//! header moves, the seal of the first block as written changes it and the target
+//! panics. When the record moves, the edits stop reaching the walk and coverage
+//! drops without a failed replay.
 
 #![no_main]
 
@@ -15,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Error, Layout, Tail};
+use buffer::{Buffer, Config, Entry, Error, Layout, Parts, Tail};
 use env::files::{File, Mode};
 use env::tasks::Tasks;
 use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
@@ -31,6 +33,10 @@ const BLOCKS: usize = 8;
 const AREA: u64 = (BLOCKS * BLOCK) as u64;
 /// A record is 9 bytes of header and a body, so this keeps a record in one block.
 const BODY_MAX: usize = BLOCK - 9;
+/// The place of a header block's CRC, right after its fields.
+const HEADER_CRC_AT: usize = 42;
+/// A header block's CRC covers its first sector.
+const SECTOR: usize = 512;
 /// The two header blocks come before the area.
 const FILE_LEN: usize = (2 + BLOCKS) * BLOCK;
 const DIR: &str = "shard-0";
@@ -113,8 +119,10 @@ fn apply(image: &mut [u8], edit: &Edit) {
         }
         Edit::SealHeader { second } => {
             let start = if *second { BLOCK } else { 0 };
-            let crc = crc32c::crc32c(&image[start..start + BLOCK - 4]);
-            image[start + BLOCK - 4..start + BLOCK].copy_from_slice(&crc.to_le_bytes());
+            let at = start + HEADER_CRC_AT;
+            let crc = crc32c::crc32c(&image[start..at]);
+            let crc = crc32c::crc32c_append(crc, &image[at + 4..start + SECTOR]);
+            image[at..at + 4].copy_from_slice(&crc.to_le_bytes());
         }
         Edit::SealRecord { block } => {
             let start = block * BLOCK;
@@ -191,19 +199,12 @@ async fn build(
         (0..INDEXES).map(|index| slots.assign(key(index))).collect();
     let mut next = vec![[0u64; 2]; INDEXES];
     for batch in &input.batches {
-        let parts: Vec<Block> = batch
+        let mut firsts = next.clone();
+        let entries: Vec<Entry> = batch
             .iter()
             .map(|append| {
                 let mut part = pool.alloc(append.part).expect("the pool has a block");
                 part.fill(0x5a);
-                part.freeze()
-            })
-            .collect();
-        let mut firsts = next.clone();
-        let entries: Vec<Entry<'_>> = batch
-            .iter()
-            .zip(&parts)
-            .map(|(append, part)| {
                 let path = usize::from(append.path == frame::Path::Backfill);
                 let first = firsts[append.index][path];
                 firsts[append.index][path] += u64::from(append.len);
@@ -216,11 +217,11 @@ async fn build(
                     stored_at: Stamp::from_nanos(7),
                     last: Some(Stamp::from_nanos(i64::try_from(first).expect("small"))),
                     tag: 0,
-                    parts: std::slice::from_ref(part),
+                    parts: Parts::from(part.freeze()),
                 }
             })
             .collect();
-        match buffer.append(&entries) {
+        match buffer.append(entries) {
             Ok(()) => next = firsts,
             Err(Error::Full { .. }) => break,
             Err(other) => panic!("append failed: {other}"),
@@ -249,6 +250,13 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
             .expect("the ring reads");
         image.extend_from_slice(&read);
     }
+    let sealed = image[..BLOCK].to_vec();
+    apply(&mut image, &Edit::SealHeader { second: false });
+    assert_eq!(
+        image[..BLOCK],
+        sealed,
+        "the header seal restates the format"
+    );
     for edit in edits {
         apply(&mut image, edit);
     }

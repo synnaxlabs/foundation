@@ -15,7 +15,8 @@ use env::thread::Handle;
 use types::time::{Monotonic, Span};
 
 use super::{millis, shard, sim};
-use crate::net::{addresses, under};
+use crate::drivers::yield_now;
+use crate::net::addresses;
 use crate::{Config, Error, Sim, link, node};
 
 /// Arrivals: the receiver's clock, the meta, and the bytes of each batch.
@@ -255,13 +256,6 @@ fn delivered(loss: f64, count: usize) -> usize {
         ..link::Config::default()
     };
     datagrams(&exchange(0, link, numbered(count)).1).len()
-}
-
-#[test]
-fn a_chance_of_zero_holds_no_draw_and_a_chance_of_one_holds_every_draw() {
-    assert!(!under(0, 0.0));
-    assert!(under(u32::MAX, 1.0));
-    assert!(under(u32::MAX / 2, 0.5) && !under(u32::MAX / 2 + 1, 0.5));
 }
 
 #[test]
@@ -819,28 +813,46 @@ fn panicked(thread: &str, message: &str) -> Error {
 
 #[test]
 fn a_socket_half_polled_on_a_second_thread_panics() {
-    let message = "a socket half polls only on the sim thread of its first poll";
+    let message = "a socket half polls only on thread \"first\" of its first poll";
     assert_eq!(stray(send_once), panicked("second", message));
     assert_eq!(stray(recv_once), panicked("second", message));
 }
 
-#[test]
-fn a_socket_polled_on_a_thread_of_another_node_panics() {
+/// Polls the halves of a socket of `a` with `poll` on a shard of `b`, and gives the
+/// error of the run.
+fn foreign(poll: fn(&mut Sender, &mut Receiver)) -> Error {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (mut sender, mut receiver) = udp(&a, 4433);
     let _b = b.shards().start(shard("b"), move |_| async move {
-        send_once(&mut sender, &mut receiver);
+        poll(&mut sender, &mut receiver);
     });
-    let message = "a socket of node 0 runs on a thread of node 1";
-    assert_eq!(sim.run().unwrap_err(), panicked("b", message));
+    sim.run().unwrap_err()
 }
 
 #[test]
-#[should_panic(expected = "a socket needs a thread that the sim started")]
-fn a_socket_polled_outside_the_sim_panics() {
+fn a_socket_polled_on_a_thread_of_another_node_panics() {
+    let message = "a socket half of node 0 runs on a thread of node 1";
+    assert_eq!(foreign(send_once), panicked("b", message));
+    assert_eq!(foreign(recv_once), panicked("b", message));
+}
+
+/// Polls the halves of a socket with `poll` on a thread that the sim did not start.
+fn outside(poll: fn(&mut Sender, &mut Receiver)) {
     let (_sim, a, _b) = pair(0, link::Config::default());
     let (mut sender, mut receiver) = udp(&a, 4433);
-    send_once(&mut sender, &mut receiver);
+    poll(&mut sender, &mut receiver);
+}
+
+#[test]
+#[should_panic(expected = "a socket half needs a thread that the sim started")]
+fn a_socket_sending_outside_the_sim_panics() {
+    outside(send_once);
+}
+
+#[test]
+#[should_panic(expected = "a socket half needs a thread that the sim started")]
+fn a_socket_receiving_outside_the_sim_panics() {
+    outside(recv_once);
 }
 
 /// TCP options with buffers of 1 MiB.
@@ -921,4 +933,57 @@ fn a_link_to_a_node_of_another_sim_panics() {
     let (mut sim, a, _b) = pair(0, link::Config::default());
     let (_other, stranger, _) = pair(0, link::Config::default());
     sim.link(&a, &stranger, link::Config::default());
+}
+
+/// The digest of a run in which a shard of `a` sends one datagram to `b` and yields
+/// once: before the send when `late`, after it otherwise.
+fn sent_in_poll(late: bool) -> u64 {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (mut sender, _a) = udp(&a, 4433);
+    let _b = udp(&b, 4433);
+    let to = at(&b, 4433);
+    let _send = a.shards().start(shard("send"), move |_| async move {
+        if late {
+            yield_now().await;
+        }
+        let transmit = transmit(to, b"x");
+        poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+        if !late {
+            yield_now().await;
+        }
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_digest_holds_the_poll_of_each_send() {
+    assert_ne!(sent_in_poll(false), sent_in_poll(true));
+}
+
+/// The digest of a run in which `a` sends one datagram to `b`, which arrives while a
+/// shard of `b` sleeps: before its second yield when `early`, after it otherwise.
+fn polled_around_arrival(early: bool) -> u64 {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (sender, _a) = udp(&a, 4433);
+    let _b = udp(&b, 4433);
+    let _send = send(&a, sender, at(&b, 4433), vec![b"x".to_vec()]);
+    let clock = b.clock();
+    let _wait = b.shards().start(shard("wait"), move |_| async move {
+        yield_now().await;
+        if early {
+            clock.sleep(Span::MILLISECOND).await;
+        }
+        yield_now().await;
+        if !early {
+            clock.sleep(Span::MILLISECOND).await;
+        }
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_digest_holds_the_polls_before_an_arrival() {
+    assert_ne!(polled_around_arrival(true), polled_around_arrival(false));
 }

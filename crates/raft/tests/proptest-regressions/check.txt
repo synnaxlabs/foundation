@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 43255e2979c1cb4f66d63ad8042e1685c6662be998a8811197009793c931704f # shrinks to run = ([Position { term: Term(0), index: 0 }, Position { term: Term(2), index: 1 }, Position { term: Term(0), index: 0 }], [Campaign { node: 0 }, Tick { node: 0, random: 0 }, Tick { node: 0, random: 0 }, Propose { node: 0 }, Deliver { picks: [Index(0), Index(9223372036854775808)] }, Cut { node: 0 }, Tick { node: 0, random: 0 }, Tick { node: 0, random: 0 }, Tick { node: 1, random: 0 }, Tick { node: 0, random: 0 }, Tick { node: 0, random: 0 }, Tick { node: 0, random: 0 }, Tick { node: 0, random: 0 }, Tick { node: 0, random: 0 }, Tick { node: 0, random: 0 }]), to = Index(6148914691236517206), from = Index(0), ahead = 0, rises = [1]
+cc 46aa822d9ceb1b112ff8bc3f72c0cdf295c5b6002cb46426a492c3a271a3e35b # shrinks to run = ([Position { term: Term(0), index: 0 }], [Campaign { node: 0 }, Crash { node: 0, kept: Hard }, ChangeVoters { node: 0, voters: [true] }]), to = Index(0), from = Index(0), ahead = 0, rises = [0]
+cc 8de847e8f7f38528b615ed2bac858574fd98cf838d14c57eb2d389a4f215deb9 # shrinks to run = ([Position { term: Term(0), index: 0 }], [Campaign { node: 0 }, Crash { node: 0, kept: Hard }, ChangeVoters { node: 0, voters: [true] }]), to = Index(0), from = Index(0), term = 0, body = PreVote { last: Position { term: Term(0), index: 0 } }
