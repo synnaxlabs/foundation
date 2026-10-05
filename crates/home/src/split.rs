@@ -1,13 +1,13 @@
 //! A writer's frame, checked against the count of each group and split into one index
 //! frame per present group (INDEX FRAMES).
 
+use std::fmt;
 use std::ops::Range;
 
+use types::channel;
 use types::frame::key_set::KeySet;
 use types::frame::{self, Draft, Form};
 use types::sample::{Scalar, Type};
-
-use crate::index::Refusal;
 
 /// The buffers of [`Split`], kept from one frame to the next, so that a split makes no
 /// heap allocation once they are large enough.
@@ -50,8 +50,8 @@ struct Part {
     series: Range<usize>,
     /// Its index stamps in [`Scratch::stamps`].
     stamps: Range<usize>,
-    /// The refusal of its first series that does not fit `count`.
-    check: Result<(), Refusal>,
+    /// The error of its first series that does not fit `count`.
+    check: Result<(), Error>,
     made: bool,
 }
 
@@ -158,7 +158,7 @@ impl Scratch {
                 }
                 Err(error) => {
                     let channel = set.entries()[entry].key;
-                    part.check = Err(Refusal::Codec { channel, error });
+                    part.check = Err(Error { channel, error });
                 }
             }
         }
@@ -192,10 +192,10 @@ pub(crate) struct Split<'a> {
 
 impl Split<'_> {
     /// Each present group, in group order, with the stamps of its index series, or
-    /// [`Refusal::Codec`] for its first series that does not fit the group's count.
+    /// the [`Error`] of its first series that does not fit the group's count.
     pub(crate) fn groups(
         &self,
-    ) -> impl Iterator<Item = (u32, Result<&[[u8; 8]], Refusal>)> {
+    ) -> impl Iterator<Item = (u32, Result<&[[u8; 8]], Error>)> {
         self.scratch.parts.iter().map(|part| {
             let stamps = part.check.clone();
             (
@@ -316,6 +316,24 @@ fn decode(
     }
     decoded.map(|()| encoded.len())
 }
+
+/// A series of `channel` that `codec` refuses at its group's count: a raw series of
+/// the wrong length, or an encoded series whose headers are not valid at that count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Error {
+    /// The series' channel.
+    pub(crate) channel: channel::Key,
+    /// Why `codec` refused it.
+    pub(crate) error: codec::Error,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "channel {}: {}", self.channel, self.error)
+    }
+}
+
+impl std::error::Error for Error {}
 
 fn to_usize(n: u32) -> usize {
     usize::try_from(n).expect("invariant: a usize holds a u32")
@@ -544,7 +562,7 @@ mod tests {
             assert_eq!(groups, [1]);
         }
 
-        mod when_a_series_does_not_fit_its_count {
+        mod when_codec_refuses_a_series {
             use super::*;
 
             #[test]
@@ -582,11 +600,11 @@ mod tests {
                     let groups: Vec<_> = split.groups().collect();
                     assert_eq!(expected.to_string(), message);
                     let channel = key(Slot::new(2));
-                    let refusal = Refusal::Codec {
+                    let error = Error {
                         channel,
                         error: expected,
                     };
-                    assert_eq!(groups[0], (0, Err(refusal)), "{form:?}");
+                    assert_eq!(groups[0], (0, Err(error)), "{form:?}");
                     let stamps = stamps(&write[&1].series[&2]);
                     assert_eq!(groups[1], (1, Ok(&stamps[..])), "{form:?}");
                 }
@@ -614,13 +632,40 @@ mod tests {
                     "vector 0 needs 32 bytes, but 24 are left"
                 );
                 let channel = key(Slot::new(3));
-                let refusal = Refusal::Codec {
+                let error = Error {
                     channel,
                     error: expected,
                 };
-                assert_eq!(groups[1], (1, Err(refusal)));
+                assert_eq!(groups[1], (1, Err(error)));
                 let stamps = stamps(&write[&0].series[&0]);
                 assert_eq!(groups[0], (0, Ok(&stamps[..])));
+            }
+
+            #[test]
+            fn refuses_an_encoded_series_with_a_header_codec_does_not_take() {
+                let set = two_groups();
+                let pool = pool(1 << 16);
+                let mut draft = draft(&pool, &set, Form::Encoded, &both());
+                for (entry, series) in draft.iter_mut() {
+                    if entry == 1 {
+                        series[0] = 9;
+                    }
+                }
+                let mut scratch = Scratch::default();
+
+                let split = scratch.split(&set, draft);
+
+                let groups: Vec<_> = split.groups().collect();
+                let expected = codec::Error::Tag { vector: 0, tag: 9 };
+                assert_eq!(
+                    expected.to_string(),
+                    "vector 0 has tag 9, which this sample type does not use"
+                );
+                let error = Error {
+                    channel: key(Slot::new(2)),
+                    error: expected,
+                };
+                assert_eq!(groups[0], (0, Err(error)));
             }
 
             #[test]
@@ -648,11 +693,11 @@ mod tests {
                     actual: 16,
                 };
                 let channel = key(Slot::new(3));
-                let refusal = Refusal::Codec {
+                let error = Error {
                     channel,
                     error: expected,
                 };
-                assert_eq!(groups, [(1, Err(refusal))]);
+                assert_eq!(groups, [(1, Err(error))]);
             }
         }
     }

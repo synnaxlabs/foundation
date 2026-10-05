@@ -199,7 +199,7 @@ mod tests {
     use std::iter;
     use std::sync::Arc;
 
-    use proptest::collection::vec;
+    use proptest::collection::{btree_set, vec};
     use proptest::prelude::*;
 
     use types::channel::Slot;
@@ -268,9 +268,16 @@ mod tests {
 
         #[test]
         fn lays_out_the_header_then_the_series() {
-            let data = [(key(Slot::new(2)), Type::Scalar(Scalar::U8))];
-            let set = interner().intern(&[Group {
-                index: key(Slot::new(1)),
+            let index = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+            let channel = [
+                16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+            ];
+            let data = [(
+                channel::Key::from_u128(u128::from_le_bytes(channel)),
+                Type::Scalar(Scalar::U8),
+            )];
+            let set = Interner::new().intern(&[Group {
+                index: channel::Key::from_u128(u128::from_le_bytes(index)),
                 data: &data,
             }]);
             let pool = pool(4096);
@@ -279,10 +286,10 @@ mod tests {
             let parts = body(&pool, &frame, &set).expect("room");
             let header = [
                 &[2, 0, 0, 0][..],
-                &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                &index,
                 &[0, 11, 0, 0, 0, 0],
                 &[16, 0, 0, 0],
-                &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+                &channel,
                 &[0, 5, 0, 0, 0, 0],
                 &[19, 0, 0, 0],
             ]
@@ -521,22 +528,31 @@ mod tests {
             bytes: Vec<u8>,
         }
 
-        /// The data types of each group, the present group, then each entry of
-        /// their key set.
-        fn write() -> impl Strategy<Value = (Vec<Vec<Type>>, usize, Vec<Entry>)> {
+        /// A write: the data types of each group, the distinct keys of its index and
+        /// then its data channels, the present group, then each entry of their key
+        /// set.
+        fn write() -> impl Strategy<Value = Write> {
             vec(vec(data_type(), 0..4), 1..4).prop_flat_map(|groups| {
                 let entries: usize = groups.iter().map(|data| data.len() + 1).sum();
+                let keys = btree_set(any::<u128>(), entries)
+                    .prop_map(|bits| {
+                        bits.into_iter().map(channel::Key::from_u128).collect()
+                    })
+                    .prop_shuffle();
                 let entry = (any::<bool>(), vec(any::<u8>(), 0..24))
                     .prop_map(|(present, bytes)| Entry { present, bytes });
-                (0..groups.len(), vec(entry, entries), Just(groups))
-                    .prop_map(|(group, entries, groups)| (groups, group, entries))
+                let group = 0..groups.len();
+                (Just(groups), keys, group, vec(entry, entries))
             })
         }
 
-        /// A key set of `groups`, each the data types on one index.
-        fn key_set(groups: &[Vec<Type>]) -> Arc<KeySet> {
-            let mut keys = (1..).map(channel::Key::from_u128);
-            let mut next = || keys.next().expect("keys never end");
+        type Write = (Vec<Vec<Type>>, Vec<channel::Key>, usize, Vec<Entry>);
+
+        /// A key set of `groups`, each the data types on one index, with `keys` in
+        /// order.
+        fn key_set(groups: &[Vec<Type>], keys: &[channel::Key]) -> Arc<KeySet> {
+            let mut keys = keys.iter().copied();
+            let mut next = || keys.next().expect("a key for each channel");
             let data: Vec<(channel::Key, Vec<(channel::Key, Type)>)> = groups
                 .iter()
                 .map(|types| (next(), types.iter().map(|&t| (next(), t)).collect()))
@@ -553,8 +569,8 @@ mod tests {
 
         proptest! {
             #[test]
-            fn reads_back_each_present_series((groups, group, entries) in write()) {
-                let set = key_set(&groups);
+            fn reads_back_each_present_series((groups, keys, group, entries) in write()) {
+                let set = key_set(&groups, &keys);
                 let series: Vec<(usize, &[u8])> = (0..entries.len())
                     .filter(|&e| to_usize(set.entries()[e].group) == group)
                     .filter(|&e| entries[e].present && entries[set.index(e)].present)
