@@ -268,8 +268,14 @@ How to read this record:
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
 - **B7** A frame applies whole or not at all, per index. Live writes are never retried.
-  Backfill frames carry numbers, and the home drops repeats. A writer may resend
-  unconfirmed live data as backfill.
+  A writer may resend unconfirmed live data as backfill. The home finds a repeat by
+  timestamp: it checks a backfill frame that starts at or before the last backfill
+  stamp against the index on both paths. When every sample exists with the same
+  values, the frame is a repeat, and the home drops and confirms it. When no sample
+  exists, the frame is out of order. Some samples stored and some not, a stored
+  timestamp with other values, or a range below the buffer's floor is an error. Writers
+  assign no numbers: a resend comes in a new session, and the writer never learned
+  them. The person decided on 2026-10-05 ("By timestamp + same values"), #148.
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -455,6 +461,24 @@ How to read this record:
   read over a stated latency gives a low edge above the truth, and the overlap keeps it.
   Decided by the `time` builder; the person accepted it on 2026-10-05 ('#1 is fine').
   Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper bounds).
+- **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
+  a reader gets no mesh time. After it, when `combine` fails (no majority, a bound too
+  wide, or no sources after a remove), the clock holds over: it keeps its last estimate
+  and its error grows by drift. It never follows the largest group or one side of a tie.
+  `push` returns the holdover and its cause, and `node` publishes it. The next majority
+  ends the holdover. Decided by the `time` builder (#142).
+- **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
+  OS error bound with each reading where the OS has one (`adjtimex` on Linux,
+  `ntp_adjtime` on macOS). Where it has none (Windows), the reading has the largest
+  error, 36500 days: a node alone still gets OS time, with an error that says
+  "unknown", and in a mesh the reading adds a vote but does not move the estimate. A
+  fixed invented error lost: a wrong value gives a bound that is not true. Amends ENV
+  SEAMS. The person decided on 2026-10-05 ("Use it, error 'unknown'"), #144.
+- **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
+  Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
+  drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
+  suspend lost: mesh time would fall behind by the time asleep, outside its bound.
+  Amends ENV SEAMS. The person decided on 2026-10-05 ("Count time asleep"), #144.
 
 ### 1.7 Transport
 
@@ -1670,7 +1694,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags |
-| 4 | `config-hcl` | Reads and writes HCL files as Documents and keeps formatting. | `document` |
+| 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
 | 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
