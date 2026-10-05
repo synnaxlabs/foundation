@@ -138,6 +138,8 @@ impl Reader {
                     if *have == size {
                         let value =
                             u64::from_be_bytes(*bytes).wrapping_shr(shift) & mask;
+                        // On a 32-bit target this saturates, and is still over
+                        // `bytes_max`.
                         self.state =
                             State::Sized(usize::try_from(value).unwrap_or(usize::MAX));
                     }
