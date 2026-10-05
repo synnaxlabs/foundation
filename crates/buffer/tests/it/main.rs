@@ -1052,3 +1052,35 @@ fn a_drop_during_a_commit_ends_the_task_after_the_sync() {
         );
     });
 }
+
+#[test]
+fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
+    run(101, Memory::default(), |mut shard| async move {
+        let parts_pool = Rc::clone(&shard.pool);
+        let config = block::Config { budget: 1 << 17 };
+        shard.pool =
+            Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+        assert_eq!(shard.pool.largest(), 1 << 16);
+        let ring = layout(64 * BLOCK, 100_000);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let mut part = parts_pool.alloc(30_000).expect("the pool has a block");
+        part.fill(7);
+        let parts = [part.freeze()];
+        buffer
+            .append(&[
+                entry(1, a, Path::Live, 0, 1, Some(1), &parts),
+                entry(1, a, Path::Live, 1, 1, Some(2), &parts),
+                entry(1, a, Path::Live, 2, 1, Some(3), &parts),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(3)));
+        drop(buffer);
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(3, Some(3))));
+    });
+}
