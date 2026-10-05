@@ -1,0 +1,68 @@
+[package]
+name = "fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Outside the root workspace: the targets need the pinned nightly.
+[workspace]
+
+[dependencies]
+codec = { path = "../crates/codec" }
+config-hcl = { path = "../crates/config-hcl" }
+document = { path = "../crates/document" }
+libfuzzer-sys = "0.4.13"
+types = { path = "../crates/types" }
+wire = { path = "../crates/wire" }
+
+[[bin]]
+name = "codec_series"
+path = "fuzz_targets/codec_series.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_hcl_read"
+path = "fuzz_targets/config_hcl_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document_encoding"
+path = "fuzz_targets/document_encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "types_channel"
+path = "fuzz_targets/types_channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "types_name"
+path = "fuzz_targets/types_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "types_time"
+path = "fuzz_targets/types_time.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_header"
+path = "fuzz_targets/wire_header.rs"
+test = false
+doc = false
+bench = false
