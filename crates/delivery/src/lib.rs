@@ -41,11 +41,11 @@ pub enum Reader {
     Unnamed,
     /// A reader with a name. It has at most one session at a time. After the session
     /// closes, the reader keeps its position and holds its data for `hold`. A hold of
-    /// zero or less ends at the close.
+    /// zero ends at the close.
     Named {
         /// The reader's name.
         name: Name,
-        /// How long the reader holds its data after its session closes.
+        /// How long the reader holds its data after its session closes: zero or more.
         hold: Span,
     },
 }

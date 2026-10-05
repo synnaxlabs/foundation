@@ -1,5 +1,6 @@
 //! The complete readers of one index at its home.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use types::name::Name;
@@ -68,27 +69,45 @@ impl Readers {
 
     /// The readers that `records` describe, in log order. A session that was open at
     /// the crash counts as closed at `now`.
+    ///
+    /// # Panics
+    ///
+    /// If a record's hold is negative.
     pub fn restore(records: impl IntoIterator<Item = Record>, now: Stamp) -> Self {
-        let mut readers = Self::new();
+        let mut last = BTreeMap::new();
         for record in records {
-            readers.closed.retain(|closed| closed.name != record.reader);
-            readers.closed.push(Closed {
-                name: record.reader,
-                hold: record.hold,
-                position: record.position,
-                at: record.closed.unwrap_or(now),
-            });
+            check(record.hold);
+            last.insert(record.reader, (record.position, record.hold, record.closed));
         }
+        let closed = last
+            .into_iter()
+            .map(|(name, (position, hold, closed))| Closed {
+                name,
+                hold,
+                position,
+                at: closed.unwrap_or(now),
+            })
+            .collect();
+        let mut readers = Self {
+            closed,
+            ..Self::default()
+        };
         readers.advance(now);
         readers
     }
 
-    /// Starts a session at `now`. A named reader with an open session is taken over.
-    pub fn open(&mut self, reader: Reader, start: Start, now: Stamp) -> Opened {
-        self.advance(now);
+    /// Starts a session. A named reader with an open session is taken over.
+    ///
+    /// # Panics
+    ///
+    /// If the reader's hold is negative.
+    pub fn open(&mut self, reader: Reader, start: Start) -> Opened {
         let (stored, replaced) = match &reader {
             Reader::Unnamed => (None, None),
-            Reader::Named { name, .. } => self.take(name),
+            Reader::Named { name, hold } => {
+                check(*hold);
+                self.take(name)
+            }
         };
         let position = match start {
             Start::At(position) => position,
@@ -174,7 +193,7 @@ impl Readers {
     }
 
     /// The lowest position that any reader holds, path by path, or `None` when no
-    /// reader holds. `buffer` may trim below it.
+    /// reader holds. `buffer` may trim below it. Takes time linear in the readers.
     #[must_use]
     pub fn floor(&self) -> Option<Position> {
         let open = self.sessions.iter().map(|session| session.position);
@@ -199,7 +218,7 @@ impl Readers {
     }
 
     /// Takes the queued records, oldest first.
-    pub fn records(&mut self) -> std::vec::Drain<'_, Record> {
+    pub fn records(&mut self) -> impl Iterator<Item = Record> {
         self.records.drain(..)
     }
 
@@ -247,7 +266,7 @@ impl Closed {
     /// A hold that would end past the last stamp ends at it.
     fn end(&self) -> Stamp {
         self.at
-            .checked_add(self.hold.max(Span::ZERO))
+            .checked_add(self.hold)
             .unwrap_or(Stamp::from_nanos(i64::MAX))
     }
 
@@ -259,6 +278,11 @@ impl Closed {
             closed: Some(self.at),
         }
     }
+}
+
+/// `config` rejects a negative hold at plan, so one here is a broken invariant.
+fn check(hold: Span) {
+    assert!(hold >= Span::ZERO, "reader hold is negative: {hold}");
 }
 
 /// On each path: `presented`, else `stored`, else `otherwise`. The reader follows
@@ -333,9 +357,7 @@ mod tests {
 
     /// Opens `name` at `position`, closes it at `closed`, and drops the records.
     fn left(readers: &mut Readers, name: &str, position: Position, closed: i64) {
-        let key = readers
-            .open(named(name, 10), Start::At(position), at(0))
-            .key;
+        let key = readers.open(named(name, 10), Start::At(position)).key;
         readers.close(key, at(closed));
         drained(readers);
     }
@@ -346,7 +368,7 @@ mod tests {
         #[test]
         fn starts_at_the_given_position() {
             let mut readers = Readers::new();
-            let opened = readers.open(Reader::Unnamed, Start::At(live(5)), at(0));
+            let opened = readers.open(Reader::Unnamed, Start::At(live(5)));
             assert_eq!(opened.position, live(5));
             assert_eq!(opened.replaced, None);
         }
@@ -354,9 +376,9 @@ mod tests {
         #[test]
         fn gives_each_session_its_own_key() {
             let mut readers = Readers::new();
-            let first = readers.open(Reader::Unnamed, Start::At(live(0)), at(0)).key;
+            let first = readers.open(Reader::Unnamed, Start::At(live(0))).key;
             readers.close(first, at(0));
-            let second = readers.open(Reader::Unnamed, Start::At(live(0)), at(0)).key;
+            let second = readers.open(Reader::Unnamed, Start::At(live(0))).key;
             assert_ne!(first, second);
         }
 
@@ -368,14 +390,14 @@ mod tests {
                 presented: Some(live(9)),
                 otherwise: live(0),
             };
-            assert_eq!(readers.open(named("a", 10), start, at(2)).position, live(9));
+            assert_eq!(readers.open(named("a", 10), start).position, live(9));
         }
 
         #[test]
         fn resume_falls_back_to_the_position_at_this_home() {
             let mut readers = Readers::new();
             left(&mut readers, "a", live(7), 1);
-            let opened = readers.open(named("a", 10), resume(live(0)), at(2));
+            let opened = readers.open(named("a", 10), resume(live(0)));
             assert_eq!(opened.position, live(7));
         }
 
@@ -383,7 +405,7 @@ mod tests {
         fn resume_falls_back_to_otherwise() {
             let mut readers = Readers::new();
             left(&mut readers, "a", live(7), 1);
-            let opened = readers.open(named("b", 10), resume(both(2, 1)), at(2));
+            let opened = readers.open(named("b", 10), resume(both(2, 1)));
             assert_eq!(opened.position, both(2, 1));
         }
 
@@ -391,15 +413,37 @@ mod tests {
         fn resume_falls_back_per_path() {
             let mut readers = Readers::new();
             left(&mut readers, "a", live(7), 1);
-            let opened = readers.open(named("a", 10), resume(both(0, 2)), at(2));
+            let opened = readers.open(named("a", 10), resume(both(0, 2)));
             assert_eq!(opened.position, both(7, 2));
+        }
+
+        #[test]
+        fn resume_prefers_presented_backfill_to_the_position_at_this_home() {
+            let mut readers = Readers::new();
+            left(&mut readers, "a", both(7, 3), 1);
+            let start = Start::Resume {
+                presented: Some(both(9, 5)),
+                otherwise: both(0, 0),
+            };
+            assert_eq!(readers.open(named("a", 10), start).position, both(9, 5));
+        }
+
+        #[test]
+        fn resume_takes_backfill_from_this_home_when_the_presented_has_none() {
+            let mut readers = Readers::new();
+            left(&mut readers, "a", both(7, 3), 1);
+            let start = Start::Resume {
+                presented: Some(live(9)),
+                otherwise: both(0, 0),
+            };
+            assert_eq!(readers.open(named("a", 10), start).position, both(9, 3));
         }
 
         #[test]
         fn resume_follows_backfill_only_when_otherwise_does() {
             let mut readers = Readers::new();
             left(&mut readers, "a", both(7, 3), 1);
-            let opened = readers.open(named("a", 10), resume(live(0)), at(2));
+            let opened = readers.open(named("a", 10), resume(live(0)));
             assert_eq!(opened.position, live(7));
         }
 
@@ -407,7 +451,7 @@ mod tests {
         fn at_ignores_the_position_at_this_home() {
             let mut readers = Readers::new();
             left(&mut readers, "a", live(7), 1);
-            let opened = readers.open(named("a", 10), Start::At(live(2)), at(2));
+            let opened = readers.open(named("a", 10), Start::At(live(2)));
             assert_eq!(opened.position, live(2));
         }
     }
@@ -418,9 +462,9 @@ mod tests {
         #[test]
         fn continues_from_the_old_session() {
             let mut readers = Readers::new();
-            let old = readers.open(named("a", 10), resume(live(0)), at(0)).key;
+            let old = readers.open(named("a", 10), resume(live(0))).key;
             readers.ack(old, live(5)).expect("forward");
-            let opened = readers.open(named("a", 10), resume(live(0)), at(1));
+            let opened = readers.open(named("a", 10), resume(live(0)));
             assert_eq!(opened.position, live(5));
             assert_eq!(opened.replaced, Some(old));
         }
@@ -428,29 +472,29 @@ mod tests {
         #[test]
         fn takes_the_presented_position() {
             let mut readers = Readers::new();
-            let old = readers.open(named("a", 10), resume(live(0)), at(0)).key;
+            let old = readers.open(named("a", 10), resume(live(0))).key;
             readers.ack(old, live(5)).expect("forward");
             let start = Start::Resume {
                 presented: Some(live(8)),
                 otherwise: live(0),
             };
-            assert_eq!(readers.open(named("a", 10), start, at(1)).position, live(8));
+            assert_eq!(readers.open(named("a", 10), start).position, live(8));
         }
 
         #[test]
         #[should_panic(expected = "session 0 is not open")]
         fn closes_the_old_session() {
             let mut readers = Readers::new();
-            let old = readers.open(named("a", 10), resume(live(0)), at(0)).key;
-            readers.open(named("a", 10), resume(live(0)), at(1));
+            let old = readers.open(named("a", 10), resume(live(0))).key;
+            readers.open(named("a", 10), resume(live(0)));
             readers.ack(old, live(1)).expect("panics before");
         }
 
         #[test]
         fn never_happens_to_unnamed_readers() {
             let mut readers = Readers::new();
-            readers.open(Reader::Unnamed, Start::At(live(0)), at(0));
-            let opened = readers.open(Reader::Unnamed, Start::At(live(0)), at(0));
+            readers.open(Reader::Unnamed, Start::At(live(0)));
+            let opened = readers.open(Reader::Unnamed, Start::At(live(0)));
             assert_eq!(opened.replaced, None);
         }
     }
@@ -460,7 +504,7 @@ mod tests {
 
         fn opened(position: Position) -> (Readers, Key) {
             let mut readers = Readers::new();
-            let key = readers.open(named("a", 10), Start::At(position), at(0)).key;
+            let key = readers.open(named("a", 10), Start::At(position)).key;
             drained(&mut readers);
             (readers, key)
         }
@@ -539,7 +583,7 @@ mod tests {
         #[test]
         fn lasts_while_the_session_is_open() {
             let mut readers = Readers::new();
-            readers.open(Reader::Unnamed, Start::At(live(3)), at(0));
+            readers.open(Reader::Unnamed, Start::At(live(3)));
             readers.advance(at(i64::MAX));
             assert_eq!(readers.floor(), Some(live(3)));
             assert_eq!(readers.deadline(), None);
@@ -548,7 +592,7 @@ mod tests {
         #[test]
         fn of_an_unnamed_reader_ends_at_the_close() {
             let mut readers = Readers::new();
-            let key = readers.open(Reader::Unnamed, Start::At(live(3)), at(0)).key;
+            let key = readers.open(Reader::Unnamed, Start::At(live(3))).key;
             readers.close(key, at(1));
             assert_eq!(readers.floor(), None);
         }
@@ -556,7 +600,7 @@ mod tests {
         #[test]
         fn of_a_named_reader_ends_after_the_close() {
             let mut readers = Readers::new();
-            let key = readers.open(named("a", 10), Start::At(live(0)), at(0)).key;
+            let key = readers.open(named("a", 10), Start::At(live(0))).key;
             readers.ack(key, live(4)).expect("forward");
             readers.close(key, at(5));
             assert_eq!(readers.deadline(), Some(at(15)));
@@ -570,24 +614,29 @@ mod tests {
         #[test]
         fn of_zero_ends_at_the_close() {
             let mut readers = Readers::new();
-            let key = readers.open(named("a", 0), Start::At(live(0)), at(0)).key;
+            let key = readers.open(named("a", 0), Start::At(live(0))).key;
             readers.close(key, at(5));
             assert_eq!(readers.floor(), None);
         }
 
         #[test]
-        fn below_zero_ends_at_the_close() {
+        #[should_panic(expected = "reader hold is negative: -3ns")]
+        fn panics_when_negative() {
+            Readers::new().open(named("a", -3), Start::At(live(0)));
+        }
+
+        #[test]
+        fn ends_first_for_the_reader_that_closed_first() {
             let mut readers = Readers::new();
-            let key = readers.open(named("a", -3), Start::At(live(0)), at(0)).key;
-            readers.close(key, at(5));
-            assert_eq!(readers.floor(), None);
-            assert_eq!(readers.deadline(), None);
+            left(&mut readers, "a", live(1), 15);
+            left(&mut readers, "b", live(1), 5);
+            assert_eq!(readers.deadline(), Some(at(15)));
         }
 
         #[test]
         fn ends_at_the_last_stamp() {
             let mut readers = Readers::new();
-            let key = readers.open(named("a", 10), Start::At(live(0)), at(0)).key;
+            let key = readers.open(named("a", 10), Start::At(live(0))).key;
             readers.close(key, at(i64::MAX - 1));
             assert_eq!(readers.deadline(), Some(at(i64::MAX)));
         }
@@ -596,7 +645,7 @@ mod tests {
         fn is_cancelled_by_a_reopen() {
             let mut readers = Readers::new();
             left(&mut readers, "a", live(4), 5);
-            let opened = readers.open(named("a", 10), resume(live(0)), at(12));
+            let opened = readers.open(named("a", 10), resume(live(0)));
             assert_eq!(opened.position, live(4));
             assert_eq!(readers.deadline(), None);
         }
@@ -605,7 +654,8 @@ mod tests {
         fn that_ended_leaves_no_position_to_resume() {
             let mut readers = Readers::new();
             left(&mut readers, "a", live(4), 5);
-            let opened = readers.open(named("a", 10), resume(live(9)), at(15));
+            readers.advance(at(15));
+            let opened = readers.open(named("a", 10), resume(live(9)));
             assert_eq!(opened.position, live(9));
         }
     }
@@ -616,17 +666,17 @@ mod tests {
         #[test]
         fn is_the_lowest_position_on_each_path() {
             let mut readers = Readers::new();
-            readers.open(Reader::Unnamed, Start::At(both(5, 9)), at(0));
-            readers.open(Reader::Unnamed, Start::At(both(7, 2)), at(0));
-            readers.open(Reader::Unnamed, Start::At(live(3)), at(0));
+            readers.open(Reader::Unnamed, Start::At(both(5, 9)));
+            readers.open(Reader::Unnamed, Start::At(both(7, 2)));
+            readers.open(Reader::Unnamed, Start::At(live(3)));
             assert_eq!(readers.floor(), Some(both(3, 2)));
         }
 
         #[test]
         fn has_no_backfill_when_no_reader_records() {
             let mut readers = Readers::new();
-            readers.open(Reader::Unnamed, Start::At(live(5)), at(0));
-            readers.open(Reader::Unnamed, Start::At(live(7)), at(0));
+            readers.open(Reader::Unnamed, Start::At(live(5)));
+            readers.open(Reader::Unnamed, Start::At(live(7)));
             assert_eq!(readers.floor(), Some(live(5)));
         }
 
@@ -638,8 +688,8 @@ mod tests {
         #[test]
         fn goes_down_when_a_session_opens_below_it() {
             let mut readers = Readers::new();
-            readers.open(Reader::Unnamed, Start::At(live(5)), at(0));
-            readers.open(Reader::Unnamed, Start::At(live(2)), at(0));
+            readers.open(Reader::Unnamed, Start::At(live(5)));
+            readers.open(Reader::Unnamed, Start::At(live(2)));
             assert_eq!(readers.floor(), Some(live(2)));
         }
     }
@@ -650,14 +700,14 @@ mod tests {
         #[test]
         fn are_written_at_once_when_a_named_reader_opens() {
             let mut readers = Readers::new();
-            readers.open(named("a", 10), Start::At(live(3)), at(0));
+            readers.open(named("a", 10), Start::At(live(3)));
             assert_eq!(drained(&mut readers), [record("a", live(3), 10, None)]);
         }
 
         #[test]
         fn are_written_at_once_when_a_named_reader_closes() {
             let mut readers = Readers::new();
-            let key = readers.open(named("a", 10), Start::At(live(3)), at(0)).key;
+            let key = readers.open(named("a", 10), Start::At(live(3))).key;
             readers.ack(key, live(5)).expect("forward");
             readers.close(key, at(7));
             assert_eq!(
@@ -670,20 +720,29 @@ mod tests {
         }
 
         #[test]
+        fn are_written_at_once_when_a_reader_closes_where_it_opened() {
+            let mut readers = Readers::new();
+            let key = readers.open(named("a", 10), Start::At(live(3))).key;
+            drained(&mut readers);
+            readers.close(key, at(7));
+            assert_eq!(drained(&mut readers), [record("a", live(3), 10, Some(7))]);
+        }
+
+        #[test]
         fn are_written_at_once_on_a_takeover() {
             let mut readers = Readers::new();
-            let old = readers.open(named("a", 10), Start::At(live(3)), at(0)).key;
+            let old = readers.open(named("a", 10), Start::At(live(3))).key;
             readers.ack(old, live(5)).expect("forward");
             drained(&mut readers);
-            readers.open(named("a", 20), resume(live(0)), at(1));
+            readers.open(named("a", 20), resume(live(0)));
             assert_eq!(drained(&mut readers), [record("a", live(5), 20, None)]);
         }
 
         #[test]
         fn are_written_on_flush_only_for_changed_positions() {
             let mut readers = Readers::new();
-            let a = readers.open(named("a", 10), Start::At(live(0)), at(0)).key;
-            readers.open(named("b", 10), Start::At(live(0)), at(0));
+            let a = readers.open(named("a", 10), Start::At(live(0))).key;
+            readers.open(named("b", 10), Start::At(live(0)));
             drained(&mut readers);
             readers.ack(a, live(2)).expect("forward");
             readers.flush();
@@ -695,7 +754,7 @@ mod tests {
         #[test]
         fn are_never_written_for_unnamed_readers() {
             let mut readers = Readers::new();
-            let key = readers.open(Reader::Unnamed, Start::At(live(0)), at(0)).key;
+            let key = readers.open(Reader::Unnamed, Start::At(live(0))).key;
             readers.ack(key, live(2)).expect("forward");
             readers.flush();
             readers.close(key, at(1));
@@ -714,7 +773,7 @@ mod tests {
             ];
             let mut readers = Readers::restore(records, at(0));
             assert_eq!(readers.floor(), Some(live(5)));
-            let opened = readers.open(named("a", 10), resume(live(0)), at(1));
+            let opened = readers.open(named("a", 10), resume(live(0)));
             assert_eq!(opened.position, live(5));
         }
 
@@ -732,10 +791,21 @@ mod tests {
         }
 
         #[test]
-        fn ends_a_negative_hold_at_a_close_after_the_restore() {
-            let records = [record("a", live(3), -5, Some(100))];
-            let readers = Readers::restore(records, at(0));
-            assert_eq!(readers.deadline(), Some(at(100)));
+        #[should_panic(expected = "reader hold is negative: -5ns")]
+        fn panics_on_a_negative_hold() {
+            Readers::restore([record("a", live(3), -5, Some(1))], at(0));
+        }
+
+        #[test]
+        fn keeps_the_last_record_of_each_reader() {
+            let records = [
+                record("b", live(1), 10, Some(15)),
+                record("a", live(3), 10, None),
+                record("b", live(4), 10, None),
+            ];
+            let readers = Readers::restore(records, at(20));
+            assert_eq!(readers.floor(), Some(live(3)));
+            assert_eq!(readers.deadline(), Some(at(30)));
         }
 
         #[test]
@@ -752,8 +822,6 @@ mod tests {
     }
 
     mod properties {
-        use std::collections::BTreeMap;
-
         use proptest::prelude::*;
 
         use super::*;
@@ -790,8 +858,7 @@ mod tests {
 
         impl Model {
             fn forget(&mut self, now: i64) {
-                self.closed
-                    .retain(|_, (_, hold, at)| *at + (*hold).max(0) > now);
+                self.closed.retain(|_, (_, hold, at)| *at + *hold > now);
             }
 
             fn open(
@@ -800,9 +867,7 @@ mod tests {
                 name: Option<usize>,
                 hold: i64,
                 start: Start,
-                now: i64,
             ) -> (Position, Option<Key>) {
-                self.forget(now);
                 let session = self
                     .open
                     .iter()
@@ -841,12 +906,10 @@ mod tests {
 
             fn ack(&mut self, key: Key, to: Position) -> Result<(), Error> {
                 let (_, from, _) = self.open.get_mut(&key).expect("open in the model");
+                // `None` sorts below every `Some`, so equal shapes compare by value.
                 let forward = to.live >= from.live
-                    && match (from.backfill, to.backfill) {
-                        (Some(a), Some(b)) => b >= a,
-                        (None, None) => true,
-                        (Some(_), None) | (None, Some(_)) => false,
-                    };
+                    && to.backfill.is_some() == from.backfill.is_some()
+                    && to.backfill >= from.backfill;
                 if !forward {
                     return Err(Error::Ack { from: *from, to });
                 }
@@ -864,21 +927,16 @@ mod tests {
 
             fn floor(&self) -> Option<Position> {
                 let open = self.open.values().map(|(_, p, _)| *p);
-                let positions = open.chain(self.closed.values().map(|(p, ..)| *p));
-                positions.reduce(|a, b| Position {
-                    live: a.live.min(b.live),
-                    backfill: match (a.backfill, b.backfill) {
-                        (Some(x), Some(y)) => Some(x.min(y)),
-                        (x, y) => x.or(y),
-                    },
+                let held: Vec<Position> =
+                    open.chain(self.closed.values().map(|(p, ..)| *p)).collect();
+                Some(Position {
+                    live: held.iter().map(|p| p.live).min()?,
+                    backfill: held.iter().filter_map(|p| p.backfill).min(),
                 })
             }
 
             fn deadline(&self) -> Option<Stamp> {
-                let ends = self
-                    .closed
-                    .values()
-                    .map(|(_, hold, at)| *at + (*hold).max(0));
+                let ends = self.closed.values().map(|(_, hold, at)| *at + *hold);
                 ends.min().map(at)
             }
         }
@@ -893,7 +951,7 @@ mod tests {
             prop_oneof![
                 (
                     proptest::option::of(0..NAMES.len()),
-                    -5..30_i64,
+                    0..30_i64,
                     position(),
                     any::<bool>(),
                     presented
@@ -978,8 +1036,8 @@ mod tests {
                     } else {
                         Start::At(start)
                     };
-                    let opened = readers.open(reader, start, at(now));
-                    let expected = model.open(opened.key, name, hold, start, now);
+                    let opened = readers.open(reader, start);
+                    let expected = model.open(opened.key, name, hold, start);
                     assert_eq!((opened.position, opened.replaced), expected);
                 }
                 Input::Ack {
@@ -1036,9 +1094,9 @@ mod tests {
             for later in [0, 1, 5, 10, 20, 40] {
                 restored.advance(at(now + later));
                 readers.advance(at(now + later));
+                assert_eq!(restored.deadline(), readers.deadline());
                 if flushed {
                     assert_eq!(restored.floor(), readers.floor());
-                    assert_eq!(restored.deadline(), readers.deadline());
                 } else {
                     assert!(holds_more(restored.floor(), readers.floor()));
                 }

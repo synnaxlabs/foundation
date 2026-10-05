@@ -206,23 +206,24 @@ How to read this record:
 - **B2** Selectors stay live: channels created later that match join the subscription.
   A start time maps to the first sample at or after it, per index. A range the buffer no
   longer has is an explicit gap.
-- **B3** Complete mode orders per index only. A reader reports one cumulative position
-  per index (a durable reader after it stores the data). Flow is push with
-  reader-granted credits. A slow reader catches up from disk and never slows writers or
-  other readers. Delivery is at-least-once; seq makes repeats easy to drop.
-- **READER RULES (write-path and advisor, 2026-10-04)** A position is one cumulative
-  seq per path: the first sample the reader has not received. A reader that does not
-  record has no backfill position. An open session holds all data it has not received.
-  A closed named reader holds from its position until `hold` after the close, in mesh
-  time; an unnamed reader holds nothing after it closes. The floor per path is the
-  lowest held position, or none; `buffer` trims below it, past retention (by store
-  time), and under disk pressure. A resume takes, per path, the position the reader's
-  `hub` presents, then the position at this home, then the home's fallback. A position
-  below the floor or past the head is accepted as is; the `buffer` read reports any gap
-  (B2). Named readers write a position record at once when they open, close, or are
-  taken over, and on the home's interval when the position changed. A session open at a
-  crash restores as closed at the restore. Supersedes the B3 single position. Basis:
-  A6, A8, B2, B3, S10, X14, #41.
+- **B3 (as revised by READER RULES)** Complete mode orders per index only. A reader
+  reports one cumulative position per index (a durable reader after it stores the data).
+  Flow is push with reader-granted credits. A slow reader catches up from disk and never
+  slows writers or other readers. Delivery is at-least-once; seq makes repeats easy to
+  drop.
+- **READER RULES (write-path and advisor, 2026-10-04)** A position is one cumulative seq
+  per path: the first sample the reader has not received. A reader that does not record
+  has no backfill position. An open session holds all data it has not received. A closed
+  named reader holds from its position until `hold` after the close, in mesh time; an
+  unnamed reader holds nothing after it closes. A hold is zero or more; `config` rejects
+  a negative hold (#94). The floor per path is the lowest held position, or none;
+  `buffer` trims below it, past retention (by store time), and under disk pressure. A
+  resume takes, per path, the position the reader's `hub` presents, then the position at
+  this home, then the home's fallback. A position below the floor or past the head is
+  accepted as is; the `buffer` read reports any gap (B2). Named readers write a position
+  record at once when they open, close, or are taken over, and on the home's interval
+  when the position changed. A session open at a crash restores as closed at the
+  restore. Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync.
@@ -799,6 +800,7 @@ How to read this record:
 | A18 quality side array | S13, BQ13 |
 | A20 channel retention, quality codes on acks | S12, S13 |
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
+| B3 one cumulative position per index | READER RULES |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
@@ -1483,7 +1485,7 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
 | 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
-| 1 | `delivery` | Keeps each reader's state per index: cursors, credits, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
+| 1 | `delivery` | Keeps each reader's state per index: positions, credits, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
