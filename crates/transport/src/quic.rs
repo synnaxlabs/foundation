@@ -45,6 +45,8 @@ pub(crate) struct Endpoint {
     pool: Rc<Pool>,
     /// The largest message a receiver takes.
     message_bytes_max: usize,
+    /// The most bytes in flight on a connection in each direction.
+    window_bytes: usize,
     /// Indexed by noq-proto's handle.
     connections: Vec<Option<Connection>>,
     /// The connections made so far.
@@ -90,8 +92,15 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `config.idle` is not positive. `Transport::new` refuses it first.
+    /// When `config.idle` is not positive, or `config.window_bytes` is below
+    /// `config.message_bytes_max`. `Transport::new` refuses both first.
     pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
+        assert!(
+            config.window_bytes >= config.message_bytes_max.get(),
+            "a window of {} bytes is below the largest message, {} bytes",
+            config.window_bytes,
+            config.message_bytes_max
+        );
         let (settings, endpoint) = Settings::new(config, shard);
         Self {
             epoch: config.clock.epoch(),
@@ -100,6 +109,7 @@ impl Endpoint {
             datagrams_max,
             pool: Rc::clone(&config.pool),
             message_bytes_max: config.message_bytes_max.get(),
+            window_bytes: config.window_bytes,
             connections: Vec::new(),
             serial: 0,
             ready: VecDeque::new(),
@@ -129,7 +139,9 @@ impl Endpoint {
             .unwrap_or_else(|error| {
                 panic!("a dial fails only on its address: {error}")
             });
-        let key = self.insert(handle, |key| Connection::dialed(key, inner, peer));
+        let key = self.insert(handle, |key, streams| {
+            Connection::dialed(key, inner, peer, streams)
+        });
         self.drive(handle, now);
         key
     }
@@ -276,13 +288,20 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `sender` holds part of a message, or after [`Endpoint::finish`].
+    /// When `sender` holds part of a message, after [`Endpoint::finish`], or when
+    /// `message` is over the largest message (this side's own until the hello).
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
+        assert!(
+            message.len() <= self.message_bytes_max,
+            "a message of {} bytes is over the largest message, {} bytes",
+            message.len(),
+            self.message_bytes_max
+        );
         sender.load(message);
         self.flush(now, sender)
     }
@@ -300,8 +319,8 @@ impl Endpoint {
         sender: &mut Sender,
     ) -> Result<Poll<()>, Error> {
         let key = sender.key().connection;
-        self.streams(now, key, Poll::Pending, |streams, inner, _| {
-            streams.flush(inner, sender)
+        self.streams(now, key, Poll::Pending, |streams, inner, _, events| {
+            streams.flush(inner, sender, events)
         })
     }
 
@@ -324,7 +343,7 @@ impl Endpoint {
     ) -> Result<(), Error> {
         sender.end();
         let stream = sender.key();
-        self.streams(now, stream.connection, (), |streams, inner, _| {
+        self.streams(now, stream.connection, (), |streams, inner, _, _| {
             streams.finish(inner, stream.id)
         })
     }
@@ -349,8 +368,8 @@ impl Endpoint {
             return ended;
         }
         let key = receiver.key().connection;
-        self.streams(now, key, Poll::Pending, |_, inner, pool| {
-            stream::read(inner, receiver, pool)
+        self.streams(now, key, Poll::Pending, |streams, inner, pool, events| {
+            streams.read(inner, receiver, pool, events)
         })
     }
 
@@ -379,10 +398,10 @@ impl Endpoint {
         })
     }
 
-    /// Runs `call` on the streams of `key`'s connection with the pool, and drives
-    /// the connection. A fault of the peer's that `call` finds closes the
-    /// connection: the caller gets it from [`Event::Closed`], and this gives
-    /// `ended`, as it does when the connection ended before.
+    /// Runs `call` on the streams of `key`'s connection with the pool and the event
+    /// queue, and drives the connection. A fault of the peer's that `call` finds
+    /// closes the connection: the caller gets it from [`Event::Closed`], and this
+    /// gives `ended`, as it does when the connection ended before.
     fn streams<T>(
         &mut self,
         now: Monotonic,
@@ -392,6 +411,7 @@ impl Endpoint {
             &mut Streams,
             &mut noq_proto::Connection,
             &Pool,
+            &mut VecDeque<Event>,
         ) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let now = self.instant(now);
@@ -400,7 +420,7 @@ impl Endpoint {
             return Ok(ended);
         };
         let Connection { inner, streams, .. } = connection;
-        let result = match call(streams, inner, &self.pool) {
+        let result = match call(streams, inner, &self.pool, &mut self.events) {
             Err(Error::Broken { reason }) => {
                 self.events.push_back(connection.fault(now, reason));
                 Ok(ended)
@@ -414,7 +434,7 @@ impl Endpoint {
     fn insert(
         &mut self,
         handle: ConnectionHandle,
-        connection: impl FnOnce(connection::Key) -> Connection,
+        connection: impl FnOnce(connection::Key, Streams) -> Connection,
     ) -> connection::Key {
         let key = connection::Key {
             handle,
@@ -429,7 +449,8 @@ impl Endpoint {
             entry.is_none(),
             "invariant: noq-proto reuses a drained handle"
         );
-        *entry = Some(connection(key));
+        let streams = Streams::new(self.window_bytes, self.message_bytes_max);
+        *entry = Some(connection(key, streams));
         key
     }
 
@@ -440,6 +461,9 @@ impl Endpoint {
         ecn: Option<EcnCodepoint>,
         datagram: BytesMut,
     ) {
+        if dropped(&datagram) {
+            return;
+        }
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -455,7 +479,9 @@ impl Endpoint {
             Some(DatagramEvent::NewConnection(incoming)) => {
                 match self.inner.accept(incoming, now, &mut reply, None) {
                     Ok((handle, inner)) => {
-                        self.insert(handle, |key| Connection::accepted(key, inner));
+                        self.insert(handle, |key, streams| {
+                            Connection::accepted(key, inner, streams)
+                        });
                         self.drive(handle, now);
                         None
                     }
@@ -480,6 +506,23 @@ impl Endpoint {
         } else {
             queue(&mut self.ready, connection);
         }
+    }
+}
+
+/// Whether the endpoint drops `datagram` unread: a long header of a version it does
+/// not speak, in fewer than [`MTU_MIN`](settings::MTU_MIN) bytes. noq-proto 1.3.0
+/// answers such a header at any size, which QUIC forbids, so a spoofed source would
+/// get more bytes than it sent (#534). Version 0 is a version negotiation for a dial,
+/// so it passes.
+fn dropped(datagram: &[u8]) -> bool {
+    match *datagram {
+        [form, a, b, c, d, ..]
+            if form & 0x80 != 0 && datagram.len() < usize::from(settings::MTU_MIN) =>
+        {
+            let version = u32::from_be_bytes([a, b, c, d]);
+            version != 0 && !settings::VERSIONS.contains(&version)
+        }
+        _ => false,
     }
 }
 
@@ -572,13 +615,10 @@ mod tests {
     fn deliver(pair: &mut Pair, destination: Option<IpAddr>, ecn: Option<Ecn>) {
         let (now, mut buffer) = (pair.now(), Vec::new());
         while let Some(transmit) = pair.client.endpoint.transmit(now, &mut buffer) {
-            let len = transmit.contents.len();
             let meta = Meta {
-                source: testing::CLIENT,
                 destination,
                 ecn,
-                len,
-                stride: len,
+                ..testing::meta(testing::CLIENT, transmit.contents)
             };
             pair.server.endpoint.receive(now, &meta, transmit.contents);
         }
@@ -781,7 +821,8 @@ mod tests {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let (meta, initial) = testing::draft_29();
+                let initial = testing::draft_29();
+                let meta = testing::meta(testing::CLIENT, &initial);
                 endpoint.receive(Monotonic(0), &meta, &initial);
                 let mut buffer = Vec::with_capacity(1 << 16);
                 let start = buffer.as_ptr();
@@ -950,8 +991,12 @@ mod tests {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let (mut meta, initial) = testing::draft_29();
-                (meta.len, meta.stride) = (10, 0);
+                let initial = testing::draft_29();
+                let meta = Meta {
+                    len: 10,
+                    stride: 0,
+                    ..testing::meta(testing::CLIENT, &initial)
+                };
                 endpoint.receive(Monotonic(0), &meta, &initial);
             });
         }

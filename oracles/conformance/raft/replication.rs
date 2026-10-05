@@ -2,7 +2,9 @@
 //! etcd Authors, Apache License 2.0, see `LICENSE`). This file is modified from the
 //! etcd source: `README.md` lists each source and the changes.
 
-use raft::{Body, Data, Entry, Hard, Message, Position, Raft, Role, Term};
+use raft::{
+    Body, Data, Entry, Error, Hard, Message, Position, Raft, Ready, Role, Term,
+};
 
 use crate::common::{
     Disk, ELECTION, Network, accept, accept_all, at_term, count, elect, key, leader,
@@ -201,22 +203,45 @@ fn follower_check_msg_app() {
     }
 }
 
+/// etcd sends each append at term 2. Ours refuses an entry above the message's
+/// term with `Error::TermBehindLog`, then takes the same append at the term of its
+/// last entry.
 #[test]
 fn follower_append_entries() {
-    let cases: [(Position, Vec<Entry>, &[u64], bool); 4] = [
-        (position(2, 2), log3(&[3]), &[1, 2, 3], true),
-        (position(1, 1), log2(&[3, 4]), &[1, 3, 4], true),
-        (position(0, 0), log(&[1]), &[1, 2], false),
-        (position(0, 0), log(&[3]), &[3], true),
+    // The term of the last entry, `prev`, the entries, the terms on disk, whether
+    // the entries are unstable, and the `last` of the answer.
+    type Case = (u64, Position, Vec<Entry>, &'static [u64], bool, u64);
+    let cases: [Case; 4] = [
+        (3, position(2, 2), log3(&[3]), &[1, 2, 3], true, 3),
+        (4, position(1, 1), log2(&[3, 4]), &[1, 3, 4], true, 3),
+        (2, position(0, 0), log(&[1]), &[1, 2], false, 1),
+        (3, position(0, 0), log(&[3]), &[3], true, 1),
     ];
-    for (i, (prev, entries, terms, unstable)) in cases.into_iter().enumerate() {
+    for (i, case) in cases.into_iter().enumerate() {
+        let (term, prev, entries, terms, unstable, last) = case;
         let unstable = if unstable { entries.clone() } else { vec![] };
         let (mut raft, mut disk) =
             start(1, &[1, 2, 3], ELECTION, at_term(2), log(&[1, 2]), 0);
-        raft.step(append(2, prev, entries, 0)).unwrap();
+        if term > 2 {
+            let refused = Error::TermBehindLog {
+                term: Term(2),
+                last: entries.last().unwrap().at,
+            };
+            let etcd = append(2, prev, entries.clone(), 0);
+            assert_eq!(raft.step(etcd), Err(refused), "#{i}");
+            assert_eq!(raft.ready(), Ready::default(), "#{i}");
+        }
+        raft.step(append(term, prev, entries, 0)).unwrap();
         let ready = raft.ready();
         assert_eq!(ready.entries, unstable, "#{i}");
-        disk.store(ready);
+        let answer = Message {
+            from: key(1),
+            to: key(2),
+            term: Term(term),
+            body: Body::AppendReply { last },
+        };
+        assert_eq!(disk.store(ready), [answer], "#{i}");
+        assert_eq!(disk.hard.term, Term(term), "#{i}");
         assert_eq!(disk.entries, log(terms), "#{i}");
     }
 }

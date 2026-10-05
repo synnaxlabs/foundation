@@ -96,7 +96,7 @@ impl Sender {
     ///
     /// ```
     /// fn cancel(sender: transport::stream::Sender) {
-    ///     sender.reset(transport::Code(1));
+    ///     sender.reset(transport::Code(16));
     /// }
     /// ```
     pub fn reset(self, code: Code) {
@@ -151,7 +151,7 @@ impl Receiver {
     ///
     /// ```
     /// fn hang_up(receiver: transport::stream::Receiver) {
-    ///     receiver.stop(transport::Code(1));
+    ///     receiver.stop(transport::Code(16));
     /// }
     /// ```
     pub fn stop(self, code: Code) {

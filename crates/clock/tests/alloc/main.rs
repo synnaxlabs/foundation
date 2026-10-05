@@ -1,0 +1,34 @@
+//! Reading mesh time makes no heap allocation. This binary has no test harness: the
+//! count covers each thread, and a harness allocates on its own thread at any time.
+
+#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
+
+use clock::Clock;
+use estimate::Measurement;
+use types::time::Span;
+
+#[global_allocator]
+static ALLOCATOR: counting::Allocator = counting::Allocator::new();
+
+fn main() {
+    assert_eq!(
+        ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
+        1,
+        "the allocator counts"
+    );
+
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let (mut clock, reader) = Clock::new(node.clock());
+    let source = clock.add();
+    let first = Measurement::new(node.clock().now(), Span::HOUR, Span::MILLISECOND);
+    let first = first.expect("at most 36500 days");
+    let _ = clock.push(source, first);
+    let (interval, allocations) = ALLOCATOR.count(|| reader.now());
+    assert_eq!(allocations, 0, "the hot path allocated");
+    assert_eq!(
+        interval,
+        Some(first.interval()),
+        "the reader reads mesh time"
+    );
+}
