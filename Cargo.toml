@@ -10,6 +10,7 @@ rust-version = "1.98"
 publish = false
 
 [workspace.dependencies]
+loom = { version = "0.7.2", features = ["futures"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 noq = { version = "1.3.0", default-features = false }
 rustls = { version = "0.23.45", default-features = false }
@@ -93,6 +94,9 @@ tests_outside_test_module = "deny"
 redundant_test_prefix = "warn"
 doc_paragraphs_missing_punctuation = "warn"
 wildcard_dependencies = "deny"
+
+[profile.dev]
+debug = "line-tables-only"
 
 [profile.release]
 overflow-checks = true

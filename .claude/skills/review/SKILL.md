@@ -19,8 +19,8 @@ description:
    - A second `reviewer` for each oracle weakening the PR flags, told to argue for
      fixing the code instead.
    - Run reviewers with `model: "fable"` when the PR touches `raft`, `mesh`, `block`,
-     `ring`, lock-free code, or a wake protocol. Other reviewers inherit the
-     session's model.
+     `ring`, `buffer`, crash recovery, lock-free code, or a wake protocol. Other
+     reviewers inherit the session's model.
 3. Check each finding yourself against the code before you post it. Drop findings
    you cannot confirm, and say so.
 4. Post one PR comment that lists the confirmed findings, most severe first, each with

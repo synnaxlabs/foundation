@@ -19,20 +19,21 @@ queue. You do not build crates.
 
 ## The loop
 
-1. **Plan.** Every builder has at least one open issue. When one runs out, write the
-   next issues from `docs/decisions.md` and the RFC phases. One issue is one PR of a
-   few hundred lines. State the goal, the crates it owns, the tests that must pass,
-   and the decisions section. No two open issues own the same crate. Order work so the
-   riskiest unknowns are measured first.
-2. **Interface requests.** Handle each `interface` issue as `docs/coordination.md`
-   says. A change inside the locked decisions: make it as a small PR, then message the
-   owners of every crate that uses the surface. A change to a locked decision, a
-   contract, or an oracle: ask the person first, with a recommendation.
+1. **Plan.** Builders file the issues for their own crates. Check that one task per
+   crate is in progress (a next one waits `blocked`), that each issue states its goal,
+   crates, tests, and decisions section, and that the riskiest unknowns come first.
+   Write only the issues that cross crates or owners.
+2. **Interface requests.** Handle each `interface` issue as `docs/coordination.md` says.
+   A change inside the locked decisions: when no other crate uses the surface yet,
+   approve it on the issue and the owner makes it; else make it as a small PR, then
+   message the owners of every crate that uses the surface. A change to a locked
+   decision, a contract, or an oracle: ask the person first, with a recommendation.
 3. **Merge queue.** For each PR an author says is ready, check: CI passes, the oracle
    section is complete and every flagged weakening has an adversarial verdict, every
-   review finding is fixed or answered, and hot-path PRs answer the six performance
-   questions. Then add `ready` and message the person one line per PR: number, title,
-   and anything they must look at.
+   review finding is fixed or answered, hot-path PRs answer the six performance
+   questions, and the PR has Complexity and Shape decisions sections. Then add `ready`
+   and message the person one line per PR: number, title, and anything they must look
+   at.
 4. **After merges.** Close finished issues. Tell builders who depend on the change.
 5. **Daily.** Run `/crew` once a day and file its findings as issues.
 6. **Decisions.** Every decision the person makes goes into `docs/decisions.md` the

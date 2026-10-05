@@ -13,11 +13,14 @@ approval; pin the version you build against there.
 | Crate | Used by | Why | License | Version | Approved |
 | --- | --- | --- | --- | --- | --- |
 | `blake3` | `spec`, `blob` | Hashes of spec chunks and blobs (R4 SETTLED, r7 area 7) | CC0-1.0 or Apache-2.0 | 1.8.7 | 2026-10-04 |
-| `rustix` | `block`, `os` | Reserve, commit, and purge pool pages; OS calls behind `env` | Apache-2.0 with LLVM exception, Apache-2.0, or MIT | 1.1.5 | 2026-10-04 |
+| `rustix` | `os` | Reserve, commit, and purge pool pages; OS calls behind `env` | Apache-2.0 with LLVM exception, Apache-2.0, or MIT | 1.1.5 | 2026-10-04 |
 | `tokio` | `os`, `transport`, `hub`, `node`, benchmarks | One `LocalRuntime` per shard (C2) | MIT | 1.53.2 | 2026-10-04 |
 | `rustls` | `transport`, `bench/carrier` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
 | `aws-lc-rs` | `transport`, signing | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
+| `hcl-edit` | `config-hcl` | Parse HCL and keep its formatting (r3 section 2); our own checker compiles the tree | MIT or Apache-2.0 | 0.9.7 | 2026-10-04 |
+| `crc32c` | `buffer` | Hardware CRC32C for write-ahead records (S4, r2 Q4, #48) | Apache-2.0 or MIT | 0.6.8 | 2026-10-04 |
+| `bytes` | `transport` | The buffer type of `noq-proto`'s stream and datagram calls (#55) | MIT | 1.12.1 | 2026-10-04 |
 
 ## Tests, benchmarks, and tools
 
@@ -27,7 +30,7 @@ These never ship in the binary.
 | --- | --- | --- | --- | --- | --- |
 | `serde_json` | `xtask` | Read `cargo metadata` output for the layer check | MIT or Apache-2.0 | | Bootstrap |
 | `proptest` | All crates (dev) | Property tests (testing layer 1) | MIT or Apache-2.0 | 1.11.0 | 2026-10-04 |
-| `loom` | `ring`, `block` (dev) | Exhaustive checks of wake protocols and atomics | MIT | 0.7.2 | 2026-10-04 |
+| `loom` | `ring`, `block` (`cfg(loom)`) | Exhaustive checks of wake protocols and atomics | MIT | 0.7.2 | 2026-10-04 |
 | `shuttle` | `ring`, `block` (dev) | Randomized (PCT) checks of larger concurrent models | Apache-2.0 | 0.9.5 | 2026-10-04 |
 | `divan` | Benchmarks | Wall-time benchmarks that also count allocations | MIT or Apache-2.0 | 0.1.21 | 2026-10-04 |
 | `libfuzzer-sys` | Fuzz targets | Coverage-guided fuzzing with `cargo-fuzz` (testing layer 2) | (MIT or Apache-2.0) and NCSA | 0.4.13 | 2026-10-04 |
