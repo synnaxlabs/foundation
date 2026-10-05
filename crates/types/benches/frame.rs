@@ -70,6 +70,15 @@ fn cases() -> Vec<Case> {
         }]
     };
     let wide = interner.intern(&one(&wide));
+    // Data slots assigned before the index slot, so each index sorts after its data.
+    let late: Vec<_> = (100_001..200_000).map(|n| (key(n), F64)).collect();
+    for &(key, _) in &late {
+        interner.slots().assign(key);
+    }
+    let late = interner.intern(&[Group {
+        index: key(200_000),
+        data: &late,
+    }]);
     let private = interner.intern(&private);
     let tenth = |n: usize| (0..10).map(move |k| k * n / 10);
     vec![
@@ -91,6 +100,11 @@ fn cases() -> Vec<Case> {
         case(
             "100k of 100k in one group",
             wide,
+            (0..100_000).map(|entry| (entry, 8)).collect(),
+        ),
+        case(
+            "100k of 100k in one group, index last",
+            late,
             (0..100_000).map(|entry| (entry, 8)).collect(),
         ),
         case(
