@@ -165,9 +165,9 @@ How to read this record:
   span unit strings, and keys as UUID strings, and never appears on the data path;
   R9-D8 exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal
   overflow and checked math for outside values; R9-D13 `types` modules are time,
-  sample, series, frame, channel, node, quality, and name; R9-D14 checks run once, at
-  the home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block` module (by SRP
-  PASS).
+  sample, series, frame, channel, node, quality, name, and hash (R16-7); R9-D14 checks
+  run once, at the home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block`
+  module (by SRP PASS).
 - **MODEL MAP (current)** Data channel -> index, -> quality (optional), -> data type,
   -> unit. Index -> error channel (optional), -> control channel (optional). Type ->
   other types; types never point at channels. Policies -> names through selectors;
@@ -337,12 +337,18 @@ How to read this record:
   prolly tree keyed by full name, about 4 KiB chunks, BLAKE3. Each change record lists
   its new chunks. A region's voters sit on one LAN. A node fetches only the regions and
   ranges it uses.
-- **RAFT SURFACE (#5)** `raft::Raft` takes `tick(random)`, `step(message)`, and
-  `campaign()`, and gives `hard()` (term and vote) and `messages()`. The caller writes
-  `hard()` to disk before it sends `messages()`, so a candidate counts its own vote at
-  once. Randomness enters only through `tick`: a node draws its election timeout on
-  the first tick after a reset. PreVote and CheckQuorum have no off switch. Until log
-  replication lands, a new leader announces itself with a heartbeat.
+- **RAFT SURFACE (#5)** `raft::Raft::new(Config, Start)` builds a follower. `Config`
+  holds the fixed inputs (key, tick counts). `Start` holds what the node had on disk:
+  `hard` (term and vote), `voters`, and `last`, the last log position, which stands in
+  for the log until replication lands. `Raft` takes `tick(random)`, `step(message)`,
+  and `campaign()`, and gives `hard()` and `messages()`. The caller writes `hard()` to
+  disk before it sends `messages()`, so a candidate counts its own vote at once.
+  Randomness enters only through `tick`: a node draws its election timeout on the
+  first tick after a reset. PreVote and CheckQuorum have no off switch. Until
+  replication lands, a new leader announces itself with a heartbeat. A node that is
+  not in its own voter list votes and follows, but never campaigns. `step` does not
+  check that a sender is a voter (a voter can learn late that a peer joined), so the
+  caller authenticates the sender and decides which nodes may send.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -510,19 +516,25 @@ How to read this record:
   file, HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, and
   Kubernetes Secrets. A policy picks the store per name. External adapters authenticate
   with the node key and may cache values sealed to it (this delays revocation).
-- **BQ12 (open, r15)** Identity across forwarding nodes. r15 recommends that a remote
-  subject signs a short-lived hello and each session open, the gateway forwards the
-  signatures, and the owner verifies them. A node acts only as itself or as connectors
-  placed on it. Node-to-node traffic is authorized by role. r15 decisions 2 to 10 are
-  decided (session opens signed, a key list per subject in OpenSSH format, `apply`
-  signs the plan hash, every node checks every change record, audit records the
-  subject and the forwarding node, MCP runs beside the agent, the caller seals secret
-  values, no end-to-end frame integrity in v1). Decision 1 waits for the person.
+- **BQ12 (locked 2026-10-04)** Identity across forwarding nodes. The person adopted
+  r15 in full (sections 4 and 6). A remote subject signs a short-lived hello and each
+  session open, the gateway forwards the signatures, and the owner verifies them
+  against the subject's keys in the spec. A node acts only as itself or as connectors
+  placed on it. Node-to-node traffic is authorized by role. r15 decisions 2 to 10 hold
+  as written there (session opens signed, a key list per subject in OpenSSH format,
+  `apply` signs the plan hash, every node checks every change record, audit records
+  the subject and the forwarding node, MCP runs beside the agent, the caller seals
+  secret values, no end-to-end frame integrity in v1).
 
 ### 1.13 Operations, agents, and the factory
 
 - **Factory constraint** Two people, each on an individual Max plan. The factory runs in
   attended, locally started sessions, not as an unattended daemon.
+- **BENCH SPEND (2026-10-04)** Linux benchmarks that need real machines run on rented
+  AWS machines. The person: "you're welcome to provision AWS machines. SET STRICT COST
+  LIMITS. I don't want more than $100 spent". The limit is 100 USD in total, across
+  all benchmarks, until the person raises it. Only the coordinator provisions, by the
+  procedure in `docs/coordination.md`.
 - **C7** One operation table (typed input and output, error codes, read-only and
   destructive flags) generates the CLI (`--json`), annotated MCP tools, and docs
   embedded in the binary. Every error has a stable code and a fix-it hint. Status is
@@ -566,6 +578,33 @@ How to read this record:
   top of each PR summary and flags weakening. Each flagged change gets its own
   adversarial reviewer. A person merges every PR. Supersedes: T2 enforcement level.
 - **AGENT REQUIREMENT** Every task must be easy to do with agents. C7 carries it.
+- **R16-1 (2026-10-04)** Release builds keep integer overflow checks
+  (`overflow-checks = true`), so R9-D10 holds in release too. An intended wrap uses
+  `wrapping_*`. The 5% gate measures the cost. Decided by the advisor under the
+  quality delegation.
+- **R16-2 (2026-10-04)** Release builds set `panic = "abort"`. A broken invariant
+  crashes the node, and crash recovery restarts it. Tests keep unwinding. Confirmed by
+  the person on 2026-10-04.
+- **R16-3 (2026-10-04)** A lint exception is `#[expect(lint, reason = "...")]`, never
+  `#[allow]`. Clippy denies `allow_attributes`. Decided by the advisor under the
+  quality delegation.
+- **R16-4 (2026-10-04)** The workspace turns on the r16 lints that check rules the
+  repo already has: `Debug` on public types, one path per item, one unsafe operation
+  per block, exact error assertions, no discarded results, determinism, bounded
+  loops, and names. The lists are in the root `Cargo.toml` and `clippy.toml`;
+  `docs/claude/rust.md` gives the rules. Decided by the advisor under the quality
+  delegation.
+- **R16-5 (2026-10-04)** The strict decoder lints (`indexing_slicing`,
+  `arithmetic_side_effects`, `as_conversions`, `string_slice`) apply only in crates
+  that decode outside input: `codec`, `wire`, `document`, `config-hcl`, and each
+  protocol parser in a `connector-<kind>`. Layer 1 decision crates (`raft`,
+  `control`, `delivery`, `access`, `estimate`) deny `wildcard_enum_match_arm`.
+  Decided by the advisor under the quality delegation.
+- **R16-6 (2026-10-04)** Each crate keeps one public `Error` enum, or one per
+  sub-boundary module. Microsoft's canonical error structs and
+  `clippy::error_impl_error` are rejected: an enum lets a test pin the variant, and
+  backtrace capture costs time on hot paths. Decided by the advisor under the quality
+  delegation.
 
 ### 1.14 Testing
 
@@ -585,6 +624,17 @@ How to read this record:
   connectors. Simulation replaces any connector through `hub`.
 - **R13 invariants (oracles)** The eight invariants in r13 section 9 become simulation
   invariants in `oracles/invariants/`.
+- **R16-7 (2026-10-04)** `clippy.toml` bans `std::collections::HashMap`, `HashSet`,
+  and `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a
+  fixed hasher, so a simulated run replays. A map keyed by outside input will get a
+  keyed hasher with its key from `env` randomness. Decided by the advisor under the
+  quality delegation.
+- **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
+  global. `clippy.toml` denies the macro. Decided by the advisor under the quality
+  delegation.
+- **R16-9 (2026-10-04)** Miri and cargo-fuzz run on one pinned nightly toolchain that
+  only those gates use. The workspace toolchain stays stable. Decided by the advisor
+  under the quality delegation.
 
 ### 1.15 Releases
 
@@ -1219,8 +1269,8 @@ Conflict: BQ5's lock text says "hub and home enforce the rules (... access)". r8
 and r12 enforce access only at the owner. BQ12 found that "authenticate at `hub`,
 authorize at the owner" lets a forwarding node impersonate a subject.
 Resolution: enforcement only at owners (`home` for data; region voters for apply,
-secret, admin), with no check in `hub` or `ctx`. BQ12 decides how the owner learns the
-true subject. Basis: root "no defense in depth", r12 table.
+secret, admin), with no check in `hub` or `ctx`. The owner learns the true subject
+from the signatures it verifies (BQ12). Basis: root "no defense in depth", r12 table.
 
 ### 3.4 Terms used two ways
 
@@ -1286,8 +1336,8 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 
 | Layer | Crate | Job (one sentence) | Allowed dependencies |
 | --- | --- | --- | --- |
-| 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and all unsafe memory code. | none |
-| 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, and owns the wake protocol (loom-checked). | none |
+| 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
+| 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, and shared value readers. | `types` |
@@ -1328,39 +1378,40 @@ SDKs hand-write their data path against golden vectors (D12).
 
 Shapes that need the person:
 
-1. **BQ12, identity across forwarding.** Decision 1 of r15 (see 1.12).
-2. **Calculation engine design.** Language, windows, state, placement, quality
+1. **Calculation engine design.** Language, windows, state, placement, quality
    propagation, and whether a large program lives in its own file. Its guarantees are
    locked (C5 + KINDS OWN).
 
 Measured before they lock:
 
-3. **C2, thread model.** The working assumption is in 1.5. The `memory` builder
-   measures the handoff on Linux first.
-4. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
+2. **C2, thread model.** The working assumption is in 1.5. The `memory` builder
+   measures the handoff on Linux first (#9).
+3. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
 
 Parameters and later choices, recorded and not asked:
 
-5. Struct template storage: whether the spec stores templates and instance records for
+4. Struct template storage: whether the spec stores templates and instance records for
    SDK code generation and `export`.
-6. Per-node settings (disk budget, pool budget, data directory): node-local config or a
+5. Per-node settings (disk budget, pool budget, data directory): node-local config or a
    policy that selects node names.
-7. The transmission policy target: links, indexes, or both (B6).
-8. Upgrades across regions: which region holds the desired version and the format
+6. The transmission policy target: links, indexes, or both (B6).
+7. Upgrades across regions: which region holds the desired version and the format
    flag, and how finalization waits for every region (BQ18, C9d).
-9. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
+8. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
    path.
-10. A20: whether a channel may carry a default max age.
-11. A3: partial-segment wildcards.
-12. A13: bounded lists.
-13. D3: license, free tier, monetization.
-14. D5: a plugin system.
+9. A20: whether a channel may carry a default max age.
+10. A3: partial-segment wildcards.
+11. A13: bounded lists.
+12. D3: license, free tier, monetization.
+13. D5: a plugin system.
 
 ### 5.2 Settled under a delegation
 
-- Quality: X10 (ack quality on the ack's index), X19 (death record scope).
+- Quality: X10 (ack quality on the ack's index), X19 (death record scope), R16-1 and
+  R16-3 to R16-9 (r16 Rust guides).
 - Memory and performance: X8 (seq per index group), X30 (merge rule), X42 (interner),
-  S4 disk format starting point, r12 I4 (`buffer` driven, not self-running).
+  S4 disk format starting point, r12 I4 (`buffer` driven, not self-running), `ring`
+  holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).

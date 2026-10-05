@@ -6,6 +6,8 @@
 //! the caller writes [`Raft::hard`] to disk if it changed, and only then sends
 //! [`Raft::messages`].
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 mod config;
 mod machine;
 mod message;
@@ -16,7 +18,7 @@ use std::fmt;
 
 use types::node;
 
-pub use config::Config;
+pub use config::{Config, Start};
 pub use machine::{Raft, Role};
 pub use message::{Body, Message};
 
@@ -25,12 +27,8 @@ pub use message::{Body, Message};
 pub struct Term(pub u64);
 
 impl Term {
-    fn next(self) -> Self {
-        Self(
-            self.0
-                .checked_add(1)
-                .expect("invariant: a term is below u64::MAX"),
-        )
+    fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
     }
 }
 
@@ -79,12 +77,20 @@ pub enum Error {
         /// The last log position.
         last: Position,
     },
-    /// A message did not come from another node, or is for another node.
+    /// A message is for another node. The caller routed it wrongly.
     Misrouted {
-        /// The message's sender.
-        from: node::Key,
         /// The message's receiver.
         to: node::Key,
+    },
+    /// A message names this node as its sender.
+    Loopback,
+    /// A second node claims to lead a term that this node leads. Election safety is
+    /// broken, or the sender is faulty.
+    SecondLeader {
+        /// The term with two leaders.
+        term: Term,
+        /// The other leader.
+        from: node::Key,
     },
 }
 
@@ -107,11 +113,16 @@ impl fmt::Display for Error {
                 "stored term {term} is lower than term {} of the last log entry",
                 last.term
             ),
-            Self::Misrouted { from, to } => write!(
+            Self::Misrouted { to } => write!(
                 f,
-                "a message from node {:032x} to node {:032x} is not for this node",
-                from.as_u128(),
+                "a message for node {:032x} is not for this node",
                 to.as_u128()
+            ),
+            Self::Loopback => f.write_str("a message names this node as its sender"),
+            Self::SecondLeader { term, from } => write!(
+                f,
+                "node {:032x} also claims to lead term {term}",
+                from.as_u128()
             ),
         }
     }

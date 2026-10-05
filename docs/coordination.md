@@ -149,6 +149,29 @@ Builders never edit another crate's public surface. To change one:
 
 A builder may change anything private inside its own crates without asking.
 
+Two cases skip the interface issue:
+
+- A crate with no public surface yet gets one in its owner's first PR. The
+  coordinator reviews that surface as an interface before it adds `ready`.
+- An additive change to a builder's own crate that a locked decision already requires.
+  The coordinator approves it in a comment on the issue, and the builder makes it in
+  its PR.
+
+## Cloud machines
+
+Only the coordinator rents machines. The limit is in `docs/decisions.md` (BENCH
+SPEND).
+
+1. The builder asks on its issue: instance types, count, and hours.
+2. Before launch, the coordinator posts the cap on the spend ledger issue (#15):
+   on-demand price per hour times count times lifetime. The sum of caps stays at or
+   under 90 USD.
+3. Every instance has the tags `project=foundation-bench` and `issue=<n>`, shutdown
+   behavior `terminate`, a root volume that is deleted on termination, and user data
+   that runs `shutdown -h +<minutes>` at boot. The lifetime is at most 240 minutes.
+4. The coordinator terminates the instances when the run ends, posts the actual hours
+   on the ledger, and checks for running tagged instances on each loop.
+
 ## Messages
 
 Sessions message each other with `SendMessage`, by name. Find names with
@@ -171,4 +194,5 @@ new session starts from that comment.
 - a change touches a locked decision, a contract, or an oracle;
 - two sessions still disagree after one exchange;
 - a PR adds a third-party dependency (record it in `docs/dependencies.md`);
-- work would spend money: cloud resources or paid services.
+- work would spend money: cloud resources or paid services, except rented benchmark
+  machines within the BENCH SPEND limit.

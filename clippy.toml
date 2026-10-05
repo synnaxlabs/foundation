@@ -1,9 +1,13 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+too-many-lines-threshold = 70
+# Tune on a Pi 4.
+stack-size-threshold = 65536
 
-# Clock, randomness, threads, and the environment come from `env`. Only the real
-# adapters may allow these, with a reason.
+# Clock, randomness, threads, disk, network, and the environment come from `env`.
+# Only `os` implements them. Hash order comes from `types::hash`.
 disallowed-methods = [
   { path = "std::time::SystemTime::now", reason = "use the injected clock" },
   { path = "std::time::Instant::now", reason = "use the injected clock" },
@@ -11,6 +15,33 @@ disallowed-methods = [
   { path = "std::thread::spawn", reason = "threads come from env" },
   { path = "std::env::var", reason = "configuration is an input" },
   { path = "std::env::var_os", reason = "configuration is an input" },
+  { path = "std::time::Instant::elapsed", reason = "reads the OS clock" },
+  { path = "std::time::SystemTime::elapsed", reason = "reads the OS clock" },
+  { path = "std::thread::Builder::spawn", reason = "threads come from env" },
+  { path = "std::thread::available_parallelism", reason = "core count comes from env" },
+  { path = "std::env::vars", reason = "configuration is an input" },
+  { path = "std::env::args", reason = "only node reads arguments" },
+  { path = "std::fs::read", reason = "disk comes from env" },
+  { path = "std::fs::File::open", reason = "disk comes from env" },
+  { path = "std::fs::File::create", reason = "disk comes from env" },
+  { path = "std::fs::OpenOptions::open", reason = "disk comes from env" },
+  { path = "std::net::TcpStream::connect", reason = "network comes from env" },
+  { path = "std::net::TcpListener::bind", reason = "network comes from env" },
+  { path = "std::net::UdpSocket::bind", reason = "network comes from env" },
+  { path = "std::process::exit", reason = "only node exits" },
+  { path = "std::collections::HashMap::new", reason = "random hash order" },
+  { path = "std::collections::HashMap::with_capacity", reason = "random hash order" },
+  { path = "std::collections::HashSet::new", reason = "random hash order" },
+  { path = "std::collections::HashSet::with_capacity", reason = "random hash order" },
+  { path = "std::hash::RandomState::new", reason = "OS randomness breaks replay" },
+]
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "use types::hash::Map" },
+  { path = "std::collections::HashSet", reason = "use types::hash::Set" },
+  { path = "std::hash::RandomState", reason = "OS randomness breaks replay" },
+]
+disallowed-macros = [
+  { path = "std::thread_local", reason = "no mutable globals" },
 ]
 
 doc-valid-idents = ["UUIDv7", "PreVote", "CheckQuorum", "OpenSSH", ".."]

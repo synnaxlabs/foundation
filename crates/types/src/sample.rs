@@ -81,10 +81,6 @@ impl Type {
     pub const fn width(self) -> Option<usize> {
         match self {
             Self::Scalar(s) => Some(s.width()),
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "array lengths fit in usize"
-            )]
             Self::Array { element, len } => Some(element.width() * len as usize),
             Self::List { .. } | Self::String | Self::Bytes => None,
         }

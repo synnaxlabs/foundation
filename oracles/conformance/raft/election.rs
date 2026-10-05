@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use raft::{Body, Config, Hard, Message, Position, Raft, Role, Term};
+use raft::{Body, Config, Hard, Message, Position, Raft, Role, Start, Term};
 use types::node;
 
 const ELECTION: u32 = 10;
@@ -25,11 +25,15 @@ fn at_term(term: u64) -> Hard {
 fn build(id: u8, voters: &[u8], election: u32, hard: Hard, last: Position) -> Raft {
     let config = Config {
         key: key(id),
-        voters: voters.iter().copied().map(key).collect(),
         election_ticks: election,
         heartbeat_ticks: 1,
     };
-    Raft::new(config, hard, last).unwrap()
+    let start = Start {
+        hard,
+        voters: voters.iter().copied().map(key).collect(),
+        last,
+    };
+    Raft::new(config, start).unwrap()
 }
 
 fn drain(raft: &mut Raft) -> Vec<Message> {
@@ -430,7 +434,9 @@ fn node_with_smaller_term_can_complete_election() {
     network.cut(2, 1);
     network.cut(2, 3);
 
+    // Node 1 rejects the PreVote from the lower term, and node 3 takes its term.
     network.campaign(&[3]);
+    network.check(3, Role::Follower, 3);
     network.campaign(&[1]);
     network.check(1, Role::Leader, 4);
     network.check(3, Role::Follower, 4);
@@ -628,6 +634,9 @@ fn non_promotable_voter_with_check_quorum() {
 
 /// A follower whose election times out just before a late heartbeat arrives does
 /// not make the leader step down.
+///
+/// In etcd, node 3 is also behind in the log. This phase has no log replication, so
+/// all logs are equal, and the leases alone protect the leader.
 #[test]
 fn disruptive_follower_prevote() {
     let mut network = Network::of(3, &[1, 2, 3], at_term(1));

@@ -1,14 +1,14 @@
 //! The crate map. It must match section 4 of `docs/decisions.md`.
 
 /// One crate in the map.
-pub struct Crate {
+pub(crate) struct Crate {
     pub name: &'static str,
     pub layer: u8,
     pub deps: Deps,
 }
 
 /// The workspace crates a crate may depend on.
-pub enum Deps {
+pub(crate) enum Deps {
     /// Only these crates.
     Only(&'static [&'static str]),
     /// Any layer 1 crate, plus these.
@@ -18,10 +18,10 @@ pub enum Deps {
 }
 
 /// Crates any crate may use as a dev-dependency, for tests.
-pub const TEST_ONLY: &[&str] = &["sim"];
+pub(crate) const TEST_ONLY: &[&str] = &["sim"];
 
 /// Every crate with its layer and the workspace crates it may depend on.
-pub const CRATES: &[Crate] = &[
+pub(crate) const CRATES: &[Crate] = &[
     // Layer 1: pure logic. It decides.
     Crate {
         name: "block",
@@ -222,7 +222,7 @@ const KIND: Crate = Crate {
 };
 
 /// Finds a crate in the map by package name.
-pub fn find(name: &str) -> Option<&'static Crate> {
+pub(crate) fn find(name: &str) -> Option<&'static Crate> {
     if name.starts_with("connector-") {
         return Some(&KIND);
     }
@@ -231,7 +231,7 @@ pub fn find(name: &str) -> Option<&'static Crate> {
 
 impl Crate {
     /// Reports whether this crate may depend on `dep`.
-    pub fn allows(&self, dep: &str) -> bool {
+    pub(crate) fn allows(&self, dep: &str) -> bool {
         match self.deps {
             Deps::Only(list) => list.contains(&dep),
             Deps::Layer1And(list) => {
@@ -242,7 +242,7 @@ impl Crate {
     }
 
     /// Describes the allowed dependencies for an error message.
-    pub fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self.deps {
             Deps::Only([]) => "no workspace crates".to_string(),
             Deps::Only(list) => list.join(", "),

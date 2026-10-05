@@ -56,3 +56,7 @@ Every PR that touches a hot path answers these in its description:
 4. How many copies per sample?
 5. Does per-frame cost grow with channel count?
 6. What wakes whom, and is it checked with loom or shuttle?
+
+Before you write a hot path, make a back-of-envelope sketch of its network, disk,
+memory, and CPU cost, in bandwidth and in latency. Put the sketch in the PR beside the
+six answers (r16 rule 41).
