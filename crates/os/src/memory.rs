@@ -1,9 +1,9 @@
 //! Address space from the OS for block pools.
 
+use std::cell::Cell;
 use std::ffi::c_void;
-use std::ops::Range;
 use std::ptr::{self, NonNull};
-use std::{fmt, process};
+use std::{fmt, io, process};
 
 use rustix::io::Errno;
 use rustix::mm::{self, MapFlags, MprotectFlags, ProtFlags};
@@ -22,6 +22,8 @@ pub struct Memory {
     base: NonNull<u8>,
     len: usize,
     page: usize,
+    /// Set by a failed purge, which can leave a hole that another mapping fills.
+    leaked: Cell<bool>,
 }
 
 impl Memory {
@@ -30,31 +32,34 @@ impl Memory {
     ///
     /// # Errors
     ///
-    /// [`Error`] when the OS fails the reserve or the commit of the first page.
+    /// [`Error::Reserve`] when the OS fails the reserve, and [`Error::Refused`] when
+    /// it refuses memory for the first page.
     ///
     /// # Panics
     ///
-    /// If `len` is 0.
+    /// If `len` is 0, or the OS fails the commit of the first page for a cause other
+    /// than memory.
     pub fn new(len: usize) -> Result<Self, Error> {
         assert!(len > 0, "memory must be more than 0 bytes");
-        let reserve = |errno: Errno| Error::Reserve {
-            len,
-            code: errno.raw_os_error(),
-        };
         // SAFETY: the OS picks the address, so the mapping replaces nothing.
         let base = unsafe {
             mm::mmap_anonymous(ptr::null_mut(), len, RESERVED, MapFlags::PRIVATE)
         }
-        .map_err(reserve)?;
+        .map_err(|errno| Error::Reserve {
+            len,
+            code: errno.raw_os_error(),
+        })?;
         let base = NonNull::new(base.cast()).expect("invariant: a mapping is not null");
         let memory = Self {
             base,
             len,
             page: rustix::param::page_size(),
+            leaked: Cell::new(false),
         };
         #[cfg(all(target_os = "linux", not(miri)))]
-        no_huge_pages(memory.at(0), len).map_err(reserve)?;
-        memory.protect(0..1).map_err(reserve)?;
+        no_huge_pages(memory.at(0), len);
+        block::Memory::commit(&memory, 0, 1)
+            .map_err(|block::Refused| Error::Refused)?;
         Ok(memory)
     }
 
@@ -78,26 +83,22 @@ impl Memory {
     fn at(&self, index: usize) -> *mut c_void {
         self.base.as_ptr().wrapping_add(index * self.page).cast()
     }
-
-    /// Makes `pages` readable and writable.
-    fn protect(&self, pages: Range<usize>) -> rustix::io::Result<()> {
-        let flags = MprotectFlags::READ.union(MprotectFlags::WRITE);
-        // SAFETY: the pages are in this mapping, and the change of protection changes
-        // no byte.
-        unsafe { mm::mprotect(self.at(pages.start), pages.len() * self.page, flags) }
-    }
 }
 
 /// Turns off huge pages in the range: the first touch of one byte of a huge page
 /// takes all of it, and a purge of part of it gives memory back only later. A kernel
 /// with no huge pages gives `EINVAL`, and has nothing to turn off.
+///
+/// # Panics
+///
+/// If the OS fails the advice for another cause.
 #[cfg(all(target_os = "linux", not(miri)))]
-fn no_huge_pages(at: *mut c_void, len: usize) -> rustix::io::Result<()> {
+fn no_huge_pages(at: *mut c_void, len: usize) {
     let advice = mm::Advice::LinuxNoHugepage;
     // SAFETY: the advice changes no byte of the mapping.
     match unsafe { mm::madvise(at, len, advice) } {
-        Ok(()) | Err(Errno::INVAL) => Ok(()),
-        Err(errno) => Err(errno),
+        Ok(()) | Err(Errno::INVAL) => {}
+        Err(errno) => panic!("no huge pages for {len} bytes failed: {errno}"),
     }
 }
 
@@ -134,7 +135,13 @@ unsafe impl block::Memory for Memory {
     fn commit(&self, offset: usize, len: usize) -> Result<(), block::Refused> {
         let end = self.end("commit", offset, len);
         let pages = offset / self.page..end.div_ceil(self.page);
-        match self.protect(pages) {
+        let flags = MprotectFlags::READ.union(MprotectFlags::WRITE);
+        // SAFETY: `end` keeps the pages in this mapping, and the change of protection
+        // changes no byte.
+        let protected = unsafe {
+            mm::mprotect(self.at(pages.start), pages.len() * self.page, flags)
+        };
+        match protected {
             Ok(()) => Ok(()),
             Err(Errno::NOMEM) => Err(block::Refused),
             Err(errno) => panic!("commit of {len} bytes at {offset} failed: {errno}"),
@@ -143,9 +150,8 @@ unsafe impl block::Memory for Memory {
 
     /// # Panics
     ///
-    /// If the range ends past the reserve. Aborts if the OS fails the purge: on Linux
-    /// a failed `MAP_FIXED` can leave a hole that another mapping fills, and the drop
-    /// would unmap that mapping.
+    /// If the range ends past the reserve, or the OS fails the purge. The reserve then
+    /// stays mapped after the drop.
     fn purge(&self, offset: usize, len: usize) {
         let end = self.end("purge", offset, len);
         let pages = offset.div_ceil(self.page)..end / self.page;
@@ -159,21 +165,25 @@ unsafe impl block::Memory for Memory {
         // SAFETY: the pages are in this mapping, and the `block::Memory` contract lets
         // a purge change the bytes in its range.
         let remapped = unsafe { mm::mmap_anonymous(at, len, RESERVED, flags) };
-        if remapped.is_err() {
-            process::abort();
+        if let Err(errno) = remapped {
+            self.leaked.set(true);
+            panic!("purge of {len} bytes failed: {errno}");
         }
         #[cfg(all(target_os = "linux", not(miri)))]
-        no_huge_pages(at, len)
-            .unwrap_or_else(|errno| panic!("purge of {len} bytes failed: {errno}"));
+        no_huge_pages(at, len);
     }
 }
 
 impl Drop for Memory {
     fn drop(&mut self) {
-        // SAFETY: `new` mapped `len` bytes at `base`, and the pool that used them is
-        // gone.
+        if self.leaked.get() {
+            return;
+        }
+        // SAFETY: `new` mapped `len` bytes at `base`, and by the `block::Memory`
+        // contract no use of them outlives this value.
         let unmapped = unsafe { mm::munmap(self.base.as_ptr().cast(), self.len) };
-        // It fails only on arguments that `new` rules out, and `Drop` never panics.
+        // On Linux it fails when the OS has no mapping left to split one (the
+        // `vm.max_map_count` limit), and `Drop` never panics.
         if unmapped.is_err() {
             process::abort();
         }
@@ -183,24 +193,32 @@ impl Drop for Memory {
 /// A failure to get memory from the OS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The OS failed the reserve of `len` bytes of address space, or the commit of
-    /// its first page.
+    /// The OS failed the reserve of `len` bytes of address space.
     Reserve {
         /// The bytes asked for.
         len: usize,
         /// The OS error code.
         code: i32,
     },
+    /// The OS refused memory for the first page of the reserve.
+    Refused,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self::Reserve { len, code } = self;
-        write!(
-            f,
-            "a reserve of {len} bytes of address space failed with OS error {code}; \
-             lower the memory budget"
-        )
+        match *self {
+            Self::Reserve { len, code } => write!(
+                f,
+                "a reserve of {len} bytes of address space failed: {}; lower the \
+                 memory budget",
+                io::Error::from_raw_os_error(code)
+            ),
+            Self::Refused => write!(
+                f,
+                "the OS refused memory for the first page of a reserve; free memory or \
+                 raise the commit limit of the system"
+            ),
+        }
     }
 }
 
@@ -208,7 +226,7 @@ impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::ops::Range;
     use std::os::fd::AsRawFd;
     use std::slice;
 
@@ -223,7 +241,8 @@ mod tests {
     unsafe extern "C" {
         /// Sets bit 0 of one byte per page of the range when the page is resident.
         fn mincore(addr: *mut c_void, len: usize, vec: *mut u8) -> i32;
-        /// Fails with `ENOMEM` when a page of the range is not mapped.
+        /// Fails with `ENOMEM` when a page of the range is not mapped. The one in
+        /// `rustix` gives code -1 on macOS.
         fn msync(addr: *mut c_void, len: usize, flags: i32) -> i32;
         /// Fails with `EFAULT` when the kernel cannot read the buffer.
         fn write(fd: i32, buf: *const c_void, len: usize) -> isize;
@@ -289,12 +308,16 @@ mod tests {
         panic!("no mapping holds the address");
     }
 
-    /// The bytes of `range` of `memory`, which a commit made usable.
-    fn bytes(memory: &mut Memory, range: Range<usize>) -> &mut [u8] {
+    /// The bytes of `range` of `memory`.
+    ///
+    /// # Safety
+    ///
+    /// A commit made the range usable, and no purge since covered a page of it.
+    unsafe fn bytes(memory: &mut Memory, range: Range<usize>) -> &mut [u8] {
         assert!(range.end <= memory.len());
         // SAFETY: the range is inside the mapping.
         let start = unsafe { memory.base().add(range.start) };
-        // SAFETY: the caller committed the range, and the borrow of `memory` keeps
+        // SAFETY: the caller keeps the range usable, and the borrow of `memory` keeps
         // its bytes for this slice alone.
         unsafe { slice::from_raw_parts_mut(start.as_ptr(), range.len()) }
     }
@@ -307,9 +330,11 @@ mod tests {
         memory.commit(0, len).unwrap();
         assert_eq!(memory.len(), len);
         assert_eq!(memory.base().as_ptr().addr() % page, 0);
-        assert!(bytes(&mut memory, 0..len).iter().all(|&byte| byte == 0));
-        bytes(&mut memory, 0..len).fill(7);
-        assert!(bytes(&mut memory, 0..len).iter().all(|&byte| byte == 7));
+        // SAFETY: the range is committed.
+        let bytes = unsafe { bytes(&mut memory, 0..len) };
+        assert!(bytes.iter().all(|&byte| byte == 0));
+        bytes.fill(7);
+        assert!(bytes.iter().all(|&byte| byte == 7));
     }
 
     #[test]
@@ -361,23 +386,34 @@ mod tests {
         let page = page_size();
         let mut memory = Memory::new(4 * page).unwrap();
         memory.commit(0, 4 * page).unwrap();
-        bytes(&mut memory, 0..4 * page).fill(1);
+        // SAFETY: the range is committed.
+        unsafe { bytes(&mut memory, 0..4 * page) }.fill(1);
         assert_eq!(resident(memory.base(), 0..4), [true; 4]);
         memory.purge(page / 2, 3 * page);
         assert_eq!(resident(memory.base(), 0..4), [true, false, false, true]);
         assert_eq!(readable(&memory, 0..4), [true, false, false, true]);
-        assert!(bytes(&mut memory, 0..page).iter().all(|&byte| byte == 1));
-        assert!(
-            bytes(&mut memory, 3 * page..4 * page)
-                .iter()
-                .all(|&byte| byte == 1)
-        );
+        for kept in [0..page, 3 * page..4 * page] {
+            // SAFETY: the purge left pages 0 and 3.
+            let kept = unsafe { bytes(&mut memory, kept) };
+            assert!(kept.iter().all(|&byte| byte == 1));
+        }
         memory.commit(page, 2 * page).unwrap();
-        assert!(
-            bytes(&mut memory, page..3 * page)
-                .iter()
-                .all(|&byte| byte == 0)
-        );
+        // SAFETY: the commit made pages 1 and 2 usable again.
+        let purged = unsafe { bytes(&mut memory, page..3 * page) };
+        assert!(purged.iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn a_purge_with_no_whole_page_in_its_range_keeps_every_byte() {
+        let page = page_size();
+        let mut memory = Memory::new(2 * page).unwrap();
+        memory.commit(0, 2 * page).unwrap();
+        // SAFETY: the range is committed.
+        unsafe { bytes(&mut memory, 0..2 * page) }.fill(1);
+        memory.purge(1, page);
+        // SAFETY: the purge covered no whole page.
+        let kept = unsafe { bytes(&mut memory, 0..2 * page) };
+        assert!(kept.iter().all(|&byte| byte == 1));
     }
 
     #[test]
@@ -444,7 +480,8 @@ mod tests {
         // SAFETY: an async sync of anonymous pages changes nothing.
         let code = unsafe { msync(base.as_ptr().cast(), len, MS_ASYNC) };
         let error = io::Error::last_os_error().raw_os_error();
-        assert_eq!((code, error), (-1, Some(12)), "the range is still mapped");
+        let unmapped = (-1, Some(Errno::NOMEM.raw_os_error()));
+        assert_eq!((code, error), unmapped, "the range is still mapped");
     }
 
     #[test]
@@ -456,13 +493,22 @@ mod tests {
             error,
             Error::Reserve {
                 len: 1 << 62,
-                code: 12
+                code: Errno::NOMEM.raw_os_error()
             }
         );
         assert_eq!(
             error.to_string(),
-            "a reserve of 4611686018427387904 bytes of address space failed with OS \
-             error 12; lower the memory budget"
+            "a reserve of 4611686018427387904 bytes of address space failed: Cannot \
+             allocate memory (os error 12); lower the memory budget"
+        );
+    }
+
+    #[test]
+    fn a_refused_first_page_names_the_memory_of_the_system() {
+        assert_eq!(
+            Error::Refused.to_string(),
+            "the OS refused memory for the first page of a reserve; free memory or \
+             raise the commit limit of the system"
         );
     }
 

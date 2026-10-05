@@ -1516,8 +1516,11 @@ How to read this record:
   can commit. On Linux with strict overcommit, `madvise` and `mprotect` keep that
   charge, so `os` purges with a `MAP_FIXED` remap (#475). `os::memory::Memory`
   reserves `PROT_NONE` pages, which take no charge, and commits with `mprotect`;
-  `ENOMEM` gives `Refused`. A failed purge remap aborts: on Linux it can leave a hole
-  that another mapping fills, and the drop would unmap that mapping. On Linux each
+  `ENOMEM` gives `Refused`, and a refused commit can leave part of its range
+  committed and charged until a purge or the drop. A failed purge remap panics, and
+  the drop then leaks the reserve: on Linux the remap can leave a hole that another
+  mapping fills, and an unmap would remove that mapping. `os::memory` builds on Linux
+  and macOS only; Windows waits for #477, and `node` adds no cfg for it. On Linux each
   reserved or purged page has no huge pages (`MADV_NOHUGEPAGE`): the first touch of
   a huge page takes 2 MiB, and a purge of part of one gives memory back only later.
   A read and write `MAP_NORESERVE` reserve with a commit that does nothing lost:
