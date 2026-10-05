@@ -1,6 +1,6 @@
 //! Repository tasks, run as `cargo xtask <task>`.
 
-#![allow(clippy::print_stderr, reason = "xtask reports to the terminal")]
+#![expect(clippy::print_stderr, reason = "xtask reports to the terminal")]
 
 mod map;
 
@@ -10,6 +10,7 @@ use std::process::{Command, ExitCode};
 use serde_json::Value;
 
 fn main() -> ExitCode {
+    #[expect(clippy::disallowed_methods, reason = "a dev tool reads its arguments")]
     if std::env::args().nth(1).as_deref() != Some("layers") {
         eprintln!("usage: cargo xtask layers");
         return ExitCode::FAILURE;
@@ -86,7 +87,7 @@ fn violation(entry: &map::Crate, dep: &str) -> String {
 }
 
 fn metadata() -> Result<Value, String> {
-    #[allow(clippy::disallowed_methods, reason = "cargo sets CARGO for its tools")]
+    #[expect(clippy::disallowed_methods, reason = "cargo sets CARGO for its tools")]
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
         .args(["metadata", "--format-version", "1", "--no-deps"])
