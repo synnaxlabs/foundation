@@ -60,7 +60,7 @@ fn main() {
         }
     });
     assert_eq!(allocations, 0, "the hot path allocated");
-    // Two blocks of each of the four classes in use.
-    let committed = 2 * (128 + 192 + 1088 + 4160);
+    // One block of each of the four classes: a dropped block serves the next alloc.
+    let committed = 128 + 192 + 1088 + 4160;
     assert_eq!(pool.committed(), committed, "blocks are used again");
 }

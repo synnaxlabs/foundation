@@ -1,6 +1,7 @@
 //! The address space a pool cuts its blocks from.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
+use std::fmt;
 use std::ptr::NonNull;
 
 use crate::ALIGN;
@@ -39,7 +40,6 @@ pub unsafe trait Memory: Send {
 
 /// Memory from the heap, committed in full from the start. It never gives pages back.
 /// It serves tests and simulation, where no OS mapping exists.
-#[derive(Debug)]
 pub struct Heap {
     base: NonNull<u8>,
     layout: Layout,
@@ -83,6 +83,12 @@ unsafe impl Memory for Heap {
     fn commit(&self, _offset: usize, _len: usize) {}
 
     fn purge(&self, _offset: usize, _len: usize) {}
+}
+
+impl fmt::Debug for Heap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Heap").field("len", &self.len()).finish()
+    }
 }
 
 impl Drop for Heap {

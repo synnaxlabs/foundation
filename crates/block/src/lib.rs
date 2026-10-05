@@ -10,6 +10,7 @@
 #![expect(unsafe_code, reason = "blocks are raw memory that threads share")]
 
 mod memory;
+mod sync;
 
 use std::cell::Cell;
 use std::fmt;
@@ -19,12 +20,8 @@ use std::ptr::NonNull;
 use std::slice;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 
-#[cfg(loom)]
-use loom::sync::atomic::AtomicUsize;
-#[cfg(not(loom))]
-use std::sync::atomic::AtomicUsize;
-
 pub use memory::{Heap, Memory};
+use sync::{AtomicUsize, Track};
 
 /// Byte alignment of every block.
 pub const ALIGN: usize = 64;
@@ -89,6 +86,7 @@ struct Region {
     /// while a drop is ahead of the pool's count.
     owed: AtomicUsize,
     memory: Box<dyn Memory>,
+    track: Track,
 }
 
 /// The start of each block.
@@ -97,9 +95,10 @@ struct Header {
     refs: AtomicUsize,
     /// The next block in the list that holds this one.
     next: AtomicUsize,
-    len: usize,
     /// Bytes from the region to this header.
     offset: usize,
+    class: usize,
+    payload: Track,
 }
 
 const _: () = assert!(
@@ -107,7 +106,7 @@ const _: () = assert!(
     "the headers fit in the bytes before a payload"
 );
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Class {
     /// Bytes of this class's span that are cut into blocks.
     carved: Cell<usize>,
@@ -118,7 +117,9 @@ struct Class {
 ///
 /// A pool is not `Sync`: only its owner shard allocates from it. Blocks it hands out
 /// may move to and drop on any thread, and stay valid after the pool drops.
-#[derive(Debug)]
+///
+/// Blocks come in sizes: 64 bytes and each power of two above it, each with 64 bytes
+/// in front. Budget that blocks of one size took stays with that size.
 pub struct Pool {
     region: NonNull<Region>,
     budget: usize,
@@ -129,7 +130,8 @@ pub struct Pool {
     classes: Box<[Class]>,
 }
 
-// SAFETY: a pool owns its region. The parts that other threads reach are atomics.
+// SAFETY: a pool moves to its owner shard as a whole. `Memory` is `Send`, and the one
+// part that other threads reach, the region header, is atomic.
 unsafe impl Send for Pool {}
 
 impl Pool {
@@ -160,6 +162,7 @@ impl Pool {
             returned: AtomicUsize::new(NONE),
             owed: AtomicUsize::new(0),
             memory: Box::new(memory),
+            track: Track::new(),
         };
         // SAFETY: the memory is committed for `HEADER` bytes, aligned, and unused.
         unsafe { region.write(first) };
@@ -173,55 +176,77 @@ impl Pool {
         }
     }
 
+    /// The most bytes one block can hold.
+    #[must_use]
+    pub fn largest(&self) -> usize {
+        self.classes
+            .len()
+            .checked_sub(1)
+            .map_or(0, |index| ALIGN << index)
+    }
+
     /// Returns a writable block of `len` bytes, aligned to [`ALIGN`]. It never waits.
+    /// The bytes are not cleared: a block that is used again keeps its old bytes.
     ///
     /// # Errors
     ///
-    /// [`Error::Exhausted`] when the budget has no room for `len` bytes.
+    /// - [`Error::TooLarge`] when no block of the pool holds `len` bytes. It never
+    ///   succeeds later.
+    /// - [`Error::Exhausted`] when the budget has no room for the block now.
     pub fn alloc(&self, len: usize) -> Result<Unique, Error> {
-        let available = self.budget - self.committed.get();
-        let exhausted = Error::Exhausted {
-            requested: len,
-            available,
-        };
-        let Some(index) = class_of(len) else {
-            return Err(exhausted);
-        };
-        let Some(class) = self.classes.get(index) else {
-            return Err(exhausted);
-        };
-        let offset = class.free.get();
-        let offset = if offset == NONE {
+        let index = class_of(len)
+            .filter(|&index| index < self.classes.len())
+            .ok_or(Error::TooLarge {
+                requested: len,
+                largest: self.largest(),
+            })?;
+        let class = &self.classes[index];
+        if class.free.get() == NONE {
+            self.reclaim();
+        }
+        let header = if class.free.get() == NONE {
             let size = footprint(index);
+            let available = self.budget - self.committed.get();
             if size > available {
-                return Err(exhausted);
+                return Err(Error::Exhausted {
+                    requested: len,
+                    available,
+                });
             }
             let offset = HEADER + index * self.span + class.carved.get();
             self.shared().memory.commit(offset, size);
             class.carved.set(class.carved.get() + size);
             self.committed.set(self.committed.get() + size);
-            offset
+            // SAFETY: the block lies in the span of its class, which the budget check
+            // keeps inside the reservation.
+            let header = unsafe { self.header(offset) };
+            let fresh = Header {
+                refs: AtomicUsize::new(1),
+                next: AtomicUsize::new(NONE),
+                offset,
+                class: index,
+                payload: Track::new(),
+            };
+            // SAFETY: the block is committed and aligned, and no holder has it.
+            unsafe { header.write(fresh) };
+            header
         } else {
-            // SAFETY: a block on a free list has a header, and only the pool reads it.
-            let free = unsafe { self.header(offset).as_ref() };
+            // SAFETY: a block on a free list has a header, and only the pool uses it.
+            let header = unsafe { self.header(class.free.get()) };
+            // SAFETY: as above.
+            let free = unsafe { header.as_ref() };
             class.free.set(free.next.load(Relaxed));
-            offset
+            free.refs.store(1, Relaxed);
+            free.payload.write();
+            header
         };
-        let header = self.header(offset);
-        let fresh = Header {
-            refs: AtomicUsize::new(0),
-            next: AtomicUsize::new(NONE),
-            len,
-            offset,
-        };
-        // SAFETY: the block is committed and aligned, and no other holder has it.
-        unsafe { header.write(fresh) };
         self.lent.set(self.lent.get() + 1);
-        Ok(Unique { header })
+        Ok(Unique { header, len })
     }
 
     /// Takes back the blocks that holders dropped, so that `alloc` can use them
-    /// again. The owner shard calls it from its loop.
+    /// again. `alloc` calls it when it has no free block; the owner shard may call it
+    /// from its loop to spread the cost.
     pub fn reclaim(&self) {
         let returned = &self.shared().returned;
         if returned.load(Relaxed) != NONE {
@@ -242,8 +267,13 @@ impl Pool {
         unsafe { self.region.as_ref() }
     }
 
-    fn header(&self, offset: usize) -> NonNull<Header> {
-        // SAFETY: each caller passes the offset of a block in the region.
+    /// The header of the block at `offset`.
+    ///
+    /// # Safety
+    ///
+    /// `offset` is the offset of a block in the region.
+    unsafe fn header(&self, offset: usize) -> NonNull<Header> {
+        // SAFETY: the caller keeps the result inside the region.
         unsafe { self.region.cast::<u8>().add(offset) }.cast()
     }
 
@@ -252,12 +282,11 @@ impl Pool {
         while offset != NONE {
             // SAFETY: a returned block has a header. Its last holder gave it up with
             // the store that the swap of `returned` read.
-            let header = unsafe { self.header(offset).as_ref() };
+            let header = unsafe { self.header(offset) };
+            // SAFETY: as above.
+            let header = unsafe { header.as_ref() };
             let next = header.next.load(Relaxed);
-            let class = self
-                .classes
-                .get((offset - HEADER) / self.span)
-                .expect("invariant: a block lies in the span of its class");
+            let class = &self.classes[header.class];
             header.next.store(class.free.get(), Relaxed);
             class.free.set(offset);
             self.lent.set(self.lent.get() - 1);
@@ -266,11 +295,23 @@ impl Pool {
     }
 }
 
+#[expect(clippy::missing_fields_in_debug, reason = "no pointer in the output")]
+impl fmt::Debug for Pool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Pool")
+            .field("budget", &self.budget)
+            .field("committed", &self.committed.get())
+            .field("lent", &self.lent.get())
+            .finish()
+    }
+}
+
 impl Drop for Pool {
     fn drop(&mut self) {
         let region = self.shared();
         self.take(region.returned.swap(CLOSED, Acquire));
         let lent = self.lent.get();
+        region.track.read();
         if region.owed.fetch_add(lent, AcqRel).wrapping_add(lent) == 0 {
             // SAFETY: the pool is gone and no holder has a block.
             unsafe { release(self.region) };
@@ -285,7 +326,9 @@ impl Drop for Pool {
 /// The pool is gone, each block is back, and no thread uses the region again.
 unsafe fn release(region: NonNull<Region>) {
     // SAFETY: the region is valid until `memory` drops.
-    let memory = unsafe { &raw mut (*region.as_ptr()).memory };
+    let shared = unsafe { region.as_ref() };
+    shared.track.write();
+    let memory = &raw const shared.memory;
     // SAFETY: the caller is the last user, so the box is read one time.
     drop(unsafe { memory.read() });
 }
@@ -304,6 +347,7 @@ unsafe fn give_back(header: NonNull<Header>) {
     let region = unsafe { header.cast::<u8>().sub(offset) }.cast::<Region>();
     // SAFETY: the region outlives each block that is not back.
     let shared = unsafe { region.as_ref() };
+    shared.track.read();
     let mut head = shared.returned.load(Relaxed);
     loop {
         if head == CLOSED {
@@ -324,18 +368,20 @@ unsafe fn give_back(header: NonNull<Header>) {
     }
 }
 
-/// The payload of a block.
-fn payload(header: NonNull<Header>) -> (NonNull<u8>, usize) {
-    // SAFETY: each `Unique` and `Block` holds a valid header.
-    let len = unsafe { header.as_ref() }.len;
+/// The first byte of the payload of a block.
+///
+/// # Safety
+///
+/// `header` is a block from `Pool::alloc` that a holder still has.
+unsafe fn payload(header: NonNull<Header>) -> NonNull<u8> {
     // SAFETY: the payload starts `HEADER` bytes after the header, in the same block.
-    (unsafe { header.cast::<u8>().add(HEADER) }, len)
+    unsafe { header.cast::<u8>().add(HEADER) }
 }
 
 /// A block with one owner, which may write to it.
-#[derive(Debug)]
 pub struct Unique {
     header: NonNull<Header>,
+    len: usize,
 }
 
 // SAFETY: a `Unique` is the one holder of its block, and the return path is atomic.
@@ -347,10 +393,26 @@ impl Unique {
     /// Makes the block immutable and shareable. It keeps the same bytes.
     #[must_use]
     pub fn freeze(self) -> Block {
-        let header = ManuallyDrop::new(self).header;
+        let unique = ManuallyDrop::new(self);
+        Block {
+            header: unique.header,
+            len: unique.len,
+        }
+    }
+
+    fn block(&self) -> &Header {
         // SAFETY: the header is valid while a holder has the block.
-        unsafe { header.as_ref() }.refs.store(1, Relaxed);
-        Block { header }
+        unsafe { self.header.as_ref() }
+    }
+}
+
+#[expect(clippy::missing_fields_in_debug, reason = "no pointer in the output")]
+impl fmt::Debug for Unique {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Unique")
+            .field("offset", &self.block().offset)
+            .field("len", &self.len)
+            .finish()
     }
 }
 
@@ -358,18 +420,22 @@ impl Deref for Unique {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        let (start, len) = payload(self.header);
+        self.block().payload.read();
+        // SAFETY: `self` holds the block.
+        let start = unsafe { payload(self.header) };
         // SAFETY: the payload is committed, so it is initialized, and no one writes
         // to it while `self` is borrowed.
-        unsafe { slice::from_raw_parts(start.as_ptr(), len) }
+        unsafe { slice::from_raw_parts(start.as_ptr(), self.len) }
     }
 }
 
 impl DerefMut for Unique {
     fn deref_mut(&mut self) -> &mut [u8] {
-        let (start, len) = payload(self.header);
+        self.block().payload.write();
+        // SAFETY: `self` holds the block.
+        let start = unsafe { payload(self.header) };
         // SAFETY: the payload is committed, and `self` is its one holder.
-        unsafe { slice::from_raw_parts_mut(start.as_ptr(), len) }
+        unsafe { slice::from_raw_parts_mut(start.as_ptr(), self.len) }
     }
 }
 
@@ -381,9 +447,9 @@ impl Drop for Unique {
 }
 
 /// An immutable block shared by reference count. Cloning it adds one reference.
-#[derive(Debug)]
 pub struct Block {
     header: NonNull<Header>,
+    len: usize,
 }
 
 // SAFETY: the bytes are immutable, and the count and the return path are atomic.
@@ -392,18 +458,29 @@ unsafe impl Send for Block {}
 unsafe impl Sync for Block {}
 
 impl Block {
-    fn refs(&self) -> &AtomicUsize {
+    fn block(&self) -> &Header {
         // SAFETY: the header is valid while a holder has the block.
-        &unsafe { self.header.as_ref() }.refs
+        unsafe { self.header.as_ref() }
+    }
+}
+
+#[expect(clippy::missing_fields_in_debug, reason = "no pointer in the output")]
+impl fmt::Debug for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Block")
+            .field("offset", &self.block().offset)
+            .field("len", &self.len)
+            .finish()
     }
 }
 
 impl Clone for Block {
     fn clone(&self) -> Self {
-        let before = self.refs().fetch_add(1, Relaxed);
+        let before = self.block().refs.fetch_add(1, Relaxed);
         assert!(before < usize::MAX / 2, "a block has too many holders");
         Self {
             header: self.header,
+            len: self.len,
         }
     }
 }
@@ -412,15 +489,17 @@ impl Deref for Block {
     type Target = [u8];
 
     fn deref(&self) -> &[u8] {
-        let (start, len) = payload(self.header);
+        self.block().payload.read();
+        // SAFETY: `self` holds the block.
+        let start = unsafe { payload(self.header) };
         // SAFETY: the payload is committed, and no one writes to a frozen block.
-        unsafe { slice::from_raw_parts(start.as_ptr(), len) }
+        unsafe { slice::from_raw_parts(start.as_ptr(), self.len) }
     }
 }
 
 impl Drop for Block {
     fn drop(&mut self) {
-        if self.refs().fetch_sub(1, AcqRel) == 1 {
+        if self.block().refs.fetch_sub(1, AcqRel) == 1 {
             // SAFETY: the count reached 0, so this was the last holder.
             unsafe { give_back(self.header) };
         }
@@ -430,12 +509,19 @@ impl Drop for Block {
 /// An error from a [`Pool`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The pool's budget has no room for the request.
+    /// The pool's budget has no room for the request now.
     Exhausted {
         /// Bytes asked for.
         requested: usize,
-        /// Bytes still free in the budget.
+        /// Bytes of the budget not committed. A block of `requested` bytes needs more.
         available: usize,
+    },
+    /// No block of the pool is large enough. The request can never succeed.
+    TooLarge {
+        /// Bytes asked for.
+        requested: usize,
+        /// The most bytes one block of the pool holds.
+        largest: usize,
     },
 }
 
@@ -448,6 +534,10 @@ impl fmt::Display for Error {
             } => write!(
                 f,
                 "pool is full: asked for {requested} bytes, {available} bytes free"
+            ),
+            Self::TooLarge { requested, largest } => write!(
+                f,
+                "block of {requested} bytes is above the largest block of {largest} bytes"
             ),
         }
     }
@@ -528,6 +618,29 @@ mod tests {
         }
     }
 
+    fn too_large(requested: usize, largest: usize) -> Error {
+        Error::TooLarge { requested, largest }
+    }
+
+    /// Heap memory with a `base` that is off by 8 bytes.
+    struct Misaligned(Heap);
+
+    // SAFETY: the range is 8 bytes shorter than the heap, and inside it.
+    unsafe impl Memory for Misaligned {
+        fn base(&self) -> NonNull<u8> {
+            // SAFETY: the heap has more than 8 bytes.
+            unsafe { self.0.base().add(8) }
+        }
+
+        fn len(&self) -> usize {
+            self.0.len() - 8
+        }
+
+        fn commit(&self, _offset: usize, _len: usize) {}
+
+        fn purge(&self, _offset: usize, _len: usize) {}
+    }
+
     mod reservation {
         use super::*;
 
@@ -555,6 +668,36 @@ mod tests {
         #[should_panic(expected = "pool needs 192 bytes of memory, got 128")]
         fn panics_when_the_memory_is_too_short() {
             drop(Pool::new(Config { budget: 128 }, Heap::new(128)));
+        }
+
+        #[test]
+        #[should_panic(expected = "pool memory must be aligned to 64 bytes")]
+        fn panics_when_the_memory_is_misaligned() {
+            let memory = Misaligned(Heap::new(256));
+            drop(Pool::new(Config { budget: 128 }, memory));
+        }
+    }
+
+    mod heap {
+        use super::*;
+
+        #[test]
+        #[should_panic(expected = "heap memory must be more than 0 bytes")]
+        fn panics_when_empty() {
+            drop(Heap::new(0));
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "heap memory of 18446744073709551615 bytes is too large"
+        )]
+        fn panics_when_too_large() {
+            drop(Heap::new(usize::MAX));
+        }
+
+        #[test]
+        fn prints_its_length() {
+            assert_eq!(format!("{:?}", Heap::new(64)), "Heap { len: 64 }");
         }
     }
 
@@ -608,33 +751,77 @@ mod tests {
         }
 
         #[test]
-        fn fails_when_the_length_is_above_each_class() {
+        fn fails_for_good_when_the_length_is_above_each_class() {
             let pool = create_pool(256);
-            assert_eq!(pool.alloc(129).err(), Some(exhausted(129, 256)));
+            assert_eq!(pool.largest(), 128);
+            let error = pool.alloc(129).expect_err("129 bytes do not fit in 128");
+            assert_eq!(error, too_large(129, 128));
+            assert_eq!(
+                error.to_string(),
+                "block of 129 bytes is above the largest block of 128 bytes"
+            );
             assert_eq!(
                 pool.alloc(usize::MAX).err(),
-                Some(exhausted(usize::MAX, 256))
+                Some(too_large(usize::MAX, 128))
             );
         }
 
         #[test]
-        fn fails_when_the_budget_is_below_one_block() {
+        fn fails_for_good_when_the_budget_is_below_one_block() {
             let pool = create_pool(127);
-            assert_eq!(pool.alloc(0).err(), Some(exhausted(0, 127)));
+            assert_eq!(pool.largest(), 0);
+            assert_eq!(pool.alloc(0).err(), Some(too_large(0, 0)));
         }
 
         #[test]
-        fn uses_a_dropped_unique_block_again_after_reclaim() {
+        fn uses_a_dropped_block_again_with_its_old_bytes() {
             let pool = create_pool(128);
-            let first = pool.alloc(64).expect("the budget has room");
+            let mut first = pool.alloc(64).expect("the budget has room");
+            first.fill(0xAA);
             let address = first.as_ptr();
             assert_eq!(pool.alloc(64).err(), Some(exhausted(64, 0)));
             drop(first);
-            assert_eq!(pool.alloc(64).err(), Some(exhausted(64, 0)));
-            pool.reclaim();
-            let second = pool.alloc(1).expect("the block is back");
+            let second = pool.alloc(4).expect("the block is back");
             assert_eq!(second.as_ptr(), address);
+            assert_eq!(&*second, &[0xAA; 4]);
             assert_eq!(pool.committed(), 128);
+        }
+
+        #[test]
+        fn keeps_the_budget_of_a_class_with_that_class() {
+            let pool = create_pool(256);
+            drop(pool.alloc(64).expect("the budget has room"));
+            assert_eq!(pool.alloc(128).err(), Some(exhausted(128, 128)));
+        }
+    }
+
+    mod debug {
+        use super::*;
+
+        #[test]
+        fn prints_offsets_and_counts_and_no_address() {
+            let pool = create_pool(256);
+            let unique = pool.alloc(3).expect("the budget has room");
+            assert_eq!(format!("{unique:?}"), "Unique { offset: 64, len: 3 }");
+            let block = unique.freeze();
+            assert_eq!(format!("{block:?}"), "Block { offset: 64, len: 3 }");
+            assert_eq!(
+                format!("{pool:?}"),
+                "Pool { budget: 256, committed: 128, lent: 1 }"
+            );
+        }
+    }
+
+    mod clone {
+        use super::*;
+
+        #[test]
+        #[should_panic(expected = "a block has too many holders")]
+        fn panics_when_the_holders_do_not_fit_in_the_count() {
+            let pool = create_pool(256);
+            let block = pool.alloc(1).expect("the budget has room").freeze();
+            block.block().refs.store(usize::MAX / 2, Relaxed);
+            let _clone = ManuallyDrop::new(block.clone());
         }
     }
 
@@ -661,7 +848,6 @@ mod tests {
             let pool = create_pool(128);
             let rounds = if cfg!(miri) { 20 } else { 2000 };
             for fill in (0..=u8::MAX).cycle().take(rounds) {
-                pool.reclaim();
                 let mut unique = pool.alloc(64).expect("the block is back");
                 unique.fill(fill);
                 let block = unique.freeze();
@@ -672,13 +858,38 @@ mod tests {
                     }
                     std::mem::drop(block);
                 });
+                let again = pool.alloc(64).expect("the block is back");
                 assert_eq!(pool.alloc(64).err(), Some(exhausted(64, 0)));
+                assert_eq!(pool.committed(), 128);
+                std::mem::drop(again);
             }
-            pool.reclaim();
-            let again = pool.alloc(64).expect("the block is back");
-            assert_eq!(pool.alloc(64).err(), Some(exhausted(64, 0)));
-            assert_eq!(pool.committed(), 128);
-            std::mem::drop(again);
+        }
+
+        #[test]
+        #[expect(clippy::disallowed_methods, reason = "a test needs a thread to join")]
+        fn hands_a_block_over_to_the_next_writer_with_no_join() {
+            let pool = create_pool(128);
+            let rounds = if cfg!(miri) { 20 } else { 1000 };
+            for fill in (1..=u8::MAX).cycle().take(rounds) {
+                let mut unique = pool.alloc(64).expect("the block is back");
+                unique.fill(fill);
+                let block = unique.freeze();
+                let clone = block.clone();
+                let reader = thread::spawn(move || {
+                    let seen = clone[0];
+                    std::mem::drop(clone);
+                    seen
+                });
+                std::mem::drop(block);
+                let mut next = loop {
+                    if let Ok(next) = pool.alloc(64) {
+                        break next;
+                    }
+                    thread::yield_now();
+                };
+                next.fill(0);
+                assert_eq!(reader.join().expect("the reader read"), fill);
+            }
         }
 
         #[test]
@@ -738,7 +949,6 @@ mod model {
             for dropper in droppers {
                 dropper.join().expect("the dropper does not panic");
             }
-            pool.reclaim();
             let blocks = [pool.alloc(64), pool.alloc(64), pool.alloc(64)];
             assert!(
                 blocks[0].is_ok() && blocks[1].is_ok(),
@@ -758,13 +968,37 @@ mod model {
             let dropper = thread::spawn(move || drop(second));
             pool.reclaim();
             dropper.join().expect("the dropper does not panic");
-            pool.reclaim();
             let blocks = [pool.alloc(64), pool.alloc(64), pool.alloc(64)];
             assert!(
                 blocks[0].is_ok() && blocks[1].is_ok(),
                 "both blocks are back"
             );
             assert!(blocks[2].is_err(), "no block came back two times");
+        });
+    }
+
+    #[test]
+    fn hands_the_payload_over_when_a_clone_races_the_last_drop() {
+        loom::model(|| {
+            let pool = create_pool(128);
+            let mut unique = pool.alloc(64).expect("the budget has room");
+            unique[0] = 1;
+            let block = unique.freeze();
+            let clone = block.clone();
+            let reader = thread::spawn(move || {
+                let seen = clone[0];
+                let again = clone.clone();
+                drop(clone);
+                let seen_again = again[0];
+                drop(again);
+                (seen, seen_again)
+            });
+            drop(block);
+            if let Ok(mut next) = pool.alloc(64) {
+                next[0] = 2;
+            }
+            let seen = reader.join().expect("the reader read");
+            assert_eq!(seen, (1, 1), "the reader saw the old bytes");
         });
     }
 
