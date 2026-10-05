@@ -9,8 +9,9 @@ oracle.
 | File | Holds |
 | --- | --- |
 | `texts/<name>.hcl` | One HCL text, exact UTF-8 bytes. `.gitattributes` keeps Git from changing a line end. |
-| `main.go`, `go.mod`, `go.sum` | The program that writes `verdicts.txt`. `go.mod` pins the HCL version. |
+| `main.go`, `values.go`, `go.mod`, `go.sum` | The program that writes `verdicts.txt` and `values.txt`. `go.mod` pins the HCL version. |
 | `verdicts.txt` | Made by the program. A line for each text: `<name> refused`, `<name> accepted`, or `<name> accepted <code>...`. The first line names the HCL version. |
+| `values.txt` | Made by the program. A line for each text that is accepted with no code: `<name> <values>`, the values HCL reads from it. The first line names the HCL version. |
 | `differences.txt` | A line for each text where `read` differs from HCL on purpose: `<name> <outcome> <decision>`. The outcome is `ok` or one diagnostic code. |
 | `verdicts.rs` | The test. |
 
@@ -22,6 +23,9 @@ oracle.
   has one of those codes.
 - For a text in `differences.txt`, `read` gives the outcome there, and that outcome is
   not what the verdict asks. So a difference that stops must be removed.
+- `values.txt` has a line for each text that is accepted with no code, and no other
+  line. For each such text that is not in `differences.txt` and reads, the Document
+  has the values in `values.txt`.
 - For each text that reads, `write` gives the bytes of a text that is accepted with no
   code and is not in `differences.txt`, and those bytes read as the same Document.
 
@@ -47,6 +51,24 @@ with its type and position. Add it to the table.
 An object key that is an expression, such as `{ f() = 1 }`, is not in the table:
 `read` has no form for it yet (#506). HCL refuses some texts only when it evaluates
 them, such as `{ a.b = 1 }`. The program only parses, so their verdict is "accepted".
+
+## The values
+
+`values.txt` and the test write values in one form:
+
+- A body is `{`, then its attributes by key as `"key" = value`, then its blocks in
+  order as `"keyword" "label"... body`, joined by `, `, then `}`.
+- A number written with digits only is its exact integer, such as `-7`.
+- Any other number is `f` and the hex bits of the `f64` nearest to the written
+  number, such as `f3ff8000000000000` for `1.5`. Zero has no sign, and a number
+  past the largest `f64` is infinity.
+- A string, a key, a label, a keyword, or a function name is in `"`, with `\` before
+  `"` and `\`. Printable ASCII is as it is, and each other character is `\u{hex}`.
+- A reference is `$` and its name, such as `$a.b`. A call is `"f"(value, ...)`, a
+  list is `[value, ...]`, and a map is `{"key" = value, ...}`, by key.
+
+HCL makes each object key a string: the number key `007` is `"7"`. A value outside
+this form stops the program with its type and position.
 
 ## Add a text
 

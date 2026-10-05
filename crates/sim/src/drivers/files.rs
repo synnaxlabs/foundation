@@ -8,6 +8,7 @@ use block::{Block, Unique};
 use env::files::{Mode, Request};
 
 use super::Node;
+use crate::disk::Handle;
 use crate::files::{Call, Done, Ended, Held};
 use crate::state::lock;
 
@@ -19,7 +20,10 @@ impl Node {
     /// Outside a thread that the sim started, and on a thread of another node.
     fn submit(&self, path: &Path, call: Call, held: Option<Held>) -> Wait {
         self.running("a file call");
-        let key = lock(&self.shared).submit(self.node, path, call, held);
+        let mut state = lock(&self.shared);
+        let now = state.now();
+        let key = state.files().submit(now, self.node, path, call, held);
+        drop(state);
         Wait {
             node: self.clone(),
             key,
@@ -46,7 +50,7 @@ impl env::files::Driver for Node {
         mode: Mode,
     ) -> Request<'a, Box<dyn env::files::Descriptor>> {
         self.request(path, Call::Open(mode), |done| {
-            let Done::Open { inode, len } = done else {
+            let Done::Open { handle, len } = done else {
                 unreachable!("invariant: an open gives a file")
             };
             let node = self.clone();
@@ -54,7 +58,7 @@ impl env::files::Driver for Node {
             let descriptor: Box<dyn env::files::Descriptor> = Box::new(Descriptor {
                 node,
                 path,
-                inode,
+                handle,
                 len,
             });
             descriptor
@@ -127,7 +131,7 @@ struct Descriptor {
     node: Node,
     /// The path that opened it.
     path: PathBuf,
-    inode: u64,
+    handle: Handle,
     len: u64,
 }
 
@@ -138,9 +142,8 @@ impl env::files::Descriptor for Descriptor {
 
     fn write_at<'a>(&'a self, offset: u64, parts: &'a [Block]) -> Request<'a, ()> {
         let bytes = parts.iter().flat_map(|part| part.iter().copied()).collect();
-        let inode = self.inode;
         let call = Call::Write {
-            inode,
+            handle: self.handle,
             offset,
             bytes,
         };
@@ -151,8 +154,11 @@ impl env::files::Descriptor for Descriptor {
 
     fn read_at(&self, offset: u64, into: Unique) -> Request<'_, Unique> {
         let len = u64::try_from(into.len()).expect("invariant: usize fits u64");
-        let inode = self.inode;
-        let call = Call::Read { inode, offset, len };
+        let call = Call::Read {
+            handle: self.handle,
+            offset,
+            len,
+        };
         let wait = self.node.submit(&self.path, call, Some(Held::Into(into)));
         Box::pin(async move {
             let Ended { result, held } = wait.await;
@@ -166,7 +172,9 @@ impl env::files::Descriptor for Descriptor {
     }
 
     fn sync(&self) -> Request<'_, ()> {
-        let call = Call::Sync { inode: self.inode };
+        let call = Call::Sync {
+            handle: self.handle,
+        };
         self.node.request(&self.path, call, drop)
     }
 }
@@ -175,6 +183,6 @@ impl Drop for Descriptor {
     fn drop(&mut self) {
         lock(&self.node.shared)
             .files()
-            .close(self.node.node, self.inode);
+            .close(self.node.node, self.handle);
     }
 }

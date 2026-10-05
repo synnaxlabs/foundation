@@ -324,6 +324,21 @@ fn a_write_in_flight_at_a_crash_keeps_any_subset_of_its_sectors() {
 }
 
 #[test]
+fn a_crash_frees_each_file_that_a_write_handle_held() {
+    for (crash, value) in [Crash::Process, Crash::Power]
+        .into_iter()
+        .flat_map(|crash| (0..64).map(move |value| (crash, value)))
+    {
+        let (mut sim, node) = disk(value);
+        crash_after(&mut sim, &node, crash, |node| write_in_flight(node, false));
+        let open = on(&mut sim, &node, |node| async move {
+            node.files().open(Path::new("a"), Mode::Write).await.err()
+        });
+        assert_eq!(open, None, "{crash:?}, value {value}");
+    }
+}
+
+#[test]
 fn a_write_that_a_fault_fails_leaves_no_bytes_at_a_crash() {
     for crash in [Crash::Process, Crash::Power] {
         let outcomes: BTreeSet<Vec<u8>> =
@@ -503,4 +518,104 @@ fn a_power_cut_restarts_the_monotonic_clock_and_the_wall_runs_on() {
     let ran = (config.monotonic + BEFORE, config.wall + BEFORE);
     assert_eq!(clocks(Crash::Process), ran);
     assert_eq!(clocks(Crash::Power), (config.monotonic, ran.1));
+}
+
+#[test]
+fn a_process_crash_frees_a_file_that_a_write_open_in_flight_opens() {
+    for value in 0..16 {
+        let (mut sim, node) = disk(value);
+        crash_after(&mut sim, &node, Crash::Process, |node| async move {
+            drop(create_synced(&node).await);
+            until_crash(&node).await;
+            hang(node.files().open(Path::new("a"), Mode::Write)).await;
+        });
+        let open = on(&mut sim, &node, |node| async move {
+            node.files().open(Path::new("a"), Mode::Write).await.err()
+        });
+        assert_eq!(open, None, "value {value}");
+    }
+}
+
+#[test]
+fn a_process_crash_applies_a_create_dir_in_flight() {
+    for value in 0..16 {
+        let (mut sim, node) = disk(value);
+        crash_after(&mut sim, &node, Crash::Process, |node| async move {
+            until_crash(&node).await;
+            hang(node.files().create_dir(Path::new("d"))).await;
+        });
+        let names = on(&mut sim, &node, |node| async move {
+            node.files().list(Path::new("")).await.unwrap()
+        });
+        assert_eq!(names, [PathBuf::from("d")], "value {value}");
+    }
+}
+
+/// The names in the data directory after a process crash with a remove of the
+/// synced file `a` in flight, and then a create of `a` in flight.
+fn remove_then_create_at_a_crash(value: u64) -> Vec<PathBuf> {
+    let (mut sim, node) = disk(value);
+    crash_after(&mut sim, &node, Crash::Process, |node| async move {
+        drop(create_synced(&node).await);
+        until_crash(&node).await;
+        let files = node.files();
+        let mut remove = pin!(files.remove(Path::new("a")));
+        let mode = Mode::Create { len: 1_024 };
+        let mut create = pin!(files.open(Path::new("a"), mode));
+        poll_fn(|cx| {
+            assert!(remove.as_mut().poll(cx).is_pending());
+            assert!(create.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        pending::<()>().await;
+    });
+    on(&mut sim, &node, |node| async move {
+        node.clock().sleep(Span::MILLISECOND).await;
+        node.files().list(Path::new("")).await.unwrap()
+    })
+}
+
+#[test]
+fn calls_in_flight_at_a_process_crash_end_in_any_order() {
+    let outcomes: BTreeSet<Vec<PathBuf>> =
+        (0..64).map(remove_then_create_at_a_crash).collect();
+    let both = BTreeSet::from([vec![], vec![PathBuf::from("a")]]);
+    assert_eq!(outcomes, both);
+}
+
+/// The names in the data directory after a process crash with a create of file `a`
+/// in flight and then a `sync_dir` of its directory in flight, a restart, and a
+/// power cut.
+fn create_then_sync_dir_at_a_crash(value: u64) -> Vec<PathBuf> {
+    let (mut sim, node) = disk(value);
+    crash_after(&mut sim, &node, Crash::Process, |node| async move {
+        until_crash(&node).await;
+        let files = node.files();
+        let mode = Mode::Create { len: 1_024 };
+        let mut create = pin!(files.open(Path::new("a"), mode));
+        let mut sync = pin!(files.sync_dir(Path::new("")));
+        poll_fn(|cx| {
+            assert!(create.as_mut().poll(cx).is_pending());
+            assert!(sync.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        pending::<()>().await;
+    });
+    on(&mut sim, &node, |node| async move {
+        node.clock().sleep(Span::MILLISECOND).await;
+    });
+    sim.crash(&node, Crash::Power);
+    on(&mut sim, &node, |node| async move {
+        node.files().list(Path::new("")).await.unwrap()
+    })
+}
+
+#[test]
+fn a_sync_dir_in_flight_at_a_process_crash_may_miss_a_create_in_flight() {
+    let outcomes: BTreeSet<Vec<PathBuf>> =
+        (0..64).map(create_then_sync_dir_at_a_crash).collect();
+    let both = BTreeSet::from([vec![], vec![PathBuf::from("a")]]);
+    assert_eq!(outcomes, both);
 }

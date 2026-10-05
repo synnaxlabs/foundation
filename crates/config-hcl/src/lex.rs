@@ -17,7 +17,8 @@ pub(crate) enum Kind {
     /// A word with `.` or `@`, which only a reference can be: identifier parts, `@`,
     /// and dots, which `types::name` checks.
     Reference,
-    /// Digits, then an optional fraction and an optional exponent.
+    /// A digit, then digits, dots, and exponents, as HCL scans a number. It can be
+    /// text that is not a number, such as `1.2.3`.
     Number,
     /// A quoted string, with its escapes read.
     String(Box<str>),
@@ -289,31 +290,29 @@ impl<'a> Tokens<'a> {
         }
     }
 
-    /// Moves past the rest of a number after its first digit.
+    /// Moves past the rest of a number after its first digit: digits, dots, and
+    /// exponents such as `e5` or `E-5`, up to the last that is not a dot.
     fn number(&mut self) {
         let bytes = self.rest.as_bytes();
-        let digits = |from: usize| {
-            let run = bytes.get(from..).map_or(0, |rest| {
-                rest.iter().take_while(|b| b.is_ascii_digit()).count()
-            });
-            from.saturating_add(run)
-        };
-        let mut len = digits(0);
-        let fraction = len.saturating_add(1);
-        if bytes.get(len) == Some(&b'.') && digits(fraction) > fraction {
-            len = digits(fraction);
-        }
-        if matches!(bytes.get(len), Some(b'e' | b'E')) {
-            let sign = len.saturating_add(1);
-            let start = sign.saturating_add(usize::from(matches!(
-                bytes.get(sign),
-                Some(b'+' | b'-')
-            )));
-            if digits(start) > start {
-                len = digits(start);
+        let (mut at, mut end) = (0, 0);
+        // Each pass moves past a part or returns.
+        for _ in 0..=bytes.len() {
+            let rest = bytes.get(at..).unwrap_or_default();
+            let len = match rest {
+                [b'0'..=b'9' | b'.', ..] => 1,
+                [b'e' | b'E', b'0'..=b'9', ..] => 2,
+                [b'e' | b'E', b'+' | b'-', b'0'..=b'9', ..] => 3,
+                _ => {
+                    self.skip_bytes(end);
+                    return;
+                }
+            };
+            at = at.saturating_add(len);
+            if rest.first() != Some(&b'.') {
+                end = at;
             }
         }
-        self.skip_bytes(len);
+        unreachable!("invariant: each pass moves past a part")
     }
 
     /// Moves past the rest of a word after its first character, `first`.
@@ -614,27 +613,63 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ends_a_line_comment_before_its_line_end() {
-        let text = "# a\r\n// b\r\n";
+    /// The kind and text of each token of `text` before the end, through the first
+    /// error.
+    fn tokens(text: &str) -> Vec<(Kind, &str)> {
         let mut tokens = Tokens::new(Source(0), text).unwrap();
         let mut found = Vec::new();
         for _ in 0..=text.len() {
             let token = tokens.next();
-            let end = token.kind == Kind::End;
-            found.push((token.kind, token.text));
-            if end {
-                break;
+            match token.kind {
+                Kind::End => return found,
+                Kind::Error(_) => {
+                    found.push((token.kind, token.text));
+                    return found;
+                }
+                kind => found.push((kind, token.text)),
             }
         }
-        assert_eq!(
-            found,
-            [
-                (Kind::Newline, "\r\n"),
-                (Kind::Newline, "\r\n"),
-                (Kind::End, "")
-            ]
-        );
+        panic!("more tokens than bytes in {text:?}")
+    }
+
+    #[test]
+    fn scans_a_number_as_hcl_does() {
+        use Kind::{Dot, Ellipsis, Identifier, Number, Operator};
+        let cases: [(&str, &[(Kind, &str)]); 16] = [
+            ("1.5e3", &[(Number, "1.5e3")]),
+            ("1E5", &[(Number, "1E5")]),
+            ("1.e5", &[(Number, "1.e5")]),
+            ("1.E+5", &[(Number, "1.E+5")]),
+            ("0.e-5", &[(Number, "0.e-5")]),
+            ("1.2.3", &[(Number, "1.2.3")]),
+            ("1e5e5", &[(Number, "1e5e5")]),
+            ("1..5", &[(Number, "1..5")]),
+            ("1.e5.e5", &[(Number, "1.e5.e5")]),
+            ("1.", &[(Number, "1"), (Dot, ".")]),
+            ("1e5.", &[(Number, "1e5"), (Dot, ".")]),
+            ("1...", &[(Number, "1"), (Ellipsis, "...")]),
+            ("1e", &[(Number, "1"), (Identifier, "e")]),
+            ("1.e", &[(Number, "1"), (Dot, "."), (Identifier, "e")]),
+            (
+                "1.e+",
+                &[
+                    (Number, "1"),
+                    (Dot, "."),
+                    (Identifier, "e"),
+                    (Operator, "+"),
+                ],
+            ),
+            ("1.ex", &[(Number, "1"), (Dot, "."), (Identifier, "ex")]),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(tokens(text), expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn ends_a_line_comment_before_its_line_end() {
+        let expected = [(Kind::Newline, "\r\n"), (Kind::Newline, "\r\n")];
+        assert_eq!(tokens("# a\r\n// b\r\n"), expected);
     }
 
     #[test]
