@@ -39,8 +39,8 @@ pub(crate) fn addresses(node: usize) -> [IpAddr; 2] {
     let Some(host) = host else {
         panic!("node {node} has no address: 10.0.0.0/8 holds 16,777,214 nodes")
     };
-    let v6 = Ipv6Addr::from_bits(V6 | u128::from(host));
-    [IpAddr::V4(Ipv4Addr::from_bits(V4 | host)), IpAddr::V6(v6)]
+    let v6 = Ipv6Addr::from_bits(V6 + u128::from(host));
+    [IpAddr::V4(Ipv4Addr::from_bits(V4 + host)), IpAddr::V6(v6)]
 }
 
 /// The node whose address is `ip`, if `ip` is an address that a node can have.
@@ -134,7 +134,7 @@ impl Socket {
             stride,
         };
         let mut count = 1;
-        let mut ended = stride == 0 || stride < first.contents.len();
+        let mut ended = false;
         while let Some(next) = self.queue.front().filter(|_| !ended) {
             let len = next.contents.len();
             let joins = next.source == first.source

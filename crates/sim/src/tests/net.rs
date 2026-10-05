@@ -316,18 +316,22 @@ fn a_send_to_an_address_of_no_node_succeeds() {
     sent(move |_| transmit(nowhere, b"lost"), Ok(()));
 }
 
+/// A socket on `port` of the IPv4 address of `node`, with a receive queue of
+/// `bytes`.
+fn queue(node: &node::Node, port: u16, bytes: usize) -> (Sender, Receiver) {
+    let config = Udp {
+        local: at(node, port),
+        send_buffer_bytes: 1 << 20,
+        recv_buffer_bytes: bytes,
+    };
+    node.net().udp(&config).unwrap()
+}
+
 #[test]
 fn a_full_receive_queue_drops_datagrams() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (sender, _a) = udp(&a, 4433);
-    let (_b, receiver) = b
-        .net()
-        .udp(&Udp {
-            local: at(&b, 4433),
-            send_buffer_bytes: 1 << 20,
-            recv_buffer_bytes: 10,
-        })
-        .unwrap();
+    let (_b, receiver) = queue(&b, 4433, 10);
     let _send = send(&a, sender, at(&b, 4433), vec![vec![7; 4]; 4]);
     sim.run_for(Span::SECOND).unwrap();
     let log = Log::default();
@@ -337,18 +341,18 @@ fn a_full_receive_queue_drops_datagrams() {
 }
 
 /// A seed under which the first socket that `b` binds receives `batch` datagrams
-/// per buffer, and the first that `a` binds sends at least 8.
+/// per buffer, and the first that `a` binds sends 64.
 fn batched(batch: usize) -> u64 {
     let fits = |seed| {
         let (_sim, a, b) = pair(seed, link::Config::default());
         let (sender, _a) = udp(&a, 4433);
         let (_b, receiver) = udp(&b, 4433);
-        sender.batch_max().get() >= 8 && receiver.batch_max().get() == batch
+        sender.batch_max().get() == 64 && receiver.batch_max().get() == batch
     };
     (0..u64::MAX).find(|&seed| fits(seed)).unwrap()
 }
 
-/// The `(len, stride)` of each batch that `b` receives when `a` sends 250 bytes in
+/// The `(len, stride)` of each batch that `b` receives when `a` sends 1,050 bytes in
 /// segments of 100, then 100 bytes, under a receive batch max of `batch`.
 fn joined(batch: usize) -> Vec<(usize, usize)> {
     let (mut sim, a, b) = pair(batched(batch), link::Config::default());
@@ -358,7 +362,7 @@ fn joined(batch: usize) -> Vec<(usize, usize)> {
     let _receive = receive(&b, receiver, &log);
     let to = at(&b, 4433);
     let _send = a.shards().start(shard("send"), move |_| async move {
-        let contents: Vec<u8> = (0..250).map(|n| u8::try_from(n).unwrap()).collect();
+        let contents: Vec<u8> = (0..=u8::MAX).cycle().take(1_050).collect();
         let segmented = Transmit {
             segment: NonZeroUsize::new(100),
             ..transmit(to, &contents)
@@ -370,7 +374,7 @@ fn joined(batch: usize) -> Vec<(usize, usize)> {
         poll_fn(|cx| sender.poll_send(cx, &single)).await.unwrap();
     });
     sim.run_for(Span::SECOND).unwrap();
-    let mut bytes: Vec<u8> = (0..250).map(|n| u8::try_from(n).unwrap()).collect();
+    let mut bytes: Vec<u8> = (0..=u8::MAX).cycle().take(1_050).collect();
     bytes.extend([9; 100]);
     assert_eq!(datagrams(&log).concat(), bytes);
     let log = log.lock().unwrap();
@@ -381,10 +385,45 @@ fn joined(batch: usize) -> Vec<(usize, usize)> {
 
 #[test]
 fn a_receive_joins_datagrams_of_one_source_and_size_up_to_its_batch_max() {
-    assert_eq!(joined(64), [(250, 100), (100, 100)]);
-    assert_eq!(joined(8), [(250, 100), (100, 100)]);
-    let single = [(100, 100), (100, 100), (50, 50), (100, 100)];
+    assert_eq!(joined(64), [(1_050, 100), (100, 100)]);
+    assert_eq!(joined(8), [(800, 100), (250, 100), (100, 100)]);
+    let mut single = vec![(100, 100); 10];
+    single.extend([(50, 50), (100, 100)]);
     assert_eq!(joined(1), single);
+}
+
+#[test]
+fn a_receive_joins_only_the_datagrams_that_fit_its_buffer() {
+    let (mut sim, a, b) = pair(batched(64), link::Config::default());
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, mut receiver) = udp(&b, 4433);
+    let _send = send(&a, sender, at(&b, 4433), vec![vec![1; 100]; 3]);
+    sim.run_for(Span::SECOND).unwrap();
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&batches);
+    let _receive = b.shards().start(shard("receive"), move |_| async move {
+        for _ in 0..2 {
+            let (meta, _) = recv(&mut receiver, 250).await;
+            log.lock().unwrap().push((meta.len, meta.stride));
+        }
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(*batches.lock().unwrap(), [(200, 100), (100, 100)]);
+}
+
+#[test]
+fn a_receive_frees_its_bytes_in_the_queue() {
+    let (mut sim, a, b) = pair(batched(64), link::Config::default());
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = queue(&b, 4433, 8);
+    let log = Log::default();
+    let _receive = receive(&b, receiver, &log);
+    let _first = send(&a, sender.clone(), at(&b, 4433), vec![vec![1; 4]; 2]);
+    sim.run_for(Span::SECOND).unwrap();
+    let _second = send(&a, sender, at(&b, 4433), vec![vec![2; 4]; 2]);
+    sim.run_for(Span::SECOND).unwrap();
+    let sent = [vec![1; 4], vec![1; 4], vec![2; 4], vec![2; 4]];
+    assert_eq!(datagrams(&log), sent);
 }
 
 #[test]

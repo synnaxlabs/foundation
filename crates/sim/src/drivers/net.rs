@@ -78,7 +78,7 @@ impl udp::Driver for Socket {
     }
 
     fn sender(&self) -> Box<dyn sender::Driver> {
-        Box::new(Sending {
+        Box::new(Sender {
             shared: Arc::clone(&self.shared),
             node: self.node,
             key: self.bound.key,
@@ -111,14 +111,14 @@ impl Drop for Socket {
 }
 
 /// One sender clone of a socket.
-struct Sending {
+struct Sender {
     shared: Shared,
     node: usize,
     key: u64,
     thread: OnceLock<u64>,
 }
 
-impl sender::Driver for Sending {
+impl sender::Driver for Sender {
     fn poll_send(
         &mut self,
         _: &mut Context<'_>,
