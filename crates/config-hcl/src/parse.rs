@@ -1538,6 +1538,7 @@ c = "°C # not a comment"
             check(r#"s = "\u12""#, &[escape(5, 9)]);
             check(r#"s = "\U00110000""#, &[escape(5, 15)]);
             check("s = \"\\\n\"", &[escape(5, 6)]);
+            check("s = \"\\\r\n\"", &[escape(5, 6)]);
         }
 
         #[test]
@@ -1699,10 +1700,9 @@ c = "°C # not a comment"
         fn refuses_a_string_that_does_not_end() {
             let quote = &needs("`\"` to end the string");
             check("s = \"abc", &[(syntax(on(4, 8), Expected::Quote), quote)]);
-            check(
-                "s = \"ab\nc\"\n",
-                &[(syntax(on(4, 7), Expected::Quote), quote)],
-            );
+            for text in ["s = \"ab\nc\"\n", "s = \"ab\r\nc\"\r\n"] {
+                check(text, &[(syntax(on(4, 7), Expected::Quote), quote)]);
+            }
         }
 
         #[test]
@@ -1720,6 +1720,11 @@ c = "°C # not a comment"
         fn names_what_the_grammar_needs() {
             let cases = [
                 ("a = \n", span(at(4, 0, 4), at(5, 1, 0)), Expected::Value),
+                (
+                    "a = # c\r\n",
+                    span(at(7, 0, 7), at(9, 1, 0)),
+                    Expected::Value,
+                ),
                 ("a = $\n", on(4, 5), Expected::Value),
                 ("a =", on(3, 3), Expected::Value),
                 ("a = [", on(5, 5), Expected::Value),
