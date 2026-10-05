@@ -583,15 +583,22 @@ impl Raft {
     // peer starts at the end of the log. A node a change removed stays a peer until
     // `release_removed` releases it.
     fn sync_voters(&mut self) {
-        let voters = self.log.voters().map_or(&self.base, |(_, voters)| voters);
+        let (at, voters) = self
+            .log
+            .voters()
+            .map_or((0, &self.base), |(at, voters)| (at.index, voters));
         if *voters == self.voters {
             return;
         }
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
-        // A removed node that is still a peer is released here, so the leave of
-        // each one is the configuration in force.
-        self.peers.retain(|&key, _| old.contains(key));
+        // A peer outside the configuration in force and the one before it is
+        // released here, so the leave of each removed peer is the configuration in
+        // force, even when one append brings several configurations.
+        let before = self.log.voters_before(at).unwrap_or(&self.base);
+        let voters = &self.voters;
+        self.peers
+            .retain(|&key, _| voters.contains(key) || before.contains(key));
         for key in self.voters.peers() {
             let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
             // A node a change adds counts as heard until the next quorum check, even
@@ -2580,6 +2587,35 @@ mod tests {
             }
             assert_eq!(raft.role(), Role::Leader);
             assert_eq!(to_3, []);
+        }
+
+        // One append brings node 1 the leave of node 3 and the next joint entry.
+        // The joint entry is in force, so node 3 is no longer a removed node of the
+        // configuration in force, and the new leader sends it nothing past index 3.
+        #[test]
+        fn a_leader_elected_after_two_changes_in_one_append_holds_the_leave() {
+            let mut raft = raft(&[1, 2, 3, 4], Hard::default());
+            let body = Body::Append {
+                prev: Position::default(),
+                entries: vec![
+                    entries(&[(1, 1)]).remove(0),
+                    config(1, 2, voters(&[1, 2, 4], &[1, 2, 3, 4])),
+                    config(1, 3, voters(&[1, 2, 4], &[])),
+                    config(1, 4, voters(&[1, 2, 4, 5], &[1, 2, 4])),
+                ],
+                commit: 3,
+            };
+            raft.step(message(2, 1, body)).unwrap();
+            sent(&mut raft);
+            elect(&mut raft, &[2, 4]);
+            raft.step(message(3, 2, Body::AppendReject { hint: 2 }))
+                .unwrap();
+            let past: Vec<u64> = appended_to_3(&mut raft)
+                .into_iter()
+                .filter(|&i| i > 3)
+                .collect();
+            assert_eq!(raft.role(), Role::Leader);
+            assert_eq!(past, Vec::<u64>::new());
         }
 
         // Node 3 missed its release, so it campaigns. The leader sends it nothing:

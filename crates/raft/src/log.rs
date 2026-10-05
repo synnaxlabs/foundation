@@ -71,6 +71,13 @@ impl Log {
         voters_in(entry).map(|voters| (entry.at, voters))
     }
 
+    // The last configuration before `index`, or `None` with none.
+    pub(crate) fn voters_before(&self, index: u64) -> Option<&Voters> {
+        let end = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
+        let end = end.min(self.entries.len());
+        self.entries[..end].iter().rev().find_map(voters_in)
+    }
+
     // The position at `index`: the zero position for 0, `None` past the end.
     pub(crate) fn at(&self, index: u64) -> Option<Position> {
         if index == 0 {
@@ -345,6 +352,16 @@ mod tests {
         assert_eq!(log.voters(), Some((position(1, 3), &voters(2))));
         let log = Log::new(vec![entry(1, 1), config(1, 2, 3)], 0).unwrap();
         assert_eq!(log.voters(), Some((position(1, 2), &voters(3))));
+    }
+
+    #[test]
+    fn gives_the_last_configuration_before_an_index() {
+        let entries = vec![config(1, 1, 1), entry(1, 2), config(1, 3, 2), entry(1, 4)];
+        let log = Log::new(entries, 0).unwrap();
+        let before: Vec<Option<&Voters>> =
+            (0..=6).map(|i| log.voters_before(i)).collect();
+        let (one, two) = (Some(&voters(1)), Some(&voters(2)));
+        assert_eq!(before, [None, None, one, one, two, two, two]);
     }
 
     #[test]
