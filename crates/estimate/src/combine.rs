@@ -306,7 +306,7 @@ mod tests {
 
         #[test]
         fn leaves_a_split_without_a_majority() {
-            let os = source(0, MAX_ERROR.nanos());
+            let os = Measurement::unknown(Monotonic(0), Span::ZERO);
             let sources = [source(0, 1_000), source(10_000_000_000, 1_000), os];
             let split = Error::NoMajority {
                 sources: 2,

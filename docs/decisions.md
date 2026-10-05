@@ -555,7 +555,9 @@ How to read this record:
   this (OS CLOCK BOUND); counting a grown bound is from the `time` builder, approved by
   the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
   Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
-  showed this case before the person chose. An exchange with an error over 36500 days
+  showed this case before the person chose. `Measurement::unknown(at, offset)` gives the
+  "unknown" error, so a source never writes 36500 days itself: 1 ns less is known and
+  votes. Approved by the coordinator (#144). An exchange with an error over 36500 days
   fails with `Bound`, and an overlap whose readings allow one before drift gives `None`:
   a stopped bound stored as a measurement could miss the true offset. Decided by the
   `time` builder (#258). Each function returns only the errors it can give: one `Error`
