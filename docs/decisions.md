@@ -908,7 +908,8 @@ How to read this record:
   its own voter list votes and follows, but never campaigns while that configuration
   is committed. `step` does not check
   that a sender is a voter (a voter can learn late that a peer joined), so the caller
-  authenticates the sender and decides which nodes may send. When the term of the
+  authenticates the sender and decides which nodes may send. A reply from a node that
+  is not a peer changes nothing (#352). When the term of the
   last entry is above `hard.term`, `Raft::new` starts at that term with no vote. The
   node sends nothing before its write, so no peer counted a vote or an answer that a
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no
@@ -2413,7 +2414,7 @@ Parameters and later choices, recorded and not asked:
   holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
-  after sync vs on receipt).
+  after sync vs on receipt), #352 item 1 (a reply from a node that is not a peer).
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52.
 - Delivery and wire internals: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,

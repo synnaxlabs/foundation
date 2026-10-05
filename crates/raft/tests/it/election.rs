@@ -3,7 +3,8 @@
 
 use proptest::prelude::*;
 use proptest::sample::Index;
-use raft::Role;
+use raft::{Body, Message, Position, Role, Term};
+use types::node;
 
 use crate::network::{ELECTION, Network, run, run_of_many};
 
@@ -74,6 +75,24 @@ proptest! {
         let elected: Vec<usize> = elected.map(|(at, _)| at).collect();
         prop_assert!(elected.len() == 1 && elected[0] != leader, "{elected:?}");
     }
+}
+
+#[test]
+fn a_group_keeps_its_leader_after_a_reply_from_a_node_that_is_not_a_peer() {
+    let mut network = Network::new(&[Position::default(); 3], 0);
+    let agreed = network.settle(&[]).unwrap();
+    let follower = (agreed.0 + 1) % 3;
+    let reply = Message {
+        from: node::Key::from_u128(9),
+        to: Network::key(follower),
+        term: Term(agreed.1.0 + 1),
+        body: Body::HeartbeatReply,
+    };
+    network.nodes[follower].step(reply).unwrap();
+    for _ in 0..4 * ELECTION {
+        network.round();
+    }
+    assert_eq!(network.agreed(), Some(agreed));
 }
 
 // Enough cases that each election-safety change tried in review fails a run.

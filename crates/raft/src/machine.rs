@@ -322,7 +322,8 @@ impl Raft {
     ///   reject names an index past this node's log.
     ///
     /// A message for a lower term is stale: it is answered or dropped with no check.
-    /// The node's state does not change on an error.
+    /// A reply from a node that is not a peer changes nothing, because this node sent
+    /// it no request. The node's state does not change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
         let Message {
             from,
@@ -338,6 +339,9 @@ impl Raft {
         }
         if term < self.term {
             self.answer_stale(from, &body);
+            return Ok(());
+        }
+        if reply(&body) && !self.peers.contains_key(&from) {
             return Ok(());
         }
         self.check(from, term, &body)?;
@@ -528,13 +532,13 @@ impl Raft {
         self.catch_up(from);
     }
 
-    // Notes that a voter answered this leader. `None` when this node does not lead
-    // or `from` is not a voter.
+    // Notes that peer `from` answered this leader. `None` when this node does not
+    // lead.
     fn heard_from(&mut self, from: node::Key) -> Option<&mut Peer> {
         if self.role != Role::Leader {
             return None;
         }
-        let peer = self.peers.get_mut(&from)?;
+        let peer = self.peer_mut(from);
         peer.active = true;
         Some(peer)
     }
@@ -876,6 +880,12 @@ impl Raft {
             .expect("invariant: every voter has a peer")
     }
 
+    fn peer_mut(&mut self, key: node::Key) -> &mut Peer {
+        self.peers
+            .get_mut(&key)
+            .expect("invariant: `step` drops a reply from a node that is not a peer")
+    }
+
     fn broadcast(&mut self, term: Term, body: &Body) {
         for &to in self.peers.keys() {
             if to != self.key {
@@ -896,6 +906,21 @@ impl Raft {
             term,
             body,
         });
+    }
+}
+
+// Whether `body` answers a request.
+fn reply(body: &Body) -> bool {
+    match body {
+        Body::PreVote { .. }
+        | Body::Vote { .. }
+        | Body::Heartbeat { .. }
+        | Body::Append { .. } => false,
+        Body::PreVoteReply { .. }
+        | Body::VoteReply { .. }
+        | Body::HeartbeatReply
+        | Body::AppendReply { .. }
+        | Body::AppendReject { .. } => true,
     }
 }
 
@@ -1418,6 +1443,31 @@ mod tests {
             };
             assert_eq!(sent(&mut raft), [reply]);
             assert_eq!(raft.leader(), None);
+        }
+
+        #[test]
+        fn drops_a_reply_from_a_node_that_is_not_a_peer() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            let hard = raft.hard();
+            let bodies = [
+                Body::PreVoteReply { granted: false },
+                Body::VoteReply { granted: false },
+                Body::HeartbeatReply,
+                Body::AppendReply { last: 9 },
+                Body::AppendReject { hint: 9 },
+            ];
+            for (term, body) in [1, 5]
+                .into_iter()
+                .flat_map(|term| bodies.iter().map(move |body| (term, body.clone())))
+            {
+                raft.step(message(9, term, body.clone())).unwrap();
+                let case = format!("{body:?} in term {term}");
+                assert_eq!((raft.role(), raft.hard()), (Role::Leader, hard), "{case}");
+                assert_eq!(sent(&mut raft), [], "{case}");
+            }
+            raft.step(message(3, 5, Body::HeartbeatReply)).unwrap();
+            assert_eq!((raft.role(), raft.term()), (Role::Follower, Term(5)));
         }
     }
 
