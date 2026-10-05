@@ -1,19 +1,19 @@
-//! Secret values and the seam each secret store implements: the sealed store, a node
-//! environment variable or file, or an outside secret manager.
+//! Resolves a named secret on the node that runs a connector, through store adapters
+//! chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`.
 
 use std::fmt;
-
-use types::name::Name;
 
 pub mod store;
 
 /// A secret value. `Debug` prints `<secret>`, never the bytes.
-pub struct Value(Box<[u8]>);
+pub struct Value(Vec<u8>);
 
 impl Value {
-    /// Wraps the bytes of a secret.
-    pub fn new(bytes: impl Into<Box<[u8]>>) -> Self {
-        Self(bytes.into())
+    /// Takes the bytes of a secret. The value keeps `bytes` as it is, so no copy of
+    /// the secret stays behind in a freed buffer.
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
     }
 
     /// The bytes. Send them only to the system they unlock.
@@ -27,17 +27,6 @@ impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("<secret>")
     }
-}
-
-/// A place that holds secret values: the sealed store, a node environment variable
-/// or file, or an outside secret manager.
-pub trait Store {
-    /// Reads the value of `name`.
-    ///
-    /// # Errors
-    ///
-    /// A [`store::Error`] that tells the caller what to do next.
-    fn get<'a>(&'a self, name: &'a Name) -> store::Request<'a>;
 }
 
 #[cfg(test)]
@@ -56,6 +45,6 @@ mod tests {
 
     #[test]
     fn exposes_the_bytes_it_wraps() {
-        assert_eq!(Value::new(*b"token").expose(), b"token");
+        assert_eq!(Value::new(b"token".to_vec()).expose(), b"token");
     }
 }
