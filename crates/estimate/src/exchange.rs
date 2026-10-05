@@ -65,7 +65,7 @@ impl Exchange {
         if low > high {
             return Err(Error::Crossed);
         }
-        Measurement::between(self.returned, low, high)
+        Measurement::checked_between(self.returned, low, high)
     }
 }
 
@@ -160,6 +160,16 @@ mod tests {
         }
 
         #[test]
+        fn fails_when_the_round_trip_passes_36500_days() {
+            let widest = MAX_ERROR.nanos();
+            let interval = peer(-widest, widest - 2);
+            assert_eq!(check(0, 0, interval, interval, 2), Ok((-2, widest)));
+            let error = Span::from_nanos(widest + 1);
+            let err = check(0, 0, interval, interval, 3);
+            assert_eq!(err, Err(Error::Bound { error }));
+        }
+
+        #[test]
         fn saturates_an_error_wider_than_a_span() {
             let widest = peer(i64::MIN, i64::MAX);
             let error = Span::from_nanos(i64::MAX);
@@ -232,6 +242,24 @@ mod tests {
             peer(mesh - below, mesh + above)
         }
 
+        /// An exchange sent at `sent` with honest intervals `widths` wide around the
+        /// peer's mesh time, and the time it returned.
+        fn exchange(
+            w: World,
+            sent: u64,
+            delays: [u64; 3],
+            widths: [i64; 4],
+        ) -> Exchange {
+            let [out, hold, back] = delays;
+            let (arrived, left) = (sent + out, sent + out + hold);
+            Exchange {
+                sent: Monotonic(sent),
+                received: honest(w, arrived, widths[0], widths[1]),
+                answered: honest(w, left, widths[2], widths[3]),
+                returned: Monotonic(left + back),
+            }
+        }
+
         proptest! {
             #[test]
             fn holds_the_truth_for_any_delays(
@@ -240,17 +268,35 @@ mod tests {
                 delays in uniform3(0..TIME_NS),
                 widths in uniform4(0..ERROR_NS),
             ) {
-                let [out, hold, back] = delays;
-                let (arrived, left) = (sent + out, sent + out + hold);
-                let exchange = Exchange {
-                    sent: Monotonic(sent),
-                    received: honest(w, arrived, widths[0], widths[1]),
-                    answered: honest(w, left, widths[2], widths[3]),
-                    returned: Monotonic(left + back),
-                };
+                let exchange = exchange(w, sent, delays, widths);
                 let m = exchange.measure(w.drift).expect("an honest exchange");
-                let at = left + back;
+                let at = exchange.returned.0;
                 prop_assert!(w.holds_truth_at(m, at), "{m:?} misses {}", w.truth(at));
+            }
+
+            #[test]
+            fn holds_the_truth_or_fails_for_wide_intervals(
+                w in world(),
+                sent in 0..TIME_NS,
+                delays in uniform3(0..TIME_NS),
+                widths in uniform4(prop_oneof![
+                    0..ERROR_NS,
+                    2 * MAX_ERROR.nanos()..=2 * MAX_ERROR.nanos() + ERROR_NS,
+                ]),
+            ) {
+                let exchange = exchange(w, sent, delays, widths);
+                let at = exchange.returned.0;
+                match exchange.measure(w.drift) {
+                    Ok(m) => {
+                        prop_assert!(
+                            w.holds_truth_at(m, at),
+                            "{m:?} misses {}",
+                            w.truth(at)
+                        );
+                    }
+                    Err(Error::Bound { error }) => prop_assert!(error > MAX_ERROR),
+                    Err(e) => prop_assert!(false, "unexpected {e}"),
+                }
             }
 
             #[test]
@@ -266,7 +312,10 @@ mod tests {
                     returned: Monotonic(local[1]),
                 };
                 match exchange.measure(Drift::from_ppb(ppb).expect("valid")) {
-                    Ok(m) => prop_assert_eq!(m.at(), Monotonic(local[1])),
+                    Ok(m) => {
+                        prop_assert_eq!(m.at(), Monotonic(local[1]));
+                        prop_assert!(m.error() <= MAX_ERROR);
+                    }
                     Err(Error::Crossed | Error::Bound { .. }) => {}
                     Err(e @ (Error::Backwards { .. } | Error::Disjoint
                         | Error::Drift { .. } | Error::NoSources
