@@ -8,6 +8,7 @@ use proptest::prelude::*;
 use proptest::sample::Index;
 use raft::{
     Body, Config, Entry, Error, Hard, Message, Position, Raft, Role, Start, Term,
+    Voters,
 };
 use types::node;
 
@@ -169,7 +170,10 @@ impl Network {
         let disk = &self.disks[node];
         let start = Start {
             hard: disk.hard,
-            voters: (0..self.disks.len()).map(Self::key).collect(),
+            voters: Voters {
+                incoming: (0..self.disks.len()).map(Self::key).collect(),
+                ..Voters::default()
+            },
             entries: disk.entries.clone(),
             applied: disk.applied,
         };
