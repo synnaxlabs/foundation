@@ -18,6 +18,9 @@
     clippy::string_slice
 )]
 
+use std::array;
+use std::iter;
+
 use block::Block;
 use types::channel::{self, Slot};
 use types::frame::Path;
@@ -33,10 +36,63 @@ pub(crate) const ENTRIES_MAX: usize = 1023;
 /// Bytes of the largest table, `table_len(ENTRIES_MAX)`.
 pub(crate) const TABLE_MAX: usize = 4 + ENTRIES_MAX * HEADER_LEN;
 
+/// The most blocks in one entry: a caller's record is at most a header block and
+/// a view of one frame's block.
+pub const PARTS_MAX: usize = 2;
+
+/// The bytes of one entry, in up to [`PARTS_MAX`] blocks. The ring writes them in
+/// place, with no copy, and drops them when the commit that writes them ends.
+#[derive(Clone, Debug, Default)]
+pub struct Parts([Option<Block>; PARTS_MAX]);
+
+impl Parts {
+    /// The blocks, in order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Block> {
+        self.0.iter().flatten()
+    }
+
+    /// How many blocks.
+    pub(crate) fn len(&self) -> usize {
+        self.iter().count()
+    }
+
+    /// Bytes in all the blocks together.
+    pub(crate) fn bytes(&self) -> usize {
+        self.iter().map(|block| block.len()).sum()
+    }
+}
+
+impl From<Block> for Parts {
+    fn from(block: Block) -> Self {
+        Self([Some(block), None])
+    }
+}
+
+impl From<Option<Block>> for Parts {
+    fn from(block: Option<Block>) -> Self {
+        Self([block, None])
+    }
+}
+
+impl From<[Block; PARTS_MAX]> for Parts {
+    fn from([first, second]: [Block; PARTS_MAX]) -> Self {
+        Self([Some(first), Some(second)])
+    }
+}
+
+impl IntoIterator for Parts {
+    type Item = Block;
+    type IntoIter = iter::Flatten<array::IntoIter<Option<Block>, PARTS_MAX>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter().flatten()
+    }
+}
+
 /// What one `append` stores: one frame's samples of one index on one path, or a
 /// record the caller owns (a position, a handoff, a gap).
-#[derive(Clone, Copy, Debug)]
-pub struct Entry<'a> {
+#[derive(Clone, Debug)]
+pub struct Entry {
     /// The index.
     pub index: channel::Key,
     /// The node's slot of `index`. Never stored.
@@ -53,11 +109,11 @@ pub struct Entry<'a> {
     pub last: Option<Stamp>,
     /// A tag the caller gives and reads back. The buffer does not read it.
     pub tag: u8,
-    /// The bytes, written in place with no copy.
-    pub parts: &'a [Block],
+    /// The bytes, written in place; see [`Parts`].
+    pub parts: Parts,
 }
 
-impl Entry<'_> {
+impl Entry {
     /// The header of this entry, with the size of its parts.
     ///
     /// # Panics
@@ -65,7 +121,7 @@ impl Entry<'_> {
     /// When the parts hold more than `u32::MAX` bytes: a group checks the body
     /// before it takes the entry.
     pub(crate) fn header(&self) -> Header {
-        let len = self.parts.iter().map(|part| part.len()).sum::<usize>();
+        let len = self.parts.bytes();
         let Ok(bytes) = u32::try_from(len) else {
             unreachable!("invariant: the entry of {len} bytes is under the maximum");
         };

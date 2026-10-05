@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Tail, Unfit};
+use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Parts, Tail, Unfit};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{Error as FileError, Mode, Operation, SECTOR};
@@ -143,8 +143,8 @@ fn entry(
     first: u64,
     len: u32,
     last: Option<i64>,
-    parts: &[Block],
-) -> Entry<'_> {
+    parts: Parts,
+) -> Entry {
     Entry {
         index: key(index),
         slot,
@@ -248,14 +248,14 @@ fn entries_are_durable_at_committed_and_recovered_at_open() {
             .expect("opens");
         let a = slots.assign(key(1));
         let b = slots.assign(key(2));
-        let parts = [shard.block(100)];
+        let parts = Parts::from(shard.block(100));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &parts)])
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), parts.clone())])
             .expect("queues");
         buffer
-            .append(&[
-                entry(2, b, Path::Backfill, 5, 2, Some(7), &parts),
-                entry(1, a, Path::Live, 3, 1, None, &[]),
+            .append([
+                entry(2, b, Path::Backfill, 5, 2, Some(7), parts.clone()),
+                entry(1, a, Path::Live, 3, 1, None, Parts::default()),
             ])
             .expect("queues");
         let live = tail(4, Some(30));
@@ -294,11 +294,11 @@ fn durable_moves_only_at_a_commit() {
             .expect("opens");
         let a = slots.assign(key(1));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         buffer.committed().await.expect("commits");
         buffer
-            .append(&[entry(1, a, Path::Live, 3, 2, Some(50), &[])])
+            .append([entry(1, a, Path::Live, 3, 2, Some(50), Parts::default())])
             .expect("queues");
         assert_eq!(buffer.tail(a, Path::Live), tail(5, Some(50)));
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
@@ -352,7 +352,7 @@ fn the_first_append_after_an_idle_span_commits_after_one_commit() {
         let a = slots.assign(key(1));
         shard.clock.sleep(commits(21)).await;
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         shard.clock.sleep(commits(1)).await;
         assert_eq!(buffer.durable(a, Path::Live), tail(0, None));
@@ -374,11 +374,11 @@ fn a_busy_buffer_keeps_one_deadline_per_commit() {
         let tenths = |count: i64| Span::from_nanos(COMMIT.nanos() / 10 * count);
         shard.memory.slow_syncs(shard.clock.clone(), tenths(2));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &[])])
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
         shard.clock.sleep(tenths(11)).await;
         buffer
-            .append(&[entry(1, a, Path::Live, 1, 1, Some(2), &[])])
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
             .expect("queues during the first sync");
         shard.clock.sleep(tenths(12)).await;
         assert_eq!(shard.memory.syncs(), 3, "two deadlines, one commit apart");
@@ -399,7 +399,7 @@ fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
         let a = slots.assign(key(1));
         shard.clock.sleep(COMMIT).await;
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &[])])
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
         shard
             .clock
@@ -443,15 +443,15 @@ fn a_batch_past_the_open_group_starts_the_next_record() {
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        let first = [shard.block(2000)];
-        let rest = [shard.block(1500)];
+        let first = Parts::from(shard.block(2000));
+        let rest = Parts::from(shard.block(1500));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &first)])
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), first.clone())])
             .expect("queues");
         buffer
-            .append(&[
-                entry(1, a, Path::Live, 1, 1, Some(2), &rest),
-                entry(1, a, Path::Live, 2, 1, Some(3), &rest),
+            .append([
+                entry(1, a, Path::Live, 1, 1, Some(2), rest.clone()),
+                entry(1, a, Path::Live, 2, 1, Some(3), rest.clone()),
             ])
             .expect("the batch starts the next record");
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(3)));
@@ -480,14 +480,14 @@ fn a_full_ring_queues_nothing() {
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        let parts = [shard.block(3900)];
+        let parts = Parts::from(shard.block(3900));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 1, None, &parts)])
+            .append([entry(1, a, Path::Live, 0, 1, None, parts.clone())])
             .expect("the first record has room");
         buffer
-            .append(&[entry(1, a, Path::Live, 1, 1, None, &parts)])
+            .append([entry(1, a, Path::Live, 1, 1, None, parts.clone())])
             .expect("the second record has room");
-        let full = buffer.append(&[entry(1, a, Path::Live, 2, 1, None, &parts)]);
+        let full = buffer.append([entry(1, a, Path::Live, 2, 1, None, parts.clone())]);
         assert_eq!(
             full,
             Err(Error::Full {
@@ -510,13 +510,13 @@ fn a_batch_is_queued_whole_or_not_at_all() {
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        let parts = [shard.block(3900)];
+        let parts = Parts::from(shard.block(3900));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 1, None, &parts)])
+            .append([entry(1, a, Path::Live, 0, 1, None, parts.clone())])
             .expect("the first record has room");
-        let full = buffer.append(&[
-            entry(1, a, Path::Live, 1, 1, None, &parts),
-            entry(1, a, Path::Live, 2, 1, None, &parts),
+        let full = buffer.append([
+            entry(1, a, Path::Live, 1, 1, None, parts.clone()),
+            entry(1, a, Path::Live, 2, 1, None, parts.clone()),
         ]);
         assert_eq!(
             full,
@@ -549,26 +549,26 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        let small = [shard.block(10)];
+        let small = Parts::from(shard.block(10));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 1, None, &small)])
+            .append([entry(1, a, Path::Live, 0, 1, None, small.clone())])
             .expect("the record has room");
-        let empty = [shard.block(0)];
-        let parts = vec![shard.block(0); 1024];
-        let body = [shard.block(BODY_MAX - 54)];
+        let empty = Parts::from(shard.block(0));
+        let two = Parts::from([shard.block(0), shard.block(0)]);
+        let body = Parts::from(shard.block(BODY_MAX - 54));
         let cases = [
             (
-                vec![entry(1, a, Path::Live, 1, 1, None, &empty); 1024],
+                vec![entry(1, a, Path::Live, 1, 1, None, empty.clone()); 1024],
                 Limit::Entries { count: 1024 },
                 "the batch has 1024 entries, and a record holds at most 1023",
             ),
             (
-                vec![entry(1, a, Path::Live, 1, 1, None, &parts)],
+                vec![entry(1, a, Path::Live, 1, 1, None, two); 512],
                 Limit::Parts { count: 1024 },
                 "the batch has 1024 parts, and a record holds at most 1023",
             ),
             (
-                vec![entry(1, a, Path::Live, 1, 1, None, &body)],
+                vec![entry(1, a, Path::Live, 1, 1, None, body.clone())],
                 Limit::Body {
                     len: 4088,
                     max: 4087,
@@ -578,13 +578,13 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
             ),
         ];
         for (batch, limit, message) in cases {
-            let large = buffer.append(&batch);
+            let large = buffer.append(batch);
             assert_eq!(large, Err(Error::Large(limit)));
             assert_eq!(Error::Large(limit).to_string(), message);
             assert_eq!(buffer.tail(a, Path::Live), tail(1, None));
         }
         buffer
-            .append(&[entry(1, a, Path::Live, 1, 1, None, &small)])
+            .append([entry(1, a, Path::Live, 1, 1, None, small.clone())])
             .expect("the record has room");
         buffer.committed().await.expect("commits");
         drop(buffer);
@@ -603,6 +603,39 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
     });
 }
 
+/// A block of a size class only the test uses: two purges give its class back
+/// once the append dropped it. Two, because a purge frees a class that was idle
+/// at the purge before.
+#[test]
+fn a_failed_append_holds_no_part() {
+    run(109, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.pool.purge();
+        shard.pool.purge();
+        let before = shard.pool.committed();
+        let body = Parts::from(shard.block(200_000));
+        let large = buffer.append([entry(1, a, Path::Live, 0, 1, None, body)]);
+        assert_eq!(
+            large,
+            Err(Error::Large(Limit::Body {
+                len: 200_055,
+                max: BODY_MAX,
+            }))
+        );
+        shard.pool.purge();
+        assert!(
+            shard.pool.purge() > 0,
+            "the class of the part has no block in use"
+        );
+        assert_eq!(shard.pool.committed(), before, "the part went back");
+    });
+}
+
 #[test]
 fn a_failed_sync_ends_the_buffer_with_its_error() {
     run(7, Memory::default(), |shard| async move {
@@ -614,7 +647,7 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
         let a = slots.assign(key(1));
         shard.memory.fail_syncs();
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         let failed = Err(Error::Files(FileError::Io {
             path: PathBuf::from(RING),
@@ -624,7 +657,7 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
         assert_eq!(buffer.committed().await, failed);
         assert_eq!(buffer.durable(a, Path::Live), Tail::default());
         assert_eq!(
-            buffer.append(&[entry(1, a, Path::Live, 3, 1, None, &[])]),
+            buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
             failed
         );
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
@@ -643,12 +676,12 @@ fn a_drop_ends_the_commit_task() {
             .expect("opens");
         let a = slots.assign(key(1));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         buffer.committed().await.expect("commits");
         assert_eq!(shard.memory.syncs(), 2);
         buffer
-            .append(&[entry(1, a, Path::Live, 3, 1, None, &[])])
+            .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
             .expect("queues");
         drop(buffer);
         shard.clock.sleep(commits(10)).await;
@@ -678,14 +711,14 @@ fn committed_waits_for_an_entry_appended_during_a_commit() {
         let sync = Span::from_nanos(4_000_000);
         shard.memory.slow_syncs(shard.clock.clone(), sync);
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &[])])
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
         shard
             .clock
             .sleep(Span::from_nanos(COMMIT.nanos() + sync.nanos() / 2))
             .await;
         buffer
-            .append(&[entry(1, a, Path::Live, 1, 1, Some(2), &[])])
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
             .expect("queues while the first sync runs");
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), tail(2, Some(2)));
@@ -707,9 +740,9 @@ fn an_entry_below_the_tail_is_a_broken_invariant() {
             .expect("opens");
         let a = slots.assign(key(1));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 3, None, &[])])
+            .append([entry(1, a, Path::Live, 0, 3, None, Parts::default())])
             .expect("queues");
-        drop(buffer.append(&[entry(1, a, Path::Live, 2, 1, None, &[])]));
+        drop(buffer.append([entry(1, a, Path::Live, 2, 1, None, Parts::default())]));
     });
     assert_eq!(
         sim.run(),
@@ -733,7 +766,15 @@ fn an_entry_past_the_last_seq_is_a_broken_invariant() {
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        drop(buffer.append(&[entry(1, a, Path::Live, u64::MAX, 1, None, &[])]));
+        drop(buffer.append([entry(
+            1,
+            a,
+            Path::Live,
+            u64::MAX,
+            1,
+            None,
+            Parts::default(),
+        )]));
     });
     assert_eq!(
         sim.run(),
@@ -835,7 +876,7 @@ fn a_ring_with_one_zero_header_block_opens_from_the_other() {
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
             let a = slots.assign(key(1));
             buffer
-                .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+                .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
                 .expect("queues");
             buffer.committed().await.expect("commits");
             drop(buffer);
@@ -1031,7 +1072,7 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
             .expect("opens");
         let a = slots.assign(key(1));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         buffer.committed().await.expect("commits");
         drop(buffer);
@@ -1051,9 +1092,9 @@ fn a_record_over_the_most_entries_is_invalid() {
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
             let a = slots.assign(key(1));
             let len = 4 + 51 * to_usize(count.into());
-            let parts = [shard.block(len - 55)];
+            let parts = Parts::from(shard.block(len - 55));
             buffer
-                .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &parts)])
+                .append([entry(1, a, Path::Live, 0, 1, Some(1), parts)])
                 .expect("queues");
             buffer.committed().await.expect("commits");
             drop(buffer);
@@ -1096,7 +1137,7 @@ fn a_record_with_an_entry_past_the_last_seq_is_invalid() {
             .expect("opens");
         let a = slots.assign(key(1));
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         buffer.committed().await.expect("commits");
         drop(buffer);
@@ -1117,9 +1158,9 @@ fn a_record_with_an_entry_below_the_tail_is_invalid() {
             .expect("opens");
         let a = slots.assign(key(1));
         buffer
-            .append(&[
-                entry(1, a, Path::Live, 0, 3, Some(30), &[]),
-                entry(1, a, Path::Live, 3, 2, Some(50), &[]),
+            .append([
+                entry(1, a, Path::Live, 0, 3, Some(30), Parts::default()),
+                entry(1, a, Path::Live, 3, 2, Some(50), Parts::default()),
             ])
             .expect("queues");
         buffer.committed().await.expect("commits");
@@ -1188,10 +1229,10 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        let parts = [shard.block(3900)];
+        let parts = Parts::from(shard.block(3900));
         for seq in 0..2 {
             buffer
-                .append(&[entry(1, a, Path::Live, seq, 1, None, &parts)])
+                .append([entry(1, a, Path::Live, seq, 1, None, parts.clone())])
                 .expect("the record has room");
         }
         buffer.committed().await.expect("commits");
@@ -1328,9 +1369,9 @@ async fn follow(shard: Shard, steps: Vec<Step>) {
                 let slot = slots.assign(key(index));
                 let at = tails.entry((index, path)).or_default();
                 let first = at.seq + skip;
-                let parts = [shard.block(bytes)];
+                let parts = Parts::from(shard.block(bytes));
                 buffer
-                    .append(&[entry(index, slot, path, first, len, last, &parts)])
+                    .append([entry(index, slot, path, first, len, last, parts.clone())])
                     .expect("the ring has room");
                 at.seq = first + u64::from(len);
                 if let Some(last) = last {
@@ -1391,7 +1432,7 @@ fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_once() {
         let a = slots.assign(key(1));
         shard.clock.sleep(commits(21)).await;
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         drop(buffer);
         shard
@@ -1426,14 +1467,14 @@ fn a_drop_during_a_commit_ends_the_task_after_the_sync() {
         let sync = Span::from_nanos(4_000_000);
         shard.memory.slow_syncs(shard.clock.clone(), sync);
         buffer
-            .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &[])])
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
         shard
             .clock
             .sleep(Span::from_nanos(COMMIT.nanos() + sync.nanos() / 2))
             .await;
         buffer
-            .append(&[entry(1, a, Path::Live, 1, 1, Some(2), &[])])
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
             .expect("queues while the first sync runs");
         drop(buffer);
         assert_eq!(
@@ -1476,12 +1517,12 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         let a = slots.assign(key(1));
         let mut part = parts_pool.alloc(30_000).expect("the pool has a block");
         part.fill(7);
-        let parts = [part.freeze()];
+        let parts = Parts::from(part.freeze());
         buffer
-            .append(&[
-                entry(1, a, Path::Live, 0, 1, Some(1), &parts),
-                entry(1, a, Path::Live, 1, 1, Some(2), &parts),
-                entry(1, a, Path::Live, 2, 1, Some(3), &parts),
+            .append([
+                entry(1, a, Path::Live, 0, 1, Some(1), parts.clone()),
+                entry(1, a, Path::Live, 1, 1, Some(2), parts.clone()),
+                entry(1, a, Path::Live, 2, 1, Some(3), parts),
             ])
             .expect("queues");
         buffer.committed().await.expect("commits");
