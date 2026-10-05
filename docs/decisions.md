@@ -381,8 +381,9 @@ How to read this record:
   an older build reads a newer block and reports its version. Two blocks at the
   start of the ring hold the last two checkpoints: checkpoint `n` goes to block `n
   mod 2`. Open takes the whole block whose `seq` comes after the other's, wrapped
-  as the writer wraps it (on a tie, the first); one torn block leaves the other. No block with the magic: not a ring. Both with
-  the magic and a wrong CRC: the ring is lost. The header with a new tail is durable
+  as the writer wraps it (on a tie, the first); one torn block leaves the other. No
+  block with the magic: not a ring. Both with the magic and a wrong CRC: the ring is
+  lost. The header with a new tail is durable
   before the writer releases the space, so the header's tail is at or before the
   writer's tail and the records between are whole. The layout comes from the header
   at open; configuration sets it at create, and a changed `body_max` takes effect at
