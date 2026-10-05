@@ -717,7 +717,13 @@ How to read this record:
   `outgoing` is `Error::EmptyIncoming`; both empty is a node that only follows.
   etcd's quorum tables are the oracle for the quorum math
   (`oracles/conformance/raft/quorum/`). A node only in `outgoing` still campaigns, so
-  a leader keeps its lead through its own removal.
+  a leader keeps its lead through its own removal. A configuration travels in the
+  log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
+  term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
+  its log from the time it writes it; `Start.voters` is the configuration before
+  `Start.entries`. A `Voters` entry with an empty `incoming` set, in `Start.entries`
+  or in an `Append`, is `Error::NoVoters`: a group with no voter can never commit or
+  elect.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
