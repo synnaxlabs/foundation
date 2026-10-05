@@ -10,7 +10,7 @@ use std::sync::Arc;
 use divan::Bencher;
 use types::channel::Slot;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{Draft, Form, Frame, Path, Range};
+use types::frame::{Draft, Form, Frame, Path};
 use types::sample::{Scalar, Type};
 
 const F64: Type = Type::Scalar(Scalar::F64);
@@ -125,7 +125,8 @@ fn build(bencher: Bencher<'_, '_>, case: &Case) {
     bencher.bench_local(|| {
         let mut draft = draft(&pool, case);
         for &group in &case.groups {
-            draft.set_range(group, Range { seq: 1, count: 1 });
+            draft.set_count(group, 1);
+            draft.set_seq(group, 1);
         }
         drop(draft.freeze(Path::Live));
     });

@@ -42,7 +42,13 @@ fn main() {
             bytes.fill(u8::try_from(entry).expect("entries are small"));
         }
         draft.series(0).expect("entry 0 is present").fill(1);
-        draft.set_range(0, Range { seq: 9, count: 2 });
+        draft.set_count(0, 2);
+        draft.set_seq(0, 9);
+        assert_eq!(
+            draft.range(0),
+            Some(Range { seq: 9, count: 2 }),
+            "the draft reads its range"
+        );
         let frame = draft.freeze(Path::Backfill);
         let copy = frame.clone();
         assert_eq!(frame.charge(), 192, "the frame charges its block");
