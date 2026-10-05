@@ -1,7 +1,8 @@
 use types::node;
 
 use crate::log::Log;
-use crate::{Body, Config, Entry, Error, Hard, Message, Start, Term};
+use crate::tracker::{BATCH, Progress};
+use crate::{Body, Config, Entry, Error, Hard, Message, Position, Start, Term};
 
 /// What a node is doing in its term.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,7 +32,7 @@ pub struct Ready {
     pub messages: Vec<Message>,
 }
 
-/// One node's election state machine. PreVote and CheckQuorum are always on.
+/// One node's state machine. PreVote and CheckQuorum are always on.
 ///
 /// After each call to [`tick`](Self::tick), [`step`](Self::step), or
 /// [`campaign`](Self::campaign), take [`ready`](Self::ready) and do what it says.
@@ -56,6 +57,8 @@ pub struct Raft {
     votes: Vec<Option<bool>>,
     // The voters a leader heard from since its last quorum check.
     active: Vec<bool>,
+    // A leader's view of each voter's log, in voter order.
+    progress: Vec<Progress>,
     outbox: Vec<Message>,
 }
 
@@ -106,6 +109,7 @@ impl Raft {
             key,
             votes: vec![None; voters.len()],
             active: vec![false; voters.len()],
+            progress: vec![Progress::new(0); voters.len()],
             outbox: Vec::new(),
             voters,
             election_ticks: u64::from(election_ticks),
@@ -164,10 +168,28 @@ impl Raft {
         self.given = hard;
         Ready {
             hard: changed.then_some(hard),
-            entries: Vec::new(),
-            committed: Vec::new(),
+            entries: self.log.unstable(),
+            committed: self.log.take_committed(),
             messages: std::mem::take(&mut self.outbox),
         }
+    }
+
+    /// Appends `data` to the log as the leader and starts to replicate it. Returns
+    /// the entry's position; it is committed once a quorum holds it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotLeader`] when this node does not lead. `leader` names the node
+    /// that does, when this node knows it.
+    pub fn propose(&mut self, data: Vec<u8>) -> Result<Position, Error> {
+        if self.role != Role::Leader {
+            return Err(Error::NotLeader {
+                leader: self.leader,
+            });
+        }
+        let at = self.log.push(self.term, data);
+        self.replicate();
+        Ok(at)
     }
 
     /// Moves the node's time forward by one tick. `random` is a fresh, uniformly
@@ -205,7 +227,7 @@ impl Raft {
     /// - [`Error::Misrouted`] when the message is for another node.
     /// - [`Error::Loopback`] when the message names this node as its sender.
     /// - [`Error::SecondLeader`] when this node leads the message's term and the
-    ///   message is a heartbeat.
+    ///   message is a heartbeat or an append.
     ///
     /// The node's state does not change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
@@ -221,7 +243,7 @@ impl Raft {
         if from == self.key {
             return Err(Error::Loopback);
         }
-        if !self.meet(from, term, body) {
+        if !self.meet(from, term, &body) {
             return Ok(());
         }
         match body {
@@ -249,21 +271,116 @@ impl Raft {
                     self.poll(from, granted);
                 }
             }
-            Body::Heartbeat => self.follow(from)?,
+            Body::Heartbeat { commit } => {
+                self.follow(from)?;
+                self.log.commit_to(commit);
+                self.send(from, self.term, Body::HeartbeatReply);
+            }
             Body::HeartbeatReply => {
                 if self.role == Role::Leader
                     && let Ok(voter) = self.voters.binary_search(&from)
                 {
                     self.active[voter] = true;
+                    self.progress[voter].heard();
+                    self.send_append(voter);
+                }
+            }
+            Body::Append {
+                prev,
+                entries,
+                commit,
+            } => {
+                self.follow(from)?;
+                let reply = match self.log.append(prev, entries) {
+                    Ok(index) => {
+                        self.log.commit_to(commit.min(index));
+                        Body::AppendReply {
+                            index,
+                            rejected: false,
+                        }
+                    }
+                    Err(index) => Body::AppendReply {
+                        index,
+                        rejected: true,
+                    },
+                };
+                self.send(from, self.term, reply);
+            }
+            Body::AppendReply { index, rejected } => {
+                if self.role == Role::Leader
+                    && let Ok(voter) = self.voters.binary_search(&from)
+                {
+                    self.active[voter] = true;
+                    if rejected {
+                        self.progress[voter].rejected(index);
+                        self.send_append(voter);
+                    } else if self.progress[voter].accepted(index) {
+                        if self.commit() {
+                            self.replicate();
+                        } else {
+                            self.send_append(voter);
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
 
+    // Commits the highest index that a quorum holds, when an entry of the leader's
+    // own term is there. Returns whether the commit index moved.
+    fn commit(&mut self) -> bool {
+        let mut matched: Vec<u64> = self
+            .progress
+            .iter()
+            .zip(&self.voters)
+            .map(|(progress, &voter)| {
+                if voter == self.key {
+                    self.log.last().index
+                } else {
+                    progress.matched
+                }
+            })
+            .collect();
+        matched.sort_unstable();
+        let index = matched[matched.len() - self.quorum()];
+        let current = self.log.at(index).is_some_and(|at| at.term == self.term);
+        if index > self.log.committed() && current {
+            self.log.commit_to(index);
+            return true;
+        }
+        false
+    }
+
+    // Sends each follower what it is due.
+    fn replicate(&mut self) {
+        for voter in 0..self.voters.len() {
+            self.send_append(voter);
+        }
+    }
+
+    // Sends one follower the entries from its `next`, or a probe, or a new commit
+    // index, unless the leader waits for its reply.
+    fn send_append(&mut self, voter: usize) {
+        let to = self.voters[voter];
+        if to == self.key || self.progress[voter].paused() {
+            return;
+        }
+        let next = self.progress[voter].next;
+        let prev = self
+            .log
+            .at(next - 1)
+            .expect("invariant: a follower's next entry follows the leader's log");
+        let entries = self.log.from(next, BATCH);
+        let last = prev.index + u64::try_from(entries.len()).unwrap_or(u64::MAX);
+        self.progress[voter].sent(last);
+        let commit = self.log.committed();
+        self.send(to, self.term, Body::Append { prev, entries, commit });
+    }
+
     // Compares the message's term with the node's term, and steps down for a higher
     // one. Returns whether the message still needs its normal handling.
-    fn meet(&mut self, from: node::Key, term: Term, body: Body) -> bool {
+    fn meet(&mut self, from: node::Key, term: Term, body: &Body) -> bool {
         if term > self.term {
             match body {
                 // A voter that heard from a leader within the election timeout does
@@ -273,24 +390,30 @@ impl Raft {
                 }
                 // A PreVote, or its grant, carries a term that no node is in yet.
                 Body::PreVote { .. } | Body::PreVoteReply { granted: true } => {}
-                Body::Heartbeat => self.become_follower(term, Some(from)),
+                Body::Heartbeat { .. } | Body::Append { .. } => {
+                    self.become_follower(term, Some(from));
+                }
                 Body::Vote { .. }
                 | Body::PreVoteReply { granted: false }
                 | Body::VoteReply { .. }
-                | Body::HeartbeatReply => self.become_follower(term, None),
+                | Body::HeartbeatReply
+                | Body::AppendReply { .. } => self.become_follower(term, None),
             }
         } else if term < self.term {
             match body {
                 // The reply carries the higher term, so a stale leader steps down and
                 // a node that is ahead of its group can be elected.
-                Body::Heartbeat => self.send(from, self.term, Body::HeartbeatReply),
+                Body::Heartbeat { .. } | Body::Append { .. } => {
+                    self.send(from, self.term, Body::HeartbeatReply);
+                }
                 Body::PreVote { .. } => {
                     self.send(from, self.term, Body::PreVoteReply { granted: false });
                 }
                 Body::Vote { .. }
                 | Body::PreVoteReply { .. }
                 | Body::VoteReply { .. }
-                | Body::HeartbeatReply => {}
+                | Body::HeartbeatReply
+                | Body::AppendReply { .. } => {}
             }
             return false;
         }
@@ -315,11 +438,19 @@ impl Raft {
         }
         if self.heartbeat_elapsed >= self.heartbeat_ticks {
             self.heartbeat_elapsed = 0;
-            self.broadcast(self.term, Body::Heartbeat);
+            // A follower commits what the heartbeat says, so it names only entries
+            // the follower is known to hold.
+            for voter in 0..self.voters.len() {
+                let to = self.voters[voter];
+                if to != self.key {
+                    let commit = self.log.committed().min(self.progress[voter].matched);
+                    self.send(to, self.term, Body::Heartbeat { commit });
+                }
+            }
         }
     }
 
-    // Handles a heartbeat from the leader of the node's own term.
+    // Handles a heartbeat or an append from the leader of the node's own term.
     fn follow(&mut self, leader: node::Key) -> Result<(), Error> {
         match self.role {
             Role::Leader => {
@@ -336,7 +467,6 @@ impl Raft {
                 self.become_follower(self.term, Some(leader));
             }
         }
-        self.send(leader, self.term, Body::HeartbeatReply);
         Ok(())
     }
 
@@ -378,7 +508,11 @@ impl Raft {
         self.reset(self.term);
         self.leader = Some(self.key);
         self.role = Role::Leader;
-        self.broadcast(self.term, Body::Heartbeat);
+        let last = self.log.last().index;
+        self.progress.fill(Progress::new(last));
+        // An entry of the leader's own term lets it commit the ones before it.
+        self.log.push(self.term, Vec::new());
+        self.replicate();
     }
 
     fn become_follower(&mut self, term: Term, leader: Option<node::Key>) {
@@ -448,7 +582,7 @@ impl Raft {
         for voter in 0..self.voters.len() {
             let to = self.voters[voter];
             if to != self.key {
-                self.send(to, term, body);
+                self.send(to, term, body.clone());
             }
         }
     }

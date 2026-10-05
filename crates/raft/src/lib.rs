@@ -11,6 +11,7 @@ mod config;
 mod log;
 mod machine;
 mod message;
+mod tracker;
 
 use std::fmt;
 
@@ -91,6 +92,11 @@ pub enum Error {
         /// The last log index.
         last: u64,
     },
+    /// A proposal to a node that does not lead.
+    NotLeader {
+        /// The node that leads, when this node knows it.
+        leader: Option<node::Key>,
+    },
     /// A message is for another node. The caller routed it wrongly.
     Misrouted {
         /// The message's receiver.
@@ -136,6 +142,14 @@ impl fmt::Display for Error {
                 f,
                 "applied index {applied} is past the last log index {last}"
             ),
+            Self::NotLeader { leader: Some(leader) } => write!(
+                f,
+                "this node does not lead; node {:032x} does",
+                leader.as_u128()
+            ),
+            Self::NotLeader { leader: None } => {
+                f.write_str("this node does not lead, and knows no leader")
+            }
             Self::Misrouted { to } => write!(
                 f,
                 "a message for node {:032x} is not for this node",
