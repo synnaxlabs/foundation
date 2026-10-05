@@ -1,4 +1,4 @@
-//! Polling a registered wait allocates nothing. This binary has no test harness: the
+//! Polling a registered wait or race allocates nothing. This binary has no test harness: the
 //! count covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
@@ -49,5 +49,19 @@ fn main() {
     assert_eq!(
         allocations, 0,
         "polling a registered wait allocates nothing"
+    );
+
+    let mut race = pin!(token.race(std::future::pending::<()>()));
+    let mut cx = Context::from_waker(&wakers[0]);
+    assert_eq!(race.as_mut().poll(&mut cx), Poll::Pending, "live token");
+    let ((), allocations) = ALLOCATOR.count(|| {
+        for waker in wakers.iter().cycle().take(64) {
+            let mut cx = Context::from_waker(waker);
+            assert_eq!(race.as_mut().poll(&mut cx), Poll::Pending, "live token");
+        }
+    });
+    assert_eq!(
+        allocations, 0,
+        "polling a registered race allocates nothing"
     );
 }

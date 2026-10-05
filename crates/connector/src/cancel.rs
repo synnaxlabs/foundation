@@ -1,8 +1,9 @@
 //! Cancellation for a connector's run and its parts.
 
 use std::fmt;
+use std::future;
 use std::mem;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -117,6 +118,29 @@ impl Token {
             node: Arc::clone(&self.0),
             key: None,
         }
+    }
+
+    /// Runs `f` until it completes or this token is cancelled. Returns `None` when the
+    /// token is cancelled first, also when it already is. Checks the token before
+    /// each poll of `f`, so a cancel wins over an `f` that is ready at the same
+    /// time. The first poll may allocate a slot in the token; later polls allocate
+    /// nothing.
+    ///
+    /// ```
+    /// async fn read(cancel: &connector::cancel::Token) -> Option<u8> {
+    ///     cancel.race(async { 7 }).await
+    /// }
+    /// ```
+    pub async fn race<F: Future>(&self, f: F) -> Option<F::Output> {
+        let mut f = pin!(f);
+        let mut wait = pin!(self.wait());
+        future::poll_fn(|cx| {
+            if wait.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(None);
+            }
+            f.as_mut().poll(cx).map(Some)
+        })
+        .await
     }
 
     /// Runs `f` once, on the thread that cancels, to unblock a blocking vendor call.
@@ -351,7 +375,6 @@ impl<T> Slab<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::pin::pin;
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering::SeqCst;
     use std::task::Wake;
@@ -586,6 +609,111 @@ mod tests {
             let leaf = root.child().child();
             root.cancel();
             assert!(leaf.cancelled(), "the leaf keeps its dropped parent alive");
+        }
+    }
+
+    mod race {
+        use super::*;
+
+        /// A future that counts its polls and drops, and completes when `ready`.
+        struct Probe {
+            ready: Arc<AtomicBool>,
+            polls: Arc<AtomicU64>,
+            drops: Arc<AtomicU64>,
+        }
+
+        impl Future for Probe {
+            type Output = u8;
+
+            fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<u8> {
+                self.polls.fetch_add(1, SeqCst);
+                if self.ready.load(SeqCst) {
+                    Poll::Ready(7)
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, SeqCst);
+            }
+        }
+
+        fn probe(ready: bool) -> (Probe, Arc<AtomicU64>, Arc<AtomicU64>) {
+            let polls = Arc::new(AtomicU64::new(0));
+            let drops = Arc::new(AtomicU64::new(0));
+            let f = Probe {
+                ready: Arc::new(AtomicBool::new(ready)),
+                polls: Arc::clone(&polls),
+                drops: Arc::clone(&drops),
+            };
+            (f, polls, drops)
+        }
+
+        fn step<F: Future>(f: Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
+            f.poll(&mut Context::from_waker(waker))
+        }
+
+        #[test]
+        fn returns_the_output_when_the_future_completes_first() {
+            let token = Token::new();
+            let (f, _, _) = probe(true);
+            let (_, waker) = Tally::waker();
+            let race = pin!(token.race(f));
+            assert_eq!(step(race, &waker), Poll::Ready(Some(7)), "f won");
+        }
+
+        #[test]
+        fn returns_none_and_drops_the_future_when_cancelled_during_the_wait() {
+            let token = Token::new();
+            let (f, polls, drops) = probe(false);
+            let (tally, waker) = Tally::waker();
+            let mut race = pin!(token.race(f));
+            assert_eq!(step(race.as_mut(), &waker), Poll::Pending, "both wait");
+            token.cancel();
+            assert_eq!(tally.wakes(), 1, "cancel wakes the race");
+            assert_eq!(step(race.as_mut(), &waker), Poll::Ready(None), "cancelled");
+            assert_eq!(polls.load(SeqCst), 1, "f is not polled after cancel");
+            assert_eq!(drops.load(SeqCst), 1, "f is dropped on return");
+        }
+
+        #[test]
+        fn never_polls_the_future_when_already_cancelled() {
+            let token = Token::new();
+            token.cancel();
+            let (f, polls, _) = probe(true);
+            let (_, waker) = Tally::waker();
+            let race = pin!(token.race(f));
+            assert_eq!(step(race, &waker), Poll::Ready(None), "cancelled");
+            assert_eq!(polls.load(SeqCst), 0, "f is never polled");
+        }
+
+        #[test]
+        fn returns_none_when_both_are_ready_on_one_poll() {
+            let token = Token::new();
+            let (f, polls, _) = probe(false);
+            let ready = Arc::clone(&f.ready);
+            let (_, waker) = Tally::waker();
+            let mut race = pin!(token.race(f));
+            assert_eq!(step(race.as_mut(), &waker), Poll::Pending, "both wait");
+            ready.store(true, SeqCst);
+            token.cancel();
+            assert_eq!(step(race, &waker), Poll::Ready(None), "cancel wins");
+            assert_eq!(polls.load(SeqCst), 1, "f is not polled again");
+        }
+
+        #[test]
+        fn leaves_no_waker_when_dropped() {
+            let token = Token::new();
+            let (f, _, _) = probe(false);
+            let (_, waker) = Tally::waker();
+            let mut race = Box::pin(token.race(f));
+            assert_eq!(step(race.as_mut(), &waker), Poll::Pending, "both wait");
+            assert_eq!(entries(&token), (1, 0, 0), "the race waits");
+            drop(race);
+            assert_eq!(entries(&token), (0, 0, 0), "the race left");
         }
     }
 
