@@ -24,9 +24,9 @@ use types::frame::Path;
 use types::time::Span;
 
 use crate::entry::{self, Entry};
-use crate::group::{Closed, Group, META_LEN, Rejected};
+use crate::group::{Closed, Group, META_LEN, Rejected, Sealed};
 use crate::header::{self, AREA_START, Header};
-use crate::record::{self, ALIGN};
+use crate::record::{self, ALIGN, Kind};
 use crate::tails::{Tail, Tails};
 use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 
@@ -301,8 +301,10 @@ impl Buffer {
             }
         }
         let chain = random(&entropy);
-        let (writer, plan) = cursor.writer(header.tail, chain)?;
-        write_restart(&file, &pool, plan, chain).await?;
+        let (writer, plan) = cursor.writer(header.tail.offset())?;
+        let body = chain.to_le_bytes();
+        let (sealed, _) = plan.seal(cursor.end().chain(), Kind::Restart, [&body[..]]);
+        write_restart(&file, &pool, sealed, &body).await?;
         let shared = Rc::new(Shared {
             file,
             pool,
@@ -322,7 +324,7 @@ impl Buffer {
                 failed: None,
             }),
         });
-        tasks.spawn(run(Rc::clone(&shared), clock, commit));
+        tasks.spawn(run(Rc::clone(&shared), clock, commit, chain));
         Ok(Self { shared })
     }
 
@@ -478,19 +480,19 @@ fn recover(
     Ok(())
 }
 
-/// Writes the restart record of `plan`, whose body is `chain`.
+/// Writes the restart record `sealed`, whose body is `chain`.
 async fn write_restart(
     file: &File,
     pool: &Pool,
-    plan: wal::Plan,
-    chain: u32,
+    sealed: wal::Sealed,
+    chain: &[u8; 4],
 ) -> Result<(), Error> {
     assert!(
-        plan.wrap.is_none(),
+        sealed.wrap.is_none(),
         "invariant: a restart record is one block and never wraps"
     );
-    let block = small_record(pool, &plan.record.header, &chain.to_le_bytes())?;
-    file.write_at(AREA_START + plan.record.place, slice::from_ref(&block))
+    let block = small_record(pool, &sealed.record.header, chain)?;
+    file.write_at(AREA_START + sealed.record.place, slice::from_ref(&block))
         .await?;
     Ok(())
 }
@@ -515,10 +517,13 @@ fn small_record(
 
 /// The commit task. It parks while the state idles; a push, a `Commit` poll, or
 /// the drop wakes it. Each deadline takes the closed groups and the open one,
-/// writes them, syncs once, and wakes the waiters. A failed file call or the drop
-/// ends the task.
-async fn run(shared: Rc<Shared>, clock: Clock, commit: Span) {
+/// seals them in order from `chain`, the value of the restart record, writes
+/// them, syncs once, and wakes the waiters. A failed file call or the drop ends
+/// the task.
+async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
+    let mut chain = chain;
     let mut taken: Vec<Closed> = Vec::new();
+    let mut sealed: Vec<Sealed> = Vec::new();
     let mut woken: Vec<Waker> = Vec::new();
     let mut sleep = clock.sleep(commit);
     loop {
@@ -553,16 +558,21 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span) {
             }
             mem::swap(&mut state.queue, &mut taken);
         }
-        let result = write(&shared, &taken).await;
+        for closed in taken.drain(..) {
+            let (record, next) = closed.seal(chain);
+            chain = next;
+            sealed.push(record);
+        }
+        let result = write(&shared, &sealed).await;
         let failed = result.is_err();
         let mut state = shared.state.borrow_mut();
         match result {
             Ok(()) => {
-                for closed in taken.drain(..) {
-                    for (&slot, header) in closed.slots().iter().zip(closed.headers()) {
+                for record in sealed.drain(..) {
+                    for (&slot, header) in record.slots().iter().zip(record.headers()) {
                         state.durable.advance(slot, header);
                     }
-                    state.spares.push(closed.clear());
+                    state.spares.push(record.clear());
                 }
                 state.commits += 1;
             }
@@ -579,13 +589,13 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span) {
     }
 }
 
-/// Writes each closed group's records and syncs once.
-async fn write(shared: &Shared, taken: &[Closed]) -> Result<(), files::Error> {
-    if taken.is_empty() {
+/// Writes each sealed group's records and syncs once.
+async fn write(shared: &Shared, sealed: &[Sealed]) -> Result<(), files::Error> {
+    if sealed.is_empty() {
         return Ok(());
     }
-    for closed in taken {
-        for (place, blocks) in closed.writes() {
+    for record in sealed {
+        for (place, blocks) in record.writes() {
             shared.file.write_at(AREA_START + place, blocks).await?;
         }
     }
