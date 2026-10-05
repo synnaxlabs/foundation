@@ -122,6 +122,7 @@ version = "0.0.0"
 name = "block"
 version = "0.0.0"
 dependencies = [
+ "divan",
  "loom",
  "proptest",
 ]
@@ -306,6 +307,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 name = "control"
 version = "0.0.0"
 dependencies = [
+ "counting",
  "divan",
  "proptest",
  "types",
@@ -737,6 +739,11 @@ dependencies = [
 [[package]]
 name = "node"
 version = "0.0.0"
+dependencies = [
+ "env",
+ "loom",
+ "sim",
+]
 
 [[package]]
 name = "noq"
@@ -1176,6 +1183,10 @@ checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 [[package]]
 name = "secret"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "semver"
@@ -1256,6 +1267,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "sim"
 version = "0.0.0"
 dependencies = [
+ "block",
  "env",
  "proptest",
  "types",
