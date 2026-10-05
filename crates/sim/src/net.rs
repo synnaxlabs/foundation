@@ -92,7 +92,8 @@ struct Datagram {
     contents: Vec<u8>,
 }
 
-struct Socket {
+/// A bound UDP socket and its receive queue.
+struct Binding {
     node: usize,
     local: SocketAddr,
     recv_batch_max: NonZeroUsize,
@@ -105,7 +106,7 @@ struct Socket {
     waker: Option<Waker>,
 }
 
-impl Socket {
+impl Binding {
     /// Whether the socket receives a datagram to `destination`.
     fn receives(&self, destination: SocketAddr) -> bool {
         let (local, ip) = (self.local.ip(), destination.ip());
@@ -161,7 +162,7 @@ pub(crate) struct Network {
     /// The link of each ordered pair of nodes that has no link of its own.
     default: link::Config,
     links: BTreeMap<(usize, usize), link::Config>,
-    sockets: BTreeMap<u64, Socket>,
+    bindings: BTreeMap<u64, Binding>,
     /// Datagrams by true arrival time, then by a key in the order they were sent.
     flights: BTreeMap<(Monotonic, u64), Datagram>,
     rng: Rng,
@@ -173,7 +174,7 @@ impl Network {
         Self {
             default,
             links: BTreeMap::new(),
-            sockets: BTreeMap::new(),
+            bindings: BTreeMap::new(),
             flights: BTreeMap::new(),
             rng,
             next: 0,
@@ -204,10 +205,10 @@ impl Network {
             });
         }
         let taken = |port: u16| {
-            (self.sockets.values()).any(|socket| {
-                let other = socket.local.ip();
-                socket.node == node
-                    && socket.local.port() == port
+            (self.bindings.values()).any(|binding| {
+                let other = binding.local.ip();
+                binding.node == node
+                    && binding.local.port() == port
                     && (covers(ip, other) || covers(other, ip))
             })
         };
@@ -224,7 +225,7 @@ impl Network {
             let index = usize::try_from(index).expect("invariant: below 3 fits usize");
             NonZeroUsize::new(BATCH_MAXES[index]).expect("invariant: not zero")
         });
-        let socket = Socket {
+        let binding = Binding {
             node,
             local,
             recv_batch_max,
@@ -234,7 +235,7 @@ impl Network {
             waker: None,
         };
         let key = self.key();
-        self.sockets.insert(key, socket);
+        self.bindings.insert(key, binding);
         Ok(Bound {
             key,
             local,
@@ -246,7 +247,7 @@ impl Network {
     /// Removes socket `key`, and returns its waker for the caller to drop after it
     /// releases the lock.
     pub(crate) fn close(&mut self, key: u64) -> Option<Waker> {
-        self.sockets.remove(&key).and_then(|socket| socket.waker)
+        self.bindings.remove(&key).and_then(|binding| binding.waker)
     }
 
     /// Sends the datagrams of `transmit` from socket `key` at true time `now`.
@@ -257,9 +258,9 @@ impl Network {
         key: u64,
         transmit: &Transmit<'_>,
     ) -> Result<(), Error> {
-        let socket = &self.sockets[&key];
-        let from = socket.node;
-        let source = source(from, socket.local, transmit)?;
+        let binding = &self.bindings[&key];
+        let from = binding.node;
+        let source = source(from, binding.local, transmit)?;
         let destination = transmit.destination;
         let to = node(destination.ip());
         let link =
@@ -349,14 +350,14 @@ impl Network {
             let datagram = flight.remove();
             let (source, destination) = (datagram.source, datagram.destination);
             let len = datagram.contents.len();
-            let socket = (self.sockets.values_mut())
-                .find(|socket| socket.receives(destination))
-                .filter(|socket| socket.queued + len <= socket.capacity);
-            let fate = match socket {
-                Some(socket) => {
-                    socket.queued += len;
-                    socket.queue.push_back(datagram);
-                    wakers.extend(socket.waker.take());
+            let binding = (self.bindings.values_mut())
+                .find(|binding| binding.receives(destination))
+                .filter(|binding| binding.queued + len <= binding.capacity);
+            let fate = match binding {
+                Some(binding) => {
+                    binding.queued += len;
+                    binding.queue.push_back(datagram);
+                    wakers.extend(binding.waker.take());
                     Fate::Queued
                 }
                 None => Fate::Dropped,
@@ -376,17 +377,17 @@ impl Network {
         buffers: &mut [IoSliceMut<'_>],
         meta: &mut [Meta],
     ) -> (Poll<usize>, Option<Waker>) {
-        let socket = (self.sockets.get_mut(&key))
+        let binding = (self.bindings.get_mut(&key))
             .expect("invariant: a socket lives while its driver does");
-        if socket.queue.is_empty() {
-            return (Poll::Pending, socket.waker.replace(waker));
+        if binding.queue.is_empty() {
+            return (Poll::Pending, binding.waker.replace(waker));
         }
         let mut count = 0;
         for (buffer, meta) in buffers.iter_mut().zip(meta) {
-            if socket.queue.is_empty() {
+            if binding.queue.is_empty() {
                 break;
             }
-            *meta = socket.batch(buffer);
+            *meta = binding.batch(buffer);
             count += 1;
         }
         (Poll::Ready(count), Some(waker))

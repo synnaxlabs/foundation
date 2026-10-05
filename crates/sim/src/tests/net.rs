@@ -658,12 +658,12 @@ fn a_socket_polled_on_a_thread_of_another_node_panics() {
     let _b = b.shards().start(shard("b"), move |_| async move {
         send_once(&mut sender, &mut receiver);
     });
-    let message = "a socket of node 0 polls on a thread of node 1";
+    let message = "a socket of node 0 runs on a thread of node 1";
     assert_eq!(sim.run().unwrap_err(), panicked("b", message));
 }
 
 #[test]
-#[should_panic(expected = "a socket polls only on a thread that the sim started")]
+#[should_panic(expected = "a socket needs a thread that the sim started")]
 fn a_socket_polled_outside_the_sim_panics() {
     let (_sim, a, _b) = pair(0, link::Config::default());
     let (mut sender, mut receiver) = udp(&a, 4433);

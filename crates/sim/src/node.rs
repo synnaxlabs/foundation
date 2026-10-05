@@ -52,20 +52,19 @@ impl Node {
         env::threads::Threads::new(self.0.clone())
     }
 
-    /// The node's network, on its [`Node::addresses`]. It has UDP sockets and no TCP
-    /// yet: `connect` and `listen` panic.
+    /// The node's network, on its [`Node::addresses`]. UDP only: `connect` and
+    /// `listen` panic.
     ///
-    /// - A bind to an address of another node gives `Error::Io` with code 99, Linux's
-    ///   `EADDRNOTAVAIL`. Port 0 binds the lowest free port from 49152.
+    /// - A bind or a send from an address that is not the node's gives `Error::Io`
+    ///   with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free port from
+    ///   49152.
+    /// - A send to the other family than the socket's gives `Error::Unreachable`.
     /// - Each socket draws its send and receive batch maxes from 1, 8, and 64.
-    /// - A datagram over the MTU of its link, with 28 header bytes over IPv4 or 48
-    ///   over IPv6, is lost. So is one that arrives where nothing is bound, or that
-    ///   would take the receive queue past `recv_buffer_bytes`. The send buffer
-    ///   never fills.
-    /// - A send to the other family than the socket's gives `Error::Unreachable`,
-    ///   and one from an address that is not the socket's gives `Error::Io` with
-    ///   code 99.
-    /// - A socket half panics when it polls outside the threads of the node.
+    /// - A datagram is lost when it is over the link's MTU with its headers (28
+    ///   bytes on IPv4, 48 on IPv6), when nothing is bound at its destination, or
+    ///   when it would fill the receive queue past `recv_buffer_bytes`. The send
+    ///   buffer never fills.
+    /// - A socket half panics when it polls outside the node's threads.
     #[must_use]
     pub fn net(&self) -> env::net::Net {
         env::net::Net::new(self.0.clone())

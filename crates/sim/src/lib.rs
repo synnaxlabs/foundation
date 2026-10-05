@@ -135,9 +135,7 @@ impl Sim {
             assert!(own, "{node:?} belongs to another sim");
         }
         config.check();
-        lock(&self.shared)
-            .net()
-            .link(from.0.node, to.0.node, config);
+        lock(&self.shared).link(from.0.node, to.0.node, config);
     }
 
     /// A hash of every scheduler pick and every datagram event so far: the time,

@@ -418,7 +418,7 @@ fn a_sleep_on_the_clock_of_another_node_panics() {
         sim.run(),
         Err(Error::Panicked {
             thread: "b-0".into(),
-            message: "a clock of node 0 sleeps on a thread of node 1".into(),
+            message: "a sleep of node 0 runs on a thread of node 1".into(),
             seed: 0,
         })
     );

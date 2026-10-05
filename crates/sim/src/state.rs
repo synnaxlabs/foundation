@@ -2,13 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::IoSliceMut;
 use std::mem;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::task::{Wake, Waker};
+use std::task::{Poll, Wake, Waker};
 use std::time::Instant;
 
-use env::net::udp::Transmit;
+use env::net::udp::{self, Meta, Transmit};
 use env::rng::Rng;
 use env::shards::Main;
 use env::tasks::Task;
@@ -16,8 +17,8 @@ use env::thread::Error;
 use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
-use crate::net::Network;
-use crate::node;
+use crate::net::{Bound, Network};
+use crate::{link, node};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
 
@@ -245,8 +246,24 @@ impl State {
             .map(|thread| (thread, self.threads[&thread].node))
     }
 
-    pub(crate) fn net(&mut self) -> &mut Network {
-        &mut self.net
+    /// Sets the link from node `from` to node `to`.
+    pub(crate) fn link(&mut self, from: usize, to: usize, config: link::Config) {
+        self.net.link(from, to, config);
+    }
+
+    /// Binds a UDP socket on `node`.
+    pub(crate) fn bind(
+        &mut self,
+        node: usize,
+        config: &udp::Config,
+    ) -> Result<Bound, env::net::Error> {
+        self.net.bind(node, config)
+    }
+
+    /// Removes socket `socket`, and returns its waker for the caller to drop after it
+    /// releases the lock.
+    pub(crate) fn close(&mut self, socket: u64) -> Option<Waker> {
+        self.net.close(socket)
     }
 
     /// Sends `transmit` from socket `socket` now.
@@ -256,6 +273,17 @@ impl State {
         transmit: &Transmit<'_>,
     ) -> Result<(), env::net::Error> {
         self.net.send(self.now, &mut self.digest, socket, transmit)
+    }
+
+    /// Receives from socket `socket`, as [`Network::recv`].
+    pub(crate) fn recv(
+        &mut self,
+        socket: u64,
+        waker: Waker,
+        buffers: &mut [IoSliceMut<'_>],
+        meta: &mut [Meta],
+    ) -> (Poll<usize>, Option<Waker>) {
+        self.net.recv(socket, waker, buffers, meta)
     }
 
     pub(crate) fn digest(&self) -> u64 {

@@ -39,6 +39,24 @@ impl Node {
             })
         })
     }
+
+    /// The sim thread that runs now. `what` names the caller in a panic.
+    ///
+    /// # Panics
+    ///
+    /// Outside a thread that the sim started, and on a thread of another node.
+    fn running(&self, what: &str) -> u64 {
+        let current = lock(&self.shared).current();
+        let Some((thread, on)) = current else {
+            panic!("{what} needs a thread that the sim started")
+        };
+        let node = self.node;
+        assert!(
+            on == node,
+            "{what} of node {node} runs on a thread of node {on}"
+        );
+        thread
+    }
 }
 
 impl env::clock::Driver for Node {
@@ -51,18 +69,8 @@ impl env::clock::Driver for Node {
     }
 
     fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
-        let mut state = lock(&self.shared);
-        let on = state.current().map(|(_, node)| node);
-        let key = state.key();
-        drop(state);
-        let Some(on) = on else {
-            panic!("a sleep needs a thread that the sim started")
-        };
-        assert!(
-            on == self.node,
-            "a clock of node {} sleeps on a thread of node {on}",
-            self.node
-        );
+        self.running("a sleep");
+        let key = lock(&self.shared).key();
         Box::pin(Timer {
             shared: Arc::clone(&self.shared),
             node: self.node,
