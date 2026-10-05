@@ -81,8 +81,10 @@ impl Index {
         let permit = self.gate.check(key, now).map_err(Refusal::Control)?;
         let order = self
             .order
-            .check(path, stamps, mesh)
-            .map_err(Refusal::Order)?;
+            .check(path, mesh)
+            .push(stamps)
+            .map_err(Refusal::Order)?
+            .end();
         Ok(Accepted {
             order,
             permit,
