@@ -392,11 +392,12 @@ How to read this record:
   holds while `CatchUp` runs on the other carrier. Streams carry whole messages in
   pool blocks, not bytes; the QUIC carrier benchmark decides whether decode reads
   chunks in place instead. A stream reaches the peer with its first message, and a
-  `Sender` dropped without `finish` resets it. Each stream has a `Class` (`Command`, `Latest`, `Complete`,
-  `CatchUp`) that sets its priority and preferred carrier. A peer is a node key or a
-  `Client` (an SDK, proved by its signed hello above). Callers admit peers, dispatch
-  streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM NETWORK.
-  Proposed by `network` in #45; approved by the coordinator on PR #53.
+  `Sender` dropped without `finish` resets it. Each stream has a `Class` (`Command`,
+  `Latest`, `Complete`, `CatchUp`) that sets its priority and preferred carrier. A
+  peer is a node key or a `Client` (an SDK, proved by its signed hello above).
+  Callers admit peers, dispatch streams (STREAM DISPATCH), and cancel stale latest
+  frames. Builds on SIM NETWORK. Proposed by `network` in #45; approved by the
+  coordinator on PR #53.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is

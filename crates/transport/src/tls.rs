@@ -456,7 +456,8 @@ mod tests {
             fn carries_the_public_key(bytes: [u8; 32]) {
                 let private_key = PrivateKey(bytes);
                 let credentials = Credentials::new(&private_key);
-                prop_assert_eq!(key(&credentials.certificate), Ok(public(&private_key)));
+                let expected = public(&private_key);
+                prop_assert_eq!(key(&credentials.certificate), Ok(expected));
             }
         }
 
