@@ -3,25 +3,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use clock::{Clock, Reader, Status};
 use estimate::Measurement;
 use estimate::combine::Error;
-use sim::Sim;
-use sim::node::{self, Node};
+use sim::node::Node;
 use types::time::{Monotonic, Span};
 
-/// 36500 days, the error of an unknown measurement.
-const UNKNOWN: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
-
-fn node() -> (Sim, Node) {
-    let mut sim = Sim::new(sim::Config::default());
-    let node = sim.node(node::Config::default());
-    (sim, node)
-}
+use crate::common::{UNKNOWN, ms, node};
 
 fn us(n: i64) -> Span {
     Span::from_nanos(n * 1_000)
-}
-
-fn ms(n: i64) -> Span {
-    Span::from_nanos(n * 1_000_000)
 }
 
 /// A measurement at the node's monotonic reading now.
