@@ -28,7 +28,9 @@ queue. You do not build crates.
    approve it on the issue and the owner makes it; else make it as a small PR, then
    message the owners of every crate that uses the surface. A change to a locked
    decision, a contract, or an oracle: ask the person first, with a recommendation.
-3. **Merge queue.** For each PR an author says is ready, check: CI passes, the oracle
+3. **Merge queue.** For each PR an author says is ready, check: every check on the
+   PR's current head passed (read them again just before you add `ready`, because a
+   push resets them), the PR has no conflict with `main`, the oracle
    section is complete and every flagged weakening has an adversarial verdict, every
    review finding is fixed or answered, hot-path PRs answer the six performance
    questions, and the PR has Complexity and Shape decisions sections. Then add `ready`
