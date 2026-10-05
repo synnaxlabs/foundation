@@ -93,15 +93,13 @@ impl Endpoint {
     /// # Panics
     ///
     /// When `config.idle` is not positive, or `config.window_bytes` is below
-    /// `block::footprint(config.message_bytes_max)`. `Transport::new` refuses both
-    /// first.
+    /// `config.message_bytes_max`. `Transport::new` refuses both first.
     pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
-        let footprint = block::footprint(config.message_bytes_max.get());
         assert!(
-            config.window_bytes >= footprint,
-            "a window of {} bytes is below the footprint of the largest message, \
-             {footprint}",
-            config.window_bytes
+            config.window_bytes >= config.message_bytes_max.get(),
+            "a window of {} bytes is below the largest message, {} bytes",
+            config.window_bytes,
+            config.message_bytes_max
         );
         let (settings, endpoint) = Settings::new(config, shard);
         Self {
@@ -394,9 +392,9 @@ impl Endpoint {
     }
 
     /// Runs `call` on the streams of `key`'s connection with the pool and the event
-    /// queue, and drives the connection. A fault of the peer's that `call` finds closes the
-    /// connection: the caller gets it from [`Event::Closed`], and this gives
-    /// `ended`, as it does when the connection ended before.
+    /// queue, and drives the connection. A fault of the peer's that `call` finds
+    /// closes the connection: the caller gets it from [`Event::Closed`], and this
+    /// gives `ended`, as it does when the connection ended before.
     fn streams<T>(
         &mut self,
         now: Monotonic,
