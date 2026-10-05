@@ -13,8 +13,8 @@ pub struct Diff<'a> {
     /// Each entry that is in only one tree, or has a different value in the two
     /// trees, in name order.
     pub changes: Vec<Changed<'a>>,
-    /// The hash of each chunk that is in the new tree and not in the old tree, in
-    /// hash order.
+    /// The digest of each chunk that is in the new tree and not in the old tree, in
+    /// digest order.
     pub chunks: Vec<Digest>,
 }
 
@@ -47,18 +47,18 @@ pub fn diff(chunks: &Chunks, old: Digest, new: Digest) -> Result<Diff<'_>, Error
         let old_level = olds.first().map_or(0, |node| node.level);
         let new_level = news.first().map_or(0, |node| node.level);
         if old_level == new_level {
-            let same: BTreeSet<Digest> = olds.iter().map(|node| node.hash).collect();
+            let same: BTreeSet<Digest> = olds.iter().map(|node| node.digest).collect();
             let same: BTreeSet<Digest> = news
                 .iter()
-                .map(|node| node.hash)
-                .filter(|hash| same.contains(hash))
+                .map(|node| node.digest)
+                .filter(|digest| same.contains(digest))
                 .collect();
-            olds.retain(|node| !same.contains(&node.hash));
-            news.retain(|node| !same.contains(&node.hash));
+            olds.retain(|node| !same.contains(&node.digest));
+            news.retain(|node| !same.contains(&node.digest));
         }
         if new_level >= old_level {
             let made = news.iter().filter(|node| !node.entries.is_empty());
-            diff.chunks.extend(made.map(|node| node.hash));
+            diff.chunks.extend(made.map(|node| node.digest));
         }
         if old_level == 0 && new_level == 0 {
             break;
@@ -74,31 +74,32 @@ pub fn diff(chunks: &Chunks, old: Digest, new: Digest) -> Result<Diff<'_>, Error
     let mut olds = entries(&olds).peekable();
     let mut news = entries(&news).peekable();
     loop {
-        let (hash, key, old, new) = match (olds.peek().copied(), news.peek().copied()) {
-            (Some((hash, old)), Some((_, new))) if old.key == new.key => {
+        let (digest, key, old, new) = match (olds.peek().copied(), news.peek().copied())
+        {
+            (Some((digest, old)), Some((_, new))) if old.key == new.key => {
                 olds.next();
                 news.next();
                 if old.payload == new.payload {
                     continue;
                 }
-                (hash, old.key, Some(old.payload), Some(new.payload))
+                (digest, old.key, Some(old.payload), Some(new.payload))
             }
-            (Some((hash, old)), Some((_, new))) if old.key < new.key => {
+            (Some((digest, old)), Some((_, new))) if old.key < new.key => {
                 olds.next();
-                (hash, old.key, Some(old.payload), None)
+                (digest, old.key, Some(old.payload), None)
             }
-            (Some((hash, old)), None) => {
+            (Some((digest, old)), None) => {
                 olds.next();
-                (hash, old.key, Some(old.payload), None)
+                (digest, old.key, Some(old.payload), None)
             }
-            (_, Some((hash, new))) => {
+            (_, Some((digest, new))) => {
                 news.next();
-                (hash, new.key, None, Some(new.payload))
+                (digest, new.key, None, Some(new.payload))
             }
             (None, None) => break,
         };
         let name = str::from_utf8(key).ok().and_then(|name| name.parse().ok());
-        let name = name.ok_or(Error::Corrupt(hash))?;
+        let name = name.ok_or(Error::Corrupt(digest))?;
         diff.changes.push(Changed { name, old, new });
     }
     Ok(diff)
@@ -122,5 +123,5 @@ fn entries<'a, 'b>(
 ) -> impl Iterator<Item = (Digest, Entry<'a>)> + 'b {
     nodes
         .iter()
-        .flat_map(|node| node.entries.iter().map(|&entry| (node.hash, entry)))
+        .flat_map(|node| node.entries.iter().map(|&entry| (node.digest, entry)))
 }

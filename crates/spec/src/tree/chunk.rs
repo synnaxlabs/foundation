@@ -1,13 +1,13 @@
 //! The bytes of one chunk: a level, then entries in key order.
 //!
 //! A leaf (level 0) entry is a key and a value. An entry of a higher level is the
-//! last key of a child chunk and the child's hash. A length is a LEB128 `u32`.
+//! last key of a child chunk and the child's digest. A length is a LEB128 `u32`.
 
 use types::digest::Digest;
 
 use super::Error;
 
-/// One entry of a chunk. `payload` is a value in a leaf and a child hash above.
+/// One entry of a chunk. `payload` is a value in a leaf and a child digest above.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Entry<'a> {
     pub key: &'a [u8],
@@ -17,22 +17,22 @@ pub(super) struct Entry<'a> {
 impl Entry<'_> {
     pub(super) fn child(&self) -> Digest {
         let bytes = self.payload.try_into();
-        Digest(bytes.expect("invariant: an entry above a leaf holds a 32-byte hash"))
+        Digest(bytes.expect("invariant: an entry above a leaf holds a 32-byte digest"))
     }
 }
 
 /// A chunk that was read and checked.
 #[derive(Debug)]
 pub(super) struct Node<'a> {
-    pub hash: Digest,
+    pub digest: Digest,
     pub level: u8,
     pub entries: Vec<Entry<'a>>,
 }
 
 impl<'a> Node<'a> {
-    /// Reads the chunk `bytes`, whose hash is `hash`.
-    pub(super) fn read(hash: Digest, bytes: &'a [u8]) -> Result<Self, Error> {
-        let corrupt = Error::Corrupt(hash);
+    /// Reads the chunk `bytes`, whose digest is `digest`.
+    pub(super) fn read(digest: Digest, bytes: &'a [u8]) -> Result<Self, Error> {
+        let corrupt = Error::Corrupt(digest);
         let (&level, mut rest) = bytes.split_first().ok_or(corrupt)?;
         let mut entries = Vec::new();
         while !rest.is_empty() {
@@ -55,7 +55,7 @@ impl<'a> Node<'a> {
             return Err(corrupt);
         }
         Ok(Self {
-            hash,
+            digest,
             level,
             entries,
         })
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_child_hashes_it_wrote() {
+    fn reads_the_child_digests_it_wrote() {
         let child = Digest::of(b"child");
         let bytes = chunk(2, &[(b"site_a.pt_9", &child.0)]);
         let node = Node::read(Digest::of(&bytes), &bytes).unwrap();
@@ -164,9 +164,9 @@ mod tests {
             &[0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
         ];
         for bytes in cases {
-            let hash = Digest::of(bytes);
-            let err = Node::read(hash, bytes).unwrap_err();
-            assert_eq!(err, Error::Corrupt(hash), "{bytes:?}");
+            let digest = Digest::of(bytes);
+            let err = Node::read(digest, bytes).unwrap_err();
+            assert_eq!(err, Error::Corrupt(digest), "{bytes:?}");
         }
     }
 }

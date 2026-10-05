@@ -20,10 +20,10 @@ pub enum Change {
 /// The result of [`apply`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Update {
-    /// The root hash of the changed tree.
+    /// The root digest of the changed tree.
     pub root: Digest,
-    /// The hash of each chunk that is in the changed tree and not in the tree
-    /// before, in hash order. The chunks are now in the [`Chunks`].
+    /// The digest of each chunk that is in the changed tree and not in the tree
+    /// before, in digest order. The chunks are now in the [`Chunks`].
     pub chunks: Vec<Digest>,
 }
 
@@ -100,9 +100,9 @@ pub(super) fn apply_at(
     if let Some(key) = top.last_key() {
         tops.insert(key.to_vec(), root);
     }
-    for (key, hash) in edits {
-        match hash {
-            Some(hash) => tops.insert(key, hash),
+    for (key, digest) in edits {
+        match digest {
+            Some(digest) => tops.insert(key, digest),
             None => tops.remove(&key),
         };
     }
@@ -110,14 +110,14 @@ pub(super) fn apply_at(
     while tops.len() > 1 {
         level = level.checked_add(1).ok_or(Error::Corrupt(root))?;
         let mut writer = Writer::new(scale, level);
-        for (key, hash) in &tops {
-            writer.push(key, &hash.0);
+        for (key, digest) in &tops {
+            writer.push(key, &digest.0);
         }
         tops = BTreeMap::new();
         for (key, bytes) in writer.finish() {
-            let hash = Digest::of(&bytes);
-            fresh.insert(hash, bytes);
-            tops.insert(key, hash);
+            let digest = Digest::of(&bytes);
+            fresh.insert(digest, bytes);
+            tops.insert(key, digest);
         }
     }
     let top = tops.into_values().next().unwrap_or_else(empty);
@@ -153,8 +153,8 @@ fn canonical(
         passed.push(root);
         root = only.child();
     }
-    for hash in passed {
-        fresh.remove(&hash);
+    for digest in passed {
+        fresh.remove(&digest);
     }
     Ok(root)
 }
@@ -191,7 +191,7 @@ fn rewrite<P: Payload>(
                 }
             }
             if let Some(key) = cursor.node.last_key() {
-                old.insert(key, cursor.node.hash);
+                old.insert(key, cursor.node.digest);
                 up.insert(key.to_vec(), None);
             }
             if !cursor.advance()? {
@@ -209,12 +209,12 @@ fn rewrite<P: Payload>(
             }
         }
         for (key, bytes) in writer.finish() {
-            let hash = Digest::of(&bytes);
-            if old.get(key.as_slice()) == Some(&hash) {
+            let digest = Digest::of(&bytes);
+            if old.get(key.as_slice()) == Some(&digest) {
                 up.remove(&key);
             } else {
-                up.insert(key, Some(hash));
-                fresh.insert(hash, bytes);
+                up.insert(key, Some(digest));
+                fresh.insert(digest, bytes);
             }
         }
     }
@@ -277,7 +277,7 @@ impl<'a> Cursor<'a> {
         node: &Node<'_>,
         index: usize,
     ) -> Result<Node<'a>, Error> {
-        let entry = node.entries.get(index).ok_or(Error::Corrupt(node.hash))?;
+        let entry = node.entries.get(index).ok_or(Error::Corrupt(node.digest))?;
         chunks.child(node, entry)
     }
 }

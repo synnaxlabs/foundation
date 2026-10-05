@@ -52,9 +52,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Missing(hash) => write!(f, "chunk {hash} is not here"),
-            Self::Corrupt(hash) => {
-                write!(f, "chunk {hash} is not a chunk of a spec tree")
+            Self::Missing(digest) => write!(f, "chunk {digest} is not here"),
+            Self::Corrupt(digest) => {
+                write!(f, "chunk {digest} is not a chunk of a spec tree")
             }
         }
     }
@@ -69,24 +69,24 @@ pub struct Chunks(BTreeMap<Digest, Vec<u8>>);
 impl Chunks {
     /// Adds a chunk and returns its digest.
     pub fn insert(&mut self, bytes: Vec<u8>) -> Digest {
-        let hash = Digest::of(&bytes);
-        self.0.insert(hash, bytes);
-        hash
+        let digest = Digest::of(&bytes);
+        self.0.insert(digest, bytes);
+        digest
     }
 
     /// Returns the bytes of a chunk.
     #[must_use]
-    pub fn get(&self, hash: Digest) -> Option<&[u8]> {
-        self.0.get(&hash).map(Vec::as_slice)
+    pub fn get(&self, digest: Digest) -> Option<&[u8]> {
+        self.0.get(&digest).map(Vec::as_slice)
     }
 
-    fn node(&self, hash: Digest) -> Result<Node<'_>, Error> {
-        let bytes = match self.0.get(&hash) {
+    fn node(&self, digest: Digest) -> Result<Node<'_>, Error> {
+        let bytes = match self.0.get(&digest) {
             Some(bytes) => bytes,
-            None if hash == empty() => EMPTY,
-            None => return Err(Error::Missing(hash)),
+            None if digest == empty() => EMPTY,
+            None => return Err(Error::Missing(digest)),
         };
-        Node::read(hash, bytes)
+        Node::read(digest, bytes)
     }
 
     // Reads the child of `parent` that `entry` names, and checks that it fits there.
@@ -97,7 +97,7 @@ impl Chunks {
         if fits {
             Ok(child)
         } else {
-            Err(Error::Corrupt(child.hash))
+            Err(Error::Corrupt(child.digest))
         }
     }
 }

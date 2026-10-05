@@ -36,7 +36,7 @@ fn build(chunks: &mut Chunks, scale: u32, model: &Model) -> Digest {
     step(chunks, scale, empty(), &changes).root
 }
 
-fn hashes(update: &Update) -> BTreeSet<Digest> {
+fn digests(update: &Update) -> BTreeSet<Digest> {
     update.chunks.iter().copied().collect()
 }
 
@@ -45,7 +45,7 @@ fn reachable(chunks: &Chunks, root: Digest) -> BTreeSet<Digest> {
     let mut found = BTreeSet::new();
     let mut level = vec![chunks.node(root).unwrap()];
     while let Some(first) = level.first() {
-        found.extend(level.iter().map(|node| node.hash));
+        found.extend(level.iter().map(|node| node.digest));
         if first.level == 0 {
             break;
         }
@@ -124,7 +124,7 @@ fn a_tree_that_shrinks_to_one_leaf_has_that_leaf_as_its_root() {
     let update = step(&mut chunks, SMALL, root, &deletes);
     let one = build(&mut chunks, SMALL, &Model::from([(1, vec![1; 20])]));
     assert_eq!(update.root, one);
-    assert_eq!(hashes(&update), BTreeSet::from([one]));
+    assert_eq!(digests(&update), BTreeSet::from([one]));
 }
 
 #[test]
@@ -184,7 +184,7 @@ fn a_missing_chunk_is_named() {
     let mut all = Chunks::default();
     let model: Model = (0..500).map(|id| (id, vec![1; 20])).collect();
     let root = build(&mut all, SMALL, &model);
-    let first = Cursor::seek(&all, root, 0, b"").unwrap().node.hash;
+    let first = Cursor::seek(&all, root, 0, b"").unwrap().node.digest;
     let mut chunks = all.clone();
     chunks.0.remove(&first);
     let key = model.keys().copied().min_by_key(|id| name(*id)).unwrap();
@@ -216,7 +216,7 @@ fn a_change_reads_only_the_chunks_near_it() {
         for _ in 0..3 {
             let path = cursor.path.iter().map(|(node, _)| node);
             for node in path.chain([&cursor.node]) {
-                near.insert(all.0[&node.hash].clone());
+                near.insert(all.0[&node.digest].clone());
             }
             cursor.advance().unwrap();
         }
@@ -238,7 +238,7 @@ fn a_missing_chunk_after_the_change_is_named() {
     for level in 0..2 {
         let mut cursor = Cursor::seek(&all, root, level, key).unwrap();
         cursor.advance().unwrap();
-        let next = cursor.node.hash;
+        let next = cursor.node.digest;
         let mut chunks = all.clone();
         chunks.0.remove(&next);
         let change = [Change::Set(first.clone(), vec![1])];
@@ -342,7 +342,10 @@ fn chunk_sizes_stay_near_the_scale() {
     let mut chunks = Chunks::default();
     let update = plant(&mut chunks);
     assert_eq!(height(&chunks, update.root), 3);
-    let made = update.chunks.iter().map(|hash| chunks.get(*hash).unwrap());
+    let made = update
+        .chunks
+        .iter()
+        .map(|digest| chunks.get(*digest).unwrap());
     let leaves = made.filter(|bytes| bytes[0] == 0);
     let mut sizes: Vec<usize> = leaves.map(<[u8]>::len).collect();
     sizes.sort_unstable();
@@ -394,7 +397,7 @@ proptest! {
             let old = reachable(&chunks, root);
             let new = reachable(&chunks, update.root);
             let made: BTreeSet<Digest> = new.difference(&old).copied().collect();
-            prop_assert_eq!(hashes(&update), made);
+            prop_assert_eq!(digests(&update), made);
             let diff = diff(&chunks, root, update.root).unwrap();
             prop_assert_eq!(&diff.chunks, &update.chunks);
             prop_assert_eq!(pairs(&diff), changed(&before, &model));
@@ -439,8 +442,8 @@ proptest! {
 // The chunks that one change can make for each level, at the small scale.
 const BOUND: usize = 16;
 
-// A change to the chunk format or the boundary rule changes these hashes, and with
-// them the root hash of every stored spec.
+// A change to the chunk format or the boundary rule changes these digests, and with
+// them the root digest of every stored spec.
 #[test]
 fn the_roots_of_known_trees_do_not_change() {
     let mut chunks = Chunks::default();
