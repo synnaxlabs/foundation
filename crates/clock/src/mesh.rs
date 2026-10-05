@@ -8,9 +8,6 @@ use crate::{DRIFT, source};
 /// The words of the cell: 1 once readers have time, then a [`Slew`].
 const WORDS: usize = 6;
 
-/// How often [`Clock::run`] measures the OS clock.
-const PERIOD: Span = Span::SECOND;
-
 /// The mesh clock of one node. It lives on one shard, and [`Reader`]s read it from
 /// any.
 #[derive(Debug)]
@@ -77,23 +74,22 @@ impl Clock {
         self.steer()
     }
 
-    /// Feeds the clock from the OS clock `wall`: measures it at once, then once a
-    /// second. It never returns; drop the future to stop it.
+    /// Feeds the clock from the node's time sources, today the OS clock `wall`. Each
+    /// source measures when its adapter decides: the OS clock at once, then a second
+    /// after the last. It never returns; drop the future to stop it.
     ///
     /// # Panics
     ///
-    /// When the OS bound is negative, or the monotonic clock goes back.
+    /// When the clock has a source already, because `run` owns every source. On a
+    /// thread that `env` did not start. When the OS bound is negative, or the
+    /// monotonic clock goes back.
     pub async fn run(mut self, wall: env::wall::Wall) -> ! {
-        let wall = source::Wall::new(wall, self.monotonic.clone());
+        assert!(self.sources.is_empty(), "a source was added before run");
+        let mut wall = source::Wall::new(wall, self.monotonic.clone());
         let source = self.add();
-        let mut sleep = self.monotonic.sleep(Span::ZERO);
         loop {
-            #[expect(clippy::disallowed_methods, reason = "clock reads its source")]
-            self.push(source, wall.measure());
-            // From now, not from the last deadline: one measurement after a suspend,
-            // not one for each period it missed.
-            sleep.reset(self.monotonic.now() + PERIOD);
-            (&mut sleep).await;
+            let measurement = wall.next().await;
+            self.push(source, measurement);
         }
     }
 

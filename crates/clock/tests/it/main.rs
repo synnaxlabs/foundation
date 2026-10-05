@@ -3,6 +3,7 @@
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
+mod common;
 mod mesh;
 mod order;
 mod run;

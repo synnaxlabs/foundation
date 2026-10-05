@@ -6,20 +6,17 @@ use sim::Sim;
 use sim::node::{self, Node};
 use types::time::{Interval, Span, Stamp};
 
-fn ms(n: i64) -> Span {
-    Span::from_nanos(n * Span::MILLISECOND.nanos())
-}
-
-/// A host whose OS gives a bound of 10 ms.
-fn host() -> (Sim, Node) {
-    let mut sim = Sim::new(sim::Config::default());
-    let host = sim.node(node::Config::default());
-    (sim, host)
-}
+use crate::common::{UNKNOWN, ms, node};
 
 /// Runs a clock on one shard of `host`, fed by `wall`.
 fn run(host: &Node, wall: env::wall::Wall) -> Reader {
     let (clock, reader) = Clock::new(host.clock());
+    start(host, clock, wall);
+    reader
+}
+
+/// Runs `clock` on one shard of `host`, fed by `wall`.
+fn start(host: &Node, clock: Clock, wall: env::wall::Wall) {
     let shard = env::shards::Config {
         name: "shard-0".into(),
         core: Some(0),
@@ -28,7 +25,6 @@ fn run(host: &Node, wall: env::wall::Wall) -> Reader {
         .shards()
         .start(shard, |_tasks| async { clock.run(wall).await });
     drop(handle.expect("the shard starts"));
-    reader
 }
 
 /// Mesh time and the OS clock now.
@@ -50,7 +46,7 @@ fn holds(interval: Interval, wall: Stamp) -> bool {
 
 #[test]
 fn serves_the_os_clock_at_once() {
-    let (mut sim, host) = host();
+    let (mut sim, host) = node();
     let reader = run(&host, host.wall());
     assert_eq!(reader.now(), None);
     sim.run_for(Span::ZERO).expect("runs");
@@ -63,8 +59,58 @@ fn serves_the_os_clock_at_once() {
 }
 
 #[test]
+fn serves_unknown_time_at_once_with_no_os_bound() {
+    let mut sim = Sim::new(sim::Config::default());
+    let host = sim.node(node::Config {
+        wall_error: None,
+        ..node::Config::default()
+    });
+    let reader = run(&host, host.wall());
+    sim.run_for(Span::ZERO).expect("runs");
+    let (mesh, wall) = read(&host, &reader);
+    let expected = Interval {
+        earliest: wall - UNKNOWN,
+        latest: wall + UNKNOWN,
+    };
+    assert_eq!(mesh, expected);
+}
+
+#[test]
+fn keeps_a_narrow_measurement_when_the_os_bound_widens() {
+    let (mut sim, host) = node();
+    let reader = run(&host, host.wall());
+    sim.run_for(Span::ZERO).expect("runs");
+    host.set_wall_error(Some(Span::SECOND));
+    sim.run_for(Span::SECOND).expect("runs");
+    let (mesh, wall) = read(&host, &reader);
+    // The first measurement, grown by drift for a second.
+    let error = Span::from_nanos(10_200_000);
+    let expected = Interval {
+        earliest: wall - error,
+        latest: wall + error,
+    };
+    assert_eq!(mesh, expected);
+}
+
+#[test]
+fn a_source_added_before_run_panics() {
+    let (mut sim, host) = node();
+    let (mut clock, _reader) = Clock::new(host.clock());
+    let _ = clock.add();
+    start(&host, clock, host.wall());
+    assert_eq!(
+        sim.run_for(Span::ZERO),
+        Err(sim::Error::Panicked {
+            thread: "shard-0".into(),
+            message: "a source was added before run".into(),
+            seed: 0,
+        })
+    );
+}
+
+#[test]
 fn steps_with_a_step_forward_of_the_os_clock_within_a_second() {
-    let (mut sim, host) = host();
+    let (mut sim, host) = node();
     let reader = run(&host, host.wall());
     sim.run_for(Span::ZERO).expect("runs");
     host.step_wall(Span::SECOND);
@@ -79,7 +125,7 @@ fn steps_with_a_step_forward_of_the_os_clock_within_a_second() {
 
 #[test]
 fn slews_after_a_step_back_of_the_os_clock_and_never_goes_back() {
-    let (mut sim, host) = host();
+    let (mut sim, host) = node();
     let reader = run(&host, host.wall());
     sim.run_for(Span::ZERO).expect("runs");
     let mut last = midpoint(read(&host, &reader).0);
@@ -100,7 +146,7 @@ fn slews_after_a_step_back_of_the_os_clock_and_never_goes_back() {
 
 #[test]
 fn measures_again_after_a_suspend() {
-    let (mut sim, host) = host();
+    let (mut sim, host) = node();
     let reader = run(&host, host.wall());
     sim.run_for(Span::ZERO).expect("runs");
     host.pause(Span::HOUR);
@@ -126,7 +172,7 @@ impl env::wall::Driver for Counted {
 
 #[test]
 fn reads_the_os_clock_once_a_second_and_once_after_a_suspend() {
-    let (mut sim, host) = host();
+    let (mut sim, host) = node();
     let reads = Arc::new(AtomicUsize::new(0));
     let counted = Counted(host.wall(), Arc::clone(&reads));
     let _reader = run(&host, env::wall::Wall::new(counted));
