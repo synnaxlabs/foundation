@@ -201,8 +201,8 @@ impl Selector {
     ///
     /// # Errors
     ///
-    /// The first pattern that does not read, or [`Error::Empty`] when no pattern
-    /// includes a name.
+    /// The first pattern that does not read, or [`Error::NoInclude`] when no pattern
+    /// includes names.
     pub fn new<'a>(patterns: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
         let mut include = Vec::new();
         let mut exclude = Vec::new();
@@ -219,7 +219,7 @@ impl Selector {
             }
         }
         if include.is_empty() {
-            return Err(Error::Empty);
+            return Err(Error::NoInclude);
         }
         Ok(Self { include, exclude })
     }
@@ -267,8 +267,10 @@ fn check_literal(input: &str, segment: &str) -> Result<(), Error> {
 /// A name, pattern, or selector that is not valid.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The text is empty, or a selector includes nothing.
+    /// The text of a name or pattern is empty.
     Empty,
+    /// A selector has no pattern that includes names: every pattern is an exclusion.
+    NoInclude,
     /// A segment is empty or holds a character other than letters, digits, `_`, `-`,
     /// or a leading `@`.
     Segment {
@@ -287,7 +289,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Empty => f.write_str("a name or selector is empty"),
+            Self::Empty => f.write_str("a name or pattern is empty"),
+            Self::NoInclude => f.write_str(
+                "a selector includes no names. Add a pattern without a leading `!`",
+            ),
             Self::Segment { input, segment } => write!(
                 f,
                 "{input:?} has a segment that is not valid: {segment:?}. Use letters, \
@@ -351,7 +356,7 @@ mod tests {
         #[test]
         fn rejects_empty_text() {
             assert_eq!("".parse::<Name>(), Err(Error::Empty));
-            assert_eq!(Error::Empty.to_string(), "a name or selector is empty");
+            assert_eq!(Error::Empty.to_string(), "a name or pattern is empty");
         }
 
         #[test]
@@ -605,8 +610,12 @@ mod tests {
 
         #[test]
         fn rejects_no_includes() {
-            assert_eq!(Selector::new([]), Err(Error::Empty));
-            assert_eq!(Selector::new(["!a"]), Err(Error::Empty));
+            assert_eq!(Selector::new([]), Err(Error::NoInclude));
+            assert_eq!(Selector::new(["!a", "!b.**"]), Err(Error::NoInclude));
+            assert_eq!(
+                Error::NoInclude.to_string(),
+                "a selector includes no names. Add a pattern without a leading `!`"
+            );
         }
 
         #[test]
