@@ -47,6 +47,7 @@ jobs:
             models:
               - 'crates/ring/**'
               - 'crates/block/**'
+              - 'crates/counting/**'
               - 'xtask/**'
               - 'Cargo.lock'
               - '.cargo/**'
