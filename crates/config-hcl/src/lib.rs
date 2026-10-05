@@ -154,7 +154,7 @@ pub enum Form {
     Namespace,
     /// An argument expanded with `...`, such as `f(xs...)`.
     Expansion,
-    /// An identifier with a letter or digit outside ASCII, such as `température`.
+    /// An identifier with a character outside ASCII, such as `température`.
     UnicodeIdentifier,
 }
 
@@ -197,8 +197,9 @@ impl fmt::Display for Form {
                  argument"
             }
             Self::UnicodeIdentifier => {
-                "identifiers with letters outside ASCII do not exist in Foundation \
-                 files. Write the key as a quoted string, or use ASCII letters"
+                "identifiers with characters outside ASCII do not exist in Foundation \
+                 files. Write the key as a quoted string, or use only ASCII \
+                 characters"
             }
         })
     }
@@ -370,8 +371,9 @@ mod tests {
             ),
             (
                 Form::UnicodeIdentifier,
-                "identifiers with letters outside ASCII do not exist in Foundation \
-                 files. Write the key as a quoted string, or use ASCII letters",
+                "identifiers with characters outside ASCII do not exist in Foundation \
+                 files. Write the key as a quoted string, or use only ASCII \
+                 characters",
             ),
         ];
         for (form, message) in cases {

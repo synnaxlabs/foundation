@@ -688,9 +688,9 @@ mod tests {
                             or `%%{` for the text `${` or `%{`";
     const NULL: &str = "`null` does not exist in Foundation files. Remove the \
                         attribute to use its default";
-    const UNICODE: &str = "identifiers with letters outside ASCII do not exist in \
-                           Foundation files. Write the key as a quoted string, or use \
-                           ASCII letters";
+    const UNICODE: &str = "identifiers with characters outside ASCII do not exist \
+                           in Foundation files. Write the key as a quoted string, or \
+                           use only ASCII characters";
 
     mod values {
         use super::*;
@@ -1051,8 +1051,8 @@ c = "°C # not a comment"
     mod heredocs {
         use super::*;
 
-        const START: &str = "the file needs a marker, such as `EOT`, and a new line to start the \
-             heredoc here";
+        const START: &str = "the file needs a marker, such as `EOT`, and a new line to \
+                             start the heredoc here";
         const END: &str =
             "the file needs the marker on a line of its own to end the heredoc here";
         /// Checks that `a = ` and then each heredoc reads as its string.
@@ -1498,10 +1498,19 @@ c = "°C # not a comment"
                 ("b température {}\n", at(2, 0, 2), at(14, 0, 13)),
                 ("a = 1\nb = é\n", at(10, 1, 4), at(12, 1, 5)),
                 ("a = f(x, 温度)\n", at(9, 0, 9), at(15, 0, 11)),
+                ("e\u{301}t = 1\n", at(0, 0, 0), at(4, 0, 3)),
+                ("a\u{200b}= 1\n", at(0, 0, 0), at(4, 0, 2)),
+                ("a = x\u{2192}y\n", at(4, 0, 4), at(9, 0, 7)),
             ];
             for (text, start, end) in cases {
                 check(text, &[unicode(span(start, end))]);
             }
+            let space = span(at(1, 0, 1), at(3, 0, 2));
+            let message = format!("the file needs {} here", Expected::AttributeOrBlock);
+            check(
+                "a\u{a0}= 1\n",
+                &[(syntax(space, Expected::AttributeOrBlock), &message)],
+            );
         }
 
         #[test]

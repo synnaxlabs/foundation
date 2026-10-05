@@ -310,7 +310,7 @@ impl<'a> Tokens<'a> {
             .char_indices()
             .find(|&(i, c)| {
                 !(identifier_part(c)
-                    || c.is_alphanumeric()
+                    || !(c.is_ascii() || c.is_whitespace())
                     || c == '@'
                     || c == '.' && dot(i))
             })
