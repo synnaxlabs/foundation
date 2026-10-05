@@ -7,6 +7,9 @@ use types::frame::key_set::KeySet;
 use types::frame::{self, Form, Frame};
 use types::sample::{Scalar, Type};
 
+/// The buffer tag of a data entry.
+pub(crate) const TAG: u8 = 0;
+
 /// Bytes of the series count that starts a body.
 const COUNT: usize = 4;
 /// Bytes of one series descriptor: channel, kind, element, `n`, and end.

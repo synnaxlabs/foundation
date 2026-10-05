@@ -8,7 +8,7 @@ use control::{Gate, Permit};
 use delivery::Readers;
 use types::channel;
 use types::frame::{Draft, Frame, Path};
-use types::time::{Interval, Monotonic};
+use types::time::{Interval, Monotonic, Stamp};
 
 use crate::order::{self, Order, Tail};
 
@@ -18,7 +18,8 @@ pub(crate) struct Index {
     /// Who may write the index. The shard opens and closes writers on it, and records
     /// each [`Gate::handoff`] before the index's next frame.
     pub(crate) gate: Gate,
-    order: Order,
+    /// Where each path stands. The shard reads it to place a handoff.
+    pub(crate) order: Order,
     readers: Readers,
 }
 
@@ -34,6 +35,11 @@ impl Accepted {
     /// The seq the frame's samples take.
     pub(crate) fn seq(&self) -> Range<u64> {
         self.order.seq.clone()
+    }
+
+    /// The newest stamp of the frame, or `None` when it is empty.
+    pub(crate) fn last(&self) -> Option<Stamp> {
+        self.order.last
     }
 
     /// Sets the seq of `group` in `draft` and freezes it on the accepted path. The
@@ -150,7 +156,7 @@ mod tests {
     use types::authority::Authority;
     use types::frame::key_set::{Group, Interner, KeySet};
     use types::frame::{self, Form};
-    use types::time::{Span, Stamp};
+    use types::time::Span;
 
     use super::*;
     use crate::common::pool;

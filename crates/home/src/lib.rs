@@ -15,6 +15,8 @@ mod index;
     expect(dead_code, reason = "the frame path is the first user")
 )]
 mod order;
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
+mod shard;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the frame path is the first user")
@@ -25,3 +27,5 @@ mod split;
     expect(dead_code, reason = "the frame path is the first user")
 )]
 mod stored;
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
+mod writer;
