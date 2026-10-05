@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn keeps_the_grid_after_a_cancelled_wait() {
-        let (cancelled, resumed, elapsed) = run(|clock, tasks| async move {
+        let (stopped, resumed, elapsed) = run(|clock, tasks| async move {
             let token = Token::new();
             let canceller = token.clone();
             let sleeper = clock.clone();
@@ -233,11 +233,11 @@ mod tests {
             let start = clock.now();
             let mut timer = Timer::new(&clock, rate(1, 1));
             timer.tick(&token).await.expect("tick 0");
-            let cancelled = timer.tick(&token).await;
+            let stopped = timer.tick(&token).await;
             let resumed = timer.tick(&Token::new()).await;
-            (cancelled, resumed, clock.now() - start)
+            (stopped, resumed, clock.now() - start)
         });
-        assert_eq!(cancelled, None, "cancelled");
+        assert_eq!(stopped, None, "cancelled");
         assert_eq!(resumed, Some(tick(1, 0, Span::ZERO)), "tick 1 on the grid");
         assert_eq!(elapsed, Span::SECOND, "at tick 1");
     }
