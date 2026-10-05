@@ -326,6 +326,23 @@ mod tests {
         usize::try_from(value).expect("an offset in the test area fits in usize")
     }
 
+    /// The smallest body a header can open holds one entry of no bytes.
+    #[test]
+    fn a_ring_that_a_header_opens_holds_one_entry() {
+        use crate::header;
+        let small = Layout::new(AREA, 55).expect("the sizes make a ring");
+        let block = header::Header::new(small, CHAIN).encode();
+        let opened = header::Header::decode(&block, &[0; 4096]).expect("a whole block");
+        let bytes = vec![0; index(AREA)];
+        let mut cursor = Cursor::new(opened.layout, opened.tail);
+        let Window { place, len } = cursor.window();
+        let step = cursor.next(&bytes[index(place)..index(place + len)]);
+        assert_eq!(step, Ok(Step::End));
+        let (writer, _) = cursor.writer(opened.tail, 1).expect("the ring is empty");
+        let pushed = Group::default().push(&writer, header(1, Path::Live, 0), &[]);
+        assert_eq!(pushed, Ok(()));
+    }
+
     /// An area in memory and the writer that continues it, as a ring just made and
     /// opened: it holds one restart record.
     struct Area {

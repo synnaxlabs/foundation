@@ -11,6 +11,7 @@
 
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
+use crate::entry;
 use crate::record::{self, ALIGN, BLOCK, HEADER_LEN, Kind};
 
 fn to_u64(len: usize) -> u64 {
@@ -78,19 +79,19 @@ impl Layout {
     /// # Errors
     ///
     /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
-    /// under 4 or over `u32::MAX`, or when `area` is less than twice the largest
-    /// record less one block. An empty ring of that length takes any record,
-    /// wherever its head is.
+    /// under the table of one entry or over `u32::MAX`, or when `area` is less than
+    /// twice the largest record less one block. An empty ring of that length takes
+    /// any record, wherever its head is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         let window = HEADER_LEN
             .checked_add(body_max)
             .and_then(|len| len.checked_next_multiple_of(ALIGN))
             .map(to_u64);
-        let restart =
-            size_of::<u32>()..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        let body =
+            entry::table_len(1)..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
         match window {
             Some(window)
-                if restart.contains(&body_max)
+                if body.contains(&body_max)
                     && area.is_multiple_of(BLOCK)
                     && window.saturating_mul(2) - BLOCK <= area =>
             {
@@ -654,7 +655,7 @@ mod tests {
             let block = 4096;
             let cases = [
                 ("an area of part blocks", 7 * block + 1, 4087),
-                ("a body under a restart value", 8 * block, 3),
+                ("a body under one entry table", 8 * block, 54),
                 ("an area under two records less a block", 2 * block, 4088),
                 ("a body over u32::MAX", u64::MAX - 4095, usize::MAX),
                 ("a record size over u64", u64::MAX - 4095, usize::MAX - 8),
@@ -663,6 +664,11 @@ mod tests {
                 let unfit = Unfit { area, body_max };
                 assert_eq!(Layout::new(area, body_max), Err(unfit), "{case}");
             }
+        }
+
+        #[test]
+        fn takes_a_body_of_one_entry_table() {
+            assert_eq!(Layout::new(4096, 55).map(|layout| layout.window), Ok(4096));
         }
 
         #[test]

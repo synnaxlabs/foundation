@@ -121,8 +121,9 @@ impl Header {
         block
     }
 
-    /// Reads the newer whole one of the two header blocks. A new ring has the same
-    /// block in both places; on a tie, the first.
+    /// Reads the newer whole one of the two header blocks: the one whose seq comes
+    /// after the other's, wrapped as [`Self::next`] wraps it. A new ring has the
+    /// same block in both places; on a tie, the first.
     ///
     /// # Errors
     ///
@@ -141,7 +142,7 @@ impl Header {
             if fields.version != VERSION {
                 return Err(Error::Version(fields.version));
             }
-            if newer.is_none_or(|newer: Fields| fields.seq > newer.seq) {
+            if newer.is_none_or(|newer: Fields| later(fields.seq, newer.seq)) {
                 newer = Some(fields);
             }
         }
@@ -158,6 +159,13 @@ impl Header {
             seq: fields.seq,
         })
     }
+}
+
+/// Whether checkpoint `seq` comes after `than`, with the seq wrapped as
+/// [`Header::next`] wraps it. The two blocks hold consecutive checkpoints, so the
+/// difference is small and its sign orders them.
+fn later(seq: u64, than: u64) -> bool {
+    seq.wrapping_sub(than).cast_signed() > 0
 }
 
 /// The fields of one block whose magic and CRC are right.
@@ -204,6 +212,8 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    use crate::entry::table_len;
+
     fn layout(area: u64, body_max: usize) -> Layout {
         Layout::new(area, body_max).expect("the test sizes make a ring")
     }
@@ -230,7 +240,7 @@ mod tests {
         (1..64u64, 0..64u64, any::<u32>(), any::<u64>()).prop_flat_map(
             |(blocks, tail, chain, seq)| {
                 let most = usize::try_from(blocks * 4096).expect("a small size") - 9;
-                (4..=most).prop_map(move |body_max| {
+                (table_len(1)..=most).prop_map(move |body_max| {
                     header((2 * blocks - 1) * 4096, body_max, tail * 4096, chain, seq)
                 })
             },
@@ -321,9 +331,9 @@ mod tests {
         let off = 4097u64.to_le_bytes();
         let cases: [(&str, Patch<'_>, Error); 4] = [
             (
-                "a body of 3 bytes",
-                &[(18, &3u32.to_le_bytes())],
-                unfit(8 * 4096, 3),
+                "a body under one entry table",
+                &[(18, &54u32.to_le_bytes())],
+                unfit(8 * 4096, 54),
             ),
             (
                 "an area of a part block",
@@ -347,15 +357,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reads_the_checkpoint_after_the_last_seq() {
+        let old = header(8 * 4096, 4087, 4096, 3, u64::MAX);
+        let new = old.next(Position::new(8192, 4).expect("aligned"));
+        assert_eq!((old.place(), new.place()), (4096, 0));
+        assert_eq!(Header::decode(&new.encode(), &old.encode()), Ok(new));
+    }
+
     proptest! {
+        /// Two seqs exactly `2^63` apart have no order, and consecutive checkpoints
+        /// are never that far apart.
         #[test]
         fn reads_the_newer_valid_block(
             newer in any_header(),
             older in any_header(),
             swap in any::<bool>(),
         ) {
-            prop_assume!(newer.seq != older.seq);
-            let (newer, older) = if newer.seq > older.seq {
+            let apart = newer.seq.wrapping_sub(older.seq);
+            prop_assume!(apart != 0 && apart != 1 << 63);
+            let (newer, older) = if later(newer.seq, older.seq) {
                 (newer, older)
             } else {
                 (older, newer)
