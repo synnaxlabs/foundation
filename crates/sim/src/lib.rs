@@ -145,7 +145,7 @@ impl Sim {
     pub fn link(&mut self, from: &Node, to: &Node, config: link::Config) {
         let (from, to) = (self.own(from), self.own(to));
         config.check();
-        lock(&self.shared).link(from, to, config);
+        lock(&self.shared).net().link(from, to, config);
     }
 
     /// Sets the line that joins port `a_path` of `a` and port `b_path` of `b`, for the
@@ -195,16 +195,17 @@ impl Sim {
     ///
     /// # Panics
     ///
-    /// When `node` belongs to another run.
+    /// - When `node` belongs to another run.
+    /// - When the drop of a future panics. The crash still ends, and the panic gives
+    ///   each message as [`Error::Panicked`] does.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
-        let (tasks, starts) = lock(&self.shared).crash(node);
-        self.drop_futures(&tasks);
+        let (tasks, starts) = lock(&self.shared).stop(node);
+        let panics = self.drop_futures(&tasks);
         drop(starts);
-        if crash == Crash::Power {
-            let orphans = lock(&self.shared).cut_power(node);
-            drop(orphans);
-        }
+        let orphans = lock(&self.shared).crash(node, crash);
+        drop(orphans);
+        assert!(panics.is_empty(), "{}", panics.join(THEN));
     }
 
     /// A hash of every scheduler pick, every datagram event, every byte arrival on a
@@ -221,9 +222,10 @@ impl Sim {
     ///
     /// # Errors
     ///
-    /// - [`Error::Panicked`] when a task panics. The run stops there, and the
+    /// - [`Error::Panicked`] when a task panics, in a poll or in the drop of its
+    ///   future. The run stops there, the thread's other futures drop, and the
     ///   thread's [`env::thread::Handle::join`] returns
-    ///   [`env::thread::Error::Panicked`].
+    ///   [`env::thread::Panicked`].
     /// - [`Error::Steps`] past [`Config::steps_max`] steps.
     /// - [`Error::Stuck`] when threads remain but nothing can run again: no task is
     ///   ready on a node that runs, and no timer, arrival, file call, or pause ends
@@ -289,26 +291,31 @@ impl Sim {
     fn step(&mut self) -> Result<(), Error> {
         let (task, thread, start) = lock(&self.shared).pick(&mut self.scheduler);
         let run = panic::catch_unwind(AssertUnwindSafe(|| {
-            if self.poll(task, thread, start).is_ready() {
-                let done = lock(&self.shared).finish(task, thread);
-                self.drop_futures(&done);
+            if self.poll(task, thread, start).is_pending() {
+                return Vec::new();
             }
+            let done = lock(&self.shared).finish(task, thread);
+            self.drop_futures(&done)
         }));
         lock(&self.shared).release();
-        let Err(payload) = run else { return Ok(()) };
+        let mut panics = run.unwrap_or_else(|payload| vec![message(&*payload)]);
+        if panics.is_empty() {
+            return Ok(());
+        }
         let name = lock(&self.shared).name(thread);
-        let panicked = env::thread::Error::Panicked { name: name.clone() };
+        let panicked = env::thread::Panicked { name: name.clone() };
         let tasks = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
-        self.drop_futures(&tasks);
+        panics.extend(self.drop_futures(&tasks));
         Err(Error::Panicked {
             thread: name,
-            message: message(&*payload),
+            message: panics.join(THEN),
             seed: self.config.seed,
         })
     }
 
     /// Polls `task` once. A thread's first task makes its future here, on the
-    /// simulated thread.
+    /// simulated thread. A future whose poll panics goes back to the store, so that
+    /// it drops as the others do.
     fn poll(&self, task: u64, thread: u64, start: Option<Start>) -> Poll<()> {
         if let Some(start) = start {
             let future = match start {
@@ -322,11 +329,21 @@ impl Sim {
             self.futures.borrow_mut().insert(&self.shared, task, future);
         }
         let (mut future, waker) = self.futures.borrow_mut().take(task);
-        let poll = future.as_mut().poll(&mut Context::from_waker(&waker));
-        if poll.is_pending() {
-            self.futures.borrow_mut().put(task, future);
+        let mut context = Context::from_waker(&waker);
+        let poll = panic::catch_unwind(AssertUnwindSafe(|| {
+            future.as_mut().poll(&mut context)
+        }));
+        match poll {
+            Ok(Poll::Ready(())) => Poll::Ready(()),
+            Ok(Poll::Pending) => {
+                self.futures.borrow_mut().put(task, future);
+                Poll::Pending
+            }
+            Err(payload) => {
+                self.futures.borrow_mut().put(task, future);
+                panic::resume_unwind(payload)
+            }
         }
-        poll
     }
 
     /// The index of `node`.
@@ -341,11 +358,21 @@ impl Sim {
     }
 
     /// Drops the futures of `tasks`, outside the borrow, since a drop may spawn.
-    fn drop_futures(&self, tasks: &[u64]) {
+    /// Returns the message of each drop that panicked, in order. Each future drops on
+    /// its own, as a second panic in one unwind aborts the process.
+    fn drop_futures(&self, tasks: &[u64]) -> Vec<String> {
         let futures = self.futures.borrow_mut().remove(tasks);
-        drop(futures);
+        (futures.into_iter())
+            .filter_map(|future| {
+                panic::catch_unwind(AssertUnwindSafe(|| drop(future))).err()
+            })
+            .map(|payload| message(&*payload))
+            .collect()
     }
 }
+
+/// What joins the messages of two panics of one thread.
+const THEN: &str = ", then a drop panicked: ";
 
 /// The message of a panic payload.
 fn message(payload: &(dyn Any + Send)) -> String {
@@ -381,13 +408,14 @@ impl fmt::Debug for Sim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Crash {
     /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
-    /// keeps each call that ended, and each file call in flight still ends, as if
-    /// its future dropped.
+    /// keeps each call that ended. Each file call in flight takes effect at the
+    /// crash, as if its future dropped, so a write keeps any subset of its sectors.
     Process,
     /// The machine loses power and boots again.
     ///
-    /// - Each 512-byte sector of a file keeps the bytes that a sync made durable,
-    ///   or the bytes of any one write on it since then, a write in flight too.
+    /// - Each [`SECTOR`](env::files::SECTOR) of a file keeps the bytes that a sync
+    ///   made durable, or the bytes of any one write on it since then, a write in
+    ///   flight too.
     /// - Each directory goes back to its entries when its last `sync_dir` ended,
     ///   and what those entries no longer reach is gone.
     /// - Other file calls in flight have no effect.
@@ -409,7 +437,8 @@ pub enum Error {
     Panicked {
         /// The thread's name.
         thread: String,
-        /// The panic message.
+        /// The panic message. When drops of the thread's futures panic after it, the
+        /// message of each follows, after ", then a drop panicked: ".
         message: String,
         /// The seed that replays the run.
         seed: u64,

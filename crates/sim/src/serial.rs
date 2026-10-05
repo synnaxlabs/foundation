@@ -1,7 +1,7 @@
 //! The serial lines of a run: their ends, open ports, and bytes in flight.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::hash::{DefaultHasher, Hash};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::task::{Poll, Waker};
 
@@ -118,6 +118,7 @@ pub(crate) struct Serial {
     next: u64,
     /// The stream that each line draws its own stream from.
     rng: Rng,
+    digest: DefaultHasher,
 }
 
 impl Serial {
@@ -128,7 +129,13 @@ impl Serial {
             flights: BTreeMap::new(),
             next: 0,
             rng,
+            digest: DefaultHasher::new(),
         }
+    }
+
+    /// A hash of every byte arrival so far: its time, end, and fate.
+    pub(crate) fn digest(&self) -> u64 {
+        self.digest.finish()
     }
 
     /// Sets the line between ports `a` and `b`, with a new stream of faults, or
@@ -258,11 +265,7 @@ impl Serial {
 
     /// Delivers the bytes that arrive by true time `at`, and returns the wakers of
     /// the ends that read them and of the ends whose queues get room.
-    pub(crate) fn deliver(
-        &mut self,
-        at: Monotonic,
-        digest: &mut DefaultHasher,
-    ) -> Vec<Waker> {
+    pub(crate) fn deliver(&mut self, at: Monotonic) -> Vec<Waker> {
         let mut wakers = Vec::new();
         while let Some(flight) = self.flights.first_entry() {
             if flight.key().0 > at {
@@ -289,7 +292,7 @@ impl Serial {
                 }
                 (Some(open), _) => push(open, byte.value, &mut wakers),
             };
-            (at, to, fate).hash(digest);
+            (at, to, fate).hash(&mut self.digest);
         }
         wakers
     }

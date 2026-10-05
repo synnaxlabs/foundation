@@ -1,7 +1,7 @@
 //! The file calls of a run: the disk of each node and the calls in flight on them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::{DefaultHasher, Hash};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::task::{Poll, Waker};
@@ -11,7 +11,8 @@ use env::files::{Error, Mode, Operation};
 use env::rng::Rng;
 use types::time::Monotonic;
 
-use crate::disk::{self, Cause, Disk};
+use crate::Crash;
+use crate::disk::{self, Cause, Disk, Handle};
 
 /// The count of call delays in nanoseconds: a call takes 0 to 100 us.
 const DELAYS: u64 = 100_001;
@@ -27,17 +28,17 @@ pub(crate) enum Call {
     SyncDir,
     Free,
     Write {
-        inode: u64,
+        handle: Handle,
         offset: u64,
         bytes: Vec<u8>,
     },
     Read {
-        inode: u64,
+        handle: Handle,
         offset: u64,
         len: u64,
     },
     Sync {
-        inode: u64,
+        handle: Handle,
     },
 }
 
@@ -57,11 +58,11 @@ impl Call {
     }
 
     /// The open file that it acts on, if any.
-    fn inode(&self) -> Option<u64> {
+    fn handle(&self) -> Option<Handle> {
         match self {
-            Self::Write { inode, .. }
-            | Self::Read { inode, .. }
-            | Self::Sync { inode } => Some(*inode),
+            Self::Write { handle, .. }
+            | Self::Read { handle, .. }
+            | Self::Sync { handle } => Some(*handle),
             _ => None,
         }
     }
@@ -71,7 +72,7 @@ impl Call {
 pub(crate) enum Done {
     /// A file that the call opened. The call holds it for the descriptor.
     Open {
-        inode: u64,
+        handle: Handle,
         len: u64,
     },
     Names(Vec<PathBuf>),
@@ -126,6 +127,8 @@ pub(crate) struct Files {
     /// counter orders them all, so a sector written at a tick past a call's key was
     /// written after the call started.
     tick: u64,
+    /// A hash of every end of a call, in order.
+    digest: DefaultHasher,
 }
 
 impl Files {
@@ -138,6 +141,7 @@ impl Files {
             done: BTreeMap::new(),
             rng,
             tick: disk::ROOT,
+            digest: DefaultHasher::new(),
         }
     }
 
@@ -173,10 +177,10 @@ impl Files {
         let failed = fault.map(|at| self.faults.remove(at)).is_some();
         let disk = &mut self.disks[node];
         let mut before = Vec::new();
-        if let Some(inode) = call.inode() {
-            disk.hold(inode);
+        if let Some(handle) = call.handle() {
+            disk.hold(handle);
             if let Call::Read { offset, len, .. } = call {
-                before = disk.file(inode).bytes(offset..offset + len);
+                before = disk.file(handle.inode).bytes(offset..offset + len);
             }
         }
         let at = Monotonic(now.0.saturating_add(delay));
@@ -200,14 +204,14 @@ impl Files {
         self.queue.first().map(|&(at, _)| at)
     }
 
-    /// Ends the calls due by true time `at`, in order, and hashes each end into
-    /// `digest`. Returns the wakers of their futures, and the blocks of the calls
-    /// whose futures dropped.
-    pub(crate) fn end(
-        &mut self,
-        at: Monotonic,
-        digest: &mut DefaultHasher,
-    ) -> (Vec<Waker>, Vec<Held>) {
+    /// A hash of every end of a call so far: its time, key, kind, and success.
+    pub(crate) fn digest(&self) -> u64 {
+        self.digest.finish()
+    }
+
+    /// Ends the calls due by true time `at`, in order. Returns the wakers of their
+    /// futures, and the blocks of the calls whose futures dropped.
+    pub(crate) fn end(&mut self, at: Monotonic) -> (Vec<Waker>, Vec<Held>) {
         let (mut wakers, mut orphans) = (Vec::new(), Vec::new());
         while let Some(&(due, key)) = self.queue.first() {
             if due > at {
@@ -220,12 +224,9 @@ impl Files {
                 (flight.node, flight.dropped, flight.waker.take());
             let kind = mem::discriminant(&flight.call);
             let ended = self.apply(key, flight);
-            (due, key, kind, ended.result.is_ok()).hash(digest);
+            (due, key, kind, ended.result.is_ok()).hash(&mut self.digest);
             if dropped {
-                if let Ok(Done::Open { inode, .. }) = ended.result {
-                    self.disks[node].release(inode);
-                }
-                orphans.extend(ended.held);
+                orphans.extend(self.discard(node, ended));
             } else {
                 self.done.insert(key, ended);
                 wakers.extend(waker);
@@ -249,47 +250,52 @@ impl Files {
         } = flight;
         let disk = &mut self.disks[node];
         let result = match &call {
-            Call::Sync { inode } if failed => {
-                disk.file(*inode).tear(key, &mut self.rng);
+            Call::Sync { handle } if failed => {
+                disk.file(handle.inode).tear(key, &mut self.rng);
                 Err(Cause::Code(IO))
             }
             _ if failed => Err(Cause::Code(IO)),
             Call::Open(mode) => disk
                 .open(key, &path, *mode)
-                .map(|(inode, len)| Done::Open { inode, len }),
+                .map(|(handle, len)| Done::Open { handle, len }),
             Call::List => disk.list(&path).map(Done::Names),
             Call::CreateDir => disk.create_dir(key, &path).map(|()| Done::Unit),
             Call::Remove => disk.remove(&path).map(|()| Done::Unit),
             Call::SyncDir => disk.sync_dir(&path).map(|()| Done::Unit),
             Call::Free => Ok(Done::Free(disk.free())),
             Call::Write {
-                inode,
+                handle,
                 offset,
                 bytes,
             } => {
-                let file = disk.file(*inode);
+                let file = disk.file(handle.inode);
                 file.write(*offset, bytes, key, tick, dropped, &mut self.rng);
                 Ok(Done::Unit)
             }
-            Call::Read { inode, offset, len } => {
-                let writes = writes(&self.flights, *inode);
-                let file = disk.file(*inode);
+            Call::Read {
+                handle,
+                offset,
+                len,
+            } => {
+                let writes = writes(&self.flights, handle.inode);
+                let file = disk.file(handle.inode);
                 let range = *offset..offset + len;
                 let bytes = file.read(range, &before, &writes, &mut self.rng);
                 Ok(Done::Read(bytes))
             }
-            Call::Sync { inode } => {
-                disk.file(*inode).sync(key);
+            Call::Sync { handle } => {
+                disk.file(handle.inode).sync(key);
                 Ok(Done::Unit)
             }
         };
-        if let Some(inode) = call.inode() {
-            disk.release(inode);
+        if let Some(handle) = call.handle() {
+            disk.release(handle);
         }
         let operation = call.operation();
         let result = result.map_err(|cause| match cause {
             Cause::NotFound => Error::NotFound { path },
             Cause::Full => Error::Full { path },
+            Cause::Busy => Error::Busy { path },
             Cause::Code(code) => Error::Io {
                 path,
                 operation,
@@ -327,51 +333,63 @@ impl Files {
         }
         let ended = (self.done.remove(&key))
             .expect("invariant: a call whose result was not taken has ended");
-        if let Ok(Done::Open { inode, .. }) = ended.result {
-            self.disks[node].release(inode);
-        }
-        (None, ended.held)
+        (None, self.discard(node, ended))
     }
 
-    /// Cuts the power of `node` at true time `at`, whose calls in flight have all
-    /// dropped: each write ends now as a dropped write, the other calls have no
-    /// effect, and the disk keeps what is durable. Hashes each end into `digest`.
-    /// Returns the blocks of the calls, for the caller to drop after it releases the
-    /// lock.
-    pub(crate) fn cut_power(
+    /// Drops call `ended` of `node`, whose future dropped: an open releases the file
+    /// it opened. Returns the blocks of the call, for the caller to drop after it
+    /// releases the lock.
+    fn discard(&mut self, node: usize, ended: Ended) -> Option<Held> {
+        if let Ok(Done::Open { handle, .. }) = ended.result {
+            self.disks[node].release(handle);
+        }
+        ended.held
+    }
+
+    /// Crashes `node` by `crash` at true time `at`, whose calls in flight have all
+    /// dropped. Each call ends now, in the order of its end time: after a `Process`
+    /// crash each takes effect, and after a `Power` crash only each write does, and
+    /// the disk keeps what is durable. Returns the blocks of the calls, for the
+    /// caller to drop after it releases the lock.
+    pub(crate) fn crash(
         &mut self,
         node: usize,
         at: Monotonic,
-        digest: &mut DefaultHasher,
+        crash: Crash,
     ) -> Vec<Held> {
         let flights = &self.flights;
-        self.queue.retain(|(_, key)| flights[key].node != node);
-        let (cut, flights) = mem::take(&mut self.flights)
+        let (cut, queue): (BTreeSet<_>, _) = mem::take(&mut self.queue)
             .into_iter()
-            .partition(|(_, flight)| flight.node == node);
-        self.flights = flights;
+            .partition(|(_, key)| flights[key].node == node);
+        self.queue = queue;
         let mut orphans = Vec::new();
-        for (key, flight) in cut {
+        for (_, key) in cut {
+            let flight = (self.flights.remove(&key))
+                .expect("invariant: a queued call is in flight");
             let kind = mem::discriminant(&flight.call);
-            let (ok, held) = if let Call::Write { .. } = flight.call {
+            let applied =
+                crash == Crash::Process || matches!(flight.call, Call::Write { .. });
+            let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
-                (ended.result.is_ok(), ended.held)
+                (ended.result.is_ok(), self.discard(node, ended))
             } else {
-                if let Some(inode) = flight.call.inode() {
-                    self.disks[node].release(inode);
+                if let Some(handle) = flight.call.handle() {
+                    self.disks[node].release(handle);
                 }
                 (false, flight.held)
             };
-            (at, key, kind, ok).hash(digest);
+            (at, key, kind, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
-        self.disks[node].cut_power(&mut self.rng);
+        if crash == Crash::Power {
+            self.disks[node].cut_power(&mut self.rng);
+        }
         orphans
     }
 
-    /// Closes a descriptor of file `inode` of `node`.
-    pub(crate) fn close(&mut self, node: usize, inode: u64) {
-        self.disks[node].release(inode);
+    /// Closes descriptor `handle` of `node`.
+    pub(crate) fn close(&mut self, node: usize, handle: Handle) {
+        self.disks[node].release(handle);
     }
 }
 
@@ -381,10 +399,10 @@ fn writes(flights: &BTreeMap<u64, Flight>, inode: u64) -> Vec<(u64, &[u8])> {
         .filter(|flight| !flight.failed)
         .filter_map(|flight| match &flight.call {
             Call::Write {
-                inode: on,
+                handle,
                 offset,
                 bytes,
-            } if *on == inode => Some((*offset, bytes.as_slice())),
+            } if handle.inode == inode => Some((*offset, bytes.as_slice())),
             _ => None,
         })
         .collect()

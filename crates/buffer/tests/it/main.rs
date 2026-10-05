@@ -7,12 +7,14 @@ mod memory;
 
 use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Error, Layout, Tail, Unfit};
+use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Tail, Unfit};
 use env::clock::Clock;
 use env::entropy::Entropy;
-use env::files::{Error as FileError, Mode, Operation};
+use env::files::{Error as FileError, Mode, Operation, SECTOR};
 use env::tasks::Tasks;
 use proptest::prelude::*;
 use types::channel::{self, Slot, Slots};
@@ -35,7 +37,9 @@ const RING: &str = "shard-0/ring";
 /// Where a header block keeps its version, its `body_max`, and its CRC.
 const VERSION_AT: usize = 8;
 const BODY_MAX_AT: usize = 18;
-const CRC_AT: usize = 4092;
+const CRC_AT: usize = 42;
+/// The bytes the header CRC covers.
+const COVER: usize = 512;
 
 /// What one test gets on its shard.
 struct Shard {
@@ -86,7 +90,8 @@ impl Shard {
             let mut block = file[place..place + to_usize(BLOCK)].to_vec();
             block[at..at + bytes.len()].copy_from_slice(bytes);
             let crc = crc32c::crc32c(&block[..CRC_AT]);
-            block[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
+            let crc = crc32c::crc32c_append(crc, &block[CRC_AT + 4..COVER]);
+            block[CRC_AT..CRC_AT + 4].copy_from_slice(&crc.to_le_bytes());
             self.memory.put(RING, place, &block);
         }
     }
@@ -533,6 +538,71 @@ fn a_batch_is_queued_whole_or_not_at_all() {
     });
 }
 
+/// A batch over a limit of one record is refused whole, and the batches before
+/// and after it commit in its place.
+#[test]
+fn a_batch_no_record_holds_is_large_and_queues_nothing() {
+    run(108, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let small = [shard.block(10)];
+        buffer
+            .append(&[entry(1, a, Path::Live, 0, 1, None, &small)])
+            .expect("the record has room");
+        let empty = [shard.block(0)];
+        let parts = vec![shard.block(0); 1024];
+        let body = [shard.block(BODY_MAX - 54)];
+        let cases = [
+            (
+                vec![entry(1, a, Path::Live, 1, 1, None, &empty); 1024],
+                Limit::Entries { count: 1024 },
+                "the batch has 1024 entries, and a record holds at most 1023",
+            ),
+            (
+                vec![entry(1, a, Path::Live, 1, 1, None, &parts)],
+                Limit::Parts { count: 1024 },
+                "the batch has 1024 parts, and a record holds at most 1023",
+            ),
+            (
+                vec![entry(1, a, Path::Live, 1, 1, None, &body)],
+                Limit::Body {
+                    len: 4088,
+                    max: 4087,
+                },
+                "the batch needs a record body of 4088 bytes, and a record of this \
+                 ring holds at most 4087",
+            ),
+        ];
+        for (batch, limit, message) in cases {
+            let large = buffer.append(&batch);
+            assert_eq!(large, Err(Error::Large(limit)));
+            assert_eq!(Error::Large(limit).to_string(), message);
+            assert_eq!(buffer.tail(a, Path::Live), tail(1, None));
+        }
+        buffer
+            .append(&[entry(1, a, Path::Live, 1, 1, None, &small)])
+            .expect("the record has room");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let count = to_usize(AREA_START + BLOCK) + 9;
+        assert_eq!(
+            shard.memory.bytes(RING)[count..count + 4],
+            2_u32.to_le_bytes(),
+            "the large batches left the group open, so one record holds both"
+        );
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(2, None));
+    });
+}
+
 #[test]
 fn a_failed_sync_ends_the_buffer_with_its_error() {
     run(7, Memory::default(), |shard| async move {
@@ -741,6 +811,176 @@ fn a_file_with_no_header_is_missing() {
     });
 }
 
+/// Bytes past the first sector of a header block still make the file not a ring.
+#[test]
+fn a_file_with_bytes_past_the_first_sector_of_a_header_block_is_missing() {
+    run(11, Memory::default(), |shard| async move {
+        shard.zeroed(AREA_START + AREA).await;
+        shard.memory.put(RING, COVER, b"not a ring");
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Err(Error::Missing));
+    });
+}
+
+/// A checkpoint is in the first sector of its block, so a crash leaves each block
+/// whole or zero. One whole block opens the ring with what it holds, and the open
+/// leaves that block as it is.
+#[test]
+fn a_ring_with_one_zero_header_block_opens_from_the_other() {
+    let block = to_usize(BLOCK);
+    for (lost, kept) in [(0, block), (block, 0)] {
+        run(102, Memory::default(), move |shard| async move {
+            let ring = layout(AREA, BODY_MAX);
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens");
+            let a = slots.assign(key(1));
+            buffer
+                .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            drop(buffer);
+            shard.memory.put(RING, lost, &[0; SECTOR]);
+            let before = shard.memory.bytes(RING);
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens again");
+            let a = slots.assign(key(1));
+            assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)), "{lost}");
+            let after = shard.memory.bytes(RING);
+            assert_eq!(after[kept..kept + block], before[kept..kept + block]);
+        });
+    }
+}
+
+/// The first write of the header goes to both blocks in one write. A crash that
+/// keeps neither first sector leaves two zero blocks, and the ring opens as new:
+/// both blocks get the same first checkpoint.
+#[test]
+fn a_ring_whose_first_header_write_was_lost_opens_as_new() {
+    run(102, Memory::default(), |shard| async move {
+        let block = to_usize(BLOCK);
+        let ring = layout(AREA, BODY_MAX);
+        drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
+        for place in [0, block] {
+            shard.memory.put(RING, place, &[0; SECTOR]);
+        }
+        let opened = shard.open(ring, &mut Slots::new()).await;
+        assert_eq!(opened.map(|buffer| buffer.layout()), Ok(ring));
+        let bytes = shard.memory.bytes(RING);
+        assert_eq!(&bytes[..8], b"FNDNRING");
+        assert_eq!(bytes[..block], bytes[block..2 * block]);
+    });
+}
+
+/// Starts a shard named `name` on `node` to run `main`.
+fn on_node<F>(
+    node: &sim::node::Node,
+    name: &str,
+    main: impl FnOnce(Tasks) -> F + Send + 'static,
+) -> env::thread::Handle
+where
+    F: Future<Output = ()> + 'static,
+{
+    let config = env::shards::Config {
+        name: name.into(),
+        core: None,
+    };
+    node.shards().start(config, main).expect("the shard starts")
+}
+
+/// A buffer config on the files of `node`.
+fn node_config(node: &sim::node::Node, tasks: Tasks, layout: Layout) -> Config {
+    let config = block::Config { budget: POOL };
+    let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
+    Config {
+        files: node.files(),
+        dir: PathBuf::from(DIR),
+        pool: Rc::new(pool),
+        clock: node.clock(),
+        tasks,
+        entropy: node.entropy(),
+        layout,
+        commit: COMMIT,
+    }
+}
+
+/// Cuts the power `cut` nanoseconds into the first open of a ring on a node
+/// with `seed`, then opens the ring again. Returns whether the first open had
+/// ended at the cut, and what the second open gave.
+fn open_after_a_cut(
+    seed: u64,
+    cut: i64,
+    ring: Layout,
+) -> (bool, Result<Layout, String>) {
+    let mut sim = sim::Sim::new(sim::Config {
+        seed,
+        ..sim::Config::default()
+    });
+    let node = sim.node(sim::node::Config::default());
+    let made = node.clone();
+    let handle = on_node(&node, "dir", move |_| async move {
+        let files = made.files();
+        files
+            .create_dir(FilePath::new(DIR))
+            .await
+            .expect("the dir is made");
+        files
+            .sync_dir(FilePath::new(""))
+            .await
+            .expect("the dir is synced");
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    let ended = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ended);
+    let first = node.clone();
+    drop(on_node(&node, "first", move |tasks| async move {
+        let config = node_config(&first, tasks, ring);
+        let _buffer = Buffer::open(config, &mut Slots::new())
+            .await
+            .expect("the first open ends well");
+        flag.store(true, Ordering::Relaxed);
+        std::future::pending::<()>().await;
+    }));
+    sim.run_for(Span::from_nanos(cut)).expect("the run goes on");
+    sim.crash(&node, sim::Crash::Power);
+    let opened = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&opened);
+    let second = node.clone();
+    let handle = on_node(&node, "second", move |tasks| async move {
+        let config = node_config(&second, tasks, ring);
+        let buffer = Buffer::open(config, &mut Slots::new()).await;
+        let layout = buffer.map(|buffer| buffer.layout());
+        *slot.lock().expect("no panic held the lock") =
+            Some(layout.map_err(|error| error.to_string()));
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    let opened = opened.lock().expect("no panic held the lock").take();
+    (
+        ended.load(Ordering::Relaxed),
+        opened.expect("the second open ended"),
+    )
+}
+
+/// A power cut at any point of the first open leaves a ring that opens again
+/// with its layout. A cut while the first header write is in flight keeps any
+/// set of its sectors.
+#[test]
+fn a_power_cut_during_the_first_open_leaves_a_ring_that_opens() {
+    let ring = layout(AREA, BODY_MAX);
+    for seed in 0..64 {
+        let mut cut = 0;
+        loop {
+            let (ended, opened) = open_after_a_cut(seed, cut, ring);
+            assert_eq!(opened, Ok(ring), "seed {seed}, cut at {cut} ns");
+            if ended {
+                break;
+            }
+            cut += 10_000;
+        }
+    }
+}
+
 #[test]
 fn two_header_blocks_with_a_wrong_crc_are_damaged() {
     run(12, Memory::default(), |shard| async move {
@@ -799,6 +1039,51 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
     });
+}
+
+/// A whole record of 1023 entries opens, and one of 1024 is a wrong shape.
+#[test]
+fn a_record_over_the_most_entries_is_invalid() {
+    for (count, opens) in [(1023_u32, true), (1024, false)] {
+        run(102, Memory::default(), move |shard| async move {
+            let ring = layout(64 * BLOCK, 100_000);
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens");
+            let a = slots.assign(key(1));
+            let len = 4 + 51 * to_usize(count.into());
+            let parts = [shard.block(len - 55)];
+            buffer
+                .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &parts)])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            drop(buffer);
+            let mut body = count.to_le_bytes().to_vec();
+            for first in 0..u64::from(count) {
+                let last = i64::try_from(first + 1).expect("fits");
+                body.extend_from_slice(&1_u128.to_le_bytes());
+                body.push(0);
+                body.extend_from_slice(&first.to_le_bytes());
+                body.extend_from_slice(&1_u32.to_le_bytes());
+                body.extend_from_slice(&7_i64.to_le_bytes());
+                body.push(1);
+                body.extend_from_slice(&last.to_le_bytes());
+                body.push(0);
+                body.extend_from_slice(&0_u32.to_le_bytes());
+            }
+            assert_eq!(body.len(), len);
+            shard.tamper_record(BLOCK, 0, &body);
+            let mut slots = Slots::new();
+            let opened = shard.open(ring, &mut slots).await;
+            let tails =
+                opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+            let expected = if opens {
+                Ok(tail(count.into(), Some(count.into())))
+            } else {
+                Err(Error::Invalid { offset: BLOCK })
+            };
+            assert_eq!(tails, expected, "{count} entries");
+        });
+    }
 }
 
 #[test]
@@ -1174,5 +1459,37 @@ fn a_drop_during_a_commit_ends_the_task_after_the_sync() {
             tail(1, Some(1)),
             "the entry queued at the drop was not written"
         );
+    });
+}
+
+#[test]
+fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
+    run(101, Memory::default(), |mut shard| async move {
+        let parts_pool = Rc::clone(&shard.pool);
+        let config = block::Config { budget: 96 << 10 };
+        shard.pool =
+            Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+        assert_eq!(shard.pool.largest(), 80 << 10);
+        let ring = layout(64 * BLOCK, 100_000);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let mut part = parts_pool.alloc(30_000).expect("the pool has a block");
+        part.fill(7);
+        let parts = [part.freeze()];
+        buffer
+            .append(&[
+                entry(1, a, Path::Live, 0, 1, Some(1), &parts),
+                entry(1, a, Path::Live, 1, 1, Some(2), &parts),
+                entry(1, a, Path::Live, 2, 1, Some(3), &parts),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(3)));
+        drop(buffer);
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(3, Some(3))));
     });
 }

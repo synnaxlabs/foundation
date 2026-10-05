@@ -139,7 +139,7 @@ fn open_reports_each_failure() {
     let results = run(0, 64 * KIB, |node, _| async move {
         let files = node.files();
         files.create_dir(Path::new("d")).await.unwrap();
-        let file = create(&node, "f", 4_096).await;
+        drop(create(&node, "f", 4_096).await);
         let mut results = Vec::new();
         for (path, mode) in [
             ("missing", Mode::Read),
@@ -154,7 +154,6 @@ fn open_reports_each_failure() {
         ] {
             results.push(files.open(Path::new(path), mode).await.map(drop));
         }
-        drop(file);
         results
     });
     let missing = Error::NotFound {
@@ -280,7 +279,7 @@ fn free_counts_each_file_and_directory_until_its_last_handle_closes() {
         let mut frees = vec![files.free().await.unwrap()];
         let file = create(&node, "f", 64 * KIB).await;
         frees.push(files.free().await.unwrap());
-        drop(create(&node, "f", 64 * KIB).await);
+        drop(files.open(Path::new("f"), Mode::Read).await.unwrap());
         frees.push(files.free().await.unwrap());
         files.create_dir(Path::new("d")).await.unwrap();
         frees.push(files.free().await.unwrap());
@@ -859,4 +858,132 @@ fn syncs_in_flight_end_in_any_order() {
     for value in 0..64 {
         assert_eq!(syncs_in_flight(value), vec![3; 512], "value {value}");
     }
+}
+
+fn busy(path: &str) -> Error {
+    Error::Busy { path: path.into() }
+}
+
+#[test]
+fn a_write_open_of_a_file_that_a_write_handle_holds_is_busy() {
+    let creates = [Mode::Create { len: 1_024 }, Mode::Create { len: 512 }];
+    let opens = run(0, MIB, move |node, _| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        drop(create(&node, "a", 1_024).await);
+        let mut opens = Vec::new();
+        for first in [Mode::Write, Mode::Create { len: 1_024 }] {
+            let _held = files.open(path, first).await.unwrap();
+            for second in [Mode::Write, creates[0], creates[1]] {
+                opens.push(files.open(path, second).await.err());
+            }
+        }
+        opens
+    });
+    assert_eq!(opens, vec![Some(busy("a")); 6]);
+}
+
+#[test]
+fn a_read_handle_neither_takes_nor_checks_the_write_hold() {
+    run(0, MIB, |node, _| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        let written = create(&node, "a", 1_024).await;
+        files.open(path, Mode::Read).await.unwrap();
+        drop(written);
+        let _read = files.open(path, Mode::Read).await.unwrap();
+        files.open(path, Mode::Write).await.unwrap();
+    });
+}
+
+/// What a write open of a file gives at once after its write handle dropped with a
+/// write in flight, and then after a millisecond.
+fn open_after_dropped_write(value: u64) -> (Option<Error>, Option<Error>) {
+    run(value, MIB, |node, _| async move {
+        let (files, path, pool) = (node.files(), Path::new("a"), pool());
+        let file = create(&node, "a", 1_024).await;
+        let parts = [block(&pool, &[1; 1_024])];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        poll_fn(|cx| {
+            assert!(write.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(write);
+        drop(file);
+        let first = files.open(path, Mode::Write).await.err();
+        node.clock().sleep(Span::MILLISECOND).await;
+        (first, files.open(path, Mode::Write).await.err())
+    })
+}
+
+#[test]
+fn a_write_in_flight_holds_the_file_after_its_handle_drops() {
+    let both = [(Some(busy("a")), None), (None, None)];
+    let opens: Vec<_> = (0..32).map(open_after_dropped_write).collect();
+    assert!(opens.iter().all(|open| both.contains(open)), "{opens:?}");
+    assert!(both.iter().all(|end| opens.contains(end)), "{opens:?}");
+}
+
+#[test]
+fn a_new_file_at_a_removed_path_is_free_while_the_old_file_is_open() {
+    run(0, MIB, |node, _| async move {
+        let old = create(&node, "a", 1_024).await;
+        node.files().remove(Path::new("a")).await.unwrap();
+        create(&node, "a", 512).await;
+        drop(old);
+    });
+}
+
+/// The error of the one of two creates of a missing file in flight at once that
+/// failed, or `None` when both or neither failed.
+fn racing_creates(value: u64) -> Option<Error> {
+    run(value, MIB, |node, tasks| async move {
+        let files = node.files();
+        let other = Rc::new(Cell::new(None));
+        let slot = Rc::clone(&other);
+        let (mode, theirs) = (Mode::Create { len: 1_024 }, files.clone());
+        tasks.spawn(
+            async move { slot.set(Some(theirs.open(Path::new("a"), mode).await)) },
+        );
+        let mine = files.open(Path::new("a"), mode).await;
+        node.clock().sleep(Span::MILLISECOND).await;
+        match (mine, other.take().expect("the other create ended")) {
+            (Ok(_), Err(e)) | (Err(e), Ok(_)) => Some(e),
+            _ => None,
+        }
+    })
+}
+
+#[test]
+fn of_two_creates_in_flight_the_second_to_end_is_busy() {
+    for value in 0..16 {
+        assert_eq!(racing_creates(value), Some(busy("a")), "value {value}");
+    }
+}
+
+/// The digest of a run in which a shard starts a `free`, drops it, and sleeps `sleep`,
+/// so that it wakes before the call ends or after it.
+fn slept_around_end(sleep: Span) -> u64 {
+    let mut sim = sim(3);
+    let node = sim.node(node::Config::default());
+    let clock = node.clock();
+    let handle = node.shards().start(shard("d"), move |_| async move {
+        let files = node.files();
+        let mut free = Box::pin(files.free());
+        poll_fn(|cx| {
+            assert!(free.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(free);
+        clock.sleep(sleep).await;
+    });
+    sim.run().unwrap();
+    handle.unwrap().join().unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_digest_holds_the_polls_before_a_file_end() {
+    let early = slept_around_end(Span::from_nanos(1));
+    assert_ne!(early, slept_around_end(Span::MILLISECOND));
 }
