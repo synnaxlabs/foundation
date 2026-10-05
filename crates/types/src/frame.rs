@@ -477,6 +477,34 @@ mod tests {
     }
 
     #[test]
+    fn reads_groups_past_the_first_mask_word() {
+        let groups: Vec<Group<'_>> = (0..130)
+            .map(|n| Group {
+                index: slot(n),
+                data: &[],
+            })
+            .collect();
+        let set = Interner::new().intern(&groups);
+        let pool = pool(1 << 16);
+        let series = [(0, 8), (64, 8), (129, 8)];
+        let mut draft =
+            Draft::new(&pool, &set, Path::Live, Form::Raw, &series).unwrap();
+        for (seq, &(entry, _)) in (1..).zip(&series) {
+            draft
+                .series(entry)
+                .unwrap()
+                .fill(u8::try_from(seq).unwrap());
+            let group = u32::try_from(entry).unwrap();
+            draft.set_range(group, Range { seq, count: 1 });
+        }
+        let frame = draft.freeze();
+        assert_eq!(frame.range(64), Some(Range { seq: 2, count: 1 }));
+        assert_eq!(frame.range(129), Some(Range { seq: 3, count: 1 }));
+        assert_eq!(frame.range(128), None);
+        assert_eq!(frame.series(129), Some([3; 8].as_slice()));
+    }
+
+    #[test]
     fn returns_the_pool_error() {
         let set = one_group();
         let pool = pool(512);
