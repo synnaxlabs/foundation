@@ -1169,6 +1169,43 @@ mod tests {
     }
 
     #[test]
+    fn a_read_that_finds_the_pool_full_gives_back_its_budget() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let config = block::Config {
+                budget: 3 * block::footprint(MESSAGE_MAX) - 1,
+            };
+            let memory = Heap::new(config.reservation());
+            let config = Config {
+                window_bytes: NARROW,
+                pool: Rc::new(Pool::new(config, memory)),
+                ..shard.config(testing::SERVER_KEY, Span::SECOND)
+            };
+            pair.server.endpoint =
+                Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
+            pair.server.key = None;
+            pair.dial(tls::public(&testing::SERVER_KEY));
+            pair.run(RUN);
+            prefixes(&mut pair, 3);
+            let (now, server) = (pair.now(), key(&pair.server));
+            let mut receivers = Vec::new();
+            while let Some(incoming) = pair.server.endpoint.accept(server) {
+                receivers.push(incoming.receiver);
+            }
+            assert_eq!(receivers.len(), 3);
+            for receiver in &mut receivers[..2] {
+                assert_eq!(next(&mut pair.server, now, receiver), Ok(Poll::Pending));
+            }
+            let full = Err(Error::Pool {
+                bytes: MESSAGE_MAX,
+                available: block::footprint(MESSAGE_MAX) - 1,
+            });
+            assert_eq!(next(&mut pair.server, now, &mut receivers[2]), full);
+            assert_eq!(next(&mut pair.server, now, &mut receivers[2]), full);
+        });
+    }
+
+    #[test]
     fn streams_that_wait_for_budget_let_the_streams_with_a_block_finish() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
@@ -1284,6 +1321,18 @@ mod tests {
         assert_eq!(budget.release(stream(1), &mut b).count(), 0);
         let woken: Vec<_> = budget.release(stream(2), &mut c).collect();
         assert_eq!(woken, [stream(3)]);
+    }
+
+    #[test]
+    fn a_budget_wakes_every_waiting_stream_when_the_room_fits_the_smallest_claim() {
+        let mut budget = Budget::new(10);
+        let [mut a, mut b, mut c, mut d] = <[Claim; 4]>::default();
+        assert!(budget.charge(stream(0), 6, &mut a));
+        assert!(budget.charge(stream(3), 3, &mut d));
+        assert!(!budget.charge(stream(1), 2, &mut b));
+        assert!(!budget.charge(stream(2), 5, &mut c));
+        let woken: Vec<_> = budget.release(stream(3), &mut d).collect();
+        assert_eq!(woken, [stream(1), stream(2)]);
     }
 
     #[test]
