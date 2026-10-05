@@ -6,6 +6,7 @@ use std::num::NonZeroUsize;
 use types::time::{Monotonic, Span, Stamp};
 
 use crate::drivers;
+use crate::state::lock;
 
 /// One simulated node: the `env` handles that its code gets. Clones refer to the same
 /// node.
@@ -48,6 +49,33 @@ impl Node {
     #[must_use]
     pub fn threads(&self) -> env::threads::Threads {
         env::threads::Threads::new(self.0.clone())
+    }
+
+    /// Steps the wall clock by `span`, forward or back, as when NTP or an operator
+    /// sets it. The monotonic clock does not move. A step forward can bring the end
+    /// of true time nearer (see [`Sim::run_for`](crate::Sim::run_for)); a timer past
+    /// the new end never fires.
+    ///
+    /// # Panics
+    ///
+    /// When the wall leaves the range of a [`Stamp`].
+    pub fn step_wall(&self, span: Span) {
+        let mut state = lock(&self.0.shared);
+        let stepped = state.step_wall(self.0.node, span);
+        drop(state);
+        let Some(wakers) = stepped else {
+            let node = self.0.node;
+            panic!("step_wall({span}) moves the wall of node {node} out of range")
+        };
+        drop(wakers);
+    }
+
+    /// Runs nothing on the node for `span` of true time while its clocks move, as in
+    /// a VM pause; a negative span is zero. Each wake in the pause, from a timer or
+    /// from another node, polls its task when the pause ends. A pause that overlaps
+    /// another ends at the later end, and one past the end of true time never ends.
+    pub fn pause(&self, span: Span) {
+        lock(&self.0.shared).pause(self.0.node, span);
     }
 }
 

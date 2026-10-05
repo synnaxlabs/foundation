@@ -127,7 +127,8 @@ impl Sim {
     ///
     /// True time ends where the first clock of a node can count no further: the
     /// monotonic clock at `u64::MAX` nanoseconds, or the wall clock in 2262. A timer
-    /// past that end never fires.
+    /// past that end never fires. A wall step in the run can bring the end nearer;
+    /// the run then stops there.
     ///
     /// # Errors
     ///
@@ -158,8 +159,8 @@ impl Sim {
             })?;
             match next {
                 Next::Poll => self.step()?,
-                Next::Fire(due) => {
-                    let wakers = lock(&self.shared).advance(due);
+                Next::Advance(at) => {
+                    let wakers = lock(&self.shared).advance(at);
                     wakers.into_iter().for_each(Waker::wake);
                 }
             }
