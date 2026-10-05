@@ -2,8 +2,6 @@
 
 pub mod key_set;
 
-use std::borrow::Borrow;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::channel;
@@ -11,13 +9,23 @@ use crate::hash;
 use crate::sample::{Scalar, Type};
 use key_set::{Entry, Group, KeySet, Snapshot};
 
+/// One of an index's two write paths. Live data arrives in time order; backfill is late
+/// data, labeled by the writer, that live readers never see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Path {
+    /// Data in time order.
+    Live,
+    /// Late data, labeled by the writer.
+    Backfill,
+}
+
 /// The node's table of channel slots and key sets. `node` makes one and injects it into
 /// `hub` and `home`, which intern at session open. Methods take `&mut self`: the caller
 /// serializes them.
 #[derive(Debug, Default)]
 pub struct Interner {
     slots: hash::Map<channel::Key, channel::Slot>,
-    sets: hash::Set<Interned>,
+    sets: hash::Map<Box<[Entry]>, Arc<KeySet>>,
     snapshot: Snapshot,
 }
 
@@ -76,7 +84,8 @@ impl Interner {
         {
             panic!("slot {} appears twice in a key set", entry.slot.get());
         }
-        if let Some(Interned(set)) = self.sets.get(entries.as_slice()) {
+        let entries = entries.into_boxed_slice();
+        if let Some(set) = self.sets.get(&entries) {
             return Arc::clone(set);
         }
         let positions = indexes
@@ -91,7 +100,7 @@ impl Interner {
             u32::try_from(self.sets.len()).expect("a node holds at most 2^32 key sets");
         let set = Arc::new(KeySet::new(
             key_set::Key::new(n),
-            entries.into_boxed_slice(),
+            entries.clone(),
             positions,
         ));
         self.snapshot = Snapshot(
@@ -102,7 +111,7 @@ impl Interner {
                 .chain([Arc::clone(&set)])
                 .collect(),
         );
-        self.sets.insert(Interned(Arc::clone(&set)));
+        self.sets.insert(entries, Arc::clone(&set));
         set
     }
 
@@ -110,31 +119,6 @@ impl Interner {
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         self.snapshot.clone()
-    }
-}
-
-/// A key set that hashes and compares by its entries, so the interner finds it from a
-/// slice of entries.
-#[derive(Debug)]
-struct Interned(Arc<KeySet>);
-
-impl Borrow<[Entry]> for Interned {
-    fn borrow(&self) -> &[Entry] {
-        self.0.entries()
-    }
-}
-
-impl PartialEq for Interned {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.entries() == other.0.entries()
-    }
-}
-
-impl Eq for Interned {}
-
-impl Hash for Interned {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.entries().hash(state);
     }
 }
 
