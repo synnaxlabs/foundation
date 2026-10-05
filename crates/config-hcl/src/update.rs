@@ -392,10 +392,9 @@ impl Diff<'_, '_> {
     fn value(&mut self, old: &Attribute, new: &Attribute) {
         let file = self.file;
         let (start, end) = offsets(old.value.span);
-        let next = file.mark(file.token(end));
-        // A heredoc ends its line, so a value with a comment after it is quoted, as
-        // in a list.
-        let ends = if file.blank(end, next.start) {
+        // A heredoc needs a line end after its marker, so a value with a comment or
+        // the end of the text after it is quoted, as in a list.
+        let ends = if file.blank_below(end).is_some() {
             Ends::Line
         } else {
             Ends::Comma
@@ -928,6 +927,13 @@ mod tests {
     }
 
     #[test]
+    fn quotes_a_value_at_the_end_of_a_text_with_no_line_end() {
+        assert_eq!(updated("a = 1", "a = \"x\\n\""), "a = \"x\\n\"");
+        assert_eq!(updated("a = 1  ", "a = \"x\\n\""), "a = \"x\\n\"  ");
+        assert_eq!(updated("a = 1\n", "a = \"x\\n\""), "a = <<EOT\nx\nEOT\n");
+    }
+
+    #[test]
     fn keeps_the_line_ends_and_the_byte_order_mark() {
         assert_eq!(
             updated(
@@ -945,7 +951,6 @@ mod tests {
             updated("/* c\r\n*/ a = 1", "a = 1\nb = 2"),
             "/* c\r\n*/ a = 1\r\nb = 2\r\n"
         );
-        assert_eq!(updated("a = 1", "a = \"x\\n\""), "a = <<EOT\nx\nEOT");
         assert_eq!(
             updated("\u{feff}b = 1\n", "a = 0\nb = 1"),
             "\u{feff}a = 0\nb = 1\n"
