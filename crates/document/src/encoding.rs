@@ -48,9 +48,48 @@ const CALL: u8 = 8;
 ///
 /// Returns [`TooDeep`] when `document` nests deeper than [`DEPTH_MAX`].
 pub fn encode(document: &Document) -> Result<Vec<u8>, TooDeep> {
+    check(document)?;
     let mut writer = Writer { out: vec![VERSION] };
-    writer.body(document, 0)?;
+    writer.body(document);
     Ok(writer.out)
+}
+
+/// Checks that [`encode`] can write `document`: it nests no deeper than [`DEPTH_MAX`].
+/// It stops at the first level past the limit, so a document of any depth is safe.
+///
+/// # Errors
+///
+/// Returns [`TooDeep`] at the first level past the limit, in the order that [`encode`]
+/// writes: the attributes, then the blocks.
+pub fn check(document: &Document) -> Result<(), TooDeep> {
+    fn body(document: &Document, depth: usize) -> Result<(), TooDeep> {
+        map(&document.attributes, depth)?;
+        document.blocks.iter().try_for_each(|block| {
+            let depth = enter(depth).ok_or(TooDeep { span: block.span })?;
+            body(&block.body, depth)
+        })
+    }
+    fn map(map: &Map, depth: usize) -> Result<(), TooDeep> {
+        map.iter()
+            .try_for_each(|attribute| value(&attribute.value, depth))
+    }
+    fn value(value: &Value, depth: usize) -> Result<(), TooDeep> {
+        let inner = || enter(depth).ok_or(TooDeep { span: value.span });
+        match &value.kind {
+            Kind::Bool(_)
+            | Kind::Integer(_)
+            | Kind::Float(_)
+            | Kind::String(_)
+            | Kind::Reference(_) => Ok(()),
+            Kind::List(items) => values(items, inner()?),
+            Kind::Map(entries) => map(entries, inner()?),
+            Kind::Call(call) => values(&call.arguments, inner()?),
+        }
+    }
+    fn values(values: &[Value], depth: usize) -> Result<(), TooDeep> {
+        values.iter().try_for_each(|item| value(item, depth))
+    }
+    body(document, 0)
 }
 
 /// Reads a document from its canonical bytes. The document has no spans.
@@ -242,32 +281,28 @@ struct Writer {
 }
 
 impl Writer {
-    fn body(&mut self, document: &Document, depth: usize) -> Result<(), TooDeep> {
-        self.map(&document.attributes, depth)?;
+    fn body(&mut self, document: &Document) {
+        self.map(&document.attributes);
         self.count(document.blocks.len());
         for block in &document.blocks {
-            let depth = enter(depth).ok_or(TooDeep { span: block.span })?;
             self.string(&block.keyword);
             self.count(block.labels.len());
             for label in &block.labels {
                 self.string(&label.text);
             }
-            self.body(&block.body, depth)?;
+            self.body(&block.body);
         }
-        Ok(())
     }
 
-    fn map(&mut self, map: &Map, depth: usize) -> Result<(), TooDeep> {
+    fn map(&mut self, map: &Map) {
         self.count(map.iter().len());
         for attribute in map.iter() {
             self.string(&attribute.key);
-            self.value(&attribute.value, depth)?;
+            self.value(&attribute.value);
         }
-        Ok(())
     }
 
-    fn value(&mut self, value: &Value, depth: usize) -> Result<(), TooDeep> {
-        let inner = || enter(depth).ok_or(TooDeep { span: value.span });
+    fn value(&mut self, value: &Value) {
         match &value.kind {
             Kind::Bool(false) => self.out.push(FALSE),
             Kind::Bool(true) => self.out.push(TRUE),
@@ -288,28 +323,26 @@ impl Writer {
                 self.string(name.as_str());
             }
             Kind::List(items) => {
-                let depth = inner()?;
                 self.out.push(LIST);
-                self.values(items, depth)?;
+                self.values(items);
             }
             Kind::Map(map) => {
-                let depth = inner()?;
                 self.out.push(MAP);
-                self.map(map, depth)?;
+                self.map(map);
             }
             Kind::Call(call) => {
-                let depth = inner()?;
                 self.out.push(CALL);
                 self.string(&call.function);
-                self.values(&call.arguments, depth)?;
+                self.values(&call.arguments);
             }
         }
-        Ok(())
     }
 
-    fn values(&mut self, values: &[Value], depth: usize) -> Result<(), TooDeep> {
+    fn values(&mut self, values: &[Value]) {
         self.count(values.len());
-        values.iter().try_for_each(|value| self.value(value, depth))
+        for value in values {
+            self.value(value);
+        }
     }
 
     fn string(&mut self, text: &str) {
@@ -478,7 +511,7 @@ mod tests {
         [&[VERSION][..], &count(1), &string("a"), value, &count(0)].concat()
     }
 
-    fn check(bytes: &[u8], expected: &Error, message: &str) {
+    fn refuses(bytes: &[u8], expected: &Error, message: &str) {
         let err = decode(bytes).unwrap_err();
         assert_eq!(&err, expected);
         assert_eq!(err.to_string(), message);
@@ -673,9 +706,11 @@ mod tests {
             if let (Some(&at), Some(&span)) =
                 (starts.get(DEPTH_MAX), spans.get(DEPTH_MAX))
             {
+                assert_eq!(check(&document), Err(TooDeep { span: Some(span) }));
                 assert_eq!(encode(&document), Err(TooDeep { span: Some(span) }));
                 assert_eq!(decode(&bytes), Err(Error::Depth { at }));
             } else {
+                assert_eq!(check(&document), Ok(()));
                 assert_eq!(encode(&document).unwrap(), bytes);
                 assert_eq!(decode(&bytes).unwrap(), document);
             }
@@ -703,6 +738,67 @@ mod tests {
         }
 
         #[test]
+        fn checks_attributes_before_blocks() {
+            let (mut document, spans) = nested_document(&[Level::List; 65]);
+            let mut deep = Document::default();
+            for _ in 0..65 {
+                let block = Block {
+                    keyword: "b".into(),
+                    keyword_span: None,
+                    labels: Vec::new(),
+                    body: deep,
+                    span: None,
+                };
+                deep = Document {
+                    attributes: Map::default(),
+                    blocks: vec![block],
+                };
+            }
+            document.blocks = deep.blocks;
+            let expected = Err(TooDeep {
+                span: Some(spans[DEPTH_MAX]),
+            });
+            assert_eq!(check(&document), expected);
+            assert_eq!(encode(&document).map(drop), expected);
+        }
+
+        /// Drops `document` one level at a time. A plain drop recurses once per level.
+        fn tear_down(document: Document) {
+            let mut documents = vec![document];
+            let mut values = Vec::new();
+            while !documents.is_empty() || !values.is_empty() {
+                if let Some(document) = documents.pop() {
+                    let attributes = document.attributes.into_vec();
+                    values.extend(attributes.into_iter().map(|a| a.value));
+                    documents.extend(document.blocks.into_iter().map(|b| b.body));
+                }
+                if let Some(value) = values.pop() {
+                    match value.kind {
+                        Kind::List(items) => values.extend(items),
+                        Kind::Map(map) => {
+                            values.extend(map.into_vec().into_iter().map(|a| a.value));
+                        }
+                        Kind::Call(call) => values.extend(call.arguments),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn checks_a_hostile_depth_without_recursing() {
+            for level in [Level::Block, Level::List, Level::Map, Level::Call] {
+                let (document, spans) = nested_document(&vec![level; 100_000]);
+                let expected = Err(TooDeep {
+                    span: Some(spans[DEPTH_MAX]),
+                });
+                assert_eq!(check(&document), expected);
+                assert_eq!(encode(&document).map(drop), expected);
+                tear_down(document);
+            }
+        }
+
+        #[test]
         fn refuses_a_hostile_depth_without_recursing() {
             for level in [Level::Block, Level::Map] {
                 let (bytes, starts) = nested_bytes(&vec![level; 100_000]);
@@ -719,7 +815,7 @@ mod tests {
         fn depth_says_the_bytes_are_corrupt() {
             let (bytes, starts) = nested_bytes(&[Level::List; 65]);
             let at = starts[DEPTH_MAX];
-            check(
+            refuses(
                 &bytes,
                 &Error::Depth { at },
                 &format!(
@@ -791,7 +887,7 @@ mod tests {
 
         #[test]
         fn refuses_a_newer_version() {
-            check(
+            refuses(
                 &[2],
                 &Error::Newer { found: 2 },
                 "the document has format version 2, and this node reads only version \
@@ -801,7 +897,7 @@ mod tests {
 
         #[test]
         fn refuses_a_version_that_does_not_exist() {
-            check(
+            refuses(
                 &[0],
                 &Error::Version { found: 0 },
                 "the document has format version 0, which does not exist. It is \
@@ -811,7 +907,7 @@ mod tests {
 
         #[test]
         fn refuses_no_bytes() {
-            check(
+            refuses(
                 &[],
                 &Error::Truncated { at: 0 },
                 "the part at byte 0 runs past the end of the document. It is cut",
@@ -852,7 +948,7 @@ mod tests {
         #[test]
         fn refuses_trailing_bytes() {
             let bytes = [&[VERSION][..], &count(0), &count(0), &[0]].concat();
-            check(
+            refuses(
                 &bytes,
                 &Error::TrailingBytes { at: 17 },
                 "the document ends at byte 17, but more bytes follow. They are corrupt",
@@ -861,7 +957,7 @@ mod tests {
 
         #[test]
         fn refuses_an_unknown_tag() {
-            check(
+            refuses(
                 &attribute(&[9]),
                 &Error::Tag { at: 18, tag: 9 },
                 "byte 18 holds 9, which is not a value tag. It is corrupt",
@@ -872,7 +968,7 @@ mod tests {
         fn refuses_text_that_is_not_utf8() {
             let bytes =
                 [&[VERSION][..], &count(1), &count(2), b"a\xff", &[TRUE]].concat();
-            check(
+            refuses(
                 &[&bytes[..], &count(0)].concat(),
                 &Error::Utf8 { at: 18 },
                 "the text at byte 18 is not UTF-8. It is corrupt",
@@ -891,7 +987,7 @@ mod tests {
                 &count(0),
             ]
             .concat();
-            check(
+            refuses(
                 &bytes,
                 &Error::KeyOrder {
                     at: 19,
@@ -929,7 +1025,7 @@ mod tests {
 
         #[test]
         fn refuses_negative_zero() {
-            check(
+            refuses(
                 &float((-0.0f64).to_bits()),
                 &Error::Float {
                     at: 19,

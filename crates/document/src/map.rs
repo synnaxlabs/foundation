@@ -75,6 +75,12 @@ impl Map {
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &Attribute> {
         self.0.iter()
     }
+
+    /// The attributes, by key, to take a deep document apart in a test.
+    #[cfg(test)]
+    pub(crate) fn into_vec(self) -> Vec<Attribute> {
+        self.0
+    }
 }
 
 #[cfg(test)]
