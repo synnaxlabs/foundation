@@ -1,7 +1,7 @@
 //! The time to build a frame (header, ranges, and descriptors, but not the series
-//! bytes), to fill and read every series in order, to look each one up, to give its
-//! charge, and to view the series bytes, for a dense frame and for frames of 100,000
-//! channels.
+//! bytes), to set each seq on a built draft, to fill and read every series in order,
+//! to look each one up, to give its charge, and to view the series bytes, for a dense
+//! frame and for frames of 100,000 channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -69,6 +69,7 @@ fn cases() -> Vec<Case> {
         }]
     };
     let wide = interner.intern(&one(&wide));
+    let private = interner.intern(&private);
     let tenth = |n: usize| (0..10).map(move |k| k * n / 10);
     vec![
         case(
@@ -83,12 +84,17 @@ fn cases() -> Vec<Case> {
         ),
         case(
             "10 of 100k private indexes",
-            interner.intern(&private),
+            Arc::clone(&private),
             tenth(100_000).map(|entry| (entry, 8)).collect(),
         ),
         case(
             "100k of 100k in one group",
             wide,
+            (0..100_000).map(|entry| (entry, 8)).collect(),
+        ),
+        case(
+            "100k of 100k private indexes",
+            private,
             (0..100_000).map(|entry| (entry, 8)).collect(),
         ),
     ]
@@ -118,7 +124,7 @@ fn frame(pool: &block::Pool, case: &Case) -> Frame {
     draft.freeze(Path::Live)
 }
 
-/// Builds a frame and sets each present group's range.
+/// Builds a frame and sets each present group's count.
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn build(bencher: Bencher<'_, '_>, case: &Case) {
     let pool = pool();
@@ -126,9 +132,22 @@ fn build(bencher: Bencher<'_, '_>, case: &Case) {
         let mut draft = draft(&pool, case);
         for &group in &case.groups {
             draft.set_count(group, 1);
-            draft.set_seq(group, 1);
         }
         drop(draft.freeze(Path::Live));
+    });
+}
+
+/// Reads each present group's count and sets its seq, on a built draft.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn seq(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let mut draft = draft(&pool, case);
+    bencher.bench_local(|| {
+        let draft = black_box(&mut draft);
+        for &group in &case.groups {
+            let range = draft.range(group).expect("the group is present");
+            draft.set_seq(group, u64::from(range.count));
+        }
     });
 }
 

@@ -28,6 +28,12 @@ mod at {
     pub(super) const SERIES: usize = 8;
     pub(super) const FORM: usize = 12;
     pub(super) const PATH: usize = 13;
+
+    /// Offsets of a range's fields after its group, which is at 0.
+    pub(super) mod range {
+        pub(in crate::frame) const COUNT: usize = 4;
+        pub(in crate::frame) const SEQ: usize = 8;
+    }
 }
 
 /// One of an index's two write paths, each with its own seq. Backfill is late data
@@ -102,6 +108,18 @@ pub struct Range {
     pub seq: u64,
     /// How many samples each series of the group holds.
     pub count: u32,
+}
+
+impl Range {
+    /// The range of `group` in the frame `bytes`, or `None` when it is absent.
+    fn find(bytes: &[u8], group: u32) -> Option<Self> {
+        let (ranges, ..) = split(bytes);
+        let range = &ranges[search(ranges, group)?];
+        Some(Self {
+            seq: u64::from_le_bytes(get(range, at::range::SEQ)),
+            count: u32::from_le_bytes(get(range, at::range::COUNT)),
+        })
+    }
 }
 
 /// Why [`Draft::new`] refused a frame.
@@ -205,7 +223,7 @@ impl Draft {
             .filter(|&entry| set.index(entry) == entry);
         for (range, index) in ranges.iter_mut().zip(indexes) {
             put(range, 0, &set.entries()[index].group.to_le_bytes());
-            range[4..].fill(0);
+            range[at::range::COUNT..].fill(0);
         }
         for &(entry, _) in series {
             if search(ranges, set.entries()[entry].group).is_none() {
@@ -251,7 +269,7 @@ impl Draft {
     /// logarithmic in the number of present groups.
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
-        range(&self.0, group)
+        Range::find(&self.0, group)
     }
 
     /// Sets how many samples each series of group `group` holds.
@@ -260,7 +278,11 @@ impl Draft {
     ///
     /// If `group` is absent from the frame.
     pub fn set_count(&mut self, group: u32, count: u32) {
-        put(self.range_mut(group), 4, &count.to_le_bytes());
+        put(
+            self.record_mut(group),
+            at::range::COUNT,
+            &count.to_le_bytes(),
+        );
     }
 
     /// Sets the seq of the first sample of group `group`, on the path the frame
@@ -270,10 +292,10 @@ impl Draft {
     ///
     /// If `group` is absent from the frame.
     pub fn set_seq(&mut self, group: u32, seq: u64) {
-        put(self.range_mut(group), 8, &seq.to_le_bytes());
+        put(self.record_mut(group), at::range::SEQ, &seq.to_le_bytes());
     }
 
-    fn range_mut(&mut self, group: u32) -> &mut [u8; RANGE] {
+    fn record_mut(&mut self, group: u32) -> &mut [u8; RANGE] {
         let (ranges, ..) = split_mut(&mut self.0);
         let Some(n) = search(ranges, group) else {
             panic!("group {group} is absent from the frame");
@@ -316,7 +338,7 @@ impl Frame {
     /// logarithmic in the number of present groups.
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
-        range(&self.0, group)
+        Range::find(&self.0, group)
     }
 
     /// The series bytes of `entry`, or `None` when it is absent. Time is logarithmic
@@ -381,16 +403,6 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
             .map_or(usize::MAX, |start| start.saturating_add(len));
     }
     Ok((groups, bytes))
-}
-
-/// The range of `group` in a frame, or `None` when it is absent.
-fn range(bytes: &[u8], group: u32) -> Option<Range> {
-    let (ranges, ..) = split(bytes);
-    let range = &ranges[search(ranges, group)?];
-    Some(Range {
-        seq: u64::from_le_bytes(get(range, 8)),
-        count: u32::from_le_bytes(get(range, 4)),
-    })
 }
 
 /// A frame's ranges, its descriptors, and its series bytes.
