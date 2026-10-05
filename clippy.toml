@@ -18,6 +18,7 @@ disallowed-methods = [
   { path = "std::time::Instant::elapsed", reason = "reads the OS clock" },
   { path = "std::time::SystemTime::elapsed", reason = "reads the OS clock" },
   { path = "std::thread::Builder::spawn", reason = "threads come from env" },
+  { path = "std::thread::Scope::spawn", reason = "threads come from env" },
   { path = "std::thread::available_parallelism", reason = "core count comes from env" },
   { path = "std::env::vars", reason = "configuration is an input" },
   { path = "std::env::args", reason = "only node reads arguments" },
