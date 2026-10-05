@@ -13,9 +13,12 @@ use crate::{Drift, Filter, Measurement};
 /// bounds (Marzullo's intersection). The estimate covers all of them, so a tie between
 /// groups that disagree gives a wide bound, not a guess. When all sources agree, the
 /// bound is not wider than the narrowest one. The estimate holds the true offset when
-/// the bounds that hold it are a majority of the bounds that vote, and every other
+/// the bounds that hold it are a majority of the sources that vote, and every other
 /// bound that votes misses them all. A falseticker that overlaps some of them can move
 /// it, as in NTP.
+///
+/// A filter with no measurement votes and agrees with no offset, so a source that has
+/// not answered counts against a majority.
 ///
 /// A bound of 36500 days at `now` is unknown. It votes only when no bound is known, so
 /// it never turns a split into an estimate. An estimate from unknown bounds alone is
@@ -23,9 +26,9 @@ use crate::{Drift, Filter, Measurement};
 ///
 /// # Errors
 ///
-/// - [`Error::NoSources`] when no filter holds a measurement.
-/// - [`Error::NoMajority`] when no offset is inside more than half of the bounds that
-///   vote.
+/// - [`Error::NoSources`] when `sources` is empty.
+/// - [`Error::NoMajority`] when no offset is inside the bounds of more than half of
+///   the sources that vote.
 ///
 /// ```
 /// use estimate::combine::combine;
@@ -50,8 +53,12 @@ pub fn combine<'a>(
     drift: Drift,
     sources: impl IntoIterator<Item = &'a Filter>,
 ) -> Result<Measurement, Error> {
-    let (mut known, mut unknown) = (Vec::new(), Vec::new());
-    for m in sources.into_iter().filter_map(|s| s.best(now, drift)) {
+    let (mut known, mut unknown, mut empty) = (Vec::new(), Vec::new(), 0);
+    for source in sources {
+        let Some(m) = source.best(now, drift) else {
+            empty += 1;
+            continue;
+        };
         let edges = if m.error_at(now, drift) < MAX_ERROR {
             &mut known
         } else {
@@ -62,7 +69,7 @@ pub fn combine<'a>(
     }
     let unknown_only = known.is_empty();
     let mut edges = if unknown_only { unknown } else { known };
-    let sources = edges.len() / 2;
+    let sources = edges.len() / 2 + empty;
     if sources == 0 {
         return Err(Error::NoSources);
     }
@@ -84,7 +91,7 @@ pub fn combine<'a>(
 /// Why [`combine`] gave no estimate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// No filter holds a measurement.
+    /// [`combine`] got no filters.
     NoSources,
     /// No offset is inside the bounds of more than half of the sources that vote.
     NoMajority {
@@ -163,6 +170,13 @@ mod tests {
             f
         };
         measurements.iter().map(filter).collect()
+    }
+
+    /// `sources`, then `empty` filters that hold no measurement.
+    fn with_empty(sources: &[Measurement], empty: usize) -> Vec<Filter> {
+        let mut filters = filters(sources);
+        filters.resize_with(sources.len() + empty, Filter::default);
+        filters
     }
 
     /// Combines one source per measurement at their own time with no drift.
@@ -292,17 +306,39 @@ mod tests {
         }
 
         #[test]
-        fn skips_empty_ones() {
-            let mut sources = filters(&[source(7, 3)]);
-            sources.push(Filter::default());
-            let m = combine(Monotonic(0), drift(0), &sources).expect("one source");
-            assert_eq!((m.offset().nanos(), m.error().nanos()), (7, 3));
+        fn counts_an_empty_one_against_a_majority() {
+            let err = combine(Monotonic(0), drift(0), &with_empty(&[source(7, 3)], 1));
+            let split = Error::NoMajority {
+                sources: 2,
+                agreeing: 1,
+            };
+            assert_eq!(err, Err(split));
+        }
+
+        #[test]
+        fn gives_the_majority_beside_an_empty_one() {
+            let sources = with_empty(&[source(10, 10), source(20, 10)], 1);
+            let m = combine(Monotonic(0), drift(0), &sources).expect("two of three");
+            assert_eq!((m.offset().nanos(), m.error().nanos()), (15, 5));
         }
 
         #[test]
         fn fails_with_none_holding_a_measurement() {
-            let empty = [Filter::default()];
-            let err = combine(Monotonic(0), drift(0), &empty);
+            let err = combine(Monotonic(0), drift(0), &with_empty(&[], 3));
+            let none = Error::NoMajority {
+                sources: 3,
+                agreeing: 0,
+            };
+            assert_eq!(err, Err(none));
+            assert_eq!(
+                none.to_string(),
+                "no majority of time sources agree: at most 0 of 3"
+            );
+        }
+
+        #[test]
+        fn fails_with_no_filters() {
+            let err = combine(Monotonic(0), drift(0), &[]);
             assert_eq!(err, Err(Error::NoSources));
             assert_eq!(Error::NoSources.to_string(), "no time sources to combine");
         }
@@ -379,6 +415,31 @@ mod tests {
             let m = combine(now, drift(1_000), &sources).expect("both hold the truth");
             let half = widest / 2 + 250;
             assert_eq!((m.offset().nanos(), m.error().nanos()), (half, widest));
+        }
+
+        #[test]
+        fn counts_an_empty_filter_beside_known_bounds() {
+            let sources = with_empty(&[source(0, 1), unknown(0), unknown(0)], 1);
+            let err = combine(Monotonic(0), drift(0), &sources);
+            let split = Error::NoMajority {
+                sources: 2,
+                agreeing: 1,
+            };
+            assert_eq!(err, Err(split));
+        }
+
+        #[test]
+        fn counts_an_empty_filter_beside_unknown_bounds_alone() {
+            let sources = [unknown(0), unknown(0)];
+            let m = combine(Monotonic(0), drift(0), &with_empty(&sources, 1));
+            let m = m.expect("two of three");
+            assert_eq!((m.offset(), m.error()), (Span::ZERO, MAX_ERROR));
+            let err = combine(Monotonic(0), drift(0), &with_empty(&sources, 2));
+            let split = Error::NoMajority {
+                sources: 4,
+                agreeing: 2,
+            };
+            assert_eq!(err, Err(split));
         }
 
         #[test]
@@ -547,6 +608,21 @@ mod tests {
                 if high - low <= 2 * i128::from(MAX_ERROR.nanos()) {
                     let truth = w.truth(w.now);
                     prop_assert!(w.holds_truth_at(m, w.now), "{m:?} misses {truth}");
+                }
+            }
+
+            #[test]
+            fn counts_each_empty_filter_against_a_majority(
+                (w, sources) in agreeing(),
+                empty in 0..10_usize,
+            ) {
+                let given = combine(Monotonic(w.now), w.drift, &with_empty(&sources, empty));
+                let n = sources.len();
+                if empty < n {
+                    prop_assert_eq!(given, w.combine(&sources));
+                } else {
+                    let split = Error::NoMajority { sources: n + empty, agreeing: n };
+                    prop_assert_eq!(given, Err(split));
                 }
             }
 
