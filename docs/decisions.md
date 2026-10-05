@@ -940,6 +940,14 @@ How to read this record:
   calc align) and compositions (polled, clocked, pushed, cyclic, out, calc). The
   kind's `&self` holds process-lifetime parts that `node` injects; `ctx` holds one
   run's capabilities. Group-based parts need revision (X5).
+- **ENDPOINT REGISTRY** `endpoint::Registry<K, S, T>` keeps at most one open
+  endpoint per key on a node. `acquire(key, settings, open)` shares the open endpoint,
+  or calls `open` when none is open. Opens and closes of one key run one at a time;
+  other keys do not wait. Unequal settings on an open key give `Error::Config`
+  (`connector.endpoint-settings`). The endpoint closes when the last `Lease` drops.
+  `node` makes one registry per kind that needs it. A FIFO lock (`endpoint::Shared`)
+  composes as `T` later. Decided by the `connector` builder in the plan on #422, after
+  `/eb-review`.
 - **PACE (2026-10-05)** `pace::Timer` ticks on a grid of deadlines at `start + n /
   rate`, from a `types::time::Rate`, and skips and counts the ticks a stall missed.
   It has one async `tick(&cancel::Token)`, with no blocking wait and no sleep, hybrid,
