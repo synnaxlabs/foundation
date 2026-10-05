@@ -1,4 +1,5 @@
-//! Bit packing in natural order, least significant bit first.
+//! Bit packing of the body of one vector: at most [`VECTOR_LEN`] values, in natural
+//! order, least significant bit first.
 
 use crate::VECTOR_LEN;
 
@@ -30,11 +31,12 @@ pub(crate) fn pack(values: impl Iterator<Item = u64>, bits: u8, out: &mut [u8]) 
     }
 }
 
-/// The first [`VECTOR_LEN`] values of `bits` bits packed in `bytes`, in order: as many
-/// as a vector holds. Past the bytes, it yields zeros.
+/// The [`VECTOR_LEN`] values of `bits` bits packed in `bytes`, in order. Past the
+/// bytes, it yields zeros.
 pub(crate) fn unpack(bytes: &[u8], bits: u8) -> impl Iterator<Item = u64> + '_ {
     let mask = u64::MAX.unbounded_shr(u32::from(64_u8.strict_sub(bits)));
     let bits = usize::from(bits);
+    // A constant bound lets LLVM prove that `index * bits` cannot overflow.
     (0..VECTOR_LEN).map(move |index| {
         let start = index.strict_mul(bits);
         let rest = bytes.get(start.div_euclid(8)..).unwrap_or_default();
