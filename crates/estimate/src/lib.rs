@@ -3,7 +3,7 @@
 //!
 //! Each time source gives [`Measurement`]s. A [`Filter`] keeps the recent ones of one
 //! source, and [`combine`] intersects the best of each source into one estimate. An
-//! [`Overlap`] keeps what every measurement of one device clock allows. The crate never
+//! [`Overlap`] keeps what every reading of one device clock allows. The crate never
 //! knows what a source is, and it reads no clock: the caller passes the local time.
 
 #![deny(clippy::wildcard_enum_match_arm)]
@@ -36,7 +36,7 @@ pub use overlap::Overlap;
 pub enum Error {
     /// An error bound is negative or more than 36500 days.
     Bound {
-        /// The error bound.
+        /// The error bound, or the largest span when the bound is wider.
         error: Span,
     },
     /// A drift rate is more than 10%.
@@ -44,14 +44,14 @@ pub enum Error {
         /// The rate in parts per billion.
         ppb: u32,
     },
-    /// A measurement is older than the newest one in an [`Overlap`].
+    /// A reading is older than the newest one in an [`Overlap`].
     Backwards {
-        /// The local time of the measurement.
+        /// The local time of the reading.
         at: Monotonic,
-        /// The local time of the newest measurement in the overlap.
+        /// The local time of the newest reading in the overlap.
         newest: Monotonic,
     },
-    /// A measurement shares no offset with an [`Overlap`].
+    /// A reading shares no offset with an [`Overlap`].
     Disjoint,
     /// There are no measurements to combine.
     NoSources,
@@ -62,6 +62,8 @@ pub enum Error {
         /// The most sources whose bounds share an offset.
         agreeing: usize,
     },
+    /// An [`Overlap`] has no low edge or no high edge.
+    Open,
 }
 
 impl fmt::Display for Error {
@@ -77,17 +79,16 @@ impl fmt::Display for Error {
             }
             Self::Backwards { at, newest } => write!(
                 f,
-                "measurement at {}ns is older than the newest at {}ns",
+                "reading at {}ns is older than the newest at {}ns",
                 at.0, newest.0
             ),
-            Self::Disjoint => {
-                f.write_str("measurement shares no offset with the overlap")
-            }
+            Self::Disjoint => f.write_str("reading shares no offset with the overlap"),
             Self::NoSources => f.write_str("no time sources to combine"),
             Self::NoMajority { sources, agreeing } => write!(
                 f,
                 "no majority of time sources agree: at most {agreeing} of {sources}"
             ),
+            Self::Open => f.write_str("overlap has no low edge or no high edge"),
         }
     }
 }

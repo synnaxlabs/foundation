@@ -409,7 +409,9 @@ How to read this record:
 - **TIME ADAPTERS** Neutral model `Measurement { at: local monotonic, offset, error }`.
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
-  same estimator serves device clocks in the connector library.
+  same estimator serves device clocks in the connector library. Amended by ESTIMATE FIT:
+  a device clock gives `Overlap` readings with a low edge, a high edge, or both, not
+  `Measurement`s.
 - **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about one local clock (the node's
   monotonic clock, or a device's sample clock in nanoseconds, #84): its offset is mesh
   time minus the local reading at `at`, and its error is a half-width from 0 to 36500
@@ -422,7 +424,7 @@ How to read this record:
   half of them. This reads C6's "follows the smallest measured bound": when sources
   agree, the result is never wider than the narrowest. The result holds the true offset
   when the bounds that hold it are a majority and every other bound misses them. Decided
-  by the `time` builder (#49). A device's measurements go to the oscillator fit
+  by the `time` builder (#49). A device's readings go to the oscillator fit
   (`Overlap`), never to `combine`. Node sources keep `Filter`, not `Overlap`: a network
   exchange puts the true offset at about the same place in each bracket, so an overlap
   gains little, and a broken drift bound would stay wrong for the life of an overlap,
@@ -442,25 +444,27 @@ How to read this record:
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
   trips; input rejects an end before the start.
-- **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock.
-  It keeps the offsets that every measurement of that clock allows, each widened by
-  drift, so it holds only the measurement with the highest low edge and the one with
-  the lowest high edge. Measurements come in local time order. An older one returns
-  `Backwards` (the device restarted), and one that shares no offset returns `Disjoint`
-  (the clock jumped, or it drifts faster than its bound). Neither changes the overlap,
-  and the caller starts a new one with a gap. Each measurement holds true mesh time,
-  with the node's own error in its bound, so the drift covers only the device
-  oscillator. The drift is fixed for the life of an overlap, because a smaller drift
-  would need measurements that it dropped. This reads r6 Q5's lower-envelope fit with
-  the rate bounded by `Drift`, not fitted. A line fit of offset and rate lost: it is
-  honest only if the rate stays constant, and no datasheet bounds oscillator wander. A
-  measured rate needs a signed rate in the model, not a smaller `Drift`. A device
-  adapter must give each measurement a two-sided bound. The return time of a read
-  bounds its last sample only from above. The lower bound comes from a device counter
-  read between two mesh stamps, or from a latency that the hardware guarantees: one
-  read over a stated latency gives a low edge above the truth, and the overlap keeps it.
-  Decided by the `time` builder; the person accepted it on 2026-10-05 ('#1 is fine').
-  Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper bounds).
+- **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
+  keeps the offsets that every reading of that clock allows, each widened by drift, so
+  it holds only the reading with the highest low edge and the one with the lowest high
+  edge. Readings come in local time order. An older one returns `Backwards` (the device
+  restarted), and one that shares no offset returns `Disjoint` (the clock jumped, or it
+  drifts faster than its bound). Neither changes the overlap, and the caller starts a
+  new one with a gap. Each reading holds true mesh time, with the node's own error in
+  its bound, so the drift covers only the device oscillator. The drift is fixed for the
+  life of an overlap, because a smaller drift would need readings that it dropped. This
+  reads r6 Q5's lower-envelope fit with the rate bounded by `Drift`, not fitted. A line
+  fit of offset and rate lost: it is honest only if the rate stays constant, and no
+  datasheet bounds oscillator wander. A measured rate needs a signed rate in the model,
+  not a smaller `Drift`. A reading gives a low edge, a high edge, or both, at one device
+  time. A read return bounds the newest sample the host knows only from above. A low
+  edge comes from a mesh stamp before the device acts (a start command or a request),
+  from a device counter read between two mesh stamps, or from a latency that the
+  hardware guarantees. The overlap gives a bound only when it has both a low edge and a
+  high edge (`Open` before that). Decided by the `time` builder; the person accepted it
+  on 2026-10-05 ('#1 is fine'). The person accepted one-sided readings on 2026-10-05
+  ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper
+  bounds).
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
   a reader gets no mesh time. After it, when `combine` fails (no majority, a bound too
   wide, or no sources after a remove), the clock holds over: it keeps its last estimate
@@ -567,9 +571,15 @@ How to read this record:
   the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
   issuer are not checked. A node sends its certificate when it dials; an SDK client
   sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
-  session protocol gets a new name. Resumption and 0-RTT are off, so rustls gets a
-  fixed time and never reads the OS clock. Randomness inside TLS comes from aws-lc
-  (TLS RANDOMNESS). Decided by `network` in #54.
+  session protocol gets a new name. A session that agrees no ALPN, or another name,
+  ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
+  ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
+  dialing node offers them in that order, and the client's order decides, so nodes
+  agree AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between
+  nodes and "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so
+  an SDK may offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
+  reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS).
+  Decided by `network` in #54; the ALPN check, suites, and groups in #108.
 
 ### 1.8 Consensus, regions, and the spec
 

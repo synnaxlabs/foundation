@@ -34,6 +34,11 @@ mod class;
 mod code;
 pub mod datagram;
 mod error;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the QUIC carrier is the first user")
+)]
+mod message;
 mod session;
 pub mod stream;
 #[cfg_attr(

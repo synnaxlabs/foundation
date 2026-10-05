@@ -1,6 +1,5 @@
 use types::time::{Monotonic, Span};
 
-use crate::drift::PER_NANO;
 use crate::{Drift, Error};
 
 /// The widest error bound. With the largest drift over the longest time, a widened
@@ -71,34 +70,23 @@ impl Measurement {
         (offset - error, offset + error)
     }
 
-    /// [`Measurement::bounds_at`] in billionths of a nanosecond, not rounded.
-    pub(crate) fn exact_bounds_at(self, now: Monotonic, drift: Drift) -> (i128, i128) {
-        let growth = drift.over_exact(now.0.abs_diff(self.at.0));
-        let offset = i128::from(self.offset.nanos()) * PER_NANO;
-        let error = i128::from(self.error.nanos()) * PER_NANO + growth;
-        (offset - error, offset + error)
-    }
-
-    /// The measurement at `at` that covers every offset from `low` to `high`, rounded
-    /// outward. The midpoint must lie between the offsets of two measurements.
+    /// The measurement at `at` that covers every offset from `low` to `high`, with its
+    /// offset and error saturated to a span.
     ///
     /// # Errors
     ///
-    /// [`Error::Bound`] when the half-width is more than 36500 days.
+    /// [`Error::Bound`] when the error is more than 36500 days.
     pub(crate) fn between(at: Monotonic, low: i128, high: i128) -> Result<Self, Error> {
-        let (offset, error) = center(low, high);
-        Self::new(at, offset, error)
+        let offset = saturated((low + high).div_euclid(2));
+        let center = i128::from(offset.nanos());
+        Self::new(at, offset, saturated((high - center).max(center - low)))
     }
 }
 
-/// The center and half-width of a hull from `low` to `high`, rounded outward.
-fn center(low: i128, high: i128) -> (Span, Span) {
-    let offset = (low + high).div_euclid(2);
-    let offset = i64::try_from(offset)
-        .expect("invariant: the hull's midpoint lies between two bound centers");
-    let error = i64::try_from(high - i128::from(offset))
-        .expect("invariant: the hull lies inside one widened bound");
-    (Span::from_nanos(offset), Span::from_nanos(error))
+/// `nanos` as a span, or the nearest span when it is past a span's range.
+fn saturated(nanos: i128) -> Span {
+    let nanos = nanos.clamp(i64::MIN.into(), i64::MAX.into());
+    Span::from_nanos(i64::try_from(nanos).expect("invariant: clamped to i64"))
 }
 
 #[cfg(test)]
