@@ -17,28 +17,34 @@ use crate::cancel;
 /// use connector::cancel::Token;
 /// use env::{clock::Clock, rng::Rng};
 ///
-/// async fn connect(clock: &Clock, rng: Rng, cancel: &Token) {
+/// async fn serve(clock: &Clock, rng: Rng, cancel: &Token) {
 ///     let config = Config { first: Span::SECOND, cap: Span::MINUTE };
 ///     let mut backoff = Backoff::new(clock, rng, config);
-///     while try_once().is_err() {
+///     loop {
+///         if session().is_ok() {
+///             backoff.reset();
+///         }
 ///         if !backoff.wait(cancel).await {
 ///             return;
 ///         }
 ///     }
-///     backoff.reset();
 /// }
-/// # fn try_once() -> Result<(), ()> { Ok(()) }
+/// # fn session() -> Result<(), ()> { Ok(()) }
 /// ```
 #[derive(Debug)]
 pub struct Backoff {
     clock: Clock,
     rng: Rng,
-    config: Config,
-    /// The longest span the next wait can take.
+    /// At least zero.
+    cap: Span,
+    /// In `1 ns..=cap`, or zero when `cap` is zero.
+    first: Span,
+    /// The longest span the next wait can take. In `first..=cap`.
     ceiling: Span,
 }
 
-/// The spans of a [`Backoff`]. A span below zero counts as zero.
+/// The spans of a [`Backoff`]. A `first` below 1 ns counts as 1 ns, so the waits
+/// always grow to `cap`. A `cap` below zero counts as zero: no wait at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The longest first wait.
@@ -51,11 +57,14 @@ impl Backoff {
     /// Makes a backoff whose next wait is its first.
     #[must_use]
     pub fn new(clock: &Clock, rng: Rng, config: Config) -> Self {
+        let cap = config.cap.max(Span::ZERO);
+        let first = config.first.max(Span::from_nanos(1)).min(cap);
         Self {
             clock: clock.clone(),
             rng,
-            config,
-            ceiling: first(config),
+            cap,
+            first,
+            ceiling: first,
         }
     }
 
@@ -66,63 +75,31 @@ impl Backoff {
     ///
     /// On a thread that `env` did not start.
     pub async fn wait(&mut self, cancel: &cancel::Token) -> bool {
-        let nanos = self.ceiling.nanos().unsigned_abs();
-        let span = self.rng.below(nanos + 1);
-        let span = Span::from_nanos(i64::try_from(span).expect("at most the ceiling"));
-        let cap = Span::from_nanos(self.config.cap.nanos().max(0));
+        let ceiling = u64::try_from(self.ceiling.nanos()).expect("at least zero");
+        let span =
+            i64::try_from(self.rng.below(ceiling + 1)).expect("at most i64::MAX");
         self.ceiling =
-            Span::from_nanos(self.ceiling.nanos().saturating_mul(2)).min(cap);
-        cancel.race(self.clock.sleep(span)).await.is_some()
+            Span::from_nanos(self.ceiling.nanos().saturating_mul(2)).min(self.cap);
+        cancel
+            .race(self.clock.sleep(Span::from_nanos(span)))
+            .await
+            .is_some()
     }
 
     /// Makes the next wait the first again. Call it after an attempt that worked.
     pub fn reset(&mut self) {
-        self.ceiling = first(self.config);
+        self.ceiling = self.first;
     }
-}
-
-fn first(config: Config) -> Span {
-    Span::from_nanos(config.first.nanos().min(config.cap.nanos()).max(0))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use env::tasks::Tasks;
     use proptest::prelude::*;
 
     use super::*;
     use crate::cancel::Token;
+    use crate::common::run;
     use env::rng::Rng;
-
-    /// Runs `main` on a shard of one simulated node and returns its output.
-    fn run<T, F>(main: impl FnOnce(Clock, Tasks) -> F + Send + 'static) -> T
-    where
-        T: Send + 'static,
-        F: Future<Output = T> + 'static,
-    {
-        let mut sim = sim::Sim::new(sim::Config::default());
-        let node = sim.node(sim::node::Config::default());
-        let clock = node.clock();
-        let out = Arc::new(Mutex::new(None));
-        let slot = Arc::clone(&out);
-        let config = env::shards::Config {
-            name: "shard-0".into(),
-            core: Some(0),
-        };
-        let handle = node
-            .shards()
-            .start(config, move |tasks| async move {
-                let value = main(clock, tasks).await;
-                *slot.lock().expect("no panic under the lock") = Some(value);
-            })
-            .expect("the shard starts");
-        sim.run().expect("the run ends");
-        handle.join().expect("the shard ends");
-        let value = out.lock().expect("no panic under the lock").take();
-        value.expect("main returned")
-    }
 
     fn ms(n: i64) -> Span {
         Span::from_nanos(n * 1_000_000)
@@ -228,7 +205,38 @@ mod tests {
     }
 
     #[test]
-    fn counts_a_span_below_zero_as_zero() {
+    fn grows_again_after_a_reset() {
+        let config = Config {
+            first: ms(1),
+            cap: Span::HOUR,
+        };
+        let spans = waits(5, config, 62, vec![32]);
+        let late = spans.get(32..).expect("62 waits");
+        assert!(late.iter().any(|s| *s > Span::SECOND));
+    }
+
+    #[test]
+    fn can_wait_the_whole_ceiling() {
+        let config = Config {
+            first: Span::from_nanos(1),
+            cap: Span::from_nanos(1),
+        };
+        let spans = waits(9, config, 64, Vec::new());
+        assert!(spans.contains(&Span::from_nanos(1)));
+    }
+
+    #[test]
+    fn grows_from_one_nanosecond_when_the_first_is_zero() {
+        let config = Config {
+            first: Span::ZERO,
+            cap: Span::MINUTE,
+        };
+        let spans = waits(4, config, 64, Vec::new());
+        assert!(spans.iter().any(|s| *s > Span::SECOND));
+    }
+
+    #[test]
+    fn never_waits_when_the_cap_is_below_zero() {
         let config = Config {
             first: ms(-5),
             cap: ms(-1),
@@ -249,10 +257,10 @@ mod tests {
                 cap: Span::from_nanos(cap),
             };
             let spans = waits(seed, config, 80, resets.clone());
-            let mut ceiling = first.min(cap);
+            let mut ceiling = first.max(1).min(cap);
             for (i, span) in spans.into_iter().enumerate() {
                 if resets.contains(&i) {
-                    ceiling = first.min(cap);
+                    ceiling = first.max(1).min(cap);
                 }
                 prop_assert!(span >= Span::ZERO, "wait {i} is not negative");
                 prop_assert!(span.nanos() <= ceiling, "wait {i}: {span:?} > {ceiling}");
