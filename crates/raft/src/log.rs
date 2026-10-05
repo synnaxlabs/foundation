@@ -168,8 +168,8 @@ impl Log {
 }
 
 // Checks that `entries` follow `before`: indexes in sequence, terms non-decreasing
-// and not zero, and each configuration valid. Returns the last position, or `before`
-// with no entries.
+// and not zero, and each configuration with a voter. Returns the last position, or
+// `before` with no entries.
 pub(crate) fn check(
     entries: &[Entry],
     mut before: Position,
@@ -183,7 +183,9 @@ pub(crate) fn check(
             });
         }
         if let Data::Voters(voters) = &entry.data {
-            voters.check()?;
+            if voters.incoming.is_empty() {
+                return Err(Error::NoVoters);
+            }
         }
         before = entry.at;
     }

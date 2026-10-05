@@ -93,8 +93,10 @@ impl Raft {
     ///
     /// - [`Error::Ticks`] when `heartbeat_ticks` is 0 or `election_ticks` is not
     ///   greater than `heartbeat_ticks`.
-    /// - [`Error::EmptyIncoming`] when `voters`, or a configuration in `entries`,
-    ///   has an empty `incoming` set but an `outgoing` set.
+    /// - [`Error::EmptyIncoming`] when `voters.incoming` is empty but `outgoing` is
+    ///   not.
+    /// - [`Error::NoVoters`] when a configuration in `entries` has an empty
+    ///   `incoming` set.
     /// - [`Error::EntryOutOfOrder`] when `entries` do not run from index 1 with
     ///   terms that never decrease.
     /// - [`Error::AppliedPastLog`] when `applied` is past the last entry.
@@ -263,8 +265,8 @@ impl Raft {
     /// - [`Error::SecondLeader`] when this node leads the message's term and the
     ///   message is a heartbeat or an append.
     /// - [`Error::EntryOutOfOrder`] when an append's entries do not follow its `prev`.
-    /// - [`Error::EmptyIncoming`] when an append carries a configuration with an empty
-    ///   `incoming` set but an `outgoing` set.
+    /// - [`Error::NoVoters`] when an append carries a configuration with an empty
+    ///   `incoming` set.
     ///
     /// The node's state does not change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
@@ -1853,9 +1855,18 @@ mod tests {
             let ready = raft.ready();
             assert_eq!(ready.committed.last(), Some(&config(1, 2, new.clone())));
             assert_eq!(raft.voters(), &new);
-            // The new peer gets one probe and then waits for its reply.
+            // The new peer gets one probe from the end of the log, then waits.
             let to: Vec<node::Key> = ready.messages.iter().map(|m| m.to).collect();
             assert_eq!(to, [key(2), key(4)]);
+            let probe = Body::Append {
+                prev: Position {
+                    term: Term(1),
+                    index: 2,
+                },
+                entries: Vec::new(),
+                commit: 2,
+            };
+            assert_eq!(ready.messages[1].body, probe);
             raft.propose(vec![7]).unwrap();
             let to: Vec<node::Key> = sent(&mut raft).iter().map(|m| m.to).collect();
             assert_eq!(to, [key(2)]);
@@ -1904,28 +1915,30 @@ mod tests {
         }
 
         #[test]
-        fn rejects_an_invalid_configuration_entry() {
-            let bad = Voters {
+        fn rejects_a_configuration_entry_with_no_voter() {
+            let outgoing_only = Voters {
                 outgoing: [key(1), key(2)].into_iter().collect(),
                 ..Voters::default()
             };
-            let mut raft = raft(&[1, 2, 3], Hard::default());
-            let body = Body::Append {
-                prev: Position::default(),
-                entries: vec![config(1, 1, bad.clone())],
-                commit: 0,
-            };
-            let error = raft.step(message(2, 1, body)).unwrap_err();
-            assert_eq!(error, Error::EmptyIncoming);
-            assert_eq!(
-                error.to_string(),
-                "the incoming voter set is empty while the outgoing set is not"
-            );
-            let start = Start {
-                entries: vec![config(1, 1, bad)],
-                ..start(&[1, 2, 3], at_term(1))
-            };
-            assert_eq!(Raft::new(CONFIG, start).unwrap_err(), Error::EmptyIncoming);
+            for bad in [Voters::default(), outgoing_only] {
+                let mut raft = raft(&[1, 2, 3], Hard::default());
+                let body = Body::Append {
+                    prev: Position::default(),
+                    entries: vec![config(1, 1, bad.clone())],
+                    commit: 0,
+                };
+                let error = raft.step(message(2, 1, body)).unwrap_err();
+                assert_eq!(error, Error::NoVoters);
+                assert_eq!(
+                    error.to_string(),
+                    "a configuration entry has an empty incoming voter set"
+                );
+                let start = Start {
+                    entries: vec![config(1, 1, bad)],
+                    ..start(&[1, 2, 3], at_term(1))
+                };
+                assert_eq!(Raft::new(CONFIG, start).unwrap_err(), Error::NoVoters);
+            }
         }
     }
 

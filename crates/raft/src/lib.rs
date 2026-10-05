@@ -70,9 +70,11 @@ pub enum Error {
         /// The configured heartbeat ticks.
         heartbeat: u32,
     },
-    /// The incoming voter set is empty while the outgoing set is not, in
-    /// `Start.voters` or in a configuration entry.
+    /// The incoming voter set of `Start.voters` is empty while the outgoing set is
+    /// not.
     EmptyIncoming,
+    /// A configuration entry has an empty incoming voter set.
+    NoVoters,
     /// The stored term is lower than the term of the last log entry.
     TermBehindLog {
         /// The stored term.
@@ -133,6 +135,9 @@ impl fmt::Display for Error {
                     f,
                     "the incoming voter set is empty while the outgoing set is not"
                 )
+            }
+            Self::NoVoters => {
+                write!(f, "a configuration entry has an empty incoming voter set")
             }
             Self::TermBehindLog { term, last } => write!(
                 f,

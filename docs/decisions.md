@@ -710,8 +710,8 @@ How to read this record:
   is in force from that commit on, for a leader and a follower alike. The caller
   stores a committed `Data::Voters` with `applied`, and passes it as `Start.voters`
   on a restart; the entries after `applied` change it the same way when they commit.
-  A `Voters` entry that fails `Voters::check`, in `Start.entries` or in an `Append`,
-  is `Error::EmptyIncoming`, like `Start.voters`.
+  A `Voters` entry with an empty `incoming` set, in `Start.entries` or in an
+  `Append`, is `Error::NoVoters`: a group with no voter can never commit or elect.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
