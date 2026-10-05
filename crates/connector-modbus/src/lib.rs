@@ -1,4 +1,4 @@
-//! Reads and commands Modbus TCP devices.
+//! Reads and commands Modbus TCP and RTU devices.
 
 #![deny(
     clippy::indexing_slicing,
@@ -10,6 +10,7 @@
 use std::fmt;
 
 pub mod pdu;
+pub mod rtu;
 pub mod tcp;
 
 /// Why a Modbus frame or PDU is not valid.
@@ -60,6 +61,13 @@ pub enum Error {
     },
     /// A last bit byte whose unused high bits are not 0.
     Padding(u8),
+    /// An RTU frame whose CRC field is not the CRC of its bytes.
+    Crc {
+        /// The CRC of the frame's address and PDU.
+        want: u16,
+        /// The CRC field of the frame.
+        got: u16,
+    },
     /// A write reply whose echo of address and value (or count) differs.
     Echo {
         /// The address and value (or count) written.
@@ -113,6 +121,9 @@ impl fmt::Display for Error {
                     f,
                     "a last bit byte of {byte:#04x} whose unused bits are not 0"
                 )
+            }
+            Self::Crc { want, got } => {
+                write!(f, "a CRC of {got:#06x} where the frame gives {want:#06x}")
             }
             Self::Echo { want, got } => {
                 write!(f, "a write reply that echoes {got:?}, not {want:?}")

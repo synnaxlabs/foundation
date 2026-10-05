@@ -69,6 +69,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "connector_modbus_rtu"
+path = "fuzz_targets/connector_modbus_rtu.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "connector_modbus_tcp"
 path = "fuzz_targets/connector_modbus_tcp.rs"
 test = false
