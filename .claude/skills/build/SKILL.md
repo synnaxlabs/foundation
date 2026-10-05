@@ -15,7 +15,10 @@ You own a set of crates. Your session name is your owner label (`owner:<name>`).
 1. Read `CLAUDE.md`, `docs/coordination.md`, and the sections of `docs/decisions.md`
    for your crates.
 2. Find your work: `gh issue list --label owner:<name> --state open`. Read the last
-   state comment on each issue.
+   state comment on each issue. With no open issue, file the next one for your crates
+   from `docs/decisions.md`: goal, crates, tests that must pass, and decisions
+   section, labeled `owner:<name>` and `crate:<crate>`. Order the riskiest unknowns
+   first.
 3. Make sure you are in your own worktree (`~/Desktop/synnaxlabs/foundation-wt/<name>`)
    and it is up to date: `git fetch origin`.
 

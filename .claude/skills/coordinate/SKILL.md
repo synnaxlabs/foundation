@@ -19,11 +19,10 @@ queue. You do not build crates.
 
 ## The loop
 
-1. **Plan.** Every builder has at least one open issue. When one runs out, write the
-   next issues from `docs/decisions.md` and the RFC phases. One issue is one PR of a
-   few hundred lines. State the goal, the crates it owns, the tests that must pass,
-   and the decisions section. No two open issues own the same crate. Order work so the
-   riskiest unknowns are measured first.
+1. **Plan.** Builders file the issues for their own crates. Check that no two open
+   issues own the same crate, that each issue states its goal, crates, tests, and
+   decisions section, and that the riskiest unknowns come first. Write only the issues
+   that cross crates or owners.
 2. **Interface requests.** Handle each `interface` issue as `docs/coordination.md`
    says. A change inside the locked decisions: make it as a small PR, then message the
    owners of every crate that uses the surface. A change to a locked decision, a
