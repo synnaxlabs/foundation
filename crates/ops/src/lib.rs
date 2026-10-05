@@ -3,8 +3,6 @@
 
 use std::ffi::OsString;
 
-use serde_json::{Value, json};
-
 mod error;
 mod mcp;
 mod operation;
@@ -12,7 +10,7 @@ mod operation;
 mod tests;
 
 pub use mcp::mcp;
-use operation::{Parsed, TABLE};
+use operation::Parsed;
 
 /// What one run of the command line writes, and how the process exits.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,45 +57,4 @@ pub fn cli(args: impl IntoIterator<Item = OsString>) -> Exit {
         stderr,
         status,
     }
-}
-
-/// The result of the MCP `tools/list` method: one tool per operation, with its input
-/// and output schemas and its `readOnlyHint` and `destructiveHint` annotations.
-#[must_use]
-pub fn tools() -> Value {
-    let inputs = operation::inputs();
-    let outputs = operation::outputs();
-    let tools: Vec<Value> = TABLE
-        .iter()
-        .map(|spec| {
-            json!({
-                "name": spec.name,
-                "description": spec.summary,
-                "inputSchema": inputs[spec.name],
-                "outputSchema": outputs[spec.name],
-                "annotations": {
-                    "readOnlyHint": spec.read_only,
-                    "destructiveHint": spec.destructive,
-                },
-            })
-        })
-        .collect();
-    json!({ "tools": tools })
-}
-
-/// The result of the MCP `tools/call` method for the tool `name`, with its
-/// `arguments`, or `null` when the call has none. A failed call is a result with
-/// `isError` set, and the error's `code`, `message`, and `fix` as its structured
-/// content.
-#[must_use]
-pub fn call(name: &str, arguments: Value) -> Value {
-    let (content, failed) = match operation::read(name, arguments) {
-        Ok(request) => (request.run().json(), false),
-        Err(error) => (error.json(), true),
-    };
-    json!({
-        "content": [{ "type": "text", "text": content.to_string() }],
-        "structuredContent": content,
-        "isError": failed,
-    })
 }

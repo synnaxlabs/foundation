@@ -20,6 +20,28 @@ fn failed(stderr: &str) -> Exit {
     }
 }
 
+fn ask(message: &Value) -> Value {
+    let reply = crate::mcp(&message.to_string()).expect("a reply");
+    assert!(!reply.contains('\n'), "one line: {reply}");
+    serde_json::from_str(&reply).expect("json")
+}
+
+fn tools() -> Value {
+    ask(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))["result"].take()
+}
+
+fn call(params: &Value) -> Value {
+    ask(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params }))
+}
+
+fn failed_call(message: &str, data: &Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": { "code": -32602, "message": message, "data": data },
+    })
+}
+
 fn names(map: &Map<String, Value>) -> BTreeSet<&str> {
     map.keys().map(String::as_str).collect()
 }
@@ -35,7 +57,7 @@ fn the_table_names_each_input_and_output_once() {
 #[test]
 fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
     let command = operation::command();
-    let tools = crate::tools();
+    let tools = tools();
     let tools = tools["tools"].as_array().expect("tools is a list");
     let docs = operation::docs();
     assert_eq!(command.get_subcommands().count(), TABLE.len());
@@ -99,10 +121,14 @@ fn json_output_parses_back_to_the_typed_output() {
             serde_json::from_value(json!({ spec.name: output.clone() }))
                 .expect(spec.name);
         assert_eq!(response.json(), output);
-        let call = crate::call(spec.name, json!({}));
-        assert_eq!(call["isError"], false);
-        assert_eq!(call["structuredContent"], output);
-        assert_eq!(call["content"][0]["text"], output.to_string());
+        let call = call(&json!({ "name": spec.name, "arguments": {} }));
+        assert_eq!(
+            call["result"],
+            json!({
+                "content": [{ "type": "text", "text": output.to_string() }],
+                "structuredContent": output,
+            })
+        );
     }
 }
 
@@ -202,15 +228,16 @@ fn an_unknown_operation_suggests_the_closest_name() {
              fix: Use `version`, the closest name\n"
         )
     );
-    let call = crate::call("versoin", json!({}));
-    assert_eq!(call["isError"], true);
     assert_eq!(
-        call["structuredContent"],
-        json!({
-            "code": "ops.unknown-operation",
-            "message": "no operation is named `versoin`",
-            "fix": "Use `version`, the closest name",
-        })
+        call(&json!({ "name": "versoin" })),
+        failed_call(
+            "no operation is named `versoin`",
+            &json!({
+                "code": "ops.unknown-operation",
+                "message": "no operation is named `versoin`",
+                "fix": "Use `version`, the closest name",
+            })
+        )
     );
 }
 
@@ -221,7 +248,10 @@ fn an_unknown_operation_far_from_every_name_points_to_the_docs() {
         "message": "no operation is named `zzz`",
         "fix": "Use a name from `foundation docs`",
     });
-    assert_eq!(crate::call("zzz", json!({}))["structuredContent"], expected);
+    assert_eq!(
+        call(&json!({ "name": "zzz" })),
+        failed_call("no operation is named `zzz`", &expected)
+    );
     let exit = cli(&["zzz", "--json"]);
     assert_eq!((exit.status, exit.stdout.as_str()), (2, ""));
     assert_eq!(
@@ -232,28 +262,24 @@ fn an_unknown_operation_far_from_every_name_points_to_the_docs() {
 
 #[test]
 fn a_call_with_a_bad_argument_names_it() {
-    let call = crate::call("version", json!({ "nope": 1 }));
-    assert_eq!(call["isError"], true);
+    let message = "unknown field `nope`, there are no fields";
     assert_eq!(
-        call["structuredContent"],
-        json!({
-            "code": "ops.argument",
-            "message": "unknown field `nope`, there are no fields",
-            "fix": "Match the arguments to the operation in `foundation docs`",
-        })
-    );
-    assert_eq!(
-        call["content"][0]["text"],
-        call["structuredContent"].to_string()
+        call(&json!({ "name": "version", "arguments": { "nope": 1 } })),
+        failed_call(
+            message,
+            &json!({
+                "code": "ops.argument",
+                "message": message,
+                "fix": "Match the arguments to the operation in `foundation docs`",
+            })
+        )
     );
 }
 
 #[test]
 fn a_call_with_no_arguments_runs() {
-    let call = crate::call("version", Value::Null);
-    assert_eq!(call["isError"], false);
     assert_eq!(
-        call["structuredContent"]["version"],
+        call(&json!({ "name": "version" }))["result"]["structuredContent"]["version"],
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -285,11 +311,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
 mod mcp {
     use serde_json::{Value, json};
 
-    fn ask(message: &Value) -> Value {
-        let reply = crate::mcp(&message.to_string()).expect("a reply");
-        assert!(!reply.contains('\n'), "one line: {reply}");
-        serde_json::from_str(&reply).expect("json")
-    }
+    use super::ask;
 
     fn request(id: Value, method: &str, params: Value) -> Value {
         let mut request = json!({ "jsonrpc": "2.0", "method": method });
@@ -340,46 +362,69 @@ mod mcp {
     #[test]
     fn ping_gets_an_empty_result() {
         assert_eq!(
-            ask(&request(json!(2), "ping", Value::Null)),
+            ask(&json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" })),
             json!({ "jsonrpc": "2.0", "id": 2, "result": {} })
         );
     }
 
     #[test]
-    fn tools_list_and_call_return_the_generated_results() {
+    fn tools_list_and_call_answer_under_the_request_id() {
         let list = ask(&request(json!(3), "tools/list", json!({})));
-        assert_eq!(
-            list,
-            json!({ "jsonrpc": "2.0", "id": 3, "result": crate::tools() })
-        );
+        assert_eq!((&list["id"], &list["result"]), (&json!(3), &super::tools()));
         let call = ask(&request(
-            json!(4),
-            "tools/call",
-            json!({ "name": "version", "arguments": {} }),
-        ));
-        assert_eq!(
-            call,
-            json!({ "jsonrpc": "2.0", "id": 4, "result": crate::call("version", json!({})) })
-        );
-        let bare = ask(&request(
-            json!(5),
+            json!("c"),
             "tools/call",
             json!({ "name": "version" }),
         ));
-        assert_eq!(bare["result"]["isError"], false);
-        let failed = ask(&request(json!(6), "tools/call", json!({ "name": "nope" })));
+        assert_eq!(call["id"], "c");
         assert_eq!(
-            failed["result"]["structuredContent"]["code"],
-            "ops.unknown-operation"
+            call["result"]["structuredContent"]["version"],
+            env!("CARGO_PKG_VERSION")
         );
+    }
+
+    #[test]
+    fn a_response_from_the_client_gets_no_reply() {
+        for response in [
+            json!({ "jsonrpc": "2.0", "id": 1, "result": {} }),
+            json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": 1, "message": "x" } }),
+        ] {
+            assert_eq!(crate::mcp(&response.to_string()), None, "{response}");
+        }
+    }
+
+    #[test]
+    fn an_id_that_parsing_could_change_is_invalid() {
+        for id in ["18446744073709551616", "-0", "1.0", "1.5", "null"] {
+            let message = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ping"}}"#);
+            let reply: Value =
+                serde_json::from_str(&crate::mcp(&message).expect("a reply"))
+                    .expect("json");
+            assert_eq!(
+                reply,
+                failure(Value::Null, -32600, "Invalid Request"),
+                "{id}"
+            );
+        }
+        for id in [json!(u64::MAX), json!(i64::MIN), json!("")] {
+            assert_eq!(ask(&request(id.clone(), "ping", json!({})))["id"], id);
+        }
     }
 
     #[test]
     fn a_notification_gets_no_reply() {
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
         assert_eq!(crate::mcp(&note.to_string()), None);
-        let unknown = json!({ "jsonrpc": "2.0", "method": "nope" });
+        let unknown = json!({ "jsonrpc": "2.0", "method": "nope", "params": 5 });
         assert_eq!(crate::mcp(&unknown.to_string()), None);
+    }
+
+    #[test]
+    fn an_invalid_notification_gets_a_reply() {
+        assert_eq!(
+            ask(&json!({ "jsonrpc": "2.0", "method": 1, "params": "bar" })),
+            failure(Value::Null, -32600, "Invalid Request")
+        );
     }
 
     #[test]
@@ -397,7 +442,7 @@ mod mcp {
         );
         assert_eq!(
             ask(&json!({ "id": 1, "method": "ping" })),
-            failure(Value::Null, -32600, "Invalid Request")
+            failure(json!(1), -32600, "Invalid Request")
         );
         assert_eq!(
             ask(&json!({ "jsonrpc": "2.0", "id": true, "method": "ping" })),
@@ -419,7 +464,18 @@ mod mcp {
 
     #[test]
     fn bad_call_params_are_invalid() {
-        for params in [Value::Null, json!([]), json!({}), json!({ "name": 1 })] {
+        assert_eq!(
+            ask(&request(json!(9), "ping", json!(5))),
+            failure(json!(9), -32602, "Invalid params")
+        );
+        for params in [
+            Value::Null,
+            json!([]),
+            json!({}),
+            json!({ "name": 1 }),
+            json!({ "name": "version", "arguments": [] }),
+            json!({ "name": "version", "arguments": null }),
+        ] {
             assert_eq!(
                 ask(&request(json!(9), "tools/call", params.clone())),
                 failure(json!(9), -32602, "Invalid params"),

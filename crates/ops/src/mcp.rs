@@ -1,5 +1,7 @@
 use serde_json::{Map, Value, json};
 
+use crate::operation::{self, TABLE};
+
 /// The one protocol version this server speaks. A client that asks for another gets
 /// this one, and may then disconnect.
 const VERSION: &str = "2025-06-18";
@@ -10,41 +12,57 @@ const METHOD: (i64, &str) = (-32601, "Method not found");
 const PARAMS: (i64, &str) = (-32602, "Invalid params");
 
 /// Answers one MCP message, a JSON-RPC 2.0 request or notification as one line of
-/// JSON. Returns the reply as one line of JSON, or `None` for a notification. Does no
-/// I/O: the caller reads each line from the client and writes each reply.
+/// JSON. Returns the reply as one line of JSON, or `None` for a notification or a
+/// response. Does no I/O: the caller reads each line from the client and writes each
+/// reply.
+///
+/// A request id must be a string or a 64-bit integer, so the reply carries it
+/// unchanged. A failed operation is a JSON-RPC error whose `data` holds the error's
+/// `code`, `message`, and `fix`.
 #[must_use]
 pub fn mcp(message: &str) -> Option<String> {
     let reply = match serde_json::from_str::<Value>(message) {
-        Ok(Value::Object(message)) => answer_object(&message)?,
-        Ok(_) => error(&Value::Null, REQUEST),
-        Err(_) => error(&Value::Null, PARSE),
+        Ok(Value::Object(message)) => answer(message)?,
+        Ok(_) => reply(&Value::Null, Err(fault(REQUEST))),
+        Err(_) => reply(&Value::Null, Err(fault(PARSE))),
     };
     Some(reply.to_string())
 }
 
-fn answer_object(message: &Map<String, Value>) -> Option<Value> {
-    // A message with no `id` is a notification, which never gets a reply.
-    let id = message.get("id")?;
-    if !(id.is_string() || id.is_number())
-        || message.get("jsonrpc") != Some(&json!("2.0"))
+fn answer(mut message: Map<String, Value>) -> Option<Value> {
+    if !message.contains_key("method")
+        && (message.contains_key("result") || message.contains_key("error"))
     {
-        return Some(error(&Value::Null, REQUEST));
+        return None;
     }
-    let Some(method) = message.get("method").and_then(Value::as_str) else {
-        return Some(error(id, REQUEST));
+    let id = match message.remove("id") {
+        None => None,
+        Some(id) if id.is_string() || id.is_i64() || id.is_u64() => Some(id),
+        Some(_) => return Some(reply(&Value::Null, Err(fault(REQUEST)))),
     };
-    let params = message.get("params").cloned().unwrap_or(Value::Null);
-    let result = match method {
+    let method = match message.remove("method") {
+        Some(Value::String(method))
+            if message.get("jsonrpc") == Some(&json!("2.0")) =>
+        {
+            method
+        }
+        _ => return Some(reply(&id.unwrap_or(Value::Null), Err(fault(REQUEST)))),
+    };
+    // Checked after the request itself, so an invalid notification gets a reply.
+    let id = id?;
+    let params = match message.remove("params") {
+        None => Map::new(),
+        Some(Value::Object(params)) => params,
+        Some(_) => return Some(reply(&id, Err(fault(PARAMS)))),
+    };
+    let result = match method.as_str() {
         "initialize" => Ok(initialize()),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(crate::tools()),
+        "tools/list" => Ok(tools()),
         "tools/call" => call(params),
-        _ => Err(METHOD),
+        _ => Err(fault(METHOD)),
     };
-    Some(match result {
-        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err(code) => error(id, code),
-    })
+    Some(reply(&id, result))
 }
 
 fn initialize() -> Value {
@@ -55,17 +73,59 @@ fn initialize() -> Value {
     })
 }
 
-fn call(params: Value) -> Result<Value, (i64, &'static str)> {
-    let Value::Object(mut params) = params else {
-        return Err(PARAMS);
-    };
-    let Some(Value::String(name)) = params.remove("name") else {
-        return Err(PARAMS);
-    };
-    let arguments = params.remove("arguments").unwrap_or(Value::Null);
-    Ok(crate::call(&name, arguments))
+fn tools() -> Value {
+    let inputs = operation::inputs();
+    let outputs = operation::outputs();
+    let tools: Vec<Value> = TABLE
+        .iter()
+        .map(|spec| {
+            json!({
+                "name": spec.name,
+                "description": spec.summary,
+                "inputSchema": inputs[spec.name],
+                "outputSchema": outputs[spec.name],
+                "annotations": {
+                    "readOnlyHint": spec.read_only,
+                    "destructiveHint": spec.destructive,
+                },
+            })
+        })
+        .collect();
+    json!({ "tools": tools })
 }
 
-fn error(id: &Value, (code, message): (i64, &str)) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+fn call(mut params: Map<String, Value>) -> Result<Value, Value> {
+    let Some(Value::String(name)) = params.remove("name") else {
+        return Err(fault(PARAMS));
+    };
+    let arguments = match params.remove("arguments") {
+        None => Map::new(),
+        Some(Value::Object(arguments)) => arguments,
+        Some(_) => return Err(fault(PARAMS)),
+    };
+    match operation::read(&name, arguments) {
+        Ok(request) => {
+            let content = request.run().json();
+            Ok(json!({
+                "content": [{ "type": "text", "text": content.to_string() }],
+                "structuredContent": content,
+            }))
+        }
+        Err(error) => Err(json!({
+            "code": PARAMS.0,
+            "message": error.to_string(),
+            "data": error.json(),
+        })),
+    }
+}
+
+fn fault((code, message): (i64, &str)) -> Value {
+    json!({ "code": code, "message": message })
+}
+
+fn reply(id: &Value, result: Result<Value, Value>) -> Value {
+    match result {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
+    }
 }

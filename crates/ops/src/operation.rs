@@ -105,18 +105,15 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, Error> {
     }
 }
 
-/// Reads a request for the operation `name` from JSON `arguments`. `null` is no
-/// arguments.
-pub(crate) fn read(name: &str, arguments: Value) -> Result<Request, Error> {
+/// Reads a request for the operation `name` from its JSON `arguments`.
+pub(crate) fn read(
+    name: &str,
+    arguments: Map<String, Value>,
+) -> Result<Request, Error> {
     if !TABLE.iter().any(|spec| spec.name == name) {
         return Err(unknown(name));
     }
-    let arguments = if arguments.is_null() {
-        Value::Object(Map::new())
-    } else {
-        arguments
-    };
-    let tagged = Map::from_iter([(name.to_owned(), arguments)]);
+    let tagged = Map::from_iter([(name.to_owned(), Value::Object(arguments))]);
     serde_json::from_value(Value::Object(tagged)).map_err(|e| Error::Argument {
         message: e.to_string(),
     })
