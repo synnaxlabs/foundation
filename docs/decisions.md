@@ -298,16 +298,15 @@ How to read this record:
   never landed, and the home applies it to the live path. When no sample exists and the
   data fits A6, it applies as backfill. Anything else is an error: some samples stored
   and some not, a stored timestamp with other values, data that fits neither path, or a
-  range below the buffer's floor. When the indexes of one resend land on different
-  paths, the home splits it into frames of one path each and drops the repeats. It
-  confirms the resend when every part has landed or was dropped. Only a mixed resend
-  pays this copy; `home` measures it when it builds the split. Live and backfill frames
-  pay no check. Values are compared decoded, not as bytes. Writers assign no numbers: a
-  resend comes in a new session, and the writer never learned them. The person decided
-  on 2026-10-05: "By timestamp + same values" (#148), then "A `resend` label" (#168),
-  then the split, a resend of every unconfirmed frame, and no session path: "as long as
-  you've evaluated the performance costs of your decision against correctness then I'm
-  ok with this" (#243).
+  range below the buffer's floor. The home checks a resend per index frame (INDEX
+  FRAMES): each one lands on one path or is dropped as a repeat, with no second split.
+  It confirms the resend when every index frame has landed or was dropped. Live and
+  backfill frames pay no check. Values are compared decoded, not as bytes. Writers
+  assign no numbers: a resend comes in a new session, and the writer never learned
+  them. The person decided on 2026-10-05: "By timestamp + same values" (#148), then "A
+  `resend` label" (#168), then the split, a resend of every unconfirmed frame, and no
+  session path: "as long as you've evaluated the performance costs of your decision
+  against correctness then I'm ok with this" (#243).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -402,8 +401,9 @@ How to read this record:
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later
-  gives it to readers. B7, the log, the seq, and reader positions are per index.
-  Decided by the `write-path` builder; approved by the coordinator (#191).
+  gives it to readers. B7, the log, the seq, and reader positions are per index. A
+  write with more than one present group pays one copy of its series into the index
+  frames. Decided by the `write-path` builder; approved by the coordinator (#191).
 - **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
   of the index frame in entry order, then the frame's encoded series bytes,
@@ -542,8 +542,13 @@ How to read this record:
   half of the bounds that vote. This reads C6's "follows the smallest measured bound":
   when sources agree, the result is never wider than the narrowest. The result holds the
   true offset when the bounds that hold it are a majority of the bounds that vote, and
-  every other bound that votes misses them. Decided by the `time` builder (#49). A
-  device's readings go to the oscillator fit (`Overlap`), never to `combine`. Node
+  every other bound that votes misses them. Decided by the `time` builder (#49). Each
+  source votes: a source with no measurement agrees with no offset, and it votes beside
+  the known bounds, or beside the unknown bounds when no bound is known. So before its
+  first estimate a clock waits until more than half of its sources agree, and one
+  source that answers first cannot set mesh time. The person decided on 2026-10-05
+  ("clock question si approved at whatever path you think"), #488. A device's readings
+  go to the oscillator fit (`Overlap`), never to `combine`. Node
   sources keep `Filter`, not `Overlap`: a network exchange puts the true offset at about
   the same place in each bracket, so an overlap gains little, and a broken drift bound
   would stay wrong for the life of an overlap, not for 8 exchanges. Decided by the
@@ -585,7 +590,11 @@ How to read this record:
   with nine fraction digits; input needs an offset, takes up to nine fraction digits,
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
-  trips; input rejects an end before the start.
+  trips; input rejects an end before the start. A byte size follows the span rules: one
+  number and one unit with no space (`200GiB`), and a decimal fraction only when it
+  gives whole bytes (`1.5GiB`). Its type lives in `types` beside `time::Span`, and the
+  `document` reader is an adapter over it. The person decided on 2026-10-05 ("A yes I
+  approve", #479).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -644,7 +653,11 @@ How to read this record:
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
   source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
-  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314.
+  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` adds
+  the OS bound to the error of its own read, so the error is never less than the OS
+  bound. An error over 36500 days reads as unknown, the same as no bound (the
+  coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
+  lint denies it elsewhere (BQ20).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
@@ -797,14 +810,20 @@ How to read this record:
   empty entry of its term first, so it can commit what came before. It replicates with
   `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
   (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
-  (its hint for the next `prev`). A malformed `Append` (entries that do not follow
-  `prev`) is `Error::EntryOutOfOrder`. `Body::Heartbeat { commit }` carries the commit
-  index, capped at what that follower is known to hold. A leader commits an index only
-  when a quorum holds it and its entry is of the leader's own term. A follower commits
-  no further than the last entry the leader sent it. `Ready.committed` gives each entry
-  once, after it is written. Batch size (64 entries) and the number of appends in flight
-  per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
-  `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
+  (its hint for the next `prev`). `step` checks every index a message names, and the
+  order of an append's entries, against the log before it changes state: entries that
+  do not follow `prev` are `Error::EntryOutOfOrder`, and an index past the log is
+  `Error::IndexPastLog`. An `Append` with an entry whose term is above the message's
+  term is `Error::TermBehindLog`: no leader sends one, and a follower that wrote it
+  could not restart. The conformance oracle changed to match; the person decided on
+  2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
+  is known to hold. A leader commits an index only when a quorum holds it and its
+  entry is of the leader's own term. A follower commits no further than the last
+  entry the leader sent it. `Ready.committed` gives each entry once, after it is
+  written. Batch size (64 entries) and the number of appends in flight per follower
+  (8) are constants, not `Config` fields: nothing measured asks for a knob. `Message`
+  and `Body` are `Clone`, not `Copy`, because an append carries entries.
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
@@ -828,10 +847,15 @@ How to read this record:
   releases it, so the node learns it is out and never campaigns. A removed node that
   answered nothing over a whole quorum check period is released at that check instead.
   A follower releases the removed nodes when the leave commits. A removed node that
-  campaigns at the leader's term did not learn the commit: the leader takes it back
-  as a peer and probes it from the end of its log, so it gets the leave and is
-  released again. A leader outside the
-  committed final set sends the commit and steps down. A node outside an uncommitted
+  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
+  only from a voter of the newest configuration in this node's log, and a node whose
+  committed configuration lacks the sender answers `removed`. The removed node takes
+  that answer only from a voter of its own region, and stops its `raft` group for that
+  region. `raft` sends nothing to a node outside its configuration; until `mesh` sends
+  the answer, such a node campaigns with no effect. Readmit in `raft` (#414) lost: it
+  sent the log to a sender that `raft` cannot check. The person decided on 2026-10-05
+  ("Ok B is fine", #193). A leader outside the committed final set sends the commit
+  and steps down. A node outside an uncommitted
   configuration still campaigns: the entry may be truncated, and a removed leader that
   lost its lead before the leave reached a peer is the only node that can win the
   election that commits it.
@@ -1062,6 +1086,13 @@ How to read this record:
   hand-kept list of the 23; own tables generated from HCL's Unicode version; and
   `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
   `ID_Start` and `ID_Continue`.
+- **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
+  the verdict of a pinned HCL version: accepted or refused. A test checks that `read`
+  accepts exactly the accepted texts, and that the output of `write` for each is
+  accepted too. A small Go program next to the texts makes the verdicts and records
+  the HCL version. A person runs it by hand when the texts change; CI does not run it
+  and needs no Go. It is the only Go code in the repo. The person decided on
+  2026-10-05 ("Yeah that's fine", #460).
 - **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
   a new Document. Each attribute and block that keeps its value and its place keeps its
   bytes, comments, and blank lines. A changed value and a changed block on one line
@@ -1118,7 +1149,7 @@ How to read this record:
   settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
   SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
-  that selects node names: `node_settings { select = "site-a/*" disk = "200 GiB" }`.
+  that selects node names: `node_settings { select = "site-a/*" disk = "200GiB" }`.
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
