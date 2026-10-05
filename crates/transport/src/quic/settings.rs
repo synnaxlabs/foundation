@@ -110,9 +110,8 @@ fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
         .rng_seed(Some(rng))
         .supported_versions(VERSIONS.to_vec())
         .grease_quic_bit(true)
-        // A reset answers only an ID this node issued, and is smaller than the
-        // datagram that caused it, so it needs no rate limit. One shared limit lets
-        // one address take every reset.
+        // `Endpoint` limits resets for each ID: one shared limit lets one address
+        // take every reset.
         .min_reset_interval(Duration::ZERO);
     endpoint
 }
@@ -668,6 +667,7 @@ mod tests {
 
     mod restart {
         use super::*;
+        use crate::quic::reset::{INTERVAL, Limit};
 
         #[test]
         fn resets_the_old_connection_at_its_next_datagram() {
@@ -720,16 +720,72 @@ mod tests {
             assert_eq!(resets, 10);
         }
 
+        /// A 40-byte short header with the ID that the server issued to a dial with
+        /// a wrong key, and a new server endpoint with the same node key.
+        fn stranger(shard: &testing::Shard) -> (Vec<u8>, Endpoint) {
+            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+            pair.dial(tls::public(&PrivateKey([9; 32])));
+            pair.run(Duration::from_secs(5));
+            let (_, _, initial) = pair.server.sent.first().expect("a reply");
+            let (_, Some(issued)) = ids(initial) else {
+                panic!("not a long header");
+            };
+            let mut forged = [[0x40].as_slice(), issued].concat();
+            forged.resize(40, 0);
+            let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+            let endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+            (forged, endpoint)
+        }
+
         #[test]
-        fn resets_a_stale_datagram_that_another_address_sent_at_the_same_time() {
+        fn sends_a_stranger_one_reset_for_an_id_from_many_addresses_at_once() {
+            let resets = testing::run(1, |shard| {
+                let (forged, mut endpoint) = stranger(shard);
+                let now = testing::at(Duration::from_millis(1));
+                (0..1_000u16)
+                    .filter(|port| {
+                        let victim =
+                            SocketAddr::new(testing::CLIENT.ip(), 1_000 + port);
+                        reply(&mut endpoint, now, victim, &forged).is_some()
+                    })
+                    .count()
+            });
+            assert_eq!(resets, 1);
+        }
+
+        #[test]
+        fn resets_each_stale_datagram_while_a_stranger_sends_an_issued_id() {
+            let resets = testing::run(1, |shard| {
+                let (stale, _) = stale(shard);
+                let (forged, mut endpoint) = stranger(shard);
+                assert_ne!(Limit::slot(&stale), Limit::slot(&forged));
+                let attacker = SocketAddr::new(testing::CLIENT.ip(), 9);
+                let mut resets = 0;
+                for ms in 0..1_000 {
+                    let now = testing::at(Duration::from_millis(ms));
+                    reply(&mut endpoint, now, attacker, &forged);
+                    if ms % 100 == 5 {
+                        let reset = reply(&mut endpoint, now, testing::CLIENT, &stale);
+                        resets += usize::from(reset.is_some());
+                    }
+                }
+                resets
+            });
+            assert_eq!(resets, 10);
+        }
+
+        #[test]
+        fn resets_one_id_again_after_the_interval() {
             let resets = testing::run(1, |shard| {
                 let (stale, mut endpoint) = stale(shard);
-                let attacker = SocketAddr::new(testing::CLIENT.ip(), 9);
-                let now = testing::at(Duration::from_millis(1));
-                [attacker, testing::CLIENT]
-                    .map(|source| reply(&mut endpoint, now, source, &stale).is_some())
+                let (start, nano) = (Duration::from_millis(1), Duration::from_nanos(1));
+                let at = [start + nano, start + INTERVAL, start + INTERVAL + nano];
+                at.map(|at| {
+                    let now = testing::at(at);
+                    reply(&mut endpoint, now, testing::CLIENT, &stale).is_some()
+                })
             });
-            assert_eq!(resets, [true, true]);
+            assert_eq!(resets, [true, false, true]);
         }
 
         #[test]
