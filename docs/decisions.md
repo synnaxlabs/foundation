@@ -590,13 +590,15 @@ How to read this record:
   reads spans, so a Document from a file equals the same Document from the spec.
   Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
 - **DOCUMENT ENCODING (2026-10-04)** `document::encoding` gives each Document exactly
-  one byte string, with no spans: a version byte, then tagged values, keys in byte
-  order, and fixed-width little-endian integers (`u64` counts and lengths, `i128`
-  integers, `f64` floats). `decode` refuses every byte string that `encode` cannot
-  write. Both refuse nesting past 64 levels, and front ends refuse files that nest
-  deeper. `spec` stores and hashes these bytes. Pinned bytes are an oracle in
+  one byte string, with no spans: a version byte, then tagged values, blocks in the
+  producer's order, keys in byte order, and fixed-width little-endian integers (`u64`
+  counts and lengths, `i128` integers, and `f64` floats as their bits). `decode`
+  refuses every byte string that `encode` cannot write. Both refuse nesting past 64
+  levels, and front ends refuse files that nest deeper. `encode` returns `TooDeep` and
+  `decode` returns `Error`: two error types, by the coordinator's ruling under R16-6.
+  `spec` stores and hashes these bytes. Pinned bytes are an oracle in
   `oracles/conformance/document/`. A new format takes a new version byte. Decided by
-  the `config` builder (#62).
+  the `config` builder; approved by the coordinator (#62).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.

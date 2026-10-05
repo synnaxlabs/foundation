@@ -176,6 +176,41 @@ fn connector_block() {
     check(&document, &bytes);
 }
 
+#[test]
+fn blocks_keep_their_order() {
+    let block = |text: &str| Block {
+        keyword: "channel".into(),
+        keyword_span: None,
+        labels: vec![label(text)],
+        body: Document::default(),
+        span: None,
+    };
+    let document = Document {
+        attributes: Map::default(),
+        blocks: vec![block("b"), block("a"), block("b")],
+    };
+    let block = |text: &str| {
+        [
+            &string("channel")[..],
+            &count(1),
+            &string(text),
+            &count(0),
+            &count(0),
+        ]
+        .concat()
+    };
+    let bytes: Vec<u8> = [
+        &[1][..],
+        &count(0),
+        &count(3),
+        &block("b"),
+        &block("a"),
+        &block("b"),
+    ]
+    .concat();
+    check(&document, &bytes);
+}
+
 /// The bytes of a document whose one attribute, `a`, holds `value`. The value starts
 /// at byte 18.
 fn one(value: &[u8]) -> Vec<u8> {
