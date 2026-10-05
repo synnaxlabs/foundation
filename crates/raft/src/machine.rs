@@ -246,14 +246,11 @@ impl Raft {
             return Err(Error::NoVoters);
         }
         if let Some((at, last)) = self.log.voters()
-            && (!last.outgoing.is_empty() || at.index > self.log.committed())
+            && (last.joint() || at.index > self.log.committed())
         {
             return Err(Error::ChangePending { at });
         }
-        let joint = Voters {
-            incoming: voters,
-            outgoing: self.voters.incoming.clone(),
-        };
+        let joint = self.voters.enter(voters);
         Ok(self.propose_entry(Data::Voters(joint)))
     }
 
@@ -270,8 +267,9 @@ impl Raft {
     fn propose_entry(&mut self, data: Data) -> Position {
         let at = self.log.push(self.term, data);
         self.sync_voters();
-        self.commit();
-        self.replicate();
+        if !self.advance() {
+            self.replicate();
+        }
         at
     }
 
@@ -422,16 +420,8 @@ impl Raft {
         let accepted = self
             .heard_from(from)
             .is_some_and(|peer| peer.progress.accepted(last));
-        if accepted {
-            if self.commit() {
-                self.replicate();
-                // A committed configuration without this node ends its lead.
-                if self.settled() && !self.voters.incoming.contains(&self.key) {
-                    self.become_follower(self.term, None);
-                }
-            } else {
-                self.catch_up(from);
-            }
+        if accepted && !self.advance() {
+            self.catch_up(from);
         }
     }
 
@@ -447,15 +437,25 @@ impl Raft {
     }
 
     // Commits the highest index that a quorum holds, when an entry of the leader's
-    // own term is there, and leaves a joint phase whose entry is committed. A group
-    // of one node commits the leave at once. Returns whether the commit index moved.
-    fn commit(&mut self) -> bool {
+    // own term is there, leaves a joint phase whose entry is committed, and sends
+    // the followers the result. A group of one node commits the leave at once. A
+    // leader outside the committed configuration steps down after the send. Returns
+    // whether the commit index moved; when it did not, nothing is sent.
+    fn advance(&mut self) -> bool {
         let mut moved = false;
         while self.commit_once() {
             moved = true;
             self.leave();
         }
-        moved
+        if !moved {
+            return false;
+        }
+        self.replicate();
+        // A committed configuration without this node ends its lead.
+        if self.settled() && !self.voters.incoming.contains(&self.key) {
+            self.become_follower(self.term, None);
+        }
+        true
     }
 
     fn commit_once(&mut self) -> bool {
@@ -478,13 +478,10 @@ impl Raft {
     // Writes the entry that leaves a joint phase, once the joint configuration is
     // committed. `Start.voters` is committed by definition.
     fn leave(&mut self) {
-        if self.voters.outgoing.is_empty() || !self.settled() {
+        if !self.voters.joint() || !self.settled() {
             return;
         }
-        let voters = Voters {
-            incoming: self.voters.incoming.clone(),
-            outgoing: BTreeSet::new(),
-        };
+        let voters = self.voters.leave();
         self.log.push(self.term, Data::Voters(voters));
         self.sync_voters();
     }
@@ -703,9 +700,12 @@ impl Raft {
         }
         // An entry of the leader's own term lets it commit the ones before it.
         self.log.push(self.term, Data::Empty);
+        // A leader always has a log entry for a joint configuration in force, so
+        // `propose_voters` reads the log alone.
         self.leave();
-        self.commit();
-        self.replicate();
+        if !self.advance() {
+            self.replicate();
+        }
     }
 
     fn become_follower(&mut self, term: Term, leader: Option<node::Key>) {
@@ -2033,7 +2033,7 @@ mod tests {
                 assert_eq!(error, Error::NoVoters);
                 assert_eq!(
                     error.to_string(),
-                    "a configuration entry has an empty incoming voter set"
+                    "a configuration has an empty incoming voter set"
                 );
                 let start = Start {
                     entries: vec![config(1, 1, bad)],

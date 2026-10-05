@@ -73,7 +73,7 @@ pub enum Error {
     /// The incoming voter set of `Start.voters` is empty while the outgoing set is
     /// not.
     EmptyIncoming,
-    /// A configuration entry has an empty incoming voter set.
+    /// A configuration has an empty incoming voter set.
     NoVoters,
     /// A configuration change is in progress: the configuration entry at `at` is not
     /// committed yet, or it is a joint configuration whose leave is not committed yet.
@@ -143,7 +143,7 @@ impl fmt::Display for Error {
                 )
             }
             Self::NoVoters => {
-                write!(f, "a configuration entry has an empty incoming voter set")
+                write!(f, "a configuration has an empty incoming voter set")
             }
             Self::ChangePending { at } => write!(
                 f,

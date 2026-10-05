@@ -34,6 +34,27 @@ impl Voters {
         Ok(())
     }
 
+    // Whether this is a joint configuration.
+    pub(crate) fn joint(&self) -> bool {
+        !self.outgoing.is_empty()
+    }
+
+    // The joint configuration that moves from these voters to `incoming`.
+    pub(crate) fn enter(&self, incoming: BTreeSet<node::Key>) -> Self {
+        Self {
+            incoming,
+            outgoing: self.incoming.clone(),
+        }
+    }
+
+    // The configuration that ends this joint phase: `incoming` alone.
+    pub(crate) fn leave(&self) -> Self {
+        Self {
+            incoming: self.incoming.clone(),
+            outgoing: BTreeSet::new(),
+        }
+    }
+
     // Every node in either set, once.
     pub(crate) fn peers(&self) -> impl Iterator<Item = node::Key> + '_ {
         self.incoming.union(&self.outgoing).copied()
