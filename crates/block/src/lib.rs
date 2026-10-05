@@ -133,3 +133,15 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod miri_break {
+    #[test]
+    #[expect(unsafe_code, reason = "deliberate break: Miri must report this read")]
+    fn reads_past_the_end() {
+        let bytes = [1u8; 1];
+        let past = bytes.as_ptr().wrapping_add(1);
+        // SAFETY: none. The read is out of bounds on purpose.
+        std::hint::black_box(unsafe { past.read() });
+    }
+}
