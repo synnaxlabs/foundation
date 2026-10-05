@@ -346,13 +346,14 @@ fn the_first_append_after_an_idle_span_commits_after_one_commit() {
             .expect("opens");
         let a = slots.assign(key(1));
         shard.clock.sleep(commits(21)).await;
-        let before = shard.clock.now();
         buffer
             .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
             .expect("queues");
-        buffer.committed().await.expect("commits");
-        assert_eq!(shard.clock.now() - before, COMMIT);
+        shard.clock.sleep(commits(1)).await;
+        assert_eq!(buffer.durable(a, Path::Live), tail(0, None));
+        shard.clock.sleep(commits(2)).await;
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
+        assert_eq!(shard.memory.syncs(), 2, "the append alone woke the task");
     });
 }
 
