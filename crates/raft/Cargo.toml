@@ -9,7 +9,7 @@ publish.workspace = true
 types = { path = "../types" }
 
 [dev-dependencies]
-proptest = { version = "1", default-features = false, features = ["std"] }
+proptest.workspace = true
 
 [[test]]
 name = "conformance"

@@ -5,9 +5,8 @@ use std::collections::BTreeMap;
 
 use proptest::prelude::*;
 use proptest::sample::Index;
+use raft::{Config, Hard, Message, Position, Raft, Role, Start, Term};
 use types::node;
-
-use crate::{Config, Hard, Message, Position, Raft, Role, Start, Term};
 
 const ELECTION: u32 = 3;
 
@@ -52,30 +51,30 @@ fn run() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
     })
 }
 
-struct Mesh {
+struct Network {
     logs: Vec<Position>,
     nodes: Vec<Raft>,
     flight: Vec<Message>,
     leaders: BTreeMap<Term, node::Key>,
 }
 
-impl Mesh {
+impl Network {
     fn new(logs: Vec<Position>) -> Self {
-        let mut mesh = Self {
+        let mut network = Self {
             nodes: Vec::new(),
             flight: Vec::new(),
             leaders: BTreeMap::new(),
             logs,
         };
-        for node in 0..mesh.logs.len() {
+        for node in 0..network.logs.len() {
             let hard = Hard {
-                term: mesh.logs[node].term,
+                term: network.logs[node].term,
                 vote: None,
             };
-            let raft = mesh.build(node, hard);
-            mesh.nodes.push(raft);
+            let raft = network.build(node, hard);
+            network.nodes.push(raft);
         }
-        mesh
+        network
     }
 
     fn key(node: usize) -> node::Key {
@@ -160,6 +159,8 @@ impl Mesh {
     }
 }
 
+// Timeouts that are equal on each node can split the vote without end, so the
+// ticks after the network heals take well-mixed values from one generated state.
 fn splitmix(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut z = *state;
@@ -171,30 +172,30 @@ fn splitmix(state: &mut u64) -> u64 {
 proptest! {
     #[test]
     fn a_term_has_at_most_one_leader((logs, actions) in run()) {
-        let mut mesh = Mesh::new(logs);
+        let mut network = Network::new(logs);
         for action in &actions {
-            mesh.apply(action);
+            network.apply(action);
         }
     }
 
     #[test]
     fn a_healed_network_elects_one_leader(
         (logs, actions) in run(),
-        mut seed in any::<u64>(),
+        mut state in any::<u64>(),
     ) {
-        let mut mesh = Mesh::new(logs);
+        let mut network = Network::new(logs);
         for action in &actions {
-            mesh.apply(action);
+            network.apply(action);
         }
         let mut rounds = 0;
-        while mesh.agreed().is_none() {
+        while network.agreed().is_none() {
             rounds += 1;
             prop_assert!(rounds <= 100 * ELECTION, "no leader after {rounds} rounds");
-            for node in 0..mesh.nodes.len() {
-                mesh.nodes[node].tick(splitmix(&mut seed));
+            for node in 0..network.nodes.len() {
+                network.nodes[node].tick(splitmix(&mut state));
             }
-            mesh.collect();
-            mesh.settle();
+            network.collect();
+            network.settle();
         }
     }
 }

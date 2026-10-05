@@ -11,8 +11,6 @@
 mod config;
 mod machine;
 mod message;
-#[cfg(test)]
-mod safety;
 
 use std::fmt;
 
