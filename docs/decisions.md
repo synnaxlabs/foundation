@@ -304,6 +304,21 @@ How to read this record:
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open. The restart record needs one free block: an open of a full ring first moves
   records at the tail to a segment.
+  Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
+  u64][tail chain: u32][seq: u64][zero padding][crc32c: u32]`, one 4096-byte block,
+  magic `FNDNRING`, version 1. The CRC is the last four bytes and covers the rest.
+  The magic, the version, and the place of the CRC are the same in every version, so
+  an older build reads a newer block and reports its version. Two blocks at the
+  start of the ring hold the last two checkpoints: checkpoint `n` goes to block `n
+  mod 2`. Open takes the whole block with the higher `seq` (on a tie, the first);
+  one torn block leaves the other. No block with the magic: not a ring. Both with
+  the magic and a wrong CRC: the ring is lost. The header with a new tail is durable
+  before the writer releases the space, so the header's tail is at or before the
+  writer's tail and the records between are whole. The layout comes from the header
+  at open; configuration sets it at create, and a changed `body_max` takes effect at
+  the next create. The open reports the effective layout, callers bound a commit by
+  it, and the node shows it in status. A new ring has the same block at `seq` 0 in
+  both places, with the tail at offset 0 and a random chain value.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -1591,17 +1606,17 @@ Rules:
    else asks `clock`. Only `node` builds real seams, and only `sim` builds simulated
    ones. Below `hub`, only `home` writes channels, and only its companion samples.
 
-Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `estimate`,
-`control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2 `os` ->
-(`transport`, `buffer`) -> (`clock`, `blob`, `sim`) -> `mesh` -> (`home`, `replica`) ->
-`hub`; layer 3 `secret`
--> `connector` -> `connector-<kind>`; layer 4 (`config-hcl`, `config`) -> `ops` ->
-`node`.
+Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
+`estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
+`os` -> (`transport`, `buffer`) -> (`clock`, `blob`, `sim`) -> `mesh` -> (`home`,
+`replica`) -> `hub`; layer 3 `secret` -> `connector` -> `connector-<kind>`; layer 4
+(`config-hcl`, `config`) -> `ops` -> `node`.
 
 | Layer | Crate | Job (one sentence) | Allowed dependencies |
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
+| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, and holds the one `unsafe impl GlobalAlloc`. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |

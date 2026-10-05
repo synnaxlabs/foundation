@@ -25,6 +25,10 @@ use crate::crc32c::Crc32c;
 /// Every record starts at a multiple of this many bytes.
 pub(crate) const ALIGN: usize = 4096;
 
+/// [`ALIGN`] as an offset in the ring.
+#[expect(clippy::as_conversions, reason = "4096 fits any width")]
+pub(crate) const BLOCK: u64 = ALIGN as u64;
+
 /// Bytes of a record before its body.
 pub(crate) const HEADER_LEN: usize = 9;
 

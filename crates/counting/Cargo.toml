@@ -1,0 +1,15 @@
+[package]
+name = "counting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[[test]]
+name = "global"
+harness = false
+
+[lints]
+workspace = true
