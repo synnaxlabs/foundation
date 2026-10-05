@@ -891,16 +891,30 @@ mod tests {
 
     #[test]
     fn producers_start_on_different_shards() {
-        let options = Options::default();
-        let firsts: BTreeSet<u32> = (0..options.producers)
-            .map(|producer| {
-                let index = Indexes::of_producer(producer, &options)
-                    .next()
-                    .expect("indexes never end");
-                index % options.shards
-            })
-            .collect();
-        assert_eq!(firsts, (0..options.shards).collect());
+        for producers in counts() {
+            for shards in counts()
+                .filter(|&shards| producers <= shards && producers * shards <= INDEXES)
+            {
+                let options = Options {
+                    producers,
+                    shards,
+                    ..Options::default()
+                };
+                let firsts: BTreeSet<u32> = (0..producers)
+                    .map(|producer| {
+                        let index = Indexes::of_producer(producer, &options)
+                            .next()
+                            .expect("indexes never end");
+                        index % shards
+                    })
+                    .collect();
+                assert_eq!(
+                    firsts.len(),
+                    producers as usize,
+                    "P={producers} S={shards}"
+                );
+            }
+        }
     }
 
     #[test]
