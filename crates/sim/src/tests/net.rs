@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::io::IoSliceMut;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::{Arc, Mutex};
@@ -324,7 +324,8 @@ fn a_datagram_to_a_port_with_nothing_bound_is_lost() {
 #[test]
 fn a_send_to_an_address_of_no_node_succeeds() {
     let nowhere = SocketAddr::from(([10, 0, 0, 9], 4433));
-    sent(move |_| transmit(nowhere, b"lost"), Ok(()));
+    let make = move |_: &node::Node, _: &node::Node| transmit(nowhere, b"lost");
+    sent(|a| at(a, 4433), make, Ok(()));
 }
 
 /// A socket on `port` of the IPv4 address of `node`, with a receive queue of
@@ -342,7 +343,7 @@ fn queue(node: &node::Node, port: u16, bytes: usize) -> (Sender, Receiver) {
 fn a_full_receive_queue_drops_datagrams() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (sender, _a) = udp(&a, 4433);
-    let (_b, receiver) = queue(&b, 4433, 2 * (4 + 768) + 1);
+    let (_b, receiver) = queue(&b, 4433, 4 + 768);
     let _send = send(&a, sender, at(&b, 4433), vec![vec![7; 4]; 4]);
     sim.run_for(Span::SECOND).unwrap();
     let log = Log::default();
@@ -351,24 +352,33 @@ fn a_full_receive_queue_drops_datagrams() {
     assert_eq!(datagrams(&log), [vec![7; 4], vec![7; 4]]);
 }
 
-/// The count of empty datagrams that a socket of `b` with a receive queue of `bytes`
-/// holds after `a` sends it three.
-fn empty(bytes: usize) -> usize {
+/// The count of datagrams of `len` bytes that a socket of `b` with a receive queue
+/// of `bytes` holds after `a` sends it three.
+fn held(len: usize, bytes: usize) -> usize {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (sender, _a) = udp(&a, 4433);
     let (_b, receiver) = queue(&b, 4433, bytes);
-    let _send = send(&a, sender, at(&b, 4433), vec![Vec::new(); 3]);
+    let _send = send(&a, sender, at(&b, 4433), vec![vec![7; len]; 3]);
     sim.run_for(Span::SECOND).unwrap();
     let log = Log::default();
     let _receive = receive(&b, receiver, &log);
     sim.run_for(Span::SECOND).unwrap();
-    log.lock().unwrap().len()
+    let log = log.lock().unwrap();
+    (log.iter())
+        .map(|(_, meta, _)| meta.len.div_ceil(meta.stride.max(1)).max(1))
+        .sum()
 }
 
 #[test]
 fn each_datagram_takes_768_bytes_of_the_receive_queue_past_its_length() {
-    let held = [0, 767, 768, 2 * 768 - 1, 2 * 768].map(empty);
-    assert_eq!(held, [0, 0, 1, 1, 2]);
+    let small = [771, 772, 2 * 772 - 1, 2 * 772].map(|bytes| held(4, bytes));
+    let empty = [767, 768].map(|bytes| held(0, bytes));
+    assert_eq!((small, empty), ([1, 2, 2, 3], [1, 2]));
+}
+
+#[test]
+fn a_receive_queue_takes_one_datagram_past_its_bytes() {
+    assert_eq!([held(0, 0), held(1_200, 1_500)], [1, 1]);
 }
 
 /// A seed under which the first socket that `b` binds receives `batch` datagrams
@@ -472,7 +482,7 @@ fn a_receive_joins_only_datagrams_of_one_ecn() {
 fn a_receive_frees_its_bytes_in_the_queue() {
     let (mut sim, a, b) = pair(batched(64), link::Config::default());
     let (sender, _a) = udp(&a, 4433);
-    let (_b, receiver) = queue(&b, 4433, 2 * (4 + 768));
+    let (_b, receiver) = queue(&b, 4433, 2 * (4 + 768) - 1);
     let log = Log::default();
     let _receive = receive(&b, receiver, &log);
     let _first = send(&a, sender.clone(), at(&b, 4433), vec![vec![1; 4]; 2]);
@@ -551,40 +561,53 @@ fn a_socket_on_the_unspecified_v6_address_receives_v4() {
 fn a_send_to_a_mapped_ipv4_address_goes_to_the_ipv4_address() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let log = Log::default();
-    let any = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 4433);
-    let (sender, _a) = bind(&a, any).unwrap();
+    let (sender, _a) = bind(&a, any()).unwrap();
     let (_b, receiver) = udp(&b, 4433);
     let _receive = receive(&b, receiver, &log);
-    let mapped = SocketAddr::new(
-        IpAddr::V6(Ipv4Addr::new(10, 0, 0, 2).to_ipv6_mapped()),
-        4433,
-    );
-    let _send = send(&a, sender, mapped, vec![b"v4".to_vec()]);
+    let _send = send(&a, sender, mapped(at(&b, 4433)), vec![b"v4".to_vec()]);
     sim.run_for(Span::SECOND).unwrap();
     assert_eq!(arrivals(&log), [(at(&a, 4433), b"v4".to_vec())]);
 }
 
 #[test]
+fn a_send_from_a_mapped_ipv4_address_goes_from_the_ipv4_address() {
+    let make = |a: &node::Node, b: &node::Node| Transmit {
+        source: Some(mapped(at(a, 4433)).ip()),
+        ..transmit(mapped(at(b, 4433)), b"v4")
+    };
+    sent(|_| any(), make, Ok(()));
+}
+
+#[test]
 fn a_socket_on_a_v6_address_cannot_reach_a_mapped_ipv4_address() {
-    let (mut sim, a, _b) = pair(0, link::Config::default());
-    let (mut sender, _a) = bind(&a, SocketAddr::new(a.addresses()[1], 4433)).unwrap();
-    let mapped = SocketAddr::new(
-        IpAddr::V6(Ipv4Addr::new(10, 0, 0, 2).to_ipv6_mapped()),
-        4433,
-    );
-    let result = Arc::new(Mutex::new(None));
-    let log = Arc::clone(&result);
-    let _send = a.shards().start(shard("send"), move |_| async move {
-        let transmit = transmit(mapped, b"v4");
-        let sent = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
-        *log.lock().unwrap() = Some(sent);
-    });
-    sim.run_for(Span::SECOND).unwrap();
-    let remote = SocketAddr::from(([10, 0, 0, 2], 4433));
-    assert_eq!(
-        *result.lock().unwrap(),
-        Some(Err(Net::Unreachable { remote }))
-    );
+    let remote = mapped(SocketAddr::new(addresses(1)[0], 4433));
+    let make = move |_: &node::Node, _: &node::Node| transmit(remote, b"v4");
+    sent(v6, make, Err(Net::Unreachable { remote }));
+}
+
+#[test]
+fn a_v4_socket_cannot_reach_a_mapped_ipv4_address() {
+    let remote = mapped(SocketAddr::new(addresses(1)[0], 4433));
+    let make = move |_: &node::Node, _: &node::Node| transmit(remote, b"v4");
+    sent(|a| at(a, 4433), make, Err(Net::Unreachable { remote }));
+}
+
+/// Port 4433 on the unspecified IPv6 address, which receives IPv4 too.
+fn any() -> SocketAddr {
+    SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 4433)
+}
+
+/// Port 4433 on the IPv6 address of `node`.
+fn v6(node: &node::Node) -> SocketAddr {
+    SocketAddr::new(node.addresses()[1], 4433)
+}
+
+/// IPv4 `address` as an IPv4-mapped IPv6 address.
+fn mapped(address: SocketAddr) -> SocketAddr {
+    let SocketAddr::V4(v4) = address else {
+        panic!("{address} is not IPv4");
+    };
+    SocketAddr::from((v4.ip().to_ipv6_mapped(), v4.port()))
 }
 
 /// The source and bytes of each batch in `log`.
@@ -672,15 +695,17 @@ fn sockets_draw_each_batch_max_from_one_eight_and_sixty_four() {
     assert_eq!(receives, BTreeSet::from([1, 8, 64]));
 }
 
-/// Sends once from `a`'s IPv4 socket with the transmit that `make` gives for `b`, and
-/// checks that the send gives `expected`.
+/// Sends once from a socket of `a` on the address that `local` gives for `a`, with
+/// the transmit that `make` gives for `a` and `b`, and checks that the send gives
+/// `expected`.
 fn sent(
-    make: impl FnOnce(&node::Node) -> Transmit<'static>,
+    local: fn(&node::Node) -> SocketAddr,
+    make: impl FnOnce(&node::Node, &node::Node) -> Transmit<'static>,
     expected: Result<(), Net>,
 ) {
     let (mut sim, a, b) = pair(0, link::Config::default());
-    let (mut sender, _a) = udp(&a, 4433);
-    let transmit = make(&b);
+    let (mut sender, _a) = bind(&a, local(&a)).unwrap();
+    let transmit = make(&a, &b);
     let result = Arc::new(Mutex::new(None));
     let log = Arc::clone(&result);
     let _send = a.shards().start(shard("send"), move |_| async move {
@@ -693,21 +718,19 @@ fn sent(
 
 #[test]
 fn a_v4_socket_cannot_reach_a_v6_address() {
-    let remote =
-        SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2)), 4433);
-    sent(
-        move |_| transmit(remote, b"v6"),
-        Err(Net::Unreachable { remote }),
-    );
+    let ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+    let remote = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 3));
+    let make = move |_: &node::Node, _: &node::Node| transmit(remote, b"v6");
+    sent(|a| at(a, 4433), make, Err(Net::Unreachable { remote }));
 }
 
 #[test]
 fn a_send_from_an_address_of_another_node_fails() {
-    let spoof = |b: &node::Node| Transmit {
+    let spoof = |_: &node::Node, b: &node::Node| Transmit {
         source: Some(b.addresses()[0]),
         ..transmit(at(b, 4433), b"spoof")
     };
-    sent(spoof, Err(Net::Io { code: 99 }));
+    sent(|a| at(a, 4433), spoof, Err(Net::Io { code: 99 }));
 }
 
 /// The digest of a run that sends 20 datagrams over a jittered link.
@@ -726,8 +749,8 @@ fn the_same_seed_gives_the_same_digest() {
     assert_ne!(Sim::new(Config::default()).digest(), digest(3));
 }
 
-/// The digest of a run that sends `contents` from `a` over a link with `loss` to a
-/// socket of `b` with a receive queue of `bytes`.
+/// The digest of a run that sends `contents` twice from `a` over a link with `loss`
+/// to a socket of `b` with a receive queue of `bytes`.
 fn traced(contents: &[u8], loss: f64, bytes: usize) -> u64 {
     let link = link::Config {
         loss,
@@ -736,7 +759,7 @@ fn traced(contents: &[u8], loss: f64, bytes: usize) -> u64 {
     let (mut sim, a, b) = pair(0, link);
     let (sender, _a) = udp(&a, 4433);
     let (_b, _receiver) = queue(&b, 4433, bytes);
-    let _send = send(&a, sender, at(&b, 4433), vec![contents.to_vec()]);
+    let _send = send(&a, sender, at(&b, 4433), vec![contents.to_vec(); 2]);
     sim.run_for(Span::SECOND).unwrap();
     sim.digest()
 }

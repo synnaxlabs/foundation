@@ -30,7 +30,7 @@ const V4_HEADERS: usize = 28;
 const V6_HEADERS: usize = 48;
 /// The bytes of a receive queue that a datagram takes past its length. Linux also
 /// charges each datagram for its buffer (`truesize`), about this much for a small one.
-const CHARGE: usize = 768;
+const OVERHEAD: usize = 768;
 /// The batch maxes that each socket draws from, for sends and for receives.
 const BATCH_MAXES: [usize; 3] = [1, 8, 64];
 
@@ -102,7 +102,7 @@ struct Datagram {
 impl Datagram {
     /// The bytes of a receive queue that it takes.
     fn charge(&self) -> usize {
-        self.contents.len() + CHARGE
+        self.contents.len() + OVERHEAD
     }
 }
 
@@ -127,6 +127,18 @@ impl Binding {
         self.local.port() == destination.port()
             && covers(local, ip)
             && node(ip) == Some(self.node)
+    }
+
+    /// Queues `datagram` while the queue takes at most `capacity` bytes, so that, as
+    /// on Linux, the last datagram may go past it. Returns its fate, and the waker of
+    /// a receive to wake.
+    fn push(&mut self, datagram: Datagram) -> (Fate, Option<Waker>) {
+        if self.queued > self.capacity {
+            return (Fate::Dropped, None);
+        }
+        self.queued += datagram.charge();
+        self.queue.push_back(datagram);
+        (Fate::Queued, self.waker.take())
     }
 
     /// Takes the next batch from the queue into `buffer`: the first datagram, then
@@ -274,10 +286,8 @@ impl Network {
     ) -> Result<(), Error> {
         let binding = &self.bindings[&key];
         let from = binding.node;
-        let ip = transmit.destination.ip().to_canonical();
-        let destination = SocketAddr::new(ip, transmit.destination.port());
-        let source = source(from, binding.local, destination, transmit.source)?;
-        let to = node(ip);
+        let (source, destination) = route(from, binding.local, transmit)?;
+        let to = node(destination.ip());
         let link =
             *(to.and_then(|to| self.links.get(&(from, to)))).unwrap_or(&self.default);
         let contents = transmit.contents;
@@ -364,16 +374,14 @@ impl Network {
             }
             let datagram = flight.remove();
             let (source, destination) = (datagram.source, datagram.destination);
-            let (len, charge) = (datagram.contents.len(), datagram.charge());
+            let len = datagram.contents.len();
             let binding = (self.bindings.values_mut())
-                .find(|binding| binding.receives(destination))
-                .filter(|binding| binding.queued + charge <= binding.capacity);
+                .find(|binding| binding.receives(destination));
             let fate = match binding {
                 Some(binding) => {
-                    binding.queued += charge;
-                    binding.queue.push_back(datagram);
-                    wakers.extend(binding.waker.take());
-                    Fate::Queued
+                    let (fate, waker) = binding.push(datagram);
+                    wakers.extend(waker);
+                    fate
                 }
                 None => Fate::Dropped,
             };
@@ -415,30 +423,40 @@ pub(crate) fn under(draw: u32, chance: f64) -> bool {
     f64::from(draw) < chance * 2f64.powi(32)
 }
 
-/// The source address of datagrams to `remote` from a socket of `node` bound to
-/// `local`, which asks to send from `ip`.
+/// The source and destination addresses of the datagrams of `transmit` from a
+/// socket of `node` bound to `local`. As on Linux, a socket on IPv6 takes an
+/// IPv4-mapped address as the IPv4 address.
 ///
 /// # Errors
 ///
-/// [`Error::Unreachable`] when the socket's family cannot reach `remote`, and
-/// [`Error::Io`] when `ip` is not an address of the socket.
-fn source(
+/// [`Error::Unreachable`] when the socket's family cannot reach the destination, and
+/// [`Error::Io`] when the source is not an address of the socket.
+fn route(
     node: usize,
     local: SocketAddr,
-    remote: SocketAddr,
-    ip: Option<IpAddr>,
-) -> Result<SocketAddr, Error> {
+    transmit: &Transmit<'_>,
+) -> Result<(SocketAddr, SocketAddr), Error> {
+    let (mut destination, mut ip) = (transmit.destination, transmit.source);
+    if local.is_ipv6() {
+        if let SocketAddr::V6(v6) = destination
+            && let Some(v4) = v6.ip().to_ipv4_mapped()
+        {
+            destination = SocketAddr::from((v4, v6.port()));
+        }
+        ip = ip.map(|ip| ip.to_canonical());
+    }
     let any = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
-    if local.ip() != any && local.is_ipv4() != remote.is_ipv4() {
+    if local.ip() != any && local.is_ipv4() != destination.is_ipv4() {
+        let remote = transmit.destination;
         return Err(Error::Unreachable { remote });
     }
     let [v4, v6] = addresses(node);
-    let own = if remote.is_ipv4() { v4 } else { v6 };
+    let own = if destination.is_ipv4() { v4 } else { v6 };
     let ip = ip.unwrap_or(own);
     if ip != own {
         return Err(Error::Io {
             code: NOT_AVAILABLE,
         });
     }
-    Ok(SocketAddr::new(ip, local.port()))
+    Ok((SocketAddr::new(ip, local.port()), destination))
 }
