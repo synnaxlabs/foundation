@@ -24,8 +24,9 @@ pub(crate) struct Key {
     pub(super) id: StreamId,
 }
 
-/// The sending half of a stream. The caller gives it to each write call. Dropping it
-/// does nothing to the stream, and the message in hand keeps its send budget.
+/// The sending half of a stream. The caller gives it to each write call, and to
+/// [`Endpoint::reset`](super::Endpoint::reset) to end it. Dropping it does nothing to
+/// the stream, and the message in hand keeps its send budget until the connection ends.
 #[derive(Debug)]
 pub(crate) struct Sender {
     key: Key,
@@ -42,8 +43,10 @@ pub(crate) struct Sender {
     finished: bool,
 }
 
-/// The receiving half of a stream. The caller gives it to each read. Dropping it does
-/// nothing to the stream, and the message in the reader keeps its receive budget.
+/// The receiving half of a stream. The caller gives it to each read, and to
+/// [`Endpoint::stop`](super::Endpoint::stop) to end it. Dropping it does nothing to the
+/// stream, and the message in the reader keeps its receive budget until the connection
+/// ends.
 #[derive(Debug)]
 pub(crate) struct Receiver {
     key: Key,
@@ -463,6 +466,44 @@ impl Streams {
             Err(FinishError::Stopped(_)) => panic!("{STOPPED}"),
             Err(FinishError::ClosedStream) => panic!("{OPEN}"),
         }
+    }
+
+    /// Resets `sender`'s stream of `inner` with `code`, and gives back its send budget.
+    /// The senders that room returns to get [`Event::Writable`] in `events`.
+    pub(super) fn reset(
+        &mut self,
+        inner: &mut noq_proto::Connection,
+        mut sender: Sender,
+        code: Code,
+        events: &mut VecDeque<Event>,
+    ) {
+        let id = sender.key.id;
+        if let Some(at) = self.senders.iter().position(|&(other, _)| other == id) {
+            self.senders.swap_remove(at);
+        }
+        reset(inner, id, code);
+        let woken = self.sending.release(sender.key, &mut sender.claim);
+        events.extend(woken.map(|stream| Event::Writable { stream }));
+    }
+
+    /// Stops `receiver`'s stream of `inner` with `code`, drops the message in its
+    /// reader, and gives back its receive budget. The receivers that room returns to
+    /// get [`Event::Readable`] in `events`.
+    pub(super) fn stop(
+        &mut self,
+        inner: &mut noq_proto::Connection,
+        mut receiver: Receiver,
+        code: Code,
+        events: &mut VecDeque<Event>,
+    ) {
+        let stopped = inner
+            .recv_stream(receiver.key.id)
+            .stop(VarInt::from_u32(code.0));
+        match stopped {
+            Ok(()) | Err(ClosedStream { .. }) => {}
+        }
+        let woken = self.receiving.release(receiver.key, &mut receiver.claim);
+        events.extend(woken.map(|stream| Event::Readable { stream }));
     }
 
     /// Reads the next whole message of `receiver`'s stream from `inner` into a block
@@ -1512,6 +1553,241 @@ mod tests {
         });
     }
 
+    /// Opens `count` senders on the narrow `pair`'s client, and writes to each a
+    /// message of [`MESSAGE_MAX`] bytes that waits.
+    fn pending(pair: &mut Pair, shard: &Shard, count: usize) -> Vec<Sender> {
+        let mut senders = Vec::new();
+        for _ in 0..count {
+            let mut sender = open_sender(pair, Class::Complete);
+            let (now, message) = (pair.now(), shard.block(&vec![1; MESSAGE_MAX]));
+            let written = pair.client.endpoint.write(now, &mut sender, message);
+            assert_eq!(written, Ok(Poll::Pending));
+            senders.push(sender);
+        }
+        senders
+    }
+
+    #[test]
+    fn a_reset_sender_gives_back_its_budget_and_the_peer_gets_its_code() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let senders = pending(&mut pair, shard, 2);
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.server);
+            assert_eq!(incoming.receiver.key().id, first.key().id);
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            pair.client.endpoint.reset(now, first, Code(9));
+            pair.run(Duration::ZERO);
+            let writable = Event::Writable {
+                stream: senders[1].key(),
+            };
+            assert!(got(&pair.client, seen, &writable));
+            pair.run(RUN);
+            let now = pair.now();
+            let read = next(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, Err(Error::Reset { code: Code(9) }));
+        });
+    }
+
+    #[test]
+    fn a_reset_sender_gives_back_its_blocks_when_the_peer_acknowledges() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            // noq-proto copies a write of 1452 bytes or less, and holds a larger one
+            // until the peer acknowledges it. A 2000-byte block takes 2112 bytes of
+            // the budget.
+            let config = block::Config { budget: 3000 };
+            let memory = Heap::new(config.reservation());
+            let pool = Pool::new(config, memory);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let (now, message) = (pair.now(), pool.alloc(2000).expect("room").freeze());
+            write(&mut pair.client, now, &mut sender, &[message]);
+            pair.client.endpoint.reset(now, sender, Code(9));
+            let exhausted = block::Error::Exhausted {
+                requested: 2000,
+                available: 888,
+            };
+            assert_eq!(pool.alloc(2000).err(), Some(exhausted));
+            pair.run(RUN);
+            assert_eq!(pool.alloc(2000).err(), None);
+        });
+    }
+
+    #[test]
+    fn a_reset_sender_that_waits_for_budget_stops_waiting() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let mut senders = pending(&mut pair, shard, 3);
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            let waiting = senders.remove(1);
+            let writable = Event::Writable {
+                stream: waiting.key(),
+            };
+            pair.client.endpoint.reset(now, waiting, Code(9));
+            pair.client.endpoint.reset(now, first, Code(9));
+            pair.run(Duration::ZERO);
+            assert!(!got(&pair.client, seen, &writable));
+            let woken = Event::Writable {
+                stream: senders[1].key(),
+            };
+            assert!(got(&pair.client, seen, &woken));
+        });
+    }
+
+    #[test]
+    fn a_reset_sender_that_the_peer_stops_gives_no_event() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let receiver = accept(&mut pair.server).receiver;
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            pair.client.endpoint.reset(now, sender, Code(9));
+            pair.server.endpoint.stop(now, receiver, Code(9));
+            pair.run(RUN);
+            assert_eq!(pair.client.events.len(), seen, "{:?}", pair.client.events);
+        });
+    }
+
+    #[test]
+    fn a_reset_after_finish_drops_the_messages_the_peer_has_not_read() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.server);
+            let now = pair.now();
+            let read = drain(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, (vec![b"a".to_vec()], false));
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"b")]);
+            let finished = pair.client.endpoint.finish(now, &mut sender);
+            assert_eq!(finished, Ok(()));
+            pair.client.endpoint.reset(now, sender, Code(9));
+            pair.run(RUN);
+            let now = pair.now();
+            let read = next(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, Err(Error::Reset { code: Code(9) }));
+        });
+    }
+
+    #[test]
+    fn a_stopped_receiver_gives_back_its_budget_and_its_block() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            prefixes(&mut pair, 4);
+            let mut receivers = wait(&mut pair);
+            let (seen, now, before) =
+                (pair.server.events.len(), pair.now(), shard.committed());
+            pair.server.endpoint.stop(now, receivers.remove(0), Code(9));
+            pair.run(Duration::ZERO);
+            let readable = Event::Readable {
+                stream: receivers[2].key(),
+            };
+            assert!(got(&pair.server, seen, &readable));
+            let now = pair.now();
+            let read = next(&mut pair.server, now, &mut receivers[2]);
+            assert_eq!(read, Ok(Poll::Pending));
+            assert_eq!(shard.committed(), before);
+        });
+    }
+
+    #[test]
+    fn a_stopped_receiver_gives_the_peer_its_code() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let receiver = accept(&mut pair.server).receiver;
+            let now = pair.now();
+            pair.server.endpoint.stop(now, receiver, Code(9));
+            pair.run(RUN);
+            let (now, message) = (pair.now(), shard.block(b"b"));
+            let written = pair.client.endpoint.write(now, &mut sender, message);
+            assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
+        });
+    }
+
+    #[test]
+    fn a_stopped_receiver_that_waits_for_budget_stops_waiting() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            prefixes(&mut pair, 5);
+            let mut receivers = wait(&mut pair);
+            let last = receivers.pop().expect("a receiver");
+            let waiting = receivers.pop().expect("a receiver");
+            let (seen, now) = (pair.server.events.len(), pair.now());
+            let readable = Event::Readable {
+                stream: waiting.key(),
+            };
+            pair.server.endpoint.stop(now, waiting, Code(9));
+            pair.server.endpoint.stop(now, receivers.remove(0), Code(9));
+            pair.run(Duration::ZERO);
+            assert!(!got(&pair.server, seen, &readable));
+            let woken = Event::Readable { stream: last.key() };
+            assert!(got(&pair.server, seen, &woken));
+        });
+    }
+
+    #[test]
+    fn after_the_connection_ends_a_reset_or_stop_wakes_no_stream() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            pending(&mut pair, shard, 2);
+            let (now, connection) = (pair.now(), key(&pair.client));
+            pair.client.endpoint.close(now, connection, Code(7));
+            pair.run(Duration::ZERO);
+            let seen = pair.client.events.len();
+            pair.client.endpoint.reset(now, first, Code(9));
+            pair.run(Duration::ZERO);
+            assert_eq!(pair.client.events.len(), seen, "{:?}", pair.client.events);
+            let mut pair = narrow(shard);
+            prefixes(&mut pair, 4);
+            let mut receivers = wait(&mut pair);
+            let (now, connection) = (pair.now(), key(&pair.server));
+            pair.server.endpoint.close(now, connection, Code(7));
+            pair.run(Duration::ZERO);
+            let seen = pair.server.events.len();
+            pair.server.endpoint.stop(now, receivers.remove(0), Code(9));
+            pair.run(Duration::ZERO);
+            assert_eq!(pair.server.events.len(), seen, "{:?}", pair.server.events);
+        });
+    }
+
+    #[test]
+    fn a_reset_or_stop_after_the_end_sends_nothing() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            assert_eq!(pair.client.endpoint.finish(now, &mut sender), Ok(()));
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.server);
+            let now = pair.now();
+            let read = drain(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, (vec![b"a".to_vec()], true));
+            pair.run(RUN);
+            let sent = (pair.client.sent.len(), pair.server.sent.len());
+            let now = pair.now();
+            pair.client.endpoint.reset(now, sender, Code(9));
+            pair.server.endpoint.stop(now, incoming.receiver, Code(9));
+            pair.run(Duration::ZERO);
+            assert_eq!((pair.client.sent.len(), pair.server.sent.len()), sent);
+        });
+    }
+
     #[test]
     #[should_panic(expected = "a message of 65537 bytes is over the largest message, \
         65536 bytes")]
@@ -1891,6 +2167,8 @@ mod tests {
             let written = endpoint.write(now, &mut sender, shard.block(b"a"));
             assert_eq!(written, Ok(Poll::Pending));
             assert_eq!(endpoint.finish(now, &mut other), Ok(()));
+            endpoint.reset(now, sender, Code(9));
+            endpoint.stop(now, receiver, Code(9));
         });
     }
 

@@ -27,8 +27,14 @@ const MAGIC: [u8; 8] = *b"FNDNRING";
 const VERSION: u16 = 1;
 /// The place of the CRC: right after the fields.
 const CRC_AT: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
-/// A disk sector, which a crash keeps whole or old. The CRC covers the first one.
-const SECTOR: usize = 512;
+/// The bytes the CRC covers: the first sector of the format. A crash keeps a
+/// sector whole or old, so a checkpoint is never torn.
+const COVER: usize = 512;
+const _: () = assert!(COVER <= env::files::SECTOR, "a checkpoint fits one sector");
+const _: () = assert!(
+    ALIGN.is_multiple_of(env::files::SECTOR),
+    "a block starts a sector"
+);
 
 /// Why neither header block can be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,10 +178,10 @@ fn later(seq: u64, than: u64) -> bool {
     seq.wrapping_sub(than).cast_signed() > 0
 }
 
-/// The CRC of the first sector of `block`, less the four bytes that hold it.
+/// The CRC of the cover of `block`, less the four bytes that hold it.
 fn crc(block: &[u8; ALIGN]) -> u32 {
-    let (sector, _) = block.split_at(SECTOR);
-    let (fields, rest) = sector.split_at(CRC_AT);
+    let (cover, _) = block.split_at(COVER);
+    let (fields, rest) = cover.split_at(CRC_AT);
     let (_, after) = rest.split_at(4);
     crc32c::append(crc32c::append(0, fields), after)
 }
@@ -285,10 +291,10 @@ mod tests {
     fn checks_only_the_first_sector() {
         let whole = header(8 * 4096, 4087, 0, 1, 0);
         let mut block = whole.encode();
-        block[SECTOR] = 1;
+        block[COVER] = 1;
         block[ALIGN - 1] = 1;
         assert_eq!(Header::decode(&block, &[0; ALIGN]), Ok(whole));
-        block[SECTOR - 1] = 1;
+        block[COVER - 1] = 1;
         assert_eq!(Header::decode(&block, &[0; ALIGN]), Err(Error::Damaged));
     }
 
@@ -436,7 +442,7 @@ mod tests {
         ) {
             let whole = header.encode();
             let mut damaged = other.encode();
-            damaged[at.index(SECTOR)] ^= 1 << bit;
+            damaged[at.index(COVER)] ^= 1 << bit;
             for other in [[0; ALIGN], damaged] {
                 let (first, second) =
                     if swap { (&other, &whole) } else { (&whole, &other) };
