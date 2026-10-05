@@ -684,6 +684,7 @@ name = "home"
 version = "0.0.0"
 dependencies = [
  "block",
+ "codec",
  "control",
  "delivery",
  "proptest",
