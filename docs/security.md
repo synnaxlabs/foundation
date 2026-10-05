@@ -144,7 +144,9 @@ state on `main`.
 
 - HCL text becomes a `Document` (`config-hcl`), and a `Document` has one canonical
   encoding (`document`). Both readers bound nesting at 64 levels. Fuzzed:
-  `config_hcl_read`, `document_encoding`.
+  `config_hcl_read`, `config_hcl_update`, `document_encoding`. Open: #446
+  (`update` puts a new block after a kept block it must come before; the
+  `config_hcl_update` target finds it, so its long runs wait on the fix).
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -237,6 +239,7 @@ The rule is one target for each decoder of outside input
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
+| `config_hcl_update` | `config_hcl::update` | Its text reads as the document; no change keeps each byte |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
