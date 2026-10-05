@@ -174,10 +174,10 @@ fn later(seq: u64, than: u64) -> bool {
     seq.wrapping_sub(than).cast_signed() > 0
 }
 
-/// The CRC of the first sector of `block`, less the four bytes that hold it.
+/// The CRC of the cover of `block`, less the four bytes that hold it.
 fn crc(block: &[u8; ALIGN]) -> u32 {
-    let (sector, _) = block.split_at(COVER);
-    let (fields, rest) = sector.split_at(CRC_AT);
+    let (cover, _) = block.split_at(COVER);
+    let (fields, rest) = cover.split_at(CRC_AT);
     let (_, after) = rest.split_at(4);
     crc32c::append(crc32c::append(0, fields), after)
 }
