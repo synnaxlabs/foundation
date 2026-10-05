@@ -215,10 +215,24 @@ How to read this record:
 - **B2** Selectors stay live: channels created later that match join the subscription.
   A start time maps to the first sample at or after it, per index. A range the buffer no
   longer has is an explicit gap.
-- **B3** Complete mode orders per index only. A reader reports one cumulative position
-  per index (a durable reader after it stores the data). Flow is push with
-  reader-granted credits. A slow reader catches up from disk and never slows writers or
-  other readers. Delivery is at-least-once; seq makes repeats easy to drop.
+- **B3 (as revised by READER RULES)** Complete mode orders per index only. A reader
+  reports one cumulative position per index (a durable reader after it stores the data).
+  Flow is push with reader-granted credits. A slow reader catches up from disk and never
+  slows writers or other readers. Delivery is at-least-once; seq makes repeats easy to
+  drop.
+- **READER RULES (write-path and advisor, 2026-10-04)** A position is one cumulative seq
+  per path: the first sample the reader has not received. A reader that does not record
+  has no backfill position. An open session holds all data it has not received. A closed
+  named reader holds from its position until `hold` after the close, in mesh time; an
+  unnamed reader holds nothing after it closes. A hold is zero or more; `config` rejects
+  a negative hold (#94). The floor per path is the lowest held position, or none;
+  `buffer` trims below it, past retention (by store time), and under disk pressure. A
+  resume takes, per path, the position the reader's `hub` presents, then the position at
+  this home, then the home's fallback. A position below the floor or past the head is
+  accepted as is; the `buffer` read reports any gap (B2). Named readers write a position
+  record at once when they open, close, or are taken over, and on the home's interval
+  when the position changed. A session open at a crash restores as closed at the
+  restore. Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync.
@@ -256,6 +270,20 @@ How to read this record:
   (natural order), RLE; timestamps add stride; floats raw, ALP, fdelta, RLE; `max` mode
   adds pco. No zstd and no ALP_rd. Policy: `compression { select, mode = auto, raw, or
   max }`, default `auto`. The validator is the top fuzz target.
+- **CODEC FORMAT V1 (#4)** A vector is a tag byte, a bit width byte, header fields,
+  zeros to a multiple of the sample width, then a body padded the same way. Tags: 0
+  raw; 1 FFOR (reference; body `sample - reference`); 2 delta (first, base; body
+  `sample - previous - base` for each sample after the first); 3 RLE (`u16` run count;
+  body the values, then `u16` lengths). Sample arithmetic is modulo 2^b, where b is
+  the bit count of a sample. Packing is in natural order in every vector, least
+  significant bit first. The person chose it ("Natural order") over FastLanes order
+  for full vectors: a natural-order FFOR decode prototype took 197 ns per vector on an
+  M3 Max, about 1.9% of a core at 100M samples/s. FastLanes order can come later as a
+  new tag. Raw and RLE have bit width 0. Integers, `Stamp`, and `Span` use all four
+  tags; other scalars use raw. Timestamp stride (BQ4) comes later as a new tag. The
+  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len`
+  (raw plus one raw header per vector) sizes the output, and the encoder makes one
+  pass. `codec/src/vector.rs` is the full spec.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
@@ -430,6 +458,15 @@ How to read this record:
   Callers admit peers, dispatch streams (STREAM DISPATCH), and cancel stale latest
   frames. Builds on SIM NETWORK. Proposed by `network` in #45; approved by the
   coordinator on PR #53.
+- **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
+  is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
+  from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
+  the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
+  issuer are not checked. A node sends its certificate when it dials; an SDK client
+  sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
+  session protocol gets a new name. Resumption and 0-RTT are off, so rustls gets a
+  fixed time and never reads the OS clock. Randomness inside TLS comes from aws-lc
+  (TLS RANDOMNESS). Decided by `network` in #54.
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -599,6 +636,14 @@ How to read this record:
   `spec` stores and hashes these bytes. Pinned bytes are an oracle in
   `oracles/conformance/document/`. A new format takes a new version byte. Decided by
   the `config` builder; approved by the coordinator (#62).
+- **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
+  recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
+  `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
+  ended the process, `hcl-primitives` read `-18446744073709551615` as 1, and its errors
+  had no fix-it hints. The reader refuses nesting past the Document limit, reads
+  integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
+  section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
+  in `docs/dependencies.md`.
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -840,6 +885,7 @@ How to read this record:
 | A18 quality side array | S13, BQ13 |
 | A20 channel retention, quality codes on acks | S12, S13 |
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
+| B3 one cumulative position per index | READER RULES |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
 | C4 integration contract | C3 |
@@ -942,7 +988,7 @@ Storage classes used in the table:
 | Control state | Memory in `control` at the home; handoff records in the index log (truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
 | Reader positions | Truth: `delivery` state at the home, written as index log records and copied by `replica`. A connected reader's `hub` keeps its own position. Status channels publish copies | `delivery`; `replica` copies; `node` publishes | `home` after failover; `hub` on resume | `delivery`, `buffer`, `replica` |
-| Holds and floors | `delivery` (hold per reader and index); floor = f(holds, retention), handed to `buffer.set_floor` | `delivery` | `buffer` | `delivery`, `buffer` |
+| Holds and floors | `delivery` (hold per reader and index); floor = lowest held position per path, handed to `buffer.set_floor`, which also applies retention | `delivery` | `buffer` | `delivery`, `buffer` |
 | Backfill dedup marks | Index log records | `home` | `replica`, a new home | `home` |
 | Gaps | Index log records (explicit gap with a count) | `home`, `buffer` | Complete readers | `home`, `buffer` |
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
@@ -1518,13 +1564,13 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
-| 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
 | 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
-| 1 | `delivery` | Keeps each reader's state per index: cursors, credits, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
+| 1 | `delivery` | Keeps each reader's state per index: positions, credits, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |

@@ -49,7 +49,11 @@ You own a set of crates. Your session name is your owner label (`owner:<name>`).
 8. Push and open the PR with `gh pr create`, filling the template. Never add a Claude
    co-author or footer.
 9. Run `/review <pr>`. Fix each finding or answer it on the PR.
-10. Message `coordinator`: `PR #<n> is ready for gates`.
+10. When every check on the current head passed, the PR has no conflict with `main`,
+    and every finding is fixed or answered, add the `ready` label. Read the checks
+    again just before you label, because a push resets them. If
+    the PR changes a public surface, a locked decision, or an oracle, message
+    `coordinator` instead: `PR #<n> needs a gate`. Only the coordinator labels those.
 11. Start the next issue while you wait.
 
 ## Rules
