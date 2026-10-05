@@ -11,7 +11,7 @@ mod tails;
 mod wal;
 
 pub use buffer::{Buffer, Commit, Config, Error};
-pub use entry::Entry;
+pub use entry::{Entry, Parts};
 pub use group::Limit;
 pub use tails::Tail;
 pub use wal::{Layout, Unfit};

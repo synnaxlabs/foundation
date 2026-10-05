@@ -187,6 +187,8 @@ impl From<header::Error> for Error {
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
+    /// The entries of the append in progress, kept with their capacity.
+    batch: RefCell<Vec<Entry>>,
 }
 
 /// What the handle and the commit task share.
@@ -341,7 +343,10 @@ impl Buffer {
             }),
         });
         tasks.spawn(run(Rc::clone(&shared), clock, commit, chain));
-        Ok(Self { shared })
+        Ok(Self {
+            shared,
+            batch: RefCell::default(),
+        })
     }
 
     /// The sizes of the ring. A commit holds at most `body_max` bytes.
@@ -375,34 +380,49 @@ impl Buffer {
     /// [`Error::Large`] when no record holds the entries together, [`Error::Full`]
     /// when the ring has no room for the whole call, and [`Error::Pool`] when the
     /// pool has no block for the record header; nothing is queued and no tail
-    /// moves. [`Error::Files`] after a failed sync.
+    /// moves. [`Error::Files`] after a failed sync. An append that fails takes no
+    /// part: the parts of `entries` are dropped.
     ///
     /// # Panics
     ///
     /// When a `first` is below the tail of its path, with the index, the path,
     /// `first`, and the tail, or when `first + len` passes `u64::MAX`.
-    pub fn append(&self, entries: &[Entry<'_>]) -> Result<(), Error> {
+    pub fn append(
+        &self,
+        entries: impl IntoIterator<Item = Entry>,
+    ) -> Result<(), Error> {
+        let mut batch = self.batch.take();
+        batch.extend(entries);
+        let queued = self.queue(&mut batch);
+        batch.clear();
+        self.batch.replace(batch);
+        queued
+    }
+
+    /// Takes `batch` into a group, or leaves its entries in it.
+    fn queue(&self, batch: &mut Vec<Entry>) -> Result<(), Error> {
         let shared = &*self.shared;
         let mut guard = shared.state.borrow_mut();
         let state = &mut *guard;
         if let Some(error) = &state.failed {
             return Err(error.clone());
         }
-        match state.open.push(&shared.pool, &state.writer, entries) {
+        let count = batch.len();
+        match state.open.push(&shared.pool, &state.writer, batch) {
             Ok(()) => {}
             Err(Rejected::Record) => {
                 state.close_open();
                 state
                     .open
-                    .push(&shared.pool, &state.writer, entries)
+                    .push(&shared.pool, &state.writer, batch)
                     .map_err(rejected)?;
             }
             Err(other) => return Err(rejected(other)),
         }
-        for entry in entries {
+        for (slot, header) in state.open.last(count) {
             state
                 .tails
-                .advance(entry.slot, &entry.header())
+                .advance(slot, header)
                 .unwrap_or_else(|invalid| panic!("invariant: {invalid}"));
         }
         let parked = state.parked.take();
