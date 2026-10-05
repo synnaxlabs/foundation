@@ -47,7 +47,7 @@ fn plan_and_apply_from_hcl_through_the_json_cli() {
 }
 
 #[test]
-#[ignore = "waits on #307"]
+#[ignore = "waits on #337"]
 fn plan_and_apply_through_mcp() {
     check(Front::Mcp);
 }

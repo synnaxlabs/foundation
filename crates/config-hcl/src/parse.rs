@@ -626,7 +626,7 @@ fn significant(digits: &str) -> bool {
 }
 
 /// The depth inside one more level, or `None` past [`DEPTH_MAX`].
-pub(crate) fn enter(depth: usize) -> Option<usize> {
+fn enter(depth: usize) -> Option<usize> {
     depth.checked_add(1).filter(|&inner| inner <= DEPTH_MAX)
 }
 
