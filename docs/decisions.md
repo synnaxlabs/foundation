@@ -802,13 +802,17 @@ How to read this record:
   `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
   (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
   (its hint for the next `prev`). A malformed `Append` (entries that do not follow
-  `prev`) is `Error::EntryOutOfOrder`. `Body::Heartbeat { commit }` carries the commit
-  index, capped at what that follower is known to hold. A leader commits an index only
-  when a quorum holds it and its entry is of the leader's own term. A follower commits
-  no further than the last entry the leader sent it. `Ready.committed` gives each entry
-  once, after it is written. Batch size (64 entries) and the number of appends in flight
-  per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
-  `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
+  `prev`) is `Error::EntryOutOfOrder`. An `Append` with an entry whose term is above
+  the message's term is `Error::TermBehindLog`: no leader sends one, and a follower
+  that wrote it could not restart. The conformance oracle changed to match; the person
+  decided on 2026-10-05 ("a is fine", #232). `Body::Heartbeat { commit }` carries
+  the commit index, capped at what that follower is known to hold. A leader commits
+  an index only when a quorum holds it and its entry is of the leader's own term. A
+  follower commits no further than the last entry the leader sent it.
+  `Ready.committed` gives each entry once, after it is written. Batch size (64
+  entries) and the number of appends in flight per follower (8) are constants, not
+  `Config` fields: nothing measured asks for a knob. `Message` and `Body` are `Clone`,
+  not `Copy`, because an append carries entries.
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
@@ -832,10 +836,15 @@ How to read this record:
   releases it, so the node learns it is out and never campaigns. A removed node that
   answered nothing over a whole quorum check period is released at that check instead.
   A follower releases the removed nodes when the leave commits. A removed node that
-  campaigns at the leader's term did not learn the commit: the leader takes it back
-  as a peer and probes it from the end of its log, so it gets the leave and is
-  released again. A leader outside the
-  committed final set sends the commit and steps down. A node outside an uncommitted
+  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
+  only from a voter of the newest configuration in this node's log, and a node whose
+  committed configuration lacks the sender answers `removed`. The removed node takes
+  that answer only from a voter of its own region, and stops its `raft` group for that
+  region. `raft` sends nothing to a node outside its configuration; until `mesh` sends
+  the answer, such a node campaigns with no effect. Readmit in `raft` (#414) lost: it
+  sent the log to a sender that `raft` cannot check. The person decided on 2026-10-05
+  ("Ok B is fine", #193). A leader outside the committed final set sends the commit
+  and steps down. A node outside an uncommitted
   configuration still campaigns: the entry may be truncated, and a removed leader that
   lost its lead before the leave reached a peer is the only node that can win the
   election that commits it.
@@ -1066,6 +1075,13 @@ How to read this record:
   hand-kept list of the 23; own tables generated from HCL's Unicode version; and
   `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
   `ID_Start` and `ID_Continue`.
+- **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
+  the verdict of a pinned HCL version: accepted or refused. A test checks that `read`
+  accepts exactly the accepted texts, and that the output of `write` for each is
+  accepted too. A small Go program next to the texts makes the verdicts and records
+  the HCL version. A person runs it by hand when the texts change; CI does not run it
+  and needs no Go. It is the only Go code in the repo. The person decided on
+  2026-10-05 ("Yeah that's fine", #460).
 - **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
   a new Document. Each attribute and block that keeps its value and its place keeps its
   bytes, comments, and blank lines. A changed value and a changed block on one line
