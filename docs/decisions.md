@@ -977,7 +977,11 @@ How to read this record:
   message each other through Remote Control ("remote control is fine"). Every session
   name is unique across both machines. There is one coordinator. If Remote Control
   fails, the fallback is one `inbox:<name>` GitHub issue per session, not a new
-  socket.
+  socket. The factory host runs on a second Claude account, so Remote Control cannot
+  reach it, and its sessions use the fallback (2026-10-05, "Yes It was the otehr
+  login"). A host session comments on `inbox:coordinator`, and the coordinator
+  comments on the host session's inbox. Laptop sessions reach host sessions through
+  the coordinator.
 - **QUALITY SESSIONS (2026-10-05)** The person approved `verify` and `red-team` and
   asked for `audit` and `ux`. `verify` owns the MVP acceptance tests (in `acceptance`,
   written before the pieces land) and the chaos lab. `red-team` attacks merged code,
