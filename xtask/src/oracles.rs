@@ -1,36 +1,27 @@
-//! The oracle check: each Rust file under `oracles/` is a test target that runs.
+//! The oracle check: an oracle test target compiles each Rust file under `oracles/`,
+//! and each oracle test target runs a test.
 
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
 
+use crate::{field, files};
+
 /// A test target whose root file is under `oracles/`.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Target {
-    pub package: String,
-    pub name: String,
+struct Target {
+    package_id: String,
+    package: String,
+    name: String,
 }
 
-/// Checks that each `.rs` file under `oracles/` is the root of a test target that
-/// `cargo test` runs, and that each such target runs at least one test. It builds
-/// each oracle test target.
-pub(crate) fn check() -> Result<(), Vec<String>> {
-    let metadata = crate::metadata().map_err(|e| vec![e])?;
-    let root = PathBuf::from(metadata["workspace_root"].as_str().unwrap_or_default());
-    let files = rust_files(&root.join("oracles")).map_err(|e| vec![e])?;
-    let (targets, mut problems) = plan(&metadata, &root, &files);
-    for target in &targets {
-        match tests_run(target) {
-            Ok(0) => problems.push(format!(
-                "oracle test target `{}` of `{}` runs no tests. An oracle must run \
-                 at least one test that is not ignored.",
-                target.name, target.package
-            )),
-            Ok(_) => {}
-            Err(e) => problems.push(e),
-        }
-    }
+/// Checks that an oracle test target compiles each `.rs` file under `oracles/` of the
+/// workspace at `root`, that `cargo test` runs each oracle test target, and that each
+/// one runs a test that is not ignored. It builds each oracle test target.
+pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
+    let problems = problems(root).map_err(|e| vec![e])?;
     if problems.is_empty() {
         Ok(())
     } else {
@@ -38,126 +29,149 @@ pub(crate) fn check() -> Result<(), Vec<String>> {
     }
 }
 
-/// Matches `files` (normalized paths under `root`) to the test targets in
-/// `metadata`. Returns the oracle test targets that `cargo test` runs, and a problem
-/// for each file that is not a test target root and each target that sets
-/// `test = false`.
-fn plan(
-    metadata: &Value,
-    root: &Path,
-    files: &[PathBuf],
-) -> (Vec<Target>, Vec<String>) {
-    let files: BTreeSet<&Path> = files.iter().map(PathBuf::as_path).collect();
-    let mut roots = BTreeSet::new();
-    let mut targets = Vec::new();
-    let mut problems = Vec::new();
-    let packages = metadata["packages"]
-        .as_array()
-        .map_or(&[][..], Vec::as_slice);
-    for package in packages {
-        let package_name = package["name"].as_str().unwrap_or_default();
-        let package_targets =
-            package["targets"].as_array().map_or(&[][..], Vec::as_slice);
-        for target in package_targets {
-            let test = target["kind"]
-                .as_array()
-                .is_some_and(|kinds| kinds.iter().any(|k| k == "test"));
-            let path =
-                normalize(Path::new(target["src_path"].as_str().unwrap_or_default()));
-            if !test || !files.contains(path.as_path()) {
-                continue;
-            }
-            let name = target["name"].as_str().unwrap_or_default().to_string();
-            if target["test"] == false {
-                problems.push(format!(
-                    "oracle test target `{name}` of `{package_name}` sets `test = \
-                     false`, so `cargo test` skips it. Remove the setting."
-                ));
-            } else {
-                targets.push(Target {
-                    package: package_name.to_string(),
-                    name,
-                });
-            }
-            roots.insert(path);
-        }
-    }
-    for file in files {
-        if !roots.contains(file) {
-            let shown = file.strip_prefix(root).unwrap_or(file).display();
+fn problems(root: &Path) -> Result<Vec<String>, String> {
+    let metadata = crate::metadata(root)?;
+    let workspace = PathBuf::from(field::text(&metadata, "workspace_root")?);
+    let oracles = workspace.join("oracles");
+    let (targets, mut problems) = targets(&metadata, &oracles)?;
+    let mut compiled = BTreeSet::new();
+    for (target, exe) in build(root, &targets)? {
+        compiled.extend(sources(&workspace, &exe)?);
+        if tests(&exe)? == 0 {
             problems.push(format!(
-                "`{shown}` is not the root of a test target, so no gate runs it. Add a \
-                 `[[test]]` entry with this `path` to the crate that it checks."
+                "oracle test target `{}` of `{}` runs no tests. An oracle must run at \
+                 least one test that is not ignored.",
+                target.name, target.package
             ));
         }
     }
-    (targets, problems)
-}
-
-/// Removes `.` and `..` components without reading the disk. Cargo reports a
-/// `[[test]] path` such as `../../oracles/x.rs` joined to the manifest directory.
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
+    for file in files::rust(&oracles)? {
+        if !compiled.contains(&file) {
+            let shown = file.strip_prefix(&workspace).unwrap_or(&file).display();
+            problems.push(format!(
+                "`{shown}` is not compiled by an oracle test target, so no gate runs \
+                 it. Make it the `path` of a `[[test]]` entry, or a module of one."
+            ));
         }
     }
-    out
+    Ok(problems)
 }
 
-/// Every `.rs` file under `dir`, in sorted order.
-fn rust_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut files = Vec::new();
-    let mut dirs = vec![dir.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        let entries =
-            std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        for entry in entries {
-            let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
-            if path.is_dir() {
-                dirs.push(path);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                files.push(path);
+/// The test targets in `metadata` whose root file is under `oracles`, and a problem
+/// for each one that sets `test = false`.
+fn targets(
+    metadata: &Value,
+    oracles: &Path,
+) -> Result<(Vec<Target>, Vec<String>), String> {
+    let mut targets = Vec::new();
+    let mut problems = Vec::new();
+    for package in field::list(metadata, "packages")? {
+        for target in field::list(package, "targets")? {
+            let test = field::list(target, "kind")?.iter().any(|k| k == "test");
+            let root = files::normalize(Path::new(field::text(target, "src_path")?));
+            if !test || !root.starts_with(oracles) {
+                continue;
             }
+            let found = Target {
+                package_id: field::text(package, "id")?.to_string(),
+                package: field::text(package, "name")?.to_string(),
+                name: field::text(target, "name")?.to_string(),
+            };
+            if !field::flag(target, "test")? {
+                problems.push(format!(
+                    "oracle test target `{}` of `{}` sets `test = false`, so `cargo \
+                     test` skips it. Remove the setting.",
+                    found.name, found.package
+                ));
+            }
+            targets.push(found);
         }
     }
-    files.sort();
-    Ok(files)
+    Ok((targets, problems))
 }
 
-/// Builds `target` and counts the tests that `cargo test` runs in it.
-fn tests_run(target: &Target) -> Result<usize, String> {
-    let all = list(target, &[])?;
-    let ignored = list(target, &["--ignored"])?;
-    Ok(count(&all).saturating_sub(count(&ignored)))
-}
-
-/// Runs the test binary of `target` with `--list` and `extra`, and returns its
-/// output.
-fn list(target: &Target, extra: &[&str]) -> Result<String, String> {
-    let output = crate::cargo()
-        .args([
-            "test",
-            "--quiet",
-            "-p",
-            &target.package,
-            "--test",
-            &target.name,
-        ])
-        .args(["--", "--list"])
-        .args(extra)
-        .output()
-        .map_err(|e| format!("cargo test: {e}"))?;
+/// Builds `targets` in the workspace at `root` and returns each one with its test
+/// executable.
+fn build<'a>(
+    root: &Path,
+    targets: &'a [Target],
+) -> Result<Vec<(&'a Target, PathBuf)>, String> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut cargo = crate::cargo();
+    cargo
+        .current_dir(root)
+        .args(["test", "--no-run", "--message-format=json"]);
+    for target in targets {
+        cargo.args(["-p", &target.package, "--test", &target.name]);
+    }
+    let output = cargo.output().map_err(|e| format!("cargo test: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "cannot list the tests of oracle test target `{}` of `{}`:\n{}",
-            target.name,
-            target.package,
+            "cannot build the oracle test targets:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let mut built = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let message: Value =
+            serde_json::from_str(line).map_err(|e| format!("cargo test: {e}"))?;
+        if field::text(&message, "reason")? != "compiler-artifact" {
+            continue;
+        }
+        let id = field::text(&message, "package_id")?;
+        let name = field::text(&message["target"], "name")?;
+        let test = field::list(&message["target"], "kind")?
+            .iter()
+            .any(|k| k == "test");
+        if let Some(target) = targets
+            .iter()
+            .find(|t| test && t.package_id == id && t.name == name)
+        {
+            built.push((target, PathBuf::from(field::text(&message, "executable")?)));
+        }
+    }
+    if built.len() != targets.len() {
+        return Err(format!(
+            "cargo built {} of the {} oracle test targets",
+            built.len(),
+            targets.len()
+        ));
+    }
+    Ok(built)
+}
+
+/// The source files that rustc read to build `exe`, from the dep-info file beside
+/// it. Rustc writes paths relative to `workspace`.
+fn sources(workspace: &Path, exe: &Path) -> Result<Vec<PathBuf>, String> {
+    let info = exe.with_extension("d");
+    let text = std::fs::read_to_string(&info)
+        .map_err(|e| format!("{}: {e}", info.display()))?;
+    Ok(text
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.strip_suffix(':'))
+        .map(|path| files::normalize(&workspace.join(path.replace("\\ ", " "))))
+        .collect())
+}
+
+/// Counts the tests that `exe` runs: those it lists less those it ignores.
+fn tests(exe: &Path) -> Result<usize, String> {
+    Ok(count(&list(exe, &[])?) - count(&list(exe, &["--ignored"])?))
+}
+
+/// Runs the test executable `exe` with `--list` and `extra`, and returns its output.
+fn list(exe: &Path, extra: &[&str]) -> Result<String, String> {
+    let output = Command::new(exe)
+        .arg("--list")
+        .args(extra)
+        .output()
+        .map_err(|e| format!("{}: {e}", exe.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} --list failed:\n{}",
+            exe.display(),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -174,114 +188,82 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn target(name: &str, kind: &str, path: &str) -> Value {
-        json!({ "name": name, "kind": [kind], "src_path": path, "test": true })
+    #[test]
+    fn reports_orphans_and_targets_that_run_no_tests() {
+        assert_eq!(
+            check(&crate::fixture()),
+            Err(vec![
+                "oracle test target `ignored` of `a` runs no tests. An oracle must \
+                 run at least one test that is not ignored."
+                    .to_string(),
+                "`oracles/orphan.rs` is not compiled by an oracle test target, so \
+                 no gate runs it. Make it the `path` of a `[[test]]` entry, or a \
+                 module of one."
+                    .to_string(),
+            ])
+        );
     }
 
-    fn metadata(targets: &[Value]) -> Value {
-        json!({ "packages": [{ "name": "raft", "targets": targets }] })
-    }
-
-    fn check(targets: &[Value], files: &[&str]) -> (Vec<Target>, Vec<String>) {
-        let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
-        plan(&metadata(targets), Path::new("/w"), &files)
-    }
-
-    fn conformance() -> Target {
-        Target {
-            package: "raft".to_string(),
-            name: "conformance".to_string(),
-        }
-    }
-
-    mod plan {
+    mod targets {
         use super::*;
 
-        #[test]
-        fn accepts_a_test_target_root() {
-            let t = target("conformance", "test", "/w/oracles/raft/election.rs");
-            let (targets, problems) = check(&[t], &["/w/oracles/raft/election.rs"]);
-            assert_eq!(targets, vec![conformance()]);
-            assert_eq!(problems, Vec::<String>::new());
+        fn target(path: &str, test: bool) -> Value {
+            json!({
+                "name": "conformance",
+                "kind": ["test"],
+                "src_path": path,
+                "test": test,
+            })
+        }
+
+        fn check(targets: &[Value]) -> Result<(Vec<Target>, Vec<String>), String> {
+            let metadata = json!({
+                "packages": [{ "id": "raft-id", "name": "raft", "targets": targets }]
+            });
+            super::targets(&metadata, Path::new("/w/oracles"))
+        }
+
+        fn conformance() -> Target {
+            Target {
+                package_id: "raft-id".to_string(),
+                package: "raft".to_string(),
+                name: "conformance".to_string(),
+            }
         }
 
         #[test]
-        fn resolves_parent_components_in_a_target_path() {
-            let path = "/w/crates/raft/../../oracles/raft/election.rs";
-            let t = target("conformance", "test", path);
-            let (targets, problems) = check(&[t], &["/w/oracles/raft/election.rs"]);
-            assert_eq!(targets, vec![conformance()]);
-            assert_eq!(problems, Vec::<String>::new());
+        fn finds_a_root_under_oracles_through_parent_components() {
+            let t = target("/w/crates/raft/../../oracles/raft/election.rs", true);
+            assert_eq!(check(&[t]), Ok((vec![conformance()], vec![])));
         }
 
         #[test]
-        fn ignores_test_targets_outside_oracles() {
-            let t = target("it", "test", "/w/crates/raft/tests/it/main.rs");
-            let (targets, problems) = check(&[t], &[]);
-            assert_eq!(targets, Vec::new());
-            assert_eq!(problems, Vec::<String>::new());
-        }
-
-        mod when_a_file_is_not_a_test_root {
-            use super::*;
-
-            fn orphan(path: &str) -> String {
-                format!(
-                    "`{path}` is not the root of a test target, so no gate runs it. \
-                     Add a `[[test]]` entry with this `path` to the crate that it \
-                     checks."
-                )
-            }
-
-            #[test]
-            fn reports_a_file_no_target_names() {
-                let (targets, problems) = check(&[], &["/w/oracles/raft/election.rs"]);
-                assert_eq!(targets, Vec::new());
-                assert_eq!(problems, vec![orphan("oracles/raft/election.rs")]);
-            }
-
-            #[test]
-            fn reports_a_file_that_only_a_binary_builds() {
-                let t = target("election", "bin", "/w/oracles/raft/election.rs");
-                let (targets, problems) = check(&[t], &["/w/oracles/raft/election.rs"]);
-                assert_eq!(targets, Vec::new());
-                assert_eq!(problems, vec![orphan("oracles/raft/election.rs")]);
-            }
-
-            #[test]
-            fn reports_a_module_beside_a_test_root() {
-                let t = target("conformance", "test", "/w/oracles/raft/main.rs");
-                let files = ["/w/oracles/raft/election.rs", "/w/oracles/raft/main.rs"];
-                let (targets, problems) = check(&[t], &files);
-                assert_eq!(targets, vec![conformance()]);
-                assert_eq!(problems, vec![orphan("oracles/raft/election.rs")]);
-            }
+        fn ignores_targets_outside_oracles_and_other_kinds() {
+            let outside = target("/w/crates/raft/tests/it/main.rs", true);
+            let mut bin = target("/w/oracles/raft/main.rs", true);
+            bin["kind"] = json!(["bin"]);
+            assert_eq!(check(&[outside, bin]), Ok((vec![], vec![])));
         }
 
         #[test]
         fn reports_a_target_that_cargo_test_skips() {
-            let mut t = target("conformance", "test", "/w/oracles/raft/election.rs");
-            t["test"] = json!(false);
-            let (targets, problems) = check(&[t], &["/w/oracles/raft/election.rs"]);
-            assert_eq!(targets, Vec::new());
+            let t = target("/w/oracles/raft/election.rs", false);
+            let problem = "oracle test target `conformance` of `raft` sets `test = \
+                           false`, so `cargo test` skips it. Remove the setting.";
             assert_eq!(
-                problems,
-                vec![
-                    "oracle test target `conformance` of `raft` sets `test = false`, \
-                     so `cargo test` skips it. Remove the setting."
-                        .to_string()
-                ]
+                check(&[t]),
+                Ok((vec![conformance()], vec![problem.to_string()]))
             );
         }
-    }
-
-    mod normalize {
-        use super::*;
 
         #[test]
-        fn removes_current_and_parent_components() {
-            let path = Path::new("/w/crates/raft/./../../oracles/x.rs");
-            assert_eq!(normalize(path), PathBuf::from("/w/oracles/x.rs"));
+        fn names_a_missing_field() {
+            let mut t = target("/w/oracles/raft/election.rs", true);
+            t["test"] = Value::Null;
+            assert_eq!(
+                check(&[t]).unwrap_err(),
+                "cargo JSON has no boolean field `test`"
+            );
         }
     }
 

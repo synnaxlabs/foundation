@@ -2,21 +2,32 @@
 
 #![expect(clippy::print_stderr, reason = "xtask reports to the terminal")]
 
+mod cfg;
+mod field;
+mod files;
 mod map;
+mod miri;
 mod oracles;
+mod select;
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use serde_json::Value;
 
 fn main() -> ExitCode {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("invariant: xtask is a directory of the workspace root");
     #[expect(clippy::disallowed_methods, reason = "a dev tool reads its arguments")]
     let result = match std::env::args().nth(1).as_deref() {
-        Some("layers") => layers(),
-        Some("oracles") => oracles::check(),
+        Some("layers") => layers(root),
+        Some("oracles") => oracles::check(root),
+        Some(name @ ("loom" | "shuttle")) => cfg::test(root, name),
+        Some("miri") => miri::run(root),
         _ => {
-            eprintln!("usage: cargo xtask <layers|oracles>");
+            eprintln!("usage: cargo xtask <layers|oracles|loom|shuttle|miri>");
             return ExitCode::FAILURE;
         }
     };
@@ -31,9 +42,10 @@ fn main() -> ExitCode {
     }
 }
 
-/// Checks every workspace dependency against the crate map in `map.rs`.
-fn layers() -> Result<(), Vec<String>> {
-    let metadata = metadata().map_err(|e| vec![e])?;
+/// Checks every dependency of the workspace at `root` against the crate map in
+/// `map.rs`.
+fn layers(root: &Path) -> Result<(), Vec<String>> {
+    let metadata = metadata(root).map_err(|e| vec![e])?;
     let packages = metadata["packages"].as_array().cloned().unwrap_or_default();
     let members: BTreeSet<&str> =
         packages.iter().filter_map(|p| p["name"].as_str()).collect();
@@ -47,9 +59,9 @@ fn layers() -> Result<(), Vec<String>> {
         }
         let Some(entry) = map::find(name) else {
             problems.push(format!(
-                "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs with \
-                 its layer, its job, and its allowed dependencies, matching the crate \
-                 map in docs/decisions.md."
+                "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
+                 with its layer, its job, and its allowed dependencies, matching the \
+                 crate map in docs/decisions.md."
             ));
             continue;
         };
@@ -91,8 +103,10 @@ fn violation(entry: &map::Crate, dep: &str) -> String {
     )
 }
 
-fn metadata() -> Result<Value, String> {
+/// Runs `cargo metadata` on the workspace at `root`.
+fn metadata(root: &Path) -> Result<Value, String> {
     let output = cargo()
+        .current_dir(root)
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .output()
         .map_err(|e| format!("cargo metadata: {e}"))?;
@@ -107,4 +121,30 @@ fn cargo() -> Command {
     #[expect(clippy::disallowed_methods, reason = "cargo sets CARGO for its tools")]
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     Command::new(cargo)
+}
+
+/// The test workspace in `xtask/fixture`.
+#[cfg(test)]
+fn fixture() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layers_reports_crates_missing_from_the_map() {
+        let missing = |name| {
+            format!(
+                "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
+                 with its layer, its job, and its allowed dependencies, matching the \
+                 crate map in docs/decisions.md."
+            )
+        };
+        assert_eq!(
+            layers(&fixture()),
+            Err(vec![missing("a"), missing("model")])
+        );
+    }
 }

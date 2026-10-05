@@ -29,9 +29,9 @@ behavior. Never print a pointer. No `thread_local!` state.
 | 8 | Hardware in the loop with real devices | Nightly and release |
 
 Benchmarks run on a dedicated machine. Mutation testing (`cargo mutants --in-diff`)
-checks on each PR that agent-written tests catch real changes. It skips `xtask`. Miri
-and cargo-fuzz run on one pinned nightly, named in `rust-toolchain-nightly`, that only
-those gates use.
+checks on each PR that agent-written tests catch real changes. `.cargo/mutants.toml`
+lists the few functions it skips, each with its reason. Miri and cargo-fuzz run on one
+pinned nightly, named in `rust-toolchain-nightly`, that only those gates use.
 
 Simulation checks liveness as well as safety: after faults stop, the mesh converges
 within a bound (r16 60). A failed run prints its replay value, and CI runs that value
@@ -68,8 +68,11 @@ again once to prove that the failure replays (r16 59).
   dependency approval in `docs/dependencies.md` first (r16 51, 52).
 - **Wake protocols and lock-free code** get loom for small models and shuttle (PCT)
   for larger ones. Only `ring` gates std types behind `cfg(loom)`. Code with `unsafe`
-  runs under Miri (r16 61). CI runs `RUSTFLAGS="--cfg loom" cargo test --release
-  --tests` on each crate whose source names `loom` in a `cfg`.
+  runs under Miri (r16 61). `cargo xtask loom` runs `cargo test --release --tests`
+  with `--cfg loom` and `LOOM_MAX_PREEMPTIONS=3` on each crate whose source or oracles
+  name `loom` in a `cfg`. `cargo xtask shuttle` does the same with `--cfg shuttle`.
+  `cargo xtask miri` runs Miri on each crate whose source names `unsafe_code`, and
+  fails when such a crate runs no tests.
 - **Hot paths** run under a counting allocator that fails on any allocation.
 - **Unit tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject
   and condition with nested modules. Name each test as the behavior it checks, with
@@ -88,8 +91,9 @@ Agents add to them freely and never weaken them. Weakening means a removed test 
 assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input
 or proptest failure file.
 
-`cargo xtask oracles` fails when a `.rs` file under `oracles/` is not the root of a
-`[[test]]` target, or when an oracle test target runs no tests.
+An oracle test target is a `[[test]]` target whose root is under `oracles/`.
+`cargo xtask oracles` fails when no oracle test target compiles a `.rs` file under
+`oracles/`, or when an oracle test target runs no tests.
 
 Each PR description starts with an oracle section that lists changes under `oracles/`
 and flags any weakening. A fresh adversarial reviewer checks each flagged change and

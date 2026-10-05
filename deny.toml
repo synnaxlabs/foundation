@@ -7,7 +7,16 @@ all-features = true
 [advisories]
 
 [licenses]
-allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  # `libfuzzer-sys` (docs/dependencies.md).
+  "NCSA",
+]
 unused-allowed-license = "allow"
 
 # Workspace crates set `publish = false` and have no license.
@@ -23,6 +32,8 @@ allow-wildcard-paths = true
 deny = [
   { crate = "openssl", reason = "aws-lc-rs is the only crypto provider" },
   { crate = "openssl-sys", reason = "aws-lc-rs is the only crypto provider" },
+  # The version requirement passes the workspace crate `ring` 0.0.0.
+  { crate = "ring:>=0.1", reason = "aws-lc-rs is the only crypto provider" },
 ]
 
 [sources]
