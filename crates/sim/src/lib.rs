@@ -139,7 +139,7 @@ impl Sim {
     pub fn link(&mut self, from: &Node, to: &Node, config: link::Config) {
         let (from, to) = (self.own(from), self.own(to));
         config.check();
-        lock(&self.shared).link(from, to, config);
+        lock(&self.shared).net().link(from, to, config);
     }
 
     /// Crashes `node` now, between runs. Each thread of the node ends at once: no
