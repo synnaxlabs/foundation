@@ -46,8 +46,8 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Missing => f.write_str(
-                "the store has no value. Run `secret set`, or point the secret store \
-                 policy at the store that holds it",
+                "the store has no value. Add the value to the store, or point the \
+                 secret store policy at the store that holds it",
             ),
             Self::Denied { detail } => write!(
                 f,
@@ -65,3 +65,34 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tells_the_caller_what_to_do() {
+        let cases = [
+            (
+                Error::Missing,
+                "the store has no value. Add the value to the store, or point the \
+                 secret store policy at the store that holds it",
+            ),
+            (
+                Error::Denied {
+                    detail: "403".into(),
+                },
+                "the store refused this node: 403. Grant the node access in the store",
+            ),
+            (
+                Error::Unavailable {
+                    detail: "timed out".into(),
+                },
+                "the store did not answer: timed out. Retrying may succeed",
+            ),
+        ];
+        for (error, message) in cases {
+            assert_eq!(error.to_string(), message);
+        }
+    }
+}
