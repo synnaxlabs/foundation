@@ -1983,7 +1983,10 @@ a bad link:
   connector (a named reader whose hold covers the cut) receives every sample, in seq
   order. With a budget that covers 30 minutes, it receives exactly one gap, whose count
   equals the trimmed samples. `verify` runs both.
-- A time error bound on every sample.
+- A time error bound on every sample. The bound must hold the true offset, and the
+  MVP target is at most 1 s. A tighter target waits for the x86 and Pi 4 run (#260).
+  The person accepted on 2026-10-05 ("as long as you've evaluated the performance
+  costs of your decision against correctness then I'm ok with this").
 - Command authority and audit (D2).
 - The mesh as code: `plan` and `apply` from HCL, operated through the JSON CLI and MCP.
 - Robust means: simulation-tested, fuzzed, and chaos-tested on real AWS links.
