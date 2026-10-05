@@ -9,3 +9,10 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+broken = []
+
+[[test]]
+name = "empty"
+path = "../../oracles/conformance/empty.rs"
