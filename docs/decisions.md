@@ -637,6 +637,16 @@ How to read this record:
   is a node key or a `Client` (an SDK, proved by its signed hello above). Callers admit
   peers, dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on
   SIM NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
+- **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
+  class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
+  `CatchUp`. The byte goes with the first message or with the finish, so an empty
+  stream still has its class. Each message is a QUIC varint length, then that many
+  bytes, at most `message_bytes_max`. A node accepts the waiting streams highest class
+  first. A peer breaks the protocol when it sends another class byte, ends a stream
+  before its class byte or inside a message, sends a message over the limit, or resets
+  or stops a stream with a code over 32 bits. The node then closes the connection with
+  application code 2^32 and the reason as text, and the caller gets `Error::Broken`.
+  Proposed by `network` in #55.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is

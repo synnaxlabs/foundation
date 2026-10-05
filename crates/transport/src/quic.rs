@@ -173,7 +173,7 @@ impl Endpoint {
         }
         let (now, datagrams_max) = (self.instant(now), self.datagrams_max);
         while let Some(key) = self.ready.pop_front() {
-            let Some(connection) = self.get(key) else {
+            let Some(connection) = find(&mut self.connections, key) else {
                 continue;
             };
             connection.queued = false;
@@ -222,7 +222,7 @@ impl Endpoint {
     /// [`Event::Closed`] is queued or was given.
     pub(crate) fn close(&mut self, now: Monotonic, key: connection::Key, code: Code) {
         let now = self.instant(now);
-        let Some(connection) = self.get(key) else {
+        let Some(connection) = find(&mut self.connections, key) else {
             return;
         };
         let closed = connection.close(now, code);
@@ -360,10 +360,6 @@ impl Endpoint {
 
     fn instant(&self, now: Monotonic) -> Instant {
         self.epoch + Duration::from_nanos(now.0)
-    }
-
-    fn get(&mut self, key: connection::Key) -> Option<&mut Connection> {
-        find(&mut self.connections, key)
     }
 
     /// Opens a stream in `dir` on the connection of `key`, unless it ended.

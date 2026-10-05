@@ -677,6 +677,34 @@ mod tests {
     }
 
     #[test]
+    fn opened_before_their_class_byte_arrive_when_it_does() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let connection = pair.client.connection();
+            let early = connection.streams().open(Dir::Uni).expect("a stream");
+            raw(&mut pair.client, Dir::Uni, &[2, 1, b'x'], true);
+            pair.run(RUN);
+            let mut incoming = accept(&mut pair.server);
+            assert_eq!(incoming.class, Class::Complete);
+            let server = key(&pair.server);
+            assert!(pair.server.endpoint.accept(server).is_none());
+            let mut send = pair.client.connection().send_stream(early);
+            assert_eq!(send.write(&[0, 1, b'y']), Ok(3));
+            send.finish().expect("finished");
+            pair.run(RUN);
+            let incoming_event = Event::Incoming { key: server };
+            assert_eq!(events(&pair.server).last(), Some(&&incoming_event));
+            let mut early = accept(&mut pair.server);
+            assert_eq!(early.class, Class::Command);
+            let now = pair.now();
+            let read = drain(&mut pair.server, now, &mut early.receiver);
+            assert_eq!(read, (vec![b"y".to_vec()], true));
+            let read = drain(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, (vec![b"x".to_vec()], true));
+        });
+    }
+
+    #[test]
     fn past_the_window_wait_for_writable_and_then_arrive_whole() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
