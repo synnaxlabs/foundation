@@ -69,7 +69,8 @@ impl Shards {
     /// # Errors
     ///
     /// - [`Error::Start`] when the thread or its executor cannot start.
-    /// - [`Error::Pin`] when the thread cannot pin to `config.core`.
+    /// - [`Error::Pin`] when `config.core` is not below [`Shards::cores`], or the
+    ///   thread cannot pin to it.
     ///
     /// ```
     /// use env::thread::{Error, Handle};
@@ -87,6 +88,10 @@ impl Shards {
     where
         F: Future<Output = ()> + 'static,
     {
+        if let Some(core) = config.core.filter(|&core| core >= self.cores().get()) {
+            let name = config.name;
+            return Err(Error::Pin { name, core });
+        }
         self.0
             .start(config, Box::new(|tasks| Box::pin(main(tasks))))
     }
@@ -107,7 +112,8 @@ impl fmt::Debug for Shards {
 pub struct Config {
     /// The thread's name, shown by the OS and in errors.
     pub name: String,
-    /// The core to pin the thread to, or `None` to let the OS place it.
+    /// The core to pin the thread to, below [`Shards::cores`], or `None` to let the OS
+    /// place it.
     pub core: Option<usize>,
 }
 
@@ -124,11 +130,59 @@ pub trait Driver: Send + Sync {
 
     /// Starts a thread with a task executor, makes [`Tasks`] for it, and runs
     /// `main(tasks)` on it, with the rules of [`Shards::start`]. `config.name` may hold
-    /// any character; `os` gives the OS the part before the first NUL byte. Dropping
-    /// the shard drops every task, also one that holds a clone of its [`Tasks`].
+    /// any character; `os` gives the OS the part before the first NUL byte.
+    /// `config.core`, when set, is below [`Driver::cores`]: [`Shards::start`] checks
+    /// it. Dropping the shard drops every task, also one that holds a clone of its
+    /// [`Tasks`].
     ///
     /// # Errors
     ///
     /// As [`Shards::start`].
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Four cores; `start` reports that it ran.
+    struct Four;
+
+    impl Driver for Four {
+        fn cores(&self) -> NonZeroUsize {
+            NonZeroUsize::new(4).expect("four is not zero")
+        }
+
+        fn start(&self, config: Config, _: Main) -> Result<Handle, Error> {
+            let reason = "the driver ran".into();
+            Err(Error::Start {
+                name: config.name,
+                reason,
+            })
+        }
+    }
+
+    fn start(core: Option<usize>) -> Error {
+        let config = Config {
+            name: "shard".into(),
+            core,
+        };
+        Shards::new(Four).start(config, |_| async {}).unwrap_err()
+    }
+
+    #[test]
+    fn a_core_past_the_bound_does_not_reach_the_driver() {
+        let name = "shard".to_owned();
+        assert_eq!(start(Some(4)), Error::Pin { name, core: 4 });
+    }
+
+    #[test]
+    fn a_core_in_the_bound_reaches_the_driver() {
+        let ran = Error::Start {
+            name: "shard".into(),
+            reason: "the driver ran".into(),
+        };
+        assert_eq!(start(Some(3)), ran);
+        assert_eq!(start(None), ran);
+    }
 }

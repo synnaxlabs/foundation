@@ -88,10 +88,6 @@ impl env::shards::Driver for Node {
     }
 
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error> {
-        if let Some(core) = config.core.filter(|&core| core >= self.cores().get()) {
-            let name = config.name;
-            return Err(Error::Pin { name, core });
-        }
         Ok(self.thread(config.name, Start::Shard(main)))
     }
 }
