@@ -57,8 +57,8 @@ state on `main`.
   (R5, BQ12).
 - The diode carrier is UDP with Noise K and no TLS. Commands, Raft, and clock exchange
   cannot cross it. Not built.
-- `transport` accepts every Ed25519 key, and every client with no certificate.
-  Admission is the caller's job. Until `node` admits a peer, the peer must not make
+- `transport` accepts every Ed25519 key that is not of small order, and every client
+  with no certificate. Admission is the caller's job. Until `node` admits a peer, the peer must not make
   the node hold memory or do work out of proportion to the bytes it sent.
 - A message on a stream is a length and then bytes. The length is the peer's choice,
   up to `message_bytes_max`.
