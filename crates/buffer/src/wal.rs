@@ -256,8 +256,8 @@ pub(crate) struct Invalid {
 /// ends within one lap of the area on any bytes.
 ///
 /// The window is one block, or the size of the record that starts there once its
-/// header is read. A walk reads at most twice the live bytes, plus the largest
-/// record once for a torn record at the end.
+/// header is read. A walk reads at most twice the live bytes, plus one block and
+/// one largest record for a torn record at the end.
 #[derive(Debug)]
 pub(crate) struct Cursor {
     layout: Layout,
@@ -417,7 +417,7 @@ mod tests {
     }
 
     /// Walks the area with the real cursor to the end of the chain. Checks that it
-    /// asks for at most twice the live bytes and one largest record.
+    /// asks for at most twice the live bytes, one block, and one largest record.
     fn walk(area: &[u8], tail: Position) -> Result<(Vec<Vec<u8>>, Cursor), Invalid> {
         let mut cursor = Cursor::new(layout(), tail);
         let mut data = Vec::new();
@@ -430,7 +430,8 @@ mod tests {
                 Step::Moved | Step::More => {}
                 Step::End => {
                     let live = cursor.at.offset - tail.offset;
-                    let most = 2 * live + to_u64(BODY_MAX + HEADER_LEN + ALIGN);
+                    let window = (BODY_MAX + HEADER_LEN).next_multiple_of(ALIGN);
+                    let most = 2 * live + to_u64(ALIGN + window);
                     assert!(asked <= most, "asked {asked} for {live} live bytes");
                     return Ok((data, cursor));
                 }
