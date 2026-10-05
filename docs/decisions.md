@@ -455,6 +455,24 @@ How to read this record:
   read over a stated latency gives a low edge above the truth, and the overlap keeps it.
   Decided by the `time` builder; the person accepted it on 2026-10-05 ('#1 is fine').
   Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper bounds).
+- **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
+  a reader gets no mesh time. After it, when `combine` fails (no majority, a bound too
+  wide, or no sources after a remove), the clock holds over: it keeps its last estimate
+  and its error grows by drift. It never follows the largest group or one side of a tie.
+  `push` returns the holdover and its cause, and `node` publishes it. The next majority
+  ends the holdover. Decided by the `time` builder (#142).
+- **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
+  OS error bound with each reading where the OS has one (`adjtimex` on Linux,
+  `ntp_adjtime` on macOS). Where it has none (Windows), the reading has the largest
+  error, 36500 days: a node alone still gets OS time, with an error that says
+  "unknown", and in a mesh the reading adds a vote but does not move the estimate. A
+  fixed invented error lost: a wrong value gives a bound that is not true. Amends ENV
+  SEAMS. The person decided on 2026-10-05 ("Use it, error 'unknown'"), #144.
+- **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
+  Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
+  drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
+  suspend lost: mesh time would fall behind by the time asleep, outside its bound.
+  Amends ENV SEAMS. The person decided on 2026-10-05 ("Count time asleep"), #144.
 
 ### 1.7 Transport
 
