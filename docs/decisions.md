@@ -215,7 +215,10 @@ How to read this record:
   holds are published on status channels. Supersedes: B1 durable reader, B2 durable
   and ad-hoc readers.
 - **S10 + S11 + BQ7 (writer)** A writer session is `{ subject, authority, control
-  lease, path: live or backfill, channels, confirmation: stored or replicated }`.
+  lease, channels, confirmation: stored or replicated }`. It has no path: the label on
+  each write (B7) is the only source, and a write with no label is live. The person
+  decided on 2026-10-05: "as long as you've evaluated the performance costs of your
+  decision against correctness then I'm ok with this" (#243).
 - **B2** Selectors stay live: channels created later that match join the subscription.
   A start time maps to the first sample at or after it, per index. A range the buffer no
   longer has is an explicit gap.
@@ -274,20 +277,26 @@ How to read this record:
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
 - **B7** A frame applies whole or not at all, per index. A writer never resends on the
-  live path. After a reconnect, it resends each unconfirmed live frame, with its
-  original boundaries, labeled `resend`. `resend` is a write label, not a third path:
-  the home checks a resend frame by timestamp against both paths of the index, and it
-  lands on one of them or on none. The home sets the frame's path when it freezes the
-  frame, after the check, so a resend frame carries the path it landed on. When every
-  sample exists with the same values, the frame is a repeat, and the home drops and
-  confirms it. When no sample exists and the frame starts after the newest live stamp,
-  it never landed, and the home applies it to the live path. When no sample exists and
-  the frame fits A6, it applies as backfill. Anything else is an error: some samples
-  stored and some not, a stored timestamp with other values, a frame that fits neither
-  path, or a range below the buffer's floor. Live and backfill frames pay no check.
-  Values are compared decoded, not as bytes. Writers assign no numbers: a resend comes
-  in a new session, and the writer never learned them. The person decided on 2026-10-05:
-  "By timestamp + same values" (#148), then "A `resend` label" (#168).
+  live path. After a reconnect, it resends each unconfirmed frame, live or backfill,
+  with its original boundaries, labeled `resend`. `resend` is a write label, not a third
+  path: the home checks a resend frame by timestamp against both paths of each index,
+  and each index lands on one of them or on none. The home sets the frame's path when it
+  freezes the frame, after the check, so a resend frame carries the path it landed on.
+  When every sample of an index exists with the same values, that index is a repeat.
+  When no sample exists and the index's data starts after its newest live stamp, it
+  never landed, and the home applies it to the live path. When no sample exists and the
+  data fits A6, it applies as backfill. Anything else is an error: some samples stored
+  and some not, a stored timestamp with other values, data that fits neither path, or a
+  range below the buffer's floor. When the indexes of one resend land on different
+  paths, the home splits it into frames of one path each and drops the repeats. It
+  confirms the resend when every part has landed or was dropped. Only a mixed resend
+  pays this copy; `home` measures it when it builds the split. Live and backfill frames
+  pay no check. Values are compared decoded, not as bytes. Writers assign no numbers: a
+  resend comes in a new session, and the writer never learned them. The person decided
+  on 2026-10-05: "By timestamp + same values" (#148), then "A `resend` label" (#168),
+  then the split, a resend of every unconfirmed frame, and no session path: "as long as
+  you've evaluated the performance costs of your decision against correctness then I'm
+  ok with this" (#243).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -1192,7 +1201,7 @@ Storage classes used in the table:
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
 | Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
 | Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one in its header | Whoever freezes the frame: the home on a write, from its label after the B7 check; a decoder or catch-up, from the path the frame came with | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
-| Label (a path or resend) | A value, `frame::Label` (B7), on each write: the `hub` writer call and the wire write message. Not in the frame block | The writer | `hub`, `wire`, `home` | `types::frame` |
+| Label (a path or resend) | A value, `frame::Label` (B7), on each write: the `hub` writer call and the wire write message. The only source of a write's path; none means live. Not in the frame block | The writer | `hub`, `wire`, `home` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
 | Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (meaning) |
 | Enum and flags definitions | Files, then Spec as named types with fingerprints | People, `discover` | Sinks, SDK code generation, `plan` | `spec` |

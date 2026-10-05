@@ -63,8 +63,8 @@ impl Path {
 pub enum Label {
     /// Data the writer has not sent before, for this path.
     Path(Path),
-    /// A live frame that the writer sends again after a reconnect, with its original
-    /// boundaries. It lands on one path or on none.
+    /// A frame that the writer sends again after a reconnect, with its original
+    /// boundaries. Each of its indexes lands on one path or on none.
     Resend,
 }
 
