@@ -892,12 +892,12 @@ mod tests {
                     seen
                 });
                 std::mem::drop(block);
-                let mut next = loop {
-                    if let Ok(next) = pool.alloc(64) {
-                        break next;
-                    }
-                    thread::yield_now();
-                };
+                let mut next = (0..10_000)
+                    .find_map(|_| {
+                        thread::yield_now();
+                        pool.alloc(64).ok()
+                    })
+                    .expect("the block came back");
                 next.fill(0);
                 assert_eq!(reader.join().expect("the reader read"), fill);
             }
