@@ -642,18 +642,19 @@ mod tests {
             panic!("no result after {POLLS} polls");
         }
 
-        /// Pushes `value`, and yields while the ring is full. It panics when the ring
-        /// stays full for seconds, so a stuck consumer fails the test in place of a
-        /// hang.
+        /// Pushes `value`, and yields while the ring is full. It panics after `YIELDS`
+        /// yields (about 10 seconds on an M3 Max), so a stuck consumer fails the test
+        /// in place of a hang.
         fn push_yielding(producer: &mut Producer<usize>, mut value: usize) {
-            for _ in 0..1_000_000 {
+            const YIELDS: u32 = 50_000_000;
+            for _ in 0..YIELDS {
                 match producer.push(value) {
                     Ok(()) => return,
                     Err(Full(back)) => value = back,
                 }
                 thread::yield_now();
             }
-            panic!("the ring stayed full");
+            panic!("the ring stayed full for {YIELDS} yields");
         }
 
         fn carries_every_value_in_order(spins: u32) {
