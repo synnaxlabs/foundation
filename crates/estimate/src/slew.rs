@@ -1,7 +1,6 @@
 use types::time::{Monotonic, Span};
 
-use crate::measurement::saturated;
-use crate::{Drift, Error, Measurement};
+use crate::{Drift, Measurement};
 
 /// The fastest the served offset moves, in parts per million of local time.
 const RATE_PPM: u64 = 500;
@@ -19,7 +18,7 @@ const RATE_PPM: u64 = 500;
 /// let ahead = Measurement::new(second, Span::MILLISECOND, Span::ZERO)?;
 /// let slew = Slew::new(Measurement::new(second, Span::ZERO, Span::ZERO)?);
 /// let slew = slew.toward(second, ahead);
-/// let m = slew.at(Monotonic(2_000_000_000), Drift::from_ppb(0)?)?;
+/// let m = slew.at(Monotonic(2_000_000_000), Drift::from_ppb(0)?);
 /// let half = Span::from_nanos(500_000);
 /// assert_eq!((m.offset(), m.error()), (half, half));
 /// # Ok::<(), estimate::Error>(())
@@ -61,17 +60,14 @@ impl Slew {
 
     /// The estimate at `now`, for a local clock that drifts from mesh time by at most
     /// `drift`. Its offset is the one served at `now`. Its error adds the part of
-    /// `target` not yet applied, so it holds the true offset when `target` does.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Bound`] when the error is more than 36500 days.
-    pub fn at(self, now: Monotonic, drift: Drift) -> Result<Measurement, Error> {
-        let served = self.served(now);
-        let gap = self.target.offset().nanos().abs_diff(served);
-        let error = self.target.error_at(now, drift).nanos();
-        let error = saturated(i128::from(error) + i128::from(gap));
-        Measurement::new(now, Span::from_nanos(served), error)
+    /// `target` not yet applied, up to 36500 days, so it holds the true offset when
+    /// `target` does.
+    #[must_use]
+    pub fn at(self, now: Monotonic, drift: Drift) -> Measurement {
+        let served = i128::from(self.served(now));
+        let gap = (i128::from(self.target.offset().nanos()) - served).abs();
+        let half = i128::from(self.target.error_at(now, drift).nanos()) + gap;
+        Measurement::between(now, served - half, served + half)
     }
 
     /// The offset served at `now`, in nanoseconds: between `from` and the target's.
@@ -91,7 +87,7 @@ mod tests {
     use types::time::{Monotonic, Span};
 
     use crate::measurement::MAX_ERROR;
-    use crate::{Drift, Error, Measurement, Slew};
+    use crate::{Drift, Measurement, Slew};
 
     const SECOND_NS: u64 = 1_000_000_000;
 
@@ -101,10 +97,10 @@ mod tests {
     }
 
     /// The estimate at `now` as `(offset, error)`, with `ppb` of drift.
-    fn check(slew: Slew, now: u64, ppb: u32) -> Result<(i64, i64), Error> {
-        let m = slew.at(Monotonic(now), Drift::from_ppb(ppb)?)?;
+    fn check(slew: Slew, now: u64, ppb: u32) -> (i64, i64) {
+        let m = slew.at(Monotonic(now), Drift::from_ppb(ppb).expect("valid"));
         assert_eq!(m.at(), Monotonic(now), "the estimate is at the reading");
-        Ok((m.offset().nanos(), m.error().nanos()))
+        (m.offset().nanos(), m.error().nanos())
     }
 
     /// A slew at offset zero until one second, then toward `offset` with no error.
@@ -119,7 +115,7 @@ mod tests {
         #[test]
         fn serves_the_first_estimate_at_once() {
             let slew = Slew::new(estimate(1_000, 5_000, 100));
-            assert_eq!(check(slew, 1_000, 0), Ok((5_000, 100)));
+            assert_eq!(check(slew, 1_000, 0), (5_000, 100));
             let start = (slew.start, slew.from);
             assert_eq!(start, (Monotonic(1_000), Span::from_nanos(5_000)));
         }
@@ -127,9 +123,9 @@ mod tests {
         #[test]
         fn keeps_mesh_time_when_the_target_changes() {
             let before = Slew::new(estimate(0, 0, 0));
-            assert_eq!(check(before, SECOND_NS, 0), Ok((0, 0)));
+            assert_eq!(check(before, SECOND_NS, 0), (0, 0));
             let after = from_zero(1_000_000);
-            assert_eq!(check(after, SECOND_NS, 0), Ok((0, 1_000_000)));
+            assert_eq!(check(after, SECOND_NS, 0), (0, 1_000_000));
             let start = (after.start, after.from);
             assert_eq!(start, (Monotonic(SECOND_NS), Span::ZERO));
         }
@@ -139,32 +135,32 @@ mod tests {
             let now = Monotonic(2 * SECOND_NS);
             let slew = from_zero(1_000_000).toward(now, estimate(0, 0, 0));
             assert_eq!(slew.from, Span::from_nanos(500_000));
-            assert_eq!(check(slew, 2 * SECOND_NS, 0), Ok((500_000, 500_000)));
+            assert_eq!(check(slew, 2 * SECOND_NS, 0), (500_000, 500_000));
         }
 
         #[test]
         fn moves_500_microseconds_in_a_second() {
             let forward = from_zero(1_000_000);
-            assert_eq!(check(forward, 2 * SECOND_NS, 0), Ok((500_000, 500_000)));
+            assert_eq!(check(forward, 2 * SECOND_NS, 0), (500_000, 500_000));
             let back = from_zero(-1_000_000);
-            assert_eq!(check(back, 2 * SECOND_NS, 0), Ok((-500_000, 500_000)));
+            assert_eq!(check(back, 2 * SECOND_NS, 0), (-500_000, 500_000));
         }
 
         #[test]
         fn rounds_the_served_offset_down() {
             let slew = from_zero(1_000_000);
-            assert_eq!(check(slew, SECOND_NS + 1_999, 0), Ok((0, 1_000_000)));
-            assert_eq!(check(slew, SECOND_NS + 2_000, 0), Ok((1, 999_999)));
+            assert_eq!(check(slew, SECOND_NS + 1_999, 0), (0, 1_000_000));
+            assert_eq!(check(slew, SECOND_NS + 2_000, 0), (1, 999_999));
         }
 
         #[test]
         fn stops_at_the_target() {
             let forward = from_zero(1_000_000);
-            assert_eq!(check(forward, 3 * SECOND_NS, 0), Ok((1_000_000, 0)));
-            assert_eq!(check(forward, 100 * SECOND_NS, 0), Ok((1_000_000, 0)));
+            assert_eq!(check(forward, 3 * SECOND_NS, 0), (1_000_000, 0));
+            assert_eq!(check(forward, 100 * SECOND_NS, 0), (1_000_000, 0));
             let back = from_zero(-1_000_000);
-            assert_eq!(check(back, 3 * SECOND_NS, 0), Ok((-1_000_000, 0)));
-            assert_eq!(check(back, 100 * SECOND_NS, 0), Ok((-1_000_000, 0)));
+            assert_eq!(check(back, 3 * SECOND_NS, 0), (-1_000_000, 0));
+            assert_eq!(check(back, 100 * SECOND_NS, 0), (-1_000_000, 0));
         }
 
         #[test]
@@ -173,7 +169,7 @@ mod tests {
             let target = estimate(SECOND_NS, 1_000_000, 10);
             let slew = Slew::new(estimate(0, 0, 0)).toward(now, target);
             let error = 500_000 + 10 + 1_000;
-            assert_eq!(check(slew, 2 * SECOND_NS, 1_000), Ok((500_000, error)));
+            assert_eq!(check(slew, 2 * SECOND_NS, 1_000), (500_000, error));
         }
 
         #[test]
@@ -183,32 +179,31 @@ mod tests {
                 from: Span::from_nanos(7),
                 target: estimate(SECOND_NS, 1_000_000, 0),
             };
-            assert_eq!(check(slew, 0, 0), Ok((7, 999_993)));
-            assert_eq!(check(slew, SECOND_NS, 0), Ok((7, 999_993)));
+            assert_eq!(check(slew, 0, 0), (7, 999_993));
+            assert_eq!(check(slew, SECOND_NS, 0), (7, 999_993));
         }
 
         #[test]
-        fn fails_when_the_error_passes_36500_days() {
+        fn stops_the_error_at_36500_days() {
             let widest = MAX_ERROR.nanos();
             let slew = |error| Slew {
                 start: Monotonic(0),
                 from: Span::ZERO,
                 target: estimate(0, 10, error),
             };
-            assert_eq!(check(slew(widest - 10), 0, 0), Ok((0, widest)));
-            let error = Span::from_nanos(widest + 1);
-            assert_eq!(check(slew(widest - 9), 0, 0), Err(Error::Bound { error }));
+            assert_eq!(check(slew(widest - 11), 0, 0), (0, widest - 1));
+            assert_eq!(check(slew(widest - 10), 0, 0), (0, widest));
+            assert_eq!(check(slew(widest - 9), 0, 0), (0, widest));
         }
 
         #[test]
-        fn saturates_an_error_wider_than_a_span() {
+        fn stops_an_error_wider_than_a_span_at_36500_days() {
             let slew = Slew {
                 start: Monotonic(0),
                 from: Span::from_nanos(i64::MIN),
                 target: estimate(0, i64::MAX, 0),
             };
-            let error = Span::from_nanos(i64::MAX);
-            assert_eq!(check(slew, 0, 0), Err(Error::Bound { error }));
+            assert_eq!(check(slew, 0, 0), (i64::MIN, MAX_ERROR.nanos()));
         }
     }
 
@@ -239,7 +234,7 @@ mod tests {
 
         /// Mesh time at `now`: `now` plus the offset served there.
         fn mesh(slew: Slew, now: u64, drift: Drift) -> i128 {
-            let m = slew.at(Monotonic(now), drift).expect("a valid estimate");
+            let m = slew.at(Monotonic(now), drift);
             i128::from(now) + i128::from(m.offset().nanos())
         }
 
@@ -278,7 +273,7 @@ mod tests {
             ) {
                 let (start, from) = (Monotonic(start), Span::from_nanos(from));
                 let slew = Slew { start, from, target };
-                let m = slew.at(Monotonic(now), w.drift).expect("a valid estimate");
+                let m = slew.at(Monotonic(now), w.drift);
                 prop_assert!(w.holds_truth_at(m, now), "{m:?} misses {}", w.truth(now));
             }
 
@@ -314,15 +309,9 @@ mod tests {
                 let s = Slew { start, from, target };
                 let next = s.toward(Monotonic(now[0]), target);
                 for slew in [s, next] {
-                    match slew.at(Monotonic(now[1]), drift) {
-                        Ok(m) => prop_assert_eq!(m.at(), Monotonic(now[1])),
-                        Err(Error::Bound { .. }) => {}
-                        Err(e @ (Error::Backwards { .. } | Error::Crossed
-                            | Error::Disjoint | Error::Drift { .. } | Error::NoSources
-                            | Error::NoMajority { .. } | Error::Open)) => {
-                            prop_assert!(false, "unexpected {e}");
-                        }
-                    }
+                    let m = slew.at(Monotonic(now[1]), drift);
+                    prop_assert_eq!(m.at(), Monotonic(now[1]));
+                    prop_assert!(m.error() <= MAX_ERROR);
                 }
             }
         }

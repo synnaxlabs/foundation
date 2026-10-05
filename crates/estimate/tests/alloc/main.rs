@@ -25,7 +25,6 @@ fn main() {
         slew.at(Monotonic(1_000_000_000), Drift::UNDISCIPLINED)
     });
     assert_eq!(allocations, 0, "the hot path allocated");
-    let m = m.expect("a valid estimate");
     assert_eq!(
         (m.offset(), m.error()),
         (Span::from_nanos(500_000), Span::from_nanos(701_000)),

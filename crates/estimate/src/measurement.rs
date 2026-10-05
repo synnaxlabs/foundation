@@ -90,7 +90,7 @@ fn capped(nanos: i128) -> Span {
 }
 
 /// `nanos` as a span, or the nearest span when it is past a span's range.
-pub(crate) fn saturated(nanos: i128) -> Span {
+fn saturated(nanos: i128) -> Span {
     let nanos = nanos.clamp(i64::MIN.into(), i64::MAX.into());
     Span::from_nanos(i64::try_from(nanos).expect("invariant: clamped to i64"))
 }
