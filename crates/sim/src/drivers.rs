@@ -67,20 +67,39 @@ impl Node {
         );
         thread
     }
+}
 
-    /// Binds a handle of the node to the sim thread that polls it first. `what`
-    /// names the handle in a panic.
+/// The sim thread that a handle of a node binds to at its first poll.
+struct Owner {
+    /// The handle, in a panic.
+    what: &'static str,
+    thread: OnceLock<u64>,
+}
+
+impl Owner {
+    /// The owner of a handle that `what` names in a panic.
+    fn new(what: &'static str) -> Self {
+        Self {
+            what,
+            thread: OnceLock::new(),
+        }
+    }
+
+    /// Binds the handle to the sim thread of `node` that polls it first.
     ///
     /// # Panics
     ///
     /// As [`Node::running`], and on a thread other than the first.
-    fn own(&self, owner: &OnceLock<u64>, what: &str) {
-        let thread = self.running(what);
-        let first = *owner.get_or_init(|| thread);
-        assert!(
-            first == thread,
-            "{what} polls only on the sim thread of its first poll"
-        );
+    fn check(&self, node: &Node) {
+        let thread = node.running(self.what);
+        let first = *self.thread.get_or_init(|| thread);
+        if first != thread {
+            let name = lock(&node.shared).name(first);
+            panic!(
+                "{} polls only on thread {name:?} of its first poll",
+                self.what
+            );
+        }
     }
 }
 
