@@ -1,0 +1,5 @@
+connector "opcua" "plc_7" {
+  url = "opc.tcp://x"
+  rate = hz(100)
+  nested { a = [1, 2, [3]] }
+}
