@@ -614,7 +614,8 @@ pub(crate) enum Literal {
 }
 
 /// Reports whether HCL reads `word` after `[` or `{` as the start of a `for`
-/// expression: whether its part before the first `.` is `for`.
+/// expression. The lexer reads `for.x` as one word, and HCL decides on its first
+/// part.
 pub(crate) fn opens_for(word: &str) -> bool {
     word.split('.').next() == Some("for")
 }

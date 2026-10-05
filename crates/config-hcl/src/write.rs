@@ -288,10 +288,8 @@ impl<'a> Writer<'a> {
     fn open(&mut self, items: Items<'_>) {
         match items {
             Items::List(values) => {
-                if let Some(first) = values.first()
-                    && starts_for(&first.kind)
-                {
-                    self.refuse(first.span, Unwritable::For);
+                if let Some(first) = values.first() {
+                    self.refuse_for(first);
                 }
                 self.out.push('[');
             }
@@ -308,6 +306,25 @@ impl<'a> Writer<'a> {
 
     fn refuse(&mut self, span: Option<Span>, part: Unwritable) {
         self.errors.push(Error::Unwritable { span, part });
+    }
+
+    /// Refuses the first item of a list at its first word when HCL reads that word
+    /// after `[` as the start of a `for` expression.
+    fn refuse_for(&mut self, item: &Value) {
+        let span = match &item.kind {
+            Kind::Reference(name) if opens_for(name.as_str()) => item.span,
+            // A call such as `for.x(1)` is refused for its function.
+            Kind::Call(call) if &*call.function == "for" => call.function_span,
+            Kind::Reference(_)
+            | Kind::Call(_)
+            | Kind::Bool(_)
+            | Kind::Integer(_)
+            | Kind::Float(_)
+            | Kind::String(_)
+            | Kind::List(_)
+            | Kind::Map(_) => return,
+        };
+        self.refuse(span, Unwritable::For);
     }
 
     /// Writes the blank line between an item and a block after it.
@@ -328,21 +345,6 @@ impl<'a> Writer<'a> {
             Some((_, line)) => line.chars().count(),
             None => self.start.saturating_add(self.out.chars().count()),
         }
-    }
-}
-
-/// Reports whether `kind` is written with a first word that opens a `for` expression
-/// after `[`.
-fn starts_for(kind: &Kind) -> bool {
-    match kind {
-        Kind::Reference(name) => opens_for(name.as_str()),
-        Kind::Call(call) => opens_for(&call.function),
-        Kind::Bool(_)
-        | Kind::Integer(_)
-        | Kind::Float(_)
-        | Kind::String(_)
-        | Kind::List(_)
-        | Kind::Map(_) => false,
     }
 }
 
@@ -784,16 +786,18 @@ mod tests {
             span: Some(span),
         };
         let long = string(&"x".repeat(90));
+        let for_call = Kind::Call(Call {
+            function: "for".into(),
+            function_span: Some(on(5, 8)),
+            arguments: vec![value(Kind::Integer(1))],
+        });
         let cases = [
             (vec![item(reference("for"), on(5, 8))], on(5, 8)),
             (
                 vec![item(reference("for.x"), on(5, 10)), value(Kind::Integer(1))],
                 on(5, 10),
             ),
-            (
-                vec![item(call("for", vec![Kind::Integer(1)]), on(5, 11))],
-                on(5, 11),
-            ),
+            (vec![item(for_call, on(5, 11))], on(5, 8)),
             (
                 vec![item(reference("for"), on(5, 8)), value(long)],
                 on(5, 8),
@@ -811,6 +815,34 @@ mod tests {
             };
             assert_eq!(write(&document), Err(vec![error]), "{document:?}");
         }
+    }
+
+    #[test]
+    fn refuses_a_list_that_starts_with_the_call_for_x_once_for_its_function() {
+        let document = attributes(vec![("a", list(vec![call("for.x", Vec::new())]))]);
+        let error = Error::Unwritable {
+            span: None,
+            part: Unwritable::Function,
+        };
+        assert_eq!(write(&document), Err(vec![error]));
+    }
+
+    #[test]
+    fn writes_for_where_hcl_reads_it_as_a_word() {
+        let document = attributes(vec![
+            ("a", reference("for")),
+            ("b", call("f", vec![reference("for")])),
+            ("c", Kind::Map(map(vec![("k", reference("for"))]))),
+            (
+                "d",
+                list(vec![list(vec![Kind::Integer(1)]), reference("for")]),
+            ),
+            ("e", list(vec![reference("for-x")])),
+        ]);
+        assert_eq!(
+            written(&document),
+            "a = for\nb = f(for)\nc = { k = for }\nd = [[1], for]\ne = [for-x]\n"
+        );
     }
 
     #[test]

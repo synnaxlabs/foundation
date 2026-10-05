@@ -5,7 +5,10 @@ use document::{Attribute, Block, Document, Label, Map};
 use proptest::prelude::*;
 
 fn identifier() -> impl Strategy<Value = String> {
-    "[a-z_éü][a-z0-9_\u{301}éü-]{0,6}"
+    prop_oneof![
+        4 => "[a-z_éü][a-z0-9_\u{301}éü-]{0,6}",
+        1 => Just("for".to_owned()),
+    ]
 }
 
 fn text() -> impl Strategy<Value = String> {
@@ -18,11 +21,16 @@ fn text() -> impl Strategy<Value = String> {
 }
 
 fn name() -> impl Strategy<Value = Kind> {
-    "[a-z_][a-z0-9_]{0,4}(\\.@?[a-z0-9_]{1,5}){0,2}"
+    let name = "[a-z_][a-z0-9_]{0,4}(\\.@?[a-z0-9_]{1,5}){0,2}"
         .prop_filter("a keyword is not a reference", |name| {
             !matches!(name.as_str(), "true" | "false" | "null")
-        })
-        .prop_map(|name| Kind::Reference(name.parse().unwrap()))
+        });
+    prop_oneof![
+        4 => name,
+        1 => Just("for".to_owned()),
+        1 => Just("for.x".to_owned()),
+    ]
+    .prop_map(|name| Kind::Reference(name.parse().unwrap()))
 }
 
 fn value() -> impl Strategy<Value = Value> {

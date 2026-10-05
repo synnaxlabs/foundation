@@ -202,7 +202,8 @@ pub enum Form {
     Operator,
     /// A conditional, such as `a ? b : c`.
     Conditional,
-    /// A `for` expression, such as `[for x in xs : x]`.
+    /// A `for` expression, such as `[for x in xs : x]`. HCL reads a list or an object
+    /// that starts with the word `for` as one, such as `[for]` or `{ for = 1 }`.
     For,
     /// An index or an attribute access after a value, such as `a[0]` or `f().b`.
     Index,
@@ -245,7 +246,8 @@ impl Form {
             Self::For => (
                 FOR,
                 "`for` expressions do not exist in Foundation files",
-                "Write each item",
+                "Write each item. Quote a key named `for`, or put another item before \
+                 an item named `for`",
             ),
             Self::Index => (
                 INDEX,
@@ -518,7 +520,8 @@ mod tests {
             Form::For,
             "hcl.for",
             "`for` expressions do not exist in Foundation files",
-            "Write each item",
+            "Write each item. Quote a key named `for`, or put another item before an \
+             item named `for`",
         ),
         (
             Form::Index,
