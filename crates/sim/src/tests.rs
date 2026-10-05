@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::future::pending;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -365,17 +365,23 @@ fn a_shard_cannot_pin_past_the_node_cores() {
 }
 
 #[test]
-fn a_thread_name_with_a_nul_byte_cannot_start() {
+fn a_thread_name_with_a_nul_byte_starts() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
-    let start = Thread::Start {
-        name: "a\0b".into(),
-        reason: "the name holds a NUL byte".into(),
-    };
-    let shard = node.shards().start(shard("a\0b"), |_| async {});
-    assert_eq!(shard.unwrap_err(), start);
-    let thread = node.threads().start("a\0b", || async {});
-    assert_eq!(thread.unwrap_err(), start);
+    let shard = node
+        .shards()
+        .start(shard("a\0b"), |_| async { panic!("shard") });
+    let thread = node.threads().start("c\0d", || async {});
+    let e = sim.run().unwrap_err();
+    assert!(matches!(e, Error::Panicked { thread, .. } if thread == "a\0b"));
+    assert_eq!(
+        shard.unwrap().join(),
+        Err(Thread::Panicked {
+            name: "a\0b".into()
+        })
+    );
+    sim.run().unwrap();
+    thread.unwrap().join().unwrap();
 }
 
 #[test]
@@ -521,10 +527,9 @@ fn a_shard_started_by_a_task_runs() {
 
 #[test]
 fn a_run_with_no_threads_ends_at_once() {
-    let mut sim = sim(5);
+    let mut sim = sim(0);
     sim.node(node::Config::default());
     sim.run().unwrap();
-    assert_eq!(sim.seed(), 5);
 }
 
 #[test]
@@ -585,4 +590,205 @@ fn a_dropped_sleep_does_not_move_time() {
     sim.run().unwrap();
     handle.unwrap().join().unwrap();
     assert_eq!(node.clock().now(), start, "no timer waits");
+}
+
+#[test]
+#[should_panic(expected = "a sleep needs a thread that the sim started")]
+fn a_sleep_outside_the_sim_panics_after_a_run() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let handle = node.shards().start(shard("shard-0"), |_| async {});
+    sim.run().unwrap();
+    handle.unwrap().join().unwrap();
+    drop(node.clock().sleep(Span::SECOND));
+}
+
+#[test]
+fn a_panic_drops_the_other_tasks_of_its_thread() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let guard = Guard(Arc::clone(&dropped));
+    let _handle = node.shards().start(shard("shard-0"), |tasks| async move {
+        tasks.spawn(async move {
+            let _guard = guard;
+            pending::<()>().await;
+        });
+        tasks.spawn(async { panic!("boom") });
+        pending::<()>().await;
+    });
+    assert!(matches!(sim.run(), Err(Error::Panicked { .. })));
+    assert!(dropped.load(Ordering::Relaxed));
+}
+
+/// Spawns a task that sets its flag, when dropped.
+struct Spawner(env::tasks::Tasks, Arc<AtomicBool>);
+
+impl Drop for Spawner {
+    fn drop(&mut self) {
+        let ran = Arc::clone(&self.1);
+        self.0
+            .spawn(async move { ran.store(true, Ordering::Relaxed) });
+    }
+}
+
+#[test]
+fn a_task_spawned_as_its_shard_ends_never_runs() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let ran = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ran);
+    let handle = node.shards().start(shard("shard-0"), |tasks| async move {
+        let spawner = Spawner(tasks.clone(), flag);
+        tasks.spawn(async move {
+            let _spawner = spawner;
+            pending::<()>().await;
+        });
+    });
+    sim.run().unwrap();
+    handle.unwrap().join().unwrap();
+    assert!(!ran.load(Ordering::Relaxed));
+}
+
+/// Panics when dropped.
+struct Bomb;
+
+impl Drop for Bomb {
+    fn drop(&mut self) {
+        panic!("bomb");
+    }
+}
+
+#[test]
+fn a_panic_in_the_drop_of_a_task_ends_the_run_and_its_thread() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let handle = node.shards().start(shard("shard-0"), |tasks| async move {
+        let bomb = Bomb;
+        tasks.spawn(async move {
+            let _bomb = bomb;
+            pending::<()>().await;
+        });
+    });
+    assert_eq!(
+        sim.run(),
+        Err(Error::Panicked {
+            thread: "shard-0".into(),
+            message: "bomb".into(),
+            seed: 0,
+        })
+    );
+    assert_eq!(
+        handle.unwrap().join(),
+        Err(Thread::Panicked {
+            name: "shard-0".into()
+        })
+    );
+}
+
+#[test]
+fn a_sleep_past_the_end_of_true_time_never_fires() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let clock = node.clock();
+    let _handle = node.shards().start(shard("shard-0"), move |_| async move {
+        clock.sleep_until(Monotonic(u64::MAX)).await;
+    });
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
+}
+
+/// A node whose wall clock ends one second after the run starts.
+fn ending(sim: &mut Sim) -> node::Node {
+    sim.node(node::Config {
+        wall: Stamp::from_nanos(i64::MAX - Span::SECOND.nanos()),
+        ..node::Config::default()
+    })
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn the_clocks_read_up_to_the_end_of_true_time() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(node.wall().now(), Stamp::from_nanos(i64::MAX));
+    let start = node::Config::default().monotonic;
+    assert_eq!(node.clock().now(), start + Span::SECOND);
+}
+
+#[test]
+#[should_panic(expected = "run_for(1ns) passes the end of true time")]
+fn run_for_past_the_end_of_true_time_panics() {
+    let mut sim = sim(0);
+    let _node = ending(&mut sim);
+    sim.run_for(Span::SECOND).unwrap();
+    drop(sim.run_for(Span::NANOSECOND));
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_node_added_later_reads_its_config_now() {
+    let mut sim = sim(0);
+    sim.node(node::Config::default());
+    sim.run_for(Span::SECOND).unwrap();
+    let config = node::Config::default();
+    let node = sim.node(config);
+    assert_eq!(node.clock().now(), config.monotonic);
+    assert_eq!(node.wall().now(), config.wall);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(node.clock().now(), config.monotonic + Span::SECOND);
+}
+
+#[test]
+fn run_for_runs_a_negative_span_as_zero() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let handle = node.shards().start(shard("shard-0"), |_| yield_now());
+    sim.run_for(Span::from_nanos(-1)).unwrap();
+    handle.unwrap().join().unwrap();
+    assert_eq!(node.clock().now(), node::Config::default().monotonic);
+}
+
+/// Counts the polls of its future.
+struct Counted<F>(Pin<Box<F>>, Arc<AtomicUsize>);
+
+impl<F: Future> Future for Counted<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        self.1.fetch_add(1, Ordering::Relaxed);
+        self.0.as_mut().poll(cx)
+    }
+}
+
+#[test]
+fn a_timer_wakes_its_task_only_when_due() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let (early, late) = (node.clock(), node.clock());
+    let polls = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&polls);
+    let a = node.shards().start(shard("early"), move |_| async move {
+        early.sleep(Span::SECOND).await;
+    });
+    let b = node.shards().start(shard("late"), move |_| {
+        let sleep = async move { late.sleep(Span::from_nanos(2_000_000_000)).await };
+        Counted(Box::pin(sleep), count)
+    });
+    sim.run().unwrap();
+    a.unwrap().join().unwrap();
+    b.unwrap().join().unwrap();
+    assert_eq!(polls.load(Ordering::Relaxed), 2);
 }

@@ -6,7 +6,6 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::thread;
 use std::time::Instant;
 
 use env::shards::{Config, Main};
@@ -14,7 +13,7 @@ use env::tasks::Task;
 use env::threads::{Body, Error, Handle};
 use types::time::{Monotonic, Stamp};
 
-use crate::state::{Futures, Shared, Start, lock};
+use crate::state::{Due, Futures, Shared, Start, lock};
 
 /// Drives every seam of one node.
 #[derive(Clone)]
@@ -30,26 +29,13 @@ impl Node {
         let shared = Arc::clone(&self.shared);
         Handle::new(move || {
             let state = lock(&shared);
-            let thread = &state.threads[&thread];
-            if let Some(outcome) = thread.outcome.clone() {
-                return outcome;
-            }
-            let name = thread.name.clone();
+            let (outcome, name) = (state.outcome(thread), state.name(thread));
             drop(state);
-            panic!("thread {name} has not ended; run the sim until it ends")
+            outcome.unwrap_or_else(|| {
+                panic!("thread {name} has not ended; run the sim until it ends")
+            })
         })
     }
-}
-
-/// Rejects a name that the OS would reject.
-fn named(name: &str) -> Result<(), Error> {
-    if name.contains('\0') {
-        return Err(Error::Start {
-            name: name.into(),
-            reason: "the name holds a NUL byte".into(),
-        });
-    }
-    Ok(())
 }
 
 impl env::clock::Driver for Node {
@@ -58,14 +44,12 @@ impl env::clock::Driver for Node {
     }
 
     fn epoch(&self) -> Instant {
-        lock(&self.shared).epoch
+        lock(&self.shared).epoch()
     }
 
     fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
         let mut state = lock(&self.shared);
-        let on = (state.current)
-            .filter(|_| thread::current().id() == state.runner)
-            .map(|thread| state.threads[&thread].node);
+        let on = state.current();
         let key = state.key();
         drop(state);
         let Some(on) = on else {
@@ -87,24 +71,22 @@ impl env::clock::Driver for Node {
 
 impl env::wall::Driver for Node {
     fn now(&self) -> Stamp {
-        let state = lock(&self.shared);
-        state.nodes[self.node].wall + state.elapsed()
+        lock(&self.shared).wall(self.node)
     }
 }
 
 impl env::entropy::Driver for Node {
     fn fill(&self, bytes: &mut [u8]) {
-        lock(&self.shared).nodes[self.node].entropy.fill(bytes);
+        lock(&self.shared).fill(self.node, bytes);
     }
 }
 
 impl env::shards::Driver for Node {
     fn cores(&self) -> NonZeroUsize {
-        lock(&self.shared).nodes[self.node].cores
+        lock(&self.shared).cores(self.node)
     }
 
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error> {
-        named(&config.name)?;
         if let Some(core) = config.core.filter(|&core| core >= self.cores().get()) {
             let name = config.name;
             return Err(Error::Pin { name, core });
@@ -115,7 +97,6 @@ impl env::shards::Driver for Node {
 
 impl env::threads::Driver for Node {
     fn start(&self, name: &str, body: Body) -> Result<Handle, Error> {
-        named(name)?;
         Ok(self.thread(name.into(), Start::Body(body)))
     }
 }
@@ -138,27 +119,26 @@ impl env::clock::Timer for Timer {
         let this = self.get_mut();
         let waker = cx.waker().clone();
         let mut state = lock(&this.shared);
-        let old =
-            (this.due.take()).and_then(|due| state.timers.remove(&(due, this.key)));
-        let now = state.monotonic(this.node);
-        let poll = if deadline <= now {
-            Poll::Ready(())
-        } else {
-            let due = state.now + (deadline - now);
-            state.timers.insert((due, this.key), waker);
-            this.due = Some(due);
-            Poll::Pending
+        let old = (this.due.take()).and_then(|at| state.disarm(at, this.key));
+        let (poll, unused) = match state.due(this.node, deadline) {
+            Due::Passed => (Poll::Ready(()), Some(waker)),
+            Due::At(at) => {
+                state.arm(at, this.key, waker);
+                this.due = Some(at);
+                (Poll::Pending, None)
+            }
+            Due::Never => (Poll::Pending, Some(waker)),
         };
         drop(state);
-        drop(old);
+        drop((old, unused));
         poll
     }
 }
 
 impl Drop for Timer {
     fn drop(&mut self) {
-        if let Some(due) = self.due {
-            let waker = lock(&self.shared).timers.remove(&(due, self.key));
+        if let Some(at) = self.due {
+            let waker = lock(&self.shared).disarm(at, self.key);
             drop(waker);
         }
     }

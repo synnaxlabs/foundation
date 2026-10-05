@@ -57,7 +57,7 @@ impl fmt::Debug for Node {
     }
 }
 
-/// Settings for one node.
+/// Settings for one node. Build it with `..Config::default()`: fields get added.
 ///
 /// ```
 /// let config = sim::node::Config {
@@ -69,9 +69,9 @@ impl fmt::Debug for Node {
 pub struct Config {
     /// The core count that [`env::shards::Shards::cores`] reports.
     pub cores: NonZeroUsize,
-    /// The monotonic reading when the run starts.
+    /// The monotonic reading when the node is added.
     pub monotonic: Monotonic,
-    /// The wall time when the run starts.
+    /// The wall time when the node is added.
     pub wall: Stamp,
 }
 

@@ -5,7 +5,6 @@ use std::mem;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Wake, Waker};
-use std::thread::ThreadId;
 use std::time::Instant;
 
 use env::rng::Rng;
@@ -14,10 +13,13 @@ use env::tasks::Task;
 use env::threads::{Body, Error};
 use types::time::{Monotonic, Span, Stamp};
 
+use crate::node;
+
 pub(crate) type Shared = Arc<Mutex<State>>;
 
-/// Locks the state. Nothing runs code from outside the crate while it holds the lock,
-/// so the lock is never poisoned, and no driver call blocks on it.
+/// Locks the state. No code that can panic, and no code from outside the crate, runs
+/// while it holds the lock, so the lock is never poisoned and no driver call blocks
+/// on it.
 pub(crate) fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
     shared
         .lock()
@@ -26,37 +28,51 @@ pub(crate) fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
 
 pub(crate) struct State {
     /// True time: zero when the run starts.
-    pub(crate) now: Monotonic,
-    pub(crate) nodes: Vec<Node>,
-    pub(crate) threads: BTreeMap<u64, Thread>,
+    now: Monotonic,
+    /// The end of true time: the last instant at which every node's clocks can be
+    /// read. It never falls below `now`.
+    last: Monotonic,
+    nodes: Vec<Node>,
+    threads: BTreeMap<u64, Thread>,
     /// The thread of each live task.
-    pub(crate) tasks: BTreeMap<u64, u64>,
-    pub(crate) ready: BTreeSet<u64>,
+    tasks: BTreeMap<u64, u64>,
+    ready: BTreeSet<u64>,
     /// Wakers by true deadline, then timer key.
-    pub(crate) timers: BTreeMap<(Monotonic, u64), Waker>,
+    timers: BTreeMap<(Monotonic, u64), Waker>,
     /// The first task of each thread that has not run yet.
-    pub(crate) starts: BTreeMap<u64, Start>,
-    /// The thread whose task the scheduler polls now.
-    pub(crate) current: Option<u64>,
-    /// The OS thread that runs the scheduler.
-    pub(crate) runner: ThreadId,
+    starts: BTreeMap<u64, Start>,
+    /// The thread whose task the scheduler polls now: set by `pick`, cleared by
+    /// `release`.
+    current: Option<u64>,
     /// The `Instant` at `Monotonic(0)` on every node.
-    pub(crate) epoch: Instant,
+    epoch: Instant,
     next: u64,
 }
 
-pub(crate) struct Node {
-    pub(crate) monotonic: Monotonic,
-    pub(crate) wall: Stamp,
-    pub(crate) cores: NonZeroUsize,
-    pub(crate) entropy: Rng,
+struct Node {
+    /// True time when the node was added.
+    added: Monotonic,
+    monotonic: Monotonic,
+    wall: Stamp,
+    cores: NonZeroUsize,
+    entropy: Rng,
 }
 
-pub(crate) struct Thread {
-    pub(crate) name: String,
-    pub(crate) node: usize,
-    pub(crate) main: u64,
-    pub(crate) outcome: Option<Result<(), Error>>,
+impl Node {
+    /// The true time at which the first of the node's clocks reaches its end.
+    fn last(&self) -> Monotonic {
+        let monotonic = u64::MAX - self.monotonic.0;
+        let wall = u64::try_from(i128::from(i64::MAX) - i128::from(self.wall.nanos()))
+            .expect("invariant: i64::MAX minus an i64 fits u64");
+        Monotonic(self.added.0.saturating_add(monotonic.min(wall)))
+    }
+}
+
+struct Thread {
+    name: String,
+    node: usize,
+    main: u64,
+    outcome: Option<Result<(), Error>>,
 }
 
 /// The next step of a run.
@@ -67,15 +83,26 @@ pub(crate) enum Next {
     Fire(Monotonic),
 }
 
+/// When a timer fires.
+pub(crate) enum Due {
+    /// Its deadline has passed.
+    Passed,
+    /// At this true time.
+    At(Monotonic),
+    /// Never: its deadline is past the end of true time.
+    Never,
+}
+
 pub(crate) enum Start {
     Shard(Main),
     Body(Body),
 }
 
 impl State {
-    pub(crate) fn new(runner: ThreadId, epoch: Instant) -> Self {
+    pub(crate) fn new(epoch: Instant) -> Self {
         Self {
             now: Monotonic::default(),
+            last: Monotonic(u64::MAX),
             nodes: Vec::new(),
             threads: BTreeMap::new(),
             tasks: BTreeMap::new(),
@@ -83,7 +110,6 @@ impl State {
             timers: BTreeMap::new(),
             starts: BTreeMap::new(),
             current: None,
-            runner,
             epoch,
             next: 0,
         }
@@ -95,13 +121,81 @@ impl State {
         self.next
     }
 
-    /// True time since the run started.
-    pub(crate) fn elapsed(&self) -> Span {
-        self.now - Monotonic::default()
+    pub(crate) fn epoch(&self) -> Instant {
+        self.epoch
+    }
+
+    /// Adds a node whose clocks read the values in `config` now, and returns its
+    /// index.
+    pub(crate) fn add(&mut self, config: node::Config, entropy: Rng) -> usize {
+        let node = Node {
+            added: self.now,
+            monotonic: config.monotonic,
+            wall: config.wall,
+            cores: config.cores,
+            entropy,
+        };
+        self.last = self.last.min(node.last());
+        self.nodes.push(node);
+        self.nodes.len() - 1
+    }
+
+    /// True time `span` from now, or `None` past the end of true time.
+    pub(crate) fn after(&self, span: Span) -> Option<Monotonic> {
+        self.now.checked_add(span).filter(|&end| end <= self.last)
+    }
+
+    /// True time since `node` was added.
+    fn since(&self, node: usize) -> u64 {
+        self.now.0 - self.nodes[node].added.0
     }
 
     pub(crate) fn monotonic(&self, node: usize) -> Monotonic {
-        self.nodes[node].monotonic + self.elapsed()
+        Monotonic(self.nodes[node].monotonic.0 + self.since(node))
+    }
+
+    pub(crate) fn wall(&self, node: usize) -> Stamp {
+        let nanos =
+            i128::from(self.nodes[node].wall.nanos()) + i128::from(self.since(node));
+        let nanos = i64::try_from(nanos)
+            .expect("invariant: true time ends before a wall clock");
+        Stamp::from_nanos(nanos)
+    }
+
+    pub(crate) fn cores(&self, node: usize) -> NonZeroUsize {
+        self.nodes[node].cores
+    }
+
+    pub(crate) fn fill(&mut self, node: usize, bytes: &mut [u8]) {
+        self.nodes[node].entropy.fill(bytes);
+    }
+
+    /// When a timer of `node` with `deadline` fires.
+    pub(crate) fn due(&self, node: usize, deadline: Monotonic) -> Due {
+        let now = self.monotonic(node);
+        if deadline <= now {
+            return Due::Passed;
+        }
+        match self.now.0.checked_add(deadline.0 - now.0) {
+            Some(at) if at <= self.last.0 => Due::At(Monotonic(at)),
+            _ => Due::Never,
+        }
+    }
+
+    /// Adds timer `key`, which wakes `waker` at true time `at`.
+    pub(crate) fn arm(&mut self, at: Monotonic, key: u64, waker: Waker) {
+        self.timers.insert((at, key), waker);
+    }
+
+    /// Removes timer `key` at true time `at`, and returns its waker for the caller to
+    /// drop after it releases the lock.
+    pub(crate) fn disarm(&mut self, at: Monotonic, key: u64) -> Option<Waker> {
+        self.timers.remove(&(at, key))
+    }
+
+    /// The node of the thread that the scheduler polls now, if any.
+    pub(crate) fn current(&self) -> Option<usize> {
+        self.current.map(|thread| self.threads[&thread].node)
     }
 
     /// Adds a thread whose first task is ready, and returns the thread's key.
@@ -122,6 +216,15 @@ impl State {
         self.ready.insert(main);
         self.starts.insert(main, start);
         thread
+    }
+
+    pub(crate) fn name(&self, thread: u64) -> String {
+        self.threads[&thread].name.clone()
+    }
+
+    /// How `thread` ended, or `None` while it runs.
+    pub(crate) fn outcome(&self, thread: u64) -> Option<Result<(), Error>> {
+        self.threads[&thread].outcome.clone()
     }
 
     /// Adds a ready task to `thread` and returns its key, or `None` when the thread
@@ -174,14 +277,25 @@ impl State {
         (task, thread, self.starts.remove(&task))
     }
 
-    /// Removes a task that completed. It may have woken itself as it completed.
-    pub(crate) fn finish(&mut self, task: u64) {
-        self.tasks.remove(&task);
-        self.ready.remove(&task);
+    /// Ends the poll that `pick` began.
+    pub(crate) fn release(&mut self) {
+        self.current = None;
     }
 
-    /// Ends `thread` and returns the keys of its tasks, whose futures the caller
-    /// drops.
+    /// Removes `task` of `thread`, which completed; it may have woken itself as it
+    /// completed. The first task of a thread ends the thread. Returns the tasks whose
+    /// futures the caller drops.
+    pub(crate) fn finish(&mut self, task: u64, thread: u64) -> Vec<u64> {
+        if task == self.threads[&thread].main {
+            return self.end(thread, Ok(()));
+        }
+        self.tasks.remove(&task);
+        self.ready.remove(&task);
+        vec![task]
+    }
+
+    /// Ends `thread` with `outcome` and returns the keys of its tasks, whose futures
+    /// the caller drops.
     pub(crate) fn end(&mut self, thread: u64, outcome: Result<(), Error>) -> Vec<u64> {
         self.threads
             .get_mut(&thread)
@@ -200,10 +314,19 @@ impl State {
     /// Moves true time to `due` and returns the wakers of the timers due by then.
     pub(crate) fn advance(&mut self, due: Monotonic) -> Vec<Waker> {
         self.now = due;
-        let later = self.timers.split_off(&(due + Span::NANOSECOND, 0));
-        mem::replace(&mut self.timers, later)
-            .into_values()
-            .collect()
+        let mut wakers = Vec::new();
+        while let Some(timer) = self.timers.first_entry() {
+            if timer.key().0 > due {
+                break;
+            }
+            wakers.push(timer.remove());
+        }
+        wakers
+    }
+
+    /// Removes the starts of the threads that have not run.
+    pub(crate) fn unstarted(&mut self) -> BTreeMap<u64, Start> {
+        mem::take(&mut self.starts)
     }
 
     /// The names of the threads that have not ended, in start order.
