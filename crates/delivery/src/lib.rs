@@ -3,6 +3,7 @@
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
+mod latest;
 mod readers;
 
 use std::fmt;
@@ -10,7 +11,18 @@ use std::fmt;
 use types::name::Name;
 use types::time::{Span, Stamp};
 
-pub use readers::{Key, Opened, Readers};
+pub use latest::Latest;
+pub use readers::{Opened, Readers};
+
+/// One session on one index. Keys are unique within one [`Readers`] or one [`Latest`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Key(u64);
+
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// A reader's position on one index: on each path, the seq of the first sample it has
 /// not received. It has every sample below it.

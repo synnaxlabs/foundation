@@ -1,22 +1,11 @@
 //! The complete readers of one index at its home.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use types::name::Name;
 use types::time::{Span, Stamp};
 
-use crate::{Error, Position, Reader, Record, Start};
-
-/// One session on one index. Keys are unique within one [`Readers`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Key(u64);
-
-impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+use crate::{Error, Key, Position, Reader, Record, Start};
 
 /// A session that [`Readers::open`] started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
