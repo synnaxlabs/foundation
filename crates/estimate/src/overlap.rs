@@ -103,24 +103,29 @@ impl Overlap {
     /// - [`Error::Bound`] when the readings, before drift, allow an error of more
     ///   than 36500 days.
     pub fn at(&self, now: Monotonic) -> Result<Measurement, Error> {
-        let (Some(low), Some(high)) =
-            (self.low.and_then(|r| r.low), self.high.and_then(|r| r.high))
-        else {
-            return Err(Error::Open);
-        };
+        let (low, high) = self.edges(|r| r.at)?;
         // Edges read at different times can cross.
-        let (low, high) = (i128::from(low.nanos()), i128::from(high.nanos()));
         Measurement::checked_between(now, low, high.max(low))?;
+        let (low, high) = self.edges(|_| now)?;
+        Ok(Measurement::between(now, low, high))
+    }
+
+    /// The highest low edge and the lowest high edge, each widened to `when` the
+    /// reading gives and rounded outward to whole nanoseconds.
+    fn edges(
+        &self,
+        when: impl Fn(Reading) -> Monotonic,
+    ) -> Result<(i128, i128), Error> {
         let edges = [self.low, self.high]
             .into_iter()
             .flatten()
-            .map(|r| r.edges_at(now, self.drift));
+            .map(|r| r.edges_at(when(r), self.drift));
         let low = edges.clone().filter_map(|(low, _)| low).max();
         let high = edges.filter_map(|(_, high)| high).min();
-        let (low, high) = low.zip(high).expect("invariant: both edges are kept");
-        // Whole nanoseconds, rounded outward.
-        let (low, high) = (low.div_euclid(PER_NANO), -(-high).div_euclid(PER_NANO));
-        Ok(Measurement::between(now, low, high))
+        let (Some(low), Some(high)) = (low, high) else {
+            return Err(Error::Open);
+        };
+        Ok((low.div_euclid(PER_NANO), -(-high).div_euclid(PER_NANO)))
     }
 
     fn narrow(&mut self, reading: Reading) -> Result<(), Error> {
