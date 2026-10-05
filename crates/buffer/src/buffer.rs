@@ -36,7 +36,7 @@ pub struct Config {
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
     /// The directory of this shard's ring, relative to the data directory. Its parent
-    /// must be there. [`Buffer::open`] makes it durably when it is not there.
+    /// must be there and durable.
     pub dir: PathBuf,
     /// Blocks for record headers and recovery reads. It needs a class of 64 KiB.
     pub pool: Rc<Pool>,
@@ -269,9 +269,9 @@ impl Drop for Buffer {
 }
 
 impl Buffer {
-    /// Opens the ring in `config.dir`, or creates it, and recovers the tail of
-    /// every path from its records. Each recovered index gets its slot from `slots`.
-    /// Starts the commit task.
+    /// Opens the ring in `config.dir`, or creates it, makes the ring and its
+    /// directory durable, and recovers the tail of every path from its records. Each
+    /// recovered index gets its slot from `slots`. Starts the commit task.
     ///
     /// # Errors
     ///
@@ -301,16 +301,16 @@ impl Buffer {
             Ok(file) => file,
             Err(files::Error::NotFound { .. }) => {
                 files.create_dir(&dir).await?;
-                // A new directory is durable only after a sync of its parent. An
-                // empty `dir` has no parent: it is the data directory.
-                files.sync_dir(dir.parent().unwrap_or(&dir)).await?;
                 let len = layout.file_len();
-                let file = files.open(&path, Mode::Create { len }).await?;
-                files.sync_dir(&dir).await?;
-                file
+                files.open(&path, Mode::Create { len }).await?
             }
             Err(error) => return Err(error.into()),
         };
+        // An open that stopped after it made the ring may not have made it durable.
+        if let Some(parent) = dir.parent() {
+            files.sync_dir(parent).await?;
+        }
+        files.sync_dir(&dir).await?;
         let header = read_header(&file, &pool, &entropy, layout).await?;
         let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
         let mut tails = Tails::default();
