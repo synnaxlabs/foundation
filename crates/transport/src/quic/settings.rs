@@ -221,12 +221,18 @@ mod tests {
     use std::collections::BTreeSet;
     use std::net::SocketAddr;
 
-    use bytes::BytesMut;
+    use std::num::NonZeroUsize;
+
+    use env::net::udp::Meta;
+    use noq_proto::Dir;
     use noq_proto::crypto::HmacKey;
-    use noq_proto::{ConnectionError, DatagramEvent, Dir, Event, FourTuple};
+    use types::time::Monotonic;
 
     use super::*;
+    use crate::Error;
     use crate::quic::testing::{self, CLIENT_SHARD, Pair, SERVER_SHARD, Side};
+    use crate::quic::{Endpoint, Event};
+    use crate::tls;
 
     /// The link delay each way in [`dial`].
     const DELAY: Duration = Duration::from_millis(10);
@@ -234,20 +240,21 @@ mod tests {
     /// A dial with an idle of 1 s, after `span`.
     fn dial(shard: &testing::Shard, span: Duration) -> Pair {
         let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+        pair.dial(tls::public(&testing::SERVER_KEY));
         pair.run(span);
         pair
     }
 
     fn connected(side: &Side) -> bool {
         let mut events = side.events.iter();
-        events.any(|(_, event)| matches!(event, Event::Connected))
+        events.any(|(_, event)| matches!(event, Event::Connected { .. }))
     }
 
     /// When and why `side`'s connection ended.
-    fn lost(side: &Side) -> Option<(Duration, &ConnectionError)> {
+    fn lost(side: &Side) -> Option<(Duration, &Error)> {
         side.events.iter().find_map(|(at, event)| match event {
-            Event::ConnectionLost { reason } => Some((*at, reason)),
-            _ => None,
+            Event::Closed { error, .. } => Some((*at, error)),
+            Event::Connected { .. } => None,
         })
     }
 
@@ -474,23 +481,26 @@ mod tests {
         #[test]
         fn offers_only_quic_v1_to_a_peer_of_another_version() {
             let versions = testing::run(1, |shard| {
-                let config = shard.config(PrivateKey([2; 32]), Span::SECOND);
-                let (_, mut endpoint) = Settings::new(&config, SERVER_SHARD);
+                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let mut endpoint = Endpoint::new(&config, SERVER_SHARD);
                 let draft_29 = [0xff, 0, 0, 0x1d];
                 let len = u8::try_from(cid::LEN).expect("fits");
                 let id = [[len].as_slice(), &[1; cid::LEN]].concat();
                 let mut initial = [[0xc0].as_slice(), &draft_29, &id, &id].concat();
                 initial.resize(usize::from(MTU_MIN), 0);
-                let mut reply = Vec::new();
-                let event = endpoint.handle(
-                    shard.epoch(),
-                    FourTuple::new(testing::CLIENT, None),
-                    None,
-                    BytesMut::from(initial.as_slice()),
-                    &mut reply,
-                );
-                assert!(matches!(event, Some(DatagramEvent::Response(_))));
-                let (_, Some(_)) = ids(&reply) else {
+                let meta = Meta {
+                    source: testing::CLIENT,
+                    destination: None,
+                    ecn: None,
+                    len: initial.len(),
+                    stride: initial.len(),
+                };
+                endpoint.receive(Monotonic(0), &meta, &initial);
+                let mut buffer = Vec::new();
+                let transmit =
+                    endpoint.transmit(Monotonic(0), NonZeroUsize::MIN, &mut buffer);
+                let reply = transmit.expect("a reply").contents;
+                let (_, Some(_)) = ids(reply) else {
                     panic!("not a long header: {reply:02x?}");
                 };
                 let versions = &reply[1 + 4 + 1 + cid::LEN + 1 + cid::LEN..];
@@ -519,7 +529,7 @@ mod tests {
                 let silence = at.checked_sub(last + DELAY).expect("after it arrives");
                 (silence, reason.clone())
             });
-            assert_eq!(reason, ConnectionError::TimedOut);
+            assert_eq!(reason, Error::TimedOut);
             let idle = Duration::from_secs(1);
             assert!(idle <= silence && silence <= idle * 4 / 3, "{silence:?}");
         }
@@ -558,6 +568,7 @@ mod tests {
             let sent = testing::run(1, |shard| {
                 let idle = Span::from_nanos(10 * Span::SECOND.nanos());
                 let mut pair = Pair::new(shard, idle, ROUND_TRIP / 2);
+                pair.dial(tls::public(&testing::SERVER_KEY));
                 pair.run(Duration::from_secs(1));
                 let before = pair.client.sent.len();
                 pair.client.drops = 1;
@@ -599,7 +610,10 @@ mod tests {
                 let (_, reason) = lost(&pair.client).expect("the connection ends");
                 reason.clone()
             });
-            assert_eq!(reason, ConnectionError::Reset);
+            let broken = Error::Broken {
+                reason: "reset by peer".into(),
+            };
+            assert_eq!(reason, broken);
         }
     }
 }
