@@ -6,12 +6,12 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+block = { path = "../block" }
 control = { path = "../control" }
 delivery = { path = "../delivery" }
 types = { path = "../types" }
 
 [dev-dependencies]
-block = { path = "../block" }
 proptest = { workspace = true }
 
 [lints]

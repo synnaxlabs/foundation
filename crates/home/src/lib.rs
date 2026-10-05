@@ -11,3 +11,8 @@ mod index;
     expect(dead_code, reason = "the frame path is the first user")
 )]
 mod order;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the frame path is the first user")
+)]
+mod stored;
