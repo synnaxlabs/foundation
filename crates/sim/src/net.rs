@@ -326,7 +326,7 @@ impl Network {
     fn chance(&mut self, chance: f64) -> bool {
         let draw = u32::try_from(self.rng.next_u64() >> 32)
             .expect("invariant: the high half of a u64 fits u32");
-        f64::from(draw) < chance * 2f64.powi(32)
+        under(draw, chance)
     }
 
     /// The true time of the first arrival.
@@ -391,6 +391,12 @@ impl Network {
         }
         (Poll::Ready(count), Some(waker))
     }
+}
+
+/// Whether `draw`, uniform over `u32`, falls under `chance`, from 0 to 1. A chance of
+/// 0 never holds a draw, and a chance of 1 holds every draw.
+pub(crate) fn under(draw: u32, chance: f64) -> bool {
+    f64::from(draw) < chance * 2f64.powi(32)
 }
 
 /// The source address of the datagrams of `transmit` from a socket of `node` bound

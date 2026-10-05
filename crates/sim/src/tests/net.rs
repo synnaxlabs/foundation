@@ -14,6 +14,7 @@ use env::thread::Handle;
 use types::time::{Monotonic, Span};
 
 use super::{millis, shard, sim};
+use crate::net::{addresses, under};
 use crate::{Config, Error, Sim, link, node};
 
 /// Arrivals: the receiver's clock, the meta, and the bytes of each batch.
@@ -225,12 +226,13 @@ fn jittered(seed: u64) -> Vec<u8> {
         ..link::Config::default()
     };
     let (_sim, log) = exchange(seed, link, numbered(20));
-    let late = after(delay()) + Span::MILLISECOND;
+    let (times, late) = (times(&log), after(delay()) + Span::MILLISECOND);
     assert!(
-        times(&log)
-            .iter()
-            .all(|&time| (after(delay())..=late).contains(&time))
+        times.is_sorted_by(|early, later| early < later),
+        "{times:?}"
     );
+    assert!((after(delay())..=late).contains(&times[0]), "{times:?}");
+    assert!((after(delay())..=late).contains(&times[19]), "{times:?}");
     datagrams(&log).concat()
 }
 
@@ -251,6 +253,13 @@ fn delivered(loss: f64, count: usize) -> usize {
         ..link::Config::default()
     };
     datagrams(&exchange(0, link, numbered(count)).1).len()
+}
+
+#[test]
+fn a_chance_of_zero_holds_no_draw_and_a_chance_of_one_holds_every_draw() {
+    assert!(!under(0, 0.0));
+    assert!(under(u32::MAX, 1.0));
+    assert!(under(u32::MAX / 2, 0.5) && !under(u32::MAX / 2 + 1, 0.5));
 }
 
 #[test]
@@ -665,8 +674,8 @@ fn a_socket_polled_outside_the_sim_panics() {
 fn the_last_node_with_an_address_has_the_last_host() {
     let last = 16_777_213;
     let v6 = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0x00ff, 0xfffe);
-    let addresses = [IpAddr::V4(Ipv4Addr::new(10, 255, 255, 254)), IpAddr::V6(v6)];
-    assert_eq!(crate::net::addresses(last), addresses);
+    let v4 = Ipv4Addr::new(10, 255, 255, 254);
+    assert_eq!(addresses(last), [IpAddr::V4(v4), IpAddr::V6(v6)]);
 }
 
 #[test]
@@ -674,7 +683,7 @@ fn the_last_node_with_an_address_has_the_last_host() {
     expected = "node 16777214 has no address: 10.0.0.0/8 holds 16,777,214 nodes"
 )]
 fn a_node_past_the_last_host_has_no_address() {
-    crate::net::addresses(16_777_214);
+    addresses(16_777_214);
 }
 
 #[test]
