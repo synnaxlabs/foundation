@@ -74,6 +74,25 @@ impl Clock {
         self.steer()
     }
 
+    /// Feeds the clock from the node's time sources, today the OS clock `wall`. Each
+    /// source measures when its adapter decides: the OS clock at once, then a second
+    /// after the last. It never returns; drop the future to stop it.
+    ///
+    /// # Panics
+    ///
+    /// When the clock has a source already, because `run` owns every source. On a
+    /// thread that `env` did not start. When the OS bound is negative, or the
+    /// monotonic clock goes back.
+    pub async fn run(mut self, wall: env::wall::Wall) -> ! {
+        assert!(self.sources.is_empty(), "a source was added before run");
+        let mut wall = source::Wall::new(wall, self.monotonic.clone());
+        let source = self.add();
+        loop {
+            let measurement = wall.next().await;
+            self.push(source, measurement);
+        }
+    }
+
     fn steer(&mut self) -> Status {
         let now = self.monotonic.now();
         let estimate = combine(now, DRIFT, self.sources.values());

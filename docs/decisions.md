@@ -618,7 +618,10 @@ How to read this record:
   number and one unit with no space (`200GiB`), and a decimal fraction only when it
   gives whole bytes (`1.5GiB`). Its type lives in `types` beside `time::Span`, and the
   `document` reader is an adapter over it. The person decided on 2026-10-05 ("A yes I
-  approve", #479).
+  approve", #479). The units are `B`, `KiB`, `MiB`, `GiB`, and `TiB`, with exact case:
+  `GB` and `Gb` are errors, because they mean other sizes. Input takes no sign. Output
+  uses the largest unit that divides the size, with no fraction: `1.5GiB` is written
+  `1536MiB`, and zero is `0B` (#505).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -705,6 +708,18 @@ How to read this record:
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
   suspend lost: mesh time would fall behind by the time asleep, outside its bound.
   Amends ENV SEAMS. The person decided on 2026-10-05 ("Count time asleep"), #144.
+- **CLOCK RUN (2026-10-05)** Within TIME ADAPTERS. `clock::Clock::run` runs all time
+  sources of one clock in one task on the clock's shard. `node` builds the source table
+  and passes it to `run`. Today the table is the OS clock. Each adapter keeps its own
+  loop and decides when it measures: the OS clock at once, then one second after the
+  last measurement, so once after a suspend. `run` adds a source for each adapter and
+  pushes each measurement. `run` owns every source, so it panics on a clock that has a
+  source already: nothing could push to that source. `run` does not give out each
+  `Status` yet (#598). Lost: a task for each adapter with a shared clock
+  (`Rc<RefCell>` or a queue), because then the caller shares the clock; the loop in
+  `node`, because the peer exchange adds and removes sources, and `node` would pass its
+  events through. Decided by the `time` builder (#144, #600). The coordinator approved
+  it on #144 and #600.
 
 ### 1.7 Transport
 
@@ -910,9 +925,9 @@ How to read this record:
   heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
   log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
   be past the log of a node that is behind. An `Append` with an entry whose term is
-  above the message's term is `Error::TermBehindLog`: no leader sends one, and a
-  follower that wrote it could not restart. The conformance oracle changed to match; the
-  person decided on 2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  above the message's term is `Error::TermBehindLog`: no leader sends one, so the
+  sender is faulty. The conformance oracle changed to match; the person decided on
+  2026-10-05 ("a is fine", #232). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -2338,7 +2353,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
