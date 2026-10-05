@@ -107,25 +107,23 @@ impl<'a> Parser<'a> {
 
     fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
         let labels = self.labels()?;
-        let depth = enter(depth).ok_or(Error::TooDeep { span: keyword.span })?;
-        self.take()?;
-        let body = if self.token.kind == lex::Kind::Newline {
-            let body = self.body(depth)?;
-            if self.token.kind != lex::Kind::CloseBrace {
-                return Err(self.syntax(Expected::Item));
+        let (body, span) = self.level(keyword.span, depth, |parser, depth| {
+            if parser.token.kind != lex::Kind::Newline {
+                return parser.one_line(depth);
             }
-            body
-        } else {
-            self.one_line(depth)?
-        };
-        let end = self.take()?.span;
+            let body = parser.body(depth)?;
+            if parser.token.kind != lex::Kind::CloseBrace {
+                return Err(parser.syntax(Expected::Item));
+            }
+            Ok(body)
+        })?;
         self.end_line()?;
         Ok(Block {
             keyword: keyword.text.into(),
             keyword_span: Some(keyword.span),
             labels,
             body,
-            span: Some(join(keyword.span, end)),
+            span: Some(span),
         })
     }
 
@@ -196,8 +194,11 @@ impl<'a> Parser<'a> {
 
     /// Reads a value that starts with no HCL form.
     fn term(&mut self, depth: usize) -> Result<Option<Value>, Error> {
-        if self.token.kind == lex::Kind::End {
-            return Err(self.syntax(Expected::Value));
+        match self.token.kind {
+            lex::Kind::End => return Err(self.syntax(Expected::Value)),
+            lex::Kind::OpenBracket => return self.list(depth).map(Some),
+            lex::Kind::OpenBrace => return self.object(depth).map(Some),
+            _ => {}
         }
         let token = self.take()?;
         let kind = match token.kind {
@@ -212,8 +213,6 @@ impl<'a> Parser<'a> {
             lex::Kind::String(text) | lex::Kind::Heredoc(text) => {
                 value::Kind::String(text)
             }
-            lex::Kind::OpenBracket => return self.list(&token, depth).map(Some),
-            lex::Kind::OpenBrace => return self.object(&token, depth).map(Some),
             _ => {
                 return Err(Error::Syntax {
                     span: token.span,
@@ -367,40 +366,60 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn list(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
-        self.refuse_for()?;
-        let (items, close) =
-            self.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)?;
+    fn list(&mut self, depth: usize) -> Result<Value, Error> {
+        let (items, span) = self.level(self.token.span, depth, |parser, depth| {
+            parser.refuse_for()?;
+            parser.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)
+        })?;
         Ok(Value {
             kind: value::Kind::List(items),
-            span: Some(join(open.span, close.span)),
+            span: Some(span),
         })
     }
 
-    fn object(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
-        let mut attributes = Vec::new();
-        let close = self.entries(&mut attributes, depth);
-        let map = self.map(attributes);
+    fn object(&mut self, depth: usize) -> Result<Value, Error> {
+        let (map, span) = self.level(self.token.span, depth, |parser, depth| {
+            let mut attributes = Vec::new();
+            let entries = parser.entries(&mut attributes, depth);
+            let map = parser.map(attributes);
+            entries.map(|()| map)
+        })?;
         Ok(Value {
             kind: value::Kind::Map(map),
-            span: Some(join(open.span, close?.span)),
+            span: Some(span),
         })
     }
 
-    /// Reads the entries of an object after its `{`, and returns the `}`.
+    /// Reads one level of nesting that starts at `start`, the keyword, function
+    /// name, or open bracket before the open bracket: takes the open bracket, reads
+    /// the inside with `inner` at the depth inside, and takes the close. Returns what
+    /// `inner` read and the span from `start` to the close, or [`Error::TooDeep`] at
+    /// `start` when the level is past [`DEPTH_MAX`].
+    fn level<T>(
+        &mut self,
+        start: Span,
+        depth: usize,
+        inner: impl FnOnce(&mut Self, usize) -> Result<T, Error>,
+    ) -> Result<(T, Span), Error> {
+        let depth = enter(depth).ok_or(Error::TooDeep { span: start })?;
+        self.take()?;
+        let inside = inner(self, depth)?;
+        let close = self.take()?;
+        Ok((inside, join(start, close.span)))
+    }
+
+    /// Reads the entries of an object after its `{`, and leaves the `}`.
     fn entries(
         &mut self,
         attributes: &mut Vec<Attribute>,
         depth: usize,
-    ) -> Result<Token<'a>, Error> {
+    ) -> Result<(), Error> {
         self.refuse_for()?;
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
             self.skip_newlines()?;
             match self.token.kind {
-                lex::Kind::CloseBrace => return self.take(),
+                lex::Kind::CloseBrace => return Ok(()),
                 _ => {
                     if let Some(form) = self.leading_form() {
                         self.refuse(form, Ends::Line)?;
@@ -425,7 +444,7 @@ impl<'a> Parser<'a> {
                 lex::Kind::Comma | lex::Kind::Newline => {
                     self.take()?;
                 }
-                lex::Kind::CloseBrace => return self.take(),
+                lex::Kind::CloseBrace => return Ok(()),
                 _ => return Err(self.syntax(Expected::ObjectEnd)),
             }
         }
@@ -465,43 +484,40 @@ impl<'a> Parser<'a> {
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep {
-            span: function.span,
+        let (arguments, span) = self.level(function.span, depth, |parser, depth| {
+            parser.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)
         })?;
-        self.take()?;
-        let (arguments, close) =
-            self.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)?;
         Ok(Value {
             kind: value::Kind::Call(Call {
                 function: function.text.into(),
                 function_span: Some(function.span),
                 arguments,
             }),
-            span: Some(join(function.span, close.span)),
+            span: Some(span),
         })
     }
 
-    /// Reads values split by `,` up to `close`, and returns them and the `close`
-    /// token. Any other token after a value is `expected`.
+    /// Reads values split by `,` up to `close`, and leaves the `close`. Any other
+    /// token after a value is `expected`.
     fn values(
         &mut self,
         close: &lex::Kind,
         expected: Expected,
         depth: usize,
-    ) -> Result<(Vec<Value>, Token<'a>), Error> {
+    ) -> Result<Vec<Value>, Error> {
         let mut values = Vec::new();
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
             self.skip_newlines()?;
             if self.token.kind == *close {
-                return Ok((values, self.take()?));
+                return Ok(values);
             }
             values.extend(self.value(depth, Ends::Comma)?);
             match &self.token.kind {
                 lex::Kind::Comma => {
                     self.take()?;
                 }
-                kind if kind == close => return Ok((values, self.take()?)),
+                kind if kind == close => return Ok(values),
                 _ => return Err(self.syntax(expected)),
             }
         }
