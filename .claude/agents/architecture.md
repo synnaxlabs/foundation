@@ -28,6 +28,13 @@ Check:
 - No defense in depth: a second guard for a bug fixed elsewhere, or an error skipped
   to hide a defect.
 - Public surfaces that changed without an `interface` issue.
+- Complexity: does each new public item, field, and parameter earn its place? Callers
+  that repeat the same steps mean the surface is wrong, not that a helper is missing.
+- Structural avoidance: a workaround for a deeper problem. Name the problem.
+- New patterns: a trait with one implementation, a registry, or new machinery where an
+  existing mechanism already covers the case.
+- Shape decisions: read the PR's "Shape decisions" section. Challenge any choice where
+  a rejected alternative is the better architecture.
 
 For each finding: file and line, the rule, why it matters here, and the fix. Most
 severe first. Report nothing you cannot point to in the code.

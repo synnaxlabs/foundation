@@ -312,6 +312,15 @@ How to read this record:
   `Range`. Supersedes: crate name `time`.
 - **R9 keep list** `Stamp - Stamp = Span`; one format and parse grammar for spans,
   ranges, and ns ISO stamps.
+- **TIME TEXT (#3)** A span is one number and one unit (`ns`, `us`, `ms`, `s`, `m`, `h`,
+  `d`). Output uses the largest of `d`, `h`, `m` that divides the span, else the largest
+  of `s`, `ms`, `us`, `ns` not more than the span, with a decimal fraction: `3d`, `90s`,
+  `1.5s`, `250us`, `0s`. Input takes a decimal fraction and a leading `-` and rejects a
+  value that is not a whole number of nanoseconds. A stamp is RFC 3339: output is UTC
+  with nine fraction digits; input needs an offset, takes up to nine fraction digits,
+  and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
+  never ends before it starts (`Range::new` returns `None`), so its text always round
+  trips; input rejects an end before the start.
 
 ### 1.7 Transport
 
@@ -569,15 +578,21 @@ How to read this record:
   Sessions message each other with `SendMessage`, but records live in the repo. Builders
   run under `/goal`; the coordinator runs `/loop /coordinate`. Details:
   `docs/coordination.md`.
-- **MODELS** Fable 5.1 for the `memory` and `consensus` builders and for reviewers of
-  `raft`, `mesh`, `block`, `ring`, lock-free code, and wake protocols. Opus 5.5 for the
-  coordinator, the other builders, and other reviewers. Sonnet 5.5 for mechanical work and the code quality and drift crew
-  agents. Sessions compact at 300k tokens of context.
-- **C9b** Work loop: a planning session splits a phase into tasks that own crates; one
-  agent per task in its own worktree; machine gates (build, lints, layer and stand-alone
-  checks, unit and property tests, thousands of simulation runs, short fuzz, the 5%
-  benchmark gate, mutation testing on the diff); two fresh adversarial reviewers; a
-  person reads and merges; cleanup agents follow.
+- **MODELS** Fable 5.1 for the `memory`, `consensus`, and `storage` builders and for
+  reviewers of `raft`, `mesh`, `block`, `ring`, `buffer`, crash recovery, lock-free
+  code, and wake protocols. Opus 5.5 for the coordinator, the other builders, and other
+  reviewers. Sonnet 5.5 for mechanical work and the code quality and drift crew agents.
+  Sessions compact at 300k tokens of context.
+- **NINE BUILDERS (2026-10-04)** The person approved five more builders (advisor
+  brief): `write-path`, `storage` (Fable), `time`, `config`, and `network`. Builders
+  file the issues for their own crates; the coordinator keeps interfaces, decisions,
+  and the merge queue. Ownership: `docs/coordination.md`.
+- **C9b** Work loop: a planning session splits a phase into tasks that own crates
+  (amended by NINE BUILDERS: each builder splits its own phase); one agent per task in
+  its own worktree; machine gates (build, lints, layer and stand-alone checks, unit and
+  property tests, thousands of simulation runs, short fuzz, the 5% benchmark gate,
+  mutation testing on the diff); two fresh adversarial reviewers; a person reads and
+  merges; cleanup agents follow.
 - **C9b2** A quality crew of six single-job agents (code quality, tests, architecture,
   performance, failure triage, drift), each with a person-owned rulebook. One command
   starts the daily run.
