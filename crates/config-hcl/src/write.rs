@@ -23,7 +23,7 @@ pub(crate) enum After {
     /// A `,`, which counts in the width of the line.
     Comma,
     /// A comment, or the end of a text with no line end, so the value is not a
-    /// heredoc.
+    /// heredoc. A comment does not count in the width of the line.
     Other,
 }
 
