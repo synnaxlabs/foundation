@@ -1,6 +1,9 @@
 //! Time values. Every timestamp is in mesh time: nanoseconds since the Unix epoch, UTC.
 
+mod calendar;
+
 use std::fmt;
+use std::iter;
 use std::ops::{Add, Sub};
 use std::str::FromStr;
 
@@ -44,6 +47,16 @@ impl Stamp {
             None => None,
         }
     }
+
+    /// The span from `earlier` to this stamp, or `None` when it does not fit in a
+    /// [`Span`]. Use it for values from outside.
+    #[must_use]
+    pub const fn checked_since(self, earlier: Self) -> Option<Span> {
+        match self.0.checked_sub(earlier.0) {
+            Some(n) => Some(Span(n)),
+            None => None,
+        }
+    }
 }
 
 impl Add<Span> for Stamp {
@@ -53,7 +66,8 @@ impl Add<Span> for Stamp {
     ///
     /// On overflow. Values from outside use [`Stamp::checked_add`].
     fn add(self, span: Span) -> Self {
-        self.checked_add(span).expect("stamp overflow")
+        self.checked_add(span)
+            .unwrap_or_else(|| panic!("stamp overflow: {} ns + {} ns", self.0, span.0))
     }
 }
 
@@ -64,7 +78,8 @@ impl Sub<Span> for Stamp {
     ///
     /// On overflow. Values from outside use [`Stamp::checked_sub`].
     fn sub(self, span: Span) -> Self {
-        self.checked_sub(span).expect("stamp overflow")
+        self.checked_sub(span)
+            .unwrap_or_else(|| panic!("stamp overflow: {} ns - {} ns", self.0, span.0))
     }
 }
 
@@ -73,9 +88,10 @@ impl Sub for Stamp {
 
     /// # Panics
     ///
-    /// On overflow.
+    /// On overflow. Values from outside use [`Stamp::checked_since`].
     fn sub(self, other: Self) -> Span {
-        Span(self.0.checked_sub(other.0).expect("span overflow"))
+        self.checked_since(other)
+            .unwrap_or_else(|| panic!("span overflow: {} ns - {} ns", self.0, other.0))
     }
 }
 
@@ -88,7 +104,7 @@ impl fmt::Display for Stamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let seconds = self.0.div_euclid(NANOS_PER_SECOND);
         let nanos = self.0.rem_euclid(NANOS_PER_SECOND);
-        let (year, month, day) = civil(seconds.div_euclid(SECONDS_PER_DAY));
+        let (year, month, day) = calendar::date(seconds.div_euclid(SECONDS_PER_DAY));
         let of_day = seconds.rem_euclid(SECONDS_PER_DAY);
         write!(
             f,
@@ -122,17 +138,11 @@ impl FromStr for Stamp {
         let minute = r.digits(2).ok_or_else(syntax)?;
         r.byte(b":").ok_or_else(syntax)?;
         let second = r.digits(2).ok_or_else(syntax)?;
-        let mut nanos = 0;
-        if r.byte(b".").is_some() {
-            let len = r.0.iter().take_while(|b| b.is_ascii_digit()).count();
-            if !(1..=9).contains(&len) {
-                return Err(syntax());
-            }
-            nanos = r.digits(len).ok_or_else(syntax)?;
-            for _ in len..9 {
-                nanos *= 10;
-            }
-        }
+        let nanos = if r.byte(b".").is_some() {
+            r.fraction().ok_or_else(syntax)?
+        } else {
+            0
+        };
         let offset = match r.byte(b"Zz+-").ok_or_else(syntax)? {
             b'Z' | b'z' => 0,
             sign => {
@@ -144,14 +154,20 @@ impl FromStr for Stamp {
             }
         };
         let valid = (1..=12).contains(&month)
-            && (1..=days_in_month(year, month)).contains(&day)
+            && (1..=calendar::days_in_month(year, month)).contains(&day)
             && hour < 24
             && minute < 60
             && second < 60;
-        if !r.0.is_empty() || !valid {
+        if !r.0.is_empty() {
             return Err(syntax());
         }
-        let seconds = days(year, month, day) * SECONDS_PER_DAY
+        if !valid {
+            return Err(ParseError {
+                input: s.into(),
+                expected: "a date and time that exist, with seconds from 00 to 59",
+            });
+        }
+        let seconds = calendar::days(year, month, day) * SECONDS_PER_DAY
             + hour * 3600
             + minute * 60
             + second
@@ -187,6 +203,18 @@ impl Reader<'_> {
         Some(value)
     }
 
+    /// Reads one to nine digits as a fraction of a second, in nanoseconds.
+    fn fraction(&mut self) -> Option<i64> {
+        let len = self.0.iter().take_while(|b| b.is_ascii_digit()).count();
+        if !(1..=9).contains(&len) {
+            return None;
+        }
+        let (digits, rest) = self.0.split_at(len);
+        self.0 = rest;
+        let padded = digits.iter().chain(iter::repeat(&b'0')).take(9);
+        Some(padded.fold(0, |n, b| n * 10 + i64::from(b - b'0')))
+    }
+
     /// Reads one byte when it is one of `allowed`.
     fn byte(&mut self, allowed: &[u8]) -> Option<u8> {
         let (&b, rest) = self.0.split_first()?;
@@ -196,49 +224,6 @@ impl Reader<'_> {
         self.0 = rest;
         Some(b)
     }
-}
-
-fn leap(year: i64) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-}
-
-fn days_in_month(year: i64, month: i64) -> i64 {
-    match month {
-        2 if leap(year) => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    }
-}
-
-/// Days since the Unix epoch of a proleptic Gregorian date.
-fn days(year: i64, month: i64, day: i64) -> i64 {
-    // Years start in March so that the leap day is last.
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let of_era = year.rem_euclid(400);
-    let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    let of_era_days = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
-    era * 146_097 + of_era_days - 719_468
-}
-
-/// The proleptic Gregorian date of a day since the Unix epoch: year, month, day.
-fn civil(days: i64) -> (i64, i64, i64) {
-    let days = days + 719_468;
-    let era = days.div_euclid(146_097);
-    let of_era = days.rem_euclid(146_097);
-    let year_of_era =
-        (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
-    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let march_month = (5 * of_year + 2) / 153;
-    let day = of_year - (153 * march_month + 2) / 5 + 1;
-    let month = if march_month < 10 {
-        march_month + 3
-    } else {
-        march_month - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    (year, month, day)
 }
 
 /// A length of time in nanoseconds. It may be negative.
@@ -366,9 +351,9 @@ impl FromStr for Span {
             return Err(syntax());
         }
         let fraction = fraction.trim_end_matches('0');
-        // A fraction with more significant digits than this is never a whole number of
-        // nanoseconds, since no unit has more than 16 factors of 2 or 5.
-        if fraction.len() > 20 {
+        // The last digit is not 0, so the mantissa lacks factors of 2 or of 5, and no
+        // unit has more than 16 of either. The bound also keeps `scale` in `u128`.
+        if fraction.len() > 16 {
             return Err(error("a whole number of nanoseconds"));
         }
         let range = || error("a span that fits in 64-bit nanoseconds");
@@ -392,16 +377,38 @@ impl FromStr for Span {
     }
 }
 
-/// A half-open range of mesh time: from `start`, up to but not including `end`.
+/// A half-open range of mesh time: from `start`, up to but not including `end`. The
+/// end is never before the start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Range {
-    /// The first instant in the range.
-    pub start: Stamp,
-    /// The first instant after the range.
-    pub end: Stamp,
+    start: Stamp,
+    end: Stamp,
 }
 
 impl Range {
+    /// Makes the range from `start` up to `end`, or returns `None` when `end` is
+    /// before `start`. When they are equal, the range is empty.
+    #[must_use]
+    pub const fn new(start: Stamp, end: Stamp) -> Option<Self> {
+        if end.0 < start.0 {
+            None
+        } else {
+            Some(Self { start, end })
+        }
+    }
+
+    /// The first instant in the range.
+    #[must_use]
+    pub const fn start(self) -> Stamp {
+        self.start
+    }
+
+    /// The first instant after the range.
+    #[must_use]
+    pub const fn end(self) -> Stamp {
+        self.end
+    }
+
     /// Reports whether `stamp` is in the range.
     #[must_use]
     pub fn contains(&self, stamp: Stamp) -> bool {
@@ -429,14 +436,8 @@ impl FromStr for Range {
         let (start, end) = s
             .split_once('/')
             .ok_or_else(|| error("a range written <start>/<end>"))?;
-        let range = Self {
-            start: start.parse()?,
-            end: end.parse()?,
-        };
-        if range.end < range.start {
-            return Err(error("a range whose end is not before its start"));
-        }
-        Ok(range)
+        Self::new(start.parse()?, end.parse()?)
+            .ok_or_else(|| error("a range whose end is not before its start"))
     }
 }
 
@@ -525,6 +526,7 @@ mod tests {
                                 fraction digits, such as 2026-10-04T12:00:00Z";
     const STAMP_RANGE: &str = "a time from 1677-09-21T00:12:43.145224192Z to \
                                2262-04-11T23:47:16.854775807Z";
+    const STAMP_DATE: &str = "a date and time that exist, with seconds from 00 to 59";
     const SPAN_SYNTAX: &str = "a number and a unit, such as 250us, 1.5s, or 3d";
     const SPAN_EXACT: &str = "a whole number of nanoseconds";
     const SPAN_RANGE: &str = "a span that fits in 64-bit nanoseconds";
@@ -552,6 +554,7 @@ mod tests {
                     (Stamp::EPOCH, "1970-01-01T00:00:00.000000000Z"),
                     (seconds(1_791_115_200), "2026-10-04T12:00:00.000000000Z"),
                     (seconds(1_709_251_199), "2024-02-29T23:59:59.000000000Z"),
+                    (seconds(951_782_400), "2000-02-29T00:00:00.000000000Z"),
                     (seconds(951_868_800), "2000-03-01T00:00:00.000000000Z"),
                     (Stamp::from_nanos(-1), "1969-12-31T23:59:59.999999999Z"),
                     (
@@ -645,6 +648,9 @@ mod tests {
                     "2026-13-01T00:00:00Z",
                     "2026-00-01T00:00:00Z",
                     "2026-04-31T00:00:00Z",
+                    "2026-06-31T00:00:00Z",
+                    "2026-09-31T00:00:00Z",
+                    "2026-11-31T00:00:00Z",
                     "2026-01-00T00:00:00Z",
                     "2025-02-29T00:00:00Z",
                     "2100-02-29T00:00:00Z",
@@ -652,7 +658,7 @@ mod tests {
                     "2026-10-04T12:60:00Z",
                     "2026-10-04T12:00:60Z",
                 ] {
-                    assert_eq!(text.parse::<Stamp>(), Err(error(text, STAMP_SYNTAX)));
+                    assert_eq!(text.parse::<Stamp>(), Err(error(text, STAMP_DATE)));
                 }
                 assert_eq!("2000-02-29T00:00:00Z".parse(), Ok(seconds(951_782_400)));
                 assert_eq!("2024-02-29T00:00:00Z".parse(), Ok(seconds(1_709_164_800)));
@@ -662,9 +668,17 @@ mod tests {
             fn shows_the_input_and_the_expected_form() {
                 assert_eq!(
                     "noon".parse::<Stamp>().unwrap_err().to_string(),
-                    "cannot read \"noon\": expected an RFC 3339 time with an offset and \
-                     up to nine fraction digits, such as 2026-10-04T12:00:00Z"
+                    "cannot read \"noon\": expected an RFC 3339 time with an offset \
+                     and up to nine fraction digits, such as 2026-10-04T12:00:00Z"
                 );
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn stamps_round_trip(nanos in any::<i64>()) {
+                let stamp = Stamp::from_nanos(nanos);
+                prop_assert_eq!(stamp.to_string().parse(), Ok(stamp));
             }
         }
 
@@ -685,6 +699,22 @@ mod tests {
             }
 
             #[test]
+            fn checked_since_returns_none_past_the_span_limits() {
+                let max = Stamp::from_nanos(i64::MAX);
+                let min = Stamp::from_nanos(i64::MIN);
+                assert_eq!(
+                    seconds(10).checked_since(seconds(4)),
+                    Some(seconds(6) - Stamp::EPOCH)
+                );
+                assert_eq!(
+                    max.checked_since(Stamp::EPOCH),
+                    Some(Span::from_nanos(i64::MAX))
+                );
+                assert_eq!(max.checked_since(Stamp::from_nanos(-1)), None);
+                assert_eq!(min.checked_since(Stamp::from_nanos(1)), None);
+            }
+
+            #[test]
             fn checked_math_returns_none_on_overflow() {
                 let max = Stamp::from_nanos(i64::MAX);
                 let min = Stamp::from_nanos(i64::MIN);
@@ -697,19 +727,19 @@ mod tests {
             }
 
             #[test]
-            #[should_panic(expected = "stamp overflow")]
+            #[should_panic(expected = "stamp overflow: 9223372036854775807 ns + 1 ns")]
             fn adding_past_the_limit_panics() {
                 let _ = Stamp::from_nanos(i64::MAX) + Span::NANOSECOND;
             }
 
             #[test]
-            #[should_panic(expected = "stamp overflow")]
+            #[should_panic(expected = "stamp overflow: -9223372036854775808 ns - 1 ns")]
             fn subtracting_past_the_limit_panics() {
                 let _ = Stamp::from_nanos(i64::MIN) - Span::NANOSECOND;
             }
 
             #[test]
-            #[should_panic(expected = "span overflow")]
+            #[should_panic(expected = "span overflow: 9223372036854775807 ns - -1 ns")]
             fn a_difference_past_the_limit_panics() {
                 let _ = Stamp::from_nanos(i64::MAX) - Stamp::from_nanos(-1);
             }
@@ -718,6 +748,14 @@ mod tests {
 
     mod span {
         use super::*;
+
+        proptest! {
+            #[test]
+            fn spans_round_trip(nanos in any::<i64>()) {
+                let span = Span::from_nanos(nanos);
+                prop_assert_eq!(span.to_string().parse(), Ok(span));
+            }
+        }
 
         #[test]
         fn writes_the_largest_exact_unit() {
@@ -780,7 +818,8 @@ mod tests {
 
         #[test]
         fn rejects_fractions_of_a_nanosecond() {
-            for text in ["0.5ns", "1.0000000001s", "0.000000000000000000001d"] {
+            let long = format!("0.{}1s", "0".repeat(38));
+            for text in ["0.5ns", "1.0000000001s", "0.000000000000000000001d", &long] {
                 assert_eq!(
                     text.parse::<Span>(),
                     Err(error(text, SPAN_EXACT)),
@@ -809,12 +848,13 @@ mod tests {
     mod range {
         use super::*;
 
+        fn range(start: Stamp, end: Stamp) -> Range {
+            Range::new(start, end).unwrap()
+        }
+
         #[test]
         fn is_half_open() {
-            let range = Range {
-                start: seconds(1),
-                end: seconds(2),
-            };
+            let range = range(seconds(1), seconds(2));
             assert!(!range.contains(seconds(1) - Span::NANOSECOND));
             assert!(range.contains(seconds(1)));
             assert!(range.contains(seconds(2) - Span::NANOSECOND));
@@ -822,11 +862,20 @@ mod tests {
         }
 
         #[test]
+        fn holds_its_start_and_end() {
+            let range = range(seconds(1), seconds(2));
+            assert_eq!((range.start(), range.end()), (seconds(1), seconds(2)));
+        }
+
+        #[test]
+        fn is_never_reversed() {
+            assert_eq!(Range::new(seconds(2), seconds(1)), None);
+            assert!(!range(seconds(1), seconds(1)).contains(seconds(1)));
+        }
+
+        #[test]
         fn writes_an_iso_interval() {
-            let range = Range {
-                start: seconds(1_791_115_200),
-                end: seconds(1_791_118_800),
-            };
+            let range = range(seconds(1_791_115_200), seconds(1_791_118_800));
             let text = "2026-10-04T12:00:00.000000000Z/2026-10-04T13:00:00.000000000Z";
             assert_eq!(range.to_string(), text);
             assert_eq!(text.parse(), Ok(range));
@@ -836,13 +885,7 @@ mod tests {
         fn reads_an_empty_range() {
             let text = "2026-10-04T12:00:00Z/2026-10-04T12:00:00Z";
             let noon = seconds(1_791_115_200);
-            assert_eq!(
-                text.parse(),
-                Ok(Range {
-                    start: noon,
-                    end: noon
-                })
-            );
+            assert_eq!(text.parse(), Ok(range(noon, noon)));
         }
 
         #[test]
@@ -865,49 +908,21 @@ mod tests {
 
         #[test]
         fn returns_the_error_of_the_stamp_that_does_not_read() {
-            let text = "2026-10-04T12:00:00Z/later";
-            assert_eq!(text.parse::<Range>(), Err(error("later", STAMP_SYNTAX)));
-        }
-    }
-
-    /// The day after `(year, month, day)` by the calendar rules, counted by hand.
-    fn next_day((year, month, day): (i64, i64, i64)) -> (i64, i64, i64) {
-        if day < days_in_month(year, month) {
-            (year, month, day + 1)
-        } else if month < 12 {
-            (year, month + 1, 1)
-        } else {
-            (year + 1, 1, 1)
-        }
-    }
-
-    proptest! {
-        #[test]
-        fn stamps_round_trip(nanos in any::<i64>()) {
-            let stamp = Stamp::from_nanos(nanos);
-            prop_assert_eq!(stamp.to_string().parse(), Ok(stamp));
+            for (text, stamp) in [
+                ("2026-10-04T12:00:00Z/later", "later"),
+                ("later/2026-10-04T12:00:00Z", "later"),
+            ] {
+                assert_eq!(text.parse::<Range>(), Err(error(stamp, STAMP_SYNTAX)));
+            }
         }
 
-        #[test]
-        fn spans_round_trip(nanos in any::<i64>()) {
-            let span = Span::from_nanos(nanos);
-            prop_assert_eq!(span.to_string().parse(), Ok(span));
-        }
-
-        #[test]
-        fn ranges_round_trip(a in any::<i64>(), b in any::<i64>()) {
-            let range = Range {
-                start: Stamp::from_nanos(a.min(b)),
-                end: Stamp::from_nanos(a.max(b)),
-            };
-            prop_assert_eq!(range.to_string().parse(), Ok(range));
-        }
-
-        #[test]
-        fn dates_follow_the_calendar(day in -106_752_i64..106_751) {
-            prop_assert_eq!(civil(day + 1), next_day(civil(day)));
-            let (year, month, d) = civil(day);
-            prop_assert_eq!(days(year, month, d), day);
+        proptest! {
+            #[test]
+            fn ranges_round_trip(a in any::<i64>(), b in any::<i64>()) {
+                let (start, end) = (a.min(b), a.max(b));
+                let range = range(Stamp::from_nanos(start), Stamp::from_nanos(end));
+                prop_assert_eq!(range.to_string().parse(), Ok(range));
+            }
         }
     }
 }
