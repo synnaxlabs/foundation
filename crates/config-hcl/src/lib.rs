@@ -14,6 +14,7 @@
 mod arbitrary;
 mod lex;
 mod parse;
+mod update;
 mod write;
 
 use std::fmt;
@@ -24,6 +25,7 @@ use document::encoding::TooDeep;
 use types::name::{self, Name};
 
 pub use parse::read;
+pub use update::update;
 pub use write::write;
 
 /// A problem in HCL text, or a part of a Document that HCL text cannot hold.
