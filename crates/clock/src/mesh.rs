@@ -21,8 +21,8 @@ pub struct Clock {
 
 impl Clock {
     /// Makes a clock with no sources, and a reader for it. Mesh time runs on
-    /// `monotonic`, the node's monotonic clock. Readers have no time until the first
-    /// measurement.
+    /// `monotonic`, the node's monotonic clock. Readers have no time until a majority
+    /// of the sources first agree.
     #[must_use]
     pub fn new(monotonic: env::clock::Clock) -> (Self, Reader) {
         let (cell, reader) = ring::latest::new([0; WORDS]);
@@ -78,7 +78,7 @@ impl Clock {
         let now = self.monotonic.now();
         let estimate = combine(now, DRIFT, self.sources.values());
         let (old, estimate) = match (self.slew, estimate) {
-            (None, Err(_)) => return Status::Unsynced,
+            (None, Err(e)) => return Status::Unsynced(e),
             (Some(slew), Err(e)) => return Status::Holdover(slew.at(now, DRIFT), e),
             (old, Ok(estimate)) => (old, estimate),
         };
@@ -100,10 +100,11 @@ impl Clock {
 /// What a clock follows after a change to its sources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
-    /// No source has a measurement yet, so readers have no time.
-    Unsynced,
-    /// A majority of the sources with measurements agrees. Holds mesh time now, as an
-    /// offset from the monotonic clock with its error. The error can be unknown
+    /// No majority of the sources has agreed yet, so readers have no time. A source
+    /// with no measurement counts against a majority. Holds why.
+    Unsynced(combine::Error),
+    /// A majority of the sources agrees. Holds mesh time now, as an offset from the
+    /// monotonic clock with its error. The error can be unknown
     /// ([`Measurement::unknown`]).
     Synced(Measurement),
     /// No majority agrees now, or no source is left. Mesh time keeps its slew, and its
@@ -122,7 +123,7 @@ impl Reader {
     /// Mesh time now. The true time is inside the interval. Its midpoint is the
     /// clock's best guess, and it never goes back: a call that starts after another
     /// returns gives a midpoint no earlier, while both edges fit a stamp (to 2162 with
-    /// an unknown error). `None` until the first measurement.
+    /// an unknown error). `None` until a majority of the clock's sources first agree.
     #[must_use]
     pub fn now(&self) -> Option<Interval> {
         self.cell.read(|words| {

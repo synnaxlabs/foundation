@@ -58,13 +58,48 @@ fn read(node: &Node, reader: &Reader) -> Option<Measurement> {
 }
 
 #[test]
-fn has_no_time_before_the_first_measurement() {
+fn has_no_time_with_no_sources() {
     let (_sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
     assert_eq!(reader.now(), None);
     let source = clock.add();
-    assert_eq!(clock.remove(source), Status::Unsynced);
+    assert_eq!(clock.remove(source), Status::Unsynced(Error::NoSources));
     assert_eq!(reader.now(), None);
+}
+
+#[test]
+fn has_no_time_until_a_majority_agrees() {
+    let (_sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    let [a, b, _] = [clock.add(), clock.add(), clock.add()];
+    let m = measure(&node, Span::HOUR, ms(2));
+    let alone = Error::NoMajority {
+        sources: 3,
+        agreeing: 1,
+        empty: 2,
+    };
+    assert_eq!(clock.push(a, m), Status::Unsynced(alone));
+    assert_eq!(reader.now(), None);
+    assert_eq!(clock.push(b, m), Status::Synced(m));
+    assert_eq!(reader.now(), Some(m.interval()));
+}
+
+#[test]
+fn a_source_that_pushes_first_cannot_set_mesh_time() {
+    let (_sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    let [liar, a, b] = [clock.add(), clock.add(), clock.add()];
+    let _ = clock.push(liar, measure(&node, Span::HOUR, ms(1)));
+    let truth = measure(&node, Span::ZERO, ms(1));
+    let split = Error::NoMajority {
+        sources: 3,
+        agreeing: 1,
+        empty: 1,
+    };
+    assert_eq!(clock.push(a, truth), Status::Unsynced(split));
+    assert_eq!(reader.now(), None);
+    assert_eq!(clock.push(b, truth), Status::Synced(truth));
+    assert_eq!(reader.now(), Some(truth.interval()));
 }
 
 #[test]
@@ -93,11 +128,15 @@ fn holds_over_while_sources_split_then_follows_the_next_majority() {
     let (mut sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
     let [a, b, c] = [clock.add(), clock.add(), clock.add()];
-    for source in [a, b, c] {
-        assert_eq!(
-            clock.push(source, measure(&node, Span::ZERO, ms(1))),
-            synced(&node, Span::ZERO, ms(1))
-        );
+    let first = measure(&node, Span::ZERO, ms(1));
+    let alone = Error::NoMajority {
+        sources: 3,
+        agreeing: 1,
+        empty: 2,
+    };
+    assert_eq!(clock.push(a, first), Status::Unsynced(alone));
+    for source in [b, c] {
+        assert_eq!(clock.push(source, first), Status::Synced(first));
     }
     sim.run_for(Span::SECOND).expect("the run ends");
     // One second of drift adds 200 us to the error of each source.
@@ -108,6 +147,7 @@ fn holds_over_while_sources_split_then_follows_the_next_majority() {
     let split = Error::NoMajority {
         sources: 3,
         agreeing: 1,
+        empty: 0,
     };
     assert_eq!(
         clock.push(c, behind),
@@ -170,21 +210,26 @@ fn a_remove_follows_the_sources_left_then_holds_over_with_none() {
     let (_sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
     let [a, b] = [clock.add(), clock.add()];
-    let _ = clock.push(a, measure(&node, Span::ZERO, ms(1)));
+    let both = measure(&node, Span::ZERO, ms(1));
+    let _ = clock.push(a, both);
+    let _ = clock.push(b, both);
     let split = Error::NoMajority {
         sources: 2,
         agreeing: 1,
+        empty: 0,
     };
     assert_eq!(
-        clock.push(b, measure(&node, Span::SECOND, ms(1))),
+        clock.push(b, measure(&node, Span::SECOND, us(500))),
         holdover(&node, Span::ZERO, ms(1), split)
     );
-    assert_eq!(clock.remove(a), synced(&node, ms(999), ms(2)));
+    // The earliest offset b allows is 999.5 ms; its latest is 1 ms above.
+    let stepped = us(999_500);
+    assert_eq!(clock.remove(a), synced(&node, stepped, ms(1)));
     assert_eq!(
         clock.remove(b),
-        holdover(&node, ms(999), ms(2), Error::NoSources)
+        holdover(&node, stepped, ms(1), Error::NoSources)
     );
-    assert_eq!(read(&node, &reader), Some(measure(&node, ms(999), ms(2))));
+    assert_eq!(read(&node, &reader), Some(measure(&node, stepped, ms(1))));
 }
 
 #[test]
@@ -237,23 +282,28 @@ fn shard(core: usize) -> env::shards::Config {
     }
 }
 
-/// Every 50 to 150 ms, three honest sources and one 10 s ahead push a measurement.
+/// Every 50 to 150 ms, one source 10 s ahead and then three honest sources push a
+/// measurement. The clock is unsynced until the third honest source first pushes.
 async fn steer(monotonic: env::clock::Clock, mut clock: Clock, truth: Truth) {
     let mut rng = env::rng::Rng::from_seed(truth.ppm.unsigned_abs());
     let sources = [clock.add(), clock.add(), clock.add(), clock.add()];
+    let mut synced = false;
     let end = monotonic.now() + RUN;
     while monotonic.now() < end {
         for (i, &source) in sources.iter().enumerate() {
             let now = monotonic.now();
             let error = 100_000 + rng.below(50_000_000);
             let noise = i128::from(rng.below(2 * error + 1)) - i128::from(error);
-            let lie = if i == 3 { 10 * Span::SECOND.nanos() } else { 0 };
+            let lie = if i == 0 { 10 * Span::SECOND.nanos() } else { 0 };
             let offset = truth.offset(now) + noise + i128::from(lie);
             let offset = Span::from_nanos(i64::try_from(offset).expect("fits"));
             let error = Span::from_nanos(error.try_into().expect("fits"));
             let m = Measurement::new(now, offset, error).expect("at most 36500 days");
-            let status = clock.push(source, m);
-            assert!(matches!(status, Status::Synced(_)), "{status:?}");
+            match clock.push(source, m) {
+                Status::Synced(_) => synced = true,
+                Status::Unsynced(_) if !synced && i < 3 => {}
+                status => panic!("{status:?} from source {i}"),
+            }
         }
         let pause = 50 + rng.below(100);
         monotonic.sleep(ms(pause.try_into().expect("fits"))).await;
