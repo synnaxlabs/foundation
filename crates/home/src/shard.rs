@@ -114,6 +114,9 @@ pub(crate) enum Error {
     /// A backfill frame found no room in the ring or the pool. Nothing is spent, and
     /// the writer writes the frame again later.
     Full,
+    /// No record of the ring holds the frame. Nothing is spent: the writer splits the
+    /// frame and writes each part.
+    Large(buffer::Limit),
     /// A commit failed. The shard takes no more frames.
     Disk(env::files::Error),
 }
@@ -123,6 +126,9 @@ impl fmt::Display for Error {
         match self {
             Self::Resend => write!(f, "the home does not take a resend frame yet"),
             Self::Full => write!(f, "the ring or the pool has no room for the frame"),
+            Self::Large(limit) => {
+                write!(f, "no record holds the frame, so split it: {limit}")
+            }
             Self::Disk(error) => write!(f, "a commit failed: {error}"),
         }
     }
@@ -172,8 +178,8 @@ impl Shard {
 
     /// Opens `writer` on each index of its key set at monotonic time `now`, and
     /// appends a handoff for each index where it takes control. A handoff that finds
-    /// no room waits for the next append on its index. A failed commit fails the next
-    /// write.
+    /// no room, or no record that holds every handoff, waits for the next append on
+    /// its index. A failed commit fails the next write.
     ///
     /// # Panics
     ///
@@ -239,8 +245,9 @@ impl Shard {
     /// # Errors
     ///
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
-    /// frame when the ring or the pool has no room; no seq moves. [`Error::Disk`]
-    /// after a failed commit.
+    /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
+    /// that no record holds; no seq moves for either. [`Error::Disk`] after a failed
+    /// commit.
     ///
     /// # Panics
     ///
@@ -321,7 +328,8 @@ impl Shard {
         {
             batch.clear();
         }
-        // A handoff with no room waits, and a failed commit fails the next write.
+        // A handoff that no record takes waits, and a failed commit fails the next
+        // write.
         drop(batch.append(&self.buffer, &mut self.indexes, session, Path::Live, mesh));
     }
 }
@@ -386,7 +394,7 @@ impl Batch {
     ///
     /// # Errors
     ///
-    /// [`Error::Disk`] after a failed commit, also for an empty batch.
+    /// As [`room`]. [`Error::Disk`] comes also for an empty batch.
     fn append(
         &mut self,
         buffer: &Buffer,
@@ -498,18 +506,19 @@ fn range(accepted: &Accepted) -> frame::Range {
 ///
 /// # Errors
 ///
-/// [`Error::Disk`] after a failed commit.
+/// [`Error::Large`] when no record holds the batch, and [`Error::Disk`] after a
+/// failed commit.
 ///
 /// # Panics
 ///
-/// If the append failed for another reason: a batch that no record holds, or a
-/// failure that only an open has.
+/// If the append failed as only an open fails.
 fn room(appended: Result<(), buffer::Error>) -> Result<bool, Error> {
     match appended {
         Ok(()) => Ok(true),
         Err(buffer::Error::Full { .. } | buffer::Error::Pool(_)) => Ok(false),
+        Err(buffer::Error::Large(limit)) => Err(Error::Large(limit)),
         Err(buffer::Error::Files(error)) => Err(Error::Disk(error)),
-        Err(error) => panic!("an append failed for neither room nor a commit: {error}"),
+        Err(error) => panic!("invariant: an append never fails as an open: {error}"),
     }
 }
 
@@ -527,7 +536,7 @@ mod tests {
     use types::channel::Slots;
     use types::frame::Form;
     use types::frame::Range;
-    use types::frame::key_set::Group;
+    use types::frame::key_set::{Group, Interner};
     use types::sample::{Scalar, Type};
     use types::time::Span;
 
@@ -568,6 +577,15 @@ mod tests {
         /// A shard over the ring of the node, made with `area` bytes when it is new,
         /// that carries the indexes of [`two_indexes`].
         async fn shard(&self, area: u64) -> Shard {
+            let mut shard = self.open(area, 4).await;
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
+            shard
+        }
+
+        /// A shard as [`shard`](Self::shard) makes, with `slots` slots in the ring and
+        /// no index carried.
+        async fn open(&self, area: u64, slots: u32) -> Shard {
             let config = buffer::Config {
                 files: self.node.files(),
                 dir: PathBuf::from(DIR),
@@ -578,15 +596,12 @@ mod tests {
                 layout: Layout::new(area, BODY_MAX).expect("a ring"),
                 commit: COMMIT,
             };
-            let mut slots = Slots::new();
-            for n in 0..4 {
-                slots.assign(key(Slot::new(n)));
+            let mut keys = Slots::new();
+            for n in 0..slots {
+                keys.assign(key(Slot::new(n)));
             }
-            let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-            let mut shard = Shard::new(buffer, Rc::clone(&self.pool), LIMITS);
-            shard.carry(Slot::new(0));
-            shard.carry(Slot::new(2));
-            shard
+            let buffer = Buffer::open(config, &mut keys).await.expect("opens");
+            Shard::new(buffer, Rc::clone(&self.pool), LIMITS)
         }
 
         /// The bytes of the ring file.
@@ -1004,6 +1019,78 @@ mod tests {
             drop((twin, blocks));
             shard.committed().await.expect("the commit ends");
             assert_eq!(shard.stored(Slot::new(0), Path::Live), 0);
+        });
+    }
+
+    #[test]
+    fn refuses_a_frame_that_no_record_holds_and_spends_nothing() {
+        run(20, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let stamps: Vec<i64> = (10..610).collect();
+            let values: Vec<i64> = (0..600)
+                .scan(1_i64, |x, _| {
+                    *x = x
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    Some(*x)
+                })
+                .collect();
+            for (label, stamp) in [(LIVE, 700), (BACKFILL, 5)] {
+                let large = frame(&test.pool, &set, &[(0, &stamps), (1, &values)]);
+                let error = shard.write(a, label, large, NOW, MESH).unwrap_err();
+                let Error::Large(buffer::Limit::Body { len, max: BODY_MAX }) = error
+                else {
+                    panic!("{error:?} is not a body over the limit");
+                };
+                assert!(len > BODY_MAX, "{len}");
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "no record holds the frame, so split it: the batch needs a \
+                         record body of {len} bytes, and a record of this ring holds at \
+                         most 4087"
+                    )
+                );
+                let small = frame(&test.pool, &set, &[(0, &[stamp]), (1, &[1])]);
+                assert_eq!(
+                    shard.write(a, label, small, NOW, MESH),
+                    Ok(&[applied(0, 0, 1)][..])
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn records_each_handoff_that_no_record_holds_with_the_next_frame_of_its_index() {
+        run(21, |test| async move {
+            const INDEXES: u32 = 1024;
+            let mut interner = Interner::new();
+            for n in 0..INDEXES {
+                interner.slots().assign(key(Slot::new(n)));
+            }
+            let groups: Vec<_> = (0..INDEXES)
+                .map(|n| Group {
+                    index: key(Slot::new(n)),
+                    data: &[],
+                })
+                .collect();
+            let set = interner.intern(&groups);
+            let mut shard = test.open(AREA, INDEXES).await;
+            for n in 0..INDEXES {
+                shard.carry(Slot::new(n));
+            }
+            let a = shard.open_writer(writer("subject-a", 1, &set), NOW, MESH);
+            let entry = set.groups()[5];
+            let write = frame(&test.pool, &set, &[(entry, &[10])]);
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[applied(5, 0, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let handoffs = find(&test.ring().await, &handoff_to("subject-a"));
+            assert_eq!(handoffs.len(), 1, "only the index of the frame records it");
         });
     }
 
