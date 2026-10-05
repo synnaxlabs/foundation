@@ -19,9 +19,9 @@ pub type Request<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
 /// absolute path or a `..` segment. The handle cannot leave the thread that made it,
 /// so each shard has its own. Clones use the same directory.
 ///
-/// One process at a time holds the data directory. `os` and `sim` build `Files` only
-/// while no other process holds it, and give [`Error::Locked`] otherwise. Every
-/// `Files` of one process shares its hold.
+/// One process at a time holds the data directory. The drivers of `os` and `sim` give
+/// a `Files` only while no other process holds it, and [`Error::Locked`] otherwise;
+/// [`Files::new`] does not check. Every `Files` of one process shares its hold.
 ///
 /// ```
 /// use std::path::Path;

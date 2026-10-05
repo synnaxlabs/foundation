@@ -568,12 +568,34 @@ fn a_power_cut_frees_the_data_directory_at_once() {
 #[test]
 fn a_dead_process_holds_only_the_data_directory_of_its_node() {
     let (mut sim, node) = disk(0);
-    let other = sim.node(node::Config::default());
+    let busy = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    let idle = sim.node(node::Config::default());
+    let own = busy.clone();
+    let handle = busy.shards().start(shard("busy"), move |_| async move {
+        write_in_flight(own, false).await;
+    });
+    drop(handle.unwrap());
     crash_after(&mut sim, &node, Crash::Process, |node| {
         write_in_flight(node, false)
     });
+    sim.crash(&idle, Crash::Process);
     assert_eq!(node.files().err(), Some(Error::Locked));
-    assert_eq!(other.files().err(), None);
+    assert_eq!(busy.files().err(), None);
+    assert_eq!(idle.files().err(), None);
+}
+
+#[test]
+fn a_dropped_call_of_the_dead_process_holds_the_data_directory() {
+    let (mut sim, node) = disk(0);
+    crash_after(&mut sim, &node, Crash::Process, |node| async move {
+        let (file, pool) = (create_synced(&node).await, pool());
+        until_crash(&node).await;
+        abandon(file.write_at(0, &[block(&pool, &[9; 1_024])])).await;
+    });
+    assert_eq!(node.files().err(), Some(Error::Locked));
 }
 
 #[test]
@@ -585,4 +607,38 @@ fn a_dropped_call_of_the_live_process_holds_nothing() {
         node.files().err()
     });
     assert_eq!(built, None);
+}
+
+/// The sectors of the file of [`write_in_flight`] after a process crash, as the
+/// restarted process reads them 1 ms after it builds its files as soon as it can,
+/// writes 5s over both sectors, and syncs.
+fn rewritten(seed: u64) -> Vec<u8> {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, Crash::Process, |node| {
+        write_in_flight(node, false)
+    });
+    on(&mut sim, &node, |node| async move {
+        let files = loop {
+            match node.files() {
+                Ok(files) => break files,
+                Err(error) => assert_eq!(error, Error::Locked),
+            }
+            node.clock().sleep(Span::MICROSECOND).await;
+        };
+        let (file, pool) = (files.open(Path::new("a"), Mode::Write).await, pool());
+        let file = file.unwrap();
+        file.write_at(0, &[block(&pool, &[5; 1_024])])
+            .await
+            .unwrap();
+        file.sync().await.unwrap();
+        node.clock().sleep(Span::MILLISECOND).await;
+        sectors(&read(&file, &pool, 0, 1_024).await)
+    })
+}
+
+#[test]
+fn a_write_of_a_dead_process_never_lands_after_a_write_of_its_restart() {
+    for seed in 0..64 {
+        assert_eq!(rewritten(seed), [5, 5], "seed {seed}");
+    }
 }

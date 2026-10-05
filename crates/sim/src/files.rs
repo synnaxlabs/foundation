@@ -106,8 +106,6 @@ struct Flight {
     waker: Option<Waker>,
     /// Its future dropped, so nothing takes its result.
     dropped: bool,
-    /// Its process crashed. It holds the data directory of its node until it ends.
-    dead: bool,
 }
 
 /// The disks of a run and the calls in flight. A call takes effect when it ends,
@@ -128,6 +126,9 @@ pub(crate) struct Files {
     /// counter orders them all, so a sector written at a tick past a call's key was
     /// written after the call started.
     tick: u64,
+    /// The tick of the last process crash of each node, 0 before one. The calls of
+    /// the node with a key up to it belong to a dead process.
+    crashed: Vec<u64>,
 }
 
 impl Files {
@@ -140,12 +141,14 @@ impl Files {
             done: BTreeMap::new(),
             rng,
             tick: disk::ROOT,
+            crashed: Vec::new(),
         }
     }
 
     /// Adds the disk of a new node, with `bytes` bytes and an empty data directory.
     pub(crate) fn add(&mut self, bytes: u64) {
         self.disks.push(Disk::new(bytes));
+        self.crashed.push(0);
     }
 
     /// Makes the next call of `operation` on `path` on `node` fail with code 5.
@@ -192,7 +195,6 @@ impl Files {
             before,
             waker: None,
             dropped: false,
-            dead: false,
         };
         self.flights.insert(key, flight);
         key
@@ -338,18 +340,14 @@ impl Files {
 
     /// Gives the calls in flight of `node` to a dead process.
     pub(crate) fn crash(&mut self, node: usize) {
-        for flight in self
-            .flights
-            .values_mut()
-            .filter(|flight| flight.node == node)
-        {
-            flight.dead = true;
-        }
+        self.crashed[node] = self.tick;
     }
 
-    /// Whether a call of a dead process of `node` is in flight.
-    pub(crate) fn held(&self, node: usize) -> bool {
-        (self.flights.values()).any(|flight| flight.node == node && flight.dead)
+    /// Whether a dead process holds the data directory of `node`: a call of it is
+    /// still in flight.
+    pub(crate) fn locked(&self, node: usize) -> bool {
+        (self.flights.range(..=self.crashed[node]))
+            .any(|(_, flight)| flight.node == node)
     }
 
     /// Cuts the power of `node` at true time `at`, whose calls in flight have all

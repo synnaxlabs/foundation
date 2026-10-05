@@ -1435,11 +1435,12 @@ How to read this record:
   (#37) gives files under one data directory, with owned blocks and a sync that
   poisons the file on failure (S4). One process at a time holds the data directory,
   so each store (the ring, the Raft log, the spec) has one owner: `os` locks it with
-  std `File::try_lock` when it builds `Files`, and every `Files` of the process shares
-  the lock. A dead process holds it until each of its file calls in flight ends. A
-  build while another process holds it fails with `Locked`. The person decided on
-  2026-10-05: "option 1" (#566). `env::net` (#44) gives UDP sockets that move GSO
-  and GRO batches with ECN and the local address, TCP streams, and listeners.
+  std `File::try_lock` once, when it builds its files driver at boot, and every
+  `Files` of the process goes through that driver. A dead process holds it until
+  each of its file calls in flight ends. A build while another process holds it
+  fails with `Locked`. The person decided on 2026-10-05: "option 1" (#566).
+  `env::net` (#44) gives UDP sockets that move GSO and GRO batches with ECN and the
+  local address, TCP streams, and listeners.
   `env::serial` (#431) gives serial ports that move bytes at the line rate, with 8
   data bits, a parity, and stop bits. Framing belongs to the protocol: a USB adapter
   hides the gap between frames, so a seam that split frames would act differently

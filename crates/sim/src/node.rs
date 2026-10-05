@@ -115,7 +115,7 @@ impl Node {
     /// `Error::Locked` after a [`Crash::Process`](crate::Crash::Process), until each
     /// file call in flight of the dead process ends. A power cut ends them at once.
     pub fn files(&self) -> Result<env::files::Files, env::files::Error> {
-        if lock(&self.0.shared).files().held(self.0.node) {
+        if lock(&self.0.shared).files().locked(self.0.node) {
             return Err(env::files::Error::Locked);
         }
         Ok(env::files::Files::new(self.0.clone()))
