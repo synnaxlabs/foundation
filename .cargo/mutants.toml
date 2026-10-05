@@ -5,4 +5,6 @@ exclude_re = [
   # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
   # break in that job shows that it fails.
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
+  # Stubs that panic until #68 fills them; #68 removes this line.
+  'crates/transport/src/(datagram|session|stream)\.rs:',
 ]
