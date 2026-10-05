@@ -495,13 +495,8 @@ impl Raft {
         if !moved {
             return false;
         }
-        let removed: Vec<node::Key> = self
-            .peers
-            .keys()
-            .filter(|&&key| !self.voters.contains(key))
-            .copied()
-            .collect();
-        for key in removed {
+        let peers: Vec<node::Key> = self.peers.keys().copied().collect();
+        for key in peers {
             self.release(key);
         }
         self.replicate();
@@ -2319,6 +2314,30 @@ mod tests {
             assert_eq!(messages[0].body, commit);
             tick_times(&mut raft, 40);
             assert_eq!(raft.role(), Role::Follower);
+        }
+
+        // Node 3 holds the leave before it commits, so the commit releases it at
+        // once: it gets the commit as a heartbeat, not as an append.
+        #[test]
+        fn a_removed_node_that_holds_the_leave_is_released_when_it_commits() {
+            let mut raft = leader();
+            raft.propose_voters(set(&[1, 2, 4])).unwrap();
+            accept(&mut raft, &[2], 2);
+            sent(&mut raft);
+            accept(&mut raft, &[3], 3);
+            assert_eq!(sent(&mut raft), []);
+            accept(&mut raft, &[2], 3);
+            let ready = raft.ready();
+            assert_eq!(ready.committed, [config(1, 3, voters(&[1, 2, 4], &[]))]);
+            let to_3: Vec<&Body> = ready
+                .messages
+                .iter()
+                .filter(|m| m.to == key(3))
+                .map(|m| &m.body)
+                .collect();
+            assert_eq!(to_3, [&Body::Heartbeat { commit: 3 }]);
+            raft.tick(0);
+            assert_eq!(to(&raft.ready().messages), [key(2), key(4)]);
         }
 
         // Only the node a change adds counts as heard; the voters that stayed
