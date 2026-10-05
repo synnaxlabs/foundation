@@ -391,6 +391,24 @@ How to read this record:
   the next create. The open reports the effective layout, callers bound a commit by
   it, and the node shows it in status. A new ring has the same block at `seq` 0 in
   both places, with the tail at offset 0 and a random chain value.
+- **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
+  write: the writer's key set with only that group present, its range, and its
+  encoded series. The home stores it, keeps it as the index's newest frame, and later
+  gives it to readers. B7, the log, the seq, and reader positions are per index.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
+- **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
+  `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
+  of the index frame in entry order, then the frame's encoded series bytes,
+  little-endian. `end` is as in FRAME LAYOUT. Kinds: scalar 0, array 1, list 2, string
+  3, bytes 4. `n` is the array length or the list maximum, else 0. `element` is the
+  scalar (bool 0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7, u64 8, f32 9, f64 10,
+  stamp 11, span 12, uuid 13), else 0. The type is the writer's type, so a reader
+  decodes with it after an `apply` changes the channel's type (A15). The header is one
+  pool block and the series bytes are a view of the frame's block, so a write copies
+  no series byte. A slot or key set number is never stored. The layout is part of the
+  disk format version (C9d), as in FRAME LAYOUT. Copy mode checks each stored body
+  once where remote records enter (X43), and the read after it panics on a bad body.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -838,11 +856,17 @@ How to read this record:
   component.
 - **DEATH RECORDS** When a writer session ends without closing, the home writes a
   "source lost" quality sample. A clean close writes nothing. Scope: X19.
-- **R12 catalog (proposal, partly adopted)** Components (cancel, pace, clock stamping,
-  retry, endpoint, link, drive, thread, queue, cycle, status, run, out, calc align) and
-  compositions (polled, clocked, pushed, cyclic, out, calc). The kind's `&self` holds
-  process-lifetime parts that `node` injects; `ctx` holds one run's capabilities.
-  Group-based parts need revision (X5).
+- **R12 catalog (proposal, partly adopted)** Components (cancel, pace (see PACE),
+  clock stamping, retry, endpoint, link, drive, thread, queue, cycle, status, run, out,
+  calc align) and compositions (polled, clocked, pushed, cyclic, out, calc). The
+  kind's `&self` holds process-lifetime parts that `node` injects; `ctx` holds one
+  run's capabilities. Group-based parts need revision (X5).
+- **PACE (2026-10-05)** `pace::Timer` ticks on a grid of deadlines at `start + n /
+  rate`, from a `types::time::Rate`, and skips and counts the ticks a stall missed.
+  It has one async `tick(&cancel::Token)`, with no blocking wait and no sleep, hybrid,
+  or spin mode: precision belongs to the clock driver in `os` (#379). Decided by the
+  `connector` builder in the plan on #237, after `/eb-review`; approved by the
+  coordinator (#237). Supersedes: r12 A.3 `pace` modes and blocking wait.
 
 ### 1.11 Config as code
 
@@ -1211,6 +1235,7 @@ How to read this record:
 | A18 quality side array | S13, BQ13 |
 | A20 channel retention, quality codes on acks | S12, S13 |
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
+| r12 A.3 `pace` modes (sleep, hybrid, spin) and blocking wait | PACE |
 | B3 one cumulative position per index | READER RULES |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
@@ -1259,7 +1284,7 @@ Storage classes used in the table:
 | Channel | Files, then Spec as `spec::Channel { key, name, kind }`. Sources of channels: X33 | People or agents in files; `discover` and `export` write files; `apply` commits | Every node through its spec snapshot; `home`, `hub`; kinds through `hub.spec()` | `spec` (type), `config` (check), `mesh` (commit) |
 | Index | Spec: `Kind::Index { error, control }`. Its settings come only from policies | As channel | `home`, `delivery`, `hub`, `buffer` | `spec` |
 | Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
-| `channel::Key` | Spec (name to key map), wire setup, disk footers. Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
+| `channel::Key` | Spec (name to key map), wire setup, disk footers, stored bodies (STORED BODY). Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
 | Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
@@ -1311,7 +1336,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Encoded samples | Index log (write-ahead ring, then segments) | `home` and `replica` through `buffer.append` | Complete readers (catch-up), `replica`, crash recovery | `buffer` |
+| Encoded samples | Index log (write-ahead ring, then segments), as stored bodies (STORED BODY) | `home` and `replica` through `buffer.append` | Complete readers (catch-up), `replica`, crash recovery | `buffer`, `home` (stored body) |
 | Seq counters (live, backfill) | Memory at the home; durable through the index log | `home` | `delivery`, `wire` (prediction) | `home` |
 | Control state | Memory in `control` at the home; handoff records in the index log (truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
@@ -1331,7 +1356,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
+| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder; `home` (INDEX FRAMES) | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
 | View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |
