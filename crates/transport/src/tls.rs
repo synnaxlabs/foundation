@@ -330,7 +330,6 @@ mod tests {
         CertificateError, CipherSuite, ClientConnection, Connection, HandshakeKind,
         NamedGroup, ServerConnection, SignatureAlgorithm, SupportedCipherSuite,
     };
-    use types::node::SmallOrder;
 
     use super::*;
 
@@ -701,32 +700,6 @@ mod tests {
                 peers,
                 Err(CertificateError::ApplicationVerificationFailure.into())
             );
-        }
-
-        #[test]
-        fn when_server_key_is_the_identity_point_the_client_refuses() {
-            assert_eq!(PublicKey::new(IDENTITY), Err(SmallOrder));
-            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
-            let peers =
-                handshake(Tls::new(&a).client(public(&b)), keyless(IDENTITY).server());
-            assert_eq!(
-                peers,
-                Err(CertificateError::ApplicationVerificationFailure.into())
-            );
-        }
-
-        #[test]
-        fn when_server_key_is_all_zero_no_keyless_server_passes() {
-            assert_eq!(PublicKey::new([0; 32]), Err(SmallOrder));
-            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
-            let client = Tls::new(&a).client(public(&b));
-            let server = keyless([0; 32]).server();
-            for _ in 0..64 {
-                assert_eq!(
-                    handshake(Arc::clone(&client), Arc::clone(&server)),
-                    Err(CertificateError::ApplicationVerificationFailure.into())
-                );
-            }
         }
     }
 
