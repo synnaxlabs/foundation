@@ -898,6 +898,14 @@ How to read this record:
   (time only from samples and ctx), and outputs on the calculation's own index.
   Supersedes: r3 single-expression language, r3 first-input index, r8 JSON Schema
   check in `config`.
+- **KIND TABLE** `kind::Kind` is typed: an associated `Config` and `impl Future`
+  methods. `kind::Table` erases it inside `connector` with a private trait that takes
+  the `Document` and parses again, so callers see one concrete type with no `Any` and
+  no downcast. An unknown kind is the diagnostic `connector.unknown-kind`, since the
+  name comes from a file. A run or a discovery fails with one of three classes:
+  `Config` (stop until the spec changes), `Device`, and `Retry` (restart with
+  backoff). Decided by the `connector` builder in the plan on #338, after
+  `/eb-review`.
 - **BQ15** A set of devices that the driver acquires as one unit is one connector.
   Otherwise, separate connectors and indexes, never two writers.
 - **R7 starting points** OPC UA: open62541 compiled in, with our own crypto plugin on

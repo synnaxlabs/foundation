@@ -302,6 +302,7 @@ name = "connector"
 version = "0.0.0"
 dependencies = [
  "counting",
+ "document",
  "env",
  "proptest",
  "sim",
