@@ -1363,8 +1363,10 @@ How to read this record:
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
   scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
   (#37) gives files under one data directory, with owned blocks and a sync that
-  poisons the file on failure (S4). `env::net` (#44) gives UDP sockets that move GSO
-  and GRO batches with ECN and the local address, TCP streams, and listeners.
+  poisons the file on failure (S4). One handle at a time holds a file open to write,
+  until it drops and its calls end; another write open fails with `Busy` (`os`:
+  `File::try_lock`) (#392). `env::net` (#44) gives UDP sockets that move GSO and GRO
+  batches with ECN and the local address, TCP streams, and listeners.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -1376,7 +1378,8 @@ How to read this record:
   session under the architecture delegation.
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
-  crash keeps each file call that ended. A `Power` crash keeps, for each 512-byte
+  crash keeps each file call that ended, and ends each call in flight at the crash, so
+  a restart finds no file held (#392). A `Power` crash keeps, for each 512-byte
   sector, its durable bytes or the bytes of any one write since then, a write in flight
   too. A `sync` makes durable the writes that ended before it started. A failed `sync`
   makes each sector keep its durable bytes or those of one such write, at random. A

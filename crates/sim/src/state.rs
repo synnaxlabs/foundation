@@ -20,7 +20,7 @@ use types::time::{Monotonic, Span, Stamp};
 
 use crate::files::{Call, Files, Held};
 use crate::net::{Bound, Network};
-use crate::{link, node, shard};
+use crate::{Crash, link, node, shard};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
 
@@ -496,15 +496,18 @@ impl State {
         (tasks, starts)
     }
 
-    /// Cuts the power of `node`, whose threads a crash ended: its monotonic clock
-    /// reads its boot value again, and its disk keeps what is durable. Returns the
-    /// blocks of its file calls in flight, for the caller to drop after it releases
-    /// the lock.
-    pub(crate) fn cut_power(&mut self, node: usize) -> Vec<Held> {
-        let (now, wall) = (self.now, self.wall(node).time);
-        let booted = &mut self.nodes[node];
-        (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
-        self.files.cut_power(node, now, &mut self.digest)
+    /// Ends the file calls in flight of `node`, whose threads a crash ended. After a
+    /// `Power` crash, its monotonic clock reads its boot value again, and its disk
+    /// keeps what is durable. Returns the blocks of the calls, for the caller to drop
+    /// after it releases the lock.
+    pub(crate) fn halt(&mut self, node: usize, crash: Crash) -> Vec<Held> {
+        let now = self.now;
+        if crash == Crash::Power {
+            let wall = self.wall(node).time;
+            let booted = &mut self.nodes[node];
+            (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
+        }
+        self.files.crash(node, now, crash, &mut self.digest)
     }
 
     /// Removes the starts of the threads that have not run.

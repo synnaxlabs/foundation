@@ -155,10 +155,8 @@ impl Sim {
         let (tasks, starts) = lock(&self.shared).crash(node);
         self.drop_futures(&tasks);
         drop(starts);
-        if crash == Crash::Power {
-            let orphans = lock(&self.shared).cut_power(node);
-            drop(orphans);
-        }
+        let orphans = lock(&self.shared).halt(node, crash);
+        drop(orphans);
     }
 
     /// A hash of every scheduler pick, every datagram event, and every end of a file
@@ -334,8 +332,8 @@ impl fmt::Debug for Sim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Crash {
     /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
-    /// keeps each call that ended, and each file call in flight still ends, as if
-    /// its future dropped.
+    /// keeps each call that ended, and each file call in flight ends at the crash,
+    /// as if its future dropped.
     Process,
     /// The machine loses power and boots again.
     ///

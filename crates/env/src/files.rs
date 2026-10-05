@@ -56,6 +56,9 @@ impl Files {
     ///
     /// - [`Error::NotFound`] when the file is not there and `mode` is not
     ///   [`Mode::Create`].
+    /// - [`Error::Busy`] when `mode` is not [`Mode::Read`] and another handle holds
+    ///   the file with [`Mode::Write`] or [`Mode::Create`]. A handle holds it until it
+    ///   drops and its calls end, in this process or another.
     /// - [`Error::Length`] when [`Mode::Create`] finds a file of another length.
     /// - [`Error::Full`] when the disk has no room for a new file.
     /// - [`Error::Io`] for other failures.
@@ -225,11 +228,13 @@ impl fmt::Debug for Files {
 pub enum Mode {
     /// Reads a file that is there.
     Read,
-    /// Reads and writes a file that is there.
+    /// Reads and writes a file that is there. Only one handle at a time holds a file
+    /// with this mode or [`Mode::Create`]; see [`Files::open`].
     Write,
     /// Reads and writes a file. When it is not there, makes it with `len` bytes,
     /// allocated and zeroed, and makes the allocation durable before the open ends. A
-    /// file that is there keeps its bytes and must have `len` bytes.
+    /// file that is there keeps its bytes and must have `len` bytes. Only one handle
+    /// at a time holds a file with this mode or [`Mode::Write`].
     Create {
         /// The length of the file.
         len: u64,
@@ -463,6 +468,11 @@ pub enum Error {
         /// The path of the file.
         path: PathBuf,
     },
+    /// Another handle holds the file with [`Mode::Write`] or [`Mode::Create`].
+    Busy {
+        /// The path of the file.
+        path: PathBuf,
+    },
     /// [`Mode::Create`] found a file of another length.
     Length {
         /// The path of the file.
@@ -495,6 +505,11 @@ impl fmt::Display for Error {
             Self::Poisoned { path } => write!(
                 f,
                 "a sync of file {} failed or was dropped; reopen it and recover",
+                path.display()
+            ),
+            Self::Busy { path } => write!(
+                f,
+                "file {} is open for writing in another handle",
                 path.display()
             ),
             Self::Length {
@@ -579,7 +594,9 @@ pub trait Driver {
     /// Opens the file at `path`. [`Mode::Create`] makes a missing file with `len`
     /// zeroed bytes, and opens a file that is there as it is. It makes the allocation
     /// durable before it ends (`os`: `fallocate`, then `fsync` the file), so a
-    /// `sync_dir` alone makes the file whole.
+    /// `sync_dir` alone makes the file whole. A write open of a file that a write
+    /// handle holds gives [`Error::Busy`] before any other check or change of the
+    /// file (`os`: `File::try_lock`).
     fn open<'a>(
         &'a self,
         path: &'a Path,
@@ -1107,6 +1124,17 @@ mod tests {
             assert_eq!(
                 e.to_string(),
                 "file ring/0 has 512 bytes, but 4096 bytes were expected"
+            );
+        }
+
+        #[test]
+        fn says_another_handle_writes_the_file() {
+            let e = Error::Busy {
+                path: "ring/0".into(),
+            };
+            assert_eq!(
+                e.to_string(),
+                "file ring/0 is open for writing in another handle"
             );
         }
 

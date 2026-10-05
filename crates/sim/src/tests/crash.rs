@@ -324,6 +324,21 @@ fn a_write_in_flight_at_a_crash_keeps_any_subset_of_its_sectors() {
 }
 
 #[test]
+fn a_crash_frees_each_file_that_a_write_handle_held() {
+    for (crash, value) in [Crash::Process, Crash::Power]
+        .into_iter()
+        .flat_map(|crash| (0..64).map(move |value| (crash, value)))
+    {
+        let (mut sim, node) = disk(value);
+        crash_after(&mut sim, &node, crash, |node| write_in_flight(node, false));
+        let open = on(&mut sim, &node, |node| async move {
+            node.files().open(Path::new("a"), Mode::Write).await.err()
+        });
+        assert_eq!(open, None, "{crash:?}, value {value}");
+    }
+}
+
+#[test]
 fn a_write_that_a_fault_fails_leaves_no_bytes_at_a_crash() {
     for crash in [Crash::Process, Crash::Power] {
         let outcomes: BTreeSet<Vec<u8>> =
