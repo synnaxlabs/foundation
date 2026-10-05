@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Body, Config, Entry, Hard, Message, Position, Raft, Ready, Role, Start, Term,
+    Body, Config, Data, Entry, Hard, Message, Position, Raft, Ready, Role, Start, Term,
     Voters,
 };
 use types::node;
@@ -37,7 +37,7 @@ pub(crate) fn build(
                 term: last.term,
                 index,
             },
-            data: Vec::new(),
+            data: Data::Empty,
         })
         .collect();
     start(id, voters, election, hard, entries, 0)
@@ -49,6 +49,7 @@ pub(crate) struct Disk {
     pub(crate) hard: Hard,
     pub(crate) entries: Vec<Entry>,
     pub(crate) committed: Vec<Entry>,
+    pub(crate) voters: Option<Voters>,
 }
 
 impl Disk {
@@ -59,9 +60,13 @@ impl Disk {
             entries,
             committed,
             messages,
+            voters,
         } = ready;
         if let Some(hard) = hard {
             self.hard = hard;
+        }
+        if voters.is_some() {
+            self.voters = voters;
         }
         if let Some(first) = entries.first() {
             let keep = usize::try_from(first.at.index - 1).unwrap();
@@ -117,6 +122,7 @@ pub(crate) fn start(
         hard,
         committed: entries[..usize::try_from(applied).unwrap()].to_vec(),
         entries,
+        voters: None,
     };
     (Raft::new(config, start).unwrap(), disk)
 }

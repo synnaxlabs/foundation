@@ -7,7 +7,9 @@ use crate::log;
 use crate::log::Log;
 use crate::progress::Progress;
 use crate::voters::Tally;
-use crate::{Body, Config, Entry, Error, Hard, Message, Position, Start, Term, Voters};
+use crate::{
+    Body, Config, Data, Entry, Error, Hard, Message, Position, Start, Term, Voters,
+};
 
 /// What a node is doing in its term.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -35,9 +37,9 @@ struct Peer {
 }
 
 impl Peer {
-    fn new() -> Self {
+    fn new(last: u64) -> Self {
         Self {
-            progress: Progress::new(0),
+            progress: Progress::new(last),
             vote: None,
             active: false,
         }
@@ -57,6 +59,9 @@ pub struct Ready {
     pub committed: Vec<Entry>,
     /// Messages to send after the write, in the order the node made them.
     pub messages: Vec<Message>,
+    /// The voters, when a configuration entry committed since the last `Ready`.
+    /// Store it with `applied`: it is `Start.voters` after a restart.
+    pub voters: Option<Voters>,
 }
 
 /// One node's state machine. PreVote and CheckQuorum are always on.
@@ -67,6 +72,8 @@ pub struct Ready {
 pub struct Raft {
     key: node::Key,
     voters: Voters,
+    // A configuration entry committed since the last `Ready`.
+    reconfigured: bool,
     peers: BTreeMap<node::Key, Peer>,
     election_ticks: u64,
     heartbeat_ticks: u64,
@@ -116,9 +123,12 @@ impl Raft {
             });
         }
         voters.check()?;
-        let peers = voters.peers().map(|key| (key, Peer::new())).collect();
         let log = Log::new(entries, applied)?;
         let last = log.last();
+        let peers = voters
+            .peers()
+            .map(|key| (key, Peer::new(last.index)))
+            .collect();
         if hard.term < last.term {
             return Err(Error::TermBehindLog {
                 term: hard.term,
@@ -128,6 +138,7 @@ impl Raft {
         Ok(Self {
             key,
             voters,
+            reconfigured: false,
             peers,
             outbox: Vec::new(),
             election_ticks: u64::from(election_ticks),
@@ -195,6 +206,7 @@ impl Raft {
             entries: self.log.take_unstable(),
             committed: self.log.take_committed(),
             messages: std::mem::take(&mut self.outbox),
+            voters: std::mem::take(&mut self.reconfigured).then(|| self.voters.clone()),
         }
     }
 
@@ -206,6 +218,10 @@ impl Raft {
     /// [`Error::NotLeader`] when this node does not lead. `leader` names the node
     /// that does, when this node knows it.
     pub fn propose(&mut self, data: Vec<u8>) -> Result<Position, Error> {
+        self.propose_entry(Data::Bytes(data))
+    }
+
+    fn propose_entry(&mut self, data: Data) -> Result<Position, Error> {
         if self.role != Role::Leader {
             return Err(Error::NotLeader {
                 leader: self.leader,
@@ -332,7 +348,7 @@ impl Raft {
     // Commits what the leader's heartbeat says and answers it.
     fn heartbeat(&mut self, leader: node::Key, commit: u64) -> Result<(), Error> {
         self.follow(leader)?;
-        self.log.commit_to(commit);
+        self.commit_to(commit);
         self.send(leader, self.term, Body::HeartbeatReply);
         Ok(())
     }
@@ -347,7 +363,7 @@ impl Raft {
     ) {
         let reply = match self.log.append(prev, entries) {
             Ok(last) => {
-                self.log.commit_to(commit.min(last));
+                self.commit_to(commit.min(last));
                 Body::AppendReply { last }
             }
             Err(hint) => Body::AppendReject { hint },
@@ -393,10 +409,38 @@ impl Raft {
         });
         let current = self.log.at(index).is_some_and(|at| at.term == self.term);
         if index > self.log.committed() && current {
-            self.log.commit_to(index);
+            self.commit_to(index);
             return true;
         }
         false
+    }
+
+    // Raises the commit index to `index` and puts the last configuration it commits
+    // in force. A lower `index` changes nothing.
+    fn commit_to(&mut self, index: u64) {
+        let from = self.log.committed();
+        self.log.commit_to(index);
+        let to = self.log.committed();
+        if let Some(voters) = self.log.last_voters(from, to).cloned() {
+            self.set_voters(voters);
+        }
+    }
+
+    // The one writer of `voters` and `peers` after `new`. A peer that stays keeps
+    // its progress; a new one starts at the end of the log.
+    fn set_voters(&mut self, voters: Voters) {
+        assert!(
+            voters.check().is_ok(),
+            "invariant: a committed configuration is valid"
+        );
+        let last = self.log.last().index;
+        let mut old = std::mem::take(&mut self.peers);
+        self.peers = voters
+            .peers()
+            .map(|key| (key, old.remove(&key).unwrap_or_else(|| Peer::new(last))))
+            .collect();
+        self.voters = voters;
+        self.reconfigured = true;
     }
 
     // Sends each follower the entries it lacks and the commit index.
@@ -587,7 +631,7 @@ impl Raft {
             peer.progress = Progress::new(last);
         }
         // An entry of the leader's own term lets it commit the ones before it.
-        self.log.push(self.term, Vec::new());
+        self.log.push(self.term, Data::Empty);
         self.commit();
         self.replicate();
     }
@@ -708,7 +752,7 @@ mod tests {
                 term: Term(term),
                 index,
             },
-            data: Vec::new(),
+            data: Data::Empty,
         };
         positions.iter().map(entry).collect()
     }
@@ -1525,7 +1569,7 @@ mod tests {
             let ready = raft.ready();
             let empty = Entry {
                 at: position(2, 1),
-                data: Vec::new(),
+                data: Data::Empty,
             };
             assert_eq!(ready.entries, std::slice::from_ref(&empty));
             assert_eq!(ready.committed, []);
@@ -1546,7 +1590,10 @@ mod tests {
             let at = raft.propose(vec![7]).unwrap();
             assert_eq!(at, position(2, 2));
             let ready = raft.ready();
-            let entry = Entry { at, data: vec![7] };
+            let entry = Entry {
+                at,
+                data: Data::Bytes(vec![7]),
+            };
             assert_eq!(ready.entries, std::slice::from_ref(&entry));
             let to_2 = Message {
                 from: key(1),
@@ -1564,7 +1611,11 @@ mod tests {
             sent(&mut raft);
             let at = raft.propose(vec![7]).unwrap();
             let ready = raft.ready();
-            assert_eq!(ready.committed, [Entry { at, data: vec![7] }]);
+            let entry = Entry {
+                at,
+                data: Data::Bytes(vec![7]),
+            };
+            assert_eq!(ready.committed, [entry]);
             assert_eq!(ready.messages, []);
         }
 
@@ -1756,6 +1807,123 @@ mod tests {
                 heartbeats,
                 [(key(2), 0), (key(3), 1), (key(4), 0), (key(5), 1)]
             );
+        }
+    }
+
+    mod config {
+        use super::*;
+
+        fn voters(ids: &[u8]) -> Voters {
+            Voters {
+                incoming: ids.iter().copied().map(key).collect(),
+                ..Voters::default()
+            }
+        }
+
+        fn config(term: u64, index: u64, voters: Voters) -> Entry {
+            Entry {
+                at: Position {
+                    term: Term(term),
+                    index,
+                },
+                data: Data::Voters(voters),
+            }
+        }
+
+        // Node 1 follows 2 at term 1 and holds `entries`, none committed.
+        fn follower_with(entries: Vec<Entry>) -> Raft {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let body = Body::Append {
+                prev: Position::default(),
+                entries,
+                commit: 0,
+            };
+            raft.step(message(2, 1, body)).unwrap();
+            sent(&mut raft);
+            raft
+        }
+
+        fn heartbeat(raft: &mut Raft, commit: u64) {
+            raft.step(message(2, 1, Body::Heartbeat { commit }))
+                .unwrap();
+        }
+
+        #[test]
+        fn a_leader_puts_a_committed_configuration_in_force() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            let new = voters(&[1, 2, 3, 4]);
+            let at = raft.propose_entry(Data::Voters(new.clone())).unwrap();
+            assert_eq!(at.index, 2);
+            assert_eq!(raft.ready().voters, None);
+            raft.step(message(2, 1, Body::AppendReply { last: 2 }))
+                .unwrap();
+            let ready = raft.ready();
+            assert_eq!(ready.voters, Some(new.clone()));
+            assert_eq!(ready.committed.last(), Some(&config(1, 2, new.clone())));
+            assert_eq!(raft.voters(), &new);
+            // The new peer gets one probe and then waits for its reply.
+            let to: Vec<node::Key> = ready.messages.iter().map(|m| m.to).collect();
+            assert_eq!(to, [key(2), key(4)]);
+            assert_eq!(raft.ready().voters, None);
+            raft.propose(vec![7]).unwrap();
+            let to: Vec<node::Key> = sent(&mut raft).iter().map(|m| m.to).collect();
+            assert_eq!(to, [key(2)]);
+        }
+
+        #[test]
+        fn a_follower_puts_a_committed_configuration_in_force() {
+            let new = voters(&[2, 3]);
+            let mut raft = follower_with(vec![
+                entries(&[(1, 1)]).remove(0),
+                config(1, 2, new.clone()),
+            ]);
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3]));
+            heartbeat(&mut raft, 2);
+            assert_eq!(raft.ready().voters, Some(new.clone()));
+            assert_eq!(raft.voters(), &new);
+            tick_times(&mut raft, 40);
+            assert_eq!(raft.role(), Role::Follower);
+        }
+
+        #[test]
+        fn only_the_last_configuration_a_commit_covers_counts() {
+            let last = voters(&[1, 2, 3, 4, 5]);
+            let mut raft = follower_with(vec![
+                entries(&[(1, 1)]).remove(0),
+                config(1, 2, voters(&[1, 2])),
+                config(1, 3, last.clone()),
+            ]);
+            heartbeat(&mut raft, 3);
+            assert_eq!(raft.ready().voters, Some(last.clone()));
+            assert_eq!(raft.voters(), &last);
+        }
+
+        #[test]
+        fn a_restart_waits_for_the_entries_after_applied_to_commit() {
+            let new = voters(&[1, 2, 3, 4]);
+            let start = Start {
+                entries: vec![entries(&[(1, 1)]).remove(0), config(1, 2, new.clone())],
+                applied: 1,
+                ..start(&[1, 2, 3], at_term(1))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3]));
+            assert_eq!(raft.ready().voters, None);
+            heartbeat(&mut raft, 2);
+            assert_eq!(raft.ready().voters, Some(new.clone()));
+            assert_eq!(raft.voters(), &new);
+        }
+
+        #[test]
+        #[should_panic(expected = "invariant: a committed configuration is valid")]
+        fn a_committed_configuration_must_be_valid() {
+            let bad = Voters {
+                outgoing: [key(1), key(2)].into_iter().collect(),
+                ..Voters::default()
+            };
+            let mut raft = follower_with(vec![config(1, 1, bad)]);
+            heartbeat(&mut raft, 1);
         }
     }
 

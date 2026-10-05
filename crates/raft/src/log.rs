@@ -1,13 +1,24 @@
-use crate::{Error, Position, Term};
+use crate::{Error, Position, Term, Voters};
 
-/// One entry of the replicated log. A leader appends an entry with no data when its
-/// term starts; the caller applies nothing for it.
+/// One entry of the replicated log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// Where the entry is in the log.
     pub at: Position,
+    /// What the entry carries.
+    pub data: Data,
+}
+
+/// What a log entry carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Data {
+    /// A leader's first entry of its term. The caller applies nothing.
+    Empty,
     /// What the caller proposed.
-    pub data: Vec<u8>,
+    Bytes(Vec<u8>),
+    /// A voter configuration, in force from the time the entry commits. The caller
+    /// applies nothing; [`Ready::voters`](crate::Ready::voters) says what to store.
+    Voters(Voters),
 }
 
 // The log in memory. Entry `i` has index `i + 1`, and terms start above zero and
@@ -71,7 +82,7 @@ impl Log {
     }
 
     // Appends one entry at the end as the leader.
-    pub(crate) fn push(&mut self, term: Term, data: Vec<u8>) -> Position {
+    pub(crate) fn push(&mut self, term: Term, data: Data) -> Position {
         let at = Position {
             term,
             index: self.last().index + 1,
@@ -132,6 +143,19 @@ impl Log {
         entries
     }
 
+    // The last configuration among the entries in `(from, to]`.
+    pub(crate) fn last_voters(&self, from: u64, to: u64) -> Option<&Voters> {
+        let range = usize::try_from(from).unwrap_or(usize::MAX)
+            ..usize::try_from(to).unwrap_or(usize::MAX);
+        self.entries[range]
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.data {
+                Data::Voters(voters) => Some(voters),
+                Data::Empty | Data::Bytes(_) => None,
+            })
+    }
+
     // The committed entries no `Ready` has given to apply yet.
     pub(crate) fn take_committed(&mut self) -> Vec<Entry> {
         let count =
@@ -171,7 +195,7 @@ mod tests {
                 term: Term(term),
                 index,
             },
-            data: vec![u8::try_from(index).unwrap()],
+            data: Data::Bytes(vec![u8::try_from(index).unwrap()]),
         }
     }
 
@@ -270,12 +294,29 @@ mod tests {
     }
 
     #[test]
+    fn finds_the_last_configuration_in_a_range() {
+        let voters = |id: u128| Voters {
+            incoming: [types::node::Key::from_u128(id)].into_iter().collect(),
+            ..Voters::default()
+        };
+        let mut log = log(&[1]);
+        log.push(Term(1), Data::Voters(voters(1)));
+        log.push(Term(1), Data::Voters(voters(2)));
+        log.push(Term(1), Data::Bytes(vec![9]));
+        assert_eq!(log.last_voters(0, 1), None);
+        assert_eq!(log.last_voters(0, 4), Some(&voters(2)));
+        assert_eq!(log.last_voters(1, 2), Some(&voters(1)));
+        assert_eq!(log.last_voters(3, 4), None);
+        assert_eq!(log.last_voters(4, 4), None);
+    }
+
+    #[test]
     fn gives_a_pushed_entry_once_to_write() {
         let mut log = log(&[1]);
-        assert_eq!(log.push(Term(2), vec![9]), position(2, 2));
+        assert_eq!(log.push(Term(2), Data::Bytes(vec![9])), position(2, 2));
         let pushed = Entry {
             at: position(2, 2),
-            data: vec![9],
+            data: Data::Bytes(vec![9]),
         };
         assert_eq!(log.take_unstable(), vec![pushed]);
         assert_eq!(log.take_unstable(), vec![]);
