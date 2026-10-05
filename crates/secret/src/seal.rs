@@ -13,6 +13,7 @@ use aws_lc_rs::hmac;
 use env::entropy::Entropy;
 use types::name::Name;
 use types::node::SealKey;
+use zeroize::Zeroizing;
 
 use crate::Value;
 
@@ -31,9 +32,9 @@ const HPKE_SUITE: &[u8] = b"HPKE\x00\x20\x00\x01\x00\x03";
 /// small order.
 #[must_use]
 pub fn seal(to: &SealKey, name: &Name, value: &Value, entropy: &Entropy) -> Vec<u8> {
-    let mut ephemeral = [0; 32];
-    entropy.fill(&mut ephemeral);
-    let ephemeral = PrivateKey::from_private_key(&X25519, &ephemeral)
+    let mut bytes = Zeroizing::new([0; 32]);
+    entropy.fill(bytes.as_mut_slice());
+    let ephemeral = PrivateKey::from_private_key(&X25519, bytes.as_slice())
         .expect("invariant: any 32 bytes are an X25519 private key");
     seal_with(
         &ephemeral,
@@ -46,22 +47,22 @@ pub fn seal(to: &SealKey, name: &Name, value: &Value, entropy: &Entropy) -> Vec<
 }
 
 /// A node's X25519 seal private key. It opens values sealed to its public key.
-/// `Debug` never shows the key.
-pub struct Opener([u8; 32]);
+/// `Debug` never shows the key, and the key is overwritten with zeros when it drops.
+pub struct Opener(Zeroizing<[u8; 32]>);
 
 impl Opener {
     /// Makes a new key from 32 bytes of `entropy`.
     #[must_use]
     pub fn generate(entropy: &Entropy) -> Self {
-        let mut bytes = [0; 32];
-        entropy.fill(&mut bytes);
+        let mut bytes = Zeroizing::new([0; 32]);
+        entropy.fill(bytes.as_mut_slice());
         Self(bytes)
     }
 
     /// Takes the bytes of a key from [`Opener::expose`].
     #[must_use]
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+        Self(Zeroizing::new(bytes))
     }
 
     /// The bytes to keep on the node's disk. Write them nowhere else.
@@ -102,7 +103,7 @@ impl Opener {
     }
 
     fn key(&self) -> PrivateKey {
-        PrivateKey::from_private_key(&X25519, &self.0)
+        PrivateKey::from_private_key(&X25519, self.0.as_slice())
             .expect("invariant: any 32 bytes are an X25519 private key")
     }
 }
