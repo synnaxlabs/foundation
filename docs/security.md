@@ -221,6 +221,6 @@ The rule is one target for each decoder of outside input
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), the `buffer` header blocks and records (#361), `raft` messages (their encoding is in
-`mesh`), `spec` tree chunks (#64), `types::time::Rate`, and each connector's
-protocol parser.
+and `tls` (#55), the `buffer` header blocks and records (#361), `raft` messages
+(their encoding is in `mesh`), `spec` tree chunks (#64), `types::time::Rate`, and
+each connector's protocol parser.
