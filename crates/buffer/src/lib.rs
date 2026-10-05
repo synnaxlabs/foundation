@@ -1,38 +1,16 @@
 //! Stores each index's log durably within the disk budget (write-ahead ring, segments,
-//! trimming, floors, `append`, `append_at`) through a per-OS driver.
+//! trimming, floors, `append`) through a per-OS driver.
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the ring engine is the first user")
-)]
+mod buffer;
 mod crc32c;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the ring engine is the first user")
-)]
 mod entry;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the ring engine is the first user")
-)]
 mod group;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the ring engine is the first user")
-)]
 mod header;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the ring engine is the first user")
-)]
 mod record;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the ring engine is the first user")
-)]
 mod tails;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the ring engine is the first user")
-)]
 mod wal;
+
+pub use buffer::{Buffer, Commit, Config, Error};
+pub use entry::Entry;
+pub use tails::Tail;
+pub use wal::{Layout, Unfit};

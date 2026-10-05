@@ -5,6 +5,12 @@ version = 4
 [[package]]
 name = "acceptance"
 version = "0.0.0"
+dependencies = [
+ "env",
+ "node",
+ "sim",
+ "types",
+]
 
 [[package]]
 name = "access"
@@ -122,6 +128,7 @@ version = "0.0.0"
 name = "block"
 version = "0.0.0"
 dependencies = [
+ "divan",
  "loom",
  "proptest",
 ]
@@ -131,8 +138,11 @@ name = "buffer"
 version = "0.0.0"
 dependencies = [
  "block",
+ "counting",
  "crc32c",
+ "env",
  "proptest",
+ "sim",
  "types",
 ]
 
@@ -306,6 +316,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 name = "control"
 version = "0.0.0"
 dependencies = [
+ "counting",
  "divan",
  "proptest",
  "types",
@@ -1182,6 +1193,13 @@ checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 [[package]]
 name = "secret"
 version = "0.0.0"
+dependencies = [
+ "aws-lc-rs",
+ "env",
+ "proptest",
+ "sim",
+ "types",
+]
 
 [[package]]
 name = "semver"
