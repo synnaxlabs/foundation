@@ -1,0 +1,117 @@
+//! `append` makes no heap allocation once the buffer has taken a batch of each
+//! shape: its slots, its entry count, and whether it closes the open record. This
+//! binary has no test harness: the count covers each thread, and a harness
+//! allocates on its own thread at any time.
+
+#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
+
+#[path = "../it/memory.rs"]
+#[expect(dead_code, reason = "this binary uses only the driver")]
+mod memory;
+
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use block::{Block, Heap, Pool};
+use buffer::{Buffer, Config, Entry, Layout};
+use types::channel::{self, Slots};
+use types::frame::Path;
+use types::time::{Span, Stamp};
+
+use crate::memory::Memory;
+
+#[global_allocator]
+static ALLOCATOR: counting::Allocator = counting::Allocator::new();
+
+const COMMIT: Span = Span::from_nanos(10_000_000);
+/// Commits that warm the buffer up: its vectors reach their size and its groups
+/// cycle through the spares.
+const WARM: u64 = 3;
+/// Commits whose `append` is counted.
+const COUNTED: u64 = 8;
+/// A record body that holds the wide batch, and no more than two of the batches
+/// that close a record.
+const BODY_MAX: usize = 8183;
+/// Indexes of the wide batch.
+const WIDE: u32 = 64;
+
+fn entry(index: u32, first: u64, parts: &[Block]) -> Entry<'_> {
+    Entry {
+        index: channel::Key::from_u128(u128::from(index)),
+        slot: channel::Slot::new(index),
+        path: Path::Live,
+        first,
+        len: 1,
+        stored_at: Stamp::from_nanos(7),
+        last: Some(Stamp::from_nanos(7)),
+        tag: 0,
+        parts,
+    }
+}
+
+fn main() {
+    assert_eq!(
+        ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
+        1,
+        "the allocator counts"
+    );
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let clock = node.clock();
+    let entropy = node.entropy();
+    let config = env::shards::Config {
+        name: "shard-0".into(),
+        core: None,
+    };
+    let handle = node
+        .shards()
+        .start(config, move |tasks| async move {
+            let config = block::Config { budget: 1 << 21 };
+            let pool =
+                Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+            let mut slots = Slots::new();
+            let config = Config {
+                files: Memory::default().files(),
+                dir: PathBuf::from("shard-0"),
+                pool: Rc::clone(&pool),
+                clock,
+                tasks,
+                entropy,
+                layout: Layout::new(256 * 4096, BODY_MAX)
+                    .expect("the sizes make a ring"),
+                commit: COMMIT,
+            };
+            let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+            for index in 0..WIDE {
+                slots.assign(channel::Key::from_u128(u128::from(index)));
+            }
+            let parts = [pool.alloc(256).expect("a block").freeze()];
+            let half = [pool.alloc(BODY_MAX / 2).expect("a block").freeze()];
+            for commit in 0..WARM + COUNTED {
+                let seq = 3 * commit;
+                let wide: Vec<Entry<'_>> =
+                    (2..WIDE).map(|index| entry(index, commit, &[])).collect();
+                let batches: [&[Entry<'_>]; 4] = [
+                    &[entry(0, seq, &parts), entry(1, seq, &parts)],
+                    &wide,
+                    &[entry(0, seq + 1, &half)],
+                    &[entry(0, seq + 2, &half), entry(1, seq + 1, &parts)],
+                ];
+                for (shape, batch) in batches.into_iter().enumerate() {
+                    let (appended, allocations) =
+                        ALLOCATOR.count(|| buffer.append(batch));
+                    appended.expect("the ring has room");
+                    if commit >= WARM {
+                        assert_eq!(
+                            allocations, 0,
+                            "append allocated at commit {commit}, shape {shape}"
+                        );
+                    }
+                }
+                buffer.committed().await.expect("commits");
+            }
+        })
+        .expect("the shard starts");
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+}

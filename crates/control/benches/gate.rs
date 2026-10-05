@@ -1,4 +1,5 @@
-//! The per-frame cost of the gate: one write from the holder.
+//! The per-frame cost of the gate: a write from the holder that the home accepts, and
+//! the read of the handoff, with none waiting and with one waiting.
 
 use control::{Gate, Lease, Writer};
 use divan::Bencher;
@@ -25,6 +26,21 @@ fn write_by_holder(bencher: Bencher<'_, '_>, leased: bool) {
     let mut now = 0;
     bencher.bench_local(|| {
         now += 1;
-        gate.write(divan::black_box(key), Monotonic(now))
+        let permit = gate
+            .check(divan::black_box(key), Monotonic(now))
+            .expect("the holder writes");
+        gate.renew(permit);
     });
+}
+
+#[divan::bench(args = [false, true])]
+fn handoff(bencher: Bencher<'_, '_>, waiting: bool) {
+    let mut gate = Gate::new();
+    gate.open(writer("plc.valve"), None, Monotonic(0));
+    gate.open(writer("plc.backup"), None, Monotonic(0));
+    if !waiting {
+        gate.recorded();
+    }
+    let gate = &gate;
+    bencher.bench_local(move || divan::black_box(gate).handoff());
 }

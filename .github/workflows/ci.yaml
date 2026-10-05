@@ -156,20 +156,29 @@ jobs:
     if: >-
       github.event_name == 'pull_request' &&
       needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
+    # A mutant that hangs runs until its timeout, so the run needs parallel jobs and
+    # memory that the 2-core hosted runner lacks.
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: Swatinem/rust-cache@v2
+      - name: Add cargo to the path
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants@27.1.0
       - name: Mutants in the diff
+        env:
+          # A mutant can allocate in a loop until the host runs out of memory, which
+          # kills the runner. Each test process gets 4 GiB, so the mutant aborts and
+          # is caught. The workspace tests peak under 1 GiB.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --data=4294967296 --
         run: |
           git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
           status=0
-          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch" || status=$?
+          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch" --jobs 4 || status=$?
           # A timeout is a mutant that made a test hang, so a test caught it. Exit 3
           # (timeout) wins over exit 2 (missed), so read the missed list too.
           if [ "$status" -eq 3 ] && [ ! -s mutants.out/missed.txt ]; then

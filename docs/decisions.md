@@ -180,6 +180,9 @@ How to read this record:
   at join, signs it with its Ed25519 key, and rotates it with that key. A voter and a
   caller check the signature. The person decided on 2026-10-05: "ok fine" and "Add an
   encryption key" (#211).
+  A caller seals with HPKE base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and
+  ChaCha20-Poly1305, built from aws-lc-rs parts. The info is `foundation/secret/1`,
+  and the associated data is the secret's full name (`secret::seal`, #318).
 - **R9 type decisions (SETTLED BY ME)** R9-D1 per-entry types are interned once in the
   key set; R9-D2 bools are one byte; R9-D3 raw series are padded to element width and
   blocks are 64-byte aligned; R9-D4 variable-length series are `ends[n]` then data;
@@ -437,10 +440,12 @@ How to read this record:
   live frame, with no reader open and no cap. A smaller copy is a 5.3 tunable. The
   person decided on 2026-10-05: "Accept it" (#139). The budget counts what stays
   resident. A purge of a block smaller than a page gives no page back, so it frees no
-  budget. When every carved block of a size class is free, the pool gives back the
-  class's whole carved range and its budget; at most two partial pages per class stay
-  resident, and `Config::budget` states that slack. A class that a reader keeps partly
-  in use keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
+  budget. When an allocation finds no room, the pool gives back the whole carved range
+  and budget of size classes whose carved blocks are all free, until the allocation
+  fits. Under this pressure, at most two partial pages per class stay resident, and
+  `Config::budget` states that slack. An idle class that no allocation presses keeps
+  its pages until the purge after idle. A class that a reader keeps partly in use
+  keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
   wait in a follow-up issue.
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
@@ -491,12 +496,16 @@ How to read this record:
   gains little, and a broken drift bound would stay wrong for the life of an overlap,
   not for 8 exchanges. Decided by the coordinator (#84). An error that grows past 36500
   days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
-  time as OS CLOCK BOUND says. `Error::Bound` is only for an input error over 36500
-  days. The person decided on 2026-10-05 ("Ok that's fine"), #225. `combine` uses
-  each bound with its full growth, so a bound that grew to "unknown" never cuts a
-  known one. An exchange with an error over 36500 days, or an overlap whose readings
-  allow one before drift, fails with `Bound`: a stopped bound stored as a measurement
-  could miss the true offset. Decided by the `time` builder (#258).
+  time as OS CLOCK BOUND says. An error over 36500 days fails only in a new measurement:
+  `Measurement::new` gives `None`. The person decided on 2026-10-05 ("Ok that's fine"),
+  #225. `combine` uses each bound with its full growth, so a bound that grew to
+  "unknown" never cuts a known one. An exchange with an error over 36500 days fails with
+  `Bound`, and an overlap whose readings allow one before drift gives `None`: a stopped
+  bound stored as a measurement could miss the true offset. Decided by the `time`
+  builder (#258). Each function returns only the errors it can give: one `Error` per
+  module (`exchange`, `overlap`, `combine`), and `Option` where a caller does the same
+  for each cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the
+  coordinator (#272).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -529,10 +538,10 @@ How to read this record:
   edge comes from a mesh stamp before the device acts (a start command or a request),
   from a device counter read between two mesh stamps, or from a latency that the
   hardware guarantees. The overlap gives a bound only when it has both a low edge and a
-  high edge (`Open` before that). Decided by the `time` builder; the person accepted it
-  on 2026-10-05 ('#1 is fine'). The person accepted one-sided readings on 2026-10-05
-  ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper
-  bounds).
+  high edge (`Overlap::at` gives `None` before that). Decided by the `time` builder; the
+  person accepted it on 2026-10-05 ('#1 is fine'). The person accepted one-sided
+  readings on 2026-10-05 ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from
+  read-return upper bounds).
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
   a reader gets no mesh time. After it, when `combine` fails (no majority, or no sources
   after a remove), the clock holds over: it keeps its last estimate and its error grows
@@ -705,6 +714,15 @@ How to read this record:
   once, after it is written. Batch size (64 entries) and the number of appends in flight
   per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
   `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
+- **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
+  the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
+  set a joint phase replaces, else empty. An election, a commit, and a leader's
+  quorum check need a majority of each non-empty set. Each set is a `BTreeSet`, so
+  a duplicate cannot exist and the order is fixed. An empty `incoming` with an
+  `outgoing` is `Error::EmptyIncoming`; both empty is a node that only follows.
+  etcd's quorum tables are the oracle for the quorum math
+  (`oracles/conformance/raft/quorum/`). A node only in `outgoing` still campaigns, so
+  a leader keeps its lead through its own removal.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -846,9 +864,11 @@ How to read this record:
   refuses every byte string that `encode` cannot write. Both refuse nesting past 64
   levels, and front ends refuse files that nest deeper. `encode` returns `TooDeep` and
   `decode` returns `Error`: two error types, by the coordinator's ruling under R16-6.
-  `spec` stores and hashes these bytes. Pinned bytes are an oracle in
-  `oracles/conformance/document/`. A new format takes a new version byte. Decided by
-  the `config` builder; approved by the coordinator (#62).
+  `check` refuses the same Documents as `encode` without writing, so another writer
+  (`config-hcl`) uses the same limit (#287). `spec` stores and hashes these bytes.
+  Pinned bytes are an oracle in `oracles/conformance/document/`. A new format takes a
+  new version byte. Decided by the `config` builder; approved by the coordinator
+  (#62).
 - **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
@@ -1276,7 +1296,7 @@ Storage classes used in the table:
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
 | Seq blocks | Region state of the home node's region | The home, through lease renewals | A new home after promotion | `mesh` |
 | Index history (re-index) | Region state: spans and seals. The spec keeps only the current index. Which region: X39 | The old home proposes the seal; voters seal at lease end if it is down | `hub` joins spans for readers | `mesh` |
-| Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40) | `secret set` and `secret delete` (sealing in `ops`) | The node that runs the connector decrypts | `mesh` (record), `ops` (seal) |
+| Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40) | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it with `secret::seal` | `mesh` (record), `secret` (seal and open) |
 | Join ticket record | Region state: options and use count. The ticket itself is a secret, never in files | Admin through `ops` | Voters at join | `mesh`, `ops` |
 | Delegation record | The parent region's spec: `{ prefix, epoch, initial voters }` | Parent voters | Nodes (epoch fencing) | `mesh` |
 | Spec pointer | Region state: `{ version, root hash }` | `apply` (compare-and-swap) | Every node that follows the region | `mesh` |
@@ -1288,7 +1308,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Encoded samples | Index log (write-ahead ring, then segments) | `home` through `buffer.append`; `replica` through `buffer.append_at` | Complete readers (catch-up), `replica`, crash recovery | `buffer` |
+| Encoded samples | Index log (write-ahead ring, then segments) | `home` and `replica` through `buffer.append` | Complete readers (catch-up), `replica`, crash recovery | `buffer` |
 | Seq counters (live, backfill) | Memory at the home; durable through the index log | `home` | `delivery`, `wire` (prediction) | `home` |
 | Control state | Memory in `control` at the home; handoff records in the index log (truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
@@ -1332,7 +1352,7 @@ Storage classes used in the table:
 | Connector status channels | Channels under the connector's name | The kind through `ctx.status()` | People, agents, tools | `connector` |
 | Node status channels | Channels under the node's name (definitions: X27) | `node`'s collector through `hub`, from each crate's pulled values | People, agents, tools, rebalancers | `node` |
 | Quarantine | Per out connector: a hold on the original data plus an error record (samples on a channel under the connector's name); size on a status channel | The kind, through a library component | `ops` list, retry, drop | `connector` |
-| Secret value | Never in files, plans, or output. Built-in store: region state ciphertexts. External stores through adapters. References by name in kind config | `secret set` (person or CI) | `ctx.secret()` on the connector's node | `ops` (seal), `node` (decrypt), resolver (X40) |
+| Secret value | Never in files, plans, or output. Built-in store: region state ciphertexts. External stores through adapters. References by name in kind config | `secret set` (person or CI) | `ctx.secret()` on the connector's node | `secret` (seal and open; `ops` seals, `node` opens), resolver (X40) |
 | Time sources | Binary: a source table built in `node`; adapters probe for hardware | Adapters feed measurements | The estimator | `clock` (adapters), estimator crate (X11) |
 | Mesh clock state | Memory per node; published as `<node>.clock.offset` and `.clock.error` | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
 | Operation table | Binary | The build | CLI, MCP, embedded docs | `ops` |
@@ -1467,7 +1487,7 @@ the oscillator fit move to a layer-1 crate (`estimate`), used by both
 (`stamp::Midpoint`, `stamp::Window`, `stamp::Fit`). Basis: R9-D13, TIME ADAPTERS, the
 SRP PASS layer-1 rule, BQ21 (names).
 Amended (2026-10-05, #143): there is no exchange state machine. The request carries
-`sent` and the peer echoes it, so `estimate::Exchange` is plain data, and
+`sent` and the peer echoes it, so `estimate::exchange::Exchange` is plain data, and
 `Exchange::measure` turns one round trip into a `Measurement`. `clock` sends requests
 on a fixed timer and keeps no state for each one: a late answer is still an exchange,
 and a lost one needs no timeout. The person approved it on 2026-10-05 ("Yeah I
@@ -1894,15 +1914,15 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
-| 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`, `append_at`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
+| 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
 | 2 | `blob` | Stores content by hash and fetches it from peers (spec chunks, binaries). | `env`, `types`, `block`, `wire`, `transport` |
 | 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
 | 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
-| 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append_at`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
+| 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
 | 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home` |
-| 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. | layer 1 |
+| 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. Seals a value to a node's seal key, and opens it. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags |
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |

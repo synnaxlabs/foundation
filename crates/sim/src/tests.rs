@@ -1,6 +1,8 @@
 //! Tests of a simulated run through the `env` handles that production code gets.
 
+mod files;
 mod net;
+mod shards;
 
 use std::collections::BTreeSet;
 use std::future::pending;
@@ -9,30 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use crate::drivers::yield_now;
 use crate::{Config, Error, Sim, node};
 use env::thread;
 use proptest::prelude::*;
 use types::time::{Monotonic, Span, Stamp};
-
-/// Completes on its second poll, so other ready tasks may run first.
-struct Yield(bool);
-
-impl Future for Yield {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if self.0 {
-            return Poll::Ready(());
-        }
-        self.0 = true;
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
-
-fn yield_now() -> Yield {
-    Yield(false)
-}
 
 fn shard(name: &str) -> env::shards::Config {
     env::shards::Config {

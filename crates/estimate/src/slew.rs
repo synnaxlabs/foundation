@@ -15,13 +15,11 @@ const RATE_PPM: u64 = 500;
 /// use types::time::{Monotonic, Span};
 ///
 /// let second = Monotonic(1_000_000_000);
-/// let ahead = Measurement::new(second, Span::MILLISECOND, Span::ZERO)?;
-/// let slew = Slew::new(Measurement::new(second, Span::ZERO, Span::ZERO)?);
-/// let slew = slew.toward(second, ahead);
-/// let m = slew.at(Monotonic(2_000_000_000), Drift::from_ppb(0)?);
+/// let exact = |offset| Measurement::new(second, offset, Span::ZERO).expect("valid");
+/// let slew = Slew::new(exact(Span::ZERO)).toward(second, exact(Span::MILLISECOND));
+/// let m = slew.at(Monotonic(2_000_000_000), Drift::from_ppb(0).expect("valid"));
 /// let half = Span::from_nanos(500_000);
 /// assert_eq!((m.offset(), m.error()), (half, half));
-/// # Ok::<(), estimate::Error>(())
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slew {

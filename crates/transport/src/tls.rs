@@ -196,63 +196,15 @@ pub(crate) fn peer(
     })
 }
 
-/// The node key that `certificate` carries. A key of small order is not a node key:
-/// a signature for it passes with no private key.
+/// The node key that `certificate` carries.
 fn key(certificate: &CertificateDer<'_>) -> Result<PublicKey, rustls::Error> {
     let parsed = ParsedCertificate::try_from(certificate)?;
     parsed
         .subject_public_key_info()
         .strip_prefix(SPKI)
         .and_then(|key| <[u8; 32]>::try_from(key).ok())
-        .filter(|key| !small_order(*key))
-        .map(PublicKey)
+        .and_then(|key| PublicKey::new(key).ok())
         .ok_or_else(|| CertificateError::ApplicationVerificationFailure.into())
-}
-
-/// The y of each Ed25519 point of small order, and p and p + 1, which aws-lc's
-/// portable decoder reads as 0 and 1.
-const SMALL_ORDER: [[u8; 32]; 7] = [
-    // 0 and p: order 4.
-    [0; 32],
-    [
-        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
-    ],
-    // 1 and p + 1: the identity.
-    [
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ],
-    [
-        0xee, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
-    ],
-    // p - 1: order 2.
-    [
-        0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
-    ],
-    // Order 8.
-    [
-        0x26, 0xe8, 0x95, 0x8f, 0xc2, 0xb2, 0x27, 0xb0, 0x45, 0xc3, 0xf4, 0x89, 0xf2,
-        0xef, 0x98, 0xf0, 0xd5, 0xdf, 0xac, 0x05, 0xd3, 0xc6, 0x33, 0x39, 0xb1, 0x38,
-        0x02, 0x88, 0x6d, 0x53, 0xfc, 0x05,
-    ],
-    [
-        0xc7, 0x17, 0x6a, 0x70, 0x3d, 0x4d, 0xd8, 0x4f, 0xba, 0x3c, 0x0b, 0x76, 0x0d,
-        0x10, 0x67, 0x0f, 0x2a, 0x20, 0x53, 0xfa, 0x2c, 0x39, 0xcc, 0xc6, 0x4e, 0xc7,
-        0xfd, 0x77, 0x92, 0xac, 0x03, 0x7a,
-    ],
-];
-
-/// Whether `key` encodes a point of small order, with either sign of x.
-fn small_order(mut key: [u8; 32]) -> bool {
-    key[31] &= 0x7f;
-    SMALL_ORDER.contains(&key)
 }
 
 /// Accepts a server only when it proves the key the caller dialed.
@@ -385,7 +337,8 @@ mod tests {
     fn public(private_key: &PrivateKey) -> PublicKey {
         let pair =
             Ed25519KeyPair::from_seed_unchecked(&private_key.0).expect("32 bytes");
-        PublicKey(pair.public_key().as_ref().try_into().expect("32 bytes"))
+        PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
+            .expect("aws-lc makes no key of small order")
     }
 
     /// Moves every pending TLS record from `from` to `to`.
@@ -748,32 +701,6 @@ mod tests {
                 Err(CertificateError::ApplicationVerificationFailure.into())
             );
         }
-
-        #[test]
-        fn when_server_key_is_the_identity_point_the_client_refuses() {
-            let a = PrivateKey([1; 32]);
-            let peers = handshake(
-                Tls::new(&a).client(PublicKey(IDENTITY)),
-                keyless(IDENTITY).server(),
-            );
-            assert_eq!(
-                peers,
-                Err(CertificateError::ApplicationVerificationFailure.into())
-            );
-        }
-
-        #[test]
-        fn when_dialed_key_is_all_zero_no_keyless_server_passes() {
-            let a = PrivateKey([1; 32]);
-            let client = Tls::new(&a).client(PublicKey([0; 32]));
-            let server = keyless([0; 32]).server();
-            for _ in 0..64 {
-                assert_eq!(
-                    handshake(Arc::clone(&client), Arc::clone(&server)),
-                    Err(CertificateError::ApplicationVerificationFailure.into())
-                );
-            }
-        }
     }
 
     mod alpn {
@@ -832,37 +759,6 @@ mod tests {
                 Err(CertificateError::BadEncoding.into())
             );
         }
-
-        #[test]
-        fn refuses_each_encoding_of_a_point_of_small_order() {
-            for hex in [
-                "0100000000000000000000000000000000000000000000000000000000000000",
-                "0100000000000000000000000000000000000000000000000000000000000080",
-                "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-                "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                "0000000000000000000000000000000000000000000000000000000000000080",
-                "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-                "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
-                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
-                "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
-                "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
-            ] {
-                let mut encoding = [0; 32];
-                for (byte, pair) in encoding.iter_mut().zip(hex.as_bytes().chunks(2)) {
-                    let pair = std::str::from_utf8(pair).expect("ASCII");
-                    *byte = u8::from_str_radix(pair, 16).expect("hex");
-                }
-                assert_eq!(
-                    key(&certificate(&keyless(encoding))),
-                    Err(CertificateError::ApplicationVerificationFailure.into()),
-                    "{hex}"
-                );
-            }
-        }
     }
 
     mod certificate {
@@ -893,7 +789,7 @@ mod tests {
             let signature = &der[der.len() - 64..];
             let verifier = UnparsedPublicKey::new(
                 &aws_lc_rs::signature::ED25519,
-                public(&private_key).0,
+                public(&private_key).to_bytes(),
             );
             assert_eq!(verifier.verify(tbs, signature), Ok(()));
         }

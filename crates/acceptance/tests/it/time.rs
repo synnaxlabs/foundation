@@ -2,15 +2,15 @@ use std::time::Duration;
 
 use crate::lab::Lab;
 
-/// A sanity cap on the bound in simulation. No decision sets a target yet.
+/// The MVP target: the bound is at most 1 s and holds the true offset.
 const MAX_ERROR_NS: u64 = 1_000_000_000;
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #336"]
 fn every_sample_carries_a_time_error_bound_that_holds_true_time() {
     let mut lab = Lab::new(1);
-    let cloud = lab.start("cloud", 1 << 30);
-    let edge = lab.start("edge", 1 << 30);
+    let cloud = lab.start("cloud");
+    let edge = lab.start("edge");
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
     lab.apply(cloud, include_str!("fixtures/edge.hcl"));
@@ -35,4 +35,5 @@ fn every_sample_carries_a_time_error_bound_that_holds_true_time() {
             "{time:?} is {true_ns}±{bound}"
         );
     }
+    lab.stop();
 }
