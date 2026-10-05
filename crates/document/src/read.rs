@@ -14,8 +14,7 @@ const BAD_SIZE: Code = Code::new("document.bad-size");
 /// # Errors
 ///
 /// A `document.bad-size` diagnostic at the value's span when the value is not a
-/// string, or when `byte::Size` refuses its text. When the text with no whitespace is
-/// a size, the fix gives it, such as `Write "200GiB"` for `"200 GiB"`.
+/// string, or when `byte::Size` refuses its text.
 pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
     let bad = |message: String, fix: String| {
         Diagnostic::new(BAD_SIZE, value.span, message, fix)
@@ -27,18 +26,27 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
         ));
     };
     text.parse::<byte::Size>().map_err(|error| {
-        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-        let fix = if compact.parse::<byte::Size>().is_ok() {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        // `1 5GiB` may mean `15GiB` or `1.5GiB`, so it gets no `Write` fix.
+        let joins_digits = words.iter().zip(words.iter().skip(1)).any(|(a, b)| {
+            a.ends_with(|c: char| c.is_ascii_digit())
+                && b.starts_with(|c: char| c.is_ascii_digit())
+        });
+        let compact = words.concat();
+        let fix = if !joins_digits && compact.parse::<byte::Size>().is_ok() {
             format!("Write \"{compact}\"")
         } else {
             format!(
-                "Use a whole number of bytes, at most {}, in B, KiB, MiB, GiB, or TiB, \
-                 with no space, such as \"200GiB\" or \"1.5GiB\"",
+                "Use a whole number of bytes, at most {}, with no space before the \
+                 unit, such as \"200GiB\" or \"1.5GiB\"",
                 byte::Size::from_bytes(u64::MAX)
             )
         };
         bad(
-            format!("the byte size {text:?} is not {}", error.expected),
+            format!(
+                "cannot read the byte size {text:?}: expected {}",
+                error.expected
+            ),
             fix,
         )
     })
@@ -65,10 +73,16 @@ mod tests {
     use crate::{Map, Position, Source, Span};
     use proptest::prelude::*;
 
-    const SYNTAX: &str = "a number and a unit, such as 1023B, 1.5GiB, or 200GiB";
-    const FIX: &str = "Use a whole number of bytes, at most 18446744073709551615B, in B, \
-                       KiB, MiB, GiB, or TiB, with no space, such as \"200GiB\" or \
-                       \"1.5GiB\"";
+    const FIX: &str = "Use a whole number of bytes, at most 18446744073709551615B, \
+                       with no space before the unit, such as \"200GiB\" or \"1.5GiB\"";
+
+    /// The message for `text`, which is not a number and a unit with no space.
+    fn syntax(text: &str) -> String {
+        format!(
+            "cannot read the byte size {text:?}: expected a number and a unit, such as \
+             1023B, 1.5GiB, or 200GiB"
+        )
+    }
 
     fn span() -> Span {
         let at = |offset| Position {
@@ -151,46 +165,38 @@ mod tests {
 
     #[test]
     fn gives_the_text_with_no_whitespace() {
+        for (text, fix) in [
+            ("200 GiB", "Write \"200GiB\""),
+            (" 1.5 GiB\t", "Write \"1.5GiB\""),
+            ("200\u{a0}GiB", "Write \"200GiB\""),
+        ] {
+            assert_eq!(size(&string(text)), refused(&syntax(text), fix), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_text_that_byte_size_refuses() {
+        for text in ["200GB", "200 GB", "", "1 5GiB", "1 024B"] {
+            assert_eq!(size(&string(text)), refused(&syntax(text), FIX), "{text:?}");
+        }
         assert_refused(&[
             (
-                "200 GiB",
-                &format!("the byte size \"200 GiB\" is not {SYNTAX}"),
-                "Write \"200GiB\"",
+                "0.3B",
+                "cannot read the byte size \"0.3B\": expected a whole number of bytes",
+                FIX,
             ),
             (
-                " 1.5 GiB\t",
-                &format!("the byte size \" 1.5 GiB\\t\" is not {SYNTAX}"),
-                "Write \"1.5GiB\"",
+                "16777216TiB",
+                "cannot read the byte size \"16777216TiB\": expected a size that fits \
+                 in a 64-bit count of bytes",
+                FIX,
             ),
         ]);
     }
 
     #[test]
-    fn refuses_a_text_that_byte_size_refuses() {
-        assert_refused(&[
-            (
-                "200GB",
-                &format!("the byte size \"200GB\" is not {SYNTAX}"),
-                FIX,
-            ),
-            (
-                "200 GB",
-                &format!("the byte size \"200 GB\" is not {SYNTAX}"),
-                FIX,
-            ),
-            ("", &format!("the byte size \"\" is not {SYNTAX}"), FIX),
-            (
-                "0.3B",
-                "the byte size \"0.3B\" is not a whole number of bytes",
-                FIX,
-            ),
-            (
-                "16777216TiB",
-                "the byte size \"16777216TiB\" is not a size that fits in a 64-bit \
-                 count of bytes",
-                FIX,
-            ),
-        ]);
+    fn names_a_string_as_a_string() {
+        assert_eq!(noun(&Kind::String("200GiB".into())), "a string");
     }
 
     #[test]
@@ -206,7 +212,10 @@ mod tests {
     fn near() -> impl Strategy<Value = String> {
         prop_oneof![
             any::<String>(),
-            "[ \t]?[0-9]{0,22}[ .\t]{0,2}[0-9]{0,2}[ \t]?(B|KiB|MiB|GiB|TiB|GB|gib|)[ \t]?",
+            concat!(
+                "[ \t\u{a0}]?[0-9]{0,22}[ .\t]{0,2}[0-9]{0,2}[ \t]?",
+                "(B|KiB|MiB|GiB|TiB|GB|gib|)[ \t]?",
+            ),
         ]
     }
 
@@ -226,7 +235,10 @@ mod tests {
                     prop_assert_eq!(diagnostic.span, Some(span()));
                     prop_assert_eq!(
                         diagnostic.message,
-                        format!("the byte size {text:?} is not {}", error.expected)
+                        format!(
+                            "cannot read the byte size {text:?}: expected {}",
+                            error.expected
+                        )
                     );
                     let written = diagnostic
                         .fix
