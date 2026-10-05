@@ -243,14 +243,7 @@ mod tests {
     }
 
     fn handed_to(index: &Index) -> Option<Writer> {
-        index.gate.handoff().and_then(|handoff| handoff.to)
-    }
-
-    /// Records the waiting handoff, as the shard does before the index's next frame.
-    fn record(index: &mut Index) {
-        if let Some(handoff) = index.gate.handoff() {
-            index.gate.recorded(&handoff);
-        }
+        index.gate.handoff().and_then(|handoff| handoff.to.cloned())
     }
 
     mod check {
@@ -322,7 +315,7 @@ mod tests {
             let mut index = index();
             let _ = index.gate.open(writer("a", 10), Some(lease(10)), at(0));
             let waiter = index.gate.open(writer("b", 5), None, at(0));
-            record(&mut index);
+            index.gate.recorded();
             assert_eq!(write(&mut index, waiter, &[1], at(20)), Ok(0..1));
             assert_eq!(handed_to(&index), Some(writer("b", 5)));
         }
@@ -358,7 +351,7 @@ mod tests {
             let mut index = index();
             let holder = index.gate.open(writer("a", 10), Some(lease(10)), at(0));
             let _ = index.gate.open(writer("b", 5), None, at(0));
-            record(&mut index);
+            index.gate.recorded();
             let refusal = write(&mut index, holder, &[1], at(20));
             assert_eq!(refusal, Err(Refusal::Control(control::Error::Expired)));
             assert_eq!(handed_to(&index), Some(writer("b", 5)));
@@ -422,12 +415,13 @@ mod tests {
             let key = index.gate.open(writer("a", 10), None, at(0));
             let first = index.check(key, Path::Live, &stamps(&[1]), at(1), mesh());
             let first = first.expect("a holder's frame in order");
-            assert_eq!(write(&mut index, key, &[1], at(2)), Ok(0..1));
+            // At the same time, so the gate still takes the first permit.
+            assert_eq!(write(&mut index, key, &[1], at(1)), Ok(0..1));
             let _ = index.advance(first);
         }
 
         #[test]
-        #[should_panic(expected = "invariant: writer 0 lost control after its check")]
+        #[should_panic(expected = "invariant: the gate changed after the check of writer 0")]
         fn panics_when_the_holder_changed_after_the_check() {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
@@ -462,7 +456,7 @@ mod tests {
             let mut index = index();
             let first = index.gate.open(writer("a", 5), None, at(0));
             assert_eq!(handed_to(&index), Some(writer("a", 5)));
-            record(&mut index);
+            index.gate.recorded();
             assert_eq!(index.gate.handoff(), None);
             let _ = index.gate.open(writer("b", 1), None, at(1));
             assert_eq!(index.gate.handoff(), None);
@@ -476,7 +470,7 @@ mod tests {
         fn names_an_empty_gate_after_the_last_close() {
             let mut index = index();
             let key = index.gate.open(writer("a", 5), None, at(0));
-            record(&mut index);
+            index.gate.recorded();
             index.gate.close(key, at(1));
             assert_eq!(index.gate.handoff(), Some(Handoff { to: None }));
         }
@@ -485,7 +479,7 @@ mod tests {
         fn is_none_when_the_gate_returns_to_the_logged_holder() {
             let mut index = index();
             let _ = index.gate.open(writer("a", 5), None, at(0));
-            record(&mut index);
+            index.gate.recorded();
             let b = index.gate.open(writer("b", 9), None, at(1));
             assert_eq!(handed_to(&index), Some(writer("b", 9)));
             index.gate.close(b, at(2));
@@ -549,15 +543,15 @@ mod tests {
                         }
                         Input::Record => {
                             if let Some(handoff) = index.gate.handoff() {
-                                prop_assert_ne!(&handoff.to, &logged);
-                                index.gate.recorded(&handoff);
-                                logged = handoff.to;
+                                prop_assert_ne!(handoff.to, logged.as_ref());
+                                logged = handoff.to.cloned();
                             }
+                            index.gate.recorded();
                         }
                         Input::Close(_) | Input::Write(_) => {}
                     }
-                    let named = index.gate.handoff().map_or(logged.clone(), |h| h.to);
-                    prop_assert_eq!(named.as_ref(), index.gate.holder());
+                    let named = index.gate.handoff().map_or(logged.as_ref(), |h| h.to);
+                    prop_assert_eq!(named, index.gate.holder());
                 }
             }
         }
