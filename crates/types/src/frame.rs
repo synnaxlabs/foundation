@@ -325,6 +325,17 @@ impl Frame {
             (to_usize(lead(descriptor)), series)
         })
     }
+
+    /// The series bytes of every present entry, as one view that shares the frame's
+    /// block, from the first series to the end. The end of each series in the
+    /// descriptors is an offset into this view. The series come in entry order, and
+    /// each starts at the end of the one before, rounded up to 8 bytes. Copies nothing.
+    #[must_use]
+    pub fn body(&self) -> block::Block {
+        let (ranges, series) = counts(&self.0);
+        let start = HEAD + RANGE * ranges + DESCRIPTOR * series;
+        self.0.clone().skip(start)
+    }
 }
 
 /// The present groups of a frame of `series`, and the bytes of its series with the
@@ -552,6 +563,25 @@ mod tests {
             frame.iter().map(|(entry, _)| entry).collect::<Vec<_>>(),
             [0]
         );
+    }
+
+    #[test]
+    fn views_the_series_bytes_without_a_copy() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        let series = [(0, 3), (1, 0), (2, 9)];
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
+        draft.series(0).unwrap().fill(1);
+        draft.series(2).unwrap().fill(2);
+        let frame = draft.freeze(Path::Live);
+        let committed = pool.committed();
+        let body = frame.body();
+        assert_eq!(pool.committed(), committed);
+        drop(frame);
+        let expected = [[1, 1, 1, 0, 0, 0, 0, 0].as_slice(), &[2; 9]].concat();
+        assert_eq!(&*body, expected.as_slice());
+        let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
+        assert!(empty.freeze(Path::Live).body().is_empty());
     }
 
     #[test]
@@ -843,6 +873,12 @@ mod tests {
             .iter()
             .map(|(entry, bytes)| (entry, bytes.to_vec()))
             .collect();
+        let mut body = Vec::new();
+        for (_, bytes) in &written {
+            body.resize(body.len().next_multiple_of(SERIES_ALIGN), 0);
+            body.extend(bytes);
+        }
+        prop_assert_eq!(&*frame.body(), body.as_slice());
         prop_assert_eq!(read, written);
         Ok(())
     }
