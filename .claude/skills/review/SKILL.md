@@ -14,8 +14,8 @@ description:
    number, the decisions section, and its job. Never give them your reasoning.
    - `reviewer`: correctness, tests, error handling, and oracle changes. Always.
    - `architecture`: layers, dependency direction, naming, principles. Always.
-   - `performance`: when the PR touches `block`, `codec`, `wire`, `delivery`,
-     `buffer`, `home`, `hub`, `transport`, or any code a frame passes through.
+   - `performance`: only when the PR's Performance section answers the six questions,
+     that is, it changes code a frame passes through.
    - A second `reviewer` for each oracle weakening the PR flags, told to argue for
      fixing the code instead.
    - Run reviewers with `model: "fable"` when the PR touches `raft`, `mesh`, `block`,

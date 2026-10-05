@@ -17,7 +17,7 @@
     clippy::as_conversions
 )]
 
-use crate::crc32c::Crc32c;
+use crate::crc32c;
 use crate::record::{ALIGN, BLOCK};
 use crate::wal::{Layout, Position, Unaligned, Unfit};
 
@@ -114,9 +114,7 @@ impl Header {
             rest = after;
         }
         let (covered, slot) = block.split_at_mut(CRC);
-        let mut crc = Crc32c::new();
-        crc.update(covered);
-        slot.copy_from_slice(&crc.finish().to_le_bytes());
+        slot.copy_from_slice(&crc32c::append(0, covered).to_le_bytes());
         block
     }
 
@@ -173,9 +171,7 @@ struct Fields {
 impl Fields {
     fn read(block: &[u8; ALIGN]) -> Option<Self> {
         let (covered, stored) = block.split_last_chunk::<4>()?;
-        let mut crc = Crc32c::new();
-        crc.update(covered);
-        if crc.finish() != u32::from_le_bytes(*stored) {
+        if crc32c::append(0, covered) != u32::from_le_bytes(*stored) {
             return None;
         }
         let (magic, rest) = covered.split_first_chunk::<8>()?;
@@ -223,9 +219,8 @@ mod tests {
 
     /// Puts the CRC of the block in its last four bytes.
     fn seal(block: &mut [u8; ALIGN]) {
-        let mut crc = Crc32c::new();
-        crc.update(&block[..CRC]);
-        block[CRC..].copy_from_slice(&crc.finish().to_le_bytes());
+        let crc = crc32c::append(0, &block[..CRC]);
+        block[CRC..].copy_from_slice(&crc.to_le_bytes());
     }
 
     fn any_header() -> impl Strategy<Value = Header> {
