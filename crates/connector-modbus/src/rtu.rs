@@ -1,7 +1,15 @@
-//! Modbus RTU framing: a unit address before each PDU, and a CRC-16 after it.
+//! Modbus RTU: a unit address before each PDU and a CRC-16 after it, a client,
+//! and a device server.
 //!
 //! A frame's length comes from its first bytes, so a frame reads as soon as its
 //! last byte arrives. Silence on the line marks no boundary here.
+
+mod client;
+mod line;
+mod serve;
+
+pub use client::{Client, Failure};
+pub use serve::serve;
 
 use crate::Error;
 use crate::pdu::{self, Request};
@@ -27,9 +35,14 @@ pub fn encode(unit: u8, request: &Request, out: &mut Vec<u8>) -> Result<(), Erro
     let start = out.len();
     out.push(unit);
     request.write_to(out);
+    seal(out, start);
+    Ok(())
+}
+
+/// Appends the CRC of the frame that starts at `start` in `out`.
+fn seal(out: &mut Vec<u8>, start: usize) {
     let crc = crc(out.iter().skip(start));
     out.extend_from_slice(&crc.to_le_bytes());
-    Ok(())
 }
 
 /// Reads the first request frame in `bytes`, as a device does, or `None` when
