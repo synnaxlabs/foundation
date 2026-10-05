@@ -163,4 +163,12 @@ jobs:
       - name: Mutants in the diff
         run: |
           git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
-          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch"
+          status=0
+          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch" || status=$?
+          # A timeout is a mutant that made a test hang, so a test caught it. Exit 3
+          # (timeout) wins over exit 2 (missed), so read the missed list too.
+          if [ "$status" -eq 3 ] && [ ! -s mutants.out/missed.txt ]; then
+            cat mutants.out/timeout.txt
+            status=0
+          fi
+          exit "$status"
