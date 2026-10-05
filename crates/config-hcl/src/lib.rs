@@ -283,12 +283,12 @@ impl Form {
 /// What is wrong with a number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Number {
-    /// A number that HCL reads but a Document cannot hold: an integer outside
-    /// `i128`, or a float that an `f64` cannot hold, past the largest or rounded to
-    /// zero from digits that are not all zero.
+    /// A number that a Document cannot hold: an integer outside `i128`, or a float
+    /// that an `f64` cannot hold, past the largest or rounded to zero from digits that
+    /// are not all zero.
     Range,
-    /// Text that HCL scans as one number and refuses, such as `1.2.3`, `1e5e5`, or an
-    /// exponent outside `i64`.
+    /// Text that HCL scans as one number but that is not a number: it has two dots,
+    /// two exponents, a dot in its exponent, or an exponent outside `i64`.
     Malformed,
 }
 
@@ -301,7 +301,8 @@ impl Number {
             ),
             Self::Malformed => (
                 "the number is not valid",
-                "Write a number such as `1.5e3`, or quote the text to make a string",
+                "Write a number such as `1.5e3`, or put the text in quotes to make a \
+                 string",
             ),
         };
         Diagnostic::new(NUMBER, Some(span), message.into(), fix.into())
@@ -639,7 +640,8 @@ mod tests {
                 },
                 "hcl.number",
                 "the number is not valid",
-                "Write a number such as `1.5e3`, or quote the text to make a string",
+                "Write a number such as `1.5e3`, or put the text in quotes to make \
+                 a string",
             ),
             (
                 Error::Escape { span: span(7) },

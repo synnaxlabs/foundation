@@ -292,19 +292,24 @@ impl<'a> Tokens<'a> {
     fn number(&mut self) {
         let bytes = self.rest.as_bytes();
         let (mut at, mut end) = (0, 0);
-        while let Some(rest) = bytes.get(at..) {
+        // Each pass moves past a part or returns.
+        for _ in 0..=bytes.len() {
+            let rest = bytes.get(at..).unwrap_or_default();
             let len = match rest {
                 [b'0'..=b'9' | b'.', ..] => 1,
                 [b'e' | b'E', b'0'..=b'9', ..] => 2,
                 [b'e' | b'E', b'+' | b'-', b'0'..=b'9', ..] => 3,
-                _ => break,
+                _ => {
+                    self.skip_bytes(end);
+                    return;
+                }
             };
             at = at.saturating_add(len);
             if rest.first() != Some(&b'.') {
                 end = at;
             }
         }
-        self.skip_bytes(end);
+        unreachable!("invariant: each pass moves past a part")
     }
 
     /// Moves past the rest of a word after its first character, `first`.
@@ -623,8 +628,9 @@ mod tests {
     #[test]
     fn scans_a_number_as_hcl_does() {
         use Kind::{Dot, Ellipsis, Identifier, Number, Operator};
-        let cases: [(&str, &[(Kind, &str)]); 15] = [
+        let cases: [(&str, &[(Kind, &str)]); 16] = [
             ("1.5e3", &[(Number, "1.5e3")]),
+            ("1E5", &[(Number, "1E5")]),
             ("1.e5", &[(Number, "1.e5")]),
             ("1.E+5", &[(Number, "1.E+5")]),
             ("0.e-5", &[(Number, "0.e-5")]),

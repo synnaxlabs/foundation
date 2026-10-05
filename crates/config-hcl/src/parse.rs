@@ -276,12 +276,12 @@ impl<'a> Parser<'a> {
             span: self.token.span,
             form,
         });
-        self.skip(ends)
+        self.skip_item(ends)
     }
 
     /// Moves past the rest of the item to the token that ends it, and leaves that
     /// token.
-    fn skip(&mut self, ends: Ends) -> Result<(), Error> {
+    fn skip_item(&mut self, ends: Ends) -> Result<(), Error> {
         let mut depth = 0usize;
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
@@ -478,14 +478,14 @@ impl<'a> Parser<'a> {
         if self.token.kind != lex::Kind::Number {
             return Err(self.syntax(Expected::Key));
         }
-        if let Err(Number::Malformed) = read_number(self.token.text, false) {
+        if malformed(self.token.text) {
             let span = self.token.span;
             let span = minus.map_or(span, |minus| join(minus.span, span));
             self.errors.push(Error::Number {
                 span,
                 problem: Number::Malformed,
             });
-            self.skip(Ends::Line)?;
+            self.skip_item(Ends::Line)?;
             return Ok(None);
         }
         let Some(digits) = integer_key(self.token.text) else {
@@ -664,7 +664,14 @@ fn text(token: Token<'_>) -> Box<str> {
 }
 
 /// The value of a number token, negated when `negative`.
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`f64` parses each number token that is not malformed"
+)]
 fn read_number(text: &str, negative: bool) -> Result<value::Kind, Number> {
+    if malformed(text) {
+        return Err(Number::Malformed);
+    }
     if text.bytes().all(|b| b.is_ascii_digit()) {
         let magnitude = text.parse::<u128>().ok();
         return magnitude
@@ -678,18 +685,23 @@ fn read_number(text: &str, negative: bool) -> Result<value::Kind, Number> {
             .map(value::Kind::Integer)
             .ok_or(Number::Range);
     }
-    // HCL refuses an exponent outside `i64`, even on zero.
-    let exponent = text.split_once(['e', 'E']).map(|(_, exponent)| exponent);
-    if exponent.is_some_and(|exponent| exponent.parse::<i64>().is_err()) {
-        return Err(Number::Malformed);
-    }
-    let float = text.parse::<f64>().ok().ok_or(Number::Malformed)?;
+    let float: f64 = text
+        .parse()
+        .expect("invariant: a number token that is not malformed is a float");
     Some(float)
         .filter(|&f| f != 0.0 || !significant(text))
         .map(|f| if negative { -f } else { f })
         .and_then(Float::new)
         .map(value::Kind::Float)
         .ok_or(Number::Range)
+}
+
+/// Reports whether the text of a number token is not a number: it has two dots, two
+/// exponents, a dot in its exponent, or an exponent outside `i64`. HCL refuses each,
+/// even on zero.
+fn malformed(text: &str) -> bool {
+    let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
+    mantissa.matches('.').nth(1).is_some() || exponent.parse::<i64>().is_err()
 }
 
 /// Reports whether the digits of a float before its exponent are not all zero.
@@ -1597,7 +1609,7 @@ c = "°C # not a comment"
         const NUMBER: &str = "the number is out of range. Use an integer that fits \
                               in 128 bits, or a float that fits in 64 bits";
         const MALFORMED: &str = "the number is not valid. Write a number such as \
-                                 `1.5e3`, or quote the text to make a string";
+                                 `1.5e3`, or put the text in quotes to make a string";
         const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
                               give it a different key";
 
@@ -1774,6 +1786,11 @@ c = "°C # not a comment"
                 form: Form::NumberKey,
             };
             check(&format!("a = {{ {digits} = 1 }}\n"), &[(long, &message)]);
+            let past = Error::Form {
+                span: on(6, 18),
+                form: Form::NumberKey,
+            };
+            check("a = { 1e3000000000 = 1 }\n", &[(past, &message)]);
             let key = Error::Form {
                 span: on(6, 9),
                 form: Form::NumberKey,
@@ -2019,6 +2036,8 @@ c = "°C # not a comment"
             check("f = -1e400\n", &[number(4, 10)]);
             check("f = 1e-400\n", &[number(4, 10)]);
             check("f = 2e-324\n", &[number(4, 10)]);
+            check("f = 1e2147483647\n", &[number(4, 16)]);
+            check("f = 1e-3000000000\n", &[number(4, 17)]);
         }
 
         #[test]
@@ -2036,14 +2055,22 @@ c = "°C # not a comment"
                 ("a = -1.2.3\n", malformed(4, 10)),
                 ("a = [1.2.3, 2]\n", malformed(5, 10)),
                 ("a = 0e9223372036854775808\n", malformed(4, 25)),
+                ("a = 0E9223372036854775808\n", malformed(4, 25)),
                 ("a = 0.e9223372036854775808\n", malformed(4, 26)),
                 ("a = 0.e-9223372036854775809\n", malformed(4, 27)),
-                ("a = { 1.2.3 = 1, b = 2 }\n", malformed(6, 11)),
                 ("a = { -1.2.3 = 1 }\n", malformed(6, 12)),
             ];
             for (text, error) in cases {
                 check(text, &[error]);
             }
+            let null = Error::Form {
+                span: on(21, 25),
+                form: Form::Null,
+            };
+            check(
+                "a = { 1.2.3 = 1, b = null }\n",
+                &[malformed(6, 11), (null, NULL)],
+            );
         }
 
         #[test]
