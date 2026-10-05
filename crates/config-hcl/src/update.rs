@@ -4,8 +4,7 @@ use std::ops::Range;
 use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
-use crate::parse::Ends;
-use crate::write::{INDENT, Writer};
+use crate::write::{After, INDENT, Writer};
 use crate::{Error, read, write};
 
 /// Changes `text` so that [`read`] reads it as `document`, and returns the new text.
@@ -393,15 +392,13 @@ impl Diff<'_, '_> {
         let file = self.file;
         let (start, end) = offsets(old.value.span);
         let next = file.mark(file.token(end));
-        // A heredoc ends its line, so a value with a comment after it is quoted, as
-        // in a list.
-        let ends = if file.blank(end, next.start) {
-            Ends::Line
+        let after = if file.blank(end, next.start) {
+            After::Line
         } else {
-            Ends::Comma
+            After::Other
         };
         let mut writer = Writer::new(file.margin(old.key_span), column(old.value.span));
-        writer.value(&new.value, 0, ends);
+        writer.value(&new.value, 0, after);
         self.edits.push(Edit {
             range: start..end,
             text: written(writer),
@@ -925,6 +922,13 @@ mod tests {
             updated("a = 1 # one\nb = 2\n", "a = \"x\\n\"\nb = \"y\\n\""),
             "a = \"x\\n\" # one\nb = <<EOT\ny\nEOT\n"
         );
+    }
+
+    #[test]
+    fn keeps_a_value_that_fits_on_one_line_before_a_comment() {
+        let line = format!("a = [\"{}\"]", "x".repeat(80));
+        assert_eq!(line.chars().count(), 88);
+        assert_eq!(updated("a = 1 # c\n", &line), format!("{line} # c\n"));
     }
 
     #[test]

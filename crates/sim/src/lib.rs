@@ -155,13 +155,11 @@ impl Sim {
     ///   each message as [`Error::Panicked`] does.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
-        let (tasks, starts) = lock(&self.shared).crash(node);
+        let (tasks, starts) = lock(&self.shared).stop(node);
         let panics = self.drop_futures(&tasks);
         drop(starts);
-        if crash == Crash::Power {
-            let orphans = lock(&self.shared).cut_power(node);
-            drop(orphans);
-        }
+        let orphans = lock(&self.shared).crash(node, crash);
+        drop(orphans);
         assert!(panics.is_empty(), "{}", panics.join(THEN));
     }
 
@@ -364,8 +362,8 @@ impl fmt::Debug for Sim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Crash {
     /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
-    /// keeps each call that ended, and each file call in flight still ends, as if
-    /// its future dropped.
+    /// keeps each call that ended. Each file call in flight takes effect at the
+    /// crash, as if its future dropped, so a write keeps any subset of its sectors.
     Process,
     /// The machine loses power and boots again.
     ///

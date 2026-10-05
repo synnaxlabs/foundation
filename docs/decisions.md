@@ -282,8 +282,11 @@ How to read this record:
   replay after a disconnect. Frames go out before the disk sync. The current value is
   the index's newest live frame, even when it holds none of the reader's channels (M3).
   The person decided on 2026-10-05: "Newest frame" (#139).
-- **B5** Live writes never wait. If the disk queue or the pool is full, the home records
-  an explicit gap and warns. Backfill waits for room.
+- **B5** Live writes never wait. If the disk queue or the pool is full, or the link to a
+  remote home cannot take the frame now, the home records an explicit gap and warns; on
+  the link, the writer's `hub` drops the frame and sends the gap to the home (RECV
+  WAITS). Backfill waits for room. The person decided on 2026-10-05: "Ok, as long as
+  the end user UX remains the same" (#581).
 - **B6** One write call is one frame. Smart batching is the default. Catch-up may merge
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
@@ -407,7 +410,8 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. A new ring has the same block at `seq` 0 in
+  records. An entry has no part, one, or two; `append` takes them owned and drops
+  them when it fails (#582). A new ring has the same block at `seq` 0 in
   both places, with the tail at offset 0 and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
@@ -807,19 +811,54 @@ How to read this record:
   `network` in #228.
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
-  message itself starts with the STREAM DISPATCH header, which the caller writes. A
-  node takes datagrams on every connection. It sends its `message_bytes_max`, at most
-  65535, as the QUIC `max_datagram_frame_size` parameter. A sender's largest datagram
-  is the smaller of the path's limit and the peer's limit less the frame header (9
-  bytes). A peer that takes no datagrams, such as an SDK client, gets none: the limit
-  is 0, and each send gives `Error::TooLarge`. A datagram over the receiver's limit
-  breaks the protocol: noq-proto closes the connection with PROTOCOL_VIOLATION, and
-  the caller gets `Error::Broken`. Each connection queues at most 64 KiB of datagrams
-  to send; when a new one does not fit, the oldest unsent ones drop. A node copies
-  each datagram into a block from its pool when it arrives, and drops it when it
-  gets no block (the pool or the system has no room). At most 64 wait untaken on one
-  connection; a new one drops the oldest. Proposed by `network` in #55; approved by
-  the coordinator.
+  message itself starts with the STREAM DISPATCH header, which the caller writes. A node
+  takes datagrams on every connection. It sends its `message_bytes_max`, at most 65535,
+  as the QUIC `max_datagram_frame_size` parameter. noq-proto holds at most
+  `message_bytes_max` bytes of datagrams until the node takes them, after each UDP
+  packet, so `message_bytes_max` is at least 1472, the largest UDP payload a node takes
+  (#610). A sender's largest datagram is the smaller of the path's limit and the peer's
+  limit less the frame header (9 bytes). A peer that takes no datagrams, such as an SDK
+  client, gets none: the limit is 0, and each send gives `Error::TooLarge`. A datagram
+  over the receiver's `message_bytes_max` breaks the protocol: noq-proto closes the
+  connection with PROTOCOL_VIOLATION, and the caller gets `Error::Broken`. Each
+  connection queues at most 64 KiB of datagram bytes to send; when a new one does not
+  fit, the oldest unsent ones drop. Small datagrams hold more pool than that, because
+  each holds a block (#615). A node copies each datagram into a block from its pool when
+  it arrives, and drops it when it gets no block (the pool or the system has no room).
+  At most 64 wait untaken on one connection; a new one drops the oldest, and they free
+  when the connection ends. #68 adds a count of each drop, with the counts of RECV
+  WAITS. Proposed by `network` in #55; approved by the coordinator on #55, and the
+  `datagram` doc on #565.
+- **RECV WAITS (#581, 2026-10-05)** `stream::Receiver::recv` waits while it has no
+  block, because the pool has no room or the system refused a commit. It gives the
+  next message, `None` at the end, `Error::Reset` when the sender cancelled the
+  stream, or the error that ended the session. It never returns `Error::Pool`, and a
+  refused commit gets no error variant. Its doc says that it waits. The message stays
+  queued, and the carrier's per-stream flow control holds the peer, as a read already
+  waits for `Readable` (STREAM WIRE); TLS over TCP must do the same (TRANSPORT SHAPE
+  LOCKED). One timer for each `Transport` retries all of its waiting reads, for both
+  causes; each retry's `alloc` takes back the blocks returned since the last try. The
+  retry interval is a `transport` constant that simulation tunes (5.3). The waiting
+  reads of one `Transport` take blocks highest class first, then oldest first, so
+  `CatchUp` reads cannot starve `Command` reads; other users of the shard pool (M4)
+  are not in this order. `transport` counts the time that reads wait and each refused
+  commit, and `node` publishes them on status channels (BQ11b); the new counts go
+  through the interface process in #68. A caller ends a wait when it drops the future;
+  it can then call `stop`. `datagram::Receiver::recv` never returns `Error::Pool`
+  either: a datagram with no block drops and is counted, and the read waits for the
+  next one. `hub` writes no retry for a read. B5 on the remote hop: the writer's `hub`
+  never waits on a live send. When the stream cannot take a live frame now, `hub`
+  drops it and adds its samples and stamps to one pending gap for each index. When the
+  stream can take a message again, `hub` sends the pending gap first, and the home
+  records it and warns. The writer gets the same answer as for a frame the home
+  dropped, and never resends it (B7). Backfill waits. This needs a send that does not
+  wait and gives the message back; `network` sets it in #68. `block` gets no wake when
+  a block returns until simulation shows that the resume latency matters; then
+  `memory` proposes one wake, which home backfill shares. Until then, home backfill
+  also retries on a timer. Rejected: each caller retries (each caller writes the same
+  timer, and the pool's states leak into `hub`), and the stream ends (memory pressure
+  becomes stream churn and lost messages, and `Command` streams drop first). Decided
+  by the advisor under the delivery and wire internals delegation.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -1483,14 +1522,16 @@ How to read this record:
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
   scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
   (#37) gives files under one data directory, with owned blocks and a sync that
-  poisons the file on failure (S4). `env::net` (#44) gives UDP sockets that move GSO
-  and GRO batches with ECN and the local address, TCP streams, and listeners.
-  `env::serial` (#431) gives serial ports that move bytes at the line rate, with 8
-  data bits, a parity, and stop bits. Framing belongs to the protocol: a USB adapter
-  hides the gap between frames, so a seam that split frames would act differently
-  on `os` and `sim`. A socket, listener, or port may move to another thread before its
-  first poll. The first poll binds it to its thread, and a poll on another thread
-  panics.
+  poisons the file on failure (S4). One handle at a time holds a file open to write,
+  until it drops and its calls end; another write open fails with `Busy` (#392). Each
+  `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP sockets
+  that move GSO and GRO batches with ECN and the local address, TCP streams, and
+  listeners. `env::serial` (#431) gives serial ports that move bytes at the line rate,
+  with 8 data bits, a parity, and stop bits. Framing belongs to the protocol: a USB
+  adapter hides the gap between frames, so a seam that split frames would act
+  differently on `os` and `sim`. A socket, listener, or port may move to another
+  thread before its first poll. The first poll binds it to its thread, and a poll on
+  another thread panics.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -1506,7 +1547,8 @@ How to read this record:
   device at run time lost (#569).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
-  crash keeps each file call that ended. A `Power` crash keeps, for each 512-byte
+  crash keeps each file call that ended, and ends each call in flight at the crash, so
+  a restart finds no file held (#392). A `Power` crash keeps, for each 512-byte
   sector, its durable bytes or the bytes of any one write since then, a write in flight
   too. A `sync` makes durable the writes that ended before it started. A failed `sync`
   makes each sector keep its durable bytes or those of one such write, at random. A
@@ -2377,6 +2419,7 @@ Parameters and later choices, recorded and not asked:
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52.
+- Delivery and wire internals: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
@@ -2402,7 +2445,8 @@ Parameters and later choices, recorded and not asked:
 - Time: exchange period, source discovery period, drift rate for bound widening
   (starts at 200 ppm, ESTIMATE COMBINE), stamp limits near 1970 and far future (A5).
 - Transport: default carrier per traffic class (QUIC vs TLS over TCP, measured on
-  Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection.
+  Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection, the retry
+  interval of a read that waits for a block (RECV WAITS).
 - Compression and reduction defaults; retention defaults; disk budget defaults.
 - Benchmark reruns owed: r1 handoff, r10 codecs, r11 memory on Linux x86-64 (pinned)
   and Raspberry Pi 4; `sim` binary size against P1 (BQ19); binary size and idle memory
