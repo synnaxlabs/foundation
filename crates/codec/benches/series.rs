@@ -40,12 +40,13 @@ struct Shape {
     lens: &'static [usize],
 }
 
-const SHAPES: [Shape; 22] = [
+const SHAPES: [Shape; 23] = [
     Shape::new("adc16.s1", Scalar::I16, create_adc16_s1, 3.933, EVERY),
     Shape::new("adc16.s256", Scalar::I16, create_adc16_s256, 1.352, FULL),
     Shape::new("adc16.white", Scalar::I16, create_adc16_white, 0.994, FULL),
     Shape::new("adc24.s6", Scalar::I32, create_adc24_s6, 4.615, EVERY),
     Shape::new("adc24.s100", Scalar::I32, create_adc24_s100, 3.131, FULL),
+    Shape::new("f64.cal", Scalar::F64, create_f64_cal, 0.994, FULL),
     Shape::new("u8.state", Scalar::U8, create_state, 229.0, EVERY),
     Shape::new("u32.state", Scalar::U32, create_state, 422.0, FULL),
     Shape::new("ts.fixed", Scalar::Stamp, create_ts_fixed, 339.6, FULL),
@@ -212,6 +213,17 @@ fn create_adc24_s6() -> Vec<i64> {
 
 fn create_adc24_s100() -> Vec<i64> {
     adc(&mut Random(7), 24, 4_000_000.0, 100.0)
+}
+
+/// Volts from `adc24.s6` counts through a calibration polynomial, as `f64` bits.
+fn create_f64_cal() -> Vec<i64> {
+    let counts = adc(&mut Random(6), 24, 4_000_000.0, 6.5);
+    let volts = counts.into_iter().map(|count| {
+        #[expect(clippy::cast_precision_loss, reason = "counts fit 24 bits")]
+        let count = count as f64;
+        0.002 + 1.25e-6 * count + 3e-15 * count * count
+    });
+    volts.map(|volt| volt.to_bits().cast_signed()).collect()
 }
 
 /// One of 4 states, each held for 1,000 to 9,999 samples.
