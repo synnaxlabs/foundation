@@ -196,41 +196,33 @@ fn encode(state: State) -> [u64; WORDS] {
         State::Synced(slew) => (1, Some(slew), None),
         State::Holdover(slew, cause) => (2, Some(slew), Some(cause)),
     };
-    let mut words = [kind, 0, 0, 0, 0, 0, 0, 0, 0];
-    if let Some(slew) = slew {
+    let [start, from, at, offset, error] = slew.map_or([0; 5], |slew| {
         let target = slew.target;
-        words[1..6].copy_from_slice(&[
+        [
             slew.start.0,
             span(slew.from),
             target.at().0,
             span(target.offset()),
             span(target.error()),
-        ]);
-    }
+        ]
+    });
     // `NoSources` is 0 sources: `NoMajority` has at least 1.
-    if let Some(combine::Error::NoMajority {
-        sources,
-        agreeing,
-        empty,
-    }) = cause
-    {
-        words[6..].copy_from_slice(&[count(sources), count(agreeing), count(empty)]);
-    }
-    words
+    let [sources, agreeing, empty] = match cause {
+        Some(combine::Error::NoMajority {
+            sources,
+            agreeing,
+            empty,
+        }) => [count(sources), count(agreeing), count(empty)],
+        Some(combine::Error::NoSources) | None => [0; 3],
+    };
+    [
+        kind, start, from, at, offset, error, sources, agreeing, empty,
+    ]
 }
 
 fn decode(words: [u64; WORDS]) -> State {
-    let [
-        kind,
-        start,
-        from,
-        at,
-        offset,
-        error,
-        sources,
-        agreeing,
-        empty,
-    ] = words;
+    let [kind, slew @ .., sources, agreeing, empty] = words;
+    let [start, from, at, offset, error] = slew;
     let span = |word: u64| Span::from_nanos(word.cast_signed());
     let count =
         |word: u64| usize::try_from(word).expect("invariant: a count from a usize");
