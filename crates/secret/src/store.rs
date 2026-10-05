@@ -10,7 +10,7 @@ use crate::Value;
 
 mod sealed;
 
-pub use sealed::{Sealed, Stale};
+pub use sealed::Sealed;
 
 /// A place that holds secret values.
 pub trait Store {

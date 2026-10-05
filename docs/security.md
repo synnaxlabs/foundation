@@ -195,8 +195,8 @@ state on `main`.
   different value. Accepted: it already holds the value.
 - Each sealed value has a version per name, bound into the associated data, so a
   writer cannot give an old value a new version. `secret::store::Sealed` refuses a
-  value or a delete older than the newest it holds. After a restart it relies on the
-  record check: every node takes a write only at the newest version plus one, so a
+  value that does not open at its version. The order of versions has one check, on
+  the record: every node takes a write only at the newest version plus one, so a
   replayed record and a jump to the last version are refused. A re-seal keeps the
   version and goes only to a node of the placement, so a node that leaves the
   placement keeps no copy in region state. The newest version of a name outlives a

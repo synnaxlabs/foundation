@@ -97,14 +97,9 @@ impl Opener {
         SealKey::new(bytes).expect("invariant: X25519 maps no key to small order")
     }
 
-    /// Opens `sealed` for the secret `name` at `version`. Pass the version stored
-    /// with `sealed` in region state, never one from another source.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Refused`] when `sealed` was sealed to another key, name, or version,
-    /// or was changed or cut.
-    pub fn open(
+    /// Opens `sealed` for the secret `name` at `version`. `Refused` when `sealed`
+    /// was sealed to another key, name, or version, or was changed or cut.
+    pub(crate) fn open(
         &self,
         name: &Name,
         version: u64,
