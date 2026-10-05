@@ -141,10 +141,9 @@ state on `main`.
 ### Time source to `estimate`
 
 - `estimate` combines one bound per source and does not know what a source is
-  (ESTIMATE COMBINE). The result holds the truth only when every bound outside the
-  majority misses it. Open, needs a decision on ESTIMATE COMBINE: #344 (one lying
-  source of three puts a small bound inside the honest overlap, and the estimate
-  follows it). This is the attack of R6.
+  (ESTIMATE COMBINE). The result holds the truth when more than half of the bounds
+  hold it, whatever the others are. So a small bound from a lying minority cannot
+  steer it off the truth (the attack of R6, #344). A lying majority can.
 
 ### Files to the spec
 

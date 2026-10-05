@@ -561,12 +561,14 @@ How to read this record:
   its last 8 measurements and offers the one with the smallest bound now. This reads R6
   TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
   fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
-  offsets inside the most bounds (Marzullo). It fails when no offset is inside the
-  bounds of more than half of the sources that vote. This reads C6's "follows the
-  smallest measured bound": when sources agree, the result is never wider than the
-  narrowest. The result holds the true offset when the bounds that hold it are a
-  majority of the sources that vote, and every other bound that votes misses them.
-  Decided by the `time` builder (#49). Each
+  offsets inside more than half of the bounds that vote. It fails when no offset is
+  inside the bounds of more than half of the sources that vote (#49). The result holds
+  the true offset when more than half of the bounds hold it, whatever the other bounds
+  are. It can be wider than the narrowest bound, so C6's "follows the smallest
+  measured bound" yields to the majority. The hull of the offsets inside the most
+  bounds (Marzullo) lost: one lying source of three put a small bound inside the
+  honest overlap, and the result followed it. The person decided on 2026-10-05 ("a is
+  fine"), #344. Each
   source votes: a source with no measurement agrees with no offset, and it votes beside
   the known bounds, or beside the unknown bounds when no bound is known. So before its
   first estimate a clock waits until more than half of its sources agree, and one
@@ -589,8 +591,8 @@ How to read this record:
   the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
   Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. When only unknown bounds vote, the estimate
-  is unknown too, at the center of the offsets inside the most of them. Approved by the
-  coordinator (#437). `Measurement::unknown(at, offset)` gives
+  is unknown too, at the center of the offsets inside more than half of them.
+  Approved by the coordinator (#437). `Measurement::unknown(at, offset)` gives
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
   (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
