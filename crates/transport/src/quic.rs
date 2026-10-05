@@ -373,6 +373,36 @@ impl Endpoint {
         })
     }
 
+    /// Resets `sender`'s stream with `code`. The peer's next read gives
+    /// [`Error::Reset`], and the messages it has not read drop, unless it acknowledged
+    /// all of the stream. The message in hand drops, and its send budget comes back.
+    /// Does nothing when the connection ended.
+    pub(crate) fn reset(&mut self, now: Monotonic, sender: Sender, code: Code) {
+        let key = sender.key().connection;
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        let Connection { inner, streams, .. } = connection;
+        streams.reset(inner, sender, code, &mut self.events);
+        self.drive(key.handle, self.instant(now));
+    }
+
+    /// Stops `receiver`'s stream with `code`. The messages not read yet drop, and the
+    /// peer's next write gives [`Error::Stopped`]. The message in the reader drops, and
+    /// its receive budget comes back. Sends nothing after a read of the end. Does
+    /// nothing when the connection ended.
+    pub(crate) fn stop(&mut self, now: Monotonic, receiver: Receiver, code: Code) {
+        let key = receiver.key().connection;
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        let Connection { inner, streams, .. } = connection;
+        streams.stop(inner, receiver, code, &mut self.events);
+        self.drive(key.handle, self.instant(now));
+    }
+
     /// The next event, in the order they happened.
     pub(crate) fn poll(&mut self) -> Option<Event> {
         self.events.pop_front()
