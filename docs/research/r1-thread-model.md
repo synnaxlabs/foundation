@@ -13,10 +13,10 @@ network take one batched handoff to the owning shard, every shard runs a Tokio
 cores are sans-I/O state machines.
 
 This refines the earlier C2 proposal. The earlier version handed every frame from a
-shared Tokio pool to a shard. The benchmark below shows that the handoff, not the
-shard, is the expensive part, so local device data should never take it. On Linux
-with pins, a handoff to a parked shard costs 4 to 9 us, with no millisecond tail
-(Linux rerun).
+shared Tokio pool to a shard. The benchmark below shows that the handoff, not the shard,
+is the expensive part, so local device data should never take it. On Linux with pinned
+threads, a handoff to a parked shard costs 4 to 11 us, with no millisecond tail (Linux
+rerun).
 
 ## Q1. Shards vs work-stealing vs hybrid
 
@@ -251,15 +251,17 @@ Limitations: synthetic work, no disk, no network, no reader consumption, macOS o
 
 Issue #9. Machine: AWS c7i.metal-24xl (bare metal), Intel Xeon Platinum 8488C, 1
 socket, 48 cores, 1 NUMA node, Ubuntu 24.04, kernel 7.0.0-1013-aws, rustc 1.98.1.
-Threads pinned with `core_affinity`. Two runs, on two hosts of this type:
+Threads pinned with `core_affinity`, except design B, which `tpc-bench` does not pin.
+Two runs, on two hosts of this type:
 
 - **Baseline:** Q6's `tpc-bench`, unchanged. Its shards spin, then yield. They never
   park.
 - **Wake path:** `bench/handoff` at b0fd43f (#469), `run.sh` with its defaults: 3 reps,
-  10 s per run, P = 8, pins from core 1. Design A uses `ring`, with one consumer task
-  per ring on a Tokio `LocalRuntime` per shard. A task that finds its ring empty parks,
-  and the push wakes it through the runtime's driver (eventfd). This is the production
-  path. `inline` is design C in the same binary.
+  10 s per run, P = 8, pins from core 1. Design A uses `ring`. Each shard runs one loop
+  on a Tokio `LocalRuntime` that takes frames with `try_pop` and parks on all its
+  rings when they are empty. A push wakes the loop through the runtime's driver
+  (eventfd). The loop is the benchmark's own; `ring` is the production crate.
+  `inline` is design C with no runtime: nothing crosses a thread.
 
 ```
 bench/handoff/run.sh <host>
@@ -276,12 +278,14 @@ Paced 10,000 frames/s per producer, P = 8 (80M samples/s). Ranges are over the r
 | A, `ring` wake, S = 8 | 1 | 5.4-8.4 us | 8.8-9.5 us | 9.5-10.0 us | 100% |
 | A, `ring` wake, S = 4 | 1 | 7.9-8.1 us | 9.9-10.2 us | 10.4-11.3 us | 75% |
 | A, `ring` wake, S = 8, 20 us spin | 1 | 5.5-5.7 us | 9.7-11.3 us | 10.0-12.7 us | 75-100% |
-| B shared (`tpc-bench`) | 1 | 1.02 us | 1.48 us | 1.77 us | - |
+| B shared (`tpc-bench`), not pinned | 1 | 0.99-1.02 us | 1.40-1.55 us | 1.77-1.94 us | - |
 | C co-located (`tpc-bench`) | 1 | 0.61-0.62 us | 0.71-0.79 us | 0.97-1.17 us | - |
 | C co-located (`inline`) | 1 | 0.54 us | 0.55-2.00 us | 0.57-2.95 us | - |
 | A, spins (`tpc-bench`), S = 8 | 8 | 4.68 us | 4.96 us | 5.17-5.18 us | - |
 | A, `ring` wake, S = 8 | 8 | 9.2-12.1 us | 13.2-15.1 us | 13.7-16.6 us | 88-100% |
 | A, `ring` wake, S = 4 | 8 | 11.2-12.2 us | 15.9-23.3 us | 16.5-24.6 us | 50-63% |
+| B shared (`tpc-bench`), not pinned | 8 | 4.67 us | 5.13-5.19 us | 5.33-5.44 us | - |
+| C co-located (`tpc-bench`) | 8 | 4.30-4.32 us | 4.43-4.45 us | 4.59-4.65 us | - |
 | C co-located (`inline`) | 8 | 4.23 us | 4.24-4.25 us | 4.46-6.15 us | - |
 
 Unthrottled throughput, P = 8, S = 8 (G samples/s):
@@ -294,21 +298,25 @@ Unthrottled throughput, P = 8, S = 8 (G samples/s):
 | C co-located (`inline`) | 13.6 | 1.87 |
 
 Reading:
-1. At WORK = 1, the wake through the runtime adds 4 to 7 us at p50 and 8 to 9 us at
-   p99.9 over the spinning handoff. Frames reach each shard every 100 us, so most pops
-   find the ring empty and park.
+1. The wake through the runtime adds 4 to 7 us at p50 and 8 to 11 us at p99.9 over
+   the spinning handoff, at S = 8 and both WORK values. Frames reach each shard once
+   per 100 us tick (one frame at S = 8, two at S = 4), so the shard finds its rings
+   empty and parks before most frames.
 2. A 20 us spin window did not help: it ends before the next frame comes. A window
    that covers the gap is a busy core per shard, which is the spinning baseline.
 3. There is no millisecond tail. Q6's risk for network frames does not occur on Linux
-   with pins: p99.9 stays under 25 us and the maximum under 0.4 ms.
+   with pinned threads: p99.9 stays under 25 us and the maximum under 0.4 ms.
 4. Unthrottled, under 2% of pops park, and the handoff gives up 26 to 30% of
-   throughput to co-location at WORK = 1 and 7% at WORK = 8.
+   throughput to `inline` at WORK = 1 and 7% at WORK = 8.
 
-Recommendation for C2: lock the working assumption (decisions 1.5). Co-location is the
-floor, and local device data never takes a handoff. Network frames take one handoff,
-with a runtime wake and no spin: 4 to 9 us is small next to a network hop. Do not add a
-spin window: it uses a core to save the wake, and it helps only when it is longer than
-the gap between frames.
+Recommendation for C2: lock the working assumption (decisions 1.5). A connector that
+reads on its shard takes no handoff. Network data and frames from vendor threads take
+one batched handoff, with one runtime wake per batch. This run woke once per frame, so 4
+to 11 us is the cost of one wake, small against the P1 latest-mode budget of 250 us at
+p99 over one LAN hop. Keep the spin window a per-node setting (performance rule 6). This
+run supports a default of 0: a window helps only when it is longer than the gap between
+frames, and then it keeps a core busy to save the wake. The sweep in decisions 5.3 sets
+the default.
 
 Limits:
 - The `tpc-bench` and `bench/handoff` numbers come from two hosts of one type. The
@@ -316,14 +324,16 @@ Limits:
 - The run does not split the wake cost between the eventfd, the scheduler, and the
   exit of the parked core from its idle state.
 - At S = 8, WORK = 1, the p50 of `ring` is 5.4 us or 8.4 us from one rep to the next.
+- `inline` runs no runtime, so it is a lower floor than Q6's design C, which runs
+  each shard on a `LocalRuntime`.
 - One instance type, synthetic work, no disk, no network, no reader, no Pi 4.
 
 ## Risks
 
 - Hot index saturates a core: needs an index ownership transfer protocol (design work,
   not yet specified).
-- Handoff tails for network frames: measured on Linux with pins and parking (Linux
-  rerun). No millisecond tail; the wake adds 4 to 9 us.
+- Handoff tails for network frames: measured on Linux with pinned threads and parking
+  (Linux rerun). No millisecond tail; the wake adds 4 to 11 us.
 - One iroh endpoint per node puts all QUIC work on one core: measure (fork 5).
 - RefCell held across `.await` panics at runtime (Iggy): sans-I/O cores and a lint or
   review rule against borrows across await points.
