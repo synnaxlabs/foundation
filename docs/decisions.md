@@ -180,6 +180,9 @@ How to read this record:
   at join, signs it with its Ed25519 key, and rotates it with that key. A voter and a
   caller check the signature. The person decided on 2026-10-05: "ok fine" and "Add an
   encryption key" (#211).
+  A caller seals with HPKE base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and
+  ChaCha20-Poly1305, built from aws-lc-rs parts. The info is `foundation/secret/1`,
+  and the associated data is the secret's full name (`secret::seal`, #318).
 - **R9 type decisions (SETTLED BY ME)** R9-D1 per-entry types are interned once in the
   key set; R9-D2 bools are one byte; R9-D3 raw series are padded to element width and
   blocks are 64-byte aligned; R9-D4 variable-length series are `ends[n]` then data;
