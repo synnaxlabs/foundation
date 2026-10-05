@@ -256,6 +256,20 @@ How to read this record:
   (natural order), RLE; timestamps add stride; floats raw, ALP, fdelta, RLE; `max` mode
   adds pco. No zstd and no ALP_rd. Policy: `compression { select, mode = auto, raw, or
   max }`, default `auto`. The validator is the top fuzz target.
+- **CODEC FORMAT V1 (#4)** A vector is a tag byte, a bit width byte, header fields,
+  zeros to a multiple of the sample width, then a body padded the same way. Tags: 0
+  raw; 1 FFOR (reference; body `sample - reference`); 2 delta (first, base; body
+  `sample - previous - base` for each sample after the first); 3 RLE (`u16` run count;
+  body the values, then `u16` lengths). Sample arithmetic is modulo 2^b, where b is
+  the bit count of a sample. Packing is in natural order in every vector, least
+  significant bit first. The person chose it ("Natural order") over FastLanes order
+  for full vectors: a natural-order FFOR decode prototype took 197 ns per vector on an
+  M3 Max, about 1.9% of a core at 100M samples/s. FastLanes order can come later as a
+  new tag. Raw and RLE have bit width 0. Integers, `Stamp`, and `Span` use all four
+  tags; other scalars use raw. Timestamp stride (BQ4) comes later as a new tag. The
+  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len`
+  (raw plus one raw header per vector) sizes the output, and the encoder makes one
+  pass. `codec/src/vector.rs` is the full spec.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
