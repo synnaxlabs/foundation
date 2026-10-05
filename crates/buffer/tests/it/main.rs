@@ -1534,3 +1534,83 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         assert_eq!(tails, Ok(tail(3, Some(3))));
     });
 }
+
+/// Kills the process `cut` nanoseconds into the first open of a ring on a node
+/// with `seed`. A new process opens the ring at once, commits one entry, and opens
+/// the ring again. Returns the tail that `committed` reported durable and the tail
+/// the reopen gave.
+fn commit_after_a_kill(seed: u64, cut: i64, ring: Layout) -> (Tail, Tail) {
+    let mut sim = sim::Sim::new(sim::Config {
+        seed,
+        ..sim::Config::default()
+    });
+    let node = sim.node(sim::node::Config::default());
+    let made = node.clone();
+    let handle = on_node(&node, "dir", move |_| async move {
+        let files = made.files();
+        files
+            .create_dir(FilePath::new(DIR))
+            .await
+            .expect("the dir is made");
+        files
+            .sync_dir(FilePath::new(""))
+            .await
+            .expect("the dir is synced");
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    let first = node.clone();
+    drop(on_node(&node, "first", move |tasks| async move {
+        let config = node_config(&first, tasks, ring);
+        let _buffer = Buffer::open(config, &mut Slots::new())
+            .await
+            .expect("the first open ends well");
+        std::future::pending::<()>().await;
+    }));
+    sim.run_for(Span::from_nanos(cut)).expect("the run goes on");
+    sim.crash(&node, sim::Crash::Process);
+    let result = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&result);
+    let second = node.clone();
+    let handle = on_node(&node, "second", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&second, tasks.clone(), ring);
+        let buffer = Buffer::open(config, &mut slots)
+            .await
+            .expect("the ring opens after the kill");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let durable = buffer.durable(a, Path::Live);
+        drop(buffer);
+        let mut slots = Slots::new();
+        let config = node_config(&second, tasks, ring);
+        let reopened = Buffer::open(config, &mut slots)
+            .await
+            .expect("the ring opens again");
+        let a = slots.assign(key(1));
+        *slot.lock().expect("no panic held the lock") =
+            Some((durable, reopened.tail(a, Path::Live)));
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    let result = result.lock().expect("no panic held the lock").take();
+    result.expect("the second shard ended")
+}
+
+/// A process kill at any time in the first open of a ring, with a restart at once,
+/// leaves a ring on which a reopen gives what `committed` of the next process
+/// reported durable.
+#[test]
+fn a_kill_at_any_time_in_the_first_open_loses_no_commit_of_the_next_process() {
+    let ring = layout(AREA, BODY_MAX);
+    for seed in 0..32 {
+        for cut in (10_000..=600_000).step_by(10_000) {
+            let (durable, recovered) = commit_after_a_kill(seed, cut, ring);
+            assert_eq!(durable, tail(3, Some(30)), "seed {seed}, kill at {cut} ns");
+            assert_eq!(recovered, durable, "seed {seed}, kill at {cut} ns");
+        }
+    }
+}
