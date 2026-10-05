@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+pub mod seal;
 pub mod store;
 
 /// A secret value. `Debug` prints `<secret>`, never the bytes.

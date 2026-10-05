@@ -180,6 +180,9 @@ How to read this record:
   at join, signs it with its Ed25519 key, and rotates it with that key. A voter and a
   caller check the signature. The person decided on 2026-10-05: "ok fine" and "Add an
   encryption key" (#211).
+  A caller seals with HPKE base mode: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, and
+  ChaCha20-Poly1305, built from aws-lc-rs parts. The info is `foundation/secret/1`,
+  and the associated data is the secret's full name (`secret::seal`, #318).
 - **R9 type decisions (SETTLED BY ME)** R9-D1 per-entry types are interned once in the
   key set; R9-D2 bools are one byte; R9-D3 raw series are padded to element width and
   blocks are 64-byte aligned; R9-D4 variable-length series are `ends[n]` then data;
@@ -1276,7 +1279,7 @@ Storage classes used in the table:
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
 | Seq blocks | Region state of the home node's region | The home, through lease renewals | A new home after promotion | `mesh` |
 | Index history (re-index) | Region state: spans and seals. The spec keeps only the current index. Which region: X39 | The old home proposes the seal; voters seal at lease end if it is down | `hub` joins spans for readers | `mesh` |
-| Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40) | `secret set` and `secret delete` (sealing in `ops`) | The node that runs the connector decrypts | `mesh` (record), `ops` (seal) |
+| Secret ciphertexts | Region state, outside the spec, one per eligible node (region of the secret: X40) | `secret set` and `secret delete` (`ops` calls `secret::seal`) | The node that runs the connector opens it with `secret::seal` | `mesh` (record), `secret` (seal and open) |
 | Join ticket record | Region state: options and use count. The ticket itself is a secret, never in files | Admin through `ops` | Voters at join | `mesh`, `ops` |
 | Delegation record | The parent region's spec: `{ prefix, epoch, initial voters }` | Parent voters | Nodes (epoch fencing) | `mesh` |
 | Spec pointer | Region state: `{ version, root hash }` | `apply` (compare-and-swap) | Every node that follows the region | `mesh` |
@@ -1332,7 +1335,7 @@ Storage classes used in the table:
 | Connector status channels | Channels under the connector's name | The kind through `ctx.status()` | People, agents, tools | `connector` |
 | Node status channels | Channels under the node's name (definitions: X27) | `node`'s collector through `hub`, from each crate's pulled values | People, agents, tools, rebalancers | `node` |
 | Quarantine | Per out connector: a hold on the original data plus an error record (samples on a channel under the connector's name); size on a status channel | The kind, through a library component | `ops` list, retry, drop | `connector` |
-| Secret value | Never in files, plans, or output. Built-in store: region state ciphertexts. External stores through adapters. References by name in kind config | `secret set` (person or CI) | `ctx.secret()` on the connector's node | `ops` (seal), `node` (decrypt), resolver (X40) |
+| Secret value | Never in files, plans, or output. Built-in store: region state ciphertexts. External stores through adapters. References by name in kind config | `secret set` (person or CI) | `ctx.secret()` on the connector's node | `secret` (seal and open; `ops` seals, `node` opens), resolver (X40) |
 | Time sources | Binary: a source table built in `node`; adapters probe for hardware | Adapters feed measurements | The estimator | `clock` (adapters), estimator crate (X11) |
 | Mesh clock state | Memory per node; published as `<node>.clock.offset` and `.clock.error` | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
 | Operation table | Binary | The build | CLI, MCP, embedded docs | `ops` |
@@ -1902,7 +1905,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
 | 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
 | 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home` |
-| 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. | layer 1 |
+| 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. Seals a value to a node's seal key, and opens it. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |
 | 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags |
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
