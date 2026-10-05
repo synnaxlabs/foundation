@@ -4,8 +4,7 @@ use std::ops::Range;
 use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
-use crate::parse::Ends;
-use crate::write::{INDENT, Writer};
+use crate::write::{After, INDENT, Writer};
 use crate::{Error, read, write};
 
 /// Changes `text` so that [`read`] reads it as `document`, and returns the new text.
@@ -394,13 +393,13 @@ impl Diff<'_, '_> {
         let (start, end) = offsets(old.value.span);
         // A heredoc needs a line end after its marker, so a value with a comment or
         // the end of the text after it is quoted, as in a list.
-        let ends = if file.blank_below(end).is_some() {
-            Ends::Line
+        let after = if file.blank_below(end).is_some() {
+            After::Line
         } else {
-            Ends::Comma
+            After::Comma
         };
         let mut writer = Writer::new(file.margin(old.key_span), column(old.value.span));
-        writer.value(&new.value, 0, ends);
+        writer.value(&new.value, 0, after);
         self.edits.push(Edit {
             range: start..end,
             text: written(writer),

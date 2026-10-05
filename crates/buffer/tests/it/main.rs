@@ -9,7 +9,7 @@ use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
 
 use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Error, Layout, Tail, Unfit};
+use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Tail, Unfit};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{Error as FileError, Mode, Operation};
@@ -530,6 +530,71 @@ fn a_batch_is_queued_whole_or_not_at_all() {
             .await
             .expect("reopens");
         assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(1, None));
+    });
+}
+
+/// A batch over a limit of one record is refused whole, and the batches before
+/// and after it commit in its place.
+#[test]
+fn a_batch_no_record_holds_is_large_and_queues_nothing() {
+    run(108, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let small = [shard.block(10)];
+        buffer
+            .append(&[entry(1, a, Path::Live, 0, 1, None, &small)])
+            .expect("the record has room");
+        let empty = [shard.block(0)];
+        let parts = vec![shard.block(0); 1024];
+        let body = [shard.block(BODY_MAX - 54)];
+        let cases = [
+            (
+                vec![entry(1, a, Path::Live, 1, 1, None, &empty); 1024],
+                Limit::Entries { count: 1024 },
+                "the batch has 1024 entries, and a record holds at most 1023",
+            ),
+            (
+                vec![entry(1, a, Path::Live, 1, 1, None, &parts)],
+                Limit::Parts { count: 1024 },
+                "the batch has 1024 parts, and a record holds at most 1023",
+            ),
+            (
+                vec![entry(1, a, Path::Live, 1, 1, None, &body)],
+                Limit::Body {
+                    len: 4088,
+                    max: 4087,
+                },
+                "the batch needs a record body of 4088 bytes, and a record of this \
+                 ring holds at most 4087",
+            ),
+        ];
+        for (batch, limit, message) in cases {
+            let large = buffer.append(&batch);
+            assert_eq!(large, Err(Error::Large(limit)));
+            assert_eq!(Error::Large(limit).to_string(), message);
+            assert_eq!(buffer.tail(a, Path::Live), tail(1, None));
+        }
+        buffer
+            .append(&[entry(1, a, Path::Live, 1, 1, None, &small)])
+            .expect("the record has room");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let count = to_usize(AREA_START + BLOCK) + 9;
+        assert_eq!(
+            shard.memory.bytes(RING)[count..count + 4],
+            2_u32.to_le_bytes(),
+            "the large batches left the group open, so one record holds both"
+        );
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(2, None));
     });
 }
 

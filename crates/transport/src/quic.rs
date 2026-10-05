@@ -440,6 +440,9 @@ impl Endpoint {
         ecn: Option<EcnCodepoint>,
         datagram: BytesMut,
     ) {
+        if dropped(&datagram) {
+            return;
+        }
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -480,6 +483,23 @@ impl Endpoint {
         } else {
             queue(&mut self.ready, connection);
         }
+    }
+}
+
+/// Whether the endpoint drops `datagram` unread: a long header of a version it does
+/// not speak, in fewer than [`MTU_MIN`](settings::MTU_MIN) bytes. noq-proto 1.3.0
+/// answers such a header at any size, which QUIC forbids, so a spoofed source would
+/// get more bytes than it sent (#534). Version 0 is a version negotiation for a dial,
+/// so it passes.
+fn dropped(datagram: &[u8]) -> bool {
+    match *datagram {
+        [form, a, b, c, d, ..]
+            if form & 0x80 != 0 && datagram.len() < usize::from(settings::MTU_MIN) =>
+        {
+            let version = u32::from_be_bytes([a, b, c, d]);
+            version != 0 && !settings::VERSIONS.contains(&version)
+        }
+        _ => false,
     }
 }
 
@@ -572,13 +592,10 @@ mod tests {
     fn deliver(pair: &mut Pair, destination: Option<IpAddr>, ecn: Option<Ecn>) {
         let (now, mut buffer) = (pair.now(), Vec::new());
         while let Some(transmit) = pair.client.endpoint.transmit(now, &mut buffer) {
-            let len = transmit.contents.len();
             let meta = Meta {
-                source: testing::CLIENT,
                 destination,
                 ecn,
-                len,
-                stride: len,
+                ..testing::meta(testing::CLIENT, transmit.contents)
             };
             pair.server.endpoint.receive(now, &meta, transmit.contents);
         }
@@ -781,7 +798,8 @@ mod tests {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let (meta, initial) = testing::draft_29();
+                let initial = testing::draft_29();
+                let meta = testing::meta(testing::CLIENT, &initial);
                 endpoint.receive(Monotonic(0), &meta, &initial);
                 let mut buffer = Vec::with_capacity(1 << 16);
                 let start = buffer.as_ptr();
@@ -950,8 +968,12 @@ mod tests {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let (mut meta, initial) = testing::draft_29();
-                (meta.len, meta.stride) = (10, 0);
+                let initial = testing::draft_29();
+                let meta = Meta {
+                    len: 10,
+                    stride: 0,
+                    ..testing::meta(testing::CLIENT, &initial)
+                };
                 endpoint.receive(Monotonic(0), &meta, &initial);
             });
         }
