@@ -409,6 +409,17 @@ How to read this record:
   disk format version (C9d), as in FRAME LAYOUT. Copy mode checks each stored body
   once where remote records enter (X43), and the read after it panics on a bad body.
   Decided by the `write-path` builder; approved by the coordinator (#191).
+- **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
+  (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
+  `len` 0, and `first` at the live tail. A record is in the log before the first frame
+  its holder writes. Its bytes are empty when no writer holds control, else
+  `[authority: u8]` then the holder's subject as UTF-8; the entry length gives the
+  subject's length. A restart or a failover starts the gate from the last record
+  (X18): `Gate::recover` with its holder, or `Gate::new` when it names none. Entry
+  tags: `DATA` 0, `HANDOFF` 1. The layout is part of the disk format version (C9d).
+  Copy mode checks each record once where remote records enter (X43), and the read
+  after it panics on a bad record.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -1366,7 +1377,7 @@ Storage classes used in the table:
 | --- | --- | --- | --- | --- |
 | Encoded samples | Index log (write-ahead ring, then segments), as stored bodies (STORED BODY) | `home` and `replica` through `buffer.append` | Complete readers (catch-up), `replica`, crash recovery | `buffer`, `home` (stored body) |
 | Seq counters (live, backfill) | Memory at the home; durable through the index log | `home` | `delivery`, `wire` (prediction) | `home` |
-| Control state | Memory in `control` at the home; handoff records in the index log (truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
+| Control state | Memory in `control` at the home; handoff records in the index log (HANDOFF RECORD; truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
 | Reader positions | Truth: `delivery` state at the home, written as index log records and copied by `replica`. A connected reader's `hub` keeps its own position. Status channels publish copies | `delivery`; `replica` copies; `node` publishes | `home` after failover; `hub` on resume | `delivery`, `buffer`, `replica` |
 | Holds and floors | `delivery` (hold per reader and index); floor = lowest held position per path, handed to `buffer.set_floor`, which also applies retention | `delivery` | `buffer` | `delivery`, `buffer` |
