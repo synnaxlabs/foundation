@@ -1,4 +1,6 @@
-//! The etcd test network and the node disks that the scenarios share.
+//! The test network and the node disks that the scenarios share, ported from the
+//! tests of etcd/raft (Copyright 2015 The etcd Authors, Apache License 2.0, see
+//! `LICENSE`). This file is modified from the etcd source.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
