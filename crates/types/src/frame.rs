@@ -665,9 +665,9 @@ mod tests {
     }
 
     /// One group: index key 1 (entry 0), then keys 2 and 3 (entries 1 and 2).
-    fn one_group(interner: &mut Interner) -> std::sync::Arc<KeySet> {
+    fn one_group(interner: &mut Interner, slots: &mut Slots) -> std::sync::Arc<KeySet> {
         interner.intern(
-            &mut table(),
+            slots,
             &[Group {
                 index: key(1),
                 data: &[(key(2), F64), (key(3), U8)],
@@ -694,7 +694,7 @@ mod tests {
 
     /// The error of a draft of `series` over [`one_group`].
     fn refusal(series: &[(usize, usize)]) -> Error {
-        let set = one_group(&mut Interner::new());
+        let set = one_group(&mut Interner::new(), &mut table());
         let result = Draft::new(&pool(1 << 16), &set, Form::Raw, series);
         result.unwrap_err()
     }
@@ -702,16 +702,17 @@ mod tests {
     #[test]
     fn lays_out_a_frame_byte_for_byte() {
         let mut interner = Interner::new();
+        let mut slots = table();
         for n in 10..13 {
             interner.intern(
-                &mut table(),
+                &mut slots,
                 &[Group {
                     index: key(n),
                     data: &[],
                 }],
             );
         }
-        let set = one_group(&mut interner);
+        let set = one_group(&mut interner, &mut slots);
         let pool = pool(1 << 16);
         let mut dirty = pool.alloc(58).unwrap();
         dirty.fill(0xff);
@@ -775,7 +776,7 @@ mod tests {
                 }],
             );
         }
-        let set = one_group(&mut interner);
+        let set = one_group(&mut interner, &mut slots);
         assert_eq!(set.key().get(), 256);
         let pool = pool(1 << 16);
         let draft = Draft::new(&pool, &set, Form::Encoded, &[(0, 8)]).unwrap();
@@ -985,7 +986,7 @@ mod tests {
     #[test]
     fn returns_the_pool_error() {
         let pool = pool(512);
-        let set = one_group(&mut Interner::new());
+        let set = one_group(&mut Interner::new(), &mut table());
         let result = Draft::new(&pool, &set, Form::Raw, &[(0, 1000)]);
         let error = result.unwrap_err();
         let cause = block::Error::TooLarge {

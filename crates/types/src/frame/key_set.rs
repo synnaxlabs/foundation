@@ -111,9 +111,11 @@ impl Interner {
     }
 
     /// The key set of `groups`: each index, with type `Stamp`, and each data channel.
-    /// Each channel gets its slot from `slots`, which assigns one to a new key in the
-    /// order of `groups`, each index before its data. Groups are numbered in the order
-    /// of their index slots. Equal groups, in any order, give the same key set. A new
+    /// Each channel gets its slot from `slots`, which must be the same table on every
+    /// call: with another table, equal groups can give two key sets, and one slot can
+    /// name two channels. `slots` assigns a slot to each new key in the order of
+    /// `groups`, each index before its data. Groups are numbered in the order of their
+    /// index slots. Equal groups, in any order, give the same key set. A new
     /// key set copies the snapshot's list, so it takes time linear in the number of key
     /// sets.
     ///
@@ -429,7 +431,7 @@ mod tests {
             &[
                 Group {
                     index: key(50),
-                    data: &[(key(40), F64)],
+                    data: &[(key(45), F64), (key(40), U8)],
                 },
                 Group {
                     index: key(30),
@@ -447,9 +449,10 @@ mod tests {
             first.entries(),
             [
                 known(0, 50, STAMP, 0),
-                known(1, 40, F64, 0),
-                known(2, 30, STAMP, 1),
-                known(3, 20, U8, 1),
+                known(1, 45, F64, 0),
+                known(2, 40, U8, 0),
+                known(3, 30, STAMP, 1),
+                known(4, 20, U8, 1),
             ]
         );
         let second = interner.intern(
@@ -461,7 +464,7 @@ mod tests {
         );
         assert_eq!(
             second.entries(),
-            [known(2, 30, STAMP, 0), known(4, 10, F64, 0)]
+            [known(3, 30, STAMP, 0), known(5, 10, F64, 0)]
         );
     }
 

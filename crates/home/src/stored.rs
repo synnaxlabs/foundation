@@ -437,9 +437,10 @@ mod tests {
             #[should_panic(expected = "the frame is not of the key set")]
             fn panics_on_a_frame_of_another_key_set() {
                 let mut interner = Interner::new();
+                let mut slots = table();
                 let [of, other] = [1, 2].map(|slot| {
                     interner.intern(
-                        &mut table(),
+                        &mut slots,
                         &[Group {
                             index: key(Slot::new(slot)),
                             data: &[],
