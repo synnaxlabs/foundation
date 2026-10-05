@@ -3,12 +3,12 @@
 //!
 //! A [`Raft`] is the state machine of one node in one voter group. It does no I/O and
 //! reads no clock. The caller gives it ticks and incoming messages. After each input,
-//! the caller writes [`Raft::hard`] to disk if it changed, and only then sends
-//! [`Raft::messages`].
+//! the caller takes a [`Ready`] and does what it says, in its order.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
 mod config;
+mod log;
 mod machine;
 mod message;
 
@@ -17,7 +17,8 @@ use std::fmt;
 use types::node;
 
 pub use config::{Config, Start};
-pub use machine::{Raft, Role};
+pub use log::Entry;
+pub use machine::{Raft, Ready, Role};
 pub use message::{Body, Message};
 
 /// An election term. A term has at most one leader.
@@ -75,6 +76,19 @@ pub enum Error {
         /// The last log position.
         last: Position,
     },
+    /// A log entry is out of order: its index is not one more than the index before
+    /// it, or its term is lower than the term before it.
+    EntryOutOfOrder {
+        /// The index that the entry should have.
+        index: u64,
+    },
+    /// The applied index is past the end of the log.
+    AppliedPastLog {
+        /// The applied index.
+        applied: u64,
+        /// The last log index.
+        last: u64,
+    },
     /// A message is for another node. The caller routed it wrongly.
     Misrouted {
         /// The message's receiver.
@@ -110,6 +124,14 @@ impl fmt::Display for Error {
                 f,
                 "stored term {term} is lower than term {} of the last log entry",
                 last.term
+            ),
+            Self::EntryOutOfOrder { index } => write!(
+                f,
+                "the log entry at index {index} does not follow the one before"
+            ),
+            Self::AppliedPastLog { applied, last } => write!(
+                f,
+                "applied index {applied} is past the last log index {last}"
             ),
             Self::Misrouted { to } => write!(
                 f,

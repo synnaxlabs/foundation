@@ -518,13 +518,16 @@ How to read this record:
   prolly tree keyed by full name, about 4 KiB chunks, BLAKE3. Each change record lists
   its new chunks. A region's voters sit on one LAN. A node fetches only the regions and
   ranges it uses.
-- **RAFT SURFACE (#5)** `raft::Raft::new(Config, Start)` builds a follower. `Config`
-  holds the fixed inputs (key, tick counts). `Start` holds what the node had on disk:
-  `hard` (term and vote), `voters`, and `last`, the last log position, which stands in
-  for the log until replication lands. `Raft` takes `tick(random)`, `step(message)`,
-  and `campaign()`, and gives `hard()` and `messages()`. The caller writes `hard()` to
-  disk before it sends `messages()`, so a candidate counts its own vote at once.
-  Randomness enters only through `tick`: a node draws its election timeout on the
+- **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
+  `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
+  on disk: `hard` (term and vote), `voters`, `entries` (the log from index 1), and
+  `applied` (the last index the caller applied). `Raft` takes `tick(random)`,
+  `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
+  when it changed), `entries` to write, `committed` entries to apply, and `messages`
+  to send. The caller writes, then sends, then applies, as etcd does: to apply first
+  only delays the next round trip. A candidate counts its own vote at once because
+  the write comes before the send. `hard()` stays a getter like `term()`. Randomness
+  enters only through `tick`: a node draws its election timeout on the
   first tick after a reset. PreVote and CheckQuorum have no off switch. Until
   replication lands, a new leader announces itself with a heartbeat. A node that is
   not in its own voter list votes and follows, but never campaigns. `step` does not
