@@ -2,7 +2,6 @@ use document::{Position, Source, Span};
 
 use crate::{Error, Expected, Form};
 
-/// A token and where it is.
 #[derive(Clone, Debug)]
 pub(crate) struct Token<'a> {
     pub(crate) kind: Kind,
@@ -13,9 +12,11 @@ pub(crate) struct Token<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    /// Letters, digits, `_`, `-`, and `@`, in parts split by single dots. It starts
-    /// with a letter, `_`, or `@`.
-    Word,
+    /// Letters, digits, `_`, and `-`, after a letter or `_`.
+    Identifier,
+    /// A word with `.` or `@`, which only a reference can be: letters, digits, `_`,
+    /// `-`, and `@`, in parts split by single dots.
+    Reference,
     /// Digits, then an optional fraction and an optional exponent.
     Number,
     /// A quoted string, with its escapes read.
@@ -36,21 +37,24 @@ pub(crate) enum Kind {
     Other,
     /// The end of the text.
     End,
+    /// A string or comment that does not end, a string escape that HCL does not
+    /// have, or a template in a string. Reading stops here.
+    Error(Error),
 }
 
 /// Splits text into tokens, skipping spaces, tabs, and comments.
-pub(crate) struct Lexer<'a> {
+pub(crate) struct Tokens<'a> {
     source: Source,
     rest: &'a str,
     at: Position,
 }
 
-impl<'a> Lexer<'a> {
+impl<'a> Tokens<'a> {
     /// Starts at the beginning of `text`, after a byte order mark.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Large`] when a span cannot count the bytes of `text`.
+    /// Returns [`Error::TooLarge`] when a span cannot count the bytes of `text`.
     pub(crate) fn new(source: Source, text: &'a str) -> Result<Self, Error> {
         check_size(text.len())?;
         let rest = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -70,13 +74,16 @@ impl<'a> Lexer<'a> {
         })
     }
 
-    /// Reads the next token.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a string or comment that does not end, a string escape
-    /// that HCL does not have, or a template in a string.
-    pub(crate) fn next(&mut self) -> Result<Token<'a>, Error> {
+    /// Reads the next token. Call it no more after [`Kind::End`] or [`Kind::Error`].
+    pub(crate) fn next(&mut self) -> Token<'a> {
+        self.read().unwrap_or_else(|error| Token {
+            kind: Kind::Error(error),
+            text: "",
+            span: self.span(self.at),
+        })
+    }
+
+    fn read(&mut self) -> Result<Token<'a>, Error> {
         self.skip()?;
         let start = self.at;
         let rest = self.rest;
@@ -101,10 +108,7 @@ impl<'a> Lexer<'a> {
                 self.number();
                 Kind::Number
             }
-            c if c.is_ascii_alphabetic() || c == '_' || c == '@' => {
-                self.word();
-                Kind::Word
-            }
+            c if c.is_ascii_alphabetic() || c == '_' || c == '@' => self.word(c),
             _ => Kind::Other,
         };
         Ok(self.token(kind, rest, start))
@@ -140,7 +144,6 @@ impl<'a> Lexer<'a> {
         Some(c)
     }
 
-    /// Moves the position past `c`.
     fn advance(&mut self, c: char) {
         let bytes =
             u32::try_from(c.len_utf8()).expect("invariant: a char has 4 bytes or less");
@@ -171,7 +174,6 @@ impl<'a> Lexer<'a> {
         found
     }
 
-    /// Moves past the next `len` bytes.
     fn skip_bytes(&mut self, len: usize) {
         let (skipped, rest) = self
             .rest
@@ -251,8 +253,8 @@ impl<'a> Lexer<'a> {
         self.skip_bytes(len);
     }
 
-    /// Moves past the rest of a word after its first character.
-    fn word(&mut self) {
+    /// Moves past the rest of a word after its first character, `first`.
+    fn word(&mut self, first: char) -> Kind {
         let bytes = self.rest.as_bytes();
         let part = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'@');
         let len = bytes
@@ -263,7 +265,16 @@ impl<'a> Lexer<'a> {
                 !(part(b) || b == b'.' && next.is_some_and(part))
             })
             .unwrap_or(bytes.len());
+        let reference = first == '@'
+            || bytes
+                .get(..len)
+                .is_some_and(|rest| rest.iter().any(|b| matches!(b, b'.' | b'@')));
         self.skip_bytes(len);
+        if reference {
+            Kind::Reference
+        } else {
+            Kind::Identifier
+        }
     }
 
     /// Reads a quoted string after its opening quote at `start`.
@@ -358,7 +369,7 @@ fn check_size(bytes: usize) -> Result<(), Error> {
     if u32::try_from(bytes).is_ok() {
         Ok(())
     } else {
-        Err(Error::Large { bytes })
+        Err(Error::TooLarge { bytes })
     }
 }
 
@@ -371,6 +382,6 @@ mod tests {
         let bytes = usize::try_from(u32::MAX).unwrap();
         assert_eq!(check_size(bytes), Ok(()));
         let bytes = bytes.checked_add(1).unwrap();
-        assert_eq!(check_size(bytes), Err(Error::Large { bytes }));
+        assert_eq!(check_size(bytes), Err(Error::TooLarge { bytes }));
     }
 }

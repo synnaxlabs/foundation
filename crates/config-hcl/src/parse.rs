@@ -3,7 +3,7 @@ use document::value::{self, Call, Float, Value};
 use document::{Attribute, Block, Document, Label, Map, Source, Span};
 use types::name::Name;
 
-use crate::lex::{self, Lexer, Token};
+use crate::lex::{self, Token, Tokens};
 use crate::{Error, Expected, Form};
 
 /// Reads HCL text as a Document. Each key, keyword, label, function name, and value
@@ -15,10 +15,10 @@ use crate::{Error, Expected, Form};
 /// HCL does not have, a template, or nesting past the limit stops reading, so it is
 /// the last one.
 pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
-    let mut lexer = Lexer::new(source, text).map_err(|error| vec![error])?;
-    let token = lexer.next().map_err(|error| vec![error])?;
+    let mut tokens = Tokens::new(source, text).map_err(|error| vec![error])?;
+    let token = tokens.next();
     let mut parser = Parser {
-        lexer,
+        tokens,
         token,
         errors: Vec::new(),
     };
@@ -34,7 +34,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
 }
 
 struct Parser<'a> {
-    lexer: Lexer<'a>,
+    tokens: Tokens<'a>,
     /// The next token, not yet taken.
     token: Token<'a>,
     /// Problems that do not stop reading.
@@ -55,11 +55,23 @@ impl<'a> Parser<'a> {
     fn body(&mut self, depth: usize) -> Result<Document, Error> {
         let mut attributes = Vec::new();
         let mut blocks = Vec::new();
+        let items = self.items(&mut attributes, &mut blocks, depth);
+        let attributes = self.map(attributes);
+        items?;
+        Ok(Document { attributes, blocks })
+    }
+
+    fn items(
+        &mut self,
+        attributes: &mut Vec<Attribute>,
+        blocks: &mut Vec<Block>,
+        depth: usize,
+    ) -> Result<(), Error> {
         loop {
             self.skip_newlines()?;
             match self.token.kind {
-                lex::Kind::End | lex::Kind::CloseBrace => break,
-                lex::Kind::Word if identifier(self.token.text) => {}
+                lex::Kind::End | lex::Kind::CloseBrace => return Ok(()),
+                lex::Kind::Identifier => {}
                 _ => return Err(self.syntax(Expected::Item)),
             }
             let name = self.take()?;
@@ -72,20 +84,17 @@ impl<'a> Parser<'a> {
                 blocks.push(self.block(&name, depth)?);
             }
         }
-        Ok(Document {
-            attributes: self.map(attributes),
-            blocks,
-        })
     }
 
     fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
         let mut labels = Vec::new();
         loop {
-            match &self.token.kind {
-                lex::Kind::String(_) => {}
-                lex::Kind::Word if identifier(self.token.text) => {}
+            match self.token.kind {
+                lex::Kind::String(_) | lex::Kind::Identifier => {}
                 lex::Kind::OpenBrace => break,
-                _ if labels.is_empty() => return Err(self.syntax(Expected::Equals)),
+                _ if labels.is_empty() => {
+                    return Err(self.syntax(Expected::AttributeOrBlock));
+                }
                 _ => return Err(self.syntax(Expected::BlockStart)),
             }
             let label = self.take()?;
@@ -121,16 +130,18 @@ impl<'a> Parser<'a> {
     /// leaves the `}`.
     fn one_line(&mut self, depth: usize) -> Result<Document, Error> {
         let mut attributes = Vec::new();
-        if self.token.kind == lex::Kind::Word && identifier(self.token.text) {
+        if self.token.kind == lex::Kind::Identifier {
             let key = self.take()?;
             if self.token.kind != lex::Kind::Equals {
                 return Err(self.syntax(Expected::Equals));
             }
             self.take()?;
             attributes.extend(self.value(depth)?.map(|value| attribute(key, value)));
-        }
-        if self.token.kind != lex::Kind::CloseBrace {
-            return Err(self.syntax(Expected::BlockEnd));
+            if self.token.kind != lex::Kind::CloseBrace {
+                return Err(self.syntax(Expected::BlockEnd));
+            }
+        } else if self.token.kind != lex::Kind::CloseBrace {
+            return Err(self.syntax(Expected::Key));
         }
         Ok(Document {
             attributes: self.map(attributes),
@@ -146,7 +157,9 @@ impl<'a> Parser<'a> {
         }
         let token = self.take()?;
         let kind = match token.kind {
-            lex::Kind::Word => return self.word(&token, depth),
+            lex::Kind::Identifier | lex::Kind::Reference => {
+                return self.word(&token, depth);
+            }
             lex::Kind::Number => return Ok(self.number(&token, None)),
             lex::Kind::Minus if self.token.kind == lex::Kind::Number => {
                 let digits = self.take()?;
@@ -155,7 +168,7 @@ impl<'a> Parser<'a> {
             lex::Kind::Minus => return Err(self.syntax(Expected::Value)),
             lex::Kind::String(text) => value::Kind::String(text),
             lex::Kind::OpenBracket => return self.list(&token, depth).map(Some),
-            lex::Kind::OpenBrace => return self.object(&token, depth),
+            lex::Kind::OpenBrace => return self.object(&token, depth).map(Some),
             _ => {
                 return Err(Error::Syntax {
                     span: token.span,
@@ -181,7 +194,7 @@ impl<'a> Parser<'a> {
                 return Ok(None);
             }
             _ if self.token.kind == lex::Kind::OpenParenthesis
-                && identifier(word.text) =>
+                && word.kind == lex::Kind::Identifier =>
             {
                 return self.call(word, depth).map(Some);
             }
@@ -217,6 +230,7 @@ impl<'a> Parser<'a> {
         } else {
             let float = digits.text.parse::<f64>().ok();
             float
+                .filter(|&f| f != 0.0 || !significant(digits.text))
                 .map(|f| if minus.is_some() { -f } else { f })
                 .and_then(Float::new)
                 .map(value::Kind::Float)
@@ -254,20 +268,29 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn object(
-        &mut self,
-        open: &Token<'a>,
-        depth: usize,
-    ) -> Result<Option<Value>, Error> {
+    fn object(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
         let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
         let mut attributes = Vec::new();
-        let close = loop {
+        let close = self.entries(&mut attributes, depth);
+        let map = self.map(attributes);
+        Ok(Value {
+            kind: value::Kind::Map(map),
+            span: Some(join(open.span, close?.span)),
+        })
+    }
+
+    /// Reads the entries of an object after its `{`, and returns the `}`.
+    fn entries(
+        &mut self,
+        attributes: &mut Vec<Attribute>,
+        depth: usize,
+    ) -> Result<Token<'a>, Error> {
+        loop {
             self.skip_newlines()?;
-            match &self.token.kind {
-                lex::Kind::CloseBrace => break self.take()?,
-                lex::Kind::String(_) => {}
-                lex::Kind::Word if identifier(self.token.text) => {}
-                _ => return Err(self.syntax(Expected::ObjectKey)),
+            match self.token.kind {
+                lex::Kind::CloseBrace => return self.take(),
+                lex::Kind::String(_) | lex::Kind::Identifier => {}
+                _ => return Err(self.syntax(Expected::Key)),
             }
             let key = self.take()?;
             if !matches!(self.token.kind, lex::Kind::Equals | lex::Kind::Colon) {
@@ -279,14 +302,10 @@ impl<'a> Parser<'a> {
                 lex::Kind::Comma | lex::Kind::Newline => {
                     self.take()?;
                 }
-                lex::Kind::CloseBrace => break self.take()?,
+                lex::Kind::CloseBrace => return self.take(),
                 _ => return Err(self.syntax(Expected::ObjectEnd)),
             }
-        };
-        Ok(Some(Value {
-            kind: value::Kind::Map(self.map(attributes)),
-            span: Some(join(open.span, close.span)),
-        }))
+        }
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
@@ -346,24 +365,35 @@ impl<'a> Parser<'a> {
 
     /// Takes the next token and reads the one after it.
     ///
+    /// # Errors
+    ///
+    /// Returns the lexer's error when the next token is [`lex::Kind::Error`].
+    ///
     /// # Panics
     ///
     /// Panics at the end of the text, which no rule takes. So every loop that takes
     /// tokens ends.
     fn take(&mut self) -> Result<Token<'a>, Error> {
+        if let lex::Kind::Error(error) = &self.token.kind {
+            return Err(error.clone());
+        }
         assert!(
             self.token.kind != lex::Kind::End,
             "invariant: no rule takes the end, at {:?}",
             self.token.span
         );
-        let next = self.lexer.next()?;
+        let next = self.tokens.next();
         Ok(std::mem::replace(&mut self.token, next))
     }
 
+    /// The problem at the next token: the lexer's error, or `expected`.
     fn syntax(&self, expected: Expected) -> Error {
-        Error::Syntax {
-            span: self.token.span,
-            expected,
+        match &self.token.kind {
+            lex::Kind::Error(error) => error.clone(),
+            _ => Error::Syntax {
+                span: self.token.span,
+                expected,
+            },
         }
     }
 }
@@ -385,14 +415,12 @@ fn text(token: Token<'_>) -> Box<str> {
     }
 }
 
-/// Reports whether `text` is a key or a keyword: a letter or `_`, then letters,
-/// digits, `_`, and `-`.
-pub(crate) fn identifier(text: &str) -> bool {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+/// Reports whether the digits of a float before its exponent are not all zero.
+fn significant(digits: &str) -> bool {
+    digits
+        .bytes()
+        .take_while(|b| !matches!(b, b'e' | b'E'))
+        .any(|b| matches!(b, b'1'..=b'9'))
 }
 
 /// The depth inside one more level, or `None` past [`DEPTH_MAX`].
@@ -730,6 +758,11 @@ c = "°C # not a comment"
         }
 
         #[test]
+        fn reads_tabs() {
+            assert_eq!(ok("a\t=\t1\t# c\n"), attributes(vec![("a", integer(1))]));
+        }
+
+        #[test]
         fn reads_crlf_lines() {
             let document = ok("a = 1\r\nb = \"x\"\r\n");
             let b = document.attributes.get("b").unwrap();
@@ -811,10 +844,11 @@ c = "°C # not a comment"
                               `\\UNNNNNNNN`";
         const TEMPLATE: &str = "templates do not exist in Foundation files. Write \
                                 `$${` or `%%{` for the text `${` or `%{`";
-        const NAME: &str = "the reference is not a valid name. Use dot-separated \
-                            parts of letters, digits, `_`, and `-`";
+        const NAME: &str = "the reference is not a valid name: \"a.@\" has a segment \
+                            that is not valid: \"@\". Use letters, digits, `_`, and \
+                            `-`, separated by dots";
         const NUMBER: &str = "the number is out of range. Use an integer that fits \
-                              in 128 bits, or a finite float";
+                              in 128 bits, or a float that fits in 64 bits";
         const NULL: &str = "`null` does not exist in Foundation files. Remove the \
                             attribute to use its default";
         const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
@@ -888,13 +922,14 @@ c = "°C # not a comment"
                 ("a = 1.x\n", on(5, 6), Expected::Newline),
                 ("a = 1ex\n", on(5, 7), Expected::Newline),
                 ("a = 1 b = 2\n", on(6, 7), Expected::Newline),
-                ("a 1\n", on(2, 3), Expected::Equals),
+                ("a 1\n", on(2, 3), Expected::AttributeOrBlock),
                 ("b \"x\" 1\n", on(6, 7), Expected::BlockStart),
                 ("b { a = 1 c = 2 }\n", on(10, 11), Expected::BlockEnd),
-                ("b { = }\n", on(4, 5), Expected::BlockEnd),
+                ("b { = }\n", on(4, 5), Expected::Key),
                 ("b { a 1 }\n", on(6, 7), Expected::Equals),
-                ("b { a.b = 1 }\n", on(4, 7), Expected::BlockEnd),
-                ("b a.b {}\n", on(2, 5), Expected::Equals),
+                ("b { a {} }\n", on(6, 7), Expected::Equals),
+                ("b { a.b = 1 }\n", on(4, 7), Expected::Key),
+                ("b a.b {}\n", on(2, 5), Expected::AttributeOrBlock),
                 ("b {}  x\n", on(6, 7), Expected::Newline),
                 (
                     "b {\n  a = 1 }\n",
@@ -910,8 +945,8 @@ c = "°C # not a comment"
                     span(at(10, 1, 0), at(10, 1, 0)),
                     Expected::ListEnd,
                 ),
-                ("a = { = 1 }\n", on(6, 7), Expected::ObjectKey),
-                ("a = { k.j = 1 }\n", on(6, 9), Expected::ObjectKey),
+                ("a = { = 1 }\n", on(6, 7), Expected::Key),
+                ("a = { k.j = 1 }\n", on(6, 9), Expected::Key),
                 ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
                 ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
                 ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
@@ -927,11 +962,9 @@ c = "°C # not a comment"
             let error = "a.@".parse::<Name>().unwrap_err();
             let name = Error::Name {
                 span: on(4, 7),
-                error: error.clone(),
+                error,
             };
-            check("r = a.@\n", &[(name.clone(), NAME)]);
-            let source = std::error::Error::source(&name).unwrap();
-            assert_eq!(source.to_string(), error.to_string());
+            check("r = a.@\n", &[(name, NAME)]);
 
             let long = "a".repeat(256);
             let error = long.parse::<Name>().unwrap_err();
@@ -939,7 +972,9 @@ c = "°C # not a comment"
                 span: on(4, 260),
                 error,
             };
-            check(&format!("r = {long}"), &[(name, NAME)]);
+            let message = "the reference is not a valid name: a name or pattern is 256 \
+                           bytes long. The limit is 255 bytes";
+            check(&format!("r = {long}"), &[(name, message)]);
         }
 
         #[test]
@@ -966,6 +1001,8 @@ c = "°C # not a comment"
             );
             check("f = 1e400\n", &[number(4, 9)]);
             check("f = -1e400\n", &[number(4, 10)]);
+            check("f = 1e-400\n", &[number(4, 10)]);
+            check("f = 2e-324\n", &[number(4, 10)]);
         }
 
         #[test]
@@ -982,6 +1019,43 @@ c = "°C # not a comment"
             check("a = 1\na = 2\n", &[repeat(on(0, 1), second)]);
             check("m = { a = 1, a = 2 }", &[repeat(on(6, 7), on(13, 14))]);
             assert_eq!(ok("b { a = 1 }\nb { a = 2 }\n").blocks.len(), 2);
+        }
+
+        #[test]
+        fn keeps_a_repeated_key_before_a_stop() {
+            let repeat = |first, second| {
+                let error = document::Error::DuplicateKey {
+                    key: "a".into(),
+                    first: Some(first),
+                    second: Some(second),
+                };
+                (Error::Document(error), REPEAT)
+            };
+            let value = "the file needs a value here";
+            let second = span(at(6, 1, 0), at(7, 1, 1));
+            let end = syntax(span(at(16, 2, 4), at(17, 3, 0)), Expected::Value);
+            check(
+                "a = 1\na = 2\nc = \n",
+                &[repeat(on(0, 1), second), (end, value)],
+            );
+            let end = syntax(on(24, 25), Expected::Value);
+            check(
+                "m = { a = 1, a = 2, b = }",
+                &[repeat(on(6, 7), on(13, 14)), (end, value)],
+            );
+        }
+
+        #[test]
+        fn keeps_a_problem_before_a_bad_token() {
+            let null = Error::Form {
+                span: on(4, 8),
+                form: Form::Null,
+            };
+            let escape = Error::Escape { span: on(10, 12) };
+            check(r#"a = null "\q""#, &[(null, NULL), (escape, ESCAPE)]);
+            let number = Error::Number { span: on(4, 9) };
+            let escape = Error::Escape { span: on(11, 13) };
+            check(r#"a = 1e400 "\q""#, &[(number, NUMBER), (escape, ESCAPE)]);
         }
 
         #[test]
@@ -1018,6 +1092,20 @@ c = "°C # not a comment"
                     (name, NAME),
                     (value, "the file needs a value here"),
                 ],
+            );
+
+            let repeat = document::Error::DuplicateKey {
+                key: "a".into(),
+                first: Some(on(0, 1)),
+                second: Some(span(at(15, 2, 0), at(16, 2, 1))),
+            };
+            let null = Error::Form {
+                span: span(at(10, 1, 4), at(14, 1, 8)),
+                form: Form::Null,
+            };
+            check(
+                "a = 1\nb = null\na = 2\n",
+                &[(null, NULL), (Error::Document(repeat), REPEAT)],
             );
         }
     }
@@ -1194,16 +1282,14 @@ c = "°C # not a comment"
             }
 
             #[test]
-            fn reports_a_problem_for_random_text(
+            fn reads_random_text_back_or_points_inside_it(
                 text in "[ -~\n\t°{}\\[\\]()\"=,.:#/*$%@\\\\-]{0,64}",
             ) {
-                if let Err(errors) = read(Source(0), &text) {
-                    prop_assert!(!errors.is_empty());
-                }
+                check_text(&text)?;
             }
 
             #[test]
-            fn reports_a_problem_for_an_edited_file(
+            fn reads_an_edited_file_back_or_points_inside_it(
                 document in document(),
                 edits in prop::collection::vec(edit(), 1..4),
             ) {
@@ -1216,11 +1302,32 @@ c = "°C # not a comment"
                         None => {}
                     }
                 }
-                let text: String = chars.into_iter().collect();
-                if let Err(errors) = read(Source(0), &text) {
-                    prop_assert!(!errors.is_empty());
+                check_text(&chars.into_iter().collect::<String>())?;
+            }
+        }
+
+        /// A text that reads gives a Document that writes and reads back the same.
+        /// Otherwise each problem starts inside the text.
+        fn check_text(text: &str) -> Result<(), TestCaseError> {
+            match read(Source(0), text) {
+                Ok(document) => {
+                    let written = write(&document);
+                    prop_assert_eq!(
+                        read(Source(0), &written),
+                        Ok(document),
+                        "{}",
+                        text
+                    );
+                }
+                Err(errors) => {
+                    let inside = |error: &&Error| {
+                        usize::try_from(error.offset()).is_ok_and(|at| at <= text.len())
+                    };
+                    let outside = errors.iter().find(|error| !inside(error));
+                    prop_assert!(outside.is_none(), "{:?} in {:?}", outside, text);
                 }
             }
+            Ok(())
         }
     }
 }

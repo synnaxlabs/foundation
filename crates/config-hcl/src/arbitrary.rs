@@ -6,8 +6,6 @@ use document::value::{Call, Float, Kind, Value};
 use document::{Attribute, Block, Document, Label, Map};
 use proptest::prelude::*;
 
-use crate::parse;
-
 fn identifier() -> impl Strategy<Value = String> {
     "[a-z_][a-z0-9_-]{0,6}"
 }
@@ -142,7 +140,7 @@ fn value_text(out: &mut String, value: &Value) {
             out.push('{');
             for (i, attribute) in map.iter().enumerate() {
                 out.push_str(if i == 0 { " " } else { ", " });
-                if parse::identifier(&attribute.key) {
+                if identifier_text(&attribute.key) {
                     out.push_str(&attribute.key);
                 } else {
                     quoted(out, &attribute.key);
@@ -168,6 +166,14 @@ fn values(out: &mut String, values: &[Value]) {
         }
         value_text(out, value);
     }
+}
+
+fn identifier_text(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
 fn quoted(out: &mut String, text: &str) {
