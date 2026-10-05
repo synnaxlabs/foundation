@@ -410,7 +410,8 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. A new ring has the same block at `seq` 0 in
+  records. An entry has no part, one, or two; `append` takes them owned and drops
+  them when it fails (#582). A new ring has the same block at `seq` 0 in
   both places, with the tail at offset 0 and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
