@@ -17,7 +17,8 @@ pub enum Data {
     /// What the caller proposed.
     Bytes(Vec<u8>),
     /// A voter configuration, in force from the time the entry commits. The caller
-    /// applies nothing; [`Ready::voters`](crate::Ready::voters) says what to store.
+    /// applies nothing, but stores it with `applied`: it is `Start.voters` after a
+    /// restart.
     Voters(Voters),
 }
 
@@ -167,7 +168,8 @@ impl Log {
 }
 
 // Checks that `entries` follow `before`: indexes in sequence, terms non-decreasing
-// and not zero. Returns the last position, or `before` with no entries.
+// and not zero, and each configuration valid. Returns the last position, or `before`
+// with no entries.
 pub(crate) fn check(
     entries: &[Entry],
     mut before: Position,
@@ -179,6 +181,9 @@ pub(crate) fn check(
                 at: entry.at,
                 before,
             });
+        }
+        if let Data::Voters(voters) = &entry.data {
+            voters.check()?;
         }
         before = entry.at;
     }

@@ -59,9 +59,6 @@ pub struct Ready {
     pub committed: Vec<Entry>,
     /// Messages to send after the write, in the order the node made them.
     pub messages: Vec<Message>,
-    /// The voters, when a configuration entry committed since the last `Ready`.
-    /// Store it with `applied`: it is `Start.voters` after a restart.
-    pub voters: Option<Voters>,
 }
 
 /// One node's state machine. PreVote and CheckQuorum are always on.
@@ -72,8 +69,6 @@ pub struct Ready {
 pub struct Raft {
     key: node::Key,
     voters: Voters,
-    // A configuration entry committed since the last `Ready`.
-    reconfigured: bool,
     peers: BTreeMap<node::Key, Peer>,
     election_ticks: u64,
     heartbeat_ticks: u64,
@@ -98,8 +93,8 @@ impl Raft {
     ///
     /// - [`Error::Ticks`] when `heartbeat_ticks` is 0 or `election_ticks` is not
     ///   greater than `heartbeat_ticks`.
-    /// - [`Error::EmptyIncoming`] when `voters.incoming` is empty but `outgoing` is
-    ///   not.
+    /// - [`Error::EmptyIncoming`] when `voters`, or a configuration in `entries`,
+    ///   has an empty `incoming` set but an `outgoing` set.
     /// - [`Error::EntryOutOfOrder`] when `entries` do not run from index 1 with
     ///   terms that never decrease.
     /// - [`Error::AppliedPastLog`] when `applied` is past the last entry.
@@ -138,7 +133,6 @@ impl Raft {
         Ok(Self {
             key,
             voters,
-            reconfigured: false,
             peers,
             outbox: Vec::new(),
             election_ticks: u64::from(election_ticks),
@@ -206,7 +200,6 @@ impl Raft {
             entries: self.log.take_unstable(),
             committed: self.log.take_committed(),
             messages: std::mem::take(&mut self.outbox),
-            voters: std::mem::take(&mut self.reconfigured).then(|| self.voters.clone()),
         }
     }
 
@@ -269,6 +262,9 @@ impl Raft {
     /// - [`Error::Loopback`] when the message names this node as its sender.
     /// - [`Error::SecondLeader`] when this node leads the message's term and the
     ///   message is a heartbeat or an append.
+    /// - [`Error::EntryOutOfOrder`] when an append's entries do not follow its `prev`.
+    /// - [`Error::EmptyIncoming`] when an append carries a configuration with an empty
+    ///   `incoming` set but an `outgoing` set.
     ///
     /// The node's state does not change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
@@ -429,10 +425,6 @@ impl Raft {
     // The one writer of `voters` and `peers` after `new`. A peer that stays keeps
     // its progress; a new one starts at the end of the log.
     fn set_voters(&mut self, voters: Voters) {
-        assert!(
-            voters.check().is_ok(),
-            "invariant: a committed configuration is valid"
-        );
         let last = self.log.last().index;
         let mut old = std::mem::take(&mut self.peers);
         self.peers = voters
@@ -440,7 +432,6 @@ impl Raft {
             .map(|key| (key, old.remove(&key).unwrap_or_else(|| Peer::new(last))))
             .collect();
         self.voters = voters;
-        self.reconfigured = true;
     }
 
     // Sends each follower the entries it lacks and the commit index.
@@ -1855,17 +1846,16 @@ mod tests {
             let new = voters(&[1, 2, 3, 4]);
             let at = raft.propose_entry(Data::Voters(new.clone())).unwrap();
             assert_eq!(at.index, 2);
-            assert_eq!(raft.ready().voters, None);
+            sent(&mut raft);
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3]));
             raft.step(message(2, 1, Body::AppendReply { last: 2 }))
                 .unwrap();
             let ready = raft.ready();
-            assert_eq!(ready.voters, Some(new.clone()));
             assert_eq!(ready.committed.last(), Some(&config(1, 2, new.clone())));
             assert_eq!(raft.voters(), &new);
             // The new peer gets one probe and then waits for its reply.
             let to: Vec<node::Key> = ready.messages.iter().map(|m| m.to).collect();
             assert_eq!(to, [key(2), key(4)]);
-            assert_eq!(raft.ready().voters, None);
             raft.propose(vec![7]).unwrap();
             let to: Vec<node::Key> = sent(&mut raft).iter().map(|m| m.to).collect();
             assert_eq!(to, [key(2)]);
@@ -1880,7 +1870,7 @@ mod tests {
             ]);
             assert_eq!(raft.voters(), &voters(&[1, 2, 3]));
             heartbeat(&mut raft, 2);
-            assert_eq!(raft.ready().voters, Some(new.clone()));
+            assert_eq!(raft.ready().committed.len(), 2);
             assert_eq!(raft.voters(), &new);
             tick_times(&mut raft, 40);
             assert_eq!(raft.role(), Role::Follower);
@@ -1895,7 +1885,6 @@ mod tests {
                 config(1, 3, last.clone()),
             ]);
             heartbeat(&mut raft, 3);
-            assert_eq!(raft.ready().voters, Some(last.clone()));
             assert_eq!(raft.voters(), &last);
         }
 
@@ -1909,21 +1898,34 @@ mod tests {
             };
             let mut raft = Raft::new(CONFIG, start).unwrap();
             assert_eq!(raft.voters(), &voters(&[1, 2, 3]));
-            assert_eq!(raft.ready().voters, None);
             heartbeat(&mut raft, 2);
-            assert_eq!(raft.ready().voters, Some(new.clone()));
+            assert_eq!(raft.ready().committed, [config(1, 2, new.clone())]);
             assert_eq!(raft.voters(), &new);
         }
 
         #[test]
-        #[should_panic(expected = "invariant: a committed configuration is valid")]
-        fn a_committed_configuration_must_be_valid() {
+        fn rejects_an_invalid_configuration_entry() {
             let bad = Voters {
                 outgoing: [key(1), key(2)].into_iter().collect(),
                 ..Voters::default()
             };
-            let mut raft = follower_with(vec![config(1, 1, bad)]);
-            heartbeat(&mut raft, 1);
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let body = Body::Append {
+                prev: Position::default(),
+                entries: vec![config(1, 1, bad.clone())],
+                commit: 0,
+            };
+            let error = raft.step(message(2, 1, body)).unwrap_err();
+            assert_eq!(error, Error::EmptyIncoming);
+            assert_eq!(
+                error.to_string(),
+                "the incoming voter set is empty while the outgoing set is not"
+            );
+            let start = Start {
+                entries: vec![config(1, 1, bad)],
+                ..start(&[1, 2, 3], at_term(1))
+            };
+            assert_eq!(Raft::new(CONFIG, start).unwrap_err(), Error::EmptyIncoming);
         }
     }
 

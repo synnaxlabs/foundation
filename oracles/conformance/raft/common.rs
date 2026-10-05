@@ -49,7 +49,6 @@ pub(crate) struct Disk {
     pub(crate) hard: Hard,
     pub(crate) entries: Vec<Entry>,
     pub(crate) committed: Vec<Entry>,
-    pub(crate) voters: Option<Voters>,
 }
 
 impl Disk {
@@ -60,13 +59,9 @@ impl Disk {
             entries,
             committed,
             messages,
-            voters,
         } = ready;
         if let Some(hard) = hard {
             self.hard = hard;
-        }
-        if voters.is_some() {
-            self.voters = voters;
         }
         if let Some(first) = entries.first() {
             let keep = usize::try_from(first.at.index - 1).unwrap();
@@ -122,7 +117,6 @@ pub(crate) fn start(
         hard,
         committed: entries[..usize::try_from(applied).unwrap()].to_vec(),
         entries,
-        voters: None,
     };
     (Raft::new(config, start).unwrap(), disk)
 }

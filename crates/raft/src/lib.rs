@@ -70,7 +70,8 @@ pub enum Error {
         /// The configured heartbeat ticks.
         heartbeat: u32,
     },
-    /// The incoming voter set is empty while the outgoing set is not.
+    /// The incoming voter set is empty while the outgoing set is not, in
+    /// `Start.voters` or in a configuration entry.
     EmptyIncoming,
     /// The stored term is lower than the term of the last log entry.
     TermBehindLog {

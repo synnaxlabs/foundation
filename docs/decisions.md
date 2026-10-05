@@ -707,11 +707,11 @@ How to read this record:
   a leader keeps its lead through its own removal. A configuration travels in the
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. The last `Voters` entry a commit covers
-  is in force from that commit on, for a leader and a follower alike, and
-  `Ready.voters` reports it once so the caller stores it beside `Hard`. `Start`
-  applies the entries after `applied` the same way on a restart. A committed
-  configuration that fails `Voters::check` is a panic, not an error: the proposer
-  checked it before the entry existed.
+  is in force from that commit on, for a leader and a follower alike. The caller
+  stores a committed `Data::Voters` with `applied`, and passes it as `Start.voters`
+  on a restart; the entries after `applied` change it the same way when they commit.
+  A `Voters` entry that fails `Voters::check`, in `Start.entries` or in an `Append`,
+  is `Error::EmptyIncoming`, like `Start.voters`.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
