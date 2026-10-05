@@ -72,7 +72,7 @@ Most of the cost is context size per turn, so keep each context small:
 | `memory` | Fable | `block`, `ring` |
 | `data-path` | Opus | `types`, `codec`, `wire` |
 | `consensus` | Fable | `raft`, `spec`, then `mesh`, `blob` |
-| `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark |
+| `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark, then two nodes in `sim` (`node`, #462) |
 | `write-path` | Opus | `control`, `delivery`, `home`, then `hub` (#462) |
 | `storage` | Fable | `buffer`, then `replica` |
 | `time` | Opus | `estimate`, then `clock` |
