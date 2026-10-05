@@ -47,7 +47,7 @@ impl Shards {
         Self(Arc::new(driver))
     }
 
-    /// The number of cores this node may use.
+    /// The number of cores this node may use. It never changes.
     ///
     /// ```
     /// fn count(shards: &env::shards::Shards) -> usize {
@@ -88,7 +88,9 @@ impl Shards {
     where
         F: Future<Output = ()> + 'static,
     {
-        if let Some(core) = config.core.filter(|&core| core >= self.cores().get()) {
+        if let Some(core) = config.core
+            && core >= self.cores().get()
+        {
             let name = config.name;
             return Err(Error::Pin { name, core });
         }
@@ -112,8 +114,9 @@ impl fmt::Debug for Shards {
 pub struct Config {
     /// The thread's name, shown by the OS and in errors.
     pub name: String,
-    /// The core to pin the thread to, below [`Shards::cores`], or `None` to let the OS
-    /// place it.
+    /// The core to pin the thread to, as an index below [`Shards::cores`] into the
+    /// cores this node may use, never an OS CPU number; or `None` to let the OS place
+    /// it.
     pub core: Option<usize>,
 }
 
@@ -125,7 +128,7 @@ pub struct Config {
 /// }
 /// ```
 pub trait Driver: Send + Sync {
-    /// The number of cores this node may use.
+    /// The number of cores this node may use. It never changes.
     fn cores(&self) -> NonZeroUsize;
 
     /// Starts a thread with a task executor, makes [`Tasks`] for it, and runs
@@ -137,7 +140,8 @@ pub trait Driver: Send + Sync {
     ///
     /// # Errors
     ///
-    /// As [`Shards::start`].
+    /// - [`Error::Start`] when the thread or its executor cannot start.
+    /// - [`Error::Pin`] when the thread cannot pin to `config.core`.
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error>;
 }
 
@@ -145,44 +149,44 @@ pub trait Driver: Send + Sync {
 mod tests {
     use super::*;
 
-    /// Four cores; `start` reports that it ran.
-    struct Four;
+    /// A node with this many cores, whose shards end at once.
+    struct Cores(NonZeroUsize);
 
-    impl Driver for Four {
+    impl Driver for Cores {
         fn cores(&self) -> NonZeroUsize {
-            NonZeroUsize::new(4).expect("four is not zero")
+            self.0
         }
 
-        fn start(&self, config: Config, _: Main) -> Result<Handle, Error> {
-            let reason = "the driver ran".into();
-            Err(Error::Start {
-                name: config.name,
-                reason,
-            })
+        fn start(&self, _: Config, _: Main) -> Result<Handle, Error> {
+            Ok(Handle::new(|| Ok(())))
         }
     }
 
-    fn start(core: Option<usize>) -> Error {
+    fn start(cores: usize, core: Option<usize>) -> Result<(), Error> {
+        let cores = NonZeroUsize::new(cores).expect("a test asks for cores");
         let config = Config {
             name: "shard".into(),
             core,
         };
-        Shards::new(Four).start(config, |_| async {}).unwrap_err()
+        let shards = Shards::new(Cores(cores));
+        shards.start(config, |_| async {}).and_then(Handle::join)
     }
 
     #[test]
-    fn a_core_past_the_bound_does_not_reach_the_driver() {
-        let name = "shard".to_owned();
-        assert_eq!(start(Some(4)), Error::Pin { name, core: 4 });
+    fn a_core_starts_only_below_the_count() {
+        for cores in 1..=8 {
+            for core in (0..=9).chain([usize::MAX]) {
+                let name = "shard".to_owned();
+                let pinned = Err(Error::Pin { name, core });
+                let want = if core < cores { Ok(()) } else { pinned };
+                assert_eq!(start(cores, Some(core)), want, "{core} of {cores}");
+            }
+        }
     }
 
     #[test]
-    fn a_core_in_the_bound_reaches_the_driver() {
-        let ran = Error::Start {
-            name: "shard".into(),
-            reason: "the driver ran".into(),
-        };
-        assert_eq!(start(Some(3)), ran);
-        assert_eq!(start(None), ran);
+    fn no_core_starts_on_any_count() {
+        assert_eq!(start(1, None), Ok(()));
+        assert_eq!(start(8, None), Ok(()));
     }
 }

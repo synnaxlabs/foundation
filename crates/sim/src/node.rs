@@ -38,8 +38,7 @@ impl Node {
         env::entropy::Entropy::new(self.0.clone())
     }
 
-    /// Starts shards on the node. A shard asks for a core below [`Config::cores`]
-    /// or gets [`env::thread::Error::Pin`].
+    /// Starts shards on the node, which has [`Config::cores`] cores.
     #[must_use]
     pub fn shards(&self) -> env::shards::Shards {
         env::shards::Shards::new(self.0.clone())
