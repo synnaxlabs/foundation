@@ -36,10 +36,14 @@ pub(crate) const ENTRIES_MAX: usize = 1023;
 /// Bytes of the largest table, `table_len(ENTRIES_MAX)`.
 pub(crate) const TABLE_MAX: usize = 4 + ENTRIES_MAX * HEADER_LEN;
 
-/// The bytes of one entry: no block, one, or two. The ring writes them in place,
-/// with no copy, and drops them when the commit that writes them ends.
+/// The most blocks in one entry: a caller's record is at most a header block and
+/// a view of one frame's block.
+pub const PARTS_MAX: usize = 2;
+
+/// The bytes of one entry, in up to [`PARTS_MAX`] blocks. The ring writes them in
+/// place, with no copy, and drops them when the commit that writes them ends.
 #[derive(Clone, Debug, Default)]
-pub struct Parts([Option<Block>; 2]);
+pub struct Parts([Option<Block>; PARTS_MAX]);
 
 impl Parts {
     /// The blocks, in order.
@@ -70,15 +74,15 @@ impl From<Option<Block>> for Parts {
     }
 }
 
-impl From<[Block; 2]> for Parts {
-    fn from([first, second]: [Block; 2]) -> Self {
+impl From<[Block; PARTS_MAX]> for Parts {
+    fn from([first, second]: [Block; PARTS_MAX]) -> Self {
         Self([Some(first), Some(second)])
     }
 }
 
 impl IntoIterator for Parts {
     type Item = Block;
-    type IntoIter = iter::Flatten<array::IntoIter<Option<Block>, 2>>;
+    type IntoIter = iter::Flatten<array::IntoIter<Option<Block>, PARTS_MAX>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter().flatten()
@@ -105,7 +109,7 @@ pub struct Entry {
     pub last: Option<Stamp>,
     /// A tag the caller gives and reads back. The buffer does not read it.
     pub tag: u8,
-    /// The bytes.
+    /// The bytes, written in place; see [`Parts`].
     pub parts: Parts,
 }
 

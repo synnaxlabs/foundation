@@ -23,7 +23,7 @@ use types::channel::{Slot, Slots};
 use types::frame::Path;
 use types::time::Span;
 
-use crate::entry::{self, Entry};
+use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{Closed, Group, Limit, META_LEN, Rejected, Sealed};
 use crate::header::{self, Header};
 use crate::record::{self, ALIGN, AREA_START, Body};
@@ -187,7 +187,8 @@ impl From<header::Error> for Error {
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
-    /// The entries of the append in progress, kept with their capacity.
+    /// The entries of the append in progress, kept with capacity for up to one
+    /// record of entries.
     batch: RefCell<Vec<Entry>>,
 }
 
@@ -394,6 +395,7 @@ impl Buffer {
         batch.extend(entries);
         let queued = self.queue(&mut batch);
         batch.clear();
+        batch.shrink_to(ENTRIES_MAX);
         self.batch.replace(batch);
         queued
     }
@@ -406,19 +408,18 @@ impl Buffer {
         if let Some(error) = &state.failed {
             return Err(error.clone());
         }
-        let count = batch.len();
-        match state.open.push(&shared.pool, &state.writer, batch) {
-            Ok(()) => {}
+        let taken = match state.open.push(&shared.pool, &state.writer, batch) {
+            Ok(taken) => taken,
             Err(Rejected::Record) => {
                 state.close_open();
                 state
                     .open
                     .push(&shared.pool, &state.writer, batch)
-                    .map_err(rejected)?;
+                    .map_err(rejected)?
             }
             Err(other) => return Err(rejected(other)),
-        }
-        for (slot, header) in state.open.last(count) {
+        };
+        for (slot, header) in state.open.entries(taken) {
             state
                 .tails
                 .advance(slot, header)

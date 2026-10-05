@@ -4,6 +4,7 @@
 
 use std::fmt;
 use std::iter;
+use std::ops::Range;
 use std::slice;
 
 use block::{Block, Pool, Unique};
@@ -113,8 +114,9 @@ impl Group {
     }
 
     /// Takes every entry of `batch`, or none, when the record with them fits the
-    /// layout and the ring of `writer`; it sets each header's `bytes` and leaves
-    /// `batch` empty. The first entry takes the group's blocks from `pool`.
+    /// layout and the ring of `writer`; it sets each header's `bytes`, leaves
+    /// `batch` empty, and gives the positions of the entries it took, for
+    /// [`Group::entries`]. The first entry takes the group's blocks from `pool`.
     ///
     /// # Errors
     ///
@@ -125,10 +127,11 @@ impl Group {
         pool: &Pool,
         writer: &Writer,
         batch: &mut Vec<Entry>,
-    ) -> Result<(), Rejected> {
+    ) -> Result<Range<usize>, Rejected> {
         let count = batch.len();
+        let start = self.headers.len();
         if count == 0 {
-            return Ok(());
+            return Ok(start..start);
         }
         let parts = batch.iter().map(|entry| entry.parts.len()).sum::<usize>();
         let len = batch.iter().map(|entry| entry.parts.bytes()).sum::<usize>();
@@ -175,13 +178,27 @@ impl Group {
             .bytes
             .checked_add(len)
             .expect("invariant: a body fits in usize");
-        Ok(())
+        Ok(start..self.headers.len())
     }
 
-    /// The slot and header of each of the last `count` entries, in order.
-    pub(crate) fn last(&self, count: usize) -> impl Iterator<Item = (Slot, &Header)> {
-        let start = self.headers.len().saturating_sub(count);
-        self.slots.iter().copied().zip(&self.headers).skip(start)
+    /// The slot and header of each entry at `positions`, in order.
+    ///
+    /// # Panics
+    ///
+    /// When `positions` reaches past the entries.
+    pub(crate) fn entries(
+        &self,
+        positions: Range<usize>,
+    ) -> impl Iterator<Item = (Slot, &Header)> {
+        let slots = self
+            .slots
+            .get(positions.clone())
+            .expect("invariant: push gave the positions");
+        let headers = self
+            .headers
+            .get(positions)
+            .expect("invariant: push gave the positions");
+        slots.iter().copied().zip(headers)
     }
 
     /// Places the record with `writer` and writes the entry table at the end of the
@@ -436,7 +453,7 @@ mod tests {
             .expect("the ring is empty");
         let entry = entry(header(1, Path::Live, 0), Parts::default());
         let pushed = Group::default().push(&pool(1 << 20), &writer, &mut vec![entry]);
-        assert_eq!(pushed, Ok(()));
+        assert_eq!(pushed, Ok(0..1));
     }
 
     /// An area in memory and the writer that continues it, as a ring just made and
@@ -742,6 +759,27 @@ mod tests {
         assert_eq!(bodies[9].len(), table_len(1) + 4096);
     }
 
+    /// A part given as `Some` or `None` writes like one given as a block or as
+    /// no block.
+    #[test]
+    fn push_takes_an_optional_part() {
+        let mut area = Area::new();
+        let mut group = Group::default();
+        let some = Parts::from(Some(block(&area.pool, b"xyz")));
+        let none = Parts::from(None);
+        area.push(&mut group, header(1, Path::Live, 0), some);
+        area.push(&mut group, header(1, Path::Live, 2), none);
+        let bytes: Vec<u32> = group.headers.iter().map(|header| header.bytes).collect();
+        assert_eq!(bytes, [3, 0]);
+        let (sealed, _) = group.close(&mut area.writer).seal(area.chain);
+        let parts: Vec<&[u8]> = sealed
+            .writes()
+            .flat_map(|(_, blocks)| blocks.iter().map(|part| &**part))
+            .skip(1)
+            .collect();
+        assert_eq!(parts, [b"xyz".as_slice()]);
+    }
+
     #[test]
     fn push_sets_the_bytes_of_the_header_from_its_parts() {
         let mut area = Area::new();
@@ -799,7 +837,10 @@ mod tests {
             )
         };
         for first in 0..ENTRIES_MAX {
-            assert_eq!(push(u64::try_from(first).expect("small")), Ok(()));
+            assert_eq!(
+                push(u64::try_from(first).expect("small")),
+                Ok(first..first + 1)
+            );
         }
         assert_eq!(push(9999), Err(Rejected::Record));
         assert_eq!(group.headers.len(), ENTRIES_MAX);
@@ -819,7 +860,7 @@ mod tests {
                 &mut vec![entry(one, part.clone().into())],
             );
             match pushed {
-                Ok(()) => {
+                Ok(_) => {
                     let closed = group.close(&mut area.writer);
                     group = area.commit(closed).clear();
                 }
@@ -995,7 +1036,7 @@ mod tests {
             } else if body > 60_000 {
                 Err(Rejected::Large(Limit::Body { len: body, max: 60_000 }))
             } else {
-                Ok(())
+                Ok(0..count)
             };
             let mut group = Group::default();
             prop_assert_eq!(group.push(&area.pool, &area.writer, &mut batch), expected.clone());
@@ -1009,13 +1050,19 @@ mod tests {
         let mut batch =
             vec![entry(header(1, Path::Live, 0), Parts::default()); ENTRIES_MAX];
         let mut group = Group::default();
-        assert_eq!(group.push(&area.pool, &area.writer, &mut batch), Ok(()));
+        assert_eq!(
+            group.push(&area.pool, &area.writer, &mut batch),
+            Ok(0..ENTRIES_MAX)
+        );
         assert_eq!(group.headers.len(), ENTRIES_MAX);
         let two = parts(&area.pool, &[b"a", b"a"]);
         let mut batch = vec![entry(header(1, Path::Live, 0), two); ENTRIES_MAX / 2];
         batch.push(entry(header(1, Path::Live, 0), parts(&area.pool, &[b"a"])));
         let mut group = Group::default();
-        assert_eq!(group.push(&area.pool, &area.writer, &mut batch), Ok(()));
+        assert_eq!(
+            group.push(&area.pool, &area.writer, &mut batch),
+            Ok(0..ENTRIES_MAX / 2 + 1)
+        );
         assert_eq!(group.writes.len(), ENTRIES_MAX);
     }
 
@@ -1059,7 +1106,7 @@ mod tests {
         assert_eq!(batch.len(), 3, "a refused batch keeps its entries");
         batch.remove(0);
         let pushed = group.push(&area.pool, &area.writer, &mut batch);
-        assert_eq!(pushed, Ok(()));
+        assert_eq!(pushed, Ok(1..3));
         assert_eq!(group.headers.len(), 3);
         assert_eq!(group.slots, [slot(1), slot(2), slot(3)]);
         assert_eq!(group.bytes, 2 * third);
@@ -1089,7 +1136,7 @@ mod tests {
         assert_eq!(group.headers.len(), 1);
         let closed = group.close(&mut area.writer);
         group = area.commit(closed).clear();
-        assert_eq!(group.push(&area.pool, &area.writer, &mut batch), Ok(()));
+        assert_eq!(group.push(&area.pool, &area.writer, &mut batch), Ok(0..1));
         let (sealed, _) = group.close(&mut area.writer).seal(area.chain);
         let places: Vec<u64> = sealed.writes().map(|(place, _)| place).collect();
         assert_eq!(places, [0], "the record wraps to the first block");
@@ -1102,7 +1149,7 @@ mod tests {
         let lent = area.pool.committed();
         assert_eq!(
             group.push(&area.pool, &area.writer, &mut Vec::new()),
-            Ok(())
+            Ok(0..0)
         );
         assert!(group.is_empty());
         assert!(group.meta.is_none(), "an empty batch takes no block");
@@ -1137,7 +1184,8 @@ mod tests {
         let two = parts(&area.pool, &[b"", b""]);
         let one = header(1, Path::Live, 0);
         let mut most = vec![entry(one, two); (ENTRIES_MAX - 1) / 2];
-        assert_eq!(group.push(&area.pool, &area.writer, &mut most), Ok(()));
+        let half = (ENTRIES_MAX - 1) / 2;
+        assert_eq!(group.push(&area.pool, &area.writer, &mut most), Ok(0..half));
         let mut rest =
             vec![entry(header(1, Path::Live, 2), parts(&area.pool, &[b""])); 2];
         assert_eq!(
@@ -1145,7 +1193,10 @@ mod tests {
             Err(Rejected::Record)
         );
         rest.pop();
-        assert_eq!(group.push(&area.pool, &area.writer, &mut rest), Ok(()));
+        assert_eq!(
+            group.push(&area.pool, &area.writer, &mut rest),
+            Ok(half..half + 1)
+        );
         assert_eq!(group.writes.len(), ENTRIES_MAX);
     }
 }
