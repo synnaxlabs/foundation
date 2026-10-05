@@ -493,14 +493,16 @@ How to read this record:
   gains little, and a broken drift bound would stay wrong for the life of an overlap,
   not for 8 exchanges. Decided by the coordinator (#84). An error that grows past 36500
   days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
-  time as OS CLOCK BOUND says. Only an input error over 36500 days fails. The person
-  decided on 2026-10-05 ("Ok that's fine"), #225. `combine` uses each bound with its
-  full growth, so a bound that grew to "unknown" never cuts a known one. An exchange
-  with an error over 36500 days fails with `Bound`, and an overlap whose readings allow
-  one before drift gives `None`: a stopped bound stored as a measurement could miss the
-  true offset. Decided by the `time` builder (#258). Each function returns only the
-  errors it can give: one `Error` per module (`exchange`, `overlap`, `combine`), and
-  `Option` for a check with one cause. Decided by the coordinator (#272).
+  time as OS CLOCK BOUND says. An error over 36500 days fails only in a new measurement:
+  `Measurement::new` gives `None`. The person decided on 2026-10-05 ("Ok that's fine"),
+  #225. `combine` uses each bound with its full growth, so a bound that grew to
+  "unknown" never cuts a known one. An exchange with an error over 36500 days fails with
+  `Bound`, and an overlap whose readings allow one before drift gives `None`: a stopped
+  bound stored as a measurement could miss the true offset. Decided by the `time`
+  builder (#258). Each function returns only the errors it can give: one `Error` per
+  module (`exchange`, `overlap`, `combine`), and `Option` where a caller does the same
+  for each cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the
+  coordinator (#272).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -1469,7 +1471,7 @@ the oscillator fit move to a layer-1 crate (`estimate`), used by both
 (`stamp::Midpoint`, `stamp::Window`, `stamp::Fit`). Basis: R9-D13, TIME ADAPTERS, the
 SRP PASS layer-1 rule, BQ21 (names).
 Amended (2026-10-05, #143): there is no exchange state machine. The request carries
-`sent` and the peer echoes it, so `estimate::Exchange` is plain data, and
+`sent` and the peer echoes it, so `estimate::exchange::Exchange` is plain data, and
 `Exchange::measure` turns one round trip into a `Measurement`. `clock` sends requests
 on a fixed timer and keeps no state for each one: a late answer is still an exchange,
 and a lost one needs no timeout. The person approved it on 2026-10-05 ("Yeah I

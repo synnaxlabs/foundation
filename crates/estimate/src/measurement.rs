@@ -106,6 +106,16 @@ impl Measurement {
         let error = saturated(error);
         Self::new(at, offset, error).ok_or(error)
     }
+
+    /// Whether the measurement between `low` and `high` has an error of at most 36500
+    /// days.
+    ///
+    /// # Panics
+    ///
+    /// When `low` is above `high`.
+    pub(crate) fn fits(low: i128, high: i128) -> bool {
+        center(low, high).1 <= MAX_ERROR.nanos().into()
+    }
 }
 
 /// The offset between `low` and `high`, saturated to a span, and the error that
@@ -255,6 +265,14 @@ mod tests {
             );
             let err = Measurement::checked_between(Monotonic(0), low - 1, low - 1);
             assert_eq!(err, Err(Span::from_nanos(MAX_ERROR.nanos() + 1)));
+        }
+
+        #[test]
+        fn fits_up_to_36500_days() {
+            let widest = i128::from(MAX_ERROR.nanos());
+            assert!(Measurement::fits(-widest, widest));
+            assert!(!Measurement::fits(-widest - 1, widest + 1));
+            assert!(!Measurement::fits(0, 2 * widest + 1));
         }
 
         #[test]

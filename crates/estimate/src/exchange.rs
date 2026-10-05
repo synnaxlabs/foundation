@@ -11,7 +11,8 @@ use crate::{Drift, Measurement};
 /// monotonic clock.
 ///
 /// ```
-/// use estimate::{Drift, Exchange};
+/// use estimate::Drift;
+/// use estimate::exchange::Exchange;
 /// use types::time::{Interval, Monotonic, Span, Stamp};
 ///
 /// let peer = |ns: i64| Interval {
@@ -48,9 +49,7 @@ impl Exchange {
     ///
     /// # Errors
     ///
-    /// - [`Error::Crossed`] when the exchange allows no offset: an interval is
-    ///   inverted, the other clock goes back, the local clock drifts more than
-    ///   `drift`, or `sent` is after `returned`.
+    /// - [`Error::Crossed`] when the exchange allows no offset.
     /// - [`Error::Bound`] when the error is more than 36500 days.
     pub fn measure(self, drift: Drift) -> Result<Measurement, Error> {
         let (received, answered) = (self.received, self.answered);
@@ -107,9 +106,9 @@ impl std::error::Error for Error {}
 mod tests {
     use types::time::{Interval, Monotonic, Span, Stamp};
 
-    use super::Error;
+    use super::{Error, Exchange};
+    use crate::Drift;
     use crate::measurement::MAX_ERROR;
-    use crate::{Drift, Exchange};
 
     const SECOND_NS: u64 = 1_000_000_000;
 

@@ -21,6 +21,7 @@ use crate::{Drift, Filter, Measurement};
 /// - [`Error::NoMajority`] when no offset is inside more than half of the bounds.
 ///
 /// ```
+/// use estimate::combine::combine;
 /// use estimate::{Drift, Filter, Measurement};
 /// use types::time::{Monotonic, Span};
 ///
@@ -33,7 +34,7 @@ use crate::{Drift, Filter, Measurement};
 ///     let m = Measurement::new(Monotonic(0), ms(offset), ms(error));
 ///     filter.push(m.expect("at most 36500 days"));
 /// }
-/// let estimate = estimate::combine(Monotonic(0), Drift::UNDISCIPLINED, &sources)?;
+/// let estimate = combine(Monotonic(0), Drift::UNDISCIPLINED, &sources)?;
 /// assert_eq!((estimate.offset(), estimate.error()), (ms(11), ms(3)));
 /// # Ok::<(), estimate::combine::Error>(())
 /// ```
@@ -122,9 +123,9 @@ fn most_covered(edges: &[(i128, Edge)]) -> (usize, i128, i128) {
 mod tests {
     use types::time::{Monotonic, Span};
 
-    use super::Error;
+    use super::{Error, combine};
     use crate::measurement::MAX_ERROR;
-    use crate::{Drift, Filter, Measurement, combine};
+    use crate::{Drift, Filter, Measurement};
 
     fn drift(ppb: u32) -> Drift {
         Drift::from_ppb(ppb).expect("valid")

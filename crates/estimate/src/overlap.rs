@@ -14,7 +14,8 @@ use crate::{Drift, Measurement};
 /// below, so readings that are open on one side still give a narrow overlap.
 ///
 /// ```
-/// use estimate::{Drift, Overlap};
+/// use estimate::Drift;
+/// use estimate::overlap::Overlap;
 /// use types::time::{Monotonic, Span};
 ///
 /// let ns = Span::from_nanos;
@@ -106,7 +107,9 @@ impl Overlap {
     pub fn at(&self, now: Monotonic) -> Option<Measurement> {
         let (low, high) = self.edges(|r| r.at)?;
         // Edges read at different times can cross.
-        Measurement::checked_between(now, low, high.max(low)).ok()?;
+        if !Measurement::fits(low, high.max(low)) {
+            return None;
+        }
         let (low, high) = self.edges(|_| now)?;
         Some(Measurement::between(now, low, high))
     }
@@ -203,9 +206,9 @@ impl std::error::Error for Error {}
 mod tests {
     use types::time::{Monotonic, Span};
 
-    use super::Error;
+    use super::{Error, Overlap};
     use crate::measurement::MAX_ERROR;
-    use crate::{Drift, Measurement, Overlap};
+    use crate::{Drift, Measurement};
 
     const SECOND_NS: u64 = 1_000_000_000;
 
@@ -339,6 +342,13 @@ mod tests {
             assert_eq!(check(1_000, &soon, SECOND_NS), Ok(Some((0, 1_000))));
             let later = [precise, m(10 * SECOND_NS, 0, 2_000)];
             assert_eq!(check(1_000, &later, 10 * SECOND_NS), Ok(Some((0, 2_000))));
+        }
+
+        #[test]
+        fn checks_the_width_before_drift() {
+            let widest = MAX_ERROR.nanos();
+            let pushes = [Push::Low(0, -widest), Push::High(SECOND_NS, widest)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((-500, widest))));
         }
 
         #[test]
