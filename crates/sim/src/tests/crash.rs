@@ -272,24 +272,32 @@ fn a_failed_sync_keeps_the_durable_bytes_or_the_write_per_sector() {
     assert_eq!(seen, all);
 }
 
-/// The sectors of a synced file of 1s after a write of 9s over both its sectors is
-/// in flight at `crash`.
-fn in_flight(seed: u64, crash: Crash) -> Vec<u8> {
-    let (mut sim, node) = disk(seed);
-    crash_after(&mut sim, &node, crash, |node| async move {
-        let (file, pool) = (create_synced(&node).await, pool());
-        let clock = node.clock();
-        clock
-            .sleep_until(node::Config::default().monotonic + BEFORE)
-            .await;
-        let parts = [block(&pool, &[9; 1_024])];
-        let mut write = pin!(file.write_at(0, &parts));
-        poll_fn(|cx| {
-            assert!(write.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
+/// Makes a synced file of 1s on `node`, then starts a write of 9s over both its
+/// sectors and waits forever, with a fault that fails the write when `failed`.
+async fn write_in_flight(node: node::Node, failed: bool) {
+    let (file, pool) = (create_synced(&node).await, pool());
+    let clock = node.clock();
+    clock
+        .sleep_until(node::Config::default().monotonic + BEFORE)
         .await;
-        pending::<()>().await;
+    if failed {
+        node.fail_file(Path::new("a"), Operation::WriteAt);
+    }
+    let parts = [block(&pool, &[9; 1_024])];
+    let mut write = pin!(file.write_at(0, &parts));
+    poll_fn(|cx| {
+        assert!(write.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    pending::<()>().await;
+}
+
+/// The sectors of the file of [`write_in_flight`] after `crash`.
+fn in_flight(seed: u64, crash: Crash, failed: bool) -> Vec<u8> {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, crash, move |node| {
+        write_in_flight(node, failed)
     });
     on(&mut sim, &node, |node| async move {
         node.clock().sleep(Span::MILLISECOND).await;
@@ -303,9 +311,31 @@ fn a_write_in_flight_at_a_crash_keeps_any_subset_of_its_sectors() {
     let all = BTreeSet::from([vec![1, 1], vec![1, 9], vec![9, 1], vec![9, 9]]);
     for crash in [Crash::Process, Crash::Power] {
         let outcomes: BTreeSet<Vec<u8>> =
-            (0..128).map(|seed| in_flight(seed, crash)).collect();
+            (0..128).map(|seed| in_flight(seed, crash, false)).collect();
         assert_eq!(outcomes, all, "{crash:?}");
     }
+}
+
+#[test]
+fn a_write_that_a_fault_fails_leaves_no_bytes_at_a_crash() {
+    for crash in [Crash::Process, Crash::Power] {
+        let outcomes: BTreeSet<Vec<u8>> =
+            (0..64).map(|seed| in_flight(seed, crash, true)).collect();
+        assert_eq!(outcomes, BTreeSet::from([vec![1, 1]]), "{crash:?}");
+    }
+}
+
+/// The digest of a run in which the power is cut during [`write_in_flight`].
+fn cut(failed: bool) -> u64 {
+    let (mut sim, node) = disk(0);
+    let body = move |node| write_in_flight(node, failed);
+    crash_after(&mut sim, &node, Crash::Power, body);
+    sim.digest()
+}
+
+#[test]
+fn the_digest_holds_each_call_that_a_power_cut_ends() {
+    assert_ne!(cut(false), cut(true));
 }
 
 #[test]

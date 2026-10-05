@@ -334,11 +334,17 @@ impl Files {
         (None, ended.held)
     }
 
-    /// Cuts the power of `node`, whose calls in flight have all dropped: each write
-    /// ends with any subset of its sectors, the other calls have no effect, and the
-    /// disk keeps what is durable. Returns the blocks of the calls, for the caller
-    /// to drop after it releases the lock.
-    pub(crate) fn cut_power(&mut self, node: usize) -> Vec<Held> {
+    /// Cuts the power of `node` at true time `at`, whose calls in flight have all
+    /// dropped: each write ends now as a dropped write, the other calls have no
+    /// effect, and the disk keeps what is durable. Hashes each end into `digest`.
+    /// Returns the blocks of the calls, for the caller to drop after it releases the
+    /// lock.
+    pub(crate) fn cut_power(
+        &mut self,
+        node: usize,
+        at: Monotonic,
+        digest: &mut DefaultHasher,
+    ) -> Vec<Held> {
         let flights = &self.flights;
         self.queue.retain(|(_, key)| flights[key].node != node);
         let (cut, flights) = mem::take(&mut self.flights)
@@ -347,20 +353,18 @@ impl Files {
         self.flights = flights;
         let mut orphans = Vec::new();
         for (key, flight) in cut {
-            if let Call::Write {
-                inode,
-                offset,
-                bytes,
-            } = &flight.call
-            {
-                let tick = self.tick();
-                let file = self.disks[node].file(*inode);
-                file.write(*offset, bytes, key, tick, true, &mut self.rng);
-            }
-            if let Some(inode) = flight.call.inode() {
-                self.disks[node].release(inode);
-            }
-            orphans.extend(flight.held);
+            let kind = mem::discriminant(&flight.call);
+            let (ok, held) = if let Call::Write { .. } = flight.call {
+                let ended = self.apply(key, flight);
+                (ended.result.is_ok(), ended.held)
+            } else {
+                if let Some(inode) = flight.call.inode() {
+                    self.disks[node].release(inode);
+                }
+                (false, flight.held)
+            };
+            (at, key, kind, ok).hash(digest);
+            orphans.extend(held);
         }
         self.disks[node].cut_power(&mut self.rng);
         orphans

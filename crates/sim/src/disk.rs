@@ -102,10 +102,11 @@ impl Disk {
         }
     }
 
-    fn entries(&mut self, dir: u64) -> &mut BTreeMap<OsString, u64> {
-        match self.inodes.get_mut(&dir) {
-            Some(Inode::Dir(dir)) => &mut dir.entries,
-            _ => unreachable!("invariant: inode {dir} is a directory"),
+    /// Directory `key`.
+    fn dir_mut(&mut self, key: u64) -> &mut Dir {
+        match self.inodes.get_mut(&key) {
+            Some(Inode::Dir(dir)) => dir,
+            _ => unreachable!("invariant: inode {key} is a directory"),
         }
     }
 
@@ -136,11 +137,11 @@ impl Disk {
             return Err(Cause::Code(DIRECTORY));
         };
         let dir = self.dir(parent)?;
-        let inode = match (self.entries(dir).get(*name).copied(), mode) {
+        let inode = match (self.dir_mut(dir).entries.get(*name).copied(), mode) {
             (Some(inode), _) => inode,
             (None, Mode::Create { len }) => {
                 self.take(len)?;
-                self.entries(dir).insert(name.into(), key);
+                self.dir_mut(dir).entries.insert(name.into(), key);
                 let file = File {
                     len,
                     sectors: BTreeMap::new(),
@@ -164,7 +165,12 @@ impl Disk {
     /// The names in the directory at `segments`.
     pub(crate) fn list(&mut self, segments: &[&OsStr]) -> Result<Vec<PathBuf>, Cause> {
         let dir = self.dir(segments)?;
-        Ok(self.entries(dir).keys().map(PathBuf::from).collect())
+        Ok(self
+            .dir_mut(dir)
+            .entries
+            .keys()
+            .map(PathBuf::from)
+            .collect())
     }
 
     /// Makes the directory at `segments`, with the key `key`.
@@ -177,13 +183,13 @@ impl Disk {
             return Ok(());
         };
         let dir = self.dir(parent)?;
-        let found = self.entries(dir).get(*name).copied();
+        let found = self.dir_mut(dir).entries.get(*name).copied();
         match found.map(|inode| &self.inodes[&inode]) {
             Some(Inode::Dir(_)) => Ok(()),
             Some(Inode::File(_)) => Err(Cause::Code(EXISTS)),
             None => {
                 self.take(DIR_BYTES)?;
-                self.entries(dir).insert(name.into(), key);
+                self.dir_mut(dir).entries.insert(name.into(), key);
                 self.inodes.insert(key, Inode::Dir(Dir::default()));
                 Ok(())
             }
@@ -196,12 +202,16 @@ impl Disk {
             return Err(Cause::Code(DIRECTORY));
         };
         let dir = self.dir(parent)?;
-        let inode = *self.entries(dir).get(*name).ok_or(Cause::NotFound)?;
+        let inode = *self
+            .dir_mut(dir)
+            .entries
+            .get(*name)
+            .ok_or(Cause::NotFound)?;
         let Some(Inode::File(file)) = self.inodes.get_mut(&inode) else {
             return Err(Cause::Code(DIRECTORY));
         };
         file.linked = false;
-        self.entries(dir).remove(*name);
+        self.dir_mut(dir).entries.remove(*name);
         self.collect(inode);
         Ok(())
     }
@@ -230,9 +240,7 @@ impl Disk {
     /// that only its old durable entries kept.
     pub(crate) fn sync_dir(&mut self, segments: &[&OsStr]) -> Result<(), Cause> {
         let key = self.dir(segments)?;
-        let Some(Inode::Dir(dir)) = self.inodes.get_mut(&key) else {
-            unreachable!("invariant: inode {key} is a directory")
-        };
+        let dir = self.dir_mut(key);
         let old = mem::replace(&mut dir.durable, dir.entries.clone());
         let new: BTreeSet<u64> = dir.durable.values().copied().collect();
         for &inode in &new {

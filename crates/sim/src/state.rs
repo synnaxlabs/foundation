@@ -504,7 +504,7 @@ impl State {
         let (now, wall) = (self.now, self.wall(node).time);
         let booted = &mut self.nodes[node];
         (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
-        self.files.cut_power(node)
+        self.files.cut_power(node, now, &mut self.digest)
     }
 
     /// Removes the starts of the threads that have not run.

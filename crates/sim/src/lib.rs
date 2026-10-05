@@ -136,12 +136,9 @@ impl Sim {
     /// When a node belongs to another run, or when `config` has a negative span or a
     /// chance outside 0 to 1.
     pub fn link(&mut self, from: &Node, to: &Node, config: link::Config) {
-        for node in [from, to] {
-            let own = Arc::ptr_eq(&node.0.shared, &self.shared);
-            assert!(own, "{node:?} belongs to another sim");
-        }
+        let (from, to) = (self.own(from), self.own(to));
         config.check();
-        lock(&self.shared).link(from.0.node, to.0.node, config);
+        lock(&self.shared).link(from, to, config);
     }
 
     /// Crashes `node` now, between runs. Each thread of the node ends at once: no
@@ -154,13 +151,12 @@ impl Sim {
     ///
     /// When `node` belongs to another run.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
-        let own = Arc::ptr_eq(&node.0.shared, &self.shared);
-        assert!(own, "{node:?} belongs to another sim");
-        let (tasks, starts) = lock(&self.shared).crash(node.0.node);
+        let node = self.own(node);
+        let (tasks, starts) = lock(&self.shared).crash(node);
         self.drop_futures(&tasks);
         drop(starts);
         if crash == Crash::Power {
-            let orphans = lock(&self.shared).cut_power(node.0.node);
+            let orphans = lock(&self.shared).cut_power(node);
             drop(orphans);
         }
     }
@@ -284,6 +280,17 @@ impl Sim {
             self.futures.borrow_mut().put(task, future);
         }
         poll
+    }
+
+    /// The index of `node`.
+    ///
+    /// # Panics
+    ///
+    /// When `node` belongs to another run.
+    fn own(&self, node: &Node) -> usize {
+        let own = Arc::ptr_eq(&node.0.shared, &self.shared);
+        assert!(own, "{node:?} belongs to another sim");
+        node.0.node
     }
 
     /// Drops the futures of `tasks`, outside the borrow, since a drop may spawn.
