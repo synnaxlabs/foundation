@@ -25,4 +25,9 @@ mod record;
     not(test),
     expect(dead_code, reason = "the ring engine is the first user")
 )]
+mod tails;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the ring engine is the first user")
+)]
 mod wal;
