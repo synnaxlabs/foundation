@@ -70,16 +70,9 @@ impl Tls {
     pub(crate) fn new(private_key: &PrivateKey) -> Self {
         let pair = Ed25519KeyPair::from_seed_unchecked(&private_key.0)
             .expect("invariant: any 32 bytes are an Ed25519 private key");
-        let key = pair.public_key().as_ref();
-        let mut tbs = Vec::with_capacity(TBS_BYTES);
-        for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, key] {
-            tbs.extend_from_slice(part);
-        }
-        let signature = pair.sign(&tbs);
-        let mut certificate = Vec::with_capacity(CERTIFICATE_BYTES);
-        for part in [CERTIFICATE, &tbs, ED25519, SIGNATURE, signature.as_ref()] {
-            certificate.extend_from_slice(part);
-        }
+        let certificate = issue(pair.public_key().as_ref(), |tbs| {
+            pair.sign(tbs).as_ref().to_vec()
+        });
         let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
         let key = any_eddsa_type(&pkcs8)
             .expect("invariant: the PKCS#8 template holds an Ed25519 key");
@@ -158,6 +151,21 @@ fn provider() -> CryptoProvider {
     }
 }
 
+/// The template certificate for `key`, with the signature `sign` gives for its
+/// to-be-signed part.
+fn issue(key: &[u8], sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
+    let mut tbs = Vec::with_capacity(TBS_BYTES);
+    for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, key] {
+        tbs.extend_from_slice(part);
+    }
+    let signature = sign(&tbs);
+    let mut certificate = Vec::with_capacity(CERTIFICATE_BYTES);
+    for part in [CERTIFICATE, &tbs, ED25519, SIGNATURE, &signature] {
+        certificate.extend_from_slice(part);
+    }
+    certificate
+}
+
 /// The peer of a finished handshake, from the protocol it agreed and the
 /// certificates a verifier here accepted.
 ///
@@ -168,7 +176,7 @@ fn provider() -> CryptoProvider {
 ///
 /// # Panics
 ///
-/// When the certificate carries no Ed25519 key, which the verifiers refuse.
+/// When the certificate carries no node key, which the verifiers refuse.
 #[expect(
     clippy::unwrap_in_result,
     reason = "another key here is a verifier defect, not a peer error"
@@ -201,8 +209,8 @@ fn key(certificate: &CertificateDer<'_>) -> Result<PublicKey, rustls::Error> {
         .ok_or_else(|| CertificateError::ApplicationVerificationFailure.into())
 }
 
-/// The y of each Ed25519 point of small order, and p and p + 1, which aws-lc reads
-/// as 0 and 1.
+/// The y of each Ed25519 point of small order, and p and p + 1, which aws-lc's
+/// portable decoder reads as 0 and 1.
 const SMALL_ORDER: [[u8; 32]; 7] = [
     // 0 and p: order 4.
     [0; 32],
@@ -549,15 +557,11 @@ mod tests {
 
     /// TLS for `key`, a point of small order, made with no private key.
     fn keyless(key: [u8; 32]) -> Tls {
-        let mut tbs = Vec::new();
-        for part in [TBS, ED25519, NAME, VALIDITY, NAME, SPKI, &key] {
-            tbs.extend_from_slice(part);
-        }
-        let mut der = Vec::new();
-        for part in [CERTIFICATE, &tbs, ED25519, SIGNATURE, &[0; 64]] {
-            der.extend_from_slice(part);
-        }
-        Tls::with(CertifiedKey::new(vec![der.into()], Arc::new(Forged)))
+        let certificate = issue(&key, |_| vec![0; 64]);
+        Tls::with(CertifiedKey::new(
+            vec![certificate.into()],
+            Arc::new(Forged),
+        ))
     }
 
     mod handshake {
@@ -732,6 +736,43 @@ mod tests {
             );
             assert_eq!(peers, Err(CertificateError::BadSignature.into()));
         }
+
+        #[test]
+        fn when_client_key_is_the_identity_point_the_server_refuses() {
+            let b = PrivateKey([2; 32]);
+            let peers =
+                handshake(keyless(IDENTITY).client(public(&b)), Tls::new(&b).server());
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_server_key_is_the_identity_point_the_client_refuses() {
+            let a = PrivateKey([1; 32]);
+            let peers = handshake(
+                Tls::new(&a).client(PublicKey(IDENTITY)),
+                keyless(IDENTITY).server(),
+            );
+            assert_eq!(
+                peers,
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            );
+        }
+
+        #[test]
+        fn when_dialed_key_is_all_zero_no_keyless_server_passes() {
+            let a = PrivateKey([1; 32]);
+            let client = Tls::new(&a).client(PublicKey([0; 32]));
+            let server = keyless([0; 32]).server();
+            for _ in 0..64 {
+                assert_eq!(
+                    handshake(Arc::clone(&client), Arc::clone(&server)),
+                    Err(CertificateError::ApplicationVerificationFailure.into())
+                );
+            }
+        }
     }
 
     mod alpn {
@@ -820,45 +861,6 @@ mod tests {
                     "{hex}"
                 );
             }
-        }
-    }
-
-    mod small_order_key {
-        use super::*;
-
-        #[test]
-        fn when_client_key_is_the_identity_point_the_server_refuses() {
-            let b = PrivateKey([2; 32]);
-            let peers =
-                handshake(keyless(IDENTITY).client(public(&b)), Tls::new(&b).server());
-            assert_eq!(
-                peers,
-                Err(CertificateError::ApplicationVerificationFailure.into())
-            );
-        }
-
-        #[test]
-        fn when_server_key_is_the_identity_point_the_client_refuses() {
-            let a = PrivateKey([1; 32]);
-            let peers = handshake(
-                Tls::new(&a).client(PublicKey(IDENTITY)),
-                keyless(IDENTITY).server(),
-            );
-            assert_eq!(
-                peers,
-                Err(CertificateError::ApplicationVerificationFailure.into())
-            );
-        }
-
-        #[test]
-        fn when_dialed_key_is_all_zero_no_keyless_server_passes() {
-            let a = PrivateKey([1; 32]);
-            let client = Tls::new(&a).client(PublicKey([0; 32]));
-            let server = keyless([0; 32]).server();
-            let passed = (0..64)
-                .filter(|_| handshake(Arc::clone(&client), Arc::clone(&server)).is_ok())
-                .count();
-            assert_eq!(passed, 0, "of 64 handshakes");
         }
     }
 
