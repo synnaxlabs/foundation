@@ -150,6 +150,13 @@ state on `main`.
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
   bidirectional controls in the reader and in written text, keys compared by
   bytes, a heredoc that closes on its marker followed by U+00A0).
+- #400 (`security`): `a = 1` and `a` U+200D `= 2` read as two keys, and the writer
+  writes the joiner raw, so a file and a diff show one key twice (HCL does the
+  same). A `Name` is ASCII (A3), so the reach is a key no schema checks: an object
+  key in a free-form map, and an attribute key until `config` refuses an unknown
+  one. Proposed: a `Diagnostic` from `config-hcl` for an identifier or an object
+  key with a `Default_Ignorable_Code_Point`, so the reader still reads as HCL does
+  (HCL IDENTIFIERS) and the diagnostic stops the `apply`.
 - Config names secrets and never holds their values (K4).
 
 ### Disk to `buffer`
