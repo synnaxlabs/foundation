@@ -586,6 +586,10 @@ mod tests {
             }
         }
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this test drives the future on a real thread; `ring` has no `env`"
+        )]
         fn block_on<F: Future>(future: F) -> F::Output {
             let waker = Waker::from(Arc::new(Unpark(thread::current())));
             let mut cx = Context::from_waker(&waker);
