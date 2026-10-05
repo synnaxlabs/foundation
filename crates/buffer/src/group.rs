@@ -376,7 +376,7 @@ mod tests {
         let block = header::Header::new(small, CHAIN).encode();
         let opened = header::Header::decode(&block, &[0; 4096]).expect("a whole block");
         let bytes = vec![0; index(AREA)];
-        let mut cursor = Cursor::new(opened.layout, opened.tail);
+        let mut cursor = Cursor::new(opened.layout, opened.tail, 1 << 16);
         let Window { place, len } = cursor.window();
         let step = cursor.next(&bytes[index(place)..index(place + len)]);
         assert_eq!(step, Ok(Step::End));
@@ -406,7 +406,7 @@ mod tests {
         fn with_body_max(body_max: usize) -> Self {
             let bytes = vec![0; index(AREA)];
             let layout = Layout::new(AREA, body_max).expect("the sizes make a ring");
-            let mut cursor = Cursor::new(layout, start());
+            let mut cursor = Cursor::new(layout, start(), 1 << 16);
             let Window { place, len } = cursor.window();
             let step = cursor.next(&bytes[index(place)..index(place + len)]);
             assert_eq!(step, Ok(Step::End), "a zeroed area ends at once");
@@ -473,7 +473,7 @@ mod tests {
         }
 
         fn walk_from(&self, tail: Position) -> Vec<Vec<u8>> {
-            let mut cursor = Cursor::new(self.layout, tail);
+            let mut cursor = Cursor::new(self.layout, tail, 1 << 16);
             let mut bodies = Vec::new();
             loop {
                 let Window { place, len } = cursor.window();
@@ -482,7 +482,10 @@ mod tests {
                     .next(window)
                     .expect("the ring holds what was written")
                 {
-                    Step::Data(body) => bodies.push(body.to_vec()),
+                    Step::Data(body) => {
+                        let start = index(place) + HEADER_LEN;
+                        bodies.push(self.bytes[start..start + body.len].to_vec());
+                    }
                     Step::Moved | Step::More => {}
                     Step::End => return bodies,
                 }
@@ -574,9 +577,7 @@ mod tests {
             for (body, stored) in bodies.iter().zip(&expected) {
                 let bytes: usize = stored.iter().map(|(_, bytes)| bytes.len()).sum();
                 prop_assert_eq!(body.len(), table_len(stored.len()) + bytes);
-                let entries: Result<Vec<(Header, &[u8])>, _> =
-                    entry::parse(body).expect("the table is whole").collect();
-                let entries = entries.expect("every entry is whole");
+                let entries = entry::parsed(body).expect("every entry is whole");
                 let stored: Vec<(Header, &[u8])> =
                     stored.iter().map(|(header, bytes)| (*header, bytes.as_slice())).collect();
                 prop_assert_eq!(entries, stored);

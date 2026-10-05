@@ -26,7 +26,7 @@ use types::time::Span;
 use crate::entry::{self, Entry};
 use crate::group::{Closed, Group, META_LEN, Rejected, Sealed};
 use crate::header::{self, AREA_START, Header};
-use crate::record::{self, ALIGN};
+use crate::record::{self, ALIGN, Body};
 use crate::tails::{Tail, Tails};
 use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 
@@ -287,7 +287,7 @@ impl Buffer {
             Err(error) => return Err(error.into()),
         };
         let header = read_header(&file, &pool, &entropy, layout).await?;
-        let mut cursor = Cursor::new(header.layout, header.tail);
+        let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
         let mut tails = Tails::default();
         loop {
             let Window { place, len } = cursor.window();
@@ -465,14 +465,14 @@ async fn read_header(
 
 /// Advances the tails past the entries of a record body at `offset`.
 fn recover(
-    body: &[u8],
+    body: Body<'_>,
     offset: u64,
     slots: &mut Slots,
     tails: &mut Tails,
 ) -> Result<(), Error> {
     let invalid = |_| Error::Invalid { offset };
-    for entry in entry::parse(body).map_err(invalid)? {
-        let (header, _) = entry.map_err(invalid)?;
+    for header in entry::parse(body.start, body.len).map_err(invalid)? {
+        let header = header.map_err(invalid)?;
         tails.advance(slots.assign(header.index), &header);
     }
     Ok(())

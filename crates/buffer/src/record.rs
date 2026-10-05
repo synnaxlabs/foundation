@@ -64,13 +64,51 @@ impl Kind {
     }
 }
 
+/// The header of a record, before its CRC is checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Head {
+    /// The kind byte. It is not zero; [`Kind::decode`] says whether it is known.
+    pub(crate) kind: u8,
+    /// Bytes of the body.
+    pub(crate) len: usize,
+    /// Bytes from the start of this record to the start of the next one.
+    pub(crate) size: usize,
+    /// The CRC the header claims: the chain value of the next record when the
+    /// body checks out.
+    pub(crate) crc: u32,
+}
+
+impl Head {
+    /// The chain value after the header fields, which the body continues.
+    pub(crate) fn chain(self, chain: u32) -> u32 {
+        let len = u32::try_from(self.len).expect("invariant: a body length fits u32");
+        let [l0, l1, l2, l3] = len.to_le_bytes();
+        crc32c::append(chain, &[l0, l1, l2, l3, self.kind])
+    }
+}
+
+/// The body of a record: the bytes that the writer gave to [`header`], joined.
+/// `start` is its first bytes, in the first block of the record; `len` is its
+/// whole length. A body read in one window has it all in `start`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Body<'a> {
+    pub(crate) start: &'a [u8],
+    pub(crate) len: usize,
+}
+
+impl<'a> Body<'a> {
+    /// The whole body, when `start` holds it all.
+    pub(crate) fn whole(self) -> Option<&'a [u8]> {
+        (self.start.len() == self.len).then_some(self.start)
+    }
+}
+
 /// One record read from the ring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Record<'a> {
     /// The kind byte. It is not zero; [`Kind::decode`] says whether it is known.
     pub(crate) kind: u8,
-    /// The bytes that the writer gave to [`header`], joined.
-    pub(crate) body: &'a [u8],
+    pub(crate) body: Body<'a>,
     /// Bytes from the start of this record to the start of the next one.
     pub(crate) size: usize,
     /// The chain value of the next record.
@@ -106,18 +144,24 @@ pub(crate) fn header<'a>(
     ([l0, l1, l2, l3, c0, c1, c2, c3, kind], crc)
 }
 
-/// The size that the record at `bytes[0]` claims, before its CRC is checked, or
+/// The header that the record at `bytes[0]` claims, before its CRC is checked, or
 /// `None` when the bytes hold no header, the kind is zero, or the size overflows.
-pub(crate) fn size(bytes: &[u8]) -> Option<usize> {
+pub(crate) fn head(bytes: &[u8]) -> Option<Head> {
     let (head, _) = bytes.split_first_chunk::<HEADER_LEN>()?;
-    let [l0, l1, l2, l3, _, _, _, _, kind] = *head;
+    let [l0, l1, l2, l3, c0, c1, c2, c3, kind] = *head;
     if kind == 0 {
         return None;
     }
     let len = usize::try_from(u32::from_le_bytes([l0, l1, l2, l3])).ok()?;
-    HEADER_LEN
+    let size = HEADER_LEN
         .checked_add(len)
-        .and_then(|size| size.checked_next_multiple_of(ALIGN))
+        .and_then(|size| size.checked_next_multiple_of(ALIGN))?;
+    Some(Head {
+        kind,
+        len,
+        size,
+        crc: u32::from_le_bytes([c0, c1, c2, c3]),
+    })
 }
 
 /// Reads the record at `bytes[0]` and checks that it follows `chain`. `bytes` starts
@@ -135,25 +179,19 @@ pub(crate) fn read(bytes: &[u8], chain: u32) -> Option<Record<'_>> {
         "invariant: {} bytes of ring are not a multiple of {ALIGN}",
         bytes.len()
     );
-    let (head, rest) = bytes.split_first_chunk::<HEADER_LEN>()?;
-    let [l0, l1, l2, l3, c0, c1, c2, c3, kind] = *head;
-    if kind == 0 {
+    let head = self::head(bytes)?;
+    let body = bytes.get(HEADER_LEN..)?.get(..head.len)?;
+    if crc32c::append(head.chain(chain), body) != head.crc {
         return None;
     }
-    let len = usize::try_from(u32::from_le_bytes([l0, l1, l2, l3])).ok()?;
-    let body = rest.get(..len)?;
-    let crc = crc32c::append(crc32c::append(chain, &[l0, l1, l2, l3, kind]), body);
-    if crc != u32::from_le_bytes([c0, c1, c2, c3]) {
-        return None;
-    }
-    let size = HEADER_LEN
-        .checked_add(len)
-        .and_then(|size| size.checked_next_multiple_of(ALIGN))?;
     Some(Record {
-        kind,
-        body,
-        size,
-        crc,
+        kind: head.kind,
+        body: Body {
+            start: body,
+            len: head.len,
+        },
+        size: head.size,
+        crc: head.crc,
     })
 }
 
@@ -233,20 +271,50 @@ mod tests {
         use super::*;
 
         #[test]
-        fn claims_the_padded_size_without_the_crc() {
-            let (mut image, _) = data(1, &[7; 5000]);
-            assert_eq!(size(&image), Some(8192));
+        fn claims_the_header_without_its_crc_checked() {
+            let (mut image, crc) = data(1, &[7; 5000]);
+            let claimed = Head {
+                kind: 1,
+                len: 5000,
+                size: 8192,
+                crc,
+            };
+            assert_eq!(head(&image), Some(claimed));
             image[4] ^= 1;
-            assert_eq!(size(&image), Some(8192));
+            assert_eq!(head(&image).map(|head| head.size), Some(8192));
+            assert_eq!(head(&image).map(|head| head.crc), Some(crc ^ 1));
             image[8] = 0;
-            assert_eq!(size(&image), None);
-            assert_eq!(size(&image[..8]), None);
+            assert_eq!(head(&image), None);
+            assert_eq!(head(&image[..8]), None);
             let mut huge = [0; HEADER_LEN];
             huge[..4].copy_from_slice(&u32::MAX.to_le_bytes());
             huge[8] = 1;
             let expected = (usize::try_from(u32::MAX).ok())
                 .and_then(|len| (HEADER_LEN + len).checked_next_multiple_of(ALIGN));
-            assert_eq!(size(&huge), expected);
+            assert_eq!(head(&huge).map(|head| head.size), expected);
+        }
+
+        #[test]
+        fn continues_the_chain_with_the_header_fields() {
+            let (image, crc) = data(1, b"abc");
+            let head = head(&image).expect("a header");
+            assert_eq!(crc32c::append(head.chain(1), b"abc"), crc);
+            assert_eq!(
+                Body {
+                    start: b"ab",
+                    len: 3
+                }
+                .whole(),
+                None
+            );
+            assert_eq!(
+                Body {
+                    start: b"abc",
+                    len: 3
+                }
+                .whole(),
+                Some(&b"abc"[..])
+            );
         }
 
         #[test]
@@ -281,7 +349,7 @@ mod tests {
             image[8] = 9;
             let expected = Record {
                 kind: 9,
-                body: &[],
+                body: Body { start: &[], len: 0 },
                 size: ALIGN,
                 crc,
             };
@@ -303,8 +371,9 @@ mod tests {
             let (mut ring, crc) = data(4, b"first");
             ring.extend(data(crc, b"second").0);
             let first = read(&ring, 4).expect("the first record is whole");
-            assert_eq!((first.body, first.crc), (&b"first"[..], crc));
-            let second = read(&ring[first.size..], first.crc).map(|r| r.body);
+            assert_eq!((first.body.whole(), first.crc), (Some(&b"first"[..]), crc));
+            let second =
+                read(&ring[first.size..], first.crc).and_then(|r| r.body.whole());
             assert_eq!(second, Some(&b"second"[..]));
         }
 
@@ -316,7 +385,10 @@ mod tests {
             ring.extend(data(crc, b"old four").0);
             let (new, crc) = data(4, b"new three");
             ring[..ALIGN].copy_from_slice(&new);
-            assert_eq!(read(&ring, 4).map(|r| r.body), Some(&b"new three"[..]));
+            assert_eq!(
+                read(&ring, 4).and_then(|r| r.body.whole()),
+                Some(&b"new three"[..])
+            );
             assert_eq!(read(&ring[ALIGN..], crc), None);
         }
 
@@ -330,7 +402,7 @@ mod tests {
             let (new, crc) = data(4, b"new");
             ring[..ALIGN].copy_from_slice(&new);
             assert_eq!(
-                read(&ring[ALIGN..], 4).map(|r| r.body),
+                read(&ring[ALIGN..], 4).and_then(|r| r.body.whole()),
                 Some(&b"forged"[..])
             );
             assert_eq!(read(&ring[ALIGN..], crc), None);
@@ -352,7 +424,8 @@ mod tests {
                 prop_assert_eq!(size % ALIGN, 0);
                 prop_assert!(size >= HEADER_LEN + body.len());
                 prop_assert!(size < HEADER_LEN + body.len() + ALIGN);
-                let expected = Record { kind: kind.byte(), body: &body, size, crc };
+                let body = Body { start: &body, len: body.len() };
+                let expected = Record { kind: kind.byte(), body, size, crc };
                 prop_assert_eq!(read(&ring, chain), Some(expected));
             }
 
