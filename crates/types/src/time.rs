@@ -460,8 +460,9 @@ pub struct Interval {
     pub latest: Stamp,
 }
 
-/// A reading of one node's monotonic clock, in nanoseconds since an arbitrary start.
-/// It never goes backwards, and it means nothing on another node.
+/// A reading of one local monotonic clock, in nanoseconds since an arbitrary start:
+/// a node's clock, or a device's sample clock. It never goes backwards, and it means
+/// nothing outside that clock.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Monotonic(pub u64);
 
