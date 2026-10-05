@@ -93,10 +93,13 @@ pub(super) struct Streams {
 struct Budget {
     max: usize,
     used: usize,
-    /// One more than the refunds so far.
+    /// One more than the wakes so far.
     round: u64,
     /// The streams whose claims wait in this `round`.
     waiting: Vec<Key>,
+    /// At most the fewest bytes that a waiting claim asks for, or `usize::MAX`. The
+    /// room stays below it between wakes.
+    smallest: usize,
     /// The event that tells the caller a waiting stream may go on.
     wake: fn(Key) -> Event,
 }
@@ -220,17 +223,18 @@ impl Budget {
             used: 0,
             round: 1,
             waiting: Vec::new(),
+            smallest: usize::MAX,
             wake,
         }
     }
 
-    /// Whether the stream of `claim` waits for the next refund.
+    /// Whether the stream of `claim` waits for the next wake.
     fn waits(&self, claim: &Claim) -> bool {
         claim.round == self.round
     }
 
     /// Charges `bytes` to `claim` when they fit. Else `stream` waits for the next
-    /// refund.
+    /// wake.
     fn charge(&mut self, stream: Key, bytes: usize, claim: &mut Claim) -> bool {
         if self.waits(claim) {
             return false;
@@ -241,12 +245,14 @@ impl Budget {
             return true;
         }
         claim.round = self.round;
+        self.smallest = self.smallest.min(bytes);
         self.waiting.push(stream);
         false
     }
 
     /// Ends `claim`, the claim of `stream`: gives back its bytes, or stops its wait.
-    /// When bytes come back, each waiting stream gets its wake in `events`.
+    /// When the room then fits the smallest waiting claim, each waiting stream gets
+    /// its wake in `events`.
     fn release(
         &mut self,
         stream: Key,
@@ -258,10 +264,10 @@ impl Budget {
             self.waiting
                 .swap_remove(at.expect("invariant: a waiting stream is listed"));
         }
-        let bytes = mem::take(claim).bytes;
-        if bytes > 0 {
-            self.used -= bytes;
+        self.used -= mem::take(claim).bytes;
+        if self.max - self.used >= self.smallest {
             self.round += 1;
+            self.smallest = usize::MAX;
             events.extend(self.waiting.drain(..).map(self.wake));
         }
     }
@@ -373,8 +379,9 @@ impl Streams {
 
     /// Writes what `sender` holds to `inner`. `Ready` when the stream took all of it.
     /// `Pending` when the stream takes no more now, or the message has no room in the
-    /// send budget. Each message that stops counting wakes the senders that found no
-    /// room with [`Event::Writable`] in `events`.
+    /// send budget. When a message stops counting and the room fits the smallest
+    /// message that found none, each sender that found none gets [`Event::Writable`]
+    /// in `events`.
     ///
     /// # Errors
     ///
@@ -399,35 +406,42 @@ impl Streams {
         sender: &mut Sender,
     ) -> Result<Poll<()>, Error> {
         let id = sender.key.id;
-        if sender.holds() {
-            if let Some(code) = self.stopped(id) {
+        let bytes = sender.body.len();
+        let blocked = if sender.holds()
+            && sender.claim.bytes == 0
+            && !self.sending.charge(sender.key, bytes, &mut sender.claim)
+        {
+            true
+        } else {
+            let mut send = inner.send_stream(id);
+            loop {
+                let written = if !sender.unsent.is_empty() {
+                    let unsent = &sender.header[sender.unsent.clone()];
+                    send.write(unsent).map(|bytes| sender.unsent.start += bytes)
+                } else if !sender.body.is_empty() {
+                    let mut chunks = slice::from_mut(&mut sender.body);
+                    send.write_chunks(&mut chunks).map(drop)
+                } else {
+                    return Ok(Poll::Ready(()));
+                };
+                // A reset stream gives `Blocked` while the connection's window is
+                // shut.
+                match written {
+                    Ok(()) => {}
+                    Err(WriteError::Blocked) => break true,
+                    Err(WriteError::ClosedStream) => break false,
+                    Err(WriteError::Stopped(_)) => panic!("{STOPPED}"),
+                }
+            }
+        };
+        // Only a push that cannot go on looks for a stop, as the look scans `senders`.
+        match (self.stopped(id), blocked) {
+            (Some(code), _) => {
                 (sender.unsent, sender.body) = (0..0, Bytes::new());
-                return Err(Error::Stopped { code });
+                Err(Error::Stopped { code })
             }
-            let bytes = sender.body.len();
-            if sender.claim.bytes == 0
-                && !self.sending.charge(sender.key, bytes, &mut sender.claim)
-            {
-                return Ok(Poll::Pending);
-            }
-        }
-        let mut send = inner.send_stream(id);
-        loop {
-            let written = if !sender.unsent.is_empty() {
-                let unsent = &sender.header[sender.unsent.clone()];
-                send.write(unsent).map(|bytes| sender.unsent.start += bytes)
-            } else if !sender.body.is_empty() {
-                let mut chunks = slice::from_mut(&mut sender.body);
-                send.write_chunks(&mut chunks).map(drop)
-            } else {
-                return Ok(Poll::Ready(()));
-            };
-            match written {
-                Ok(()) => {}
-                Err(WriteError::Blocked) => return Ok(Poll::Pending),
-                Err(WriteError::ClosedStream) => panic!("{OPEN}"),
-                Err(WriteError::Stopped(_)) => panic!("{STOPPED}"),
-            }
+            (None, true) => Ok(Poll::Pending),
+            (None, false) => panic!("{OPEN}"),
         }
     }
 
@@ -460,9 +474,9 @@ impl Streams {
 
     /// Reads the next whole message of `receiver`'s stream from `inner` into a block
     /// from `pool`. `Ready(None)` at the end. `Pending` when no whole message is here
-    /// yet, or the next has no room in the receive budget. Each message that stops
-    /// counting wakes the receivers that found no room with [`Event::Readable`] in
-    /// `events`.
+    /// yet, or the next has no room in the receive budget. When a message stops
+    /// counting and the room fits the smallest message that found none, each receiver
+    /// that found none gets [`Event::Readable`] in `events`.
     ///
     /// # Errors
     ///
@@ -1253,6 +1267,65 @@ mod tests {
             let events = &pair.server.events[seen..];
             let woken = events.iter().filter(|(_, other)| *other == readable);
             assert_eq!(woken.count(), 1);
+        });
+    }
+
+    /// Stream `index` of a client's connection, for a [`Budget`] alone.
+    fn stream(index: u64) -> Key {
+        Key {
+            connection: connection::Key {
+                handle: noq_proto::ConnectionHandle(0),
+                serial: 0,
+            },
+            id: StreamId::new(noq_proto::Side::Client, Dir::Uni, index),
+        }
+    }
+
+    #[test]
+    fn a_budget_wakes_no_stream_until_the_room_fits_the_smallest_claim_that_waits() {
+        let mut budget = Budget::new(10, |stream| Event::Writable { stream });
+        let mut events = VecDeque::new();
+        let [mut a, mut b, mut c, mut d] = <[Claim; 4]>::default();
+        assert!(budget.charge(stream(0), 9, &mut a));
+        assert!(!budget.charge(stream(1), 2, &mut b));
+        budget.release(stream(0), &mut a, &mut events);
+        let woken: Vec<_> = events.drain(..).collect();
+        assert_eq!(woken, [Event::Writable { stream: stream(1) }]);
+        assert!(budget.charge(stream(1), 2, &mut b));
+        assert!(budget.charge(stream(2), 7, &mut c));
+        assert!(!budget.charge(stream(3), 5, &mut d));
+        budget.release(stream(1), &mut b, &mut events);
+        assert_eq!(events, []);
+        budget.release(stream(2), &mut c, &mut events);
+        assert_eq!(events, [Event::Writable { stream: stream(3) }]);
+    }
+
+    #[test]
+    fn a_read_wakes_no_stream_until_the_room_fits_the_smallest_waiting_message() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let small =
+                [[byte(Class::Complete)].as_slice(), &*Prefix::new(100)].concat();
+            let ids = [
+                raw(&mut pair.client, Dir::Uni, &small, false),
+                raw(&mut pair.client, Dir::Uni, &small, false),
+            ];
+            prefixes(&mut pair, 3);
+            let mut receivers = wait(&mut pair);
+            let readable = Event::Readable {
+                stream: receivers[4].key(),
+            };
+            let body = vec![7; 100];
+            for (at, woken) in [(0, false), (1, true)] {
+                let mut send = pair.client.connection().send_stream(ids[at]);
+                assert_eq!(send.write(&body), Ok(100));
+                pair.run(RUN);
+                let (seen, now) = (pair.server.events.len(), pair.now());
+                let read = drain(&mut pair.server, now, &mut receivers[at]);
+                assert_eq!(read, (vec![body.clone()], false));
+                pair.run(Duration::ZERO);
+                assert_eq!(got(&pair.server, seen, &readable), woken);
+            }
         });
     }
 
