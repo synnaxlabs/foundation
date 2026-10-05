@@ -1,0 +1,1226 @@
+use document::encoding::DEPTH_MAX;
+use document::value::{self, Call, Float, Value};
+use document::{Attribute, Block, Document, Label, Map, Source, Span};
+use types::name::Name;
+
+use crate::lex::{self, Lexer, Token};
+use crate::{Error, Expected, Form};
+
+/// Reads HCL text as a Document. Each key, keyword, label, function name, and value
+/// has a span in `source`.
+///
+/// # Errors
+///
+/// Returns each problem found, in source order. A syntax error, a string escape that
+/// HCL does not have, a template, or nesting past the limit stops reading, so it is
+/// the last one.
+pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
+    let mut lexer = Lexer::new(source, text).map_err(|error| vec![error])?;
+    let token = lexer.next().map_err(|error| vec![error])?;
+    let mut parser = Parser {
+        lexer,
+        token,
+        errors: Vec::new(),
+    };
+    let document = parser.file();
+    let mut errors = parser.errors;
+    match document {
+        Ok(document) if errors.is_empty() => return Ok(document),
+        Ok(_) => {}
+        Err(error) => errors.push(error),
+    }
+    errors.sort_by_key(Error::offset);
+    Err(errors)
+}
+
+struct Parser<'a> {
+    lexer: Lexer<'a>,
+    /// The next token, not yet taken.
+    token: Token<'a>,
+    /// Problems that do not stop reading.
+    errors: Vec<Error>,
+}
+
+impl<'a> Parser<'a> {
+    fn file(&mut self) -> Result<Document, Error> {
+        let document = self.body(0)?;
+        if self.token.kind == lex::Kind::End {
+            Ok(document)
+        } else {
+            Err(self.syntax(Expected::Item))
+        }
+    }
+
+    /// Reads attributes and blocks up to `}` or the end, and leaves that token.
+    fn body(&mut self, depth: usize) -> Result<Document, Error> {
+        let mut attributes = Vec::new();
+        let mut blocks = Vec::new();
+        loop {
+            self.skip_newlines()?;
+            match self.token.kind {
+                lex::Kind::End | lex::Kind::CloseBrace => break,
+                lex::Kind::Word if identifier(self.token.text) => {}
+                _ => return Err(self.syntax(Expected::Item)),
+            }
+            let name = self.take()?;
+            if self.token.kind == lex::Kind::Equals {
+                self.take()?;
+                let value = self.value(depth)?;
+                self.end_line()?;
+                attributes.extend(value.map(|value| attribute(name, value)));
+            } else {
+                blocks.push(self.block(&name, depth)?);
+            }
+        }
+        Ok(Document {
+            attributes: self.map(attributes),
+            blocks,
+        })
+    }
+
+    fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
+        let mut labels = Vec::new();
+        loop {
+            match &self.token.kind {
+                lex::Kind::String(_) => {}
+                lex::Kind::Word if identifier(self.token.text) => {}
+                lex::Kind::OpenBrace => break,
+                _ if labels.is_empty() => return Err(self.syntax(Expected::Equals)),
+                _ => return Err(self.syntax(Expected::BlockStart)),
+            }
+            let label = self.take()?;
+            let span = Some(label.span);
+            labels.push(Label {
+                text: text(label),
+                span,
+            });
+        }
+        let depth = enter(depth).ok_or(Error::TooDeep { span: keyword.span })?;
+        self.take()?;
+        let body = if self.token.kind == lex::Kind::Newline {
+            let body = self.body(depth)?;
+            if self.token.kind != lex::Kind::CloseBrace {
+                return Err(self.syntax(Expected::Item));
+            }
+            body
+        } else {
+            self.one_line(depth)?
+        };
+        let end = self.take()?.span;
+        self.end_line()?;
+        Ok(Block {
+            keyword: keyword.text.into(),
+            keyword_span: Some(keyword.span),
+            labels,
+            body,
+            span: Some(join(keyword.span, end)),
+        })
+    }
+
+    /// Reads the body of a one-line block, which holds one attribute or none, and
+    /// leaves the `}`.
+    fn one_line(&mut self, depth: usize) -> Result<Document, Error> {
+        let mut attributes = Vec::new();
+        if self.token.kind == lex::Kind::Word && identifier(self.token.text) {
+            let key = self.take()?;
+            if self.token.kind != lex::Kind::Equals {
+                return Err(self.syntax(Expected::Equals));
+            }
+            self.take()?;
+            attributes.extend(self.value(depth)?.map(|value| attribute(key, value)));
+        }
+        if self.token.kind != lex::Kind::CloseBrace {
+            return Err(self.syntax(Expected::BlockEnd));
+        }
+        Ok(Document {
+            attributes: self.map(attributes),
+            blocks: Vec::new(),
+        })
+    }
+
+    /// Reads a value. Returns `None` when the value has a problem that does not stop
+    /// reading.
+    fn value(&mut self, depth: usize) -> Result<Option<Value>, Error> {
+        if self.token.kind == lex::Kind::End {
+            return Err(self.syntax(Expected::Value));
+        }
+        let token = self.take()?;
+        let kind = match token.kind {
+            lex::Kind::Word => return self.word(&token, depth),
+            lex::Kind::Number => return Ok(self.number(&token, None)),
+            lex::Kind::Minus if self.token.kind == lex::Kind::Number => {
+                let digits = self.take()?;
+                return Ok(self.number(&digits, Some(token.span)));
+            }
+            lex::Kind::Minus => return Err(self.syntax(Expected::Value)),
+            lex::Kind::String(text) => value::Kind::String(text),
+            lex::Kind::OpenBracket => return self.list(&token, depth).map(Some),
+            lex::Kind::OpenBrace => return self.object(&token, depth),
+            _ => {
+                return Err(Error::Syntax {
+                    span: token.span,
+                    expected: Expected::Value,
+                });
+            }
+        };
+        Ok(Some(Value {
+            kind,
+            span: Some(token.span),
+        }))
+    }
+
+    fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
+        let kind = match word.text {
+            "true" => value::Kind::Bool(true),
+            "false" => value::Kind::Bool(false),
+            "null" => {
+                self.errors.push(Error::Form {
+                    span: word.span,
+                    form: Form::Null,
+                });
+                return Ok(None);
+            }
+            _ if self.token.kind == lex::Kind::OpenParenthesis
+                && identifier(word.text) =>
+            {
+                return self.call(word, depth).map(Some);
+            }
+            text => match text.parse::<Name>() {
+                Ok(name) => value::Kind::Reference(name),
+                Err(error) => {
+                    self.errors.push(Error::Name {
+                        span: word.span,
+                        error,
+                    });
+                    return Ok(None);
+                }
+            },
+        };
+        Ok(Some(Value {
+            kind,
+            span: Some(word.span),
+        }))
+    }
+
+    /// Reads a number, after its minus sign if `minus` holds the sign's span. Returns
+    /// `None` when the number is out of range.
+    fn number(&mut self, digits: &Token<'a>, minus: Option<Span>) -> Option<Value> {
+        let span = minus.map_or(digits.span, |minus| join(minus, digits.span));
+        let kind = if digits.text.bytes().all(|b| b.is_ascii_digit()) {
+            let magnitude = digits.text.parse::<u128>().ok();
+            magnitude
+                .and_then(|n| match minus {
+                    Some(_) => 0i128.checked_sub_unsigned(n),
+                    None => i128::try_from(n).ok(),
+                })
+                .map(value::Kind::Integer)
+        } else {
+            let float = digits.text.parse::<f64>().ok();
+            float
+                .map(|f| if minus.is_some() { -f } else { f })
+                .and_then(Float::new)
+                .map(value::Kind::Float)
+        };
+        if kind.is_none() {
+            self.errors.push(Error::Number { span });
+        }
+        kind.map(|kind| Value {
+            kind,
+            span: Some(span),
+        })
+    }
+
+    fn list(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
+        let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
+        let mut items = Vec::new();
+        let close = loop {
+            self.skip_newlines()?;
+            if self.token.kind == lex::Kind::CloseBracket {
+                break self.take()?;
+            }
+            items.extend(self.value(depth)?);
+            self.skip_newlines()?;
+            match self.token.kind {
+                lex::Kind::Comma => {
+                    self.take()?;
+                }
+                lex::Kind::CloseBracket => break self.take()?,
+                _ => return Err(self.syntax(Expected::ListEnd)),
+            }
+        };
+        Ok(Value {
+            kind: value::Kind::List(items),
+            span: Some(join(open.span, close.span)),
+        })
+    }
+
+    fn object(
+        &mut self,
+        open: &Token<'a>,
+        depth: usize,
+    ) -> Result<Option<Value>, Error> {
+        let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
+        let mut attributes = Vec::new();
+        let close = loop {
+            self.skip_newlines()?;
+            match &self.token.kind {
+                lex::Kind::CloseBrace => break self.take()?,
+                lex::Kind::String(_) => {}
+                lex::Kind::Word if identifier(self.token.text) => {}
+                _ => return Err(self.syntax(Expected::ObjectKey)),
+            }
+            let key = self.take()?;
+            if !matches!(self.token.kind, lex::Kind::Equals | lex::Kind::Colon) {
+                return Err(self.syntax(Expected::ObjectEquals));
+            }
+            self.take()?;
+            attributes.extend(self.value(depth)?.map(|value| attribute(key, value)));
+            match self.token.kind {
+                lex::Kind::Comma | lex::Kind::Newline => {
+                    self.take()?;
+                }
+                lex::Kind::CloseBrace => break self.take()?,
+                _ => return Err(self.syntax(Expected::ObjectEnd)),
+            }
+        };
+        Ok(Some(Value {
+            kind: value::Kind::Map(self.map(attributes)),
+            span: Some(join(open.span, close.span)),
+        }))
+    }
+
+    fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
+        let depth = enter(depth).ok_or(Error::TooDeep {
+            span: function.span,
+        })?;
+        self.take()?;
+        let mut arguments = Vec::new();
+        let close = loop {
+            self.skip_newlines()?;
+            if self.token.kind == lex::Kind::CloseParenthesis {
+                break self.take()?;
+            }
+            arguments.extend(self.value(depth)?);
+            self.skip_newlines()?;
+            match self.token.kind {
+                lex::Kind::Comma => {
+                    self.take()?;
+                }
+                lex::Kind::CloseParenthesis => break self.take()?,
+                _ => return Err(self.syntax(Expected::ArgumentsEnd)),
+            }
+        };
+        Ok(Value {
+            kind: value::Kind::Call(Call {
+                function: function.text.into(),
+                function_span: Some(function.span),
+                arguments,
+            }),
+            span: Some(join(function.span, close.span)),
+        })
+    }
+
+    /// Builds a map, and keeps its problems. The map is empty when it has problems,
+    /// because `read` then returns no document.
+    fn map(&mut self, attributes: Vec<Attribute>) -> Map {
+        Map::new(attributes).unwrap_or_else(|errors| {
+            self.errors.extend(errors.into_iter().map(Error::Document));
+            Map::default()
+        })
+    }
+
+    fn end_line(&mut self) -> Result<(), Error> {
+        match self.token.kind {
+            lex::Kind::Newline => self.take().map(drop),
+            lex::Kind::End => Ok(()),
+            _ => Err(self.syntax(Expected::Newline)),
+        }
+    }
+
+    fn skip_newlines(&mut self) -> Result<(), Error> {
+        while self.token.kind == lex::Kind::Newline {
+            self.take()?;
+        }
+        Ok(())
+    }
+
+    /// Takes the next token and reads the one after it.
+    ///
+    /// # Panics
+    ///
+    /// Panics at the end of the text, which no rule takes. So every loop that takes
+    /// tokens ends.
+    fn take(&mut self) -> Result<Token<'a>, Error> {
+        assert!(
+            self.token.kind != lex::Kind::End,
+            "invariant: no rule takes the end, at {:?}",
+            self.token.span
+        );
+        let next = self.lexer.next()?;
+        Ok(std::mem::replace(&mut self.token, next))
+    }
+
+    fn syntax(&self, expected: Expected) -> Error {
+        Error::Syntax {
+            span: self.token.span,
+            expected,
+        }
+    }
+}
+
+fn attribute(key: Token<'_>, value: Value) -> Attribute {
+    let key_span = Some(key.span);
+    Attribute {
+        key: text(key),
+        key_span,
+        value,
+    }
+}
+
+/// The text of a key or a label: a string's contents, or the identifier.
+fn text(token: Token<'_>) -> Box<str> {
+    match token.kind {
+        lex::Kind::String(text) => text,
+        _ => token.text.into(),
+    }
+}
+
+/// Reports whether `text` is a key or a keyword: a letter or `_`, then letters,
+/// digits, `_`, and `-`.
+pub(crate) fn identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// The depth inside one more level, or `None` past [`DEPTH_MAX`].
+fn enter(depth: usize) -> Option<usize> {
+    depth.checked_add(1).filter(|&inner| inner <= DEPTH_MAX)
+}
+
+fn join(start: Span, end: Span) -> Span {
+    Span::new(start.source(), start.start(), end.end())
+        .expect("invariant: `end` ends after `start` starts")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arbitrary::{document, write};
+    use document::Position;
+    use proptest::prelude::*;
+
+    fn at(offset: u32, line: u32, column: u32) -> Position {
+        Position {
+            offset,
+            line,
+            column,
+        }
+    }
+
+    fn span(start: Position, end: Position) -> Span {
+        Span::new(Source(0), start, end).unwrap()
+    }
+
+    /// A span on the first line of an ASCII text.
+    fn on(start: u32, end: u32) -> Span {
+        span(at(start, 0, start), at(end, 0, end))
+    }
+
+    fn ok(text: &str) -> Document {
+        read(Source(0), text).unwrap()
+    }
+
+    fn value(kind: value::Kind) -> Value {
+        Value { kind, span: None }
+    }
+
+    fn attributes(attributes: Vec<(&str, value::Kind)>) -> Document {
+        Document {
+            attributes: map(attributes),
+            blocks: Vec::new(),
+        }
+    }
+
+    fn map(attributes: Vec<(&str, value::Kind)>) -> Map {
+        let attributes = attributes
+            .into_iter()
+            .map(|(key, kind)| Attribute {
+                key: key.into(),
+                key_span: None,
+                value: value(kind),
+            })
+            .collect();
+        Map::new(attributes).unwrap()
+    }
+
+    fn integer(n: i128) -> value::Kind {
+        value::Kind::Integer(n)
+    }
+
+    fn float(f: f64) -> value::Kind {
+        value::Kind::Float(Float::new(f).unwrap())
+    }
+
+    fn string(text: &str) -> value::Kind {
+        value::Kind::String(text.into())
+    }
+
+    fn reference(name: &str) -> value::Kind {
+        value::Kind::Reference(name.parse().unwrap())
+    }
+
+    fn block(keyword: &str, labels: &[&str], body: Document) -> Block {
+        Block {
+            keyword: keyword.into(),
+            keyword_span: None,
+            labels: labels
+                .iter()
+                .map(|&text| Label {
+                    text: text.into(),
+                    span: None,
+                })
+                .collect(),
+            body,
+            span: None,
+        }
+    }
+
+    fn check(text: &str, expected: &[(Error, &str)]) {
+        let errors = read(Source(0), text).unwrap_err();
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        let (errors_expected, messages_expected): (Vec<Error>, Vec<&str>) =
+            expected.iter().cloned().unzip();
+        assert_eq!(errors, errors_expected);
+        assert_eq!(messages, messages_expected);
+    }
+
+    fn syntax(span: Span, expected: Expected) -> Error {
+        Error::Syntax { span, expected }
+    }
+
+    mod values {
+        use super::*;
+
+        #[test]
+        fn reads_booleans() {
+            let expected = attributes(vec![
+                ("a", value::Kind::Bool(true)),
+                ("b", value::Kind::Bool(false)),
+            ]);
+            assert_eq!(ok("a = true\nb = false\n"), expected);
+        }
+
+        #[test]
+        fn reads_integers_exactly() {
+            let text = "a = 42\nb = -3\n\
+                        c = 170141183460469231731687303715884105727\n\
+                        d = -170141183460469231731687303715884105728\n\
+                        e = - 7\nf = 007\n";
+            let expected = attributes(vec![
+                ("a", integer(42)),
+                ("b", integer(-3)),
+                ("c", integer(i128::MAX)),
+                ("d", integer(i128::MIN)),
+                ("e", integer(-7)),
+                ("f", integer(7)),
+            ]);
+            assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_floats() {
+            let text = "a = 1.5\nb = -0.25\nc = 1e3\nd = 2.5E-3\ne = -0.0\nf = 1e+2\n";
+            let expected = attributes(vec![
+                ("a", float(1.5)),
+                ("b", float(-0.25)),
+                ("c", float(1000.0)),
+                ("d", float(0.0025)),
+                ("e", float(0.0)),
+                ("f", float(100.0)),
+            ]);
+            assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_string_escapes() {
+            let text = r#"a = "x\n\r\t\"\\\u00b0\U0001F600"
+b = "$${x} %%{y} $ % $$ %% $$${z}"
+c = "°C # not a comment"
+"#;
+            let expected = attributes(vec![
+                ("a", string("x\n\r\t\"\\°\u{1F600}")),
+                ("b", string("${x} %{y} $ % $$ %% $${z}")),
+                ("c", string("°C # not a comment")),
+            ]);
+            assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_references() {
+            let text = "a = site_a.pt_1\nb = site_a.1\nc = @system.x\nd = a-b.c-d\n";
+            let expected = attributes(vec![
+                ("a", reference("site_a.pt_1")),
+                ("b", reference("site_a.1")),
+                ("c", reference("@system.x")),
+                ("d", reference("a-b.c-d")),
+            ]);
+            assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_lists() {
+            let text = "a = []\nb = [1, 2,]\nc = [\n  1,\n\n  [true]\n]\n";
+            let expected = attributes(vec![
+                ("a", value::Kind::List(Vec::new())),
+                (
+                    "b",
+                    value::Kind::List(vec![value(integer(1)), value(integer(2))]),
+                ),
+                (
+                    "c",
+                    value::Kind::List(vec![
+                        value(integer(1)),
+                        value(value::Kind::List(vec![value(value::Kind::Bool(true))])),
+                    ]),
+                ),
+            ]);
+            assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_objects() {
+            let text =
+                "a = {}\nb = { k = 1, \"a b\" = 2 }\nc = {\n  x: 1\n  y = 2,\n\n}\n";
+            let expected = attributes(vec![
+                ("a", value::Kind::Map(Map::default())),
+                (
+                    "b",
+                    value::Kind::Map(map(vec![("k", integer(1)), ("a b", integer(2))])),
+                ),
+                (
+                    "c",
+                    value::Kind::Map(map(vec![("x", integer(1)), ("y", integer(2))])),
+                ),
+            ]);
+            assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_calls() {
+            let text = "a = secret(\"pw\")\nb = f()\nc = g(1, [2], h(3),)\n\
+                        d = f(\n  1,\n  2\n)\n";
+            let call = |function: &str, arguments: Vec<Value>| {
+                value::Kind::Call(Call {
+                    function: function.into(),
+                    function_span: None,
+                    arguments,
+                })
+            };
+            let expected = attributes(vec![
+                ("a", call("secret", vec![value(string("pw"))])),
+                ("b", call("f", Vec::new())),
+                (
+                    "c",
+                    call(
+                        "g",
+                        vec![
+                            value(integer(1)),
+                            value(value::Kind::List(vec![value(integer(2))])),
+                            value(call("h", vec![value(integer(3))])),
+                        ],
+                    ),
+                ),
+                ("d", call("f", vec![value(integer(1)), value(integer(2))])),
+            ]);
+            assert_eq!(ok(text), expected);
+        }
+    }
+
+    mod blocks {
+        use super::*;
+
+        #[test]
+        fn reads_labels_and_nested_blocks() {
+            let text = "connector \"opcua\" \"site_a.plc_7\" {\n  \
+                        url = \"opc.tcp://x\"\n\n  in {\n    \
+                        channel = site_a.pt_1\n  }\n}\n";
+            let input = block(
+                "in",
+                &[],
+                attributes(vec![("channel", reference("site_a.pt_1"))]),
+            );
+            let mut body = attributes(vec![("url", string("opc.tcp://x"))]);
+            body.blocks.push(input);
+            let expected = Document {
+                attributes: Map::default(),
+                blocks: vec![block("connector", &["opcua", "site_a.plc_7"], body)],
+            };
+            assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_identifier_labels() {
+            let expected = Document {
+                attributes: Map::default(),
+                blocks: vec![block("resource", &["aws", "x-1"], Document::default())],
+            };
+            assert_eq!(ok("resource aws x-1 {\n}\n"), expected);
+        }
+
+        #[test]
+        fn reads_one_line_blocks() {
+            let text = "a {}\nb { x = 1 }\nc \"l\" { y = [1, 2] }";
+            let expected = Document {
+                attributes: Map::default(),
+                blocks: vec![
+                    block("a", &[], Document::default()),
+                    block("b", &[], attributes(vec![("x", integer(1))])),
+                    block(
+                        "c",
+                        &["l"],
+                        attributes(vec![(
+                            "y",
+                            value::Kind::List(vec![
+                                value(integer(1)),
+                                value(integer(2)),
+                            ]),
+                        )]),
+                    ),
+                ],
+            };
+            assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn keeps_block_order() {
+            let channel = |label| block("channel", &[label], Document::default());
+            let expected = Document {
+                attributes: Map::default(),
+                blocks: vec![channel("b"), channel("a"), channel("b")],
+            };
+            assert_eq!(
+                ok("channel \"b\" {}\nchannel \"a\" {}\nchannel \"b\" {}\n"),
+                expected
+            );
+        }
+    }
+
+    mod lines {
+        use super::*;
+
+        #[test]
+        fn reads_an_empty_file() {
+            assert_eq!(ok(""), Document::default());
+            assert_eq!(ok("\n\n# only a comment\n"), Document::default());
+        }
+
+        #[test]
+        fn skips_comments() {
+            let text =
+                "# c\na = 1 # c\n// c\nb = /* c */ 2\n/* multi\nline */\nc = 3 // c";
+            let expected = attributes(vec![
+                ("a", integer(1)),
+                ("b", integer(2)),
+                ("c", integer(3)),
+            ]);
+            assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_crlf_lines() {
+            let document = ok("a = 1\r\nb = \"x\"\r\n");
+            let b = document.attributes.get("b").unwrap();
+            assert_eq!(b.value, value(string("x")));
+            assert_eq!(b.key_span, Some(span(at(7, 1, 0), at(8, 1, 1))));
+        }
+
+        #[test]
+        fn skips_a_byte_order_mark() {
+            let document = ok("\u{feff}a = 1\n");
+            let a = document.attributes.get("a").unwrap();
+            assert_eq!(a.key_span, Some(span(at(3, 0, 0), at(4, 0, 1))));
+        }
+    }
+
+    mod spans {
+        use super::*;
+
+        #[test]
+        fn names_each_part() {
+            let text = "m = { u = \"°C\", v = 1 }\nb \"l\" {\n  r = f(x)\n}\n";
+            let document = ok(text);
+            let outer = document.attributes.get("m").unwrap();
+            assert_eq!(outer.key_span, Some(on(0, 1)));
+            assert_eq!(outer.value.span, Some(span(at(4, 0, 4), at(24, 0, 23))));
+            let value::Kind::Map(object) = &outer.value.kind else {
+                panic!("not a map: {outer:?}");
+            };
+            let u = object.get("u").unwrap();
+            assert_eq!(u.key_span, Some(on(6, 7)));
+            assert_eq!(u.value.span, Some(span(at(10, 0, 10), at(15, 0, 14))));
+            let v = object.get("v").unwrap();
+            assert_eq!(v.key_span, Some(span(at(17, 0, 16), at(18, 0, 17))));
+            assert_eq!(v.value.span, Some(span(at(21, 0, 20), at(22, 0, 21))));
+
+            let b = &document.blocks[0];
+            assert_eq!(b.keyword_span, Some(span(at(25, 1, 0), at(26, 1, 1))));
+            assert_eq!(b.labels[0].span, Some(span(at(27, 1, 2), at(30, 1, 5))));
+            assert_eq!(b.span, Some(span(at(25, 1, 0), at(45, 3, 1))));
+            let r = b.body.attributes.get("r").unwrap();
+            assert_eq!(r.key_span, Some(span(at(35, 2, 2), at(36, 2, 3))));
+            assert_eq!(r.value.span, Some(span(at(39, 2, 6), at(43, 2, 10))));
+            let value::Kind::Call(call) = &r.value.kind else {
+                panic!("not a call: {r:?}");
+            };
+            assert_eq!(call.function_span, Some(span(at(39, 2, 6), at(40, 2, 7))));
+            assert_eq!(
+                call.arguments[0].span,
+                Some(span(at(41, 2, 8), at(42, 2, 9)))
+            );
+        }
+
+        #[test]
+        fn covers_the_minus_sign() {
+            let document = ok("a = -3\nb = - 3\n");
+            let a = document.attributes.get("a").unwrap();
+            assert_eq!(a.value.span, Some(on(4, 6)));
+            let b = document.attributes.get("b").unwrap();
+            assert_eq!(b.value.span, Some(span(at(11, 1, 4), at(14, 1, 7))));
+        }
+
+        #[test]
+        fn covers_lists_and_strings() {
+            let document = ok("a = [1, \"x\"]");
+            let a = document.attributes.get("a").unwrap();
+            assert_eq!(a.value.span, Some(on(4, 12)));
+            let value::Kind::List(items) = &a.value.kind else {
+                panic!("not a list: {a:?}");
+            };
+            assert_eq!(items[1].span, Some(on(8, 11)));
+        }
+    }
+
+    mod errors {
+        use super::*;
+
+        const ESCAPE: &str = "the string has an escape that HCL does not have. \
+                              Use `\\n`, `\\r`, `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or \
+                              `\\UNNNNNNNN`";
+        const TEMPLATE: &str = "templates do not exist in Foundation files. Write \
+                                `$${` or `%%{` for the text `${` or `%{`";
+        const NAME: &str = "the reference is not a valid name. Use dot-separated \
+                            parts of letters, digits, `_`, and `-`";
+        const NUMBER: &str = "the number is out of range. Use an integer that fits \
+                              in 128 bits, or a finite float";
+        const NULL: &str = "`null` does not exist in Foundation files. Remove the \
+                            attribute to use its default";
+        const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
+                              give it a different key";
+
+        #[test]
+        fn refuses_an_escape_that_hcl_does_not_have() {
+            let escape = |start, end| {
+                (
+                    Error::Escape {
+                        span: on(start, end),
+                    },
+                    ESCAPE,
+                )
+            };
+            check(r#"s = "a\qb""#, &[escape(6, 8)]);
+            check(r#"s = "\ud800""#, &[escape(5, 11)]);
+            check(r#"s = "\u12""#, &[escape(5, 9)]);
+            check(r#"s = "\U00110000""#, &[escape(5, 15)]);
+            check("s = \"\\\n\"", &[escape(5, 6)]);
+        }
+
+        #[test]
+        fn refuses_a_template() {
+            let template = |start, end| {
+                let form = Form::Template;
+                (
+                    Error::Form {
+                        span: on(start, end),
+                        form,
+                    },
+                    TEMPLATE,
+                )
+            };
+            check(r#"s = "a${b}""#, &[template(6, 8)]);
+            check(r#"s = "%{if x}""#, &[template(5, 7)]);
+            check(r#"s = "$ ${b}""#, &[template(7, 9)]);
+        }
+
+        #[test]
+        fn refuses_a_string_that_does_not_end() {
+            let quote = "the file needs `\"` to end the string here";
+            check("s = \"abc", &[(syntax(on(4, 8), Expected::Quote), quote)]);
+            check(
+                "s = \"ab\nc\"\n",
+                &[(syntax(on(4, 7), Expected::Quote), quote)],
+            );
+        }
+
+        #[test]
+        fn refuses_a_comment_that_does_not_end() {
+            check(
+                "a = 1 /* x",
+                &[(
+                    syntax(on(6, 10), Expected::CommentEnd),
+                    "the file needs `*/` to end the comment here",
+                )],
+            );
+        }
+
+        #[test]
+        fn names_what_the_grammar_needs() {
+            let cases = [
+                ("a = \n", span(at(4, 0, 4), at(5, 1, 0)), Expected::Value),
+                ("a = $\n", on(4, 5), Expected::Value),
+                ("a =", on(3, 3), Expected::Value),
+                ("a = [", on(5, 5), Expected::Value),
+                ("a = -x\n", on(5, 6), Expected::Value),
+                ("a = /x\n", on(4, 5), Expected::Value),
+                ("a = 1\rb = 2\n", on(5, 6), Expected::Newline),
+                ("a = 1.x\n", on(5, 6), Expected::Newline),
+                ("a = 1ex\n", on(5, 7), Expected::Newline),
+                ("a = 1 b = 2\n", on(6, 7), Expected::Newline),
+                ("a 1\n", on(2, 3), Expected::Equals),
+                ("b \"x\" 1\n", on(6, 7), Expected::BlockStart),
+                ("b { a = 1 c = 2 }\n", on(10, 11), Expected::BlockEnd),
+                ("b { = }\n", on(4, 5), Expected::BlockEnd),
+                ("b { a 1 }\n", on(6, 7), Expected::Equals),
+                ("b { a.b = 1 }\n", on(4, 7), Expected::BlockEnd),
+                ("b a.b {}\n", on(2, 5), Expected::Equals),
+                ("b {}  x\n", on(6, 7), Expected::Newline),
+                (
+                    "b {\n  a = 1 }\n",
+                    span(at(12, 1, 8), at(13, 1, 9)),
+                    Expected::Newline,
+                ),
+                ("b {\n", span(at(4, 1, 0), at(4, 1, 0)), Expected::Item),
+                ("}\n", on(0, 1), Expected::Item),
+                ("a.b = 1\n", on(0, 3), Expected::Item),
+                ("a = [1 2]\n", on(7, 8), Expected::ListEnd),
+                (
+                    "a = [1, 2\n",
+                    span(at(10, 1, 0), at(10, 1, 0)),
+                    Expected::ListEnd,
+                ),
+                ("a = { = 1 }\n", on(6, 7), Expected::ObjectKey),
+                ("a = { k.j = 1 }\n", on(6, 9), Expected::ObjectKey),
+                ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
+                ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
+                ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
+            ];
+            for (text, span, expected) in cases {
+                let message = format!("the file needs {expected} here");
+                check(text, &[(syntax(span, expected), &message)]);
+            }
+        }
+
+        #[test]
+        fn refuses_a_reference_that_is_not_a_name() {
+            let error = "a.@".parse::<Name>().unwrap_err();
+            let name = Error::Name {
+                span: on(4, 7),
+                error: error.clone(),
+            };
+            check("r = a.@\n", &[(name.clone(), NAME)]);
+            let source = std::error::Error::source(&name).unwrap();
+            assert_eq!(source.to_string(), error.to_string());
+
+            let long = "a".repeat(256);
+            let error = long.parse::<Name>().unwrap_err();
+            let name = Error::Name {
+                span: on(4, 260),
+                error,
+            };
+            check(&format!("r = {long}"), &[(name, NAME)]);
+        }
+
+        #[test]
+        fn refuses_a_number_out_of_range() {
+            let number = |start, end| {
+                (
+                    Error::Number {
+                        span: on(start, end),
+                    },
+                    NUMBER,
+                )
+            };
+            check(
+                "i = 170141183460469231731687303715884105728\n",
+                &[number(4, 43)],
+            );
+            check(
+                "i = -170141183460469231731687303715884105729\n",
+                &[number(4, 44)],
+            );
+            check(
+                "i = 999999999999999999999999999999999999999999\n",
+                &[number(4, 46)],
+            );
+            check("f = 1e400\n", &[number(4, 9)]);
+            check("f = -1e400\n", &[number(4, 10)]);
+        }
+
+        #[test]
+        fn refuses_a_repeated_key() {
+            let repeat = |first, second| {
+                let error = document::Error::DuplicateKey {
+                    key: "a".into(),
+                    first: Some(first),
+                    second: Some(second),
+                };
+                (Error::Document(error), REPEAT)
+            };
+            let second = span(at(6, 1, 0), at(7, 1, 1));
+            check("a = 1\na = 2\n", &[repeat(on(0, 1), second)]);
+            check("m = { a = 1, a = 2 }", &[repeat(on(6, 7), on(13, 14))]);
+            assert_eq!(ok("b { a = 1 }\nb { a = 2 }\n").blocks.len(), 2);
+        }
+
+        #[test]
+        fn refuses_null_and_reads_on() {
+            let null = Error::Form {
+                span: on(4, 8),
+                form: Form::Null,
+            };
+            check("a = null\nb = 1\n", &[(null, NULL)]);
+        }
+
+        #[test]
+        fn returns_every_problem_in_source_order() {
+            let text = "m = { a = 1, a = 2, b = null }\nr = a.@\nc = \n";
+            let repeat = document::Error::DuplicateKey {
+                key: "a".into(),
+                first: Some(on(6, 7)),
+                second: Some(on(13, 14)),
+            };
+            let null = Error::Form {
+                span: on(24, 28),
+                form: Form::Null,
+            };
+            let name = Error::Name {
+                span: span(at(35, 1, 4), at(38, 1, 7)),
+                error: "a.@".parse::<Name>().unwrap_err(),
+            };
+            let value = syntax(span(at(43, 2, 4), at(44, 3, 0)), Expected::Value);
+            check(
+                text,
+                &[
+                    (Error::Document(repeat), REPEAT),
+                    (null, NULL),
+                    (name, NAME),
+                    (value, "the file needs a value here"),
+                ],
+            );
+        }
+    }
+
+    mod depth {
+        use super::*;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Level {
+            Block,
+            List,
+            Object,
+            Call,
+        }
+
+        fn blocks(levels: &[Level]) -> usize {
+            levels
+                .iter()
+                .take_while(|&&level| level == Level::Block)
+                .count()
+        }
+
+        /// A one-character span.
+        fn char_at(offset: usize, line: usize, column: usize) -> Span {
+            let [offset, line, column] =
+                [offset, line, column].map(|n| u32::try_from(n).unwrap());
+            let next = |n: u32| n.checked_add(1).unwrap();
+            span(
+                at(offset, line, column),
+                at(next(offset), line, next(column)),
+            )
+        }
+
+        /// A file nested through `levels`, outermost first, with `true` inside, and
+        /// the span of the token that opens each level.
+        fn nested(levels: &[Level]) -> (String, Vec<Span>) {
+            let mut text = String::new();
+            let mut spans = Vec::new();
+            for line in 0..blocks(levels) {
+                spans.push(char_at(text.len(), line, 0));
+                text.push_str("b {\n");
+            }
+            text.push_str("a = ");
+            let start = text.len().checked_sub(4).unwrap();
+            let values = &levels[blocks(levels)..];
+            for level in values {
+                let column = text.len().checked_sub(start).unwrap();
+                spans.push(char_at(text.len(), blocks(levels), column));
+                text.push_str(match level {
+                    Level::List => "[",
+                    Level::Object => "{ k = ",
+                    Level::Call => "f(",
+                    Level::Block => panic!("a block inside a value: {levels:?}"),
+                });
+            }
+            text.push_str("true");
+            for level in values.iter().rev() {
+                text.push_str(match level {
+                    Level::List => "]",
+                    Level::Object => " }",
+                    Level::Call => ")",
+                    Level::Block => panic!("a block inside a value: {levels:?}"),
+                });
+            }
+            text.push('\n');
+            for _ in 0..blocks(levels) {
+                text.push_str("}\n");
+            }
+            (text, spans)
+        }
+
+        /// The file reads up to the limit, and the encoding takes what it reads.
+        fn check_depth(levels: &[Level]) {
+            let (text, spans) = nested(levels);
+            if let Some(&span) = spans.get(DEPTH_MAX) {
+                let expected = Err(vec![Error::TooDeep { span }]);
+                assert_eq!(read(Source(0), &text), expected);
+            } else {
+                let document = read(Source(0), &text).unwrap();
+                let bytes = document::encoding::encode(&document).unwrap();
+                assert_eq!(document::encoding::decode(&bytes).unwrap(), document);
+            }
+        }
+
+        #[test]
+        fn counts_each_kind_of_level() {
+            for level in [Level::Block, Level::List, Level::Object, Level::Call] {
+                check_depth(&[level; DEPTH_MAX]);
+                check_depth(&[level; DEPTH_MAX + 1]);
+            }
+        }
+
+        #[test]
+        fn too_deep_names_the_fix() {
+            let (text, spans) = nested(&[Level::List; 65]);
+            let errors = read(Source(0), &text).unwrap_err();
+            assert_eq!(errors, vec![Error::TooDeep { span: spans[64] }]);
+            assert_eq!(
+                errors[0].to_string(),
+                "the file nests deeper than 64 levels. Make it flatter"
+            );
+        }
+
+        fn levels(total: usize) -> impl Strategy<Value = Vec<Level>> {
+            (0..=total).prop_flat_map(move |blocks| {
+                let value = prop_oneof![
+                    Just(Level::List),
+                    Just(Level::Object),
+                    Just(Level::Call)
+                ];
+                prop::collection::vec(value, total.saturating_sub(blocks)).prop_map(
+                    move |values| {
+                        let mut levels = vec![Level::Block; blocks];
+                        levels.extend(values);
+                        levels
+                    },
+                )
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn counts_any_mix_of_levels(
+                levels in prop_oneof![levels(DEPTH_MAX), levels(DEPTH_MAX + 1)],
+            ) {
+                check_depth(&levels);
+            }
+        }
+
+        /// Runs `f` on a thread with a small stack, so that recursion past the limit
+        /// would overflow it.
+        fn small_stack(f: impl FnOnce() + Send + 'static) {
+            #[expect(clippy::disallowed_methods, reason = "a test owns its threads")]
+            let thread = std::thread::Builder::new().stack_size(2_097_152).spawn(f);
+            thread.unwrap().join().unwrap();
+        }
+
+        #[test]
+        fn refuses_a_hostile_depth_without_recursing() {
+            small_stack(|| {
+                for level in [Level::Block, Level::List, Level::Object, Level::Call] {
+                    let (text, spans) = nested(&vec![level; 100_000]);
+                    let span = spans[DEPTH_MAX];
+                    assert_eq!(
+                        read(Source(0), &text),
+                        Err(vec![Error::TooDeep { span }])
+                    );
+                }
+                let text = format!("a = {}1", "-".repeat(100_000));
+                let expected = syntax(on(5, 6), Expected::Value);
+                assert_eq!(read(Source(0), &text), Err(vec![expected]));
+            });
+        }
+    }
+
+    mod properties {
+        use super::*;
+
+        fn edit() -> impl Strategy<Value = (prop::sample::Index, Option<char>)> {
+            let c = prop::sample::select(
+                &[
+                    '{', '}', '[', ']', '(', ')', '"', '=', ',', '.', ':', '#', '/',
+                    '*', '$', '%', '\\', '-', '\n', '\r', ' ', 'a', '1', '°',
+                ][..],
+            );
+            (any::<prop::sample::Index>(), prop::option::of(c))
+        }
+
+        proptest! {
+            #[test]
+            fn reads_what_the_writer_writes(document in document()) {
+                let text = write(&document);
+                prop_assert_eq!(read(Source(0), &text), Ok(document), "{}", text);
+            }
+
+            #[test]
+            fn reports_a_problem_for_random_text(
+                text in "[ -~\n\t°{}\\[\\]()\"=,.:#/*$%@\\\\-]{0,64}",
+            ) {
+                if let Err(errors) = read(Source(0), &text) {
+                    prop_assert!(!errors.is_empty());
+                }
+            }
+
+            #[test]
+            fn reports_a_problem_for_an_edited_file(
+                document in document(),
+                edits in prop::collection::vec(edit(), 1..4),
+            ) {
+                let mut chars: Vec<char> = write(&document).chars().collect();
+                for (i, c) in &edits {
+                    let i = i.index(chars.len().saturating_add(1));
+                    match c {
+                        Some(c) => chars.insert(i, *c),
+                        None if i < chars.len() => drop(chars.remove(i)),
+                        None => {}
+                    }
+                }
+                let text: String = chars.into_iter().collect();
+                if let Err(errors) = read(Source(0), &text) {
+                    prop_assert!(!errors.is_empty());
+                }
+            }
+        }
+    }
+}
