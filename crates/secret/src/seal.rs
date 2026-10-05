@@ -13,11 +13,13 @@ use aws_lc_rs::hmac;
 use env::entropy::Entropy;
 use types::name::Name;
 use types::node::SealKey;
+use zeroize::Zeroizing;
 
 use crate::Value;
 
 const INFO: &[u8] = b"foundation/secret/1";
 const ENC_LEN: usize = 32;
+const TAG_LEN: usize = 16;
 const KEM_SUITE: &[u8] = b"KEM\x00\x20";
 const HPKE_SUITE: &[u8] = b"HPKE\x00\x20\x00\x01\x00\x03";
 
@@ -31,9 +33,9 @@ const HPKE_SUITE: &[u8] = b"HPKE\x00\x20\x00\x01\x00\x03";
 /// small order.
 #[must_use]
 pub fn seal(to: &SealKey, name: &Name, value: &Value, entropy: &Entropy) -> Vec<u8> {
-    let mut ephemeral = [0; 32];
-    entropy.fill(&mut ephemeral);
-    let ephemeral = PrivateKey::from_private_key(&X25519, &ephemeral)
+    let mut bytes = Zeroizing::new([0; 32]);
+    entropy.fill(bytes.as_mut_slice());
+    let ephemeral = PrivateKey::from_private_key(&X25519, bytes.as_slice())
         .expect("invariant: any 32 bytes are an X25519 private key");
     seal_with(
         &ephemeral,
@@ -46,22 +48,22 @@ pub fn seal(to: &SealKey, name: &Name, value: &Value, entropy: &Entropy) -> Vec<
 }
 
 /// A node's X25519 seal private key. It opens values sealed to its public key.
-/// `Debug` never shows the key.
-pub struct Opener([u8; 32]);
+/// `Debug` never shows the key, and the key is overwritten with zeros when it drops.
+pub struct Opener(Box<Zeroizing<[u8; 32]>>);
 
 impl Opener {
     /// Makes a new key from 32 bytes of `entropy`.
     #[must_use]
     pub fn generate(entropy: &Entropy) -> Self {
-        let mut bytes = [0; 32];
-        entropy.fill(&mut bytes);
+        let mut bytes = Box::new(Zeroizing::new([0; 32]));
+        entropy.fill(bytes.as_mut_slice());
         Self(bytes)
     }
 
     /// Takes the bytes of a key from [`Opener::expose`].
     #[must_use]
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+        Self(Box::new(Zeroizing::new(bytes)))
     }
 
     /// The bytes to keep on the node's disk. Write them nowhere else.
@@ -102,7 +104,7 @@ impl Opener {
     }
 
     fn key(&self) -> PrivateKey {
-        PrivateKey::from_private_key(&X25519, &self.0)
+        PrivateKey::from_private_key(&X25519, self.0.as_slice())
             .expect("invariant: any 32 bytes are an X25519 private key")
     }
 }
@@ -143,11 +145,15 @@ fn seal_with(
 ) -> Option<Vec<u8>> {
     let enc = ephemeral.compute_public_key().ok()?;
     let (key, nonce) = schedule(ephemeral, to, enc.as_ref(), to, info)?;
-    let mut sealed = enc.as_ref().to_vec();
-    let mut body = plain.to_vec();
-    key.seal_in_place_append_tag(nonce, Aad::from(aad), &mut body)
+    // Sized for the tag, so the plain bytes are encrypted where they are and no
+    // reallocation frees a copy of them.
+    let mut sealed = Vec::with_capacity(ENC_LEN + plain.len() + TAG_LEN);
+    sealed.extend_from_slice(enc.as_ref());
+    sealed.extend_from_slice(plain);
+    let tag = key
+        .seal_in_place_separate_tag(nonce, Aad::from(aad), &mut sealed[ENC_LEN..])
         .expect("invariant: a secret is far below the AEAD's size limit");
-    sealed.append(&mut body);
+    sealed.extend_from_slice(tag.as_ref());
     Some(sealed)
 }
 
@@ -161,13 +167,13 @@ fn open_with(
     let (enc, body) = sealed.split_at_checked(ENC_LEN).ok_or(Error::Refused)?;
     let (key, nonce) =
         schedule(own, enc, enc, own_public, info).ok_or(Error::Refused)?;
-    let mut body = body.to_vec();
+    let mut body = Zeroizing::new(body.to_vec());
     let plain_len = key
         .open_in_place(nonce, Aad::from(aad), &mut body)
         .map_err(|_unspecified| Error::Refused)?
         .len();
     body.truncate(plain_len);
-    Ok(body)
+    Ok(std::mem::take(&mut *body))
 }
 
 /// Runs the KEM and the base-mode key schedule. `peer` is the public key to agree
@@ -181,7 +187,7 @@ fn schedule(
     info: &[u8],
 ) -> Option<(LessSafeKey, Nonce)> {
     let dh = agreement::agree(own, UnparsedPublicKey::new(&X25519, peer), (), |dh| {
-        Ok(dh.to_vec())
+        Ok(Zeroizing::new(dh.to_vec()))
     })
     .ok()?;
     let eae_prk = extract(KEM_SUITE, &[], b"eae_prk", &dh);
@@ -203,24 +209,30 @@ fn schedule(
 }
 
 /// HKDF-Extract over the labeled input.
-fn extract(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u8]) -> Vec<u8> {
+fn extract(suite: &[u8], salt: &[u8], label: &[u8], ikm: &[u8]) -> Zeroizing<Vec<u8>> {
     let key = hmac::Key::new(hmac::HMAC_SHA256, salt);
     let mut ctx = hmac::Context::with_key(&key);
     for part in [b"HPKE-v1", suite, label, ikm] {
         ctx.update(part);
     }
-    ctx.sign().as_ref().to_vec()
+    Zeroizing::new(ctx.sign().as_ref().to_vec())
 }
 
 /// HKDF-Expand over the labeled info, for at most one hash length.
-fn expand(suite: &[u8], prk: &[u8], label: &[u8], info: &[u8], len: u16) -> Vec<u8> {
+fn expand(
+    suite: &[u8],
+    prk: &[u8],
+    label: &[u8],
+    info: &[u8],
+    len: u16,
+) -> Zeroizing<Vec<u8>> {
     assert!(len <= 32, "one HMAC-SHA256 block holds {len} bytes");
     let key = hmac::Key::new(hmac::HMAC_SHA256, prk);
     let mut ctx = hmac::Context::with_key(&key);
     for part in [&len.to_be_bytes()[..], b"HPKE-v1", suite, label, info, &[1]] {
         ctx.update(part);
     }
-    ctx.sign().as_ref()[..usize::from(len)].to_vec()
+    Zeroizing::new(ctx.sign().as_ref()[..usize::from(len)].to_vec())
 }
 
 #[cfg(test)]

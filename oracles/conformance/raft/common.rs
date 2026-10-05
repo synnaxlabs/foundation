@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Body, Config, Entry, Hard, Message, Position, Raft, Ready, Role, Start, Term,
+    Body, Config, Data, Entry, Hard, Message, Position, Raft, Ready, Role, Start, Term,
     Voters,
 };
 use types::node;
@@ -37,7 +37,7 @@ pub(crate) fn build(
                 term: last.term,
                 index,
             },
-            data: Vec::new(),
+            data: Data::Empty,
         })
         .collect();
     start(id, voters, election, hard, entries, 0)

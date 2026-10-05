@@ -160,12 +160,12 @@ impl Lab {
         _node: Node,
         _hcl: &str,
     ) -> (String, Vec<String>) {
-        todo!("waits on #307")
+        todo!("waits on #337")
     }
 
     /// Runs the MCP `apply` tool on `node` with a plan from [`Lab::mcp_plan`].
     pub(crate) fn mcp_apply(&mut self, _node: Node, _plan: &str) {
-        todo!("waits on #307")
+        todo!("waits on #337")
     }
 
     /// Attaches a simulated device to `node` at `address`.

@@ -621,6 +621,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "home"
 version = "0.0.0"
 dependencies = [
+ "block",
+ "control",
+ "delivery",
  "proptest",
  "types",
 ]
@@ -751,6 +754,7 @@ version = "0.0.0"
 dependencies = [
  "env",
  "loom",
+ "ops",
  "sim",
 ]
 
@@ -1317,6 +1321,10 @@ checksum = "ea06cc588e43c632923a55450401b8f25e628131571d4e1baea1bdfdb2b5ed06"
 [[package]]
 name = "spec"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "strsim"
