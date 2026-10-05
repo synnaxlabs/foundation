@@ -82,7 +82,7 @@ impl Index {
         let order = self
             .order
             .check(path, mesh)
-            .stamps(stamps)
+            .push(stamps)
             .map_err(Refusal::Order)?
             .end();
         Ok(Accepted {

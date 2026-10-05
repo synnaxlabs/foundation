@@ -57,7 +57,7 @@ impl Order {
     }
 
     /// Starts the check of one frame's index series on `path` at mesh time `now`.
-    /// [`Check::stamps`] takes the series in order, in chunks of any length, and
+    /// [`Check::push`] takes the series in order, in chunks of any length, and
     /// [`Check::end`] gives the seq its samples take. Changes nothing:
     /// [`Order::advance`] spends the seq.
     pub(crate) fn check(&self, path: Path, now: Interval) -> Check<'_> {
@@ -130,7 +130,7 @@ impl Check<'_> {
     ///
     /// [`Error`] names the first stamp that breaks a rule. Each stamp is checked
     /// against the limits, then the order on its path, then the other path.
-    pub(crate) fn stamps(mut self, stamps: &[[u8; 8]]) -> Result<Self, Error> {
+    pub(crate) fn push(mut self, stamps: &[[u8; 8]]) -> Result<Self, Error> {
         let (Some(first), Some(last)) = (stamps.first(), stamps.last()) else {
             return Ok(self);
         };
@@ -158,8 +158,8 @@ impl Check<'_> {
         Err(self.breach(stamps))
     }
 
-    /// Ends the check and returns the seq the series takes. An empty series gets an
-    /// empty range.
+    /// Ends the check and returns the seq the series takes. The seq counts only the
+    /// stamps pushed, so end after the last chunk. An empty series gets an empty range.
     ///
     /// # Panics
     ///
@@ -190,7 +190,7 @@ impl Check<'_> {
         }
     }
 
-    /// The first rule that `stamps` break, in the order that [`Check::stamps`] states.
+    /// The first rule that `stamps` break, in the order that [`Check::push`] states.
     fn breach(&self, stamps: &[[u8; 8]]) -> Error {
         let (path, earliest, latest) =
             (self.path, self.order.config.earliest, self.latest);
@@ -368,7 +368,22 @@ mod tests {
         stamps: &[[u8; 8]],
         now: Interval,
     ) -> Result<Range<u64>, Error> {
-        let accepted = order.check(path, now).stamps(stamps)?.end();
+        accept_in(order, path, stamps, usize::MAX, now)
+    }
+
+    /// [`accept`], with the stamps pushed in chunks of `size`.
+    fn accept_in(
+        order: &mut Order,
+        path: Path,
+        stamps: &[[u8; 8]],
+        size: usize,
+        now: Interval,
+    ) -> Result<Range<u64>, Error> {
+        let mut check = order.check(path, now);
+        for chunk in stamps.chunks(size) {
+            check = check.push(chunk)?;
+        }
+        let accepted = check.end();
         let seq = accepted.seq.clone();
         order.advance(accepted);
         Ok(seq)
@@ -492,6 +507,12 @@ mod tests {
         }
 
         #[test]
+        fn accepts_a_stamp_at_the_earliest() {
+            let earliest = bytes(&[config().earliest]);
+            assert_eq!(accept(&mut order(), Path::Live, &earliest, now()), Ok(0..1));
+        }
+
+        #[test]
         fn rejects_a_stamp_past_mesh_time_and_ahead() {
             let mut order = order();
             assert_eq!(
@@ -586,7 +607,7 @@ mod tests {
         #[test]
         fn spends_the_seq_only_at_advance() {
             let mut order = order();
-            let accepted = order.check(Path::Live, now()).stamps(&stamps(&[1, 2]));
+            let accepted = order.check(Path::Live, now()).push(&stamps(&[1, 2]));
             let accepted = accepted.expect("stamps in order").end();
             assert_eq!(accepted.seq, 0..2);
             assert_eq!(order.tail(Path::Live), Tail::default());
@@ -597,9 +618,9 @@ mod tests {
         #[test]
         fn gives_a_series_in_chunks_one_seq() {
             let mut order = order();
-            let check = order.check(Path::Live, now()).stamps(&stamps(&[1]));
-            let check = check.and_then(|check| check.stamps(&[]));
-            let check = check.and_then(|check| check.stamps(&stamps(&[2, 3])));
+            let check = order.check(Path::Live, now()).push(&stamps(&[1]));
+            let check = check.and_then(|check| check.push(&[]));
+            let check = check.and_then(|check| check.push(&stamps(&[2, 3])));
             let accepted = check.expect("stamps in order").end();
             assert_eq!(accepted.seq, 0..3);
             order.advance(accepted);
@@ -609,10 +630,10 @@ mod tests {
         #[test]
         fn checks_each_chunk_against_the_one_before() {
             let order = order();
-            let check = order.check(Path::Backfill, now()).stamps(&stamps(&[1, 2]));
-            let check = check.and_then(|check| check.stamps(&[]));
+            let check = order.check(Path::Backfill, now()).push(&stamps(&[1, 2]));
+            let check = check.and_then(|check| check.push(&[]));
             let error = check
-                .and_then(|check| check.stamps(&stamps(&[2, 3])))
+                .and_then(|check| check.push(&stamps(&[2, 3])))
                 .expect_err("a tie across chunks");
             assert_eq!(
                 error,
@@ -628,9 +649,9 @@ mod tests {
         #[should_panic(expected = "invariant: the order moved after the check")]
         fn panics_when_the_other_path_moved_after_the_check() {
             let mut order = order();
-            let live = order.check(Path::Live, now()).stamps(&stamps(&[5]));
+            let live = order.check(Path::Live, now()).push(&stamps(&[5]));
             let live = live.expect("stamps in order").end();
-            let backfill = order.check(Path::Backfill, now()).stamps(&stamps(&[7]));
+            let backfill = order.check(Path::Backfill, now()).push(&stamps(&[7]));
             order.advance(backfill.expect("backfill before any live sample").end());
             order.advance(live);
         }
@@ -862,24 +883,6 @@ mod tests {
         /// and mesh time.
         type Frame = (Path, Vec<Stamp>, usize, Interval);
 
-        /// [`accept`], with the stamps checked in chunks of `size`.
-        fn accept_in(
-            order: &mut Order,
-            path: Path,
-            stamps: &[[u8; 8]],
-            size: usize,
-            now: Interval,
-        ) -> Result<Range<u64>, Error> {
-            let mut check = order.check(path, now);
-            for chunk in stamps.chunks(size) {
-                check = check.stamps(chunk)?;
-            }
-            let accepted = check.end();
-            let seq = accepted.seq.clone();
-            order.advance(accepted);
-            Ok(seq)
-        }
-
         fn check(config: Config, start: [Tail; 2], frames: Vec<Frame>) {
             let mut order = Order::new(config, start[0], start[1]);
             let mut model = Model::new(config, start[0], start[1]);
@@ -888,7 +891,7 @@ mod tests {
                 let series = bytes(&stamps);
                 let restarted = Order::new(config, before[0], before[1])
                     .check(path, now)
-                    .stamps(&series)
+                    .push(&series)
                     .map(|check| check.end().seq);
                 let accepted = accept_in(&mut order, path, &series, size, now);
                 assert_eq!(accepted, model.accept(path, &stamps, now));
