@@ -726,9 +726,9 @@ How to read this record:
   elect. A leader changes the voters with `Raft::propose_voters(set)`: it writes the
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
-  last configuration entry is not committed, or a joint phase has not left, a
-  proposal is `Error::ChangePending`. A leader outside the committed final set sends
-  the commit and steps down.
+  last configuration entry is not committed, a proposal is `Error::ChangePending`.
+  The leader sends a node the change removed the leave and its commit, then drops
+  it. A leader outside the committed final set sends the commit and steps down.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,

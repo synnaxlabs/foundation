@@ -71,6 +71,7 @@ pub struct Raft {
     // `Start.voters`: in force while no entry in the log holds a configuration.
     base: Voters,
     voters: Voters,
+    // The voters in force, plus the nodes a change removed until its leave commits.
     peers: BTreeMap<node::Key, Peer>,
     election_ticks: u64,
     heartbeat_ticks: u64,
@@ -228,15 +229,16 @@ impl Raft {
     /// joint phase, where the old set and the new set each need a majority. When the
     /// joint entry commits, the leader proposes the entry that leaves the joint phase
     /// on its own. Returns the position of the joint entry. A node outside the new
-    /// set still votes and follows, but never campaigns; a leader outside it steps
-    /// down when the leave commits.
+    /// set gets the leave and its commit, then votes and follows but never
+    /// campaigns; a leader outside it steps down when the leave commits.
     ///
     /// # Errors
     ///
     /// - [`Error::NotLeader`] when this node does not lead.
     /// - [`Error::NoVoters`] when `voters` is empty.
     /// - [`Error::ChangePending`] when the last configuration entry in the log is
-    ///   not committed yet, or a joint phase has not left yet.
+    ///   not committed yet. The leave follows a joint entry at once, so this covers
+    ///   a joint phase that has not left.
     pub fn propose_voters(
         &mut self,
         voters: BTreeSet<node::Key>,
@@ -245,8 +247,8 @@ impl Raft {
         if voters.is_empty() {
             return Err(Error::NoVoters);
         }
-        if let Some((at, last)) = self.log.voters()
-            && (last.joint() || at.index > self.log.committed())
+        if let Some((at, _)) = self.log.voters()
+            && at.index > self.log.committed()
         {
             return Err(Error::ChangePending { at });
         }
@@ -451,9 +453,14 @@ impl Raft {
             return false;
         }
         self.replicate();
-        // A committed configuration without this node ends its lead.
-        if self.settled() && !self.voters.incoming.contains(&self.key) {
-            self.become_follower(self.term, None);
+        if self.settled() {
+            // The nodes a change removed got the commit; they leave the peers.
+            let voters = &self.voters;
+            self.peers.retain(|&key, _| voters.contains(key));
+            // A committed configuration without this node ends its lead.
+            if !voters.incoming.contains(&self.key) {
+                self.become_follower(self.term, None);
+            }
         }
         true
     }
@@ -493,9 +500,9 @@ impl Raft {
             .is_none_or(|(at, _)| at.index <= self.log.committed())
     }
 
-    // Puts the last configuration in the log in force, or `base` with none. The one
-    // writer of `voters` and `peers` after `new`. A peer that stays keeps its
-    // progress; a new one starts at the end of the log.
+    // Puts the last configuration in the log in force, or `base` with none. A new
+    // peer starts at the end of the log. A node a change removed stays a peer until
+    // `advance` sends it the commit of the leave.
     fn sync_voters(&mut self) {
         let voters = self.log.voters().map_or(&self.base, |(_, voters)| voters);
         if *voters == self.voters {
@@ -503,11 +510,9 @@ impl Raft {
         }
         let voters = voters.clone();
         let last = self.log.last().index;
-        let mut old = std::mem::take(&mut self.peers);
-        self.peers = voters
-            .peers()
-            .map(|key| (key, old.remove(&key).unwrap_or_else(|| Peer::new(last))))
-            .collect();
+        for key in voters.peers() {
+            self.peers.entry(key).or_insert_with(|| Peer::new(last));
+        }
         self.voters = voters;
     }
 
@@ -759,7 +764,7 @@ impl Raft {
     }
 
     fn promotable(&self) -> bool {
-        self.peers.contains_key(&self.key)
+        self.voters.contains(self.key)
     }
 
     fn peer(&self, key: node::Key) -> &Peer {
@@ -2122,10 +2127,15 @@ mod tests {
             let ready = raft.ready();
             assert_eq!(ready.committed, [config(1, 2, joint)]);
             assert_eq!(ready.entries, [config(1, 3, new.clone())]);
-            // Node 4 waits for the answer to its probe.
-            assert_eq!(to(&ready.messages), [key(2)]);
+            // Node 3 gets the leave; node 4 waits for the answer to its probe.
+            assert_eq!(to(&ready.messages), [key(2), key(3)]);
             accept(&mut raft, &[2], 3);
-            assert_eq!(raft.ready().committed, [config(1, 3, new)]);
+            let ready = raft.ready();
+            assert_eq!(ready.committed, [config(1, 3, new)]);
+            // The commit reaches node 3, then the leader forgets it.
+            assert_eq!(to(&ready.messages), [key(2), key(3)]);
+            raft.tick(0);
+            assert_eq!(to(&raft.ready().messages), [key(2), key(4)]);
             assert_eq!(raft.role(), Role::Leader);
         }
 

@@ -55,6 +55,11 @@ impl Voters {
         }
     }
 
+    // Whether `key` is in either set.
+    pub(crate) fn contains(&self, key: node::Key) -> bool {
+        self.incoming.contains(&key) || self.outgoing.contains(&key)
+    }
+
     // Every node in either set, once.
     pub(crate) fn peers(&self) -> impl Iterator<Item = node::Key> + '_ {
         self.incoming.union(&self.outgoing).copied()

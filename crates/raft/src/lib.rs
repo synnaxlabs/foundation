@@ -76,7 +76,7 @@ pub enum Error {
     /// A configuration has an empty incoming voter set.
     NoVoters,
     /// A configuration change is in progress: the configuration entry at `at` is not
-    /// committed yet, or it is a joint configuration whose leave is not committed yet.
+    /// committed yet.
     ChangePending {
         /// The position of the last configuration entry in the log.
         at: Position,
