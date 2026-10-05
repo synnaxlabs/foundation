@@ -137,32 +137,32 @@ func forms(name string, src []byte, node hclsyntax.Node) []string {
 		}
 		return codes
 	case *hclsyntax.ObjectConsKeyExpr:
-		return key(src, node)
+		if codes, known := key(src, node); known {
+			return codes
+		}
 	}
 	log.Fatalf("%s: %T at %s is not in the table of forms", name, node, node.Range())
 	return nil
 }
 
-// key is the code for an object key that is not a name, a string, or a number with
-// or without a `-`, which HCL evaluates and read refuses as hcl.syntax, or for a
-// number key that HCL rounds. The walk finds the forms inside the key.
-func key(src []byte, node *hclsyntax.ObjectConsKeyExpr) []string {
+// key is the code for an object key that is a name, a string, or a number with or
+// without a `-`: none, or hcl.number-key for a number that HCL rounds. The walk finds
+// the forms inside the key. Any other key is an expression, which is not known.
+func key(src []byte, node *hclsyntax.ObjectConsKeyExpr) (codes []string, known bool) {
 	switch wrapped := node.Wrapped.(type) {
 	case *hclsyntax.ParenthesesExpr, *hclsyntax.TemplateExpr, *hclsyntax.TemplateWrapExpr:
-		return nil
+		return nil, true
 	case *hclsyntax.ScopeTraversalExpr:
-		if len(wrapped.Traversal) == 1 {
-			return nil
-		}
+		return nil, len(wrapped.Traversal) == 1
 	case *hclsyntax.LiteralValueExpr:
-		return rounded(src, wrapped)
+		return rounded(src, wrapped), true
 	case *hclsyntax.UnaryOpExpr:
 		if literal, ok := wrapped.Val.(*hclsyntax.LiteralValueExpr); ok &&
 			wrapped.Op == hclsyntax.OpNegate && literal.Val.Type() == cty.Number {
-			return rounded(src, literal)
+			return rounded(src, literal), true
 		}
 	}
-	return []string{"hcl.syntax"}
+	return nil, false
 }
 
 // rounded is hcl.number-key for a number with a fraction, an exponent, or more than

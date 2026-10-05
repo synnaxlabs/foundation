@@ -12,12 +12,15 @@ use config_hcl::{read, write};
 use document::Source;
 use document::diagnostic::Diagnostic;
 
-/// What HCL does with a text: `None` when it refuses the text, else the codes of the
-/// forms outside data in it.
-type Verdict = Option<BTreeSet<String>>;
+/// What HCL does with a text.
+enum Verdict {
+    Refused,
+    /// Accepted, with the codes of the forms outside data in the text.
+    Accepted(BTreeSet<String>),
+}
 
-/// What `read` gives: `None` for a Document, else the codes of its errors.
-type Outcome = Option<BTreeSet<String>>;
+/// What `read` gives: a Document, or the codes of its errors.
+type Outcome = Result<(), BTreeSet<String>>;
 
 fn directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../oracles/conformance/hcl")
@@ -54,8 +57,10 @@ fn verdicts() -> Vec<(String, Verdict)> {
             let mut words = line.split(' ');
             let name = words.next().unwrap().to_owned();
             let verdict = match words.next() {
-                Some("accepted") => Some(words.map(str::to_owned).collect()),
-                Some("refused") if words.next().is_none() => None,
+                Some("accepted") => {
+                    Verdict::Accepted(words.map(str::to_owned).collect())
+                }
+                Some("refused") if words.next().is_none() => Verdict::Refused,
                 _ => panic!("verdicts.txt: {line:?} is not a verdict"),
             };
             (name, verdict)
@@ -80,8 +85,8 @@ fn differences() -> Vec<(String, Outcome)> {
                 "differences.txt: {line:?} has no decision"
             );
             let outcome = match outcome {
-                "ok" => None,
-                code => Some(BTreeSet::from([code.to_owned()])),
+                "ok" => Ok(()),
+                code => Err(BTreeSet::from([code.to_owned()])),
             };
             (name.to_owned(), outcome)
         })
@@ -89,7 +94,7 @@ fn differences() -> Vec<(String, Outcome)> {
 }
 
 fn outcome(text: &str) -> Outcome {
-    read(Source(0), text).err().map(|errors| {
+    read(Source(0), text).map(drop).map_err(|errors| {
         errors
             .iter()
             .map(|error| Diagnostic::from(error).code.as_str().to_owned())
@@ -102,14 +107,16 @@ fn outcome(text: &str) -> Outcome {
 /// errors for some of those forms only.
 fn agrees(verdict: &Verdict, outcome: &Outcome) -> bool {
     match (verdict, outcome) {
-        (None, outcome) => outcome.is_some(),
-        (Some(forms), None) => forms.is_empty(),
-        (Some(forms), Some(codes)) => !forms.is_empty() && codes.is_subset(forms),
+        (Verdict::Refused, outcome) => outcome.is_err(),
+        (Verdict::Accepted(forms), Ok(())) => forms.is_empty(),
+        (Verdict::Accepted(forms), Err(codes)) => {
+            !forms.is_empty() && codes.is_subset(forms)
+        }
     }
 }
 
 fn show(outcome: &Outcome) -> String {
-    outcome.as_ref().map_or_else(|| "ok".into(), join)
+    outcome.as_ref().map_or_else(join, |()| "ok".into())
 }
 
 fn join(codes: &BTreeSet<String>) -> String {
@@ -181,9 +188,9 @@ fn reads_as_hcl_does() {
                 "{name}: read gives {}, and HCL {}",
                 show(&got),
                 match &verdict {
-                    None => "refuses it".into(),
-                    Some(forms) if forms.is_empty() => "accepts it".into(),
-                    Some(forms) => format!("finds {}", join(forms)),
+                    Verdict::Refused => "refuses it".into(),
+                    Verdict::Accepted(forms) if forms.is_empty() => "accepts it".into(),
+                    Verdict::Accepted(forms) => format!("finds {}", join(forms)),
                 }
             )),
             _ => None,
@@ -201,7 +208,7 @@ fn writes_text_hcl_accepts() {
     let data: BTreeSet<&str> = verdicts()
         .iter()
         .filter(|(name, verdict)| {
-            verdict.as_ref().is_some_and(BTreeSet::is_empty)
+            matches!(verdict, Verdict::Accepted(forms) if forms.is_empty())
                 && !differences.contains(name)
         })
         .filter_map(|(name, _)| texts.get(name).map(String::as_str))

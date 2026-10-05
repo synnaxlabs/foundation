@@ -1059,7 +1059,9 @@ How to read this record:
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
   ended the process, `hcl-primitives` read `-18446744073709551615` as 1, and its errors
   had no fix-it hints. The reader refuses nesting past the Document limit, reads
-  integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
+  integers exactly, refuses a float that an `f64` cannot hold (past the largest, or
+  rounded to zero from digits that are not all zero), and gives each unsupported HCL
+  form an error with a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
 - **HCL IDENTIFIERS (2026-10-05)** The reader accepts identifiers outside ASCII as HCL
@@ -1080,13 +1082,14 @@ How to read this record:
   small Go program next to the texts lists the diagnostic code that `read` gives for
   each form outside data in it, such as `hcl.null`. A test checks that `read` accepts
   exactly the accepted texts with no code, refuses each other accepted text only with
-  the codes listed for it, and refuses each refused text. The output of `write` for
-  each text that reads must be a text that is accepted with no code. `differences.txt`
-  lists each text where `read` differs from HCL on purpose, with its outcome and the
-  decision behind it. The program records the HCL version. A person runs it by hand
-  when the texts change; CI does not run it and needs no Go. It is the only Go code in
-  the repo. The person decided on 2026-10-05 ("Yeah that's fine", #460); the
-  coordinator approved the codes and `differences.txt` on #460.
+  `Error::Form` of the codes listed for it, and refuses each refused text.
+  `differences.txt` lists each text where `read` differs from HCL on purpose, with its
+  outcome and the decision behind it, and the test checks that outcome instead. For
+  each text that reads, `write` must give the bytes of a text in the directory that is
+  accepted with no code and is not in `differences.txt`. The program records the HCL
+  version. A person runs it by hand when the texts change; CI does not run it and
+  needs no Go. It is the only Go code in the repo. The person decided on 2026-10-05
+  ("Yeah that's fine", #460); the coordinator approved the plan on #460.
 - **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
   a new Document. Each attribute and block that keeps its value and its place keeps its
   bytes, comments, and blank lines. A changed value and a changed block on one line

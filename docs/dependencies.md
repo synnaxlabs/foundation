@@ -53,7 +53,8 @@ These never ship in the binary.
 | `divan` | Benchmarks | Wall-time benchmarks that also count allocations | MIT or Apache-2.0 | 0.1.21 | 2026-10-04 |
 | `libfuzzer-sys` | Fuzz targets | Coverage-guided fuzzing with `cargo-fuzz` (testing layer 2) | (MIT or Apache-2.0) and NCSA | 0.4.13 | 2026-10-04 |
 | `hdrhistogram` | Benchmarks | Latency percentiles | MIT or Apache-2.0 | 7.6.0 | 2026-10-04 |
-| `github.com/hashicorp/hcl/v2` (Go module, and the modules in its `go.sum`) | `oracles/conformance/hcl/main.go`, run by hand | The verdicts of HCL on the texts of the HCL oracle | MPL-2.0 | 2.25.0 | 2026-10-05 (#460) |
+| `github.com/hashicorp/hcl/v2` (Go module, and the modules in its `go.sum`) | `oracles/conformance/hcl/main.go`, run by hand | The verdicts of HCL on the texts of the HCL oracle | MPL-2.0; the `go.sum` modules: MIT, Apache-2.0, BSD-3-Clause | 2.25.0 | 2026-10-05 (#460) |
+| `github.com/zclconf/go-cty` (Go module, required by `hcl/v2`) | `oracles/conformance/hcl/main.go`, run by hand | The type of an HCL literal, to find a number | MIT | 1.19.0 | 2026-10-05 (#460) |
 | `core_affinity` | Benchmarks | Pin benchmark threads to cores on Linux | MIT or Apache-2.0 | 0.8.3 | 2026-10-04 |
 | `noq` | `bench/carrier` only | QUIC endpoint on Tokio for the carrier benchmark (#10). No product crate depends on it. Its `noq-proto` brings `aes-gcm` for Retry tags only; packets use aws-lc-rs | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
 | `tokio-rustls` | `bench/carrier` only | TLS over TCP on Tokio for the carrier benchmark (#10) | MIT or Apache-2.0 | 0.26.6 | 2026-10-04 |

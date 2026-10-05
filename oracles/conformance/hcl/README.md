@@ -1,8 +1,8 @@
 # HCL conformance
 
 HCL texts, each with the verdict of HCL v2.25.0 (`github.com/hashicorp/hcl/v2`), and a
-test that `config_hcl::read` and `config_hcl::write` agree with them. `crates/config-hcl`
-runs the test as its `conformance` test. The `[[test]]` entry in
+test that `config_hcl::read` and `config_hcl::write` agree with them.
+`crates/config-hcl` runs the test as its `conformance` test. The `[[test]]` entry in
 `crates/config-hcl/Cargo.toml` is part of this oracle: to remove it is to weaken the
 oracle.
 
@@ -44,10 +44,9 @@ with its type and position. Add it to the table.
 | `p::f()` | `hcl.namespace` |
 | `f(a...)` | `hcl.expansion` |
 | An object key that is a number with a fraction, an exponent, or more than 154 digits | `hcl.number-key` |
-| Any other object key that is not a name, a string, or a number, such as `{ a.b = 1 }` | `hcl.syntax` |
-
-HCL refuses some texts only when it evaluates them, such as `{ a.b = 1 }`. The
-program only parses, so their verdict is "accepted".
+An object key that is an expression, such as `{ f() = 1 }`, is not in the table:
+`read` has no form for it yet (#506). HCL refuses some texts only when it evaluates
+them, such as `{ a.b = 1 }`. The program only parses, so their verdict is "accepted".
 
 ## Add a text
 
