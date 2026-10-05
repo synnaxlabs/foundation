@@ -7,7 +7,7 @@
 use delivery::{Key, Readers};
 use types::channel::Slot;
 use types::frame::key_set::{Group, Interner};
-use types::frame::{Draft, Form, Frame, Path};
+use types::frame::{Draft, Form, Frame, Label};
 use types::time::Stamp;
 
 #[global_allocator]
@@ -29,7 +29,7 @@ fn main() {
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let frame = || {
-        Draft::new(&pool, &set, Path::Live, Form::Raw, &[(0, 8)])
+        Draft::new(&pool, &set, Label::Live, Form::Raw, &[(0, 8)])
             .expect("the pool holds the frame")
             .freeze()
     };
