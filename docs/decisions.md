@@ -468,7 +468,11 @@ How to read this record:
   not for 8 exchanges. Decided by the coordinator (#84). An error that grows past 36500
   days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
   time as OS CLOCK BOUND says. `Error::Bound` is only for an input error over 36500
-  days. The person decided on 2026-10-05 ("Ok that's fine"), #225.
+  days. The person decided on 2026-10-05 ("Ok that's fine"), #225. `combine` uses
+  each bound with its full growth, so a bound that grew to "unknown" never cuts a
+  known one. An exchange with an error over 36500 days, or an overlap whose readings
+  allow one before drift, fails with `Bound`: a stopped bound stored as a measurement
+  could miss the true offset. Decided by the `time` builder (#258).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -506,9 +510,9 @@ How to read this record:
   ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper
   bounds).
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
-  a reader gets no mesh time. After it, when `combine` fails (no majority, a bound too
-  wide, or no sources after a remove), the clock holds over: it keeps its last estimate
-  and its error grows by drift. It never follows the largest group or one side of a tie.
+  a reader gets no mesh time. After it, when `combine` fails (no majority, or no sources
+  after a remove), the clock holds over: it keeps its last estimate and its error grows
+  by drift. It never follows the largest group or one side of a tie.
   `push` returns the holdover and its cause, and `node` publishes it. The next majority
   ends the holdover. Decided by the `time` builder (#142).
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the

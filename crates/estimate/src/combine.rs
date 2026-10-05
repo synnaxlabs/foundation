@@ -260,13 +260,27 @@ mod tests {
         assert_eq!((m.offset(), m.error()), (Span::ZERO, MAX_ERROR));
     }
 
+    /// The old bound grows past 36500 days to hold the true offset of 36500 days and
+    /// 1 ns, so it must not cut the new bound.
+    #[test]
+    fn keeps_a_bound_grown_past_36500_days() {
+        let widest = MAX_ERROR.nanos();
+        let now = Monotonic(1_000_000_000);
+        let new = Measurement::new(now, Span::from_nanos(widest), Span::from_nanos(1));
+        let sources = filters(&[source(0, widest - 500), new.expect("valid")]);
+        let m = combine(now, drift(1_000), &sources).expect("both hold the truth");
+        assert_eq!((m.offset().nanos(), m.error().nanos()), (widest, 1));
+    }
+
     mod properties {
         use proptest::collection::vec;
         use proptest::prelude::*;
 
         use super::*;
 
-        use crate::world::{ERROR_NS, World, agreeing, any_measurements, nanos};
+        use crate::world::{
+            ERROR_NS, TIME_NS, World, agreeing, any_measurements, nanos, world,
+        };
 
         impl World {
             fn combine(self, sources: &[Measurement]) -> Result<Measurement, Error> {
@@ -308,6 +322,24 @@ mod tests {
                 })
         }
 
+        /// Sources with errors near 36500 days that hold the true offset at an edge,
+        /// so drift can carry it past 36500 days.
+        fn wide() -> impl Strategy<Value = (World, Vec<Measurement>)> {
+            world().prop_flat_map(|w| {
+                let widest = MAX_ERROR.nanos();
+                let errors = widest - ERROR_NS..=widest;
+                let one = (0..TIME_NS, errors, any::<bool>()).prop_map(
+                    move |(at, error, above)| {
+                        let slack = if above { error } else { -error };
+                        let offset = nanos(w.truth(at) + i128::from(slack));
+                        let error = Span::from_nanos(error);
+                        Measurement::new(Monotonic(at), offset, error).expect("valid")
+                    },
+                );
+                (Just(w), vec(one, 1..10))
+            })
+        }
+
         proptest! {
             #[test]
             fn holds_the_truth_when_every_source_does((w, sources) in agreeing()) {
@@ -329,6 +361,16 @@ mod tests {
                 let m = w.combine(&sources).expect("truechimers are a majority");
                 let truth = w.truth(w.now);
                 prop_assert!(w.holds_truth_at(m, w.now), "{m:?} misses {truth}");
+            }
+
+            #[test]
+            fn holds_the_truth_or_is_unknown((w, sources) in wide()) {
+                let m = w.combine(&sources).expect("every bound holds the truth");
+                let truth = w.truth(w.now);
+                prop_assert!(
+                    m.error() == MAX_ERROR || w.holds_truth_at(m, w.now),
+                    "{m:?} misses {truth}"
+                );
             }
 
             #[test]

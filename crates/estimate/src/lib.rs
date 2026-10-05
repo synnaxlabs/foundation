@@ -39,7 +39,7 @@ pub use overlap::Overlap;
 pub enum Error {
     /// An error bound is negative or more than 36500 days.
     Bound {
-        /// The error bound.
+        /// The error bound, or the largest span when the bound is wider.
         error: Span,
     },
     /// A drift rate is more than 10%.
