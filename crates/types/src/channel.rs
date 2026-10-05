@@ -53,6 +53,10 @@ impl FromStr for Key {
     type Err = crate::ParseError;
 
     /// Reads a hyphenated UUID string, in either case.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::ParseError`] when `s` is not 8-4-4-4-12 hex digits with hyphens.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         crate::uuid::read(s).map(Self)
     }
@@ -101,22 +105,42 @@ mod tests {
     mod v7 {
         use super::*;
 
+        fn check(time: Stamp, random: u128, expected: &str) {
+            assert_eq!(Key::v7(time, random).to_string(), expected);
+        }
+
         #[test]
         fn matches_the_rfc_example() {
-            let key = Key::v7(millis(EXAMPLE_MILLIS), EXAMPLE_RANDOM);
-            assert_eq!(key.to_string(), EXAMPLE);
+            check(millis(EXAMPLE_MILLIS), EXAMPLE_RANDOM, EXAMPLE);
         }
 
         #[test]
         fn keeps_whole_milliseconds() {
             let later = millis(EXAMPLE_MILLIS) + Span::from_nanos(999_999);
-            assert_eq!(Key::v7(later, EXAMPLE_RANDOM).to_string(), EXAMPLE);
+            check(later, EXAMPLE_RANDOM, EXAMPLE);
+        }
+
+        #[test]
+        fn keeps_all_74_random_bits() {
+            check(
+                millis(EXAMPLE_MILLIS),
+                u128::MAX,
+                "017f22e2-79b0-7fff-bfff-ffffffffffff",
+            );
         }
 
         #[test]
         fn ignores_random_bits_past_the_low_74() {
-            let random = EXAMPLE_RANDOM | u128::MAX << 74;
-            assert_eq!(Key::v7(millis(EXAMPLE_MILLIS), random).to_string(), EXAMPLE);
+            check(
+                millis(EXAMPLE_MILLIS),
+                EXAMPLE_RANDOM | u128::MAX << 74,
+                EXAMPLE,
+            );
+        }
+
+        #[test]
+        fn accepts_the_epoch() {
+            check(Stamp::EPOCH, 0, "00000000-0000-7000-8000-000000000000");
         }
 
         #[test]
@@ -125,6 +149,25 @@ mod tests {
         )]
         fn panics_before_the_epoch() {
             let _key = Key::v7(Stamp::from_nanos(-1), 0);
+        }
+
+        proptest! {
+            #[test]
+            fn has_the_version_and_variant(ms in 0..MAX_MILLIS, random in any::<u128>()) {
+                let bits = Key::v7(millis(ms), random).as_u128();
+                prop_assert_eq!(bits >> 76 & 0xf, 7);
+                prop_assert_eq!(bits >> 62 & 0b11, 0b10);
+                prop_assert_eq!(bits >> 80, u128::try_from(ms).unwrap());
+            }
+
+            #[test]
+            fn later_milliseconds_sort_later(
+                ms in 0..MAX_MILLIS,
+                a in any::<u128>(),
+                b in any::<u128>(),
+            ) {
+                prop_assert!(Key::v7(millis(ms), a) < Key::v7(millis(ms + 1), b));
+            }
         }
     }
 
@@ -162,30 +205,13 @@ mod tests {
                 );
             }
         }
-    }
 
-    proptest! {
-        #[test]
-        fn keys_round_trip(bits in any::<u128>()) {
-            let key = Key::from_u128(bits);
-            prop_assert_eq!(key.to_string().parse(), Ok(key));
-        }
-
-        #[test]
-        fn has_the_version_and_variant(ms in 0..MAX_MILLIS, random in any::<u128>()) {
-            let bits = Key::v7(millis(ms), random).as_u128();
-            prop_assert_eq!(bits >> 76 & 0xf, 7);
-            prop_assert_eq!(bits >> 62 & 0b11, 0b10);
-            prop_assert_eq!(bits >> 80, u128::try_from(ms).unwrap());
-        }
-
-        #[test]
-        fn later_milliseconds_sort_later(
-            ms in 0..MAX_MILLIS,
-            a in any::<u128>(),
-            b in any::<u128>(),
-        ) {
-            prop_assert!(Key::v7(millis(ms), a) < Key::v7(millis(ms + 1), b));
+        proptest! {
+            #[test]
+            fn keys_round_trip(bits in any::<u128>()) {
+                let key = Key::from_u128(bits);
+                prop_assert_eq!(key.to_string().parse(), Ok(key));
+            }
         }
     }
 }
