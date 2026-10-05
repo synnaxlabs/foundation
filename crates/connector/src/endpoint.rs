@@ -94,12 +94,7 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq + fmt::Debug, T> Registry<K, S, T
                     if *open == settings {
                         Poll::Ready(Ok(Claim::Shared(endpoint)))
                     } else {
-                        Poll::Ready(Err(Error::Config(vec![Diagnostic::new(
-                            SETTINGS,
-                            None,
-                            format!("the endpoint {key:?} is open with other settings: {open:?}"),
-                            "Give every connector on this endpoint the same settings".into(),
-                        )])))
+                        Poll::Ready(Err(unequal(&key, open)))
                     }
                 }
             }
@@ -226,6 +221,15 @@ impl<K: Ord, S, T> Drop for Free<'_, K, S, T> {
             wake(busy);
         }
     }
+}
+
+fn unequal(key: &impl fmt::Debug, open: &impl fmt::Debug) -> Error {
+    Error::Config(vec![Diagnostic::new(
+        SETTINGS,
+        None,
+        format!("the endpoint {key:?} is open with other settings: {open:?}"),
+        "Give every connector on this endpoint the same settings".into(),
+    )])
 }
 
 fn wake<S, T>(slot: Option<Slot<S, T>>) {
