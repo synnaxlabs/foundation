@@ -429,23 +429,20 @@ impl Raft {
     }
 
     // Takes back a removed node that campaigns at this leader's term: it did not
-    // learn the commit of its leave. Its PreVote names the end of its log, and when
-    // that position is in this log the node is a peer again from there, so
-    // replication brings it the leave and `release_removed` releases it.
+    // learn the commit of its leave. The node is a peer again, probed from the end
+    // of its log or of this one, whichever is shorter, so replication brings it the
+    // leave and `release_removed` releases it.
     fn readmit(&mut self, from: node::Key, term: Term, last: Position) {
         if self.role != Role::Leader
             || Some(term) != self.term.next()
             || self.peers.contains_key(&from)
-            || self.log.at(last.index) != Some(last)
         {
             return;
         }
-        let mut peer = Peer::new(last.index);
-        peer.progress.accepted(last.index);
+        let mut peer = Peer::new(last.index.min(self.log.last().index));
         peer.active = true;
         self.peers.insert(from, peer);
-        self.release_removed();
-        self.catch_up(from);
+        self.send_appends(from..=from);
     }
 
     // A follower commits what the heartbeat says, so it names only entries the
@@ -2351,9 +2348,9 @@ mod tests {
         }
 
         // Node 3 was released, but what it got last was lost, so it campaigns. The
-        // leader takes it back from the position its PreVote names, when that
-        // position is in the leader's log: a node that holds the leave gets the
-        // commit, a node behind it gets the entries.
+        // leader takes it back and probes it from the end of node 3's log, or of
+        // its own when node 3's is longer. Node 3 holds the leave, so its answer
+        // brings the commit and the release.
         #[test]
         fn a_removed_node_that_campaigns_gets_what_it_missed() {
             let mut raft = leader();
@@ -2365,34 +2362,35 @@ mod tests {
                 term: Term(term),
                 index,
             };
+            let probe = |prev| Body::Append {
+                prev,
+                entries: Vec::new(),
+                commit: 3,
+            };
             raft.step(message(3, 2, Body::PreVote { last: at(1, 3) }))
                 .unwrap();
             let messages = sent(&mut raft);
             assert_eq!(to(&messages), [key(3)]);
             assert_eq!(messages[0].term, Term(1));
+            assert_eq!(messages[0].body, probe(at(1, 3)));
+            accept(&mut raft, &[3], 3);
+            let messages = sent(&mut raft);
+            assert_eq!(to(&messages), [key(3)]);
             assert_eq!(messages[0].body, Body::Heartbeat { commit: 3 });
-            // A PreVote from another term, a log that differs, and a voter's
-            // disruptive PreVote get nothing.
+            // A PreVote from another term and a voter's disruptive PreVote get
+            // nothing.
             raft.step(message(3, 3, Body::PreVote { last: at(1, 3) }))
-                .unwrap();
-            raft.step(message(3, 2, Body::PreVote { last: at(2, 3) }))
                 .unwrap();
             raft.step(message(2, 2, Body::PreVote { last: at(1, 3) }))
                 .unwrap();
             assert_eq!(sent(&mut raft), []);
-            raft.step(message(3, 2, Body::PreVote { last: at(1, 1) }))
+            // A longer log, from a leader this one replaced, is probed from the end
+            // of this log.
+            raft.step(message(3, 2, Body::PreVote { last: at(2, 5) }))
                 .unwrap();
             let messages = sent(&mut raft);
             assert_eq!(to(&messages), [key(3)]);
-            let entries = raft.log.slice(2, 2);
-            assert_eq!(
-                messages[0].body,
-                Body::Append {
-                    prev: at(1, 1),
-                    entries,
-                    commit: 3,
-                }
-            );
+            assert_eq!(messages[0].body, probe(at(1, 3)));
             assert_eq!(raft.role(), Role::Leader);
         }
 

@@ -788,8 +788,8 @@ How to read this record:
   answered nothing over a whole quorum check period is released at that check instead.
   A follower releases the removed nodes when the leave commits. A removed node that
   campaigns at the leader's term did not learn the commit: the leader takes it back
-  as a peer from the position its PreVote names, when that position is in the
-  leader's log, so it gets the leave and is released again. A leader outside the
+  as a peer and probes it from the end of its log, so it gets the leave and is
+  released again. A leader outside the
   committed final set sends the commit and steps down. A node outside an uncommitted
   configuration still campaigns: the entry may be truncated, and a removed leader that
   lost its lead before the leave reached a peer is the only node that can win the

@@ -263,6 +263,7 @@ fn a_removed_node_whose_release_is_lost_gets_the_commit_when_it_campaigns() {
         [
             (ELECTION - 1, key(1), Body::PreVote { last: end }),
             (ELECTION - 1, key(2), Body::PreVote { last: end }),
+            (ELECTION - 1, key(1), Body::AppendReply { last: 3 }),
             (ELECTION - 1, key(1), Body::HeartbeatReply),
         ]
     );
@@ -372,4 +373,88 @@ fn a_removed_leader_that_restarts_before_the_leave_commits_finishes_the_change()
     };
     assert_eq!(a.voters(), &new);
     assert_eq!(b.voters(), &new);
+}
+
+// Whether a message crosses between the sides {1, 4} and {2, 3}.
+fn crosses(message: &Message) -> bool {
+    let side = |at: node::Key| at == key(1) || at == key(4);
+    side(message.from) != side(message.to)
+}
+
+// Node 4 is removed. It holds the leave and an entry after it that only leader 1
+// sent it, while nodes 2 and 3 hold the leave but not its commit. Node 2 then wins
+// term 2 with node 3's vote, so node 4's last position is not in the new leader's
+// log. After the network mends, node 4 must still learn the commit of its leave and
+// stop campaigning.
+#[test]
+fn a_removed_node_whose_last_entry_the_new_leader_lacks_stops_campaigning() {
+    let mut nodes: BTreeMap<node::Key, Raft> = (1..=4)
+        .map(|id| (key(id), node(id, &[1, 2, 3, 4])))
+        .collect();
+    let mut lost = Vec::new();
+    nodes.get_mut(&key(1)).unwrap().campaign();
+    run(&mut nodes);
+    assert_eq!(nodes[&key(1)].role(), Role::Leader);
+    nodes
+        .get_mut(&key(1))
+        .unwrap()
+        .propose_voters(set(&[1, 2, 3]))
+        .unwrap();
+    // Nodes 2 and 3 take the leave, but their answers are lost, so the leave does
+    // not commit. Node 4 takes the leave too.
+    let (committed, _) = run_holding(&mut nodes, &mut lost, |m| {
+        m.from != key(4) && m.body == Body::AppendReply { last: 3 }
+    });
+    assert_eq!(lost.len(), 2);
+    // The joint entry is committed; the leave is not.
+    assert_eq!(committed[&key(1)].len(), 1);
+    assert_eq!(committed[&key(1)][0].at.index, 2);
+    let new = Voters {
+        incoming: set(&[1, 2, 3]),
+        outgoing: BTreeSet::new(),
+    };
+    for id in 1..=4 {
+        assert_eq!(nodes[&key(id)].voters(), &new, "node {id}");
+    }
+    lost.clear();
+
+    // The network splits: {1, 4} and {2, 3}. Leader 1 proposes an entry that only
+    // node 4 gets.
+    nodes.get_mut(&key(1)).unwrap().propose(vec![7]).unwrap();
+    run_holding(&mut nodes, &mut lost, crosses);
+    assert_eq!(lost.len(), 2, "{lost:?}");
+    lost.clear();
+
+    // Nodes 2 and 3 time out and elect node 2 in term 2, which commits the leave.
+    for _ in 0..3 * ELECTION {
+        nodes.get_mut(&key(2)).unwrap().tick(0);
+        nodes.get_mut(&key(3)).unwrap().tick(3);
+        run_holding(&mut nodes, &mut lost, crosses);
+    }
+    assert_eq!(
+        (nodes[&key(2)].role(), nodes[&key(2)].term()),
+        (Role::Leader, Term(2))
+    );
+    assert_eq!(nodes[&key(3)].leader(), Some(key(2)));
+
+    // The network mends.
+    let mut from_4 = Vec::new();
+    for round in 0..8 * ELECTION {
+        for node in nodes.values_mut() {
+            node.tick(0);
+        }
+        let (_, sent) = run(&mut nodes);
+        from_4.extend(
+            sent.iter()
+                .filter(|m| m.from == key(4))
+                .map(|m| (round, m.to, m.term, m.body.clone())),
+        );
+    }
+    let late: Vec<&(u32, node::Key, Term, Body)> = from_4
+        .iter()
+        .filter(|(round, ..)| *round >= 4 * ELECTION)
+        .collect();
+    assert_eq!(nodes[&key(1)].leader(), Some(key(2)));
+    assert_eq!(nodes[&key(4)].leader(), Some(key(2)), "{late:?}");
+    assert_eq!(late, Vec::<&(u32, node::Key, Term, Body)>::new());
 }
