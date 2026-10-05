@@ -98,9 +98,12 @@ Most of the cost is context size per turn, so keep each context small:
 A connector kind starts with its protocol codec and its device simulator, which need
 only layer 1. It moves onto the `connector` contract when that surface merges.
 
-Sessions on the two machines talk through Remote Control. Turn it on for every new
-session in `/config` ("Enable Remote Control for all sessions"), or run
-`/remote-control` in a running one.
+The factory host runs on a second Claude account, so `SendMessage` and Remote Control
+cannot reach its sessions. Each host session has an open issue titled
+`inbox:<name>`, and the coordinator has `inbox:coordinator`. A message is one comment
+on the receiver's inbox. A host session reads its inbox once per loop run and
+writes to `inbox:coordinator`. The coordinator relays between laptop and host
+sessions. Records still go into issues, PRs, and docs first.
 
 Two first surfaces have a named reviewer besides the coordinator: `consensus` reviews
 `document`, because `spec` uses it; `simulation` reviews `transport`, because `sim`
@@ -263,6 +266,9 @@ from the person's account. Fix a dependency with a local patch
 (`docs/dependencies.md`).
 
 ## Escalate to the person when
+
+Ask in a few short, plain sentences: what breaks, why, the fix, and your default. Never
+use a multi-select dropdown.
 
 - a change touches a locked decision, a contract, or an oracle;
 - two sessions still disagree after one exchange;

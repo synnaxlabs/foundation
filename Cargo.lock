@@ -126,6 +126,7 @@ dependencies = [
 name = "buffer"
 version = "0.0.0"
 dependencies = [
+ "block",
  "crc32c",
  "proptest",
  "types",
@@ -347,6 +348,8 @@ dependencies = [
 name = "delivery"
 version = "0.0.0"
 dependencies = [
+ "block",
+ "counting",
  "divan",
  "proptest",
  "types",
@@ -1394,6 +1397,9 @@ name = "types"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "block",
+ "counting",
+ "divan",
  "proptest",
 ]
 
