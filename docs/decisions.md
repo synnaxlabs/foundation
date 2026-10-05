@@ -169,13 +169,13 @@ How to read this record:
   blocks are 64-byte aligned; R9-D4 variable-length series are `ends[n]` then data;
   R9-D5 `types` is byte layout only and meaning lives in the spec; R9-D6 `time::Span`
   value and `duration` keyword; R9-D7 JSON uses RFC 3339 UTC with 9 fraction digits,
-  span unit strings, and keys as UUID strings, and never appears on the data path;
-  R9-D8 exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal
-  overflow and checked math for outside values; R9-D13 `types` modules are time,
-  sample, series, frame, channel, node, quality, name, hash (R16-7), and authority
-  (#57: `access`, `spec`, `wire`, and `control` all use it); R9-D14 checks
-  run once, at the home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block`
-  module (by SRP PASS).
+  span unit strings, and keys as UUID strings, and never appears on the data path; R9-D8
+  exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal overflow
+  and checked math for outside values; R9-D13 `types` modules are time, sample, series,
+  frame, channel, node, quality, name, hash (R16-7), authority (#57: `access`, `spec`,
+  `wire`, and `control` all use it), and digest (the BLAKE3 address of spec chunks and
+  blobs, which `spec`, `blob`, `wire`, and `mesh` share); R9-D14 checks run once, at the
+  home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block` module (by SRP PASS).
 - **MODEL MAP (current)** Data channel -> index, -> quality (optional), -> data type,
   -> unit. Index -> error channel (optional), -> control channel (optional). Type ->
   other types; types never point at channels. Policies -> names through selectors;
