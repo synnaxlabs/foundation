@@ -506,13 +506,14 @@ fn a_batch_is_queued_whole_or_not_at_all() {
     run(6, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(3 * BLOCK, 8183), &mut slots)
+            .open(layout(4 * BLOCK, 8183), &mut slots)
             .await
             .expect("opens");
         let a = slots.assign(key(1));
+        let first = Parts::from(shard.block(5000));
         let parts = Parts::from(shard.block(3900));
         buffer
-            .append([entry(1, a, Path::Live, 0, 1, None, parts.clone())])
+            .append([entry(1, a, Path::Live, 0, 1, None, first)])
             .expect("the first record has room");
         let full = buffer.append([
             entry(1, a, Path::Live, 1, 1, None, parts.clone()),
@@ -531,7 +532,7 @@ fn a_batch_is_queued_whole_or_not_at_all() {
         drop(buffer);
         let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(3 * BLOCK, 8183), &mut slots)
+            .open(layout(4 * BLOCK, 8183), &mut slots)
             .await
             .expect("reopens");
         assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(1, None));
