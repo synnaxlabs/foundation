@@ -157,17 +157,18 @@ impl Connection {
                     Err(Fault(reason)) => events.push_back(self.fault(now, reason)),
                 }
             }
-            noq_proto::Event::DatagramReceived if self.live() => {
+            noq_proto::Event::DatagramReceived => {
+                // noq-proto gives it before stream events, and none after it closes,
+                // so it never follows a fault or close of ours.
                 assert!(
                     self.connected(),
-                    "invariant: noq-proto gives datagrams only after it connects"
+                    "invariant: noq-proto gives datagrams only on an open connection"
                 );
                 self.datagrams.pull(&mut self.inner, pool, key, events);
             }
             noq_proto::Event::HandshakeDataReady
             | noq_proto::Event::HandshakeConfirmed
             | noq_proto::Event::Stream(_)
-            | noq_proto::Event::DatagramReceived
             | noq_proto::Event::DatagramsUnblocked
             | noq_proto::Event::Path(_)
             | noq_proto::Event::NatTraversal(_) => {}
