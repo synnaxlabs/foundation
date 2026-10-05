@@ -49,8 +49,8 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   files, sockets, `process::exit`), the std blocking waits (`park`, `Condvar`,
   `Barrier`, `mpsc` receive), std `HashMap`, `HashSet`, `RandomState`, `thread_local!`,
   and `env::wall::Wall::now` outside `clock`. Only `os` implements the `env` seams and
-  calls the OS clock, files, randomness, and threads. `transport` owns its sockets. Only
-  `node` reads arguments and exits. Each such call carries one `#[expect]`.
+  calls the OS clock, files, sockets, randomness, and threads. Only `node` reads
+  arguments and exits. Each such call carries one `#[expect]`.
 - A crate's `[lints]` table cannot add to the workspace set, so stricter lints go at
   the top of `lib.rs` as `#![deny(...)]` (r16 63):
   - Decoders of outside input (`codec`, `wire`, `document`, `config-hcl`, and each

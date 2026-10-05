@@ -18,6 +18,7 @@ approval; pin the version you build against there.
 | `rustls` | `transport` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
 | `aws-lc-rs` | `transport`, signing | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
+| `hcl-edit` | `config-hcl` | Parse HCL and keep its formatting (r3 section 2); our own checker compiles the tree | MIT or Apache-2.0 | 0.9.7 | 2026-10-04 |
 
 ## Tests, benchmarks, and tools
 
