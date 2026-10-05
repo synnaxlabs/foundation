@@ -778,6 +778,11 @@ mod tests {
 
         fn append(&mut self, body: &[u8]) -> Result<Plan, Full> {
             let plan = self.writer.append(body.len())?;
+            assert_eq!(plan.offset % AREA, plan.place, "the offset is at the place");
+            assert!(
+                plan.offset >= self.head.offset,
+                "the offset is at or past the head"
+            );
             let (sealed, chain) = plan.seal(self.head.chain, [body]);
             self.apply(&sealed, body, true);
             self.head = Position {

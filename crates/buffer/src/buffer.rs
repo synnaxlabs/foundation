@@ -23,12 +23,11 @@ use types::channel::{Slot, Slots};
 use types::frame::Path;
 use types::time::Span;
 
-use crate::durable::Logs;
 use crate::entry::{self, Entry};
 use crate::group::{Closed, Group, Limit, META_LEN, Rejected, Sealed};
 use crate::header::{self, Header};
+use crate::log::{self, Logs, Tail};
 use crate::record::{self, ALIGN, AREA_START, Body};
-use crate::tails::{self, Tail, Tails};
 use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 
 /// What one shard's buffer is given at open.
@@ -208,10 +207,8 @@ struct State {
     spares: Vec<Group>,
     /// Closed groups the task writes at its next deadline.
     queue: Vec<Closed>,
-    /// With every appended entry.
-    tails: Tails,
-    /// With every synced entry, and the records that hold each path.
-    durable: Logs,
+    /// Where each path stands, and the records that hold it.
+    logs: Logs,
     /// How many deadlines took the groups to write.
     taken: u64,
     /// How many deadlines synced what they took.
@@ -238,13 +235,13 @@ impl State {
         self.queue.push(full.close(&mut self.writer));
     }
 
-    /// Moves the durable logs past the synced `sealed` groups and keeps their
+    /// Moves the durable tails past the synced `sealed` groups and keeps their
     /// records as spares.
     fn synced(&mut self, sealed: impl Iterator<Item = Sealed>) {
         for record in sealed {
             for (&slot, header) in record.slots().iter().zip(record.headers()) {
-                self.durable
-                    .advance(slot, header, record.offset())
+                self.logs
+                    .sync(slot, header, record.offset())
                     .expect("invariant: append checked the entry");
             }
             self.spares.push(record.clear());
@@ -307,13 +304,13 @@ impl Buffer {
         };
         let header = read_header(&file, &pool, &entropy, layout).await?;
         let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
-        let mut durable = Logs::default();
+        let mut logs = Logs::default();
         loop {
             let Window { place, len } = cursor.window();
             let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
             let offset = cursor.offset();
             match cursor.next(&bytes)? {
-                Step::Data(body) => recover(body, offset, slots, &mut durable)?,
+                Step::Data(body) => recover(body, offset, slots, &mut logs)?,
                 Step::Moved | Step::More => {}
                 Step::End => break,
             }
@@ -330,8 +327,7 @@ impl Buffer {
                 open: Group::default(),
                 spares: Vec::new(),
                 queue: Vec::new(),
-                tails: durable.tails(),
-                durable,
+                logs,
                 taken: 0,
                 commits: 0,
                 wakers: Vec::new(),
@@ -353,13 +349,13 @@ impl Buffer {
     /// Where `path` of the index at `slot` stands, with every appended entry.
     #[must_use]
     pub fn tail(&self, slot: Slot, path: Path) -> Tail {
-        self.shared.state.borrow().tails.get(slot, path)
+        self.shared.state.borrow().logs.appended(slot, path)
     }
 
     /// Where `path` of the index at `slot` stands on disk.
     #[must_use]
     pub fn durable(&self, slot: Slot, path: Path) -> Tail {
-        self.shared.state.borrow().durable.tail(slot, path)
+        self.shared.state.borrow().logs.durable(slot, path)
     }
 
     /// Queues every entry of `entries` for the next group commit, or none, and
@@ -401,8 +397,8 @@ impl Buffer {
         }
         for entry in entries {
             state
-                .tails
-                .advance(entry.slot, &entry.header())
+                .logs
+                .append(entry.slot, &entry.header())
                 .unwrap_or_else(|invalid| panic!("invariant: {invalid}"));
         }
         let parked = state.parked.take();
@@ -485,20 +481,21 @@ async fn read_header(
     Ok(header)
 }
 
-/// Advances the durable logs past the entries of a record body at `offset`.
+/// Feeds the logs the entries of a record body at `offset`, as appended and
+/// synced.
 fn recover(
     body: Body<'_>,
     offset: u64,
     slots: &mut Slots,
-    durable: &mut Logs,
+    logs: &mut Logs,
 ) -> Result<(), Error> {
     let unread = |_: entry::Invalid| Error::Invalid { offset };
-    let misplaced = |_: tails::Invalid| Error::Invalid { offset };
+    let misplaced = |_: log::Invalid| Error::Invalid { offset };
     for header in entry::parse(body.start, body.len).map_err(unread)? {
         let header = header.map_err(unread)?;
-        durable
-            .advance(slots.assign(header.index), &header, offset)
-            .map_err(misplaced)?;
+        let slot = slots.assign(header.index);
+        logs.append(slot, &header).map_err(misplaced)?;
+        logs.sync(slot, &header, offset).map_err(misplaced)?;
     }
     Ok(())
 }
@@ -656,7 +653,7 @@ mod tests {
     use types::time::Stamp;
 
     use super::*;
-    use crate::durable::Run;
+    use crate::log::Run;
 
     const COMMIT: Span = Span::from_nanos(1_000_000);
 
@@ -681,7 +678,7 @@ mod tests {
     }
 
     /// Runs `main` on a shard of `node` with a buffer on the node's files, then
-    /// gives the durable logs the buffer ended with.
+    /// gives the logs the buffer ended with.
     fn with_buffer<F>(
         sim: &mut sim::Sim,
         node: &sim::node::Node,
@@ -718,8 +715,8 @@ mod tests {
                 let mut slots = Slots::new();
                 let buffer = Buffer::open(config, &mut slots).await.expect("opens");
                 let buffer = main(buffer, slots, pool).await;
-                let durable = buffer.shared.state.borrow().durable.clone();
-                *ended.lock().expect("no panic held the lock") = Some(durable);
+                let logs = buffer.shared.state.borrow().logs.clone();
+                *ended.lock().expect("no panic held the lock") = Some(logs);
             })
             .expect("the shard starts");
         sim.run().expect("the run ends");
@@ -765,7 +762,8 @@ mod tests {
         assert_eq!(live, [run(0, 4096), run(6, 8192), run(12, 12288)]);
         let backfill: Vec<Run> = written.runs(Slot::new(1), Path::Backfill).collect();
         assert_eq!(backfill, [run(0, 4096), run(3, 8192), run(6, 12288)]);
-        assert_eq!(written.tail(Slot::new(0), Path::Live).seq, 15);
+        assert_eq!(written.durable(Slot::new(0), Path::Live).seq, 15);
+        assert_eq!(written.appended(Slot::new(0), Path::Live).seq, 15);
         let walked =
             with_buffer(
                 &mut sim,

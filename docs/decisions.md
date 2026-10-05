@@ -381,8 +381,9 @@ How to read this record:
   wrong shape.
   For each path, memory holds one run per data record with an entry of it: the
   `first` of the path's first entry in the record and the record's offset, oldest
-  first, 16 bytes per record and path, so at most 16/51 of the area. The recovery
-  walk and each sync feed the runs in ring order; a read starts from them (#510).
+  first, 16 bytes per record and path in a deque that doubles, so at most 32/51
+  of the area. The recovery walk and each sync feed the runs in ring order; a
+  read starts from them (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
