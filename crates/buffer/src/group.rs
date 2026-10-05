@@ -132,11 +132,7 @@ impl Group {
             self.wrap = Some(wrap);
         }
         for entry in batch {
-            let len = entry.parts.iter().map(|part| part.len()).sum::<usize>();
-            let Ok(bytes) = u32::try_from(len) else {
-                unreachable!("invariant: the body of {len} bytes is under the maximum");
-            };
-            self.headers.push(entry.header(bytes));
+            self.headers.push(entry.header());
             self.slots.push(entry.slot);
             self.writes.extend(entry.parts.iter().cloned());
         }
@@ -306,7 +302,7 @@ mod tests {
         }
     }
 
-    /// The entry that `push` makes `header` from; `bytes` is set at the push.
+    /// The entry that `push` makes `header` from; `bytes` comes from the parts.
     fn entry(header: Header, parts: &[Block]) -> Entry<'_> {
         Entry {
             index: header.index,

@@ -51,8 +51,17 @@ pub(crate) struct Entry<'a> {
 }
 
 impl Entry<'_> {
-    /// The header of this entry, with `bytes` as the size of its parts.
-    pub(crate) fn header(&self, bytes: u32) -> Header {
+    /// The header of this entry, with the size of its parts.
+    ///
+    /// # Panics
+    ///
+    /// When the parts hold more than `u32::MAX` bytes: a group checks the body
+    /// before it takes the entry.
+    pub(crate) fn header(&self) -> Header {
+        let len = self.parts.iter().map(|part| part.len()).sum::<usize>();
+        let Ok(bytes) = u32::try_from(len) else {
+            unreachable!("invariant: the entry of {len} bytes is under the maximum");
+        };
         Header {
             index: self.index,
             path: self.path,
