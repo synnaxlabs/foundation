@@ -1072,8 +1072,18 @@ How to read this record:
   connectors, policies, and access. Most specific pattern wins; equal specificity is a
   plan error; `explain` shows each effective value and its source. A rename can move a
   channel under other policies, and `plan` shows it. Current policy kinds: retention,
-  placement, transmission, compression, reduction, time, access, and secret store.
-  Targets and combination rules: X25, X26. Specificity: SPECIFICITY (#3).
+  placement, transmission, compression, reduction, time, access, secret store, and node
+  settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
+  SPECIFICITY (#3).
+- **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
+  that selects node names: `node_settings { select = "site-a/*" disk = "200 GiB" }`.
+  A node that no policy selects computes a default from its free disk and memory at
+  start, so a mesh with no policy works. Before it reads the spec, a node uses the last
+  budget it applied, which it keeps in its data directory; the first start uses the
+  default. The data directory is node-local: a start argument of `foundation`, with a
+  default, because the spec is stored in it. Node-local config for the budgets lost:
+  `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
+  decided on 2026-10-05 ("Yeah mesh node"), #342.
 
 ### 1.12 Access, identity, and secrets
 
@@ -1529,7 +1539,7 @@ Storage classes used in the table:
 | Mesh clock state | Memory per node; published as `<node>.clock.offset` and `.clock.error` | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
 | Operation table | Binary | The build | CLI, MCP, embedded docs | `ops` |
 | Node key material | Node-local disk | `node` at join | `transport`, `node` | `node` |
-| Per-node settings (disk budget, pool budget, data directory) | Open (5.1) | | `buffer`, `block` | Open |
+| Per-node settings (disk budget, pool budget, data directory) | Budgets: a policy in the spec; data directory: a start argument (NODE SETTINGS) | `apply`; whoever starts the node | `buffer`, `block` | `node` |
 | SDK guide, JSON schemas for editors | Generated from kinds and the operation table | `ops`, `init` | Agents, editors | `ops` |
 
 ---
@@ -2128,18 +2138,16 @@ Parameters and later choices, recorded and not asked:
 
 4. Struct template storage: whether the spec stores templates and instance records for
    SDK code generation and `export`.
-5. Per-node settings (disk budget, pool budget, data directory): node-local config or a
-   policy that selects node names.
-6. The transmission policy target: links, indexes, or both (B6).
-7. Upgrades across regions: which region holds the desired version and the format
+5. The transmission policy target: links, indexes, or both (B6).
+6. Upgrades across regions: which region holds the desired version and the format
    flag, and how finalization waits for every region (BQ18, C9d).
-8. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
+7. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
    path.
-9. A20: whether a channel may carry a default max age.
-10. A3: partial-segment wildcards.
-11. A13: bounded lists.
-12. D3: license, free tier, monetization.
-13. D5: a plugin system.
+8. A20: whether a channel may carry a default max age.
+9. A3: partial-segment wildcards.
+10. A13: bounded lists.
+11. D3: license, free tier, monetization.
+12. D5: a plugin system.
 
 ### 5.2 Settled under a delegation
 
