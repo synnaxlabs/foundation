@@ -5,11 +5,15 @@ use crate::{Drift, Measurement};
 /// The fastest the served offset moves, in parts per million of local time.
 const RATE_PPM: u64 = 500;
 
+/// The largest gap to a target's earliest offset that mesh time slews across: one
+/// second of slew. Past it, mesh time steps.
+const STEP_GAP: Span = Span::from_nanos(500_000);
+
 /// Mesh time that moves toward a target estimate at no more than 500 ppm, or steps
-/// forward to it when its whole interval is ahead. It never goes back. Mesh time at a
-/// local reading is the reading plus the offset served there. The part of the target
-/// not yet applied goes into the error, so the estimate holds the true offset while
-/// the slew runs. Every value is valid.
+/// forward when it is more than 500 us behind every offset the target allows. It
+/// never goes back. Mesh time at a local reading is the reading plus the offset served
+/// there. The part of the target not yet applied goes into the error, so the estimate
+/// holds the true offset while the slew runs. Every value is valid.
 ///
 /// ```
 /// use estimate::{Drift, Measurement, Slew};
@@ -21,10 +25,11 @@ const RATE_PPM: u64 = 500;
 /// };
 /// let still = Drift::from_ppb(0).expect("valid");
 /// let first = Slew::new(estimate(Span::ZERO, Span::MILLISECOND));
-/// let slew = first.toward(second, still, estimate(Span::MILLISECOND, Span::ZERO));
-/// let m = slew.at(Monotonic(2_000_000_000), still);
 /// let half = Span::from_nanos(500_000);
-/// assert_eq!((m.offset(), m.error()), (half, half));
+/// let slew = first.toward(second, still, estimate(half, Span::ZERO));
+/// let m = slew.at(Monotonic(1_500_000_000), still);
+/// let quarter = Span::from_nanos(250_000);
+/// assert_eq!((m.offset(), m.error()), (quarter, quarter));
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slew {
@@ -49,23 +54,30 @@ impl Slew {
     }
 
     /// Moves toward `target` from the offset served at `now`, for a local clock that
-    /// drifts from mesh time by at most `drift`. When every offset `target` allows at
-    /// `now` is above every offset `self` allows there, the result steps to `target`
-    /// at once. Each error counts with its full growth, past 36500 days. Mesh time
-    /// from the result at or after `now` is never earlier than mesh time from `self`
-    /// at or before `now`.
+    /// drifts from mesh time by at most `drift`. When the served offset is more than
+    /// 500 us below the earliest offset `target` allows at `now`, the result steps to
+    /// that earliest offset at once. The target's error counts with its full growth,
+    /// past 36500 days. Mesh time from the result at or after `now` is never earlier
+    /// than mesh time from `self` at or before `now`.
     #[must_use]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "the earliest offset is above the served one and at most the target's"
+    )]
     pub fn toward(self, now: Monotonic, drift: Drift, target: Measurement) -> Self {
+        let served = self.served(now);
         let (earliest, _) = target.bounds_at(now, drift);
-        let (_, latest) = self.bounds_at(now, drift);
-        let from = if earliest > latest {
-            target.offset()
+        let from = if earliest - i128::from(served) > i128::from(STEP_GAP.nanos()) {
+            let fits = i64::try_from(earliest);
+            fits.unwrap_or_else(|_| {
+                panic!("invariant: offset {earliest}ns is not an i64")
+            })
         } else {
-            Span::from_nanos(self.served(now))
+            served
         };
         Self {
             start: now,
-            from,
+            from: Span::from_nanos(from),
             target,
         }
     }
@@ -105,6 +117,7 @@ impl Slew {
 mod tests {
     use types::time::{Monotonic, Span};
 
+    use super::STEP_GAP;
     use crate::measurement::MAX_ERROR;
     use crate::{Drift, Measurement, Slew};
 
@@ -126,7 +139,7 @@ mod tests {
         (m.offset().nanos(), m.error().nanos())
     }
 
-    /// Offset zero, known within a second, so that a target within a second slews.
+    /// Offset zero, known within a second.
     fn unsure() -> Slew {
         Slew::new(estimate(0, 0, 1_000_000_000))
     }
@@ -159,8 +172,8 @@ mod tests {
         #[test]
         fn keeps_mesh_time_when_the_target_changes() {
             assert_eq!(check(unsure(), SECOND_NS, 0), (0, 1_000_000_000));
-            let after = from_zero(1_000_000);
-            assert_eq!(check(after, SECOND_NS, 0), (0, 1_000_000));
+            let after = from_zero(500_000);
+            assert_eq!(check(after, SECOND_NS, 0), (0, 500_000));
             let start = (after.start, after.from);
             assert_eq!(start, (Monotonic(SECOND_NS), Span::ZERO));
         }
@@ -168,31 +181,31 @@ mod tests {
         #[test]
         fn continues_from_the_offset_served_mid_slew() {
             let now = Monotonic(2 * SECOND_NS);
-            let slew = from_zero(1_000_000).toward(now, drift(0), estimate(0, 0, 0));
-            assert_eq!(slew.from, Span::from_nanos(500_000));
-            assert_eq!(check(slew, 2 * SECOND_NS, 0), (500_000, 500_000));
+            let slew = from_zero(-1_000_000).toward(now, drift(0), estimate(0, 0, 0));
+            assert_eq!(slew.from, Span::from_nanos(-500_000));
+            assert_eq!(check(slew, 2 * SECOND_NS, 0), (-500_000, 500_000));
         }
 
         #[test]
         fn moves_500_microseconds_in_a_second() {
-            let forward = from_zero(1_000_000);
-            assert_eq!(check(forward, 2 * SECOND_NS, 0), (500_000, 500_000));
+            let forward = from_zero(500_000);
+            assert_eq!(check(forward, 3 * SECOND_NS / 2, 0), (250_000, 250_000));
             let back = from_zero(-1_000_000);
             assert_eq!(check(back, 2 * SECOND_NS, 0), (-500_000, 500_000));
         }
 
         #[test]
         fn rounds_the_served_offset_down() {
-            let slew = from_zero(1_000_000);
-            assert_eq!(check(slew, SECOND_NS + 1_999, 0), (0, 1_000_000));
-            assert_eq!(check(slew, SECOND_NS + 2_000, 0), (1, 999_999));
+            let slew = from_zero(500_000);
+            assert_eq!(check(slew, SECOND_NS + 1_999, 0), (0, 500_000));
+            assert_eq!(check(slew, SECOND_NS + 2_000, 0), (1, 499_999));
         }
 
         #[test]
         fn stops_at_the_target() {
-            let forward = from_zero(1_000_000);
-            assert_eq!(check(forward, 3 * SECOND_NS, 0), (1_000_000, 0));
-            assert_eq!(check(forward, 100 * SECOND_NS, 0), (1_000_000, 0));
+            let forward = from_zero(500_000);
+            assert_eq!(check(forward, 2 * SECOND_NS, 0), (500_000, 0));
+            assert_eq!(check(forward, 100 * SECOND_NS, 0), (500_000, 0));
             let back = from_zero(-1_000_000);
             assert_eq!(check(back, 3 * SECOND_NS, 0), (-1_000_000, 0));
             assert_eq!(check(back, 100 * SECOND_NS, 0), (-1_000_000, 0));
@@ -201,85 +214,84 @@ mod tests {
         #[test]
         fn adds_the_part_not_applied_to_the_drifted_error() {
             let now = Monotonic(SECOND_NS);
-            let target = estimate(SECOND_NS, 1_000_000, 10);
+            let target = estimate(SECOND_NS, -1_000_000, 10);
             let slew = unsure().toward(now, drift(0), target);
             let error = 500_000 + 10 + 1_000;
-            assert_eq!(check(slew, 2 * SECOND_NS, 1_000), (500_000, error));
+            assert_eq!(check(slew, 2 * SECOND_NS, 1_000), (-500_000, error));
         }
 
         #[test]
-        fn steps_to_an_estimate_wholly_ahead() {
-            let slew = near_zero(111, 0);
+        fn steps_only_past_a_gap_of_500_microseconds() {
+            assert_eq!(near_zero(500_010, 0).from, Span::ZERO);
+            assert_eq!(near_zero(500_011, 0).from, Span::from_nanos(500_001));
+        }
+
+        #[test]
+        fn steps_to_the_earliest_offset() {
+            let slew = near_zero(1_000_000, 0);
             let start = (slew.start, slew.from);
-            assert_eq!(start, (Monotonic(SECOND_NS), Span::from_nanos(111)));
-            assert_eq!(check(slew, SECOND_NS, 0), (111, 10));
+            assert_eq!(start, (Monotonic(SECOND_NS), Span::from_nanos(999_990)));
+            assert_eq!(check(slew, SECOND_NS, 0), (999_990, 20));
+            assert_eq!(check(slew, SECOND_NS + 20_000, 0), (1_000_000, 10));
         }
 
+        /// A node with no real-time clock starts an hour behind, with a bound wide
+        /// enough to hold the new estimate.
         #[test]
-        fn slews_toward_an_estimate_that_overlaps() {
-            assert_eq!(near_zero(110, 0).from, Span::ZERO);
-            assert_eq!(check(near_zero(110, 0), SECOND_NS, 0), (0, 120));
-        }
-
-        #[test]
-        fn counts_drift_before_it_steps() {
-            assert_eq!(near_zero(120, 10).from, Span::ZERO);
-            assert_eq!(near_zero(121, 10).from, Span::from_nanos(121));
+        fn steps_when_the_estimates_overlap() {
+            let hour = Span::HOUR.nanos();
+            let slew = Slew::new(estimate(0, 0, 2 * hour));
+            let target = estimate(SECOND_NS, hour, 1_000_000);
+            let next = slew.toward(Monotonic(SECOND_NS), drift(0), target);
+            assert_eq!(next.from, Span::from_nanos(hour - 1_000_000));
         }
 
         #[test]
         fn never_steps_back() {
-            let slew = near_zero(-1_000, 0);
+            let hour = Span::HOUR.nanos();
+            let slew = near_zero(-hour, 0);
             assert_eq!(slew.from, Span::ZERO);
-            assert_eq!(check(slew, SECOND_NS, 0), (0, 1_010));
+            assert_eq!(check(slew, SECOND_NS, 0), (0, hour + 10));
         }
 
+        /// The target is from time zero, so at one second its error has grown by
+        /// 1000 ns.
         #[test]
-        fn steps_only_past_the_whole_served_estimate() {
-            let now = 2 * SECOND_NS;
-            let back = from_zero(-1_000_000);
-            assert_eq!(check(back, now, 0), (-500_000, 500_000));
-            let next = |offset| {
-                back.toward(Monotonic(now), drift(0), estimate(now, offset, 10))
-            };
-            assert_eq!(next(10).from, Span::from_nanos(-500_000));
-            assert_eq!(next(11).from, Span::from_nanos(11));
-        }
-
-        #[test]
-        fn compares_both_estimates_at_now() {
+        fn counts_the_growth_of_the_target_to_now() {
             let slew = Slew::new(estimate(0, 0, 100));
             let next = |offset| {
-                let target = estimate(2 * SECOND_NS, offset, 10);
-                slew.toward(Monotonic(SECOND_NS), drift(10), target).from
-            };
-            assert_eq!(next(130), Span::ZERO);
-            assert_eq!(next(131), Span::from_nanos(131));
-        }
-
-        /// The slew back reaches its target at 3 s, after which a target at -600 us
-        /// is wholly ahead. At `now` it is not, so mesh time does not step back.
-        #[test]
-        fn compares_mid_slew_at_now() {
-            let now = Monotonic(2 * SECOND_NS);
-            let target = estimate(4 * SECOND_NS, -600_000, 10);
-            let slew = from_zero(-1_000_000).toward(now, drift(0), target);
-            assert_eq!(slew.from, Span::from_nanos(-500_000));
-        }
-
-        /// Readers see the served error stop at 36500 days, but its full growth still
-        /// reaches a target 500 ns past that, so mesh time slews.
-        #[test]
-        fn compares_full_growth_past_36500_days() {
-            let widest = MAX_ERROR.nanos();
-            let slew = Slew::new(estimate(0, 0, widest));
-            assert_eq!(check(slew, SECOND_NS, 1_000), (0, widest));
-            let next = |offset| {
-                let target = estimate(SECOND_NS, offset, 0);
+                let target = estimate(0, offset, 10);
                 slew.toward(Monotonic(SECOND_NS), drift(1_000), target).from
             };
-            assert_eq!(next(widest + 500), Span::ZERO);
-            assert_eq!(next(widest + 1_001), Span::from_nanos(widest + 1_001));
+            assert_eq!(next(501_010), Span::ZERO);
+            assert_eq!(next(501_011), Span::from_nanos(500_001));
+        }
+
+        /// Mid-slew, the offset served at two seconds is -500 us.
+        #[test]
+        fn compares_the_offset_served_at_now() {
+            let now = 2 * SECOND_NS;
+            let slew = from_zero(-1_000_000);
+            let next = |offset| {
+                slew.toward(Monotonic(now), drift(0), estimate(now, offset, 0))
+                    .from
+            };
+            assert_eq!(next(0), Span::from_nanos(-500_000));
+            assert_eq!(next(1), Span::from_nanos(1));
+        }
+
+        /// Readers see the target's error stop at 36500 days, but with its full growth
+        /// the earliest offset is only 500 us ahead, so mesh time slews.
+        #[test]
+        fn counts_full_growth_past_36500_days() {
+            let widest = MAX_ERROR.nanos();
+            let slew = Slew::new(estimate(0, 0, 0));
+            let next = |offset| {
+                let target = estimate(0, offset, widest);
+                slew.toward(Monotonic(SECOND_NS), drift(1_000), target).from
+            };
+            assert_eq!(next(widest + 501_000), Span::ZERO);
+            assert_eq!(next(widest + 501_001), Span::from_nanos(500_001));
         }
 
         #[test]
@@ -358,18 +370,17 @@ mod tests {
         }
 
         /// A slew, three readings, a drift, and a new target at the middle reading.
-        /// Half the targets have an earliest offset there within 2 ns of the slew's
-        /// latest, where a step starts.
+        /// Half the targets have an earliest offset there within 2 ns of 500 us past
+        /// the served offset, where a step starts.
         fn retarget() -> impl Strategy<Value = (Slew, [u64; 3], Drift, Measurement)> {
             (slew(), readings(), 0..=100_000_000_u32).prop_flat_map(|(s, r, ppb)| {
                 let drift = Drift::from_ppb(ppb).expect("valid");
                 let now = Monotonic(r[1]);
-                let served = s.at(now, drift);
-                let latest = served.offset().nanos() + served.error().nanos();
+                let edge = s.at(now, drift).offset().nanos() + STEP_GAP.nanos();
                 let near = (0..TIME_NS, 0..ERROR_NS, -2..=2_i64).prop_map(
                     move |(at, error, gap)| {
                         let grown = estimate(at, 0, error).error_at(now, drift);
-                        estimate(at, latest + grown.nanos() + gap, error)
+                        estimate(at, edge + grown.nanos() + gap, error)
                     },
                 );
                 (Just(s), Just(r), Just(drift), prop_oneof![target(), near])
@@ -389,21 +400,18 @@ mod tests {
                 prop_assert!(at_switch(s) <= at_switch(next));
             }
 
-            /// Errors stay far below 36500 days, where readers see the edges that
+            /// Errors stay far below 36500 days, where readers see the edge that
             /// `toward` compares.
             #[test]
-            fn steps_only_to_a_target_wholly_ahead(
+            fn steps_only_past_a_gap_of_500_microseconds(
                 (s, [_, switch, _], drift, target) in retarget(),
             ) {
                 let now = Monotonic(switch);
-                let edges = |m: Measurement| {
-                    let offset = i128::from(m.offset().nanos());
-                    let error = i128::from(m.error_at(now, drift).nanos());
-                    (offset - error, offset + error)
-                };
-                let served = s.at(now, drift);
-                let ahead = edges(target).0 > edges(served).1;
-                let expected = if ahead { target.offset() } else { served.offset() };
+                let served = s.at(now, drift).offset().nanos();
+                let error = target.error_at(now, drift).nanos();
+                let earliest = target.offset().nanos() - error;
+                let step = earliest - served > STEP_GAP.nanos();
+                let expected = Span::from_nanos(if step { earliest } else { served });
                 let next = s.toward(now, drift, target);
                 prop_assert_eq!(next.at(now, drift).offset(), expected);
             }

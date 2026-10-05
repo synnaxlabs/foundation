@@ -19,7 +19,8 @@ fn main() {
 
     let estimate = |offset, error| Measurement::new(Monotonic(0), offset, error);
     let first = estimate(Span::ZERO, Span::MILLISECOND).expect("valid");
-    let target = estimate(Span::MILLISECOND, Span::MICROSECOND).expect("valid");
+    let back = Span::from_nanos(-Span::MILLISECOND.nanos());
+    let target = estimate(back, Span::MICROSECOND).expect("valid");
     let (m, allocations) = ALLOCATOR.count(|| {
         let slew = Slew::new(first).toward(Monotonic(0), Drift::UNDISCIPLINED, target);
         slew.at(Monotonic(1_000_000_000), Drift::UNDISCIPLINED)
@@ -27,7 +28,7 @@ fn main() {
     assert_eq!(allocations, 0, "the hot path allocated");
     assert_eq!(
         (m.offset(), m.error()),
-        (Span::from_nanos(500_000), Span::from_nanos(701_000)),
+        (Span::from_nanos(-500_000), Span::from_nanos(701_000)),
         "the slew reads back mid-way"
     );
 }

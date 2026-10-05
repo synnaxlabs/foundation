@@ -498,7 +498,7 @@ How to read this record:
   NIC hardware clock (kept by ptp4l), and the OS daemon. No PTP client in v1. Device
   clock fitting (DAQmx, LabJack) is a connector-library component that writes residual
   error to the index's error channel. Amended by MESH SLEW: mesh time also steps
-  forward to an estimate whose whole interval is ahead of it.
+  forward when it is more than 500 us behind every offset an estimate allows.
 - **TIME ADAPTERS** Neutral model `Measurement { at: local monotonic, offset, error }`.
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
@@ -576,22 +576,25 @@ How to read this record:
   `push` returns the holdover and its cause, and `node` publishes it. The next majority
   ends the holdover. Decided by the `time` builder (#142).
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
-  estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The
-  part not yet applied goes into the error, so a slew of 1 s takes 2000 s and its
-  error says so. Mesh time steps forward to an estimate when the estimate's whole
-  interval is ahead of mesh time's whole interval: the estimate's earliest true time
-  is later than mesh time's latest true time. That proves mesh time is behind. Mesh
-  time never steps back. A clock in holdover keeps its slew. Cost: mesh time that is
-  ahead, or behind with an interval that overlaps the estimate, still slews. After a
-  stale first estimate that is ahead, or a Windows OS clock alone under OS CLOCK
-  BOUND (its error is unknown, so each estimate overlaps it), a correction of 1 h
-  takes 83 days and one of 1 day about 5.5 years, with a true error the whole time. A
-  majority of falsetickers wholly ahead steps mesh time into the future, and it does
-  not come back. That is outside the fault model. Lost: a frequency loop (a PLL, as
-  in ntpd), because R6 bounds drift with an error that grows and a PLL can overshoot;
-  the slew private in `clock`, because it is decision logic in layer 2. Amends R6 TIME
+  estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
+  not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
+  so. When the offset served at `now` is more than 500 us (1 s of slew) below the
+  earliest offset the new estimate allows at `now`, mesh time steps forward to that
+  earliest offset. In every other case it slews. Mesh time never steps back. A clock in
+  holdover keeps its slew. Cost: mesh time that is ahead still slews. After a stale
+  first estimate that is ahead, or for an estimate with an unknown error (a Windows OS
+  clock alone under OS CLOCK BOUND, whose earliest offset is 36500 days back), a
+  correction of 1 h takes 83 days and one of 1 day about 5.5 years, with a true error
+  the whole time. A majority of falsetickers more than 500 us ahead steps mesh time into
+  the future, and it does not come back. That is outside the fault model. Lost: a
+  frequency loop (a PLL, as in ntpd), because R6 bounds drift with an error that grows
+  and a PLL can overshoot; the slew private in `clock`, because it is decision logic in
+  layer 2; a step only when the estimate's whole interval is ahead of mesh time's,
+  because when both bounds hold the intervals overlap and it never fires. Amends R6 TIME
   LOCKED ("slew only") and r6 Q3 item 6 ("Step forward only at startup"). The person
-  decided on 2026-10-05 ("Ok 225 mesh slew approved"), with the forward step.
+  decided on 2026-10-05 ("Ok 225 mesh slew approved"), with the forward step. The person
+  changed the forward step on 2026-10-05 ("I think (b)"), because the first rule never
+  fires when both bounds hold.
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
