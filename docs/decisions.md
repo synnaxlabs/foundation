@@ -2289,3 +2289,12 @@ The first wave builds the riskiest pieces in parallel: `block` and `ring` (`memo
 (`simulation`). The second wave adds `control`, `delivery`, `access`, then `buffer`,
 `home`, and `replica` for a single-node write path measured against P1, then
 `transport`, `mesh`, `clock`, and `hub`.
+
+**FIRST SLICE (2026-10-05)** Before more features, one thin slice runs end to end: two
+nodes in `sim` on the real `transport`, a writer on node A writes one channel, its home
+stores it, and a reader on node B gets the same values in the same order. It goes
+through a minimal `mesh` (the members and the home of one index, no snapshots) and a
+minimal `hub` (one writer and one reader session). Access, config files, and failover
+wait until its acceptance scenario passes. The plan and owners are on #462. The person
+decided on 2026-10-05 ("Yes, let's do that", relayed by `advisor`): slower is fine, if
+the system is solid.

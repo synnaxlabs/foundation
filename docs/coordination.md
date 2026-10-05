@@ -73,14 +73,13 @@ Most of the cost is context size per turn, so keep each context small:
 | `data-path` | Opus | `types`, `codec`, `wire` |
 | `consensus` | Fable | `raft`, `spec`, then `mesh`, `blob` |
 | `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark |
-| `write-path` | Opus | `control`, `delivery`, then `home` |
+| `write-path` | Opus | `control`, `delivery`, `home`, then `hub` (#462) |
 | `storage` | Fable | `buffer`, then `replica` |
 | `time` | Opus | `estimate`, then `clock` |
 | `config` | Opus | `document`, `config-hcl`, then `config` |
 | `network` | Opus | `transport` |
 | `advisor` | Opus | Answers design questions; writes no code here |
 | **Factory host** | | |
-| `hub` | Fable | `hub`; starts after `home`'s write path and `mesh`'s snapshot and watch |
 | `connector` | Opus | `connector` (the kind contract, supervisor, `ctx`, components) |
 | `access` | Opus | `secret`, then `access` after `spec` (#43) |
 | `ops` | Opus | `node` first as a walking skeleton for `verify`, then `ops` |
