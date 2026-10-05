@@ -2,15 +2,23 @@
 //! can be cut, simulated devices and stores, and the operator's front ends. Each
 //! method with a `todo!` waits on the surface it names.
 
+use std::future::poll_fn;
+use std::io::IoSliceMut;
+use std::net::SocketAddr;
 use std::ops::Range;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use env::net::udp;
 use types::time::Span;
 
 /// A whole mesh on one deterministic simulation.
 #[derive(Debug)]
 pub(crate) struct Lab {
     sim: sim::Sim,
+    /// The link that [`Lab::heal`] puts back.
+    link: sim::link::Config,
     members: Vec<Member>,
 }
 
@@ -78,12 +86,13 @@ pub(crate) struct Command {
 impl Lab {
     /// Builds an empty mesh whose run replays from `key`.
     pub(crate) fn new(key: u64) -> Self {
-        let sim = sim::Sim::new(sim::Config {
+        let config = sim::Config {
             seed: key,
             ..sim::Config::default()
-        });
+        };
         Self {
-            sim,
+            sim: sim::Sim::new(config),
+            link: config.link,
             members: Vec::new(),
         }
     }
@@ -104,13 +113,13 @@ impl Lab {
 
     /// Sets the disk budget of `node` to `bytes`.
     pub(crate) fn limit(&mut self, _node: Node, _bytes: u64) {
-        todo!("waits on the buffer budget in node")
+        todo!("waits on the per-node disk budget, open in decisions 5.1 item 5")
     }
 
     /// The disk budget that holds `span` of one `f64` channel at `rate` samples per
     /// second, as `buffer` stores it.
-    pub(crate) fn bytes(&self, _rate: u64, _span: Duration) -> u64 {
-        todo!("waits on the buffer budget in node")
+    pub(crate) fn budget(&self, _rate: u64, _span: Duration) -> u64 {
+        todo!("waits on the per-node disk budget, open in decisions 5.1 item 5")
     }
 
     /// Creates a single-use join ticket on `admin`.
@@ -242,7 +251,7 @@ impl Lab {
         todo!("waits on connector-influx")
     }
 
-    /// Cuts every link between `a` and `b`.
+    /// Cuts every link between `a` and `b`. Datagrams in flight still arrive.
     pub(crate) fn cut(&mut self, a: Node, b: Node) {
         let config = sim::link::Config {
             loss: 1.0,
@@ -253,7 +262,7 @@ impl Lab {
 
     /// Restores every link between `a` and `b`.
     pub(crate) fn heal(&mut self, a: Node, b: Node) {
-        self.link(a, b, sim::link::Config::default());
+        self.link(a, b, self.link);
     }
 
     fn link(&mut self, a: Node, b: Node, config: sim::link::Config) {
@@ -297,12 +306,77 @@ impl Lab {
 #[test]
 fn nodes_start_run_and_stop() {
     let mut lab = Lab::new(1);
-    let cloud = lab.start("cloud");
-    let edge = lab.start("edge");
-    lab.run(Duration::from_secs(1));
-    lab.cut(edge, cloud);
-    lab.run(Duration::from_secs(1));
-    lab.heal(edge, cloud);
+    lab.start("cloud");
+    lab.start("edge");
     lab.run(Duration::from_secs(1));
     lab.stop();
+}
+
+/// Sends one datagram every 100 ms, from 50 ms to 2,950 ms, from `node` to `peer`,
+/// and counts the datagrams that reach `node`.
+fn chatter(lab: &Lab, node: Node, peer: Node) -> Arc<AtomicU64> {
+    let at = |n: Node| SocketAddr::new(lab.members[n.0].host.addresses()[0], 9000);
+    let host = &lab.members[node.0].host;
+    let (mut sender, mut receiver) = host
+        .net()
+        .udp(&udp::Config {
+            local: at(node),
+            send_buffer_bytes: 1 << 16,
+            recv_buffer_bytes: 1 << 16,
+        })
+        .unwrap();
+    let shard = |name: &str| env::shards::Config {
+        name: name.into(),
+        core: None,
+    };
+    let millis = |n: i64| Span::from_nanos(n * Span::MILLISECOND.nanos());
+    let (clock, to) = (host.clock(), at(peer));
+    let send = host.shards().start(shard("send"), move |_| async move {
+        clock.sleep(millis(50)).await;
+        for _ in 0..30 {
+            let transmit = udp::Transmit {
+                destination: to,
+                source: None,
+                ecn: None,
+                contents: b"ping",
+                segment: None,
+            };
+            poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+            clock.sleep(millis(100)).await;
+        }
+    });
+    let count = Arc::new(AtomicU64::new(0));
+    let tally = Arc::clone(&count);
+    let receive = host.shards().start(shard("receive"), move |_| async move {
+        let mut bytes = [0; 64];
+        let mut meta = [udp::Meta::default()];
+        loop {
+            poll_fn(|cx| {
+                let mut buffers = [IoSliceMut::new(&mut bytes)];
+                receiver.poll_recv(cx, &mut buffers, &mut meta)
+            })
+            .await
+            .unwrap();
+            let datagrams = meta[0].len / meta[0].stride.max(1);
+            tally.fetch_add(datagrams as u64, Ordering::Relaxed);
+        }
+    });
+    drop((send.unwrap(), receive.unwrap()));
+    count
+}
+
+#[test]
+fn a_cut_drops_datagrams_both_ways_until_heal() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    let (at_a, at_b) = (chatter(&lab, a, b), chatter(&lab, b, a));
+    let counts = || [&at_a, &at_b].map(|c| c.load(Ordering::Relaxed));
+    lab.run(Duration::from_secs(1));
+    assert_eq!(counts(), [10, 10], "before the cut");
+    lab.cut(a, b);
+    lab.run(Duration::from_secs(1));
+    assert_eq!(counts(), [10, 10], "during the cut");
+    lab.heal(a, b);
+    lab.run(Duration::from_secs(1));
+    assert_eq!(counts(), [20, 20], "after the heal");
 }

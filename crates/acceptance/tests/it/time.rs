@@ -35,4 +35,5 @@ fn every_sample_carries_a_time_error_bound_that_holds_true_time() {
             "{time:?} is {true_ns}±{bound}"
         );
     }
+    lab.stop();
 }

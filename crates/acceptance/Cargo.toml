@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 
 [dev-dependencies]
+env = { path = "../env" }
 node = { path = "../node" }
 sim = { path = "../sim" }
 types = { path = "../types" }

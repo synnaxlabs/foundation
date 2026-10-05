@@ -13,7 +13,8 @@ fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
     let mut lab = Lab::new(1);
     let cloud = lab.start("cloud");
     let edge = lab.start("edge");
-    let bytes = lab.bytes(RATE, budget);
+    lab.limit(cloud, 1 << 40);
+    let bytes = lab.budget(RATE, budget);
     lab.limit(edge, bytes);
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
@@ -26,10 +27,10 @@ fn check(budget: Duration) -> (Received, std::ops::Range<u64>) {
     lab.run(HOUR);
     lab.heal(edge, cloud);
     lab.run(HOUR);
-    (
-        lab.stored("influx", "edge.value"),
-        lab.written("edge.value"),
-    )
+    let stored = lab.stored("influx", "edge.value");
+    let written = lab.written("edge.value");
+    lab.stop();
+    (stored, written)
 }
 
 #[test]

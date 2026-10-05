@@ -18,4 +18,5 @@ fn two_nodes_join_by_ticket_and_agree_on_the_spec() {
     }
     assert_ne!(lab.spec(cloud), before, "apply changed the spec");
     assert_eq!(lab.spec(edge), lab.spec(cloud), "edge holds the new spec");
+    lab.stop();
 }

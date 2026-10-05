@@ -36,4 +36,5 @@ fn a_subject_without_authority_cannot_command_and_the_audit_records_who_did() {
         (4.0, Some(4.0)),
         "value and ack"
     );
+    lab.stop();
 }

@@ -37,6 +37,7 @@ fn check(front: Front) {
     assert_eq!(lab.read(node, "admin", "site.temp").samples, 1, "applied");
     let changes = plan_and_apply(&mut lab, node, front);
     assert_eq!(changes, Vec::<String>::new(), "second plan");
+    lab.stop();
 }
 
 #[test]

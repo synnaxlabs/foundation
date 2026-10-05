@@ -23,6 +23,7 @@ fn check(protocol: Protocol, hcl: &str) {
     let audit = lab.audit(edge, "dev.q");
     assert_eq!(audit.len(), 1, "audit {audit:?}");
     assert_eq!(audit[0].ack, Some(7.0), "ack");
+    lab.stop();
 }
 
 #[test]
@@ -67,4 +68,5 @@ fn influx_receives_every_sample_the_edge_writes() {
     assert_eq!(stored.seqs, Some(lab.written("edge.value")), "seqs");
     assert!(stored.contiguous, "contiguous");
     assert_eq!(stored.gaps, [], "gaps");
+    lab.stop();
 }
