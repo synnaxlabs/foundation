@@ -9,7 +9,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use divan::Bencher;
-use types::channel::Slot;
+use types::channel;
 use types::frame::key_set::{Group, Interner, KeySet};
 use types::frame::{self, Draft, Form, Frame, Path};
 use types::sample::{Scalar, Type};
@@ -35,8 +35,8 @@ impl fmt::Display for Case {
     }
 }
 
-fn slot(n: usize) -> Slot {
-    Slot::new(u32::try_from(n).expect("the cases use few slots"))
+fn key(n: usize) -> channel::Key {
+    channel::Key::from_u128(u128::try_from(n).expect("the cases use few keys"))
 }
 
 fn case(name: &'static str, set: Arc<KeySet>, series: Vec<(usize, usize)>) -> Case {
@@ -55,17 +55,17 @@ fn case(name: &'static str, set: Arc<KeySet>, series: Vec<(usize, usize)>) -> Ca
 
 fn cases() -> Vec<Case> {
     let mut interner = Interner::new();
-    let dense: Vec<_> = (1..16).map(|n| (slot(n), F64)).collect();
-    let wide: Vec<_> = (1..100_000).map(|n| (slot(n), F64)).collect();
+    let dense: Vec<_> = (1..16).map(|n| (key(n), F64)).collect();
+    let wide: Vec<_> = (1..100_000).map(|n| (key(n), F64)).collect();
     let private: Vec<_> = (0..100_000)
         .map(|n| Group {
-            index: slot(n),
+            index: key(n),
             data: &[],
         })
         .collect();
     let one = |data| {
         [Group {
-            index: slot(0),
+            index: key(0),
             data,
         }]
     };
