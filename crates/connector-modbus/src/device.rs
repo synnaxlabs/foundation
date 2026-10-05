@@ -3,12 +3,7 @@
 
 use std::ops::Range;
 
-use crate::Error;
-use crate::pdu::{self, Request, Table};
-
-const ILLEGAL_FUNCTION: u8 = 1;
-const ILLEGAL_ADDRESS: u8 = 2;
-const ILLEGAL_VALUE: u8 = 3;
+use crate::pdu::{Exception, Request, Table};
 
 /// The four tables of one device. An address at or above a table's length is not
 /// in the device.
@@ -34,6 +29,10 @@ impl Device {
     /// `IllegalAddress`. A write that gets an exception changes nothing. An empty
     /// PDU has no function to answer, so `out` is unchanged.
     ///
+    /// One check is stricter than the specification: a function 15 request whose
+    /// last data byte has an unused bit set gets `IllegalValue`, so a test catches
+    /// a client that sends one.
+    ///
     /// # Panics
     ///
     /// Only on a bug in this crate: a request decode error that no request PDU
@@ -42,25 +41,20 @@ impl Device {
         let Some(&function) = pdu.first() else {
             return;
         };
-        let code = match Request::decode(pdu) {
-            Ok(request) => match self.apply(function, &request, out) {
+        let exception = match Request::decode(pdu) {
+            Ok(request) => match self.apply(&request, out) {
                 Some(()) => return,
-                None => ILLEGAL_ADDRESS,
+                None => Exception::IllegalAddress,
             },
-            Err(error) => exception(&error),
+            Err(error) => Exception::of(&error),
         };
-        out.extend_from_slice(&[function | pdu::EXCEPTION, code]);
+        exception.write_to(function, out);
     }
 
     /// Does a valid request and appends its reply, or gives `None` with `self`
     /// and `out` unchanged when the request's range is not in the device.
-    fn apply(
-        &mut self,
-        function: u8,
-        request: &Request,
-        out: &mut Vec<u8>,
-    ) -> Option<()> {
-        let fields = match request {
+    fn apply(&mut self, request: &Request, out: &mut Vec<u8>) -> Option<()> {
+        match request {
             Request::Read {
                 table,
                 start,
@@ -68,62 +62,34 @@ impl Device {
             } => {
                 let span = span(*start, usize::from(*count));
                 match table {
-                    Table::Coils => read_bits(function, self.coils.get(span)?, out),
+                    Table::Coils => request.reply_bits(self.coils.get(span)?, out),
                     Table::DiscreteInputs => {
-                        read_bits(function, self.discrete_inputs.get(span)?, out);
+                        request.reply_bits(self.discrete_inputs.get(span)?, out);
                     }
                     Table::HoldingRegisters => {
-                        read_registers(
-                            function,
-                            self.holding_registers.get(span)?,
-                            out,
-                        );
+                        request.reply_registers(self.holding_registers.get(span)?, out);
                     }
                     Table::InputRegisters => {
-                        read_registers(function, self.input_registers.get(span)?, out);
+                        request.reply_registers(self.input_registers.get(span)?, out);
                     }
                 }
                 return Some(());
             }
             Request::WriteCoil { address, value } => {
-                *self.coils.get_mut(usize::from(*address))? = *value;
-                [*address, pdu::coil(*value)]
+                write(&mut self.coils, *address, &[*value])?;
             }
             Request::WriteRegister { address, value } => {
-                *self.holding_registers.get_mut(usize::from(*address))? = *value;
-                [*address, *value]
+                write(&mut self.holding_registers, *address, &[*value])?;
             }
             Request::WriteCoils { start, values } => {
                 write(&mut self.coils, *start, values)?;
-                [*start, pdu::count(values)]
             }
             Request::WriteRegisters { start, values } => {
                 write(&mut self.holding_registers, *start, values)?;
-                [*start, pdu::count(values)]
             }
-        };
-        out.push(function);
-        pdu::put(out, fields);
-        Some(())
-    }
-}
-
-/// The exception code the specification gives for a request that is not valid.
-fn exception(error: &Error) -> u8 {
-    match error {
-        Error::Function(_) => ILLEGAL_FUNCTION,
-        Error::Range { .. } => ILLEGAL_ADDRESS,
-        Error::Size { .. }
-        | Error::Count { .. }
-        | Error::ByteCount { .. }
-        | Error::Padding(_)
-        | Error::Coil(_) => ILLEGAL_VALUE,
-        Error::Protocol(_)
-        | Error::Length(_)
-        | Error::Answer { .. }
-        | Error::Echo { .. } => {
-            unreachable!("invariant: a request PDU never gives {error}")
         }
+        request.reply_written(out);
+        Some(())
     }
 }
 
@@ -137,20 +103,6 @@ fn write<T: Copy>(table: &mut [T], start: u16, values: &[T]) -> Option<()> {
         .get_mut(span(start, values.len()))?
         .copy_from_slice(values);
     Some(())
-}
-
-fn read_bits(function: u8, bits: &[bool], out: &mut Vec<u8>) {
-    out.push(function);
-    out.push(pdu::byte_count(pdu::data_bytes(true, bits.len())));
-    out.extend(bits.chunks(8).map(pdu::pack));
-}
-
-fn read_registers(function: u8, registers: &[u16], out: &mut Vec<u8>) {
-    out.push(function);
-    out.push(pdu::byte_count(pdu::data_bytes(false, registers.len())));
-    for register in registers {
-        out.extend_from_slice(&register.to_be_bytes());
-    }
 }
 
 #[cfg(test)]

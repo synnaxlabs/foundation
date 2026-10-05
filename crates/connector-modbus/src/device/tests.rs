@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 
 use super::*;
-use crate::pdu::{Exception, Reply};
+use crate::pdu::Reply;
 
 fn bits(bytes: &[u8], count: usize) -> Vec<bool> {
     bytes
@@ -93,21 +93,24 @@ fn writes_as_the_specification_gives() {
 }
 
 #[test]
-fn refuses_a_request_with_the_exception_the_specification_gives() {
-    let cases: [(&[u8], [u8; 2]); 13] = [
+fn refuses_a_request_that_is_not_valid() {
+    let cases: [(&[u8], [u8; 2]); 15] = [
         (&[0x2B, 0x0E], [0xAB, 1]),
         (&[0x85], [0x85, 1]),
         (&[0x03, 0x00, 0x00, 0x00], [0x83, 3]),
         (&[0x01, 0x00, 0x00, 0x00, 0x00], [0x81, 3]),
         (&[0x05, 0x00, 0x01, 0x00, 0x01], [0x85, 3]),
         (&[0x10, 0x00, 0x00, 0x00, 0x02, 0x03, 0, 0, 0], [0x90, 3]),
-        (&[0x0F, 0x00, 0x00, 0x00, 0x01, 0x01, 0xFF], [0x8F, 3]),
         (&[0x10, 0xFF, 0xFF, 0x00, 0x02, 0x03, 0, 0, 0], [0x90, 3]),
+        (&[0x10, 0xFF, 0xFF, 0x00, 0x02, 0x04, 0, 0], [0x90, 3]),
         (&[0x03, 0xFF, 0xFF, 0x00, 0x02], [0x83, 2]),
         (&[0x03, 0x00, 0x6C, 0x00, 0x03], [0x83, 2]),
         (&[0x05, 0x00, 0xC8, 0xFF, 0x00], [0x85, 2]),
         (&[0x06, 0x00, 0x6E, 0x00, 0x01], [0x86, 2]),
         (&[0x10, 0x00, 0x6D, 0x00, 0x02, 0x04, 0, 1, 0, 1], [0x90, 2]),
+        // Stricter than the specification, which does not check the unused bits.
+        (&[0x0F, 0x00, 0x00, 0x00, 0x01, 0x01, 0xFF], [0x8F, 3]),
+        (&[0x0F, 0xFF, 0xFF, 0x00, 0x02, 0x01, 0xFF], [0x8F, 3]),
     ];
     let mut device = example();
     for (request, reply) in cases {
@@ -117,36 +120,43 @@ fn refuses_a_request_with_the_exception_the_specification_gives() {
     assert_eq!(answer(&mut device, &[]), [], "an empty PDU gets no reply");
 }
 
+const BITS: u16 = 2500;
+const REGISTERS: u16 = 400;
+
 /// A request that `Request::encode` accepts, near the device's tables.
 fn request() -> impl Strategy<Value = Request> {
-    let tables = prop_oneof![
-        Just(Table::Coils),
-        Just(Table::DiscreteInputs),
-        Just(Table::HoldingRegisters),
-        Just(Table::InputRegisters),
-    ];
+    let bits = prop_oneof![Just(Table::Coils), Just(Table::DiscreteInputs)];
+    let registers =
+        prop_oneof![Just(Table::HoldingRegisters), Just(Table::InputRegisters)];
     prop_oneof![
-        (tables, 0..=300_u16, 1..=125_u16).prop_map(|(table, start, count)| {
-            Request::Read {
-                table,
-                start,
-                count,
-            }
-        }),
-        (0..=300_u16, any::<bool>())
-            .prop_map(|(address, value)| Request::WriteCoil { address, value }),
-        (0..=300_u16, any::<u16>())
-            .prop_map(|(address, value)| Request::WriteRegister { address, value }),
-        (0..=300_u16, prop::collection::vec(any::<bool>(), 1..=125))
-            .prop_map(|(start, values)| Request::WriteCoils { start, values }),
-        (0..=300_u16, prop::collection::vec(any::<u16>(), 1..=123))
-            .prop_map(|(start, values)| Request::WriteRegisters { start, values }),
+        (bits, 0..=BITS, 1..=2000_u16),
+        (registers, 0..=REGISTERS, 1..=125_u16),
     ]
+    .prop_map(|(table, start, count)| Request::Read {
+        table,
+        start,
+        count,
+    })
+    .boxed()
+    .prop_union(
+        prop_oneof![
+            (0..=BITS, any::<bool>())
+                .prop_map(|(address, value)| Request::WriteCoil { address, value }),
+            (0..=REGISTERS, any::<u16>()).prop_map(|(address, value)| {
+                Request::WriteRegister { address, value }
+            }),
+            (0..=BITS, prop::collection::vec(any::<bool>(), 1..=1968))
+                .prop_map(|(start, values)| Request::WriteCoils { start, values }),
+            (0..=REGISTERS, prop::collection::vec(any::<u16>(), 1..=123))
+                .prop_map(|(start, values)| Request::WriteRegisters { start, values }),
+        ]
+        .boxed(),
+    )
 }
 
 fn device() -> impl Strategy<Value = Device> {
-    let bits = || prop::collection::vec(any::<bool>(), 0..=400);
-    let registers = || prop::collection::vec(any::<u16>(), 0..=400);
+    let bits = || prop::collection::vec(any::<bool>(), 0..=usize::from(BITS));
+    let registers = || prop::collection::vec(any::<u16>(), 0..=usize::from(REGISTERS));
     (bits(), bits(), registers(), registers()).prop_map(
         |(coils, discrete_inputs, holding_registers, input_registers)| Device {
             coils,
@@ -157,14 +167,34 @@ fn device() -> impl Strategy<Value = Device> {
     )
 }
 
-fn span(start: u16, count: usize) -> std::ops::Range<usize> {
-    usize::from(start)..usize::from(start).saturating_add(count)
+/// Where `address` sits in the `count` addresses from `start`, if it does.
+fn offset(address: usize, start: u16, count: usize) -> Option<usize> {
+    address
+        .checked_sub(usize::from(start))
+        .filter(|&offset| offset < count)
 }
 
+/// The values at the `count` addresses from `start`, or `None` when one is not in
+/// `table`.
+fn get<T: Copy>(table: &[T], start: u16, count: usize) -> Option<Vec<T>> {
+    let values: Vec<T> = table
+        .iter()
+        .enumerate()
+        .filter(|&(address, _)| offset(address, start, count).is_some())
+        .map(|(_, &value)| value)
+        .collect();
+    (values.len() == count).then_some(values)
+}
+
+/// Sets each address from `start` to its value, or gives `None` when one is not in
+/// `table`.
 fn set<T: Copy>(table: &mut [T], start: u16, values: &[T]) -> Option<()> {
-    table
-        .get_mut(span(start, values.len()))?
-        .copy_from_slice(values);
+    get(table, start, values.len())?;
+    for (address, slot) in table.iter_mut().enumerate() {
+        if let Some(offset) = offset(address, start, values.len()) {
+            *slot = *values.get(offset)?;
+        }
+    }
     Some(())
 }
 
@@ -178,21 +208,22 @@ fn model(device: &Device, request: &Request) -> Option<(Device, Vec<u16>)> {
             start,
             count,
         } => {
-            let span = span(*start, usize::from(*count));
+            let count = usize::from(*count);
             let bits = |table: &[bool]| -> Option<Vec<u16>> {
                 Some(
-                    table
-                        .get(span.clone())?
-                        .iter()
-                        .map(|&b| u16::from(b))
+                    get(table, *start, count)?
+                        .into_iter()
+                        .map(u16::from)
                         .collect(),
                 )
             };
             match table {
                 Table::Coils => bits(&device.coils)?,
                 Table::DiscreteInputs => bits(&device.discrete_inputs)?,
-                Table::HoldingRegisters => device.holding_registers.get(span)?.to_vec(),
-                Table::InputRegisters => device.input_registers.get(span)?.to_vec(),
+                Table::HoldingRegisters => {
+                    get(&device.holding_registers, *start, count)?
+                }
+                Table::InputRegisters => get(&device.input_registers, *start, count)?,
             }
         }
         Request::WriteCoil { address, value } => {
