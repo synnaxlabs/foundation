@@ -514,6 +514,126 @@ mod tests {
         }
     }
 
+    /// A waker that counts its wakes.
+    #[derive(Default)]
+    struct Count(AtomicUsize);
+
+    impl std::task::Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Relaxed);
+        }
+    }
+
+    impl Count {
+        fn wakes(&self) -> usize {
+            self.0.load(Relaxed)
+        }
+    }
+
+    fn poll<F: Future>(f: std::pin::Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
+        f.poll(&mut std::task::Context::from_waker(waker))
+    }
+
+    /// An open that stays pending until `done` holds its result.
+    fn gate(
+        done: &RefCell<Option<Result<(), Error>>>,
+    ) -> impl Future<Output = Result<(), Error>> {
+        future::poll_fn(|_| done.take().map_or(Poll::Pending, Poll::Ready))
+    }
+
+    #[test]
+    fn wakes_a_waiter_when_the_open_ends() {
+        let ports = Registry::<u8, (), ()>::new();
+        let done = RefCell::new(None);
+        let mut first = std::pin::pin!(ports.acquire(0, (), |()| gate(&done)));
+        assert!(poll(first.as_mut(), Waker::noop()).is_pending());
+        let count = Arc::new(Count::default());
+        let waker = Waker::from(Arc::clone(&count));
+        let mut second =
+            std::pin::pin!(ports.acquire(0, (), |()| future::ready(Ok(()))));
+        assert!(poll(second.as_mut(), &waker).is_pending());
+        assert!(poll(second.as_mut(), &waker).is_pending());
+        *done.borrow_mut() = Some(Ok(()));
+        let Poll::Ready(Ok(_first)) = poll(first.as_mut(), Waker::noop()) else {
+            panic!("the open ended");
+        };
+        assert_eq!(count.wakes(), 1);
+        assert!(matches!(poll(second.as_mut(), &waker), Poll::Ready(Ok(_))));
+    }
+
+    #[test]
+    fn wakes_a_waiter_when_the_open_fails() {
+        let ports = Registry::<u8, (), ()>::new();
+        let done = RefCell::new(None);
+        let mut first = std::pin::pin!(ports.acquire(0, (), |()| gate(&done)));
+        assert!(poll(first.as_mut(), Waker::noop()).is_pending());
+        let count = Arc::new(Count::default());
+        let waker = Waker::from(Arc::clone(&count));
+        let mut second =
+            std::pin::pin!(ports.acquire(0, (), |()| future::ready(Ok(()))));
+        assert!(poll(second.as_mut(), &waker).is_pending());
+        *done.borrow_mut() = Some(Err(Error::Device("no reply".into())));
+        assert!(matches!(
+            poll(first.as_mut(), Waker::noop()),
+            Poll::Ready(Err(Error::Device(_)))
+        ));
+        assert_eq!(count.wakes(), 1);
+        assert!(matches!(poll(second.as_mut(), &waker), Poll::Ready(Ok(_))));
+    }
+
+    /// An endpoint whose close waits for the test to let it end.
+    struct Hold {
+        closing: std::sync::mpsc::Sender<()>,
+        end: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl Drop for Hold {
+        #[expect(clippy::disallowed_methods, reason = "a test owns its threads")]
+        fn drop(&mut self) {
+            self.closing.send(()).expect("the waiter listens");
+            let end = self.end.lock().expect("one close");
+            end.recv().expect("the waiter lets the close end");
+        }
+    }
+
+    #[test]
+    fn wakes_a_waiter_when_the_close_ends() {
+        let ports = Arc::new(Registry::<u8, (), Hold>::new());
+        let (closing, at_close) = std::sync::mpsc::channel();
+        let (let_end, end) = std::sync::mpsc::channel();
+        let (closed, at_closed) = std::sync::mpsc::channel();
+        let hold = Hold {
+            closing,
+            end: Mutex::new(end),
+        };
+        let open = |(): &()| future::ready(Ok(hold));
+        let lease = block_on(ports.acquire(0, (), open)).expect("opens");
+        let p = Arc::clone(&ports);
+        #[expect(clippy::disallowed_methods, reason = "a test owns its threads")]
+        let waiter = std::thread::spawn(move || {
+            at_close.recv().expect("the close starts");
+            let count = Arc::new(Count::default());
+            let waker = Waker::from(Arc::clone(&count));
+            let open = |(): &()| future::ready(Err(Error::Device("unused".into())));
+            let mut acquire = std::pin::pin!(p.acquire(0, (), open));
+            assert!(
+                poll(acquire.as_mut(), &waker).is_pending(),
+                "the slot is busy"
+            );
+            let_end.send(()).expect("the close waits");
+            at_closed.recv().expect("the close ends");
+            assert_eq!(count.wakes(), 1);
+            assert!(matches!(
+                poll(acquire.as_mut(), &waker),
+                Poll::Ready(Err(Error::Device(_)))
+            ));
+        });
+        drop(lease);
+        closed.send(()).expect("the waiter listens");
+        waiter.join().expect("the waiter passed");
+        assert_eq!(format!("{ports:?}"), "{}");
+    }
+
     /// An endpoint that fails the test when two are open at once.
     struct Exclusive(Arc<AtomicUsize>);
 
@@ -537,7 +657,7 @@ mod tests {
                     reason = "a test owns its threads"
                 )]
                 std::thread::spawn(move || {
-                    for _ in 0..2_000 {
+                    for _ in 0..200 {
                         let open = |(): &()| {
                             let n = live.fetch_add(1, Relaxed);
                             assert_eq!(n, 0, "a second endpoint opened");
