@@ -1,5 +1,8 @@
+use std::io::{BufRead, Write};
+
 use serde_json::{Map, Value, json};
 
+use crate::error::Error;
 use crate::operation::{self, TABLE};
 
 /// The one protocol version this server speaks. A client that asks for another gets
@@ -11,16 +14,40 @@ const REQUEST: (i64, &str) = (-32600, "Invalid Request");
 const METHOD: (i64, &str) = (-32601, "Method not found");
 const PARAMS: (i64, &str) = (-32602, "Invalid params");
 
-/// Answers one MCP message, a JSON-RPC 2.0 request or notification as one line of
-/// JSON. Returns the reply as one line of JSON, or `None` for a notification or a
-/// response. Does no I/O: the caller reads each line from the client and writes each
-/// reply.
+/// Answers each line of `input` with at most one line on `output`, until `input` ends
+/// or the reader closes `output`.
+pub(crate) fn serve(
+    mut input: impl BufRead,
+    output: &mut impl Write,
+) -> Result<(), Error> {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = input
+            .read_until(b'\n', &mut line)
+            .map_err(|e| Error::Input {
+                message: e.to_string(),
+            })?;
+        if read == 0 {
+            return Ok(());
+        }
+        // A line that is not UTF-8 is not JSON either, so "" gets the parse error.
+        let Some(reply) = respond(std::str::from_utf8(&line).unwrap_or("")) else {
+            continue;
+        };
+        if !crate::write(output, &format!("{reply}\n"))? {
+            return Ok(());
+        }
+    }
+}
+
+/// Answers one MCP message, a JSON-RPC 2.0 request or notification. Returns the reply
+/// as one line of JSON, or `None` for a notification or a response.
 ///
 /// A request id must be a string or a 64-bit integer, so the reply carries it
 /// unchanged. A failed operation is a JSON-RPC error whose `data` holds the error's
 /// `code`, `message`, and `fix`.
-#[must_use]
-pub fn mcp(message: &str) -> Option<String> {
+pub(crate) fn respond(message: &str) -> Option<String> {
     let reply = match serde_json::from_str::<Value>(message) {
         Ok(Value::Object(message)) => answer(message)?,
         Ok(_) => reply(&Value::Null, Err(fault(REQUEST))),

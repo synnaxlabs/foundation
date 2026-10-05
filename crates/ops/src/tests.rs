@@ -1,15 +1,33 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io;
 
 use serde_json::{Map, Value, json};
 
-use crate::Exit;
 use crate::error::Error;
 use crate::operation::{self, Response, TABLE};
 
-fn cli(args: &[&str]) -> Exit {
+#[derive(Debug, PartialEq, Eq)]
+struct Exit {
+    stdout: String,
+    stderr: String,
+    status: u8,
+}
+
+fn run(args: &[&str], input: impl io::BufRead) -> Exit {
     let args = ["foundation"].iter().chain(args).map(OsString::from);
-    crate::cli(args)
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let status = crate::cli(args, input, &mut stdout, &mut stderr);
+    Exit {
+        stdout: String::from_utf8(stdout).expect("UTF-8"),
+        stderr: String::from_utf8(stderr).expect("UTF-8"),
+        status,
+    }
+}
+
+fn cli(args: &[&str]) -> Exit {
+    run(args, io::empty())
 }
 
 fn failed(stderr: &str) -> Exit {
@@ -21,7 +39,7 @@ fn failed(stderr: &str) -> Exit {
 }
 
 fn ask(message: &Value) -> Value {
-    let reply = crate::mcp(&message.to_string()).expect("a reply");
+    let reply = crate::mcp::respond(&message.to_string()).expect("a reply");
     assert!(!reply.contains('\n'), "one line: {reply}");
     serde_json::from_str(&reply).expect("json")
 }
@@ -60,7 +78,8 @@ fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
     let tools = tools();
     let tools = tools["tools"].as_array().expect("tools is a list");
     let docs = operation::docs();
-    assert_eq!(command.get_subcommands().count(), TABLE.len());
+    // One more for `mcp`, which is not an operation.
+    assert_eq!(command.get_subcommands().count(), TABLE.len() + 1);
     assert_eq!(tools.len(), TABLE.len());
     let inputs = operation::inputs();
     let outputs = operation::outputs();
@@ -294,11 +313,20 @@ fn error_codes_and_fixes_match_the_golden_file() {
             name: String::new(),
             closest: None,
         },
+        Error::Input {
+            message: String::new(),
+        },
+        Error::Output {
+            message: String::new(),
+        },
     ];
     for error in &every {
         // A new variant fails this match, so it joins `every` and the golden file.
         match error {
-            Error::Argument { .. } | Error::Unknown { .. } => {}
+            Error::Argument { .. }
+            | Error::Unknown { .. }
+            | Error::Input { .. }
+            | Error::Output { .. } => {}
         }
     }
     let lines: Vec<_> = every
@@ -389,7 +417,11 @@ mod mcp {
             json!({ "jsonrpc": "2.0", "id": 1, "result": {} }),
             json!({ "jsonrpc": "2.0", "id": 1, "error": { "code": 1, "message": "x" } }),
         ] {
-            assert_eq!(crate::mcp(&response.to_string()), None, "{response}");
+            assert_eq!(
+                crate::mcp::respond(&response.to_string()),
+                None,
+                "{response}"
+            );
         }
     }
 
@@ -398,7 +430,7 @@ mod mcp {
         for id in ["18446744073709551616", "-0", "1.0", "1.5", "null"] {
             let message = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ping"}}"#);
             let reply: Value =
-                serde_json::from_str(&crate::mcp(&message).expect("a reply"))
+                serde_json::from_str(&crate::mcp::respond(&message).expect("a reply"))
                     .expect("json");
             assert_eq!(
                 reply,
@@ -414,9 +446,9 @@ mod mcp {
     #[test]
     fn a_notification_gets_no_reply() {
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert_eq!(crate::mcp(&note.to_string()), None);
+        assert_eq!(crate::mcp::respond(&note.to_string()), None);
         let unknown = json!({ "jsonrpc": "2.0", "method": "nope", "params": 5 });
-        assert_eq!(crate::mcp(&unknown.to_string()), None);
+        assert_eq!(crate::mcp::respond(&unknown.to_string()), None);
     }
 
     #[test]
@@ -430,7 +462,8 @@ mod mcp {
     #[test]
     fn bad_json_is_a_parse_error() {
         let reply: Value =
-            serde_json::from_str(&crate::mcp("{").expect("a reply")).expect("json");
+            serde_json::from_str(&crate::mcp::respond("{").expect("a reply"))
+                .expect("json");
         assert_eq!(reply, failure(Value::Null, -32700, "Parse error"));
     }
 
@@ -482,5 +515,143 @@ mod mcp {
                 "{params}"
             );
         }
+    }
+
+    #[test]
+    fn a_tool_call_never_suggests_mcp() {
+        assert_eq!(
+            ask(&request(json!(1), "tools/call", json!({ "name": "mcpp" })))["error"]["data"]
+                ["fix"],
+            "Use a name from `foundation docs`"
+        );
+    }
+}
+
+mod serve {
+    use std::io::{self, Read, Write};
+
+    use super::{Exit, run};
+
+    const PING: &str = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+    const PONG: &str = "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{}}\n";
+
+    struct Failing(io::ErrorKind);
+
+    impl Read for Failing {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+    }
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mcp_answers_each_line_until_input_ends() {
+        let note = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
+        let input = format!("{PING}{note}{PING}");
+        assert_eq!(
+            run(&["mcp"], input.as_bytes()),
+            Exit {
+                stdout: format!("{PONG}{PONG}"),
+                stderr: String::new(),
+                status: 0
+            }
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_gets_the_parse_error_and_the_next_line_runs() {
+        let input = [b"{\"method\":\"\xff\"}\n".as_slice(), PING.as_bytes()].concat();
+        let exit = run(&["mcp"], input.as_slice());
+        assert_eq!(
+            exit.stdout,
+            format!(
+                "{}\n{PONG}",
+                r#"{"error":{"code":-32700,"message":"Parse error"},"id":null,"jsonrpc":"2.0"}"#
+            )
+        );
+        assert_eq!((exit.status, exit.stderr.as_str()), (0, ""));
+    }
+
+    #[test]
+    fn a_reader_that_left_ends_the_run_without_an_error() {
+        let input = format!("{PING}{PING}");
+        let mut rest = input.as_bytes();
+        let mut stdout = Vec::new();
+        let status = crate::cli(
+            ["foundation", "mcp"].map(Into::into),
+            &mut rest,
+            Failing(io::ErrorKind::BrokenPipe),
+            &mut stdout,
+        );
+        assert_eq!(
+            (status, stdout.as_slice(), rest),
+            (0, b"".as_slice(), PING.as_bytes())
+        );
+        let mut stderr = Vec::new();
+        let status = crate::cli(
+            ["foundation", "version"].map(Into::into),
+            io::empty(),
+            Failing(io::ErrorKind::BrokenPipe),
+            &mut stderr,
+        );
+        assert_eq!((status, stderr.as_slice()), (0, b"".as_slice()));
+    }
+
+    #[test]
+    fn an_output_that_fails_is_an_error() {
+        let mut stderr = Vec::new();
+        let status = crate::cli(
+            ["foundation", "version", "--json"].map(Into::into),
+            io::empty(),
+            Failing(io::ErrorKind::StorageFull),
+            &mut stderr,
+        );
+        let message = io::Error::from(io::ErrorKind::StorageFull).to_string();
+        assert_eq!(status, 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&stderr).expect("json"),
+            serde_json::json!({
+                "code": "ops.output",
+                "message": format!("standard output could not be written: {message}"),
+                "fix": "Give standard output a destination that can be written",
+            })
+        );
+    }
+
+    #[test]
+    fn an_input_that_fails_is_an_error() {
+        let input = io::BufReader::new(Failing(io::ErrorKind::Other));
+        let message = io::Error::from(io::ErrorKind::Other).to_string();
+        assert_eq!(
+            run(&["mcp"], input),
+            Exit {
+                stdout: String::new(),
+                stderr: format!(
+                    "error[ops.input]: standard input could not be read: {message}\n\
+                     fix: Give standard input a source that can be read\n"
+                ),
+                status: 1
+            }
+        );
+    }
+
+    #[test]
+    fn help_lists_mcp_and_describes_foundation() {
+        let help = run(&["--help"], io::empty()).stdout;
+        assert!(help.starts_with("Run Foundation operations\n"), "{help}");
+        assert!(
+            help.lines()
+                .any(|line| line.trim_start().starts_with("mcp ")),
+            "{help}"
+        );
     }
 }
