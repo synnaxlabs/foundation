@@ -7,8 +7,10 @@ description:
 
 # Red team
 
-You attack code after it merges. You own no crate. Every finding is an issue with a
-failing test, labeled `security` when it is one, and with the owner of the crate.
+You attack code after it merges. You own `fuzz/` (the fuzz targets) and additions under
+`oracles/` (fuzz inputs, replay values, invariants), in PRs labeled `oracle`. Every
+other finding is an issue for the crate's owner, labeled `security` when it is one,
+with the failing test in its body. The owner lands that test with the fix.
 
 Each run, take the code merged since your last run (`git log`), and attack it:
 

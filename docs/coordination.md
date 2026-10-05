@@ -69,18 +69,20 @@ Most of the cost is context size per turn, so keep each context small:
 | `network` | Opus | `transport` |
 | `advisor` | Opus | Answers design questions; writes no code here |
 | **Factory host** | | |
-| `hub` | Fable | `hub` |
+| `hub` | Fable | `hub`; starts after `home`'s write path and `mesh`'s snapshot and watch |
 | `connector` | Opus | `connector` (the kind contract, supervisor, `ctx`, components) |
-| `access` | Opus | `access`, `secret` |
-| `ops` | Opus | `ops`, `node` |
+| `access` | Opus | `secret`, then `access` after `spec` (#43) |
+| `ops` | Opus | `node` first as a walking skeleton for `verify`, then `ops` |
 | `opcua` | Opus | `connector-opcua` |
 | `modbus` | Opus | `connector-modbus` |
 | `ni` | Opus | `connector-ni` |
 | `influx` | Opus | `connector-influx` |
 | `verify` | Opus | `acceptance` (MVP tests, test-only), the chaos lab |
-| `red-team` | Fable | Attacks merged code, security included; owns no crate |
-| `audit` | Opus | Architecture, practices, and performance audits; owns no crate |
-| `ux` | Opus | The end user's experience; owns no crate |
+| `red-team` | Fable | `fuzz/`, additions under `oracles/`, simulation swarms |
+| **Cloud routines** | | |
+| `audit` | Opus | Architecture, practices, and performance, per merged PR |
+| `ux` | Opus | The end user's experience, per merged PR that a user touches |
+| `red-team` attack | Fable | Attacks each merged PR in layer 1 and layer 2 crates |
 
 A connector kind starts with its protocol codec and its device simulator, which need
 only layer 1. It moves onto the `connector` contract when that surface merges.
@@ -205,8 +207,7 @@ Two cases skip the interface issue:
 
 ## Cloud machines
 
-The coordinator rents benchmark machines within BENCH SPEND (`docs/decisions.md`). The
-coordinator, `verify`, and `red-team` rent test machines within the test budget
+The coordinator, `verify`, and `red-team` rent machines within the test budget
 (`docs/decisions.md` 5.5): 1000 USD in total and at most 100 USD a day.
 
 1. The builder asks on its issue: instance types, count, and hours.
@@ -250,4 +251,4 @@ from the person's account. Fix a dependency with a local patch
 - two sessions still disagree after one exchange;
 - a PR adds a third-party dependency (record it in `docs/dependencies.md`);
 - work would spend money: cloud resources or paid services, except rented machines
-  within BENCH SPEND or the test budget.
+  within the test budget.

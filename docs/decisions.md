@@ -805,11 +805,11 @@ How to read this record:
 
 - **Factory constraint** Two people, each on an individual Max plan. The factory runs in
   attended, locally started sessions, not as an unattended daemon.
-- **BENCH SPEND (2026-10-04)** Linux benchmarks that need real machines run on rented
-  AWS machines. The person: "you're welcome to provision AWS machines. SET STRICT COST
-  LIMITS. I don't want more than $100 spent". The limit is 100 USD in total, across
-  all benchmarks, until the person raises it. Only the coordinator provisions, by the
-  procedure in `docs/coordination.md`.
+- **BENCH SPEND (2026-10-04, replaced by the test budget in 5.5 on 2026-10-05)** Linux
+  benchmarks that need real machines run on rented AWS machines. The person: "you're
+  welcome to provision AWS machines. SET STRICT COST LIMITS. I don't want more than $100
+  spent". The limit is 100 USD in total, across all benchmarks, until the person raises
+  it. Only the coordinator provisions, by the procedure in `docs/coordination.md`.
 - **C7** One operation table (typed input and output, error codes, read-only and
   destructive flags) generates the CLI (`--json`), annotated MCP tools, and docs
   embedded in the binary. Every error has a stable code and a fix-it hint. Status is
@@ -893,22 +893,35 @@ How to read this record:
   Each day, at least two hours before the stop, the coordinator asks the person to renew
   one more day. On a yes it runs `sudo shutdown -c; sudo shutdown -h +1440` on the host
   and posts the day on the ledger (#163). Without a yes, the host stops. The person's
-  laptop keeps the first nine builders, the coordinator, and the advisor.
+  laptop keeps the first nine builders, the coordinator, and the advisor. On the host,
+  sessions use a fine-grained GitHub token for `synnaxlabs/foundation` only (contents,
+  issues, and pull requests), not the person's login, and an instance role that can
+  start and stop only instances tagged `project=foundation-test`.
 - **REMOTE CONTROL (2026-10-05)** Sessions on the laptop and on the factory host
   message each other through Remote Control ("remote control is fine"). Every session
   name is unique across both machines. There is one coordinator. If Remote Control
   fails, the fallback is one `inbox:<name>` GitHub issue per session, not a new
   socket.
 - **QUALITY SESSIONS (2026-10-05)** The person approved `verify` and `red-team` and
-  asked for `audit` and `ux`. These four own no product crate: `verify` (the MVP
-  acceptance tests, written before the pieces land, and the chaos lab), `red-team`
-  (attacks merged code, security and vulnerabilities included), `audit` (architecture
-  boundaries, software practices, and performance across merged code), and `ux` (the end
-  user's experience: CLI, files, errors, plan output, MCP, docs). Each finding is an
-  issue; `verify` and `red-team` findings come with a failing test.
+  asked for `audit` and `ux`. `verify` owns the MVP acceptance tests (in `acceptance`,
+  written before the pieces land) and the chaos lab. `red-team` attacks merged code,
+  security and vulnerabilities included, and owns `fuzz/` and additions under
+  `oracles/`. `audit` checks architecture boundaries, software practices, and
+  performance across merged code. `ux` checks the end user's experience: CLI, files,
+  errors, plan output, MCP, and docs. Each finding is an issue; `verify` and `red-team`
+  findings come with a failing test.
 - **BREAKER REVIEW (2026-10-05)** Every PR gets a third reviewer, the `breaker`, whose
   only output is a test that fails against the PR, or nothing. It runs on Fable for
-  layer 1 and layer 2 crates.
+  layer 1 and layer 2 crates, in its own worktree.
+- **CLOUD ROUTINES (2026-10-05)** The person has 250 USD of cloud session credits: "we
+  should use up the usage credits quickly", and the quality passes "should be running
+  more often than nightly". `audit`, `ux`, and the `red-team` attack pass on layer 1
+  and layer 2 code run as Claude Code routines in the cloud, one run per merged PR,
+  plus an hourly sweep for merges whose event was dropped. Each run files issues and
+  needs no reply, so the one-way messaging of cloud sessions does not matter. A pilot
+  checks first that a run can use `gh`. After the pilot, the `breaker` moves to a
+  routine on each opened PR. `red-team` keeps a host session for fuzzing, simulation
+  swarms, and the threat model.
 
 ### 1.14 Testing
 
@@ -1721,6 +1734,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
 | 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
+| 4 | `acceptance` | Runs the MVP acceptance scenarios against whole meshes built from `node`. Test-only. | all crates |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
 
 Outside the binary: the Rust SDK reuses `block`, `types`, `codec`, and `wire`; other
@@ -1831,8 +1845,14 @@ a bad link:
   with Raft for the spec and membership.
 - Inbound connectors, each with commands back to the device: OPC UA client, Modbus
   TCP and RTU, and NI DAQmx. Outbound: InfluxDB. The person cut LabJack, MQTT with
-  Sparkplug B, and Kafka from the MVP ("eliminate 3 of those").
-- Store-and-forward: a link pulled for an hour loses nothing, or records every gap.
+  Sparkplug B, and Kafka from the MVP ("eliminate 3 of those"). CI tests the NI
+  connector against a stub `libnidaqmx.so` (R7 loads the library at run time). NI's
+  simulated devices run only on the factory host, if NI's driver builds for its kernel.
+- Store-and-forward: an edge node writes 1M samples/s (1% of P1) while its link to the
+  cloud is cut for one hour. With a disk budget that covers the hour, the InfluxDB out
+  connector (a named reader whose hold covers the cut) receives every sample, in seq
+  order. With a budget that covers 30 minutes, it receives exactly one gap, whose count
+  equals the trimmed samples. `verify` runs both.
 - A time error bound on every sample.
 - Command authority and audit (D2).
 - The mesh as code: `plan` and `apply` from HCL, operated through the JSON CLI and MCP.
@@ -1841,9 +1861,10 @@ a bad link:
 Out of the MVP: standby failover (`replica`), more than one region, the calculation
 engine, and performance work past the P1 targets.
 
-**Test budget (2026-10-05).** The person approved 1000 USD for AWS testing: a nightly
-chaos lab (about 2 USD a day), a spot simulation swarm of four c7i.8xlarge for four
-hours (about 9 USD), a nightly P1 benchmark on a c7i.metal-24xl (about 4 USD), and
+**Test budget (2026-10-05).** The person approved 1000 USD for AWS testing, and it
+replaces BENCH SPEND: a nightly chaos lab (about 2 USD a day), a spot simulation swarm
+of four c7i.8xlarge for four hours (ledger cap 22.85 USD at the on-demand price, about
+9 USD at spot), a nightly P1 benchmark on a c7i.metal-24xl (about 4 USD), and
 benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day ("test budget
 should be capped at $100 a day"). Every launch goes in the ledger (#15) with its cap
 and an automatic shutdown first.

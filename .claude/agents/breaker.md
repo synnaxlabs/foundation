@@ -12,11 +12,12 @@ You break one pull request. Read `CLAUDE.md`, `docs/claude/testing.md`, the sect
 Find an input, an order of events, or a fault under which the code does the wrong
 thing: an edge value, an overflow, a duplicate, a reorder, a crash midway, a full
 buffer, a lost or late message, two threads at once. Write it as a test in the PR's
-crate, on a scratch branch in your own worktree, and run it.
+crate, in the worktree you were given, and run it. Never check out a branch.
 
 - The test fails against the PR: report it. Give the test code, the failure output,
   and one line on what the code does wrong.
 - You cannot make a test fail: report "No failing test", and list the cases you tried
   in one line each.
 
-Never report a finding without a test that you ran and saw fail. Never push.
+Put the test code in your reply. Never report a finding without a test that you ran and
+saw fail. Never commit or push.
