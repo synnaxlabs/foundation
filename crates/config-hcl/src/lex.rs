@@ -15,7 +15,7 @@ pub(crate) enum Kind {
     /// Letters, digits, `_`, and `-`, after a letter or `_`.
     Identifier,
     /// A word with `.` or `@`, which only a reference can be: letters, digits, `_`,
-    /// `-`, and `@`, in parts split by single dots.
+    /// `-`, `@`, and dots, which `types::name` checks.
     Reference,
     /// Digits, then an optional fraction and an optional exponent.
     Number,
@@ -91,6 +91,18 @@ impl<'a> Tokens<'a> {
             text: "",
             span: self.span(self.at),
         })
+    }
+
+    /// Reads the next token that is not a new line.
+    pub(crate) fn next_past_lines(&mut self) -> Token<'a> {
+        // Each pass moves past a new line or returns.
+        for _ in 0..=self.rest.len() {
+            let token = self.next();
+            if token.kind != Kind::Newline {
+                return token;
+            }
+        }
+        unreachable!("invariant: each pass moves past a new line")
     }
 
     fn read(&mut self) -> Result<Token<'a>, Error> {
@@ -283,13 +295,15 @@ impl<'a> Tokens<'a> {
     fn word(&mut self, first: char) -> Kind {
         let bytes = self.rest.as_bytes();
         let part = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'@');
+        // A dot is part of the word unless it starts a splat or an expansion.
+        let dot = |i: usize| {
+            let rest = bytes.get(i..).unwrap_or_default();
+            !rest.starts_with(b".*") && !rest.starts_with(b"...")
+        };
         let len = bytes
             .iter()
             .enumerate()
-            .position(|(i, &b)| {
-                let next = bytes.get(i.saturating_add(1)).copied();
-                !(part(b) || b == b'.' && next.is_some_and(part))
-            })
+            .position(|(i, &b)| !(part(b) || b == b'.' && dot(i)))
             .unwrap_or(bytes.len());
         let reference = first == '@'
             || bytes
