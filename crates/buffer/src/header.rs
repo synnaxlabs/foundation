@@ -31,6 +31,10 @@ const CRC_AT: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
 /// sector whole or old, so a checkpoint is never torn.
 const COVER: usize = 512;
 const _: () = assert!(COVER <= env::files::SECTOR, "a checkpoint fits one sector");
+const _: () = assert!(
+    ALIGN.is_multiple_of(env::files::SECTOR),
+    "a block starts a sector"
+);
 
 /// Why neither header block can be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

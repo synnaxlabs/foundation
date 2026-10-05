@@ -1521,7 +1521,7 @@ mod tests {
                 prop_assert_eq!(cursor.at.offset, ring.writer.head());
             }
 
-            /// A crash leaves any subset of the 512-byte sectors of the last
+            /// A crash leaves any subset of the sectors of the last
             /// write. The record is live when every sector it wrote survives;
             /// lost padding does not count. A flipped bit in it drops it.
             #[test]
