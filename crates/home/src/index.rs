@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use control::{Gate, Permit};
 use delivery::Readers;
-use types::frame::{self, Draft, Frame, Path};
+use types::frame::{Draft, Frame, Path};
 use types::time::{Interval, Monotonic};
 
 use crate::order::{self, Order, Tail};
@@ -43,16 +43,7 @@ impl Accepted {
     /// If `group` is absent from `draft`, or a frame was frozen already.
     pub(crate) fn freeze(&mut self, mut draft: Draft, group: u32) -> &Frame {
         assert!(self.frame.is_none(), "invariant: a frame is frozen once");
-        let seq = &self.order.seq;
-        let count = u32::try_from(seq.end - seq.start)
-            .expect("invariant: a group holds fewer than 2^32 samples");
-        draft.set_range(
-            group,
-            frame::Range {
-                seq: seq.start,
-                count,
-            },
-        );
+        draft.set_seq(group, self.order.seq.start);
         self.frame.insert(draft.freeze(self.order.path))
     }
 }
@@ -149,8 +140,8 @@ mod tests {
     use control::{Handoff, Lease, Writer};
     use types::authority::Authority;
     use types::channel::Slot;
-    use types::frame::Form;
     use types::frame::key_set::{Group, Interner, KeySet};
+    use types::frame::{self, Form};
     use types::time::{Span, Stamp};
 
     use super::*;
@@ -181,6 +172,8 @@ mod tests {
                 .expect("the pool has room");
             let bytes = draft.series(0).expect("the index is present");
             bytes.copy_from_slice(stamps.as_flattened());
+            let count = u32::try_from(stamps.len()).expect("a short test frame");
+            draft.set_count(0, count);
             draft
         }
     }
