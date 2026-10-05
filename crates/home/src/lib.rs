@@ -1,6 +1,15 @@
 //! Runs the per-index write path (time checks, seq, fence, control, storage, fan-out),
 //! crash-recovery and copy-mode opens, and companion writes.
 
+#[cfg(test)]
+mod common;
+#[cfg_attr(not(test), expect(dead_code, reason = "the shard is the first user"))]
+mod handoff;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the frame path is the first user")
+)]
+mod index;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the frame path is the first user")

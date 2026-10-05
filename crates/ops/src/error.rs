@@ -68,8 +68,16 @@ impl Error {
         json!({ "code": self.code().as_str(), "message": self.to_string(), "fix": self.fix() })
     }
 
+    /// The error as two lines for a terminal. A backslash or a character that does not
+    /// print is written as its Rust escape, so caller text cannot add a line, move the
+    /// cursor, or look like other text.
     pub(crate) fn text(&self) -> String {
-        format!("error[{}]: {self}\nfix: {}\n", self.code(), self.fix())
+        let message = escape(&self.to_string());
+        format!(
+            "error[{}]: {message}\nfix: {}\n",
+            self.code(),
+            escape(&self.fix())
+        )
     }
 }
 
@@ -86,4 +94,13 @@ impl fmt::Display for Error {
             }
         }
     }
+}
+
+fn escape(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '"' | '\'' => c.to_string(),
+            _ => c.escape_debug().to_string(),
+        })
+        .collect()
 }

@@ -516,6 +516,8 @@ mod tests {
                     ("for", Kind::Integer(2)),
                     ("a b", Kind::Integer(3)),
                     ("7", Kind::Integer(4)),
+                    ("été", Kind::Integer(5)),
+                    ("a\u{200b}", Kind::Integer(6)),
                 ])),
             ),
             (
@@ -523,6 +525,7 @@ mod tests {
                 call("true", vec![Kind::Integer(1), list(Vec::new())]),
             ),
             ("empty", call("f", vec![Kind::Map(Map::default())])),
+            ("température", call("é", Vec::new())),
         ]);
         assert_eq!(
             written(&document),
@@ -531,11 +534,13 @@ mod tests {
              empty = f({})\n\
              integer = -170141183460469231731687303715884105728\n\
              large = 1e300\n\
-             map = { \"7\" = 4, \"a b\" = 3, \"for\" = 2, x = 1 }\n\
+             map = { \"7\" = 4, \"a b\" = 3, \"a\u{200b}\" = 6, \"for\" = 2, x = 1, \
+             été = 5 }\n\
              one = 1.0\n\
              reference = @a.7b\n\
              small = -1e-7\n\
              string = \"\\\"q\\\" \\\\ $${a} %%{b} $c\\t\\r\\u0001é\"\n\
+             température = é()\n\
              words = [for, a-b]\n\
              zero = 0.0\n"
         );

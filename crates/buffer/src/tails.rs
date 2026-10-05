@@ -2,7 +2,9 @@
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use types::channel::Slot;
+use std::fmt;
+
+use types::channel::{self, Slot};
 use types::frame::Path;
 use types::hash;
 use types::time::Stamp;
@@ -16,6 +18,52 @@ pub struct Tail {
     pub seq: u64,
     /// The `last` of the newest entry that has one, or `None` before it.
     pub stamp: Option<Stamp>,
+}
+
+/// An entry that cannot go on its path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Invalid {
+    /// The entry starts below the tail of its path.
+    Below {
+        index: channel::Key,
+        path: Path,
+        first: u64,
+        tail: u64,
+    },
+    /// The entry ends past the last seq.
+    Past {
+        index: channel::Key,
+        path: Path,
+        first: u64,
+        len: u32,
+    },
+}
+
+impl fmt::Display for Invalid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Below {
+                index,
+                path,
+                first,
+                tail,
+            } => write!(
+                f,
+                "an entry of index {index} on path {path:?} starts at {first}, below \
+                 the tail {tail}"
+            ),
+            Self::Past {
+                index,
+                path,
+                first,
+                len,
+            } => write!(
+                f,
+                "an entry of index {index} on path {path:?} starts at {first} with \
+                 {len} samples, past the last seq"
+            ),
+        }
+    }
 }
 
 /// The tails of every path the log holds, by the node's slot of the index and
@@ -34,34 +82,38 @@ impl Tails {
     /// and `stamp` to `last` when the entry has one. A `first` past the tail is a
     /// skip ahead.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// When `first` is below the tail, with the index, the path, `first`, and the
-    /// tail. When `first + len` does not fit in a `u64`.
-    pub(crate) fn advance(&mut self, slot: Slot, header: &Header) {
+    /// [`Invalid`] when `first` is below the tail or `first + len` does not fit in
+    /// a `u64`. The tail does not move.
+    pub(crate) fn advance(
+        &mut self,
+        slot: Slot,
+        header: &Header,
+    ) -> Result<(), Invalid> {
         let tail = self.0.entry((slot, header.path)).or_default();
-        assert!(
-            header.first >= tail.seq,
-            "invariant: an entry of index {} on path {:?} starts at {}, below the \
-             tail {}",
-            header.index,
-            header.path,
-            header.first,
-            tail.seq
-        );
+        if header.first < tail.seq {
+            return Err(Invalid::Below {
+                index: header.index,
+                path: header.path,
+                first: header.first,
+                tail: tail.seq,
+            });
+        }
+        let past = Invalid::Past {
+            index: header.index,
+            path: header.path,
+            first: header.first,
+            len: header.len,
+        };
         tail.seq = header
             .first
             .checked_add(u64::from(header.len))
-            .unwrap_or_else(|| {
-                panic!(
-                    "invariant: an entry of index {} on path {:?} starts at {} with {} \
-                     samples, past the last seq",
-                    header.index, header.path, header.first, header.len
-                )
-            });
+            .ok_or(past)?;
         if let Some(last) = header.last {
             tail.stamp = Some(last);
         }
+        Ok(())
     }
 }
 
@@ -70,7 +122,6 @@ impl Tails {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use types::channel;
 
     fn slot(value: u32) -> Slot {
         Slot::new(value)
@@ -147,7 +198,7 @@ mod tests {
             for next in log {
                 let first = end(&entries, next.index, next.path) + next.skip;
                 let entry = header(next.index, next.path, first, next.len, next.last);
-                tails.advance(slot(next.index), &entry);
+                prop_assert_eq!(tails.advance(slot(next.index), &entry), Ok(()));
                 entries.push(entry);
                 let stamps: Vec<Stamp> =
                     on(&entries, next.index, next.path).filter_map(|header| header.last).collect();
@@ -176,9 +227,15 @@ mod tests {
     #[test]
     fn each_path_of_an_index_has_its_own_tail() {
         let mut tails = Tails::default();
-        tails.advance(slot(1), &header(1, Path::Live, 0, 3, Some(30)));
-        tails.advance(slot(1), &header(1, Path::Backfill, 0, 1, Some(10)));
-        tails.advance(slot(2), &header(2, Path::Live, 0, 5, None));
+        tails
+            .advance(slot(1), &header(1, Path::Live, 0, 3, Some(30)))
+            .expect("advances");
+        tails
+            .advance(slot(1), &header(1, Path::Backfill, 0, 1, Some(10)))
+            .expect("advances");
+        tails
+            .advance(slot(2), &header(2, Path::Live, 0, 5, None))
+            .expect("advances");
         let live = Tail {
             seq: 3,
             stamp: Some(Stamp::from_nanos(30)),
@@ -202,8 +259,12 @@ mod tests {
     #[test]
     fn a_skip_ahead_moves_the_seq_past_the_gap() {
         let mut tails = Tails::default();
-        tails.advance(slot(1), &header(1, Path::Live, 0, 2, Some(2)));
-        tails.advance(slot(1), &header(1, Path::Live, 10, 1, Some(11)));
+        tails
+            .advance(slot(1), &header(1, Path::Live, 0, 2, Some(2)))
+            .expect("advances");
+        tails
+            .advance(slot(1), &header(1, Path::Live, 10, 1, Some(11)))
+            .expect("advances");
         let expected = Tail {
             seq: 11,
             stamp: Some(Stamp::from_nanos(11)),
@@ -214,8 +275,12 @@ mod tests {
     #[test]
     fn an_entry_with_no_last_stamp_keeps_the_stamp() {
         let mut tails = Tails::default();
-        tails.advance(slot(1), &header(1, Path::Live, 0, 2, Some(2)));
-        tails.advance(slot(1), &header(1, Path::Live, 2, 0, None));
+        tails
+            .advance(slot(1), &header(1, Path::Live, 0, 2, Some(2)))
+            .expect("advances");
+        tails
+            .advance(slot(1), &header(1, Path::Live, 2, 0, None))
+            .expect("advances");
         let expected = Tail {
             seq: 2,
             stamp: Some(Stamp::from_nanos(2)),
@@ -224,24 +289,53 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "invariant: an entry of index 00000000-0000-0000-0000-000000000001 \
-                    on path Live starts at 2, below the tail 3"
-    )]
-    fn an_entry_below_the_tail_is_a_broken_invariant() {
+    fn an_entry_below_the_tail_is_invalid_and_leaves_the_tail() {
         let mut tails = Tails::default();
-        tails.advance(slot(1), &header(1, Path::Live, 0, 3, None));
-        tails.advance(slot(1), &header(1, Path::Live, 2, 1, None));
+        tails
+            .advance(slot(1), &header(1, Path::Live, 0, 3, None))
+            .expect("advances");
+        let invalid = Invalid::Below {
+            index: channel::Key::from_u128(1),
+            path: Path::Live,
+            first: 2,
+            tail: 3,
+        };
+        assert_eq!(
+            tails.advance(slot(1), &header(1, Path::Live, 2, 1, Some(9))),
+            Err(invalid)
+        );
+        assert_eq!(
+            invalid.to_string(),
+            "an entry of index 00000000-0000-0000-0000-000000000001 on path Live \
+             starts at 2, below the tail 3"
+        );
+        assert_eq!(
+            tails.get(slot(1), Path::Live),
+            Tail {
+                seq: 3,
+                stamp: None
+            }
+        );
     }
 
     #[test]
-    #[should_panic(
-        expected = "invariant: an entry of index 00000000-0000-0000-0000-000000000001 on \
-                    path Live starts at 18446744073709551615 with 1 samples, past the \
-                    last seq"
-    )]
-    fn an_entry_past_the_last_seq_is_a_broken_invariant() {
+    fn an_entry_past_the_last_seq_is_invalid_and_leaves_the_tail() {
         let mut tails = Tails::default();
-        tails.advance(slot(1), &header(1, Path::Live, u64::MAX, 1, None));
+        let invalid = Invalid::Past {
+            index: channel::Key::from_u128(1),
+            path: Path::Live,
+            first: u64::MAX,
+            len: 1,
+        };
+        assert_eq!(
+            tails.advance(slot(1), &header(1, Path::Live, u64::MAX, 1, Some(9))),
+            Err(invalid)
+        );
+        assert_eq!(
+            invalid.to_string(),
+            "an entry of index 00000000-0000-0000-0000-000000000001 on path Live \
+             starts at 18446744073709551615 with 1 samples, past the last seq"
+        );
+        assert_eq!(tails.get(slot(1), Path::Live), Tail::default());
     }
 }

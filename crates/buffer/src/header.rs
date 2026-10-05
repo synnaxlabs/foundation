@@ -27,9 +27,6 @@ const VERSION: u16 = 1;
 const FIELDS: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
 const CRC: usize = ALIGN - 4;
 
-/// Where the area starts: after the two header blocks.
-pub(crate) const AREA_START: u64 = 2 * BLOCK;
-
 /// Why neither header block can be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
@@ -212,6 +209,7 @@ mod tests {
     use proptest::prelude::*;
 
     use crate::entry::table_len;
+    use crate::record::AREA_START;
 
     fn layout(area: u64, body_max: usize) -> Layout {
         Layout::new(area, body_max).expect("the test sizes make a ring")

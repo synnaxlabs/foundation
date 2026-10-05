@@ -57,9 +57,10 @@ state on `main`.
   (R5, BQ12).
 - The diode carrier is UDP with Noise K and no TLS. Commands, Raft, and clock exchange
   cannot cross it. Not built.
-- `transport` accepts every Ed25519 key, and every client with no certificate.
-  Admission is the caller's job. Until `node` admits a peer, the peer must not make
-  the node hold memory or do work out of proportion to the bytes it sent.
+- `transport` accepts every Ed25519 key that is not of small order, and every client
+  with no certificate. Admission is the caller's job. Until `node` admits a peer, the
+  peer must not make the node hold memory or do work out of proportion to the bytes
+  it sent.
 - A message on a stream is a length and then bytes. The length is the peer's choice,
   up to `message_bytes_max`.
 - A key of small order needs no private key. `types::node::PublicKey::new` refuses
@@ -149,6 +150,13 @@ state on `main`.
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
   bidirectional controls in the reader and in written text, keys compared by
   bytes, a heredoc that closes on its marker followed by U+00A0).
+- #400 (`security`): `a = 1` and `a` U+200D `= 2` read as two keys, and the writer
+  writes the joiner raw, so a file and a diff show one key twice (HCL does the
+  same). A `Name` is ASCII (A3), so the reach is a key no schema checks: an object
+  key in a free-form map, and an attribute key until `config` refuses an unknown
+  one. Proposed: a `Diagnostic` from `config-hcl` for an identifier or an object
+  key with a `Default_Ignorable_Code_Point`, so the reader still reads as HCL does
+  (HCL IDENTIFIERS) and the diagnostic stops the `apply`.
 - Config names secrets and never holds their values (K4).
 
 ### Disk to `buffer`

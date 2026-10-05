@@ -263,6 +263,18 @@ impl Draft {
         })
     }
 
+    /// The key set the draft's entries number into.
+    #[must_use]
+    pub fn key_set(&self) -> key_set::Key {
+        key_set::Key::new(u32::from_le_bytes(get(&self.0, at::KEY_SET)))
+    }
+
+    /// How the draft's series hold their samples.
+    #[must_use]
+    pub fn form(&self) -> Form {
+        Form::from_byte(self.0[at::FORM])
+    }
+
     /// The samples of group `group`, or `None` when its index is absent. Time is
     /// logarithmic in the number of present groups.
     #[must_use]
@@ -732,6 +744,25 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_header_of_a_draft() {
+        let mut interner = Interner::new();
+        // A key wider than one byte, and unlike the counts in the header.
+        for n in 0..256 {
+            interner.intern(&[Group {
+                index: slot(1000 + n),
+                data: &[],
+            }]);
+        }
+        let set = one_group(&mut interner);
+        assert_eq!(set.key().get(), 256);
+        let pool = pool(1 << 16);
+        let draft = Draft::new(&pool, &set, Form::Encoded, &[(0, 8)]).unwrap();
+        assert_eq!(draft.key_set(), set.key());
+        assert_eq!(draft.form(), Form::Encoded);
+        assert_eq!(draft.freeze(Path::Live).key_set(), set.key());
+    }
+
+    #[test]
     fn reads_the_header_and_absent_parts() {
         let set = two_groups();
         let pool = pool(1 << 16);
@@ -1188,6 +1219,8 @@ mod tests {
         let mut draft = Draft::new(&pool, &set, case.form, &series)
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
         let taken = to_u64(pool.committed() - before);
+        prop_assert_eq!(draft.key_set(), set.key());
+        prop_assert_eq!(draft.form(), case.form);
         fill(&mut draft, &series, entries, case.in_order)?;
         let mut ranges = Vec::new();
         for ((group, &(seq, count, seq_first)), &present) in

@@ -270,6 +270,7 @@ dependencies = [
 name = "codec"
 version = "0.0.0"
 dependencies = [
+ "block",
  "counting",
  "divan",
  "proptest",
@@ -293,6 +294,7 @@ dependencies = [
  "document",
  "proptest",
  "types",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -300,6 +302,7 @@ name = "connector"
 version = "0.0.0"
 dependencies = [
  "counting",
+ "document",
  "env",
  "proptest",
  "sim",
@@ -622,6 +625,8 @@ name = "home"
 version = "0.0.0"
 dependencies = [
  "block",
+ "control",
+ "delivery",
  "proptest",
  "types",
 ]
@@ -752,6 +757,7 @@ version = "0.0.0"
 dependencies = [
  "env",
  "loom",
+ "ops",
  "sim",
 ]
 
