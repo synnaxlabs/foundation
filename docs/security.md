@@ -120,9 +120,9 @@ state on `main`.
   authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
   built (`mesh`). `raft` checks each index a message names, and the order of an
   append's entries, before it acts; an entry above the message's term is still
-  written (#232, open). It does not check the sender. A leased leader takes a
-  `PreVote` at its next term from any sender as a removed node that lacks the commit
-  of its leave, and replicates its log to it (RAFT VOTERS).
+  written (#232, open). A node that a change removed and that missed its release
+  can win an election once no voter has a lease, and lead until it commits the
+  leave (#483).
 - `raft` counts a reply only from a voter. But it takes a higher term from any
   sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
   #352 (a reply from a node that is not a voter makes the leader step down; one
@@ -259,6 +259,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 | `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
+| `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
