@@ -121,9 +121,11 @@ impl Token {
     }
 
     /// Runs `f` until it completes or this token is cancelled. Returns `None` when the
-    /// token is cancelled first, also when it already is. Checks the token before
-    /// each poll of `f`, so a cancel wins over an `f` that is ready at the same
-    /// time. On `None`, `f` is dropped, and what it did before the cancel stays done.
+    /// token is cancelled before a poll of `f`, also when it already is, so a cancel
+    /// wins over an `f` that is ready at the same time. A cancel during a poll of `f`
+    /// does not stop that poll, and `race` returns its output; check `cancelled`
+    /// after `race` when that matters. On `None`, `f` is dropped, and what it did
+    /// before the cancel stays done.
     /// The first poll may allocate a slot in the token; later polls allocate
     /// nothing, and a poll with the same waker as the last one takes no lock.
     ///
@@ -705,6 +707,41 @@ mod tests {
             token.cancel();
             assert_eq!(poll(race, &waker), Poll::Ready(None), "cancel wins");
             assert_eq!(polls.load(SeqCst), 1, "f is not polled again");
+        }
+
+        /// Cancels the token inside its own poll, then completes.
+        struct Cancels(Token);
+
+        impl Future for Cancels {
+            type Output = u8;
+
+            fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<u8> {
+                self.0.cancel();
+                Poll::Ready(7)
+            }
+        }
+
+        #[test]
+        fn returns_the_output_when_cancelled_during_the_poll_of_the_future() {
+            let token = Token::new();
+            let (_, waker) = Tally::waker();
+            let race = pin!(token.race(Cancels(token.clone())));
+            assert_eq!(poll(race, &waker), Poll::Ready(Some(7)), "the poll ran");
+            assert!(token.cancelled(), "the token is cancelled");
+        }
+
+        #[test]
+        fn wakes_the_waker_of_the_last_poll() {
+            let token = Token::new();
+            let (f, _, _) = probe(false);
+            let (first, a) = Tally::waker();
+            let (second, b) = Tally::waker();
+            let mut race = pin!(token.race(f));
+            assert_eq!(poll(race.as_mut(), &a), Poll::Pending, "both wait");
+            assert_eq!(poll(race.as_mut(), &b), Poll::Pending, "both wait");
+            token.cancel();
+            assert_eq!((first.wakes(), second.wakes()), (0, 1), "the newest waker");
+            assert_eq!(poll(race.as_mut(), &b), Poll::Ready(None), "cancelled");
         }
 
         #[test]
