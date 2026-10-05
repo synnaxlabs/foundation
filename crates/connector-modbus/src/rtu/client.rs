@@ -55,8 +55,8 @@ impl Client {
     ///   starts after the quiet.
     /// - [`Failure::Frame`] with the codec error of a reply that is not valid: a bad
     ///   CRC, or a reply that does not match the request. Also with the error of
-    ///   [`Request::encode`] for a request that is not valid, and nothing is sent
-    ///   then.
+    ///   [`encode`](super::encode) for a request that is not valid, and nothing is
+    ///   sent then.
     /// - [`Failure::Unit`] for a reply from another unit.
     /// - [`Failure::Serial`] when the port failed. The client is no use then.
     #[expect(
@@ -69,7 +69,7 @@ impl Client {
         request: &Request,
     ) -> Result<Reply<'_>, Failure> {
         self.bytes.clear();
-        super::encode(unit.get(), request, &mut self.bytes).map_err(Failure::Frame)?;
+        super::encode(unit.get(), request, &mut self.bytes)?;
         self.line.rest(self.stale).await?;
         // A timeout past the end of the clock never ends.
         let deadline = self.line.now().checked_add(self.timeout);
