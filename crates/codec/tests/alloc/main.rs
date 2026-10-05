@@ -128,7 +128,7 @@ fn round_trip_types() {
         Type::String,
         Type::Bytes,
         Type::List {
-            element: Scalar::U32,
+            element: Scalar::U64,
             max: 4,
         },
     ];
@@ -148,7 +148,7 @@ fn round_trip_types() {
 }
 
 /// The raw bytes of `count` samples of `data_type`, an array or a variable type. A
-/// variable sample holds 0 to 4 elements.
+/// variable sample holds 0 to 4 elements, after the ends and their padding.
 fn values(data_type: Type, count: usize) -> Vec<u8> {
     let bytes = |len| (0..len).map(|i| mix(i).to_le_bytes()[0]);
     let width = match data_type {
@@ -168,10 +168,10 @@ fn values(data_type: Type, count: usize) -> Vec<u8> {
         .collect();
     let elements = u64::from(ends.last().copied().unwrap_or(0));
     let elements = elements * u64::try_from(width).expect("widths are small");
-    ends.iter()
-        .flat_map(|end| end.to_le_bytes())
-        .chain(bytes(elements))
-        .collect()
+    let mut values: Vec<u8> = ends.iter().flat_map(|end| end.to_le_bytes()).collect();
+    values.resize(values.len().next_multiple_of(width.min(8)), 0);
+    values.extend(bytes(elements));
+    values
 }
 
 /// Encodes, checks, and decodes `values`, the raw bytes of `count` samples of

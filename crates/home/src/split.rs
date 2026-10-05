@@ -60,7 +60,8 @@ impl Scratch {
     ///
     /// # Panics
     ///
-    /// If `draft` is not of `set`, or holds a series whose type `codec` does not take.
+    /// If `draft` is not of `set`, or holds a series whose type the home does not
+    /// write.
     pub(crate) fn split<'a>(
         &'a mut self,
         set: &'a KeySet,
@@ -270,11 +271,11 @@ impl Split<'_> {
 ///
 /// # Panics
 ///
-/// If `codec` does not take `data_type`.
+/// If the home does not write a series of `data_type`.
 fn scalar(data_type: Type) -> Scalar {
     match data_type {
         Type::Scalar(scalar) => scalar,
-        other => panic!("codec does not take a series of {other:?} yet"),
+        other => panic!("home does not write a series of {other:?} yet"),
     }
 }
 
@@ -808,8 +809,8 @@ mod tests {
             }
 
             #[test]
-            #[should_panic(expected = "codec does not take a series of String yet")]
-            fn on_a_series_of_a_type_codec_does_not_take() {
+            #[should_panic(expected = "home does not write a series of String yet")]
+            fn on_a_series_of_a_type_the_home_does_not_write() {
                 let set = interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[(key(Slot::new(2)), Type::String)],

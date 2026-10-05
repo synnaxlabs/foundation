@@ -78,7 +78,8 @@ pub enum Label {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Form {
     /// As a connector writes them: fixed-width values back to back, or for strings,
-    /// bytes, and lists, the `u32` end of each sample, in elements, then the elements.
+    /// bytes, and lists, the `u32` end of each sample, in elements, then zeros up to a
+    /// multiple of the element width or 8, whichever is less, then the elements.
     Raw,
     /// As `codec` encodes them, in tagged vectors.
     Encoded,

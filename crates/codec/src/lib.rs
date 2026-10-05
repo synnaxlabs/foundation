@@ -62,13 +62,14 @@ impl Encoder {
     ///
     /// Raw samples are little-endian, and an array's elements are back to back. A
     /// `String`, `Bytes`, or `List` series is the `u32` end of each sample, counted in
-    /// elements from the first, then the elements.
+    /// elements from the first, then padding up to a multiple of the element width or
+    /// 8, whichever is less, then the elements. `encode` does not read the padding.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Overflow`] when `count` samples take more than `usize::MAX`
-    /// bytes, [`Error::Length`] when `values` does not hold them, and [`Error::Ends`] or
-    /// [`Error::Long`] when their ends are not valid. It writes nothing then.
+    /// bytes, [`Error::Length`] when `values` does not hold them, and [`Error::Ends`]
+    /// or [`Error::Long`] when their ends are not valid. It writes nothing then.
     ///
     /// # Panics
     ///
@@ -105,7 +106,21 @@ impl Encoder {
 /// Returns [`Error::Overflow`] when the samples take more than `usize::MAX` bytes, the
 /// error of the first vector whose header or length is not valid, [`Error::Ends`] or
 /// [`Error::Long`] for the first end that is not valid, or [`Error::Trailing`].
+#[inline]
 pub fn validate(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, Error> {
+    let Type::Scalar(scalar) = data_type else {
+        return validate_shape(data_type, count, bytes);
+    };
+    let layout = Layout::of(scalar);
+    let len = layout.raw_len(count)?;
+    trailing(layout.check(count, bytes, 0)?)?;
+    Ok(len)
+}
+
+/// [`validate`] for any type. Out of line, so that the scalar path of [`validate`] is
+/// small enough to inline.
+#[inline(never)]
+fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, Error> {
     let (len, rest) = match Shape::of(data_type) {
         Shape::Fixed { element, len } => {
             let elements = elements(count, len)?;
@@ -115,20 +130,21 @@ pub fn validate(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, Er
             )
         }
         Shape::Variable { element, max } => {
-            let ends_len = Layout::END.raw_len(count)?;
+            let start = element.start(count)?;
             let (elements, rest) = ends(count, bytes, max, None)?;
-            let len = ends_len
+            let len = start
                 .checked_add(element.raw_len(elements)?)
                 .ok_or(Error::Overflow)?;
             (len, element.check(elements, rest, vectors(count))?)
         }
     };
-    end(rest)?;
+    trailing(rest)?;
     Ok(len)
 }
 
 /// Decodes `bytes`, an encoded series of `count` samples of `data_type`, into `out`. It
-/// checks what [`validate`] checks.
+/// checks what [`validate`] checks, and it writes the padding of a variable series as
+/// zeros.
 ///
 /// # Errors
 ///
@@ -139,7 +155,27 @@ pub fn validate(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, Er
 ///
 /// Panics when `bytes` are valid and `out` is not the length that [`validate`]
 /// returns.
+#[inline]
 pub fn decode(
+    data_type: Type,
+    count: usize,
+    bytes: &[u8],
+    out: &mut [u8],
+) -> Result<(), Error> {
+    let Type::Scalar(scalar) = data_type else {
+        return decode_shape(data_type, count, bytes, out);
+    };
+    let layout = Layout::of(scalar);
+    if out.len() != layout.raw_len(count)? {
+        return misfit(data_type, count, bytes, out.len());
+    }
+    trailing(layout.fill(count, bytes, 0, out)?)
+}
+
+/// [`decode`] for any type. Out of line, so that the scalar path of [`decode`] is small
+/// enough to inline.
+#[inline(never)]
+fn decode_shape(
     data_type: Type,
     count: usize,
     bytes: &[u8],
@@ -155,11 +191,12 @@ pub fn decode(
             element.fill(elements, bytes, 0, out)?
         }
         Shape::Variable { element, max } => {
-            let Some((ends_out, out)) =
-                out.split_at_mut_checked(Layout::END.raw_len(count)?)
+            let Some((front, out)) = out.split_at_mut_checked(element.start(count)?)
             else {
                 return misfit(data_type, count, bytes, held);
             };
+            let (ends_out, padding) = front.split_at_mut(Layout::END.raw_len(count)?);
+            padding.fill(0);
             let (elements, rest) = ends(count, bytes, max, Some(ends_out))?;
             if out.len() != element.raw_len(elements)? {
                 return misfit(data_type, count, bytes, held);
@@ -167,7 +204,7 @@ pub fn decode(
             element.fill(elements, rest, vectors(count), out)?
         }
     };
-    end(rest)
+    trailing(rest)
 }
 
 /// Returns the error of `bytes` when they are not valid. Otherwise it panics: `decode`
@@ -196,7 +233,7 @@ fn vectors(count: usize) -> usize {
 }
 
 /// Checks that no bytes are left after the last vector.
-fn end(rest: &[u8]) -> Result<(), Error> {
+fn trailing(rest: &[u8]) -> Result<(), Error> {
     if rest.is_empty() {
         Ok(())
     } else {
@@ -239,7 +276,7 @@ fn ends<'a>(
 enum Shape {
     /// `len` elements in each sample.
     Fixed { element: Layout, len: usize },
-    /// The end of each sample, then at most `max` elements in each sample.
+    /// The end of each sample, padding, then at most `max` elements in each sample.
     Variable { element: Layout, max: u32 },
 }
 
@@ -272,7 +309,7 @@ impl Shape {
     }
 
     /// Checks `values`, the raw bytes of `count` samples, and splits them into their
-    /// ends and their elements.
+    /// ends and their elements, without the padding.
     fn split(self, count: usize, values: &[u8]) -> Result<(&[u8], &[u8]), Error> {
         let length = |expected| Error::Length {
             expected,
@@ -288,17 +325,18 @@ impl Shape {
             }
             Self::Variable { element, max } => {
                 let ends_len = Layout::END.raw_len(count)?;
-                let (ends, rest) =
+                let (ends, _) =
                     values.split_at_checked(ends_len).ok_or(length(ends_len))?;
                 let mut check = Ends::new(max);
                 check.check(ends)?;
-                let expected = ends_len
+                let start = element.start(count)?;
+                let expected = start
                     .checked_add(element.raw_len(check.elements())?)
                     .ok_or(Error::Overflow)?;
                 if values.len() != expected {
                     return Err(length(expected));
                 }
-                Ok((ends, rest))
+                Ok((ends, values.split_at(start).1))
             }
         }
     }
@@ -421,6 +459,16 @@ impl Layout {
         count.checked_mul(self.width()).ok_or(Error::Overflow)
     }
 
+    /// Where the elements of `count` variable samples start in their raw bytes: after
+    /// the ends, padded to a multiple of the element width or 8, whichever is less. A
+    /// frame starts each series on 8 bytes, so the elements are then aligned.
+    fn start(self, count: usize) -> Result<usize, Error> {
+        Self::END
+            .raw_len(count)?
+            .checked_next_multiple_of(self.width().min(8))
+            .ok_or(Error::Overflow)
+    }
+
     /// The bytes of the raw headers of the vectors of `len` bytes of values.
     fn headers(self, len: usize) -> usize {
         let width = self.width();
@@ -453,6 +501,11 @@ impl Layout {
     /// Decodes the vectors of `count` samples at the front of `bytes` into `out`, which
     /// holds exactly the samples, where the first is vector `first` of the series.
     /// Returns the bytes after them.
+    #[expect(
+        clippy::inline_always,
+        reason = "as a call, it made a decode of 10 samples about 6% slower"
+    )]
+    #[inline(always)]
     fn fill<'a>(
         self,
         count: usize,
@@ -691,10 +744,12 @@ mod tests {
             .collect()
     }
 
-    /// The raw bytes of a variable series: `ends`, then `elements`.
-    fn raw(ends: &[u32], elements: &[u8]) -> Vec<u8> {
+    /// The raw bytes of a variable series with elements of `width` bytes: `ends`,
+    /// zeros up to a multiple of `width` or 8, whichever is less, then `elements`.
+    fn raw(ends: &[u32], width: usize, elements: &[u8]) -> Vec<u8> {
         let mut values: Vec<u8> =
             ends.iter().flat_map(|end| end.to_le_bytes()).collect();
+        values.resize(values.len().next_multiple_of(width.min(8)), 0);
         values.extend(elements);
         values
     }
@@ -711,7 +766,7 @@ mod tests {
             .collect();
         let elements: Vec<u8> =
             samples.iter().flat_map(|s| s.as_ref().to_vec()).collect();
-        (samples.len(), raw(&ends, &elements))
+        (samples.len(), raw(&ends, width, &elements))
     }
 
     /// Any sample type.
@@ -749,7 +804,7 @@ mod tests {
             })
             .collect();
         let elements = usize::try_from(ends.last().copied().unwrap_or(0)).unwrap();
-        raw(&ends, &fill(elements * width))
+        raw(&ends, width, &fill(elements * width))
     }
 
     /// The count and series of a frame in `form` that holds `bytes` as the series of
@@ -1342,8 +1397,8 @@ mod tests {
                         end: 1,
                         previous: 2,
                     },
-                    "sample 1 ends at element 1, before the end of the sample before it \
-                     at 2",
+                    "sample 1 ends at element 1, before the end of the sample before \
+                     it at 2",
                 ),
                 (
                     Error::Long {
@@ -1519,21 +1574,27 @@ mod tests {
             element: Scalar::U16,
             max: 2,
         };
+        const LIST_8: Type = Type::List {
+            element: Scalar::F64,
+            max: 2,
+        };
 
         /// Checks that `encode` refuses the raw `ends` and `elements` of `data_type`
         /// with `expected`, and that `validate` and `decode` refuse them encoded.
         fn refuses(data_type: Type, ends: &[u32], elements: &[u8], expected: &Error) {
             let count = ends.len();
-            let values = raw(ends, elements);
-            assert_eq!(
-                Encoder::new(data_type).encode(count, &values, &mut [0; 256]),
-                Err(expected.clone()),
-                "{data_type:?} raw"
-            );
             let element = match data_type {
                 Type::List { element, .. } => element,
                 _ => Scalar::U8,
             };
+            let values = raw(ends, element.width(), elements);
+            let mut out = [7; 256];
+            assert_eq!(
+                Encoder::new(data_type).encode(count, &values, &mut out),
+                Err(expected.clone()),
+                "{data_type:?} raw"
+            );
+            assert_eq!(out, [7; 256], "a refused {data_type:?} series wrote to out");
             let encoded = [
                 encode(Scalar::U32, &values[..4 * count]),
                 encode(element, elements),
@@ -1578,8 +1639,54 @@ mod tests {
         }
 
         #[test]
+        fn pads_the_ends_to_the_element_width_or_8() {
+            let value = 1.5_f64.to_le_bytes();
+            let (count, values) = variable(8, &[value]);
+            assert_eq!(values, [[1, 0, 0, 0, 0, 0, 0, 0], value].concat());
+            let parts = [
+                encode(Scalar::U32, &values[..4]),
+                encode(Scalar::F64, &value),
+            ];
+            assert_eq!(encode_type(LIST_8, count, &values), parts.concat());
+            for (element, count, start) in [
+                (Scalar::U8, 1, 4),
+                (Scalar::U16, 1, 4),
+                (Scalar::F32, 1, 4),
+                (Scalar::F64, 1, 8),
+                (Scalar::F64, 2, 8),
+                (Scalar::I64, 3, 16),
+                (Scalar::Uuid, 1, 8),
+            ] {
+                let data_type = Type::List { element, max: 1 };
+                let width = element.width();
+                let mut values = vec![0xab; start + count * width];
+                for (sample, end) in values.as_chunks_mut::<4>().0[..count]
+                    .iter_mut()
+                    .zip(1_u32..)
+                {
+                    *sample = end.to_le_bytes();
+                }
+                let encoded = encode_type(data_type, count, &values);
+                let case = format!("{data_type:?}, {count} samples");
+                assert_eq!(
+                    validate(data_type, count, &encoded),
+                    Ok(values.len()),
+                    "{case}"
+                );
+                let mut out = vec![0xff; values.len()];
+                assert_eq!(
+                    decode(data_type, count, &encoded, &mut out),
+                    Ok(()),
+                    "{case}"
+                );
+                values[4 * count..start].fill(0);
+                assert_eq!(out, values, "{case}");
+            }
+        }
+
+        #[test]
         fn encodes_no_samples_as_no_bytes() {
-            for data_type in [Type::String, Type::Bytes, LIST] {
+            for data_type in [Type::String, Type::Bytes, LIST, LIST_8] {
                 assert_eq!(encode_type(data_type, 0, &[]), [], "{data_type:?}");
                 assert_eq!(validate(data_type, 0, &[]), Ok(0));
                 assert_eq!(decode(data_type, 0, &[], &mut []), Ok(()));
@@ -1619,18 +1726,21 @@ mod tests {
         fn refuses_values_that_do_not_fit_the_ends() {
             for (data_type, count, values, expected) in [
                 (Type::String, 2, vec![0; 5], 8),
-                (Type::String, 2, raw(&[1, 3], b"ab"), 11),
-                (Type::String, 2, raw(&[1, 3], b"abcd"), 11),
-                (LIST, 1, raw(&[1], &[1, 0, 2]), 6),
+                (Type::String, 2, raw(&[1, 3], 1, b"ab"), 11),
+                (Type::String, 2, raw(&[1, 3], 1, b"abcd"), 11),
+                (LIST, 1, raw(&[1], 2, &[1, 0, 2]), 6),
+                (LIST_8, 1, vec![1, 0, 0, 0, 0, 0], 16),
             ] {
+                let mut out = [7; 64];
                 assert_eq!(
-                    Encoder::new(data_type).encode(count, &values, &mut [0; 64]),
+                    Encoder::new(data_type).encode(count, &values, &mut out),
                     Err(Error::Length {
                         expected,
                         actual: values.len(),
                     }),
                     "{data_type:?} {values:?}"
                 );
+                assert_eq!(out, [7; 64], "a refused {data_type:?} series wrote to out");
             }
         }
 
@@ -1657,7 +1767,7 @@ mod tests {
         fn numbers_vectors_across_the_ends_and_the_elements() {
             let mut ends = vec![0; 1_024];
             ends.push(1);
-            let mut encoded = encode(Scalar::U32, &raw(&ends, &[]));
+            let mut encoded = encode(Scalar::U32, &raw(&ends, 1, &[]));
             encoded.extend([9, 0, 120]);
             let tag = Error::Tag { vector: 2, tag: 9 };
             assert_eq!(validate(Type::String, 1_025, &encoded), Err(tag.clone()));

@@ -354,8 +354,12 @@ How to read this record:
   1024. A fixed array is the series of its `count * len` elements. A `String`,
   `Bytes`, or `List` series is the `u32` series of its ends, then the series of its
   elements (`u8` for `String` and `Bytes`). An end counts elements from the first, so
-  ends never decrease, and a `List` sample holds at most `max` elements. `codec` does
-  not check UTF-8. Vector numbers in errors count across the ends and the elements.
+  ends never decrease, and a `List` sample holds at most `max` elements. In the raw
+  form, zeros pad the ends to a multiple of the element width or 8, whichever is less
+  (R9-D3). A frame series starts on 8 bytes, so the elements are then aligned. The
+  encoded form has no padding. `codec` owns the check of the ends, raw and encoded,
+  and a view of a raw variable series relies on it. `codec` does not check UTF-8 (the
+  owner is #556). Vector numbers in errors count across the ends and the elements.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
