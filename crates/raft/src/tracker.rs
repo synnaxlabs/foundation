@@ -175,6 +175,16 @@ mod tests {
     }
 
     #[test]
+    fn a_follower_that_holds_more_than_it_was_sent_moves_next_past_it() {
+        let mut progress = Progress::new(0);
+        progress.sent(0);
+        progress.accepted(0);
+        progress.sent(2);
+        assert!(progress.accepted(5));
+        assert_eq!((progress.next, progress.matched), (6, 5));
+    }
+
+    #[test]
     fn a_probe_with_no_entries_does_not_move_next() {
         let mut progress = Progress::new(0);
         progress.sent(0);
