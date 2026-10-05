@@ -3,31 +3,7 @@
 //! A leaf (level 0) entry is a key and a value. An entry of a higher level is the
 //! last key of a child chunk and the child's hash. A length is a LEB128 `u32`.
 
-use std::fmt;
-
-use super::Error;
-
-/// The BLAKE3 hash of a chunk's bytes. It is the chunk's address.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Hash(pub [u8; 32]);
-
-impl Hash {
-    pub(super) fn of(bytes: &[u8]) -> Self {
-        Self(*blake3::hash(bytes).as_bytes())
-    }
-}
-
-impl fmt::Display for Hash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
-    }
-}
-
-impl fmt::Debug for Hash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Hash({self})")
-    }
-}
+use super::{Error, Hash};
 
 /// One entry of a chunk. `payload` is a value in a leaf and a child hash above.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,7 +79,7 @@ fn write_bytes(chunk: &mut Vec<u8>, bytes: &[u8]) {
     let mut length = length.expect("invariant: a key or value is under 4 GiB");
     loop {
         let [low, ..] = length.to_le_bytes();
-        length >>= 7;
+        length /= 0x80;
         if length == 0 {
             chunk.push(low & 0x7F);
             break;
@@ -116,14 +92,14 @@ fn write_bytes(chunk: &mut Vec<u8>, bytes: &[u8]) {
 // Refuses a length that `write_bytes` does not make, so one entry has one encoding.
 fn take_bytes<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
     let mut length = 0_u32;
-    for shift in (0..32).step_by(7) {
+    for place in [1_u32, 0x80, 0x4000, 0x20_0000, 0x1000_0000] {
         let (&byte, tail) = rest.split_first()?;
         *rest = tail;
-        let bits = u32::from(byte & 0x7F);
-        if bits << shift >> shift != bits || (byte == 0 && shift > 0) {
+        if byte == 0 && place > 1 {
             return None;
         }
-        length |= bits << shift;
+        let part = u32::from(byte & 0x7F).checked_mul(place)?;
+        length = length.checked_add(part)?;
         if byte & 0x80 == 0 {
             return rest.split_off(..usize::try_from(length).ok()?);
         }
@@ -190,12 +166,5 @@ mod tests {
             let err = Node::read(hash, bytes).unwrap_err();
             assert_eq!(err, Error::Corrupt(hash), "{bytes:?}");
         }
-    }
-
-    #[test]
-    fn shows_a_hash_as_hex() {
-        let hash = Hash([0xAB; 32]);
-        assert_eq!(hash.to_string(), "ab".repeat(32));
-        assert_eq!(format!("{hash:?}"), format!("Hash({})", "ab".repeat(32)));
     }
 }

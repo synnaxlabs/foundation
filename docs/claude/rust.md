@@ -53,10 +53,10 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   `node` reads arguments and exits. Each such call carries one `#[expect]`.
 - A crate's `[lints]` table cannot add to the workspace set, so stricter lints go at
   the top of `lib.rs` as `#![deny(...)]` (r16 63):
-  - Decoders of outside input (`codec`, `wire`, `document`, `config-hcl`, and each
-    protocol parser in a `connector-<kind>`) deny `indexing_slicing`,
-    `arithmetic_side_effects`, `as_conversions`, and `string_slice`. Bad input
-    returns an error. It never panics or wraps.
+  - Decoders of outside input (`codec`, `wire`, `document`, `config-hcl`,
+    `spec::tree`, and each protocol parser in a `connector-<kind>`) deny
+    `indexing_slicing`, `arithmetic_side_effects`, `as_conversions`, and
+    `string_slice`. Bad input returns an error. It never panics or wraps.
   - Layer 1 decision crates (`raft`, `control`, `delivery`, `access`, `estimate`)
     deny `wildcard_enum_match_arm`, so a new variant breaks every match.
 - `clippy::todo` and `let_underscore_untyped` turn on for a crate when its stubs are

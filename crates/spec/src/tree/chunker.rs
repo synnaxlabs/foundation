@@ -5,6 +5,9 @@ use super::chunk;
 /// The scale of the chunk size distribution, in bytes.
 pub(super) const SCALE: u32 = 4096;
 
+// A larger scale takes the powers in `boundary` out of range.
+const _: () = assert!(SCALE <= 8192, "the boundary rule overflows");
+
 /// Reports whether a chunk ends after the entry with `key`, which fills the chunk's
 /// entry bytes from `start` to `end`.
 ///
@@ -14,13 +17,17 @@ pub(super) const SCALE: u32 = 4096;
 ///
 /// A chunk above the leaves never ends after its first entry. Each level then has at
 /// most half the chunks of the level below, for keys of any size.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the first check keeps each operand below 2^15 for a scale up to 8192"
+)]
 fn boundary(scale: u32, level: u8, key: &[u8], start: usize, end: usize) -> bool {
     if level > 0 && start == 0 {
         return false;
     }
     let scale = u128::from(scale);
-    let (start, end) = (start as u128, end as u128);
-    // Keeps the powers below in range for an entry of any size.
+    let start = u128::try_from(start).unwrap_or(u128::MAX);
+    let end = u128::try_from(end).unwrap_or(u128::MAX);
     if end >= 4 * scale {
         return true;
     }
@@ -33,20 +40,16 @@ fn boundary(scale: u32, level: u8, key: &[u8], start: usize, end: usize) -> bool
     u128::from(draw) * scale.pow(4) < (end.pow(4) - start.pow(4)) << 64
 }
 
-/// A finished chunk: its last key and its bytes.
-pub(super) type Chunk = (Vec<u8>, Vec<u8>);
-
 /// Builds the chunks of one level from entries in key order.
 pub(super) struct Writer {
     scale: u32,
     level: u8,
     chunk: Vec<u8>,
     last: Vec<u8>,
-    done: Vec<Chunk>,
+    done: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Writer {
-    /// `scale` must be at most 8192, so that the boundary rule cannot overflow.
     pub(super) fn new(scale: u32, level: u8) -> Self {
         Self {
             scale,
@@ -58,9 +61,9 @@ impl Writer {
     }
 
     pub(super) fn push(&mut self, key: &[u8], payload: &[u8]) {
-        let start = self.chunk.len() - 1;
+        let start = self.chunk.len().saturating_sub(1);
         chunk::write(&mut self.chunk, self.level, key, payload);
-        let end = self.chunk.len() - 1;
+        let end = self.chunk.len().saturating_sub(1);
         self.last.clear();
         self.last.extend_from_slice(key);
         if boundary(self.scale, self.level, key, start, end) {
@@ -73,7 +76,8 @@ impl Writer {
         self.chunk.len() == 1
     }
 
-    pub(super) fn finish(mut self) -> Vec<Chunk> {
+    /// Ends the level. Returns the last key and the bytes of each chunk.
+    pub(super) fn finish(mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
         if !self.at_boundary() {
             self.cut();
         }

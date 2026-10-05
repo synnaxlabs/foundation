@@ -1,13 +1,20 @@
 use proptest::prelude::*;
 use proptest::sample::Index;
 
+use std::collections::BTreeSet;
+
+use super::apply::{Cursor, apply_at};
+use super::diff::children;
 use super::*;
 
 // A small scale gives trees of several levels from a few hundred entries.
 const SMALL: u32 = 256;
 
 type Model = BTreeMap<u16, Vec<u8>>;
-type Change = (u16, Option<Vec<u8>>);
+// A change by id: a value sets the entry, and `None` deletes it.
+type Step = (u16, Option<Vec<u8>>);
+// An entry that differs: its name, its old value, and its new value.
+type Pair = (Name, Option<Vec<u8>>, Option<Vec<u8>>);
 
 // Some names are longer than a chunk at the small scale.
 fn name(id: u16) -> Name {
@@ -16,9 +23,12 @@ fn name(id: u16) -> Name {
     name.parse().unwrap()
 }
 
-fn step(chunks: &mut Chunks, scale: u32, root: Hash, changes: &[Change]) -> Update {
-    let named = changes.iter().map(|(id, value)| (name(*id), value.clone()));
-    apply_at(chunks, scale, root, named).unwrap()
+fn step(chunks: &mut Chunks, scale: u32, root: Hash, steps: &[Step]) -> Update {
+    let changes = steps.iter().map(|(id, value)| match value {
+        Some(value) => Change::Set(name(*id), value.clone()),
+        None => Change::Delete(name(*id)),
+    });
+    apply_at(chunks, scale, root, changes).unwrap()
 }
 
 fn build(chunks: &mut Chunks, scale: u32, model: &Model) -> Hash {
@@ -49,16 +59,21 @@ fn height(chunks: &Chunks, root: Hash) -> usize {
     usize::from(chunks.node(root).unwrap().level) + 1
 }
 
-fn names(ids: impl IntoIterator<Item = u16>) -> Vec<Name> {
-    let mut names: Vec<_> = ids.into_iter().map(name).collect();
-    names.sort();
-    names
-}
-
-fn changed(old: &Model, new: &Model) -> Vec<Name> {
+fn changed(old: &Model, new: &Model) -> Vec<Pair> {
     let ids = old.keys().chain(new.keys()).copied();
     let ids: BTreeSet<u16> = ids.filter(|id| old.get(id) != new.get(id)).collect();
-    names(ids)
+    let pair = |id| (name(id), old.get(&id).cloned(), new.get(&id).cloned());
+    let mut pairs: Vec<Pair> = ids.into_iter().map(pair).collect();
+    pairs.sort();
+    pairs
+}
+
+fn pairs(diff: &Diff<'_>) -> Vec<Pair> {
+    let pair = |changed: &Changed<'_>| {
+        let old = changed.old.map(<[u8]>::to_vec);
+        (changed.name.clone(), old, changed.new.map(<[u8]>::to_vec))
+    };
+    diff.changes.iter().map(pair).collect()
 }
 
 // Some values are longer than a chunk at the small scale.
@@ -67,7 +82,7 @@ fn value() -> impl Strategy<Value = Vec<u8>> {
     size.prop_flat_map(|size| prop::collection::vec(any::<u8>(), size))
 }
 
-fn change() -> impl Strategy<Value = Change> {
+fn a_step() -> impl Strategy<Value = Step> {
     (0..2000_u16, prop::option::weighted(0.7, value()))
 }
 
@@ -96,7 +111,8 @@ fn a_tree_with_each_entry_deleted_is_the_empty_tree() {
     let update = step(&mut chunks, SMALL, root, &deletes);
     assert_eq!((update.root, update.chunks.len()), (empty(), 0));
     let diff = diff(&chunks, root, empty()).unwrap();
-    assert_eq!((diff.names, diff.chunks), (names(0..500), vec![]));
+    assert_eq!(pairs(&diff), changed(&model, &Model::new()));
+    assert_eq!(diff.chunks, vec![]);
 }
 
 #[test]
@@ -174,7 +190,7 @@ fn a_missing_chunk_is_named() {
     let key = model.keys().copied().min_by_key(|id| name(*id)).unwrap();
 
     assert_eq!(get(&chunks, root, &name(key)), Err(Error::Missing(first)));
-    let change = [(name(key), None), (name(1999), Some(vec![2]))];
+    let change = [Change::Delete(name(key)), Change::Set(name(1999), vec![2])];
     assert_eq!(apply(&mut chunks, root, change), Err(Error::Missing(first)));
     assert_eq!(chunks.0.len(), all.0.len() - 1);
     assert_eq!(diff(&chunks, empty(), root), Err(Error::Missing(first)));
@@ -207,10 +223,10 @@ fn a_change_reads_only_the_chunks_near_it() {
     }
     assert!(near.0.len() < 10);
 
-    let change = [(first.clone(), Some(vec![1]))];
+    let change = [Change::Set(first.clone(), vec![1])];
     let update = apply(&mut near, root, change.clone()).unwrap();
     assert_eq!(update, apply(&mut all, root, change).unwrap());
-    assert_eq!(get(&near, root, &first), Ok(value.as_deref()));
+    assert_eq!(get(&near, root, &first), Ok(Some(value.as_slice())));
 }
 
 #[test]
@@ -225,7 +241,7 @@ fn a_missing_chunk_after_the_change_is_named() {
         let next = cursor.node.hash;
         let mut chunks = all.clone();
         chunks.0.remove(&next);
-        let change = [(first.clone(), Some(vec![1]))];
+        let change = [Change::Set(first.clone(), vec![1])];
         assert_eq!(apply(&mut chunks, root, change), Err(Error::Missing(next)));
         assert_eq!(diff(&chunks, empty(), root), Err(Error::Missing(next)));
     }
@@ -251,7 +267,7 @@ fn a_child_at_the_wrong_level_is_named() {
     assert_eq!(get(&chunks, root, &b), Err(Error::Corrupt(leaf)));
 
     let top = raw(&mut chunks, 255, &[("a", &leaf.0)]);
-    let change = [("zz".parse().unwrap(), Some(vec![1]))];
+    let change = [Change::Set("zz".parse().unwrap(), vec![1])];
     assert_eq!(apply(&mut chunks, top, change), Err(Error::Corrupt(leaf)));
 }
 
@@ -273,7 +289,10 @@ fn a_child_with_another_last_key_is_named() {
 #[test]
 fn a_name_longer_than_a_chunk_fits_in_the_tree() {
     let long: Name = "a".repeat(3 * 4096).parse().unwrap();
-    let changes = [(long.clone(), Some(vec![1])), (name(1), Some(vec![2]))];
+    let changes = [
+        Change::Set(long.clone(), vec![1]),
+        Change::Set(name(1), vec![2]),
+    ];
     let mut chunks = Chunks::default();
     let root = apply(&mut chunks, empty(), changes).unwrap().root;
     assert_eq!(get(&chunks, root, &long), Ok(Some(&[1][..])));
@@ -281,9 +300,11 @@ fn a_name_longer_than_a_chunk_fits_in_the_tree() {
 
     let mut chunks = Chunks::default();
     let update = plant(&mut chunks);
-    let root = apply(&mut chunks, update.root, [(long.clone(), Some(vec![1]))]);
-    let root = root.unwrap().root;
-    let all = (0..50_000).map(definition).chain([(long, Some(vec![1]))]);
+    let change = [Change::Set(long.clone(), vec![1])];
+    let root = apply(&mut chunks, update.root, change.clone())
+        .unwrap()
+        .root;
+    let all = (0..50_000).map(set).chain(change);
     let whole = apply(&mut Chunks::default(), empty(), all).unwrap().root;
     assert_eq!(root, whole);
 }
@@ -306,13 +327,18 @@ fn bytes_that_are_not_a_chunk_are_named() {
 
 // A spec of 50,000 definitions with names and value sizes like real ones.
 fn plant(chunks: &mut Chunks) -> Update {
-    apply(chunks, empty(), (0..50_000).map(definition)).unwrap()
+    apply(chunks, empty(), (0..50_000).map(set)).unwrap()
 }
 
-fn definition(id: u32) -> (Name, Option<Vec<u8>>) {
+fn set(id: u32) -> Change {
+    let (name, value) = definition(id);
+    Change::Set(name, value)
+}
+
+fn definition(id: u32) -> (Name, Vec<u8>) {
     let name = format!("plant_{}.line_{}.sensor_{id}", id % 5, id % 61);
     let size = 60 + usize::try_from(id.wrapping_mul(2_654_435_761) % 120).unwrap();
-    (name.parse().unwrap(), Some(vec![0xA5; size]))
+    (name.parse().unwrap(), vec![0xA5; size])
 }
 
 #[test]
@@ -339,12 +365,12 @@ fn one_change_to_a_large_tree_rewrites_about_one_chunk_for_each_level() {
     let mut counts = BTreeMap::new();
     for id in (0..75_000).step_by(37) {
         let (name, value) = definition(id);
-        let value = match id % 3 {
-            0 => None,
-            1 => Some(vec![9; 33]),
-            _ => value,
+        let change = match id % 3 {
+            0 => Change::Delete(name),
+            1 => Change::Set(name, vec![9; 33]),
+            _ => Change::Set(name, value),
         };
-        let update = apply(&mut chunks.clone(), root, [(name, value)]).unwrap();
+        let update = apply(&mut chunks.clone(), root, [change]).unwrap();
         *counts.entry(update.chunks.len()).or_insert(0_usize) += 1;
     }
     let changes: usize = counts.range(1..).map(|(_, changes)| changes).sum();
@@ -355,7 +381,7 @@ fn one_change_to_a_large_tree_rewrites_about_one_chunk_for_each_level() {
 proptest! {
     #[test]
     fn the_same_entries_give_the_same_root_in_any_order(
-        batches in prop::collection::vec(prop::collection::vec(change(), 1..40), 0..24),
+        batches in prop::collection::vec(prop::collection::vec(a_step(), 1..40), 0..24),
     ) {
         let mut chunks = Chunks::default();
         let mut model = Model::new();
@@ -372,10 +398,10 @@ proptest! {
             let old = reachable(&chunks, root);
             let new = reachable(&chunks, update.root);
             let made: BTreeSet<Hash> = new.difference(&old).copied().collect();
-            prop_assert_eq!(hashes(&update), made.clone());
+            prop_assert_eq!(hashes(&update), made);
             let diff = diff(&chunks, root, update.root).unwrap();
-            prop_assert_eq!(diff.chunks.iter().copied().collect::<BTreeSet<_>>(), made);
-            prop_assert_eq!(diff.names, changed(&before, &model));
+            prop_assert_eq!(&diff.chunks, &update.chunks);
+            prop_assert_eq!(pairs(&diff), changed(&before, &model));
             root = update.root;
         }
         prop_assert_eq!(root, build(&mut Chunks::default(), SMALL, &model));
@@ -406,13 +432,11 @@ proptest! {
         let old_root = build(&mut chunks, SMALL, &old);
         let new_root = build(&mut chunks, SMALL, &new);
         let diff = diff(&chunks, old_root, new_root).unwrap();
-        prop_assert_eq!(diff.names, changed(&old, &new));
+        prop_assert_eq!(pairs(&diff), changed(&old, &new));
         let old_chunks = reachable(&chunks, old_root);
         let new_chunks = reachable(&chunks, new_root);
         let made: Vec<Hash> = new_chunks.difference(&old_chunks).copied().collect();
-        let mut found = diff.chunks;
-        found.sort();
-        prop_assert_eq!(found, made);
+        prop_assert_eq!(diff.chunks, made);
     }
 }
 
@@ -471,7 +495,7 @@ proptest! {
         }
         let name: Name = "c".parse().unwrap();
         for &root in &made {
-            let change = [(name.clone(), Some(vec![1; 300]))];
+            let change = [Change::Set(name.clone(), vec![1; 300])];
             let results = (
                 get(&chunks, root, &name).is_ok(),
                 diff(&chunks, empty(), root).is_ok(),
