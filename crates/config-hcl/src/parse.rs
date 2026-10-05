@@ -1654,6 +1654,11 @@ c = "°C # not a comment"
         fn names_what_the_grammar_needs() {
             let cases = [
                 ("a = \n", span(at(4, 0, 4), at(5, 1, 0)), Expected::Value),
+                (
+                    "a = # c\r\n",
+                    span(at(7, 0, 7), at(9, 1, 0)),
+                    Expected::Value,
+                ),
                 ("a = $\n", on(4, 5), Expected::Value),
                 ("a =", on(3, 3), Expected::Value),
                 ("a = [", on(5, 5), Expected::Value),

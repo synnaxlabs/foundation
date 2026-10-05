@@ -245,13 +245,22 @@ impl<'a> Tokens<'a> {
                 Some(' ' | '\t') => {
                     self.bump();
                 }
-                Some('#') => self.eat_while(|c| c != '\n'),
-                Some('/') if self.second(|c| c == '/') => self.eat_while(|c| c != '\n'),
+                Some('#') => self.line_comment(),
+                Some('/') if self.second(|c| c == '/') => self.line_comment(),
                 Some('/') if self.second(|c| c == '*') => self.comment()?,
                 _ => return Ok(()),
             }
         }
         unreachable!("invariant: each pass moves past a character")
+    }
+
+    /// Moves past a comment up to the `\n` or `\r\n` that ends its line.
+    fn line_comment(&mut self) {
+        let len = match self.rest.split_once('\n') {
+            Some((line, _)) => line.strip_suffix('\r').unwrap_or(line).len(),
+            None => self.rest.len(),
+        };
+        self.skip_bytes(len);
     }
 
     fn comment(&mut self) -> Result<(), Error> {
@@ -588,6 +597,29 @@ mod tests {
             }
             prop_assert!(false, "more tokens than bytes in {text:?}");
         }
+    }
+
+    #[test]
+    fn ends_a_line_comment_before_its_line_end() {
+        let text = "# a\r\n// b\r\n# c\r";
+        let mut tokens = Tokens::new(Source(0), text).unwrap();
+        let mut found = Vec::new();
+        for _ in 0..=text.len() {
+            let token = tokens.next();
+            let end = token.kind == Kind::End;
+            found.push((token.kind, token.text));
+            if end {
+                break;
+            }
+        }
+        assert_eq!(
+            found,
+            [
+                (Kind::Newline, "\r\n"),
+                (Kind::Newline, "\r\n"),
+                (Kind::End, "")
+            ]
+        );
     }
 
     #[test]
