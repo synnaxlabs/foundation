@@ -11,14 +11,10 @@
 
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
-use crate::record::{self, ALIGN, HEADER_LEN, Kind};
+use crate::record::{self, ALIGN, BLOCK, HEADER_LEN, Kind};
 
 fn to_u64(len: usize) -> u64 {
     u64::try_from(len).expect("invariant: a length in memory fits in u64")
-}
-
-fn block() -> u64 {
-    to_u64(ALIGN)
 }
 
 /// An offset that is not on a block boundary.
@@ -41,7 +37,7 @@ impl Position {
     ///
     /// [`Unaligned`] when `offset` is not a multiple of [`ALIGN`].
     pub(crate) fn new(offset: u64, chain: u32) -> Result<Self, Unaligned> {
-        if offset.is_multiple_of(block()) {
+        if offset.is_multiple_of(BLOCK) {
             Ok(Self { offset, chain })
         } else {
             Err(Unaligned { offset })
@@ -92,8 +88,8 @@ impl Layout {
         match window {
             Some(window)
                 if restart.contains(&body_max)
-                    && area.is_multiple_of(block())
-                    && window.saturating_mul(2) - block() <= area =>
+                    && area.is_multiple_of(BLOCK)
+                    && window.saturating_mul(2) - BLOCK <= area =>
             {
                 Ok(Self {
                     area,
@@ -103,6 +99,14 @@ impl Layout {
             }
             _ => Err(Unfit { area, body_max }),
         }
+    }
+
+    pub(crate) fn area(self) -> u64 {
+        self.area
+    }
+
+    pub(crate) fn body_max(self) -> usize {
+        self.body_max
     }
 }
 
@@ -276,7 +280,7 @@ impl Cursor {
             layout,
             tail: tail.offset,
             at: tail,
-            want: block(),
+            want: BLOCK,
             ended: false,
         }
     }
@@ -324,7 +328,7 @@ impl Cursor {
             self.want = size;
             return Ok(Step::More);
         }
-        self.want = block();
+        self.want = BLOCK;
         let Some(record) = record::read(bytes, self.at.chain) else {
             self.ended = true;
             return Ok(Step::End);
@@ -398,6 +402,8 @@ mod tests {
     const BLOCKS: u64 = 8;
     const AREA: u64 = BLOCKS * 4096;
     const BODY_MAX: usize = 3 * ALIGN;
+    /// The unit a crash keeps or loses of an unsynced write.
+    const SECTOR: usize = 512;
 
     const START: Position = Position {
         offset: 0,
@@ -935,32 +941,54 @@ mod tests {
                 prop_assert_eq!(cursor.at, ring.writer.head());
             }
 
+            /// A crash leaves any subset of the 512-byte sectors of the last
+            /// write. The record is live when every sector it wrote survives;
+            /// lost padding does not count. A flipped bit in it drops it.
             #[test]
-            fn drops_a_last_record_that_is_torn_or_damaged(
+            fn keeps_a_last_record_only_when_its_sectors_survive(
                 ops in ops(),
                 last in body(),
-                kept in any::<[bool; 8]>(),
+                kept in prop::collection::vec(
+                    prop::bool::weighted(0.9),
+                    index(AREA) / SECTOR,
+                ),
+                damaged in any::<bool>(),
                 flip in any::<prop::sample::Index>(),
+                chain in any::<u32>(),
                 after in body(),
             ) {
+                let opened = |op: &Op| matches!(op, Op::Reopen(c) if *c == chain);
+                prop_assume!(chain != 1 && !ops.iter().any(opened));
                 let mut ring = Ring::new();
                 run(&mut ring, &ops);
                 let before = ring.area.clone();
-                let mut expected = ring.data();
                 let Ok(plan) = ring.append(&last) else {
                     return Err(TestCaseError::reject("the ring is full"));
                 };
-                ring.live.pop_back();
-                let whole = ring.area.clone();
-                for (block, _) in kept.iter().enumerate().filter(|(_, kept)| !**kept) {
-                    let block = block * ALIGN..(block + 1) * ALIGN;
-                    ring.area[block.clone()].copy_from_slice(&before[block]);
+                let mut sectors = Vec::new();
+                for (place, len) in plan
+                    .wrap
+                    .map(|wrap| (wrap.place, HEADER_LEN))
+                    .into_iter()
+                    .chain([(plan.record.place, HEADER_LEN + last.len())])
+                {
+                    let first = index(place) / SECTOR;
+                    sectors.extend(first..=(index(place) + len - 1) / SECTOR);
                 }
-                if ring.area == whole {
+                for (sector, _) in kept.iter().enumerate().filter(|(_, kept)| !**kept) {
+                    let bytes = sector * SECTOR..(sector + 1) * SECTOR;
+                    ring.area[bytes.clone()].copy_from_slice(&before[bytes]);
+                }
+                let whole = sectors.iter().all(|sector| kept[*sector]);
+                if whole && damaged {
                     let written = HEADER_LEN + last.len();
                     ring.area[index(plan.record.place) + flip.index(written)] ^= 1;
                 }
-                let found = ring.reopen(1);
+                if !whole || damaged {
+                    ring.live.pop_back();
+                }
+                let mut expected = ring.data();
+                let found = ring.reopen(chain);
                 prop_assume!(found.is_ok());
                 prop_assert_eq!(found, Ok(expected.clone()));
                 prop_assume!(ring.append(&after).is_ok());
@@ -987,7 +1015,9 @@ mod tests {
                 }
                 let tail = at(tail, chain);
                 match walk(&area, tail) {
-                    Ok((_, cursor)) => prop_assert!(cursor.at.offset - tail.offset <= AREA),
+                    Ok((_, cursor)) => {
+                        prop_assert!(cursor.at.offset - tail.offset <= AREA);
+                    }
                     Err(invalid) => prop_assert!(invalid.offset - tail.offset < AREA),
                 }
             }
