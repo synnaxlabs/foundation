@@ -82,19 +82,18 @@ impl Clock {
             (Some(slew), Err(e)) => return Status::Holdover(slew.at(now, DRIFT), e),
             (old, Ok(estimate)) => (old, estimate),
         };
-        let mut steered = (Slew::new(estimate), now);
+        // Before the first estimate, readers have no time that could go back.
+        let mut slew = Slew::new(estimate);
         self.cell.update(|_| {
             // `toward` keeps mesh time from going back only against reads before its
             // `now`, so the clock reads inside the update.
             if let Some(old) = old {
-                let now = self.monotonic.now();
-                steered = (old.toward(now, DRIFT, estimate), now);
+                slew = old.toward(self.monotonic.now(), DRIFT, estimate);
             }
-            encode(steered.0)
+            encode(slew)
         });
-        let (slew, now) = steered;
         self.slew = Some(slew);
-        Status::Synced(slew.at(now, DRIFT))
+        Status::Synced(slew.at(self.monotonic.now(), DRIFT))
     }
 }
 
@@ -104,8 +103,8 @@ pub enum Status {
     /// No source has a measurement yet, so readers have no time.
     Unsynced,
     /// A majority of the sources with measurements agrees. Holds mesh time now, as an
-    /// offset from the monotonic clock with its error. An error of 36500 days is
-    /// unknown.
+    /// offset from the monotonic clock with its error. The error can be unknown
+    /// ([`Measurement::unknown`]).
     Synced(Measurement),
     /// No majority agrees now, or no source is left. Mesh time keeps its slew, and its
     /// error grows by drift. Holds mesh time now and why.

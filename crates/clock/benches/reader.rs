@@ -17,7 +17,8 @@ fn main() {
     divan::main();
 }
 
-/// The OS monotonic clock, through `std`.
+/// A stand-in for the `os` driver, which does not exist yet: `std`'s monotonic clock,
+/// which stops in sleep on macOS and does not order its read.
 struct Os(Instant);
 
 impl env::clock::Driver for Os {
@@ -78,9 +79,20 @@ fn now(bencher: Bencher<'_, '_>) {
         .bench_local(|| read_all(&reader));
 }
 
-/// Reads while another thread pushes a measurement once a millisecond.
-#[divan::bench(sample_count = 20)]
-fn now_with_a_push_each_millisecond(bencher: Bencher<'_, '_>) {
+/// Reads on 1, 4, and 8 threads at once.
+#[divan::bench(sample_count = 20, threads = [1, 4, 8])]
+fn now_on_many_threads(bencher: Bencher<'_, '_>) {
+    let monotonic = monotonic();
+    let (mut clock, reader) = Clock::new(monotonic.clone());
+    let source = clock.add();
+    push(&mut clock, source, &monotonic);
+    bencher
+        .counter(divan::counter::ItemsCount::new(READS))
+        .bench(|| read_all(&reader));
+}
+
+/// Reads while another thread pushes a measurement, then waits `pause`.
+fn now_beside_a_writer(bencher: Bencher<'_, '_>, pause: Duration) {
     let monotonic = monotonic();
     let (mut clock, reader) = Clock::new(monotonic.clone());
     let source = clock.add();
@@ -94,7 +106,9 @@ fn now_with_a_push_each_millisecond(bencher: Bencher<'_, '_>) {
         scope.spawn(|| {
             while !stopped.load(Relaxed) {
                 push(&mut clock, source, &monotonic);
-                thread::sleep(Duration::from_millis(1));
+                if !pause.is_zero() {
+                    thread::sleep(pause);
+                }
             }
         });
         bencher
@@ -102,4 +116,17 @@ fn now_with_a_push_each_millisecond(bencher: Bencher<'_, '_>) {
             .bench_local(|| read_all(&reader));
         stopped.store(true, Relaxed);
     });
+}
+
+/// Reads while another thread pushes once a millisecond.
+#[divan::bench(sample_count = 20)]
+fn now_with_a_push_each_millisecond(bencher: Bencher<'_, '_>) {
+    now_beside_a_writer(bencher, Duration::from_millis(1));
+}
+
+/// Reads while another thread pushes in a tight loop: the worst case, where most reads
+/// run again.
+#[divan::bench(sample_count = 20)]
+fn now_with_a_spinning_push(bencher: Bencher<'_, '_>) {
+    now_beside_a_writer(bencher, Duration::ZERO);
 }

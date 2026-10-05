@@ -1,4 +1,5 @@
-//! Adapters that measure the node's monotonic clock against a time source.
+//! The sources of a [`Clock`](crate::Clock): the key of each, and the adapters that
+//! measure the node's monotonic clock against a time source.
 
 use estimate::Measurement;
 use estimate::exchange::{self, Exchange};
