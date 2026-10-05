@@ -538,11 +538,12 @@ How to read this record:
   its last 8 measurements and offers the one with the smallest bound now. This reads R6
   TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
   fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
-  offsets inside the most bounds (Marzullo). It fails when no offset is inside more than
-  half of the bounds that vote. This reads C6's "follows the smallest measured bound":
-  when sources agree, the result is never wider than the narrowest. The result holds the
-  true offset when the bounds that hold it are a majority of the bounds that vote, and
-  every other bound that votes misses them. Decided by the `time` builder (#49). Each
+  offsets inside the most bounds (Marzullo). It fails when no offset is inside the
+  bounds of more than half of the sources that vote. This reads C6's "follows the
+  smallest measured bound": when sources agree, the result is never wider than the
+  narrowest. The result holds the true offset when the bounds that hold it are a
+  majority of the sources that vote, and every other bound that votes misses them.
+  Decided by the `time` builder (#49). Each
   source votes: a source with no measurement agrees with no offset, and it votes beside
   the known bounds, or beside the unknown bounds when no bound is known. So before its
   first estimate a clock waits until more than half of its sources agree, and one

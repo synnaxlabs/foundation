@@ -17,8 +17,9 @@ use crate::{Drift, Filter, Measurement};
 /// bound that votes misses them all. A falseticker that overlaps some of them can move
 /// it, as in NTP.
 ///
-/// A filter with no measurement votes and agrees with no offset, so a source that has
-/// not answered counts against a majority.
+/// A filter with no measurement votes and agrees with no offset, so a source with no
+/// measurement yet counts against a majority. It votes beside the known bounds, or
+/// beside the unknown bounds when no bound is known.
 ///
 /// A bound of 36500 days at `now` is unknown. It votes only when no bound is known, so
 /// it never turns a split into an estimate. An estimate from unknown bounds alone is
@@ -78,7 +79,11 @@ pub fn combine<'a>(
     edges.sort_unstable();
     let (agreeing, low, high) = most_covered(&edges);
     if 2 * agreeing <= sources {
-        return Err(Error::NoMajority { sources, agreeing });
+        return Err(Error::NoMajority {
+            sources,
+            agreeing,
+            empty,
+        });
     }
     let estimate = Measurement::between(now, low, high);
     Ok(if unknown_only {
@@ -99,6 +104,8 @@ pub enum Error {
         sources: usize,
         /// The most sources whose bounds share an offset.
         agreeing: usize,
+        /// The sources with no measurement, which agree with no offset.
+        empty: usize,
     },
 }
 
@@ -106,9 +113,14 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoSources => f.write_str("no time sources to combine"),
-            Self::NoMajority { sources, agreeing } => write!(
+            Self::NoMajority {
+                sources,
+                agreeing,
+                empty,
+            } => write!(
                 f,
-                "no majority of time sources agree: at most {agreeing} of {sources}"
+                "no majority of time sources agree: at most {agreeing} of {sources}, \
+                 and {empty} have no measurement"
             ),
         }
     }
@@ -259,11 +271,13 @@ mod tests {
             let split = Error::NoMajority {
                 sources: 2,
                 agreeing: 1,
+                empty: 0,
             };
             assert_eq!(err, Err(split));
             assert_eq!(
                 split.to_string(),
-                "no majority of time sources agree: at most 1 of 2"
+                "no majority of time sources agree: at most 1 of 2, and 0 have no \
+                 measurement"
             );
         }
 
@@ -275,7 +289,8 @@ mod tests {
                 err,
                 Err(Error::NoMajority {
                     sources: 4,
-                    agreeing: 2
+                    agreeing: 2,
+                    empty: 0,
                 })
             );
         }
@@ -311,6 +326,7 @@ mod tests {
             let split = Error::NoMajority {
                 sources: 2,
                 agreeing: 1,
+                empty: 1,
             };
             assert_eq!(err, Err(split));
         }
@@ -328,11 +344,13 @@ mod tests {
             let none = Error::NoMajority {
                 sources: 3,
                 agreeing: 0,
+                empty: 3,
             };
             assert_eq!(err, Err(none));
             assert_eq!(
                 none.to_string(),
-                "no majority of time sources agree: at most 0 of 3"
+                "no majority of time sources agree: at most 0 of 3, and 3 have no \
+                 measurement"
             );
         }
 
@@ -358,6 +376,7 @@ mod tests {
             let split = Error::NoMajority {
                 sources: 2,
                 agreeing: 1,
+                empty: 0,
             };
             assert_eq!(check(&sources), Err(split));
         }
@@ -424,6 +443,7 @@ mod tests {
             let split = Error::NoMajority {
                 sources: 2,
                 agreeing: 1,
+                empty: 1,
             };
             assert_eq!(err, Err(split));
         }
@@ -438,6 +458,7 @@ mod tests {
             let split = Error::NoMajority {
                 sources: 4,
                 agreeing: 2,
+                empty: 2,
             };
             assert_eq!(err, Err(split));
         }
@@ -616,12 +637,14 @@ mod tests {
                 (w, sources) in agreeing(),
                 empty in 0..10_usize,
             ) {
-                let given = combine(Monotonic(w.now), w.drift, &with_empty(&sources, empty));
+                let all = with_empty(&sources, empty);
+                let given = combine(Monotonic(w.now), w.drift, &all);
                 let n = sources.len();
                 if empty < n {
                     prop_assert_eq!(given, w.combine(&sources));
                 } else {
-                    let split = Error::NoMajority { sources: n + empty, agreeing: n };
+                    let sources = n + empty;
+                    let split = Error::NoMajority { sources, agreeing: n, empty };
                     prop_assert_eq!(given, Err(split));
                 }
             }
@@ -668,7 +691,10 @@ mod tests {
                     })
                     .collect();
                 match combine(Monotonic(now), drift(ppb), &filters(&unknown)) {
-                    Ok(m) => prop_assert_eq!((m.at(), m.error()), (Monotonic(now), MAX_ERROR)),
+                    Ok(m) => {
+                        let now = Monotonic(now);
+                        prop_assert_eq!((m.at(), m.error()), (now, MAX_ERROR));
+                    }
                     Err(Error::NoMajority { .. }) => {}
                     Err(e @ Error::NoSources) => prop_assert!(false, "unexpected {e}"),
                 }
