@@ -410,11 +410,12 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. `Layout::entry_max` is the most bytes of parts one entry alone holds, so
-  a caller sizes each entry before it appends (#627). An entry has no part, one, or
-  two; `append` takes them owned and drops them when it fails (#582). A new ring has
-  the same block at `seq` 0 in both places, with the tail at offset 0 and a random
-  chain value.
+  records. `Layout::entry_max` is the most bytes of parts that `append` takes in a
+  batch of one entry; a batch of more entries holds less. A user that appends an
+  entry alone checks at open that its largest one fits (#627). An entry has no
+  part, one, or two; `append` takes them owned and drops them when it fails (#582).
+  A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
+  and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later

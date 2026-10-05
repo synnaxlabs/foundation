@@ -1046,7 +1046,9 @@ mod tests {
         /// One entry alone takes `entry_max` bytes of parts, and is large with one
         /// byte more.
         #[test]
-        fn one_entry_alone_takes_the_entry_max(body_max in table_len(1)..=60_000usize) {
+        fn one_entry_alone_takes_the_entry_max(
+            body_max in prop_oneof![Just(table_len(1)), table_len(1)..=60_000usize],
+        ) {
             let area = Area::with_body_max(body_max);
             let max = area.layout.entry_max();
             let push = |len: usize| {
