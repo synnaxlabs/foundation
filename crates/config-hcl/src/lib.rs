@@ -1,4 +1,4 @@
-//! Reads HCL files as Documents.
+//! Reads HCL files as Documents, and writes Documents as HCL files.
 //!
 //! Files hold data only: booleans, numbers, strings, lists, objects, names, function
 //! calls, attributes, and blocks. Each other HCL form is an error.
@@ -14,15 +14,18 @@
 mod arbitrary;
 mod lex;
 mod parse;
+mod write;
 
 use std::fmt;
 
 use document::Span;
+use document::encoding::TooDeep;
 use types::name;
 
 pub use parse::read;
+pub use write::write;
 
-/// A problem in HCL text.
+/// A problem in HCL text, or a part of a Document that HCL text cannot hold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The text breaks the grammar.
@@ -69,10 +72,17 @@ pub enum Error {
         /// The length of the file.
         bytes: usize,
     },
+    /// A part of a Document that HCL text cannot hold, from [`write`].
+    Unwritable {
+        /// Where the part is, or `None` for a Document with no spans.
+        span: Option<Span>,
+        /// The part.
+        part: Unwritable,
+    },
 }
 
 impl Error {
-    /// Where the problem starts, to sort problems in source order.
+    /// Where the problem starts, to sort the problems that `read` gives in source order.
     fn offset(&self) -> u32 {
         match self {
             Self::Syntax { span, .. }
@@ -88,6 +98,9 @@ impl Error {
                     .offset
             }
             Self::TooLarge { .. } => 0,
+            Self::Unwritable { .. } => {
+                unreachable!("invariant: read gives no Unwritable")
+            }
         }
     }
 }
@@ -124,6 +137,7 @@ impl fmt::Display for Error {
                  smaller files",
                 u32::MAX
             ),
+            Self::Unwritable { part, .. } => write!(f, "{part}"),
         }
     }
 }
@@ -202,6 +216,49 @@ impl fmt::Display for Form {
                  exist in Foundation files. Write the key as a quoted string"
             }
         })
+    }
+}
+
+/// A part of a Document that no HCL text reads back as the same part. Each message
+/// has its fix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unwritable {
+    /// A key of a body that is not an identifier, such as `my key`. HCL has no quoted
+    /// key in a body. A key in a map value can be any text.
+    Key,
+    /// A block keyword that is not an identifier.
+    Keyword,
+    /// A function name that is not an identifier.
+    Function,
+    /// A name that HCL does not read as a reference, such as `true`, `null`, `7a`, or
+    /// `-a`.
+    Reference,
+    /// A block or a value nested deeper than [`document::encoding::DEPTH_MAX`], which
+    /// [`read`] refuses.
+    Depth,
+}
+
+impl fmt::Display for Unwritable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Key => f.write_str(
+                "a key of a body must be an identifier, such as `retry_limit`. Rename \
+                 the key, or move it into a map value",
+            ),
+            Self::Keyword => f.write_str(
+                "a block keyword must be an identifier, such as `channel`. Rename the \
+                 keyword",
+            ),
+            Self::Function => f.write_str(
+                "a function name must be an identifier, such as `secret`. Rename the \
+                 function",
+            ),
+            Self::Reference => f.write_str(
+                "HCL does not read this name as a reference. Start it with a letter, `_`, \
+                 or `@`, and do not use `true`, `false`, or `null`",
+            ),
+            Self::Depth => fmt::Display::fmt(&TooDeep { span: None }, f),
+        }
     }
 }
 
@@ -377,6 +434,40 @@ mod tests {
         ];
         for (form, message) in cases {
             let error = Error::Form { span: span(), form };
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[test]
+    fn each_unwritable_part_has_its_fix() {
+        let cases = [
+            (
+                Unwritable::Key,
+                "a key of a body must be an identifier, such as `retry_limit`. Rename \
+                 the key, or move it into a map value",
+            ),
+            (
+                Unwritable::Keyword,
+                "a block keyword must be an identifier, such as `channel`. Rename the \
+                 keyword",
+            ),
+            (
+                Unwritable::Function,
+                "a function name must be an identifier, such as `secret`. Rename the \
+                 function",
+            ),
+            (
+                Unwritable::Reference,
+                "HCL does not read this name as a reference. Start it with a letter, `_`, \
+                 or `@`, and do not use `true`, `false`, or `null`",
+            ),
+            (
+                Unwritable::Depth,
+                "the document nests deeper than 64 levels. Make it flatter",
+            ),
+        ];
+        for (part, message) in cases {
+            let error = Error::Unwritable { span: None, part };
             assert_eq!(error.to_string(), message);
         }
     }
