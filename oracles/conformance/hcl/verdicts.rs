@@ -33,7 +33,9 @@ fn texts() -> BTreeMap<String, String> {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|extension| extension == "hcl") {
             let name = path.file_stem().unwrap().to_str().unwrap().to_owned();
-            texts.insert(name, fs::read_to_string(&path).unwrap());
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            texts.insert(name, text);
         }
     }
     texts
@@ -104,9 +106,10 @@ fn outcome(text: &str) -> Outcome {
 
 /// Whether `outcome` is what `verdict` asks of `read`: a refused text gives errors, a
 /// text with only data gives a Document, and a text with forms outside data gives
-/// errors for some of those forms only.
+/// errors for some of those forms only. `Err` with no error never agrees.
 fn agrees(verdict: &Verdict, outcome: &Outcome) -> bool {
     match (verdict, outcome) {
+        (_, Err(codes)) if codes.is_empty() => false,
         (Verdict::Refused, outcome) => outcome.is_err(),
         (Verdict::Accepted(forms), Ok(())) => forms.is_empty(),
         (Verdict::Accepted(forms), Err(codes)) => {
@@ -219,6 +222,12 @@ fn writes_text_hcl_accepts() {
             continue;
         };
         match write(&document) {
+            Ok(written) if read(Source(0), &written).as_ref() != Ok(&document) => {
+                failures.push(format!(
+                    "{name}: write gives {written:?}, which reads as \
+                     another Document"
+                ));
+            }
             Ok(written) if data.contains(written.as_str()) => {}
             Ok(written) => failures.push(format!(
                 "{name}: write gives {written:?}, which is not a text with only \

@@ -69,6 +69,8 @@ object-colon accepted
 object-duplicate-key accepted
 object-integer-key-154-written accepted
 object-integer-key-154 accepted
+object-key-155-digits accepted
+object-key-leading-zeros accepted
 object-keyword-keys-written accepted
 object-keyword-keys accepted
 object-lines accepted
@@ -91,15 +93,17 @@ operator accepted hcl.operator
 parentheses accepted hcl.parentheses
 reference-unicode accepted
 reference accepted
-splat-attribute accepted hcl.index hcl.splat
-splat accepted hcl.index hcl.splat
+splat-attribute accepted hcl.splat
+splat accepted hcl.splat
 string-escapes-written accepted
 string-escapes accepted
 string-template-escapes accepted
 string accepted
 template-alone accepted hcl.template
 template-directive accepted hcl.conditional hcl.template
+template-heredoc-number accepted hcl.template
 template-heredoc accepted hcl.template
+template-number accepted hcl.template
 template accepted hcl.template
 two-attributes-one-line refused
 unclosed-block refused

@@ -1060,8 +1060,10 @@ How to read this record:
   ended the process, `hcl-primitives` read `-18446744073709551615` as 1, and its errors
   had no fix-it hints. The reader refuses nesting past the Document limit, reads
   integers exactly, refuses a float that an `f64` cannot hold (past the largest, or
-  rounded to zero from digits that are not all zero), and gives each unsupported HCL
-  form an error with a fix-it hint. r3
+  rounded to zero from digits that are not all zero), refuses an object key that is a
+  number with a fraction, an exponent, or more than 154 digits (HCL can change such a
+  key when it makes a string of it), and gives each unsupported HCL form an error with
+  a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
 - **HCL IDENTIFIERS (2026-10-05)** The reader accepts identifiers outside ASCII as HCL
@@ -1086,7 +1088,8 @@ How to read this record:
   `differences.txt` lists each text where `read` differs from HCL on purpose, with its
   outcome and the decision behind it, and the test checks that outcome instead. For
   each text that reads, `write` must give the bytes of a text in the directory that is
-  accepted with no code and is not in `differences.txt`. The program records the HCL
+  accepted with no code and is not in `differences.txt`, and those bytes must read as
+  the same Document. The program records the HCL
   version. A person runs it by hand when the texts change; CI does not run it and
   needs no Go. It is the only Go code in the repo. The person decided on 2026-10-05
   ("Yeah that's fine", #460); the coordinator approved the plan on #460.

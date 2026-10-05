@@ -8,7 +8,7 @@ oracle.
 
 | File | Holds |
 | --- | --- |
-| `texts/<name>.hcl` | One HCL text, exact bytes. `.gitattributes` keeps Git from changing a line end. |
+| `texts/<name>.hcl` | One HCL text, exact UTF-8 bytes. `.gitattributes` keeps Git from changing a line end. |
 | `main.go`, `go.mod`, `go.sum` | The program that writes `verdicts.txt`. `go.mod` pins the HCL version. |
 | `verdicts.txt` | Made by the program. A line for each text: `<name> refused`, `<name> accepted`, or `<name> accepted <code>...`. The first line names the HCL version. |
 | `differences.txt` | A line for each text where `read` differs from HCL on purpose: `<name> <outcome> <decision>`. The outcome is `ok` or one diagnostic code. |
@@ -23,7 +23,7 @@ oracle.
 - For a text in `differences.txt`, `read` gives the outcome there, and that outcome is
   not what the verdict asks. So a difference that stops must be removed.
 - For each text that reads, `write` gives the bytes of a text that is accepted with no
-  code and is not in `differences.txt`.
+  code and is not in `differences.txt`, and those bytes read as the same Document.
 
 ## The codes
 
@@ -43,7 +43,7 @@ with its type and position. Add it to the table.
 | `(a)` | `hcl.parentheses` |
 | `p::f()` | `hcl.namespace` |
 | `f(a...)` | `hcl.expansion` |
-| An object key that is a number with a fraction, an exponent, or more than 154 digits | `hcl.number-key` |
+| An object key that is a number with a fraction or an exponent, or an integer that HCL rounds | `hcl.number-key` |
 An object key that is an expression, such as `{ f() = 1 }`, is not in the table:
 `read` has no form for it yet (#506). HCL refuses some texts only when it evaluates
 them, such as `{ a.b = 1 }`. The program only parses, so their verdict is "accepted".

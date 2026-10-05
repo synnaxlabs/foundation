@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"math/big"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -95,7 +96,9 @@ func forms(name string, src []byte, node hclsyntax.Node) []string {
 		return nil
 	case *hclsyntax.TemplateExpr:
 		for _, part := range node.Parts {
-			if _, literal := part.(*hclsyntax.LiteralValueExpr); !literal {
+			// Text between interpolations is a string literal; `${"x"}` is a template.
+			literal, ok := part.(*hclsyntax.LiteralValueExpr)
+			if !ok || literal.Val.Type() != cty.String {
 				return []string{"hcl.template"}
 			}
 		}
@@ -114,8 +117,10 @@ func forms(name string, src []byte, node hclsyntax.Node) []string {
 		return []string{"hcl.conditional"}
 	case *hclsyntax.ForExpr:
 		return []string{"hcl.for"}
-	case *hclsyntax.IndexExpr, *hclsyntax.RelativeTraversalExpr:
-		return []string{"hcl.index"}
+	case *hclsyntax.IndexExpr:
+		return index(node.Collection)
+	case *hclsyntax.RelativeTraversalExpr:
+		return index(node.Source)
 	case *hclsyntax.ScopeTraversalExpr:
 		for _, step := range node.Traversal {
 			if _, index := step.(hcl.TraverseIndex); index {
@@ -146,8 +151,8 @@ func forms(name string, src []byte, node hclsyntax.Node) []string {
 }
 
 // key is the code for an object key that is a name, a string, or a number with or
-// without a `-`: none, or hcl.number-key for a number that HCL rounds. The walk finds
-// the forms inside the key. Any other key is an expression, which is not known.
+// without a `-`: none, or the code of rounded. The walk finds the forms inside the
+// key. Any other key is an expression, which is not known.
 func key(src []byte, node *hclsyntax.ObjectConsKeyExpr) (codes []string, known bool) {
 	switch wrapped := node.Wrapped.(type) {
 	case *hclsyntax.ParenthesesExpr, *hclsyntax.TemplateExpr, *hclsyntax.TemplateWrapExpr:
@@ -165,14 +170,26 @@ func key(src []byte, node *hclsyntax.ObjectConsKeyExpr) (codes []string, known b
 	return nil, false
 }
 
-// rounded is hcl.number-key for a number with a fraction, an exponent, or more than
-// 154 digits, which HCL rounds when it makes the key.
+// index is hcl.index for an index into source, or none when source is the item of a
+// splat, whose index is part of the splat.
+func index(source hclsyntax.Expression) []string {
+	if _, item := source.(*hclsyntax.AnonSymbolExpr); item {
+		return nil
+	}
+	return []string{"hcl.index"}
+}
+
+// rounded is hcl.number-key for a number key with a fraction or an exponent, and for
+// an integer key that HCL rounds when it makes the key.
 func rounded(src []byte, literal *hclsyntax.LiteralValueExpr) []string {
 	if literal.Val.IsNull() || literal.Val.Type() != cty.Number {
 		return nil
 	}
-	text := string(literal.Range().SliceBytes(src))
-	if strings.ContainsAny(text, ".eE") || len(text) > 154 {
+	written, integer := new(big.Int).SetString(string(literal.Range().SliceBytes(src)), 10)
+	if !integer {
+		return []string{"hcl.number-key"}
+	}
+	if read, _ := literal.Val.AsBigFloat().Int(nil); read.Cmp(written) != 0 {
 		return []string{"hcl.number-key"}
 	}
 	return nil
