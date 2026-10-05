@@ -1514,7 +1514,14 @@ How to read this record:
   are usable from the start: they hold the pool's header, so `Pool::new` makes no
   commit that can fail. A purged page stops counting against the memory the system
   can commit. On Linux with strict overcommit, `madvise` and `mprotect` keep that
-  charge, so `os` purges with a `MAP_FIXED` remap (#475).
+  charge, so `os` purges with a `MAP_FIXED` remap (#475). `os::memory::Memory`
+  reserves `PROT_NONE` pages, which take no charge, and commits with `mprotect`;
+  `ENOMEM` gives `Refused`. A failed purge remap aborts: on Linux it can leave a hole
+  that another mapping fills, and the drop would unmap that mapping. On Linux each
+  reserved or purged page has no huge pages (`MADV_NOHUGEPAGE`): the first touch of
+  a huge page takes 2 MiB, and a purge of part of one gives memory back only later.
+  A read and write `MAP_NORESERVE` reserve with a commit that does nothing lost:
+  strict overcommit and Windows charge it in full, and it never refuses (#66).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a

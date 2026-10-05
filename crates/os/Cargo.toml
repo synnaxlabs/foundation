@@ -9,5 +9,8 @@ publish.workspace = true
 block = { path = "../block" }
 rustix = { workspace = true }
 
+[dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 [lints]
 workspace = true

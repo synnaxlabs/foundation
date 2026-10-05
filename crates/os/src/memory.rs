@@ -1,24 +1,23 @@
 //! Address space from the OS for block pools.
 
+use std::ffi::c_void;
+use std::ops::Range;
 use std::ptr::{self, NonNull};
 use std::{fmt, process};
 
-use rustix::mm::{self, MapFlags, ProtFlags};
+use rustix::io::Errno;
+use rustix::mm::{self, MapFlags, MprotectFlags, ProtFlags};
 
-/// `MAP_NORESERVE` keeps the reserve out of the OS commit count, since a pool reserves
-/// far more than its budget. Miri takes no flag but `MAP_PRIVATE`.
+/// The protection of reserved pages. Miri takes no `PROT_NONE`, so under it each page
+/// is usable from the start.
 #[cfg(not(miri))]
-const FLAGS: MapFlags = MapFlags::PRIVATE.union(MapFlags::NORESERVE);
+const RESERVED: ProtFlags = ProtFlags::empty();
 #[cfg(miri)]
-const FLAGS: MapFlags = MapFlags::PRIVATE;
+const RESERVED: ProtFlags = ProtFlags::READ.union(ProtFlags::WRITE);
 
-const PROT: ProtFlags = ProtFlags::READ.union(ProtFlags::WRITE);
-
-/// Address space from the OS for one block pool. Pages take memory when first
-/// touched, so a commit is free, and a purge gives pages back at once.
-///
-/// On Linux with strict overcommit (`vm.overcommit_memory=2`), the OS counts the full
-/// reserve as committed, so a large reserve can fail.
+/// Address space from the OS for one block pool. A reserved page takes no memory and
+/// no commit charge. A commit makes pages readable and writable, and the OS charges
+/// them. A purge gives pages and their charge back at once.
 pub struct Memory {
     base: NonNull<u8>,
     len: usize,
@@ -26,23 +25,27 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// Reserves `len` bytes of zeroed address space, aligned to the page size.
+    /// Reserves `len` bytes of address space, aligned to the page size, and commits
+    /// its first page.
     ///
     /// # Errors
     ///
-    /// [`Error`] when the OS fails the reserve of `len` bytes.
+    /// [`Error`] when the OS fails the reserve or the commit of the first page.
     ///
     /// # Panics
     ///
     /// If `len` is 0.
     pub fn new(len: usize) -> Result<Self, Error> {
         assert!(len > 0, "memory must be more than 0 bytes");
+        let reserve = |errno: Errno| Error::Reserve {
+            len,
+            code: errno.raw_os_error(),
+        };
         // SAFETY: the OS picks the address, so the mapping replaces nothing.
-        let base = unsafe { mm::mmap_anonymous(ptr::null_mut(), len, PROT, FLAGS) }
-            .map_err(|errno| Error::Reserve {
-                len,
-                code: errno.raw_os_error(),
-            })?;
+        let base = unsafe {
+            mm::mmap_anonymous(ptr::null_mut(), len, RESERVED, MapFlags::PRIVATE)
+        }
+        .map_err(reserve)?;
         let base = NonNull::new(base.cast()).expect("invariant: a mapping is not null");
         let memory = Self {
             base,
@@ -50,23 +53,50 @@ impl Memory {
             page: rustix::param::page_size(),
         };
         #[cfg(all(target_os = "linux", not(miri)))]
-        no_huge_pages(base, len).map_err(|errno| Error::Reserve {
-            len,
-            code: errno.raw_os_error(),
-        })?;
+        no_huge_pages(memory.at(0), len).map_err(reserve)?;
+        memory.protect(0..1).map_err(reserve)?;
         Ok(memory)
+    }
+
+    /// The end of `len` bytes at `offset`.
+    ///
+    /// # Panics
+    ///
+    /// If the range ends past the reserve.
+    fn end(&self, call: &str, offset: usize, len: usize) -> usize {
+        let end = offset.checked_add(len).filter(|&end| end <= self.len);
+        let Some(end) = end else {
+            panic!(
+                "{call} of {len} bytes at {offset} ends past {} bytes",
+                self.len
+            )
+        };
+        end
+    }
+
+    /// The address of page `index`.
+    fn at(&self, index: usize) -> *mut c_void {
+        self.base.as_ptr().wrapping_add(index * self.page).cast()
+    }
+
+    /// Makes `pages` readable and writable.
+    fn protect(&self, pages: Range<usize>) -> rustix::io::Result<()> {
+        let flags = MprotectFlags::READ.union(MprotectFlags::WRITE);
+        // SAFETY: the pages are in this mapping, and the change of protection changes
+        // no byte.
+        unsafe { mm::mprotect(self.at(pages.start), pages.len() * self.page, flags) }
     }
 }
 
 /// Turns off huge pages in the range: the first touch of one byte of a huge page
-/// takes all of it, past the pool's budget. A kernel with no huge pages gives
-/// `EINVAL`, and has nothing to turn off.
+/// takes all of it, and a purge of part of it gives memory back only later. A kernel
+/// with no huge pages gives `EINVAL`, and has nothing to turn off.
 #[cfg(all(target_os = "linux", not(miri)))]
-fn no_huge_pages(at: NonNull<u8>, len: usize) -> rustix::io::Result<()> {
+fn no_huge_pages(at: *mut c_void, len: usize) -> rustix::io::Result<()> {
     let advice = mm::Advice::LinuxNoHugepage;
     // SAFETY: the advice changes no byte of the mapping.
-    match unsafe { mm::madvise(at.as_ptr().cast(), len, advice) } {
-        Ok(()) | Err(rustix::io::Errno::INVAL) => Ok(()),
+    match unsafe { mm::madvise(at, len, advice) } {
+        Ok(()) | Err(Errno::INVAL) => Ok(()),
         Err(errno) => Err(errno),
     }
 }
@@ -84,10 +114,10 @@ impl fmt::Debug for Memory {
     }
 }
 
-// SAFETY: the mapping stays at `base` for `len` bytes until the drop. The OS zeroes
-// each page when first touched, so each byte is readable, writable, and initialized
-// from the start. `purge` replaces only whole pages inside its range, with zeroed
-// pages.
+// SAFETY: the mapping stays at `base` for `len` bytes until the drop. `new` commits
+// the first page. A commit makes each page it touches readable and writable, and a
+// page reads zero until its first write. Only a purge, of whole pages inside its
+// range, makes pages unusable again.
 unsafe impl block::Memory for Memory {
     fn base(&self) -> NonNull<u8> {
         self.base
@@ -97,54 +127,45 @@ unsafe impl block::Memory for Memory {
         self.len
     }
 
-    fn commit(&self, _offset: usize, _len: usize) -> Result<(), block::Refused> {
-        Ok(())
+    /// # Panics
+    ///
+    /// If the range ends past the reserve, or the OS fails the commit for a cause
+    /// other than memory.
+    fn commit(&self, offset: usize, len: usize) -> Result<(), block::Refused> {
+        let end = self.end("commit", offset, len);
+        let pages = offset / self.page..end.div_ceil(self.page);
+        match self.protect(pages) {
+            Ok(()) => Ok(()),
+            Err(Errno::NOMEM) => Err(block::Refused),
+            Err(errno) => panic!("commit of {len} bytes at {offset} failed: {errno}"),
+        }
     }
 
     /// # Panics
     ///
-    /// If the range ends past the reserve, or the OS fails the purge.
+    /// If the range ends past the reserve. Aborts if the OS fails the purge: on Linux
+    /// a failed `MAP_FIXED` can leave a hole that another mapping fills, and the drop
+    /// would unmap that mapping.
     fn purge(&self, offset: usize, len: usize) {
-        let end = offset.checked_add(len).filter(|&end| end <= self.len);
-        let Some(end) = end else {
-            panic!(
-                "purge of {len} bytes at {offset} ends past {} bytes",
-                self.len
-            )
-        };
+        let end = self.end("purge", offset, len);
         let pages = offset.div_ceil(self.page)..end / self.page;
-        if !pages.is_empty() {
-            // SAFETY: the pages are inside the mapping.
-            let at = unsafe { self.base.add(pages.start * self.page) };
-            discard(at, pages.len() * self.page);
+        // Miri takes no `MAP_FIXED`.
+        if pages.is_empty() || cfg!(miri) {
+            return;
         }
+        let at = self.at(pages.start);
+        let len = pages.len() * self.page;
+        let flags = MapFlags::PRIVATE.union(MapFlags::FIXED);
+        // SAFETY: the pages are in this mapping, and the `block::Memory` contract lets
+        // a purge change the bytes in its range.
+        let remapped = unsafe { mm::mmap_anonymous(at, len, RESERVED, flags) };
+        if remapped.is_err() {
+            process::abort();
+        }
+        #[cfg(all(target_os = "linux", not(miri)))]
+        no_huge_pages(at, len)
+            .unwrap_or_else(|errno| panic!("purge of {len} bytes failed: {errno}"));
     }
-}
-
-/// Gives back `len` bytes of whole pages at `at`, which read zero after it. Not
-/// `MAP_FIXED`, as on macOS: a failed `MAP_FIXED` on Linux can leave a hole.
-#[cfg(target_os = "linux")]
-fn discard(at: NonNull<u8>, len: usize) {
-    // SAFETY: the pages are in this private anonymous mapping, and the
-    // `block::Memory` contract lets a purge change the bytes in its range.
-    unsafe { mm::madvise(at.as_ptr().cast(), len, mm::Advice::LinuxDontNeed) }
-        .unwrap_or_else(|errno| panic!("purge of {len} bytes failed: {errno}"));
-}
-
-#[cfg(target_os = "macos")]
-use self::remap as discard;
-
-/// Gives back `len` bytes of whole pages at `at`, which read zero after it. Not
-/// `MADV_FREE`, which keeps the pages resident until the system needs memory. Tests
-/// run it on Linux too.
-#[cfg(any(target_os = "macos", test))]
-fn remap(at: NonNull<u8>, len: usize) {
-    let flags = FLAGS.union(MapFlags::FIXED);
-    // SAFETY: the pages are in this mapping, and the `block::Memory` contract lets a
-    // purge change the bytes in its range. `MAP_FIXED` puts zeroed pages at the same
-    // address, and on macOS a failed one leaves the old pages.
-    unsafe { mm::mmap_anonymous(at.as_ptr().cast(), len, PROT, flags) }
-        .unwrap_or_else(|errno| panic!("purge of {len} bytes failed: {errno}"));
 }
 
 impl Drop for Memory {
@@ -162,7 +183,8 @@ impl Drop for Memory {
 /// A failure to get memory from the OS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The OS failed the reserve of `len` bytes of address space.
+    /// The OS failed the reserve of `len` bytes of address space, or the commit of
+    /// its first page.
     Reserve {
         /// The bytes asked for.
         len: usize,
@@ -186,9 +208,8 @@ impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::c_void;
     use std::io;
-    use std::ops::Range;
+    use std::os::fd::AsRawFd;
     use std::slice;
 
     use block::{Config, Memory as _, Pool};
@@ -204,6 +225,8 @@ mod tests {
         fn mincore(addr: *mut c_void, len: usize, vec: *mut u8) -> i32;
         /// Fails with `ENOMEM` when a page of the range is not mapped.
         fn msync(addr: *mut c_void, len: usize, flags: i32) -> i32;
+        /// Fails with `EFAULT` when the kernel cannot read the buffer.
+        fn write(fd: i32, buf: *const c_void, len: usize) -> isize;
     }
 
     /// Whether each page of `pages` in the mapping at `base` is resident.
@@ -221,10 +244,28 @@ mod tests {
         vec.iter().map(|byte| byte & 1 == 1).collect()
     }
 
-    /// The flags of the mapping that holds `at`, from `/proc/self/smaps`.
+    /// Whether the first byte of each page of `pages` of `memory` is readable.
+    fn readable(memory: &Memory, pages: Range<usize>) -> Vec<bool> {
+        let (_reader, writer) = io::pipe().unwrap();
+        let fault = Some(Errno::FAULT.raw_os_error());
+        pages
+            .map(|index| {
+                // SAFETY: the kernel reads one byte of the mapping, and no Rust
+                // reference covers it.
+                match unsafe { write(writer.as_raw_fd(), memory.at(index), 1) } {
+                    1 => true,
+                    -1 if io::Error::last_os_error().raw_os_error() == fault => false,
+                    written => panic!("a write of 1 byte gave {written}"),
+                }
+            })
+            .collect()
+    }
+
+    /// The flags of the mapping that holds page `index` of `memory`, from
+    /// `/proc/self/smaps`.
     #[cfg(target_os = "linux")]
-    fn flags(at: NonNull<u8>) -> Vec<String> {
-        let at = at.as_ptr().addr();
+    fn flags(memory: &Memory, index: usize) -> Vec<String> {
+        let at = memory.at(index).addr();
         let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
         let mut holds = false;
         for line in smaps.lines() {
@@ -248,22 +289,37 @@ mod tests {
         panic!("no mapping holds the address");
     }
 
-    /// The bytes of `memory`.
-    fn bytes(memory: &mut Memory) -> &mut [u8] {
-        // SAFETY: the reserve is zeroed and writable, and the borrow of `memory`
-        // keeps its bytes for this slice alone.
-        unsafe { slice::from_raw_parts_mut(memory.base().as_ptr(), memory.len()) }
+    /// The bytes of `range` of `memory`, which a commit made usable.
+    fn bytes(memory: &mut Memory, range: Range<usize>) -> &mut [u8] {
+        assert!(range.end <= memory.len());
+        // SAFETY: the range is inside the mapping.
+        let start = unsafe { memory.base().add(range.start) };
+        // SAFETY: the caller committed the range, and the borrow of `memory` keeps
+        // its bytes for this slice alone.
+        unsafe { slice::from_raw_parts_mut(start.as_ptr(), range.len()) }
     }
 
     #[test]
-    fn a_reserve_is_zeroed_aligned_and_writable() {
+    fn a_committed_reserve_is_zeroed_aligned_and_writable() {
         let page = page_size();
-        let mut memory = Memory::new(3 * page + 100).unwrap();
-        assert_eq!(memory.len(), 3 * page + 100);
+        let len = 3 * page + 100;
+        let mut memory = Memory::new(len).unwrap();
+        memory.commit(0, len).unwrap();
+        assert_eq!(memory.len(), len);
         assert_eq!(memory.base().as_ptr().addr() % page, 0);
-        assert!(bytes(&mut memory).iter().all(|&byte| byte == 0));
-        bytes(&mut memory).fill(7);
-        assert!(bytes(&mut memory).iter().all(|&byte| byte == 7));
+        assert!(bytes(&mut memory, 0..len).iter().all(|&byte| byte == 0));
+        bytes(&mut memory, 0..len).fill(7);
+        assert!(bytes(&mut memory, 0..len).iter().all(|&byte| byte == 7));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri takes no PROT_NONE")]
+    fn a_commit_makes_each_page_it_touches_usable() {
+        let page = page_size();
+        let memory = Memory::new(4 * page).unwrap();
+        assert_eq!(readable(&memory, 0..4), [true, false, false, false]);
+        memory.commit(page + 1, page).unwrap();
+        assert_eq!(readable(&memory, 0..4), [true, true, true, false]);
     }
 
     #[test]
@@ -300,22 +356,32 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "Miri has no madvise, MAP_FIXED, or mincore")]
+    #[cfg_attr(miri, ignore = "Miri has no MAP_FIXED or mincore")]
     fn a_purge_gives_back_each_page_fully_inside_its_range() {
         let page = page_size();
         let mut memory = Memory::new(4 * page).unwrap();
-        bytes(&mut memory).fill(1);
+        memory.commit(0, 4 * page).unwrap();
+        bytes(&mut memory, 0..4 * page).fill(1);
         assert_eq!(resident(memory.base(), 0..4), [true; 4]);
         memory.purge(page / 2, 3 * page);
         assert_eq!(resident(memory.base(), 0..4), [true, false, false, true]);
-        let bytes = bytes(&mut memory);
-        assert!(bytes[..page].iter().all(|&byte| byte == 1));
-        assert!(bytes[page..3 * page].iter().all(|&byte| byte == 0));
-        assert!(bytes[3 * page..].iter().all(|&byte| byte == 1));
+        assert_eq!(readable(&memory, 0..4), [true, false, false, true]);
+        assert!(bytes(&mut memory, 0..page).iter().all(|&byte| byte == 1));
+        assert!(
+            bytes(&mut memory, 3 * page..4 * page)
+                .iter()
+                .all(|&byte| byte == 1)
+        );
+        memory.commit(page, 2 * page).unwrap();
+        assert!(
+            bytes(&mut memory, page..3 * page)
+                .iter()
+                .all(|&byte| byte == 0)
+        );
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "Miri has no madvise, MAP_FIXED, or mincore")]
+    #[cfg_attr(miri, ignore = "Miri has no MAP_FIXED or mincore")]
     fn a_pool_purge_gives_back_the_pages_of_an_idle_block() {
         let page = page_size();
         let config = Config { budget: 1 << 20 };
@@ -340,37 +406,33 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
-    #[cfg_attr(miri, ignore = "Miri has no /proc")]
-    fn a_reserve_has_no_huge_pages_and_no_commit_charge() {
-        let memory = Memory::new(1 << 22).unwrap();
-        let flags = flags(memory.base());
-        let has = |flag: &str| flags.iter().any(|on| on == flag);
-        let huge = std::path::Path::new("/sys/kernel/mm/transparent_hugepage").exists();
-        let overcommit = std::fs::read_to_string("/proc/sys/vm/overcommit_memory");
-        let strict = overcommit.unwrap().trim() == "2";
-        assert_eq!(has("nh"), huge, "huge pages are on: {flags:?}");
-        // Strict overcommit ignores `MAP_NORESERVE`.
-        assert_eq!(
-            has("nr"),
-            !strict,
-            "the reserve is in the commit count: {flags:?}"
-        );
+    #[should_panic(expected = "commit of 2 bytes at 99 ends past 100 bytes")]
+    fn a_commit_past_the_end_panics() {
+        Memory::new(100).unwrap().commit(99, 2).unwrap();
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "Miri has no MAP_FIXED or mincore")]
-    fn a_remap_gives_back_each_page_in_its_range() {
+    #[cfg(target_os = "linux")]
+    #[cfg_attr(miri, ignore = "Miri has no /proc")]
+    fn only_a_committed_page_takes_a_commit_charge() {
         let page = page_size();
-        let mut memory = Memory::new(3 * page).unwrap();
-        bytes(&mut memory).fill(1);
-        // SAFETY: the page is inside the mapping.
-        remap(unsafe { memory.base().add(page) }, page);
-        assert_eq!(resident(memory.base(), 0..3), [true, false, true]);
-        let bytes = bytes(&mut memory);
-        assert!(bytes[..page].iter().all(|&byte| byte == 1));
-        assert!(bytes[page..2 * page].iter().all(|&byte| byte == 0));
-        assert!(bytes[2 * page..].iter().all(|&byte| byte == 1));
+        let memory = Memory::new(4 * page).unwrap();
+        let huge = std::path::Path::new("/sys/kernel/mm/transparent_hugepage").exists();
+        let has = |index: usize, flag: &str| {
+            let flags = flags(&memory, index);
+            flags.iter().any(|on| on == flag)
+        };
+        assert!(has(0, "ac"));
+        assert!(!has(1, "ac"));
+        memory.commit(page, 2 * page).unwrap();
+        assert!(has(1, "ac") && has(2, "ac"));
+        assert!(!has(3, "ac"));
+        memory.purge(page, page);
+        assert!(!has(1, "ac"));
+        assert!(has(2, "ac"));
+        for index in 0..4 {
+            assert_eq!(has(index, "nh"), huge, "huge pages on page {index}");
+        }
     }
 
     #[test]
