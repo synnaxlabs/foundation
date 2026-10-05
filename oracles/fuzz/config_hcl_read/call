@@ -1,0 +1,2 @@
+p = secret("plc_7_password")
+t = f64("rpm")

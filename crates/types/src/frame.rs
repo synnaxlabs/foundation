@@ -190,7 +190,7 @@ impl Draft {
         series: &[(usize, usize)],
     ) -> Result<Self, Error> {
         let (groups, len) = measure(set, series)?;
-        let start = HEAD + RANGE * groups + DESCRIPTOR * series.len();
+        let start = body_start(groups, series.len());
         let mut block = pool.alloc(start.saturating_add(len))?;
         let head = &mut block[..HEAD];
         head.fill(0);
@@ -326,15 +326,22 @@ impl Frame {
         })
     }
 
+    /// The credit that sending the frame to a reader spends: the bytes a block of the
+    /// frame's length takes from its pool. It depends only on that length.
+    #[must_use]
+    pub fn charge(&self) -> u64 {
+        to_u64(block::footprint(self.0.len()))
+    }
+
     /// The series bytes of every present entry, as one view that shares the frame's
     /// block, from the first series to the end. The end of each series in the
-    /// descriptors is an offset into this view. The series come in entry order, and
-    /// each starts at the end of the one before, rounded up to 8 bytes. Copies nothing.
+    /// descriptors is an offset into this view. Copies nothing. Until it drops, the
+    /// view keeps the whole block in use: [`Frame::charge`] bytes of the pool, not its
+    /// length.
     #[must_use]
     pub fn body(&self) -> block::Block {
         let (ranges, series) = counts(&self.0);
-        let start = HEAD + RANGE * ranges + DESCRIPTOR * series;
-        self.0.clone().skip(start)
+        self.0.clone().skip(body_start(ranges, series))
     }
 }
 
@@ -364,8 +371,8 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
 /// A frame's ranges, its descriptors, and its series bytes.
 fn split(bytes: &[u8]) -> (&[[u8; RANGE]], &[[u8; DESCRIPTOR]], &[u8]) {
     let (ranges, series) = counts(bytes);
-    let (ranges, rest) = bytes[HEAD..].split_at(RANGE * ranges);
-    let (descriptors, body) = rest.split_at(DESCRIPTOR * series);
+    let (head, body) = bytes.split_at(body_start(ranges, series));
+    let (ranges, descriptors) = head[HEAD..].split_at(RANGE * ranges);
     (ranges.as_chunks().0, descriptors.as_chunks().0, body)
 }
 
@@ -373,13 +380,19 @@ fn split_mut(
     bytes: &mut [u8],
 ) -> (&mut [[u8; RANGE]], &mut [[u8; DESCRIPTOR]], &mut [u8]) {
     let (ranges, series) = counts(bytes);
-    let (ranges, rest) = bytes[HEAD..].split_at_mut(RANGE * ranges);
-    let (descriptors, body) = rest.split_at_mut(DESCRIPTOR * series);
+    let (head, body) = bytes.split_at_mut(body_start(ranges, series));
+    let (ranges, descriptors) = head[HEAD..].split_at_mut(RANGE * ranges);
     (
         ranges.as_chunks_mut().0,
         descriptors.as_chunks_mut().0,
         body,
     )
+}
+
+/// Where the series bytes start in a frame of `ranges` ranges and `series`
+/// descriptors.
+const fn body_start(ranges: usize, series: usize) -> usize {
+    HEAD + RANGE * ranges + DESCRIPTOR * series
 }
 
 /// The counts of ranges and descriptors in a frame's header.
@@ -424,6 +437,11 @@ fn put(bytes: &mut [u8], at: usize, value: &[u8]) {
 
 fn to_usize(n: u32) -> usize {
     usize::try_from(n).expect("invariant: a usize holds a u32")
+}
+
+/// A byte count as a `u64`.
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).expect("invariant: a u64 holds a usize")
 }
 
 /// An entry, count, or offset of a frame as a `u32`. An entry fits because a key set's
@@ -566,7 +584,31 @@ mod tests {
     }
 
     #[test]
-    fn views_the_series_bytes_without_a_copy() {
+    fn charges_the_bytes_its_block_takes() {
+        let set = two_groups();
+        // Fixed values: nodes of two versions must agree on a charge.
+        let cases: [(&[(usize, usize)], u64); 7] = [
+            (&[], 128),
+            (&[(0, 0)], 128),
+            (&[(0, 0), (2, 0)], 128),
+            (&[(0, 24)], 128),
+            (&[(0, 25)], 192),
+            (&[(0, 89)], 320),
+            (&[(0, 8), (1, 8), (2, 4000)], 4160),
+        ];
+        for (series, charge) in cases {
+            let pool = pool(1 << 16);
+            let before = pool.committed();
+            let draft = Draft::new(&pool, &set, Form::Raw, series).unwrap();
+            let taken = to_u64(pool.committed() - before);
+            let frame = draft.freeze(Path::Live);
+            assert_eq!(frame.charge(), charge, "{series:?}");
+            assert_eq!(frame.charge(), taken, "{series:?}");
+        }
+    }
+
+    #[test]
+    fn views_the_series_bytes() {
         let set = two_groups();
         let pool = pool(1 << 16);
         let series = [(0, 3), (1, 0), (2, 9)];
@@ -574,14 +616,32 @@ mod tests {
         draft.series(0).unwrap().fill(1);
         draft.series(2).unwrap().fill(2);
         let frame = draft.freeze(Path::Live);
-        let committed = pool.committed();
-        let body = frame.body();
-        assert_eq!(pool.committed(), committed);
-        drop(frame);
         let expected = [[1, 1, 1, 0, 0, 0, 0, 0].as_slice(), &[2; 9]].concat();
-        assert_eq!(&*body, expected.as_slice());
+        assert_eq!(&*frame.body(), expected.as_slice());
         let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
         assert!(empty.freeze(Path::Live).body().is_empty());
+    }
+
+    #[test]
+    fn gives_the_block_back_when_the_frame_and_view_drop() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        let series = [(0, 3), (1, 0), (2, 9)];
+        let frame = Draft::new(&pool, &set, Form::Raw, &series)
+            .unwrap()
+            .freeze(Path::Live);
+        let committed = pool.committed();
+        let len = frame.0.len();
+        let body = frame.body();
+        drop(frame);
+        drop(body);
+        let again = pool.alloc(len).unwrap();
+        assert_eq!(
+            pool.committed(),
+            committed,
+            "the pool reuses the frame's block"
+        );
+        drop(again);
     }
 
     #[test]
@@ -838,8 +898,10 @@ mod tests {
         let (set, series) = shape(case);
         let entries = set.entries().len();
         let pool = pool(1 << 20);
+        let before = pool.committed();
         let mut draft = Draft::new(&pool, &set, case.form, &series)
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let taken = to_u64(pool.committed() - before);
         fill(&mut draft, &series, entries, case.in_order)?;
         let mut ranges = Vec::new();
         for ((group, &(seq, count)), &present) in
@@ -857,6 +919,7 @@ mod tests {
         prop_assert_eq!(frame.key_set(), set.key());
         prop_assert_eq!(frame.path(), case.path);
         prop_assert_eq!(frame.form(), case.form);
+        prop_assert_eq!(frame.charge(), taken);
         for (group, range) in (0_u32..).zip(ranges) {
             prop_assert_eq!(frame.range(group), range);
         }

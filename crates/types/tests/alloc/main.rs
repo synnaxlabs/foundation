@@ -45,6 +45,7 @@ fn main() {
         draft.set_range(0, Range { seq: 9, count: 2 });
         let frame = draft.freeze(Path::Backfill);
         let copy = frame.clone();
+        assert_eq!(frame.charge(), 192, "the frame charges its block");
         assert_eq!(frame.key_set(), set.key(), "the frame names its key set");
         assert_eq!(frame.path(), Path::Backfill, "the frame keeps its path");
         assert_eq!(frame.form(), Form::Raw, "the frame keeps its form");
