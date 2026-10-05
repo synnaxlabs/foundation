@@ -49,8 +49,7 @@ impl Threads {
     ///
     /// # Errors
     ///
-    /// [`Error::Start`] when the thread or its executor cannot start, or when `name`
-    /// holds a NUL byte.
+    /// [`Error::Start`] when the thread or its executor cannot start.
     ///
     /// ```
     /// use env::threads::{Error, Handle};
@@ -178,7 +177,8 @@ impl std::error::Error for Error {}
 /// ```
 pub trait Driver: Send + Sync {
     /// Starts a thread with an executor for one future, and runs `body()` on it to
-    /// completion, with the rules of [`Threads::start`].
+    /// completion, with the rules of [`Threads::start`]. `name` may hold any
+    /// character; `os` gives the OS the part before the first NUL byte.
     ///
     /// # Errors
     ///
