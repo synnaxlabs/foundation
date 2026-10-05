@@ -54,7 +54,7 @@ fn a_shard_cancel_runs_the_hook_that_unblocks_a_thread() {
     let unblocked = Arc::new(AtomicBool::new(false));
     let (part, flag) = (token.child(), Arc::clone(&unblocked));
     let thread = node.threads().start("vendor", move || async move {
-        let _hook = part.on_cancel(move || flag.store(true, SeqCst));
+        let _hook = part.hook(move || flag.store(true, SeqCst));
         part.wait().await;
     });
     let clock = node.clock();

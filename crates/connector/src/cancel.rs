@@ -22,8 +22,14 @@ use std::task::{Context, Poll, Waker};
 pub struct Token(Arc<Node>);
 
 impl Token {
-    /// Makes a live root token. The supervisor makes one for each run.
+    /// Makes a live root token. The supervisor makes one for each run. A kind makes
+    /// its parts with [`Token::child`]; a token from `new` cancels only through
+    /// itself.
     #[must_use]
+    #[expect(
+        clippy::new_without_default,
+        reason = "a defaulted field would make a root that the run's cancel never reaches"
+    )]
     pub fn new() -> Self {
         Self(Arc::new(Node {
             parent: None,
@@ -115,10 +121,19 @@ impl Token {
 
     /// Runs `f` once, on the thread that cancels, to unblock a blocking vendor call.
     /// That thread may be a shard, so `f` must not block. When the token is already
-    /// cancelled, runs `f` now. Dropping the returned [`Hook`] before cancel removes
-    /// `f`, but does not wait for an `f` that already runs. So `f` must hold an `Arc`
-    /// to any vendor handle it uses, and the handle must close only when the last
-    /// `Arc` drops, never right after the `Hook` drops.
+    /// cancelled, runs `f` now.
+    ///
+    /// `f` can run before the vendor call starts, so the call would then block
+    /// forever. Make `f` close or abort the handle so that later calls also return,
+    /// or check [`Token::cancelled`] before each blocking call.
+    ///
+    /// Dropping the returned [`Hook`] before cancel removes `f`, but does not wait
+    /// for an `f` that already runs. So `f` must hold an `Arc` to any vendor handle
+    /// it uses, and the handle must close only when the last `Arc` drops.
+    ///
+    /// # Panics
+    ///
+    /// When the token is already cancelled and `f` panics.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -127,11 +142,11 @@ impl Token {
     /// let cancel = connector::cancel::Token::new();
     /// let stopped = Arc::new(AtomicBool::new(false));
     /// let flag = Arc::clone(&stopped);
-    /// let _hook = cancel.on_cancel(move || flag.store(true, Ordering::Relaxed));
+    /// let _hook = cancel.hook(move || flag.store(true, Ordering::Relaxed));
     /// cancel.cancel();
     /// assert!(stopped.load(Ordering::Relaxed), "the hook ran");
     /// ```
-    pub fn on_cancel(&self, f: impl FnOnce() + Send + 'static) -> Hook {
+    pub fn hook(&self, f: impl FnOnce() + Send + 'static) -> Hook {
         let mut state = self.0.lock();
         if self.0.cancelled.load(Relaxed) {
             drop(state);
@@ -145,13 +160,6 @@ impl Token {
     }
 }
 
-impl Default for Token {
-    /// Makes a live root token, as [`Token::new`].
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Token")
@@ -160,7 +168,9 @@ impl fmt::Debug for Token {
     }
 }
 
-/// The future from [`Token::wait`].
+/// The future from [`Token::wait`]. It holds its own handle to the token, so it can
+/// move to another task. It completes at once when the token is already cancelled,
+/// and never when every token that could cancel it drops first.
 #[must_use = "a future does nothing unless it is awaited"]
 pub struct Wait {
     node: Arc<Node>,
@@ -213,10 +223,10 @@ impl fmt::Debug for Wait {
     }
 }
 
-/// Keeps a hook from [`Token::on_cancel`] registered. Drop it to remove the hook.
+/// Keeps a hook from [`Token::hook`] registered. Drop it to remove the hook.
 #[must_use = "dropping a hook removes it"]
 pub struct Hook {
-    /// `None` when the hook already ran in [`Token::on_cancel`].
+    /// `None` when the hook already ran in [`Token::hook`].
     node: Option<(Arc<Node>, usize)>,
 }
 
@@ -235,12 +245,12 @@ impl fmt::Debug for Hook {
 }
 
 /// One token in the tree. A child holds its parent; a parent holds only weak links.
-/// A child leaves its parent's list once: when it cancels, or at its last drop.
+/// A child leaves a live parent's list at its last drop.
 struct Node {
     /// The parent and this node's slot in its children.
     parent: Option<(Arc<Node>, usize)>,
-    /// Set once, under `state`'s lock. After it is set, `state` stays empty, so a
-    /// stale slot key never removes another entry.
+    /// Set once, under `state`'s lock. After it is set, nothing is inserted into or
+    /// removed from `state`, so a stale slot key never removes another entry.
     cancelled: AtomicBool,
     state: Mutex<State>,
 }
@@ -468,7 +478,7 @@ mod tests {
         fn twice_does_nothing_more() {
             let token = Token::new();
             let (runs, f) = counter();
-            let _hook = token.on_cancel(f);
+            let _hook = token.hook(f);
             token.cancel();
             token.cancel();
             assert!(token.cancelled(), "the token is cancelled");
@@ -484,7 +494,7 @@ mod tests {
             assert_eq!(poll(wait.as_mut(), &waker), Poll::Pending, "live token");
             let seen = Arc::new(AtomicU64::new(u64::MAX));
             let (shared, observed) = (Arc::clone(&tally), Arc::clone(&seen));
-            let _hook = token.on_cancel(move || observed.store(shared.wakes(), SeqCst));
+            let _hook = token.hook(move || observed.store(shared.wakes(), SeqCst));
             token.cancel();
             assert_eq!(seen.load(SeqCst), 1, "the child's waiter woke first");
         }
@@ -494,7 +504,7 @@ mod tests {
     fn debug_shows_whether_cancelled() {
         let token = Token::new();
         let wait = token.wait();
-        let hook = token.on_cancel(|| {});
+        let hook = token.hook(|| {});
         assert_eq!(
             format!("{token:?}"),
             "Token { cancelled: false, .. }",
@@ -649,7 +659,7 @@ mod tests {
         fn runs_once_before_cancel_returns() {
             let token = Token::new();
             let (runs, f) = counter();
-            let _hook = token.on_cancel(f);
+            let _hook = token.hook(f);
             assert_eq!(runs.load(SeqCst), 0, "not before cancel");
             token.cancel();
             assert_eq!(runs.load(SeqCst), 1, "the hook ran in cancel");
@@ -660,7 +670,7 @@ mod tests {
             let token = Token::new();
             token.cancel();
             let (runs, f) = counter();
-            let hook = token.on_cancel(f);
+            let hook = token.hook(f);
             assert_eq!(runs.load(SeqCst), 1, "a late hook runs at once");
             drop(hook);
             assert_eq!(runs.load(SeqCst), 1, "dropping it changes nothing");
@@ -670,7 +680,7 @@ mod tests {
         fn dropped_never_runs() {
             let token = Token::new();
             let (runs, f) = counter();
-            drop(token.on_cancel(f));
+            drop(token.hook(f));
             assert_eq!(entries(&token), (0, 0, 0), "the hook is removed");
             token.cancel();
             assert_eq!(runs.load(SeqCst), 0, "a dropped hook never runs");
@@ -682,10 +692,10 @@ mod tests {
             let other = Token::new();
             let (runs, f) = counter();
             let (inner, again) = (other.clone(), token.clone());
-            let _hook = token.on_cancel(move || {
+            let _hook = token.hook(move || {
                 inner.cancel();
                 again.cancel();
-                drop(again.on_cancel(f));
+                drop(again.hook(f));
             });
             token.cancel();
             assert!(other.cancelled(), "the hook cancelled another token");
@@ -794,7 +804,7 @@ mod tests {
                     let i = pick(self.tokens.len(), i);
                     if let Some(token) = &self.tokens[i] {
                         let (runs, f) = counter();
-                        self.hooks.push((i, Some(token.on_cancel(f)), runs, None));
+                        self.hooks.push((i, Some(token.hook(f)), runs, None));
                     }
                 }
                 Op::DropHook(i) if !self.hooks.is_empty() => {
