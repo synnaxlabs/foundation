@@ -57,7 +57,8 @@ pub struct Reading {
     /// The OS's guess at UTC.
     pub time: Stamp,
     /// The most that `time` can be from UTC, by the OS's own count, or `None` when
-    /// the OS gives no bound.
+    /// the OS gives no bound. Never negative: a driver that gives a negative bound
+    /// is broken.
     pub error: Option<Span>,
 }
 

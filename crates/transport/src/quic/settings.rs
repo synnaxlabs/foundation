@@ -222,16 +222,16 @@ mod tests {
     use std::net::SocketAddr;
 
     use std::num::NonZeroUsize;
+    use std::task::Poll;
 
     use noq_proto::Dir;
     use noq_proto::crypto::HmacKey;
     use types::time::Monotonic;
 
     use super::*;
-    use crate::Error;
     use crate::quic::testing::{self, CLIENT_SHARD, Pair, SERVER_SHARD, Side};
     use crate::quic::{Endpoint, Event};
-    use crate::tls;
+    use crate::{Class, Error, tls};
 
     /// The link delay each way in [`dial`].
     const DELAY: Duration = Duration::from_millis(10);
@@ -253,23 +253,27 @@ mod tests {
     fn lost(side: &Side) -> Option<(Duration, &Error)> {
         side.events.iter().find_map(|(at, event)| match event {
             Event::Closed { error, .. } => Some((*at, error)),
-            Event::Connected { .. } => None,
+            _ => None,
         })
     }
 
     /// Sends "ping" from the client on a new stream, and gives what the server reads.
-    fn ping(pair: &mut Pair) -> Vec<u8> {
-        let client = pair.client.connection();
-        let stream = client.streams().open(Dir::Uni).expect("a stream");
-        client.send_stream(stream).write(b"ping").expect("written");
-        client.send_stream(stream).finish().expect("finished");
+    fn ping(shard: &testing::Shard, pair: &mut Pair) -> Vec<u8> {
+        let (now, key) = (pair.now(), pair.client.key.expect("a connection"));
+        let client = &mut pair.client.endpoint;
+        let opened = client.open_sender(now, key, Class::Command);
+        let mut sender = opened.expect("a stream");
+        let written = client.write(now, &mut sender, shard.block(b"ping"));
+        assert_eq!(written, Ok(Poll::Ready(())));
         pair.run(Duration::from_millis(100));
-        let server = pair.server.connection();
-        let stream = server.streams().accept(Dir::Uni).expect("a stream");
-        let mut receive = server.recv_stream(stream);
-        let mut chunks = receive.read(true).expect("readable");
-        let chunk = chunks.next(usize::MAX).expect("read").expect("a chunk");
-        chunk.bytes.to_vec()
+        let (now, key) = (pair.now(), pair.server.key.expect("a connection"));
+        let server = &mut pair.server.endpoint;
+        let mut incoming = server.accept(key).expect("a stream");
+        let read = server.read(now, &mut incoming.receiver).expect("read");
+        let Poll::Ready(Some(message)) = read else {
+            panic!("no message");
+        };
+        message.to_vec()
     }
 
     /// The destination ID of a datagram's first packet, and its source ID when the
@@ -338,7 +342,7 @@ mod tests {
             testing::run(1, |shard| {
                 let mut pair = dial(shard, Duration::from_millis(100));
                 assert!(connected(&pair.client) && connected(&pair.server));
-                assert_eq!(ping(&mut pair), b"ping");
+                assert_eq!(ping(shard, &mut pair), b"ping");
             });
         }
 
@@ -372,7 +376,7 @@ mod tests {
                 let mut pair = dial(shard, Duration::from_millis(100));
                 let moved = SocketAddr::new(testing::CLIENT.ip(), 3);
                 pair.client.address = moved;
-                assert_eq!(ping(&mut pair), b"ping");
+                assert_eq!(ping(shard, &mut pair), b"ping");
                 let (_, to, _) = pair.server.sent.last().expect("a datagram");
                 assert_eq!(*to, moved);
             });

@@ -792,9 +792,10 @@ mod tests {
     #[test]
     fn a_first_entry_the_pool_has_no_block_for_changes_nothing() {
         let mut area = Area::new();
-        area.pool = pool(1 << 17);
+        let budget = 2 * block::footprint(META_LEN) - 1;
+        area.pool = pool(budget);
         let _held = area.pool.alloc(META_LEN).expect("the first block fits");
-        let available = (1 << 17) - area.pool.committed();
+        let available = budget - area.pool.committed();
         let mut group = Group::default();
         let rejected = group.push(
             &area.pool,
@@ -956,7 +957,7 @@ mod tests {
     #[test]
     fn a_first_entry_the_pool_has_no_wrap_block_for_changes_nothing() {
         let mut area = Area::new();
-        area.pool = pool(65_664);
+        area.pool = pool(block::footprint(META_LEN) + 64);
         let mut group = Group::default();
         let rejected = group.push(
             &area.pool,
@@ -971,7 +972,7 @@ mod tests {
         assert!(group.is_empty());
         assert!(group.meta.is_none(), "the meta block goes back");
         area.pool.reclaim();
-        assert_eq!(area.pool.committed(), 65_600);
+        assert_eq!(area.pool.committed(), block::footprint(META_LEN));
     }
 
     #[test]
