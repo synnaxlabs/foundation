@@ -36,16 +36,13 @@ impl Prefix {
             .unwrap_or_else(|| {
                 panic!("a message of {len} bytes is over the varint limit")
             });
-        let (tag, size, rotate) = match value {
-            0..64 => (0x00, 1, 7),
-            64..16_384 => (0x40, 2, 6),
-            16_384..1_073_741_824 => (0x80, 4, 4),
-            _ => (0xc0, 8, 0),
+        let (tag, size, shift) = match value {
+            0..64 => (0, 1, 56),
+            64..16_384 => (0x40 << 56, 2, 48),
+            16_384..1_073_741_824 => (0x80 << 56, 4, 32),
+            _ => (0xc0 << 56, 8, 0),
         };
-        let mut bytes = value.to_be_bytes();
-        bytes.rotate_left(rotate);
-        let [first, ..] = &mut bytes;
-        *first |= tag;
+        let bytes = (value.wrapping_shl(shift) | tag).to_be_bytes();
         Self { bytes, size }
     }
 }
@@ -111,7 +108,7 @@ impl Reader {
     /// - [`Error::Broken`] when the peer breaks the framing: a message over
     ///   `bytes_max`, or a stream that ends inside a message. The stream cannot go on.
     /// - [`Error::Pool`] when `pool` has no room for the message now. Its bytes stay
-    ///   with the source; call again after a block frees.
+    ///   with the source; call again when the pool has room.
     /// - The source's error.
     ///
     /// # Panics
