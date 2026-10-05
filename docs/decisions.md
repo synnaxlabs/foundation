@@ -250,22 +250,28 @@ How to read this record:
   grant for a session it closed. The home sends a whole frame while the bytes it has
   spent are below the limit, so it passes the limit by less than one frame and never
   splits a frame. After a refusal, the session gets no later frame until it has the
-  refused one; frames from catch-up spend credit too. A frame costs its charge: the
-  bytes its pool block pins, which are `block`'s header, the frame header, the
-  descriptors, and the encoded series (M3). `types` sets the charge with the frame
-  layout, so the home and the `hub` compute the same charge from the frame alone, and a
-  frame with only empty series still costs its headers. Per-connection framing in `wire`
-  (X35) pins no pool memory and does not count. Credits apply only to complete delivery,
-  which is reliable: a lost frame would leak credit. The `hub` raises the limit only
-  after it releases a frame, and it bounds its decoded copies itself, since a small
-  encoded frame can decode to much more. It sends a `Credit` only when the room it has
-  not announced reaches half the window, and puts the grants for all sessions on one
-  link into one message. It sizes one window per reader from the link's bandwidth-delay
-  product, adapts it, and divides it among the indexes the reader reads. Each session
-  with room can pass its limit by one frame, so the `hub` counts one largest frame per
-  such session against the window, and a reader pins at most its window. Replaces r11
-  5.2 (a window beyond the acknowledged position): flow control stays apart from durable
-  acks. Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41.
+  refused one; frames from catch-up spend credit too. A frame costs its charge,
+  `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
+  `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
+  just past a class costs about twice its length, and a frame with only empty series
+  still costs its headers. The charge depends only on the frame's length, so the home
+  and the `hub` compute the same charge for the same frame. A remote complete reader
+  gets only the series of its view (M2): the home sends a frame of those series, and
+  both ends charge that frame. The person chose this on 2026-10-05 ("B is approved ...
+  send only partial frames"), #267. The charge is part of the wire contract: a change to
+  `block`'s header or size classes needs a new wire version (C9d). The window counts
+  charges, not wire bytes. Per-connection framing in `wire` (X35) pins no pool memory
+  and does not count. Credits apply only to complete delivery, which is reliable: a lost
+  frame would leak credit. The `hub` raises the limit only after it releases a frame,
+  and it bounds its decoded copies itself, since a small encoded frame can decode to
+  much more. It sends a `Credit` only when the room it has not announced reaches half
+  the window, and puts the grants for all sessions on one link into one message. It
+  sizes one window per reader from the link's bandwidth-delay product, adapts it, and
+  divides it among the indexes the reader reads. Each session with room can pass its
+  limit by one frame, so the `hub` counts one largest frame per such session against the
+  window, and a reader pins at most its window. Replaces r11 5.2 (a window beyond the
+  acknowledged position): flow control stays apart from durable acks.
+  Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41, #267.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync. The current value is
@@ -486,7 +492,11 @@ How to read this record:
   not for 8 exchanges. Decided by the coordinator (#84). An error that grows past 36500
   days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
   time as OS CLOCK BOUND says. `Error::Bound` is only for an input error over 36500
-  days. The person decided on 2026-10-05 ("Ok that's fine"), #225.
+  days. The person decided on 2026-10-05 ("Ok that's fine"), #225. `combine` uses
+  each bound with its full growth, so a bound that grew to "unknown" never cuts a
+  known one. An exchange with an error over 36500 days, or an overlap whose readings
+  allow one before drift, fails with `Bound`: a stopped bound stored as a measurement
+  could miss the true offset. Decided by the `time` builder (#258).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -524,9 +534,9 @@ How to read this record:
   ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper
   bounds).
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
-  a reader gets no mesh time. After it, when `combine` fails (no majority, a bound too
-  wide, or no sources after a remove), the clock holds over: it keeps its last estimate
-  and its error grows by drift. It never follows the largest group or one side of a tie.
+  a reader gets no mesh time. After it, when `combine` fails (no majority, or no sources
+  after a remove), the clock holds over: it keeps its last estimate and its error grows
+  by drift. It never follows the largest group or one side of a tie.
   `push` returns the holdover and its cause, and `node` publishes it. The next majority
   ends the holdover. Decided by the `time` builder (#142).
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
