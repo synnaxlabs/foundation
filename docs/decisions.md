@@ -801,9 +801,10 @@ How to read this record:
   breaks the protocol: noq-proto closes the connection with PROTOCOL_VIOLATION, and
   the caller gets `Error::Broken`. Each connection queues at most 64 KiB of datagrams
   to send; when a new one does not fit, the oldest unsent ones drop. A node copies
-  each datagram into a block from its pool when it arrives, and drops it when the
-  pool has no room. At most 64 wait untaken on one connection; a new one drops the
-  oldest. Proposed by `network` in #55; approved by the coordinator.
+  each datagram into a block from its pool when it arrives, and drops it when it
+  gets no block (the pool or the system has no room). At most 64 wait untaken on one
+  connection; a new one drops the oldest. Proposed by `network` in #55; approved by
+  the coordinator.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is

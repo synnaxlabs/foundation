@@ -83,8 +83,8 @@ pub struct Receiver {
 
 impl Receiver {
     /// Waits for the next datagram. It lands in one block from the shard's pool. A
-    /// datagram drops when the pool has no room for it, or when the receivers fall
-    /// behind: then the oldest untaken one drops.
+    /// datagram drops when it gets no block (the pool or the system has no room for
+    /// it), or when the receivers fall behind: then the oldest untaken one drops.
     ///
     /// # Errors
     ///

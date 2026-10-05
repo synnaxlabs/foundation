@@ -75,8 +75,9 @@ pub(super) struct Received(VecDeque<Block>);
 
 impl Received {
     /// Moves each datagram that `inner` holds into a block from `pool`, and gives
-    /// [`Event::Datagram`] when none waited. A datagram drops when `pool` has no
-    /// room for it. When [`WAITING_MAX`] wait, the oldest drops.
+    /// [`Event::Datagram`] when none waited. A datagram drops when it gets no block
+    /// (`pool` or the system has no room). When [`WAITING_MAX`] wait, the oldest
+    /// drops.
     pub(super) fn pull(
         &mut self,
         inner: &mut noq_proto::Connection,
