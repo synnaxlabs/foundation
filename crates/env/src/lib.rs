@@ -14,5 +14,6 @@ pub mod net;
 pub mod rng;
 pub mod shards;
 pub mod tasks;
+pub mod thread;
 pub mod threads;
 pub mod wall;
