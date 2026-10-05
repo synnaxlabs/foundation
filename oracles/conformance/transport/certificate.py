@@ -1,8 +1,8 @@
 """Writes certificate.txt: the NODE KEY TLS certificate of the node key [1; 32].
 
-It builds the DER from the template in docs/decisions.md and signs it with the
-OpenSSL CLI, so it shares no code with `crates/transport`. Run it from this
-directory: `python3 certificate.py`.
+It builds the DER from the NODE KEY TLS template, in the field order of the
+template in `crates/transport/src/tls.rs`, and signs it with the OpenSSL CLI, so it
+shares no code with `crates/transport`.
 """
 
 import subprocess
@@ -47,7 +47,7 @@ def main() -> None:
         certificate = tlv(0x30, tbs + algorithm + tlv(0x03, b"\x00" + signature))
     text = certificate.hex()
     lines = [text[i:i + 64] for i in range(0, len(text), 64)]
-    Path("certificate.txt").write_text("\n".join(lines) + "\n")
+    Path(__file__).with_name("certificate.txt").write_text("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

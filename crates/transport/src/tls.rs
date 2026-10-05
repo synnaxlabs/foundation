@@ -351,6 +351,7 @@ mod tests {
         ALL_CIPHER_SUITES, ALL_KX_GROUPS, default_provider,
     };
     use rustls::pki_types::PrivateKeyDer;
+    use rustls::server::Acceptor;
     use rustls::sign::{Signer, SigningKey};
     use rustls::{
         CertificateError, CipherSuite, ClientConnection, Connection, HandshakeKind,
@@ -746,6 +747,8 @@ mod tests {
             );
         }
 
+        const ALPNS: &str =
+            include_str!("../../../oracles/conformance/transport/alpn.txt");
         const SUITES: &str =
             include_str!("../../../oracles/conformance/transport/suites.txt");
         const GROUPS: &str =
@@ -782,13 +785,25 @@ mod tests {
         }
 
         #[test]
-        fn when_a_node_dials_it_offers_the_suites_and_groups_in_order() {
-            let provider = provider();
-            let suites = provider.cipher_suites.iter();
-            let suites = suites.map(|suite| u16::from(suite.suite()));
+        fn when_a_node_dials_its_client_hello_offers_the_oracle_lists() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let name = ServerName::from(IpAddr::from(Ipv6Addr::LOCALHOST));
+            let client = Tls::new(&a).client(public(&b));
+            let mut client = ClientConnection::new(client, name).expect("a client");
+            let mut wire = Vec::new();
+            while client.wants_write() {
+                client.write_tls(&mut wire).expect("writes to a Vec");
+            }
+            let mut acceptor = Acceptor::default();
+            acceptor.read_tls(&mut wire.as_slice()).expect("reads from a slice");
+            let accepted = acceptor.accept().expect("a hello").expect("a whole hello");
+            let hello = accepted.client_hello();
+            let alpn = hello.alpn().expect("ALPN").collect::<Vec<_>>();
+            assert_eq!(alpn, ALPNS.lines().map(str::as_bytes).collect::<Vec<_>>());
+            let suites = hello.cipher_suites().iter().map(|&suite| u16::from(suite));
             assert_eq!(suites.collect::<Vec<_>>(), codes(SUITES));
-            let groups = provider.kx_groups.iter();
-            let groups = groups.map(|group| u16::from(group.name()));
+            let groups = hello.named_groups().expect("groups").iter();
+            let groups = groups.map(|&group| u16::from(group));
             assert_eq!(groups.collect::<Vec<_>>(), codes(GROUPS));
         }
 
@@ -932,7 +947,7 @@ mod tests {
         }
 
         #[test]
-        fn is_the_golden_certificate() {
+        fn matches_the_oracle() {
             let golden =
                 include_str!("../../../oracles/conformance/transport/certificate.txt");
             let golden = golden.split_whitespace().collect::<String>();
