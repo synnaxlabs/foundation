@@ -6,7 +6,7 @@ use crate::lab::{Lab, Protocol};
 /// `dev.q` and checks that the device applied it and the connector acknowledged it.
 fn check(protocol: Protocol, hcl: &str) {
     let mut lab = Lab::new(1);
-    let edge = lab.start("edge", 1 << 30);
+    let edge = lab.start("edge");
     lab.device(edge, protocol, "dev");
     lab.set_point("dev", "p", 21.5);
     lab.apply(edge, hcl);
@@ -23,38 +23,39 @@ fn check(protocol: Protocol, hcl: &str) {
     let audit = lab.audit(edge, "dev.q");
     assert_eq!(audit.len(), 1, "audit {audit:?}");
     assert_eq!(audit[0].ack, Some(7.0), "ack");
+    lab.stop();
 }
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #338"]
 fn opc_ua_reads_and_commands() {
     check(Protocol::OpcUa, include_str!("fixtures/opcua.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #338"]
 fn modbus_tcp_reads_and_commands() {
     check(Protocol::ModbusTcp, include_str!("fixtures/modbus_tcp.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #338"]
 fn modbus_rtu_reads_and_commands() {
     check(Protocol::ModbusRtu, include_str!("fixtures/modbus_rtu.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #338"]
 fn ni_daqmx_reads_and_commands() {
     check(Protocol::Ni, include_str!("fixtures/ni.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #341"]
 fn influx_receives_every_sample_the_edge_writes() {
     let mut lab = Lab::new(1);
-    let cloud = lab.start("cloud", 1 << 30);
-    let edge = lab.start("edge", 1 << 30);
+    let cloud = lab.start("cloud");
+    let edge = lab.start("edge");
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
     lab.influx(cloud, "influx");
@@ -67,4 +68,5 @@ fn influx_receives_every_sample_the_edge_writes() {
     assert_eq!(stored.seqs, Some(lab.written("edge.value")), "seqs");
     assert!(stored.contiguous, "contiguous");
     assert_eq!(stored.gaps, [], "gaps");
+    lab.stop();
 }
