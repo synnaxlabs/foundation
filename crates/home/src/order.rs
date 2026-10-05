@@ -15,6 +15,17 @@ pub(crate) struct Config {
     pub(crate) ahead: Span,
 }
 
+/// A frame whose stamps passed [`Order::check`] on one path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Accepted {
+    /// The path of the frame.
+    pub(crate) path: Path,
+    /// The seq of the frame's samples.
+    pub(crate) seq: Range<u64>,
+    /// The newest stamp of the frame, or `None` when it is empty.
+    last: Option<Stamp>,
+}
+
 /// Where one path of an index stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Tail {
@@ -43,11 +54,10 @@ impl Order {
         }
     }
 
-    /// Accepts one frame's index series on `path` at mesh time `now`, and returns the
-    /// seq of its samples. `stamps` is the series in place: each stamp is little-endian
-    /// `i64` nanoseconds since the epoch. A rejected frame changes nothing. An empty
-    /// frame gets an empty range. Call it after every other check that can reject the
-    /// frame, because the seq it gives is spent.
+    /// Checks one frame's index series on `path` at mesh time `now`, and returns the
+    /// seq its samples take. `stamps` is the series in place: each stamp is
+    /// little-endian `i64` nanoseconds since the epoch. Changes nothing:
+    /// [`Order::advance`] spends the seq. An empty frame gets an empty range.
     ///
     /// # Errors
     ///
@@ -57,25 +67,44 @@ impl Order {
     /// # Panics
     ///
     /// If the path's seq would pass `u64::MAX`.
-    pub(crate) fn accept(
-        &mut self,
+    pub(crate) fn check(
+        &self,
         path: Path,
         stamps: &[[u8; 8]],
         now: Interval,
-    ) -> Result<Range<u64>, Error> {
-        self.check(path, stamps, now)?;
-        let tail = match path {
+    ) -> Result<Accepted, Error> {
+        self.rules(path, stamps, now)?;
+        let start = self.tail(path).seq;
+        let end = start
+            .checked_add(stamps.len() as u64)
+            .expect("invariant: a path takes fewer than 2^64 samples");
+        Ok(Accepted {
+            path,
+            seq: start..end,
+            last: stamps.last().copied().map(stamp),
+        })
+    }
+
+    /// Spends the seq of a frame that [`Order::check`] accepted. Later frames on its
+    /// path must follow it.
+    ///
+    /// # Panics
+    ///
+    /// If the path moved after the check.
+    pub(crate) fn advance(&mut self, accepted: &Accepted) {
+        let tail = match accepted.path {
             Path::Live => &mut self.live,
             Path::Backfill => &mut self.backfill,
         };
-        let start = tail.seq;
-        if let Some(last) = stamps.last() {
-            tail.seq = start
-                .checked_add(stamps.len() as u64)
-                .expect("invariant: a path takes fewer than 2^64 samples");
-            tail.stamp = Some(stamp(*last));
+        assert_eq!(
+            tail.seq, accepted.seq.start,
+            "invariant: the {:?} path moved after the check of {accepted:?}",
+            accepted.path,
+        );
+        if let Some(last) = accepted.last {
+            tail.seq = accepted.seq.end;
+            tail.stamp = Some(last);
         }
-        Ok(start..tail.seq)
     }
 
     /// Where `path` stands.
@@ -86,7 +115,7 @@ impl Order {
         }
     }
 
-    fn check(
+    fn rules(
         &self,
         path: Path,
         stamps: &[[u8; 8]],
@@ -119,7 +148,7 @@ impl Order {
         Err(self.breach(path, stamps, latest))
     }
 
-    /// The first rule that a frame breaks, in the order that `accept` states.
+    /// The first rule that a frame breaks, in the order that `check` states.
     fn breach(&self, path: Path, stamps: &[[u8; 8]], latest: Stamp) -> Error {
         let earliest = self.config.earliest;
         let other = match path {
@@ -292,6 +321,18 @@ mod tests {
         }
     }
 
+    /// Checks a frame and spends its seq, as the home does after a stored frame.
+    fn accept(
+        order: &mut Order,
+        path: Path,
+        stamps: &[[u8; 8]],
+        now: Interval,
+    ) -> Result<Range<u64>, Error> {
+        let accepted = order.check(path, stamps, now)?;
+        order.advance(&accepted);
+        Ok(accepted.seq)
+    }
+
     fn order() -> Order {
         Order::new(config(), Tail::default(), Tail::default())
     }
@@ -310,10 +351,13 @@ mod tests {
         fn gives_a_frame_the_next_seq_on_its_path() {
             let mut order = order();
             assert_eq!(
-                order.accept(Path::Live, &stamps(&[1, 2, 3]), now()),
+                accept(&mut order, Path::Live, &stamps(&[1, 2, 3]), now()),
                 Ok(0..3)
             );
-            assert_eq!(order.accept(Path::Live, &stamps(&[4, 5]), now()), Ok(3..5));
+            assert_eq!(
+                accept(&mut order, Path::Live, &stamps(&[4, 5]), now()),
+                Ok(3..5)
+            );
             assert_eq!(order.tail(Path::Live), tail(5, 5));
         }
 
@@ -321,13 +365,20 @@ mod tests {
         fn counts_each_path_apart() {
             let mut order = order();
             assert_eq!(
-                order.accept(Path::Live, &stamps(&[10, 11]), now()),
+                accept(&mut order, Path::Live, &stamps(&[10, 11]), now()),
                 Ok(0..2)
             );
-            let backfill = order.accept(Path::Backfill, &stamps(&[1, 2, 3]), now());
+            let backfill =
+                accept(&mut order, Path::Backfill, &stamps(&[1, 2, 3]), now());
             assert_eq!(backfill, Ok(0..3));
-            assert_eq!(order.accept(Path::Live, &stamps(&[12]), now()), Ok(2..3));
-            assert_eq!(order.accept(Path::Backfill, &stamps(&[4]), now()), Ok(3..4));
+            assert_eq!(
+                accept(&mut order, Path::Live, &stamps(&[12]), now()),
+                Ok(2..3)
+            );
+            assert_eq!(
+                accept(&mut order, Path::Backfill, &stamps(&[4]), now()),
+                Ok(3..4)
+            );
             assert_eq!(order.tail(Path::Live), tail(12, 3));
             assert_eq!(order.tail(Path::Backfill), tail(4, 4));
         }
@@ -335,9 +386,11 @@ mod tests {
         #[test]
         fn rejects_a_stamp_not_after_the_last_frame() {
             let mut order = order();
-            assert_eq!(order.accept(Path::Live, &stamps(&[5, 6]), now()), Ok(0..2));
-            let error = order
-                .accept(Path::Live, &stamps(&[4]), now())
+            assert_eq!(
+                accept(&mut order, Path::Live, &stamps(&[5, 6]), now()),
+                Ok(0..2)
+            );
+            let error = accept(&mut order, Path::Live, &stamps(&[4]), now())
                 .expect_err("a stamp before the last frame");
             assert_eq!(
                 error,
@@ -356,9 +409,9 @@ mod tests {
 
         #[test]
         fn rejects_a_tie_inside_a_frame() {
-            let error = order()
-                .accept(Path::Backfill, &stamps(&[1, 2, 2]), now())
-                .expect_err("a tie");
+            let error =
+                accept(&mut order(), Path::Backfill, &stamps(&[1, 2, 2]), now())
+                    .expect_err("a tie");
             assert_eq!(
                 error,
                 Error::Backwards {
@@ -377,9 +430,11 @@ mod tests {
         #[test]
         fn rejects_a_stamp_before_the_earliest_before_its_order() {
             let mut order = order();
-            assert_eq!(order.accept(Path::Live, &stamps(&[5]), now()), Ok(0..1));
-            let error = order
-                .accept(Path::Live, &bytes(&[Stamp::EPOCH]), now())
+            assert_eq!(
+                accept(&mut order, Path::Live, &stamps(&[5]), now()),
+                Ok(0..1)
+            );
+            let error = accept(&mut order, Path::Live, &bytes(&[Stamp::EPOCH]), now())
                 .expect_err("a clock that was never set");
             assert_eq!(
                 error,
@@ -399,11 +454,10 @@ mod tests {
         fn rejects_a_stamp_past_mesh_time_and_ahead() {
             let mut order = order();
             assert_eq!(
-                order.accept(Path::Live, &stamps(&[60, 61]), now()),
+                accept(&mut order, Path::Live, &stamps(&[60, 61]), now()),
                 Ok(0..2)
             );
-            let error = order
-                .accept(Path::Live, &stamps(&[62, 63]), now())
+            let error = accept(&mut order, Path::Live, &stamps(&[62, 63]), now())
                 .expect_err("a stamp past the limit");
             assert_eq!(
                 error,
@@ -423,13 +477,15 @@ mod tests {
         #[test]
         fn rejects_backfill_at_or_after_the_newest_live_stamp() {
             let mut order = order();
-            assert_eq!(order.accept(Path::Live, &stamps(&[10]), now()), Ok(0..1));
             assert_eq!(
-                order.accept(Path::Backfill, &stamps(&[8, 9]), now()),
+                accept(&mut order, Path::Live, &stamps(&[10]), now()),
+                Ok(0..1)
+            );
+            assert_eq!(
+                accept(&mut order, Path::Backfill, &stamps(&[8, 9]), now()),
                 Ok(0..2)
             );
-            let error = order
-                .accept(Path::Backfill, &stamps(&[10]), now())
+            let error = accept(&mut order, Path::Backfill, &stamps(&[10]), now())
                 .expect_err("backfill at the newest live stamp");
             assert_eq!(
                 error,
@@ -451,7 +507,7 @@ mod tests {
         fn accepts_backfill_before_any_live_sample() {
             let mut order = order();
             assert_eq!(
-                order.accept(Path::Backfill, &stamps(&[1, 2]), now()),
+                accept(&mut order, Path::Backfill, &stamps(&[1, 2]), now()),
                 Ok(0..2)
             );
             assert_eq!(order.tail(Path::Live), Tail::default());
@@ -461,11 +517,10 @@ mod tests {
         fn rejects_live_at_or_before_the_newest_backfill_stamp() {
             let mut order = order();
             assert_eq!(
-                order.accept(Path::Backfill, &stamps(&[5, 6]), now()),
+                accept(&mut order, Path::Backfill, &stamps(&[5, 6]), now()),
                 Ok(0..2)
             );
-            let error = order
-                .accept(Path::Live, &stamps(&[6]), now())
+            let error = accept(&mut order, Path::Live, &stamps(&[6]), now())
                 .expect_err("live at the newest backfill stamp");
             assert_eq!(
                 error,
@@ -481,14 +536,31 @@ mod tests {
                  backfill stamp 2026-10-05T00:00:06.000000000Z: check the source's \
                  clock"
             );
-            assert_eq!(order.accept(Path::Live, &stamps(&[7]), now()), Ok(0..1));
+            assert_eq!(
+                accept(&mut order, Path::Live, &stamps(&[7]), now()),
+                Ok(0..1)
+            );
+        }
+
+        #[test]
+        fn spends_the_seq_only_at_advance() {
+            let mut order = order();
+            let accepted = order.check(Path::Live, &stamps(&[1, 2]), now());
+            let accepted = accepted.expect("stamps in order");
+            assert_eq!(accepted.seq, 0..2);
+            assert_eq!(order.tail(Path::Live), Tail::default());
+            order.advance(&accepted);
+            assert_eq!(order.tail(Path::Live), tail(2, 2));
         }
 
         #[test]
         fn changes_nothing_for_a_rejected_frame() {
             let mut order = order();
-            assert_eq!(order.accept(Path::Live, &stamps(&[1, 2]), now()), Ok(0..2));
-            let rejected = order.accept(Path::Live, &stamps(&[3, 3]), now());
+            assert_eq!(
+                accept(&mut order, Path::Live, &stamps(&[1, 2]), now()),
+                Ok(0..2)
+            );
+            let rejected = accept(&mut order, Path::Live, &stamps(&[3, 3]), now());
             assert_eq!(
                 rejected,
                 Err(Error::Backwards {
@@ -498,25 +570,31 @@ mod tests {
                 })
             );
             assert_eq!(order.tail(Path::Live), tail(2, 2));
-            assert_eq!(order.accept(Path::Live, &stamps(&[3]), now()), Ok(2..3));
+            assert_eq!(
+                accept(&mut order, Path::Live, &stamps(&[3]), now()),
+                Ok(2..3)
+            );
         }
 
         #[test]
         fn gives_an_empty_frame_no_seq() {
             let mut order = order();
-            assert_eq!(order.accept(Path::Live, &stamps(&[1]), now()), Ok(0..1));
+            assert_eq!(
+                accept(&mut order, Path::Live, &stamps(&[1]), now()),
+                Ok(0..1)
+            );
             let epoch = Interval {
                 earliest: Stamp::EPOCH,
                 latest: Stamp::EPOCH,
             };
-            assert_eq!(order.accept(Path::Live, &[], epoch), Ok(1..1));
+            assert_eq!(accept(&mut order, Path::Live, &[], epoch), Ok(1..1));
             assert_eq!(order.tail(Path::Live), tail(1, 1));
         }
 
         #[test]
         fn continues_from_the_tails_it_starts_at() {
             let mut order = Order::new(config(), tail(5, 7), tail(2, 3));
-            let live = order.accept(Path::Live, &stamps(&[5]), now());
+            let live = accept(&mut order, Path::Live, &stamps(&[5]), now());
             assert_eq!(
                 live,
                 Err(Error::Backwards {
@@ -525,8 +603,11 @@ mod tests {
                     stamp: s(5),
                 })
             );
-            assert_eq!(order.accept(Path::Live, &stamps(&[6]), now()), Ok(7..8));
-            let backfill = order.accept(Path::Backfill, &stamps(&[2]), now());
+            assert_eq!(
+                accept(&mut order, Path::Live, &stamps(&[6]), now()),
+                Ok(7..8)
+            );
+            let backfill = accept(&mut order, Path::Backfill, &stamps(&[2]), now());
             assert_eq!(
                 backfill,
                 Err(Error::Backwards {
@@ -535,7 +616,10 @@ mod tests {
                     stamp: s(2),
                 })
             );
-            assert_eq!(order.accept(Path::Backfill, &stamps(&[3]), now()), Ok(3..4));
+            assert_eq!(
+                accept(&mut order, Path::Backfill, &stamps(&[3]), now()),
+                Ok(3..4)
+            );
         }
 
         #[test]
@@ -551,7 +635,7 @@ mod tests {
             let mut order = Order::new(config, Tail::default(), Tail::default());
             let last = Stamp::from_nanos(i64::MAX);
             assert_eq!(
-                order.accept(Path::Live, &bytes(&[last]), at(i64::MAX - 1)),
+                accept(&mut order, Path::Live, &bytes(&[last]), at(i64::MAX - 1)),
                 Ok(0..1)
             );
             let behind = Config {
@@ -560,7 +644,12 @@ mod tests {
             };
             let mut order = Order::new(behind, Tail::default(), Tail::default());
             assert_eq!(
-                order.accept(Path::Live, &bytes(&[Stamp::EPOCH]), at(i64::MIN)),
+                accept(
+                    &mut order,
+                    Path::Live,
+                    &bytes(&[Stamp::EPOCH]),
+                    at(i64::MIN)
+                ),
                 Err(Error::Ahead {
                     stamp: Stamp::EPOCH,
                     latest: Stamp::from_nanos(i64::MIN),
@@ -575,7 +664,8 @@ mod tests {
                 stamp: None,
                 seq: u64::MAX,
             };
-            let accepted = Order::new(config(), full, Tail::default()).accept(
+            let accepted = accept(
+                &mut Order::new(config(), full, Tail::default()),
                 Path::Live,
                 &stamps(&[1]),
                 now(),
@@ -695,9 +785,10 @@ mod tests {
             for (path, stamps, now) in frames {
                 let before = tails(&order);
                 let series = bytes(&stamps);
-                let restarted =
-                    Order::new(config, before[0], before[1]).accept(path, &series, now);
-                let accepted = order.accept(path, &series, now);
+                let restarted = Order::new(config, before[0], before[1])
+                    .check(path, &series, now)
+                    .map(|accepted| accepted.seq);
+                let accepted = accept(&mut order, path, &series, now);
                 assert_eq!(accepted, model.accept(path, &stamps, now));
                 assert_eq!(restarted, accepted, "a restart from the tails differs");
                 if accepted.is_err() {
