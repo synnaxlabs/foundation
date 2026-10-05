@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use env::shards::{Config, Main};
 use env::tasks::Task;
-use env::threads::{Body, Error, Handle};
+use env::thread::{Error, Handle};
+use env::threads::Body;
 use types::time::{Monotonic, Stamp};
 
 use crate::state::{Due, Futures, Shared, Start, lock};

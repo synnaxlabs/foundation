@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+crc32c = { workspace = true }
 
 [lints]
 workspace = true

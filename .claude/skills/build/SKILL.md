@@ -40,6 +40,8 @@ You own a set of crates. Your session name is your owner label (`owner:<name>`).
    cargo fmt --check
    cargo clippy --workspace --all-targets -- -D warnings
    cargo xtask layers
+   cargo xtask globals
+   cargo xtask oracles
    cargo test --workspace
    ```
 6. If the change touches a hot path, run its benchmarks and answer the six questions

@@ -12,7 +12,8 @@ use env::net::udp::Transmit;
 use env::rng::Rng;
 use env::shards::Main;
 use env::tasks::Task;
-use env::threads::{Body, Error};
+use env::thread::Error;
+use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
 use crate::net::Network;

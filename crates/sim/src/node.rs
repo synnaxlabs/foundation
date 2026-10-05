@@ -40,7 +40,7 @@ impl Node {
     }
 
     /// Starts shards on the node. A shard asks for a core below [`Config::cores`]
-    /// or gets [`env::threads::Error::Pin`].
+    /// or gets [`env::thread::Error::Pin`].
     #[must_use]
     pub fn shards(&self) -> env::shards::Shards {
         env::shards::Shards::new(self.0.clone())

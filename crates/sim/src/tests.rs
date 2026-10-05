@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use crate::{Config, Error, Sim, node};
-use env::threads::Error as Thread;
+use env::thread;
 use proptest::prelude::*;
 use types::time::{Monotonic, Span, Stamp};
 
@@ -268,7 +268,7 @@ fn a_panic_ends_the_run_and_its_thread() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "shard-0".into()
         })
     );
@@ -295,7 +295,7 @@ fn a_panic_in_a_spawned_task_ends_its_shard() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "shard-0".into()
         })
     );
@@ -354,7 +354,7 @@ fn a_shard_cannot_pin_past_the_node_cores() {
     };
     assert_eq!(
         node.shards().start(config, |_| async {}).unwrap_err(),
-        Thread::Pin {
+        thread::Error::Pin {
             name: "shard-4".into(),
             core: 4
         }
@@ -375,17 +375,17 @@ fn a_thread_name_with_a_nul_byte_starts() {
     let shard = node
         .shards()
         .start(shard("a\0b"), |_| async { panic!("shard") });
-    let thread = node.threads().start("c\0d", || async {});
+    let handle = node.threads().start("c\0d", || async {});
     let e = sim.run().unwrap_err();
     assert!(matches!(e, Error::Panicked { thread, .. } if thread == "a\0b"));
     assert_eq!(
         shard.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "a\0b".into()
         })
     );
     sim.run().unwrap();
-    thread.unwrap().join().unwrap();
+    handle.unwrap().join().unwrap();
 }
 
 #[test]
@@ -686,7 +686,7 @@ fn a_panic_in_the_drop_of_a_task_ends_the_run_and_its_thread() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(Thread::Panicked {
+        Err(thread::Error::Panicked {
             name: "shard-0".into()
         })
     );
@@ -857,7 +857,7 @@ fn log_after(
     name: &'static str,
     span: Span,
     log: &Arc<Mutex<Vec<(&'static str, Monotonic)>>>,
-) -> env::threads::Handle {
+) -> env::thread::Handle {
     let clock = node.clock();
     let log = Arc::clone(log);
     let handle = node.shards().start(shard(name), move |_| async move {
