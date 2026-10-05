@@ -549,8 +549,17 @@ impl Rate {
     ///
     /// When `num` or `den` is zero.
     pub fn new(num: u64, den: u64) -> Result<Self, ParseError> {
-        let _ = (num, den);
-        todo!()
+        if num == 0 || den == 0 {
+            return Err(ParseError {
+                input: format!("{num}/{den}"),
+                expected: "a rate whose numerator and denominator are above zero",
+            });
+        }
+        let divisor = gcd(num, den);
+        Ok(Self {
+            num: num / divisor,
+            den: den / divisor,
+        })
     }
 
     /// The numerator of the reduced fraction.
@@ -565,6 +574,34 @@ impl Rate {
         self.den
     }
 
+    /// The exact time that `n` samples take at this rate, rounded down to the
+    /// nanosecond.
+    ///
+    /// # Panics
+    ///
+    /// When the result does not fit in a [`Span`].
+    #[must_use]
+    #[track_caller]
+    pub fn span(self, n: u64) -> Span {
+        let Some(span) = self.checked_span(n) else {
+            panic!("span overflow: {n} samples at {}/{} Hz", self.num, self.den)
+        };
+        span
+    }
+
+    /// The number of whole samples that fit in `span`: the largest `n` with
+    /// `self.span(n) <= span`, or zero when `span` is negative.
+    #[must_use]
+    pub fn count(self, span: Span) -> u64 {
+        let Ok(nanos) = u128::try_from(span.0) else {
+            return 0;
+        };
+        // span(n) <= nanos exactly when n * den * 1e9 < (nanos + 1) * num.
+        let limit = (nanos + 1) * u128::from(self.num) - 1;
+        let count = limit / (u128::from(self.den) * nanos_per_second());
+        u64::try_from(count).unwrap_or(u64::MAX)
+    }
+
     /// The exact time of sample `n` after a sample at `start`, rounded down to the
     /// nanosecond.
     ///
@@ -572,10 +609,34 @@ impl Rate {
     ///
     /// When the result does not fit in a [`Stamp`].
     #[must_use]
+    #[track_caller]
     pub fn stamp(self, start: Stamp, n: u64) -> Stamp {
-        let _ = (start, n);
-        todo!()
+        start + self.span(n)
     }
+
+    /// [`Rate::span`], or `None` when it does not fit in a [`Span`].
+    fn checked_span(self, n: u64) -> Option<Span> {
+        let (num, scale) = (u128::from(self.num), nanos_per_second());
+        let samples = u128::from(n) * u128::from(self.den);
+        let (seconds, rest) = (samples / num, samples % num);
+        let nanos = seconds
+            .checked_mul(scale)?
+            .checked_add(rest * scale / num)?;
+        i64::try_from(nanos).ok().map(Span)
+    }
+}
+
+/// [`NANOS_PER_SECOND`] as a `u128`.
+fn nanos_per_second() -> u128 {
+    u128::from(NANOS_PER_SECOND.unsigned_abs())
+}
+
+/// The greatest common divisor of `a` and `b`.
+const fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 impl fmt::Display for Rate {
@@ -1117,6 +1178,157 @@ mod tests {
                 let (start, end) = (a.min(b), a.max(b));
                 let range = range(Stamp::from_nanos(start), Stamp::from_nanos(end));
                 prop_assert_eq!(range.to_string().parse(), Ok(range));
+            }
+        }
+    }
+
+    mod rate {
+        use super::*;
+
+        const RATE_NONZERO: &str =
+            "a rate whose numerator and denominator are above zero";
+
+        fn rate(num: u64, den: u64) -> Rate {
+            Rate::new(num, den).unwrap()
+        }
+
+        fn rates() -> impl Strategy<Value = Rate> {
+            prop_oneof![
+                (1..=u64::MAX, 1..=u64::MAX),
+                (1..=10_000_000_000_u64, Just(1)),
+                (Just(1), 1..=1_000_000_u64),
+                (1..=1000_u64, 1..=1000_u64),
+            ]
+            .prop_map(|(num, den)| rate(num, den))
+        }
+
+        #[test]
+        fn reduces_the_fraction() {
+            for (num, den, reduced) in [
+                (1, 1, (1, 1)),
+                (1000, 1, (1000, 1)),
+                (6, 4, (3, 2)),
+                (4, 12, (1, 3)),
+                (u64::MAX, u64::MAX, (1, 1)),
+            ] {
+                let rate = rate(num, den);
+                assert_eq!((rate.num(), rate.den()), reduced, "{num}/{den}");
+            }
+        }
+
+        #[test]
+        fn refuses_a_zero() {
+            for (num, den, input) in [(0, 1, "0/1"), (1, 0, "1/0"), (0, 0, "0/0")] {
+                assert_eq!(Rate::new(num, den), Err(error(input, RATE_NONZERO)));
+            }
+        }
+
+        #[test]
+        fn spans_whole_samples_rounded_down() {
+            for (num, den, n, nanos) in [
+                (7, 1, 0, 0),
+                (1, 1, 3, 3_000_000_000),
+                (3, 1, 1, 333_333_333),
+                (3, 1, 2, 666_666_666),
+                (3, 1, 3, 1_000_000_000),
+                (1, 3, 1, 3_000_000_000),
+                (1_000_000_000, 1, 7, 7),
+                (3_000_000_000, 1, 2, 0),
+                (3_000_000_000, 1, 3, 1),
+                (1, 1, 9_223_372_036, 9_223_372_036_000_000_000),
+            ] {
+                let span = rate(num, den).span(n);
+                assert_eq!(span, Span::from_nanos(nanos), "{n} at {num}/{den} Hz");
+            }
+        }
+
+        #[test]
+        #[should_panic(expected = "span overflow: 9223372037 samples at 1/1 Hz")]
+        fn span_panics_past_i64() {
+            let span = rate(1, 1).span(9_223_372_037);
+            unreachable!("got {span}");
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "span overflow: 600000000000000 samples at 1/600000000000000 Hz"
+        )]
+        fn span_panics_past_u128() {
+            let span = rate(1, 600_000_000_000_000).span(600_000_000_000_000);
+            unreachable!("got {span}");
+        }
+
+        #[test]
+        fn counts_the_samples_that_fit() {
+            for (num, den, nanos, count) in [
+                (1, 1, 0, 0),
+                (1, 1, 999_999_999, 0),
+                (1, 1, 1_000_000_000, 1),
+                (3, 1, 333_333_332, 0),
+                (3, 1, 333_333_333, 1),
+                (3, 1, 1_000_000_000, 3),
+                (1, 3, 5_999_999_999, 1),
+                (3_000_000_000, 1, 0, 2),
+                (3_000_000_000, 1, 1, 5),
+                (1, 1, -1, 0),
+                (1, 1, i64::MIN, 0),
+                (1, 1, i64::MAX, 9_223_372_036),
+                (u64::MAX, 1, i64::MAX, u64::MAX),
+            ] {
+                let span = Span::from_nanos(nanos);
+                assert_eq!(
+                    rate(num, den).count(span),
+                    count,
+                    "{span} at {num}/{den} Hz"
+                );
+            }
+        }
+
+        #[test]
+        fn stamps_a_span_after_the_start() {
+            let start = seconds(10);
+            assert_eq!(
+                rate(3, 1).stamp(start, 1),
+                Stamp::from_nanos(10_333_333_333)
+            );
+            assert_eq!(rate(3, 1).stamp(start, 0), start);
+        }
+
+        #[test]
+        #[should_panic(expected = "stamp overflow: 9223372036854775807 ns + 1 ns")]
+        fn stamp_panics_past_i64() {
+            let stamp = rate(1_000_000_000, 1).stamp(Stamp::from_nanos(i64::MAX), 1);
+            unreachable!("got {stamp}");
+        }
+
+        proptest! {
+            #[test]
+            fn counts_agree_with_spans(
+                rate in rates(),
+                nanos in prop_oneof![0..=i64::MAX, 0..=1_000_000_000_i64],
+            ) {
+                let span = Span::from_nanos(nanos);
+                let count = rate.count(span);
+                prop_assert!(rate.span(count) <= span);
+                let next = count.checked_add(1).and_then(|n| rate.checked_span(n));
+                if let Some(next) = next {
+                    prop_assert!(span < next);
+                }
+            }
+
+            #[test]
+            fn spans_match_exact_math(
+                rate in rates(),
+                n in prop_oneof![any::<u64>(), 0..=1_u64 << 34],
+            ) {
+                let exact = u128::from(n)
+                    .checked_mul(u128::from(rate.den()))
+                    .and_then(|product| product.checked_mul(1_000_000_000))
+                    .map(|product| product / u128::from(rate.num()));
+                if let Some(exact) = exact {
+                    let expected = i64::try_from(exact).ok().map(Span::from_nanos);
+                    prop_assert_eq!(rate.checked_span(n), expected);
+                }
             }
         }
     }
