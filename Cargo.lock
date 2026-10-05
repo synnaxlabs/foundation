@@ -622,6 +622,8 @@ name = "home"
 version = "0.0.0"
 dependencies = [
  "block",
+ "control",
+ "delivery",
  "proptest",
  "types",
 ]
