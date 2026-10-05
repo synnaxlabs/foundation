@@ -1,5 +1,3 @@
-use crate::Error;
-
 const MAX_PPB: u32 = 100_000_000;
 
 /// Billionths of a nanosecond in a nanosecond: the unit of [`Drift::over_exact`].
@@ -9,9 +7,8 @@ pub(crate) const PER_NANO: i128 = 1_000_000_000;
 /// billion. An error bound grows by this rate as its measurement ages.
 ///
 /// ```
-/// let drift = estimate::Drift::from_ppb(200_000)?;
-/// assert_eq!(drift, estimate::Drift::UNDISCIPLINED);
-/// # Ok::<(), estimate::Error>(())
+/// let drift = estimate::Drift::from_ppb(200_000);
+/// assert_eq!(drift, Some(estimate::Drift::UNDISCIPLINED));
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Drift(u32);
@@ -20,16 +17,14 @@ impl Drift {
     /// 200 ppm, a safe bound for an oscillator that nothing disciplines.
     pub const UNDISCIPLINED: Self = Self(200_000);
 
-    /// Wraps a rate in parts per billion.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Drift`] when `ppb` is more than 100,000,000 (10%).
-    pub const fn from_ppb(ppb: u32) -> Result<Self, Error> {
+    /// The drift bound of `ppb` parts per billion, or `None` when `ppb` is more than
+    /// 100,000,000 (10%).
+    #[must_use]
+    pub const fn from_ppb(ppb: u32) -> Option<Self> {
         if ppb > MAX_PPB {
-            return Err(Error::Drift { ppb });
+            return None;
         }
-        Ok(Self(ppb))
+        Some(Self(ppb))
     }
 
     /// [`Drift::over`] in billionths of a nanosecond, not rounded.
@@ -47,7 +42,7 @@ impl Drift {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Drift, Error};
+    use crate::Drift;
 
     fn drift(ppb: u32) -> Drift {
         Drift::from_ppb(ppb).expect("valid")
@@ -55,12 +50,8 @@ mod tests {
 
     #[test]
     fn rejects_more_than_10_percent() {
-        let err = Drift::from_ppb(100_000_001);
-        assert_eq!(err, Err(Error::Drift { ppb: 100_000_001 }));
-        assert_eq!(
-            Error::Drift { ppb: 100_000_001 }.to_string(),
-            "drift 100000001 ppb is more than 100000000 ppb (10%)"
-        );
+        assert_eq!(Drift::from_ppb(100_000_000), Some(Drift(100_000_000)));
+        assert_eq!(Drift::from_ppb(100_000_001), None);
     }
 
     #[test]
