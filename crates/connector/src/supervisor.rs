@@ -17,6 +17,9 @@ const RESTART: retry::Config = retry::Config {
     cap: Span::MINUTE,
 };
 
+/// A run at least this long starts the waits again from the first.
+const HEALTHY: Span = Span::MINUTE;
+
 /// Runs connectors of the kinds in a table, one `run` call at a time per connector.
 #[derive(Debug)]
 pub struct Supervisor {
@@ -39,7 +42,7 @@ impl Supervisor {
     /// Runs one connector: parses its config, starts `run`, and restarts it with
     /// backoff after any error but `Config`. The waits start again from the first
     /// after a run that lasted at least a minute. Never starts a run before the last
-    /// one returned.
+    /// one returned, or after `cancel` is cancelled.
     ///
     /// Returns `Ok` when `run` returns `Ok`, or when `cancel` is cancelled and the
     /// run returned. The future is not `Send`: call it on a shard.
@@ -56,11 +59,11 @@ impl Supervisor {
         cancel: &cancel::Token,
     ) -> Result<(), Error> {
         let mut backoff = retry::Backoff::new(&self.clock, self.entropy.rng(), RESTART);
-        loop {
+        while !cancel.cancelled() {
             let ctx = Context::new(
                 name.clone(),
                 (),
-                cancel.clone(),
+                cancel.child(),
                 self.clock.clone(),
                 self.entropy.clone(),
             );
@@ -73,15 +76,15 @@ impl Supervisor {
             {
                 Ok(()) => return Ok(()),
                 Err(error @ Error::Config(_)) => return Err(error),
+                // These reach the connector's status in #420.
                 Err(Error::Device(_) | Error::Retry(_)) => {}
             }
-            if self.clock.now() - start >= RESTART.cap {
+            if self.clock.now() - start >= HEALTHY {
                 backoff.reset();
             }
-            if !backoff.wait(cancel).await {
-                return Ok(());
-            }
+            backoff.wait(cancel).await;
         }
+        Ok(())
     }
 }
 
@@ -111,6 +114,10 @@ mod tests {
         Device(Span),
         /// Returns a config error at once.
         Config,
+        /// Returns a retry error at once.
+        Retry,
+        /// Cancels its own token, then returns a device error.
+        Abort,
         /// Waits for the cancel, then the span, then returns a device error.
         Linger(Span),
     }
@@ -167,6 +174,11 @@ mod tests {
                     Err(Error::Device("no reply".into()))
                 }
                 Some(Step::Config) => Err(Error::Config(vec![bad()])),
+                Some(Step::Retry) => Err(Error::Retry("busy".into())),
+                Some(Step::Abort) => {
+                    ctx.cancel().cancel();
+                    Err(Error::Device("stopped its parts".into()))
+                }
                 Some(Step::Linger(span)) => {
                     ctx.cancel().wait().await;
                     clock.sleep(span).await;
@@ -206,7 +218,7 @@ mod tests {
     }
 
     /// Supervises one connector of [`Script`] with `steps` and `config`, and
-    /// cancels it after `cancel`, if given.
+    /// cancels it after `cancel`, if given. A zero `cancel` cancels before the call.
     fn supervise(
         kind: &'static str,
         steps: Vec<Step>,
@@ -222,7 +234,9 @@ mod tests {
             let kinds = Arc::new(Table::new().with("script", script));
             let supervisor = Supervisor::new(kinds, clock.clone(), entropy);
             let token = Token::new();
-            if let Some(after) = cancel {
+            if cancel == Some(Span::ZERO) {
+                token.cancel();
+            } else if let Some(after) = cancel {
                 let canceller = token.clone();
                 let sleeper = clock.clone();
                 tasks.spawn(async move {
@@ -287,6 +301,31 @@ mod tests {
     }
 
     #[test]
+    fn restarts_after_a_retry_error() {
+        let out = supervise("script", vec![Step::Retry, Step::Done], config(), None);
+        out.result.expect("ok");
+        assert_eq!(out.runs.len(), 2);
+    }
+
+    #[test]
+    fn restarts_after_a_run_cancels_its_own_token() {
+        let out = supervise("script", vec![Step::Abort, Step::Done], config(), None);
+        out.result.expect("ok");
+        assert_eq!(out.runs.len(), 2, "the run's token is not the caller's");
+    }
+
+    #[test]
+    fn grows_the_waits_after_short_runs() {
+        let mut steps = vec![Step::Device(Span::ZERO); 12];
+        steps.push(Step::Done);
+        let out = supervise("script", steps, config(), None);
+        out.result.expect("ok");
+        let last = out.runs.last().expect("13 runs").0;
+        // With no growth, twelve waits of at most 1 s each.
+        assert!(last > ms(12_000), "{last:?}");
+    }
+
+    #[test]
     fn returns_a_config_error_from_run_without_a_restart() {
         let steps = vec![Step::Config, Step::Done];
         let out = supervise("script", steps, config(), None);
@@ -337,6 +376,13 @@ mod tests {
         out.result.expect("ok after a cancel");
         assert_eq!(out.runs, [(Span::ZERO, Some(Span::ZERO))]);
         assert_eq!(out.returned, Span::from_nanos(1), "at the cancel");
+    }
+
+    #[test]
+    fn starts_no_run_when_cancelled_before_the_call() {
+        let out = supervise("script", vec![Step::Done], config(), Some(Span::ZERO));
+        out.result.expect("ok after a cancel");
+        assert!(out.runs.is_empty(), "a run started after the cancel");
     }
 
     #[test]
