@@ -7,6 +7,8 @@ mod memory;
 
 use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use block::{Block, Heap, Pool};
 use buffer::{Buffer, Config, Entry, Error, Layout, Tail, Unfit};
@@ -744,22 +746,133 @@ fn a_file_with_no_header_is_missing() {
 }
 
 /// The first write of the header goes to both blocks in one write. A crash keeps
-/// any set of its sectors; a checkpoint is in one sector, so each block is whole or
-/// zero, and the ring opens as new when no record landed.
+/// any set of its sectors, and a checkpoint is in the first sector of its block,
+/// so each block is whole or zero. One whole block opens the ring; none opens it
+/// as new.
 #[test]
-fn a_ring_whose_first_header_write_was_torn_opens_as_new() {
-    run(102, Memory::default(), |shard| async move {
-        let ring = layout(AREA, BODY_MAX);
-        drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
-        let len = to_usize(AREA_START + AREA);
-        let block = to_usize(BLOCK);
-        shard.memory.put(RING, SECTOR, &vec![0; block - SECTOR]);
-        shard
-            .memory
-            .put(RING, block + SECTOR, &vec![0; len - block - SECTOR]);
-        let opened = shard.open(ring, &mut Slots::new()).await;
-        assert_eq!(opened.map(|buffer| buffer.layout()), Ok(ring));
+fn a_ring_whose_first_header_write_was_torn_opens() {
+    let block = to_usize(BLOCK);
+    for lost in [vec![0], vec![block], vec![0, block]] {
+        run(102, Memory::default(), move |shard| async move {
+            let ring = layout(AREA, BODY_MAX);
+            drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
+            for place in &lost {
+                shard.memory.put(RING, *place, &[0; SECTOR]);
+            }
+            let opened = shard.open(ring, &mut Slots::new()).await;
+            assert_eq!(opened.map(|buffer| buffer.layout()), Ok(ring), "{lost:?}");
+        });
+    }
+}
+
+/// Starts a shard named `name` on `node` to run `main`.
+fn on_node<F>(
+    node: &sim::node::Node,
+    name: &str,
+    main: impl FnOnce(Tasks) -> F + Send + 'static,
+) -> env::thread::Handle
+where
+    F: Future<Output = ()> + 'static,
+{
+    let config = env::shards::Config {
+        name: name.into(),
+        core: None,
+    };
+    node.shards().start(config, main).expect("the shard starts")
+}
+
+/// A buffer config on the files of `node`.
+fn node_config(node: &sim::node::Node, tasks: Tasks, layout: Layout) -> Config {
+    let config = block::Config { budget: POOL };
+    let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
+    Config {
+        files: node.files(),
+        dir: PathBuf::from(DIR),
+        pool: Rc::new(pool),
+        clock: node.clock(),
+        tasks,
+        entropy: node.entropy(),
+        layout,
+        commit: COMMIT,
+    }
+}
+
+/// Cuts the power `cut` nanoseconds into the first open of a ring on a node
+/// with `seed`, then opens the ring again. Returns whether the first open had
+/// ended at the cut, and what the second open gave.
+fn open_after_a_cut(
+    seed: u64,
+    cut: i64,
+    ring: Layout,
+) -> (bool, Result<Layout, String>) {
+    let mut sim = sim::Sim::new(sim::Config {
+        seed,
+        ..sim::Config::default()
     });
+    let node = sim.node(sim::node::Config::default());
+    let made = node.clone();
+    let handle = on_node(&node, "dir", move |_| async move {
+        let files = made.files();
+        files
+            .create_dir(FilePath::new(DIR))
+            .await
+            .expect("the dir is made");
+        files
+            .sync_dir(FilePath::new(""))
+            .await
+            .expect("the dir is synced");
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    let ended = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ended);
+    let first = node.clone();
+    drop(on_node(&node, "first", move |tasks| async move {
+        let config = node_config(&first, tasks, ring);
+        let _buffer = Buffer::open(config, &mut Slots::new())
+            .await
+            .expect("the first open ends well");
+        flag.store(true, Ordering::Relaxed);
+        std::future::pending::<()>().await;
+    }));
+    sim.run_for(Span::from_nanos(cut)).expect("the run goes on");
+    sim.crash(&node, sim::Crash::Power);
+    let opened = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&opened);
+    let second = node.clone();
+    let handle = on_node(&node, "second", move |tasks| async move {
+        let config = node_config(&second, tasks, ring);
+        let buffer = Buffer::open(config, &mut Slots::new()).await;
+        let layout = buffer.map(|buffer| buffer.layout());
+        *slot.lock().expect("no panic held the lock") =
+            Some(layout.map_err(|error| error.to_string()));
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    let opened = opened.lock().expect("no panic held the lock").take();
+    (
+        ended.load(Ordering::Relaxed),
+        opened.expect("the second open ended"),
+    )
+}
+
+/// A power cut at any point of the first open leaves a ring that opens again
+/// with its layout. A cut while the first header write is in flight keeps any
+/// set of its sectors.
+#[test]
+fn a_power_cut_during_the_first_open_leaves_a_ring_that_opens() {
+    let ring = layout(AREA, BODY_MAX);
+    for seed in 0..8 {
+        let mut cut = 0;
+        loop {
+            let (ended, opened) = open_after_a_cut(seed, cut, ring);
+            assert_eq!(opened, Ok(ring), "seed {seed}, cut at {cut} ns");
+            if ended {
+                break;
+            }
+            cut += 5_000;
+        }
+    }
 }
 
 #[test]

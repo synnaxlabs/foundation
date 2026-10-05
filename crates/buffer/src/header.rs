@@ -10,8 +10,8 @@
 //! Integers are little-endian. The CRC is at offset 42 and covers the rest of the
 //! first 512-byte sector, so a checkpoint is in one sector, which a crash keeps
 //! whole or old. A later version may put fields after the CRC in that sector and
-//! this version still reads the block and reports its version. Bytes past the
-//! sector are not read.
+//! this version still reads the block and reports its version. Nothing reads the
+//! bytes past the sector.
 
 #![deny(
     clippy::indexing_slicing,
@@ -27,8 +27,8 @@ const MAGIC: [u8; 8] = *b"FNDNRING";
 const VERSION: u16 = 1;
 /// The place of the CRC: right after the fields.
 const CRC: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
-/// The bytes of a block that the CRC covers, less the CRC itself.
-const SECTOR: usize = 512;
+/// A disk sector, which a crash keeps whole or old. The CRC covers the first one.
+pub(crate) const SECTOR: usize = 512;
 
 /// Why neither header block can be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,10 +116,12 @@ impl Header {
             slot.copy_from_slice(field);
             rest = after;
         }
-        let crc = self::crc(&block);
+        let crc = crc(&block).to_le_bytes();
         let (_, rest) = block.split_at_mut(CRC);
-        let (slot, _) = rest.split_at_mut(4);
-        slot.copy_from_slice(&crc.to_le_bytes());
+        let (slot, _) = rest
+            .split_first_chunk_mut::<4>()
+            .expect("invariant: the CRC is in the block");
+        *slot = crc;
         block
     }
 
@@ -241,11 +243,9 @@ mod tests {
     /// Bytes to put into a block at offsets.
     type Patch<'a> = &'a [(usize, &'a [u8])];
 
-    /// Puts the CRC of the first sector of the block after its fields.
+    /// Puts the CRC of the block after its fields.
     fn seal(block: &mut [u8; ALIGN]) {
-        let crc = crc32c::append(0, &block[..CRC]);
-        let crc = crc32c::append(crc, &block[CRC + 4..SECTOR]);
-        block[CRC..CRC + 4].copy_from_slice(&crc.to_le_bytes());
+        block[CRC..CRC + 4].copy_from_slice(&crc(block).to_le_bytes());
     }
 
     fn any_header() -> impl Strategy<Value = Header> {
