@@ -343,9 +343,14 @@ How to read this record:
   M3 Max, about 1.9% of a core at 100M samples/s. FastLanes order can come later as a
   new tag. Raw and RLE have bit width 0. Integers, `Stamp`, and `Span` use all four
   tags; other scalars use raw. Timestamp stride (BQ4) comes later as a new tag. The
-  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len`
-  (raw plus one raw header per vector) sizes the output, and the encoder makes one
-  pass. `codec/src/vector.rs` is the full spec.
+  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len` of
+  the raw length (raw plus one raw header per vector) sizes the output, and the
+  encoder makes one pass. `codec/src/vector.rs` is the full spec. `codec` is the one
+  place that checks a series against its count (#359): `encode` refuses raw values
+  that do not hold `count` samples, and `validate` refuses encoded bytes that do not
+  parse as `count` samples. The bytes do not carry the count, so a wrong count passes
+  when the vectors also parse at it: a vector with bit width 0 holds any count up to
+  1024.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
@@ -408,6 +413,23 @@ How to read this record:
   no series byte. A slot or key set number is never stored. The layout is part of the
   disk format version (C9d), as in FRAME LAYOUT. Copy mode checks each stored body
   once where remote records enter (X43), and the read after it panics on a bad body.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
+- **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
+  (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
+  `len` 0, and `first` at the live tail. It records a handoff after the gate input
+  that gave it and before the next input or frame. Its bytes are empty when no writer
+  holds control, else `[authority: u8]` then the holder's subject as UTF-8; the entry
+  length gives the subject's length. A restart or a failover starts the gate from the
+  last record (X18): `Gate::recover` with its holder, or `Gate::new` when it names
+  none. Trimming must keep the last record of each index (#406). Until it does,
+  retention can remove that record, and a holder that held control for longer than
+  the retention gets no grace after a restart. The layout is part of the disk format
+  version (C9d). Copy mode checks each record once where remote records enter (X43),
+  and the read after it panics on a bad record.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
+- **ENTRY TAGS (#191)** Each entry of an index log has a tag (S4) that says what its
+  bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
+  record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
@@ -524,7 +546,9 @@ How to read this record:
   days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
   time as OS CLOCK BOUND says. An error over 36500 days fails only in a new measurement:
   `Measurement::new` gives `None`. The person decided on 2026-10-05 ("Ok that's fine"),
-  #225. `combine` uses each bound with its full growth, so a bound that grew to
+  #225. In an `Interval` from `Measurement::interval`, "unknown" is a half-width of
+  36500 days, and the true time can be outside it. Decided by the `time` builder
+  (#142). `combine` uses each bound with its full growth, so a bound that grew to
   "unknown" never cuts a known one. An exchange with an error over 36500 days fails with
   `Bound`, and an overlap whose readings allow one before drift gives `None`: a stopped
   bound stored as a measurement could miss the true offset. Decided by the `time`
@@ -953,6 +977,15 @@ How to read this record:
   does (Unicode `XID_Start` and `XID_Continue`, through `unicode-ident`), so
   `température = 1` reads. A new error for each such identifier lost: a valid HCL file
   would fail. The person decided on 2026-10-05 ("go with yes"), with low priority, #263.
+  A reference outside ASCII is still an `Error::Name`, because names are ASCII (A3).
+  Measured against HCL v2.25.0, two differences remain. HCL reads the 23 compatibility
+  characters in `ID_Start` but not in `XID_Start` (U+037A, U+0E33, and others). The
+  reader refuses them at the start of an identifier, and 19 of them after it. The
+  reader follows the Unicode version of `unicode-ident` in `Cargo.lock`, which can be
+  newer than HCL's, so it accepts characters that HCL does not know yet. Lost: a
+  hand-kept list of the 23; own tables generated from HCL's Unicode version; and
+  `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
+  `ID_Start` and `ID_Continue`.
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -1218,6 +1251,16 @@ How to read this record:
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
   session under the architecture delegation.
+- **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
+  between runs; a test restarts the node with new threads on the same disk. A `Process`
+  crash keeps each file call that ended. A `Power` crash keeps, for each 512-byte
+  sector, its durable bytes or the bytes of any one write since then, a write in flight
+  too. A `sync` makes durable the writes that ended before it started. A failed `sync`
+  makes each sector keep its durable bytes or those of one such write, at random. A
+  `sync_dir` makes durable the entries at its end. A removed file takes space until the
+  removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
+  thread that a crash ended panics, because no process joins its own threads after it
+  dies. Built by `simulation` in #114.
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
@@ -1383,7 +1426,7 @@ Storage classes used in the table:
 | --- | --- | --- | --- | --- |
 | Encoded samples | Index log (write-ahead ring, then segments), as stored bodies (STORED BODY) | `home` and `replica` through `buffer.append` | Complete readers (catch-up), `replica`, crash recovery | `buffer`, `home` (stored body) |
 | Seq counters (live, backfill) | Memory at the home; durable through the index log | `home` | `delivery`, `wire` (prediction) | `home` |
-| Control state | Memory in `control` at the home; handoff records in the index log (truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
+| Control state | Memory in `control` at the home; handoff records in the index log (HANDOFF RECORD; truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
 | Reader positions | Truth: `delivery` state at the home, written as index log records and copied by `replica`. A connected reader's `hub` keeps its own position. Status channels publish copies | `delivery`; `replica` copies; `node` publishes | `home` after failover; `hub` on resume | `delivery`, `buffer`, `replica` |
 | Holds and floors | `delivery` (hold per reader and index); floor = lowest held position per path, handed to `buffer.set_floor`, which also applies retention | `delivery` | `buffer` | `delivery`, `buffer` |

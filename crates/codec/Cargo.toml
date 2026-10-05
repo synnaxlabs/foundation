@@ -9,6 +9,7 @@ publish.workspace = true
 types = { path = "../types" }
 
 [dev-dependencies]
+block = { path = "../block" }
 counting = { path = "../counting" }
 divan.workspace = true
 proptest.workspace = true
