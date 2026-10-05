@@ -32,9 +32,9 @@ const HEADER: usize = 64;
 const NONE: usize = 0;
 /// In `Region::returned`: the pool is gone.
 const CLOSED: usize = usize::MAX;
-/// Size classes at most, so the largest payload (2 GiB) and any position in it fit in
-/// a `u32`, and a handle stays 16 bytes.
-const CLASSES: usize = 26;
+/// The most size classes a pool has. The largest payload is then 2 GiB, so a length
+/// or a position fits in a `u32` and a handle stays 16 bytes.
+const CLASSES_MAX: usize = 26;
 
 /// Settings for one [`Pool`].
 #[derive(Clone, Debug)]
@@ -45,8 +45,8 @@ pub struct Config {
 
 impl Config {
     /// Bytes of address space that a pool with these settings needs from its
-    /// [`Memory`]. Each size class can grow to the full budget, so this is many times
-    /// the budget.
+    /// [`Memory`]. Each size class can grow to the full budget, so this is up to 26
+    /// times the budget.
     ///
     /// # Panics
     ///
@@ -61,12 +61,12 @@ impl Config {
     }
 }
 
-/// How many size classes fit in `budget`, at most `CLASSES`. Class `i` has a payload
-/// of `64 << i` bytes.
+/// How many size classes fit in `budget`, at most `CLASSES_MAX`. Class `i` has a
+/// payload of `64 << i` bytes.
 fn classes(budget: usize) -> usize {
     match budget.checked_sub(HEADER) {
         Some(room) if room >= ALIGN => {
-            ((room / ALIGN).ilog2() as usize + 1).min(CLASSES)
+            ((room / ALIGN).ilog2() as usize + 1).min(CLASSES_MAX)
         }
         _ => 0,
     }
@@ -111,6 +111,14 @@ const _: () = assert!(
     size_of::<Region>() <= HEADER && size_of::<Header>() <= HEADER,
     "the headers fit in the bytes before a payload"
 );
+const _: () = assert!(
+    ALIGN << (CLASSES_MAX - 1) <= u32::MAX as usize,
+    "the largest payload fits in a u32"
+);
+const _: () = assert!(
+    size_of::<Unique>() == 16 && size_of::<Block>() == 16,
+    "a handle is 16 bytes"
+);
 
 #[derive(Default)]
 struct Class {
@@ -124,8 +132,8 @@ struct Class {
 /// A pool is not `Sync`: only its owner shard allocates from it. Blocks it hands out
 /// may move to and drop on any thread, and stay valid after the pool drops.
 ///
-/// Blocks come in sizes: 64 bytes and each power of two above it, each with 64 bytes
-/// in front. Budget that blocks of one size took stays with that size.
+/// Blocks come in sizes: 64 bytes and each power of two above it up to 2 GiB, each
+/// with 64 bytes in front. Budget that blocks of one size took stays with that size.
 pub struct Pool {
     region: NonNull<Region>,
     budget: usize,
@@ -200,10 +208,8 @@ impl Pool {
     ///   succeeds later.
     /// - [`Error::Exhausted`] when the budget has no room for the block now.
     pub fn alloc(&self, len: usize) -> Result<Unique, Error> {
-        let (held, index) = u32::try_from(len)
-            .ok()
-            .zip(class_of(len))
-            .filter(|&(_, index)| index < self.classes.len())
+        let index = class_of(len)
+            .filter(|&index| index < self.classes.len())
             .ok_or(Error::TooLarge {
                 requested: len,
                 largest: self.largest(),
@@ -249,7 +255,14 @@ impl Pool {
             header
         };
         self.lent.set(self.lent.get() + 1);
-        Ok(Unique { header, len: held })
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the class check above keeps `len` at or below 2 GiB"
+        )]
+        Ok(Unique {
+            header,
+            len: len as u32,
+        })
     }
 
     /// Takes back the blocks that holders dropped, so that `alloc` can use them
@@ -461,7 +474,8 @@ impl Drop for Unique {
 /// pool.
 pub struct Block {
     header: NonNull<Header>,
-    /// Bytes of the payload before this view.
+    /// Bytes of the payload before this view. `start + len` never exceeds the length
+    /// that `alloc` gave.
     start: u32,
     len: u32,
 }
@@ -472,18 +486,19 @@ unsafe impl Send for Block {}
 unsafe impl Sync for Block {}
 
 impl Block {
-    /// Returns a block that shares this one's buffer and starts `len` bytes later.
+    /// Returns a block that shares this one's buffer and starts `count` bytes later.
+    /// Check the length first when the bytes came from outside.
     ///
     /// # Panics
     ///
-    /// If `len` is more than the block's length.
+    /// If `count` is more than the block's length.
     #[must_use]
-    pub fn skip(mut self, len: usize) -> Block {
-        let skipped = u32::try_from(len)
+    pub fn skip(mut self, count: usize) -> Block {
+        let skipped = u32::try_from(count)
             .ok()
             .filter(|&skipped| skipped <= self.len)
             .unwrap_or_else(|| {
-                panic!("cannot skip {len} bytes of a block of {} bytes", self.len)
+                panic!("cannot skip {count} bytes of a block of {} bytes", self.len)
             });
         self.start += skipped;
         self.len -= skipped;
@@ -525,9 +540,10 @@ impl Deref for Block {
     fn deref(&self) -> &[u8] {
         self.block().payload.read();
         // SAFETY: `self` holds the block.
-        let payload = unsafe { payload(self.header) };
-        // SAFETY: `start` is within the payload.
-        let start = unsafe { payload.add(self.start as usize) };
+        let first = unsafe { payload(self.header) };
+        // SAFETY: `start + len` is at most the length `alloc` gave (field invariant),
+        // so the add stays in the block.
+        let start = unsafe { first.add(self.start as usize) };
         // SAFETY: the payload is committed, and no one writes to a frozen block.
         unsafe { slice::from_raw_parts(start.as_ptr(), self.len as usize) }
     }
@@ -691,10 +707,15 @@ mod tests {
         }
 
         #[test]
-        fn stops_at_the_largest_class() {
-            let reservation = |budget| Config { budget }.reservation();
-            assert_eq!(reservation((1 << 31) + 64), 64 + 26 * ((1 << 31) + 64));
-            assert_eq!(reservation(1 << 40), 64 + 26 * (1 << 40));
+        #[cfg(target_pointer_width = "64")]
+        fn stops_at_a_payload_of_two_gibibytes() {
+            assert_eq!(ALIGN << (CLASSES_MAX - 1), 1 << 31);
+            assert_eq!(class_of(1 << 31), Some(CLASSES_MAX - 1));
+            assert_eq!(class_of((1 << 31) + 1), Some(CLASSES_MAX));
+            assert_eq!(classes((1 << 31) + 63), CLASSES_MAX - 1);
+            assert_eq!(classes((1 << 31) + 64), CLASSES_MAX);
+            assert_eq!(classes(1 << 40), CLASSES_MAX);
+            assert_eq!(classes(usize::MAX), CLASSES_MAX);
         }
 
         #[test]
@@ -906,6 +927,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg(target_pointer_width = "64")]
         #[should_panic(expected = "cannot skip 4294967296 bytes of a block of 5 bytes")]
         fn panics_past_a_u32() {
             let pool = create_pool(256);

@@ -483,8 +483,8 @@ How to read this record:
 - **PROTOCOL HEADER (#75)** The header of STREAM DISPATCH is 3 bytes: the wire
   version (`u16`, little-endian), then the protocol number (`u8`): clock 1, mesh 2,
   replica 3, blob 4, hub 5. On a stream, the header is the whole first message, so
-  later messages carry no prefix. A datagram starts with it; its handler reads from
-  `wire::header::LEN` until `block` has a view that skips a prefix (#110). The
+  later messages carry no prefix. A datagram starts with it; its handler calls
+  `Block::skip(wire::header::LEN)` on the rest (BLOCK VIEW). The
   version covers every message on that stream, encoded series included: each wire
   version fixes one codec version (wire 1 carries codec 1). The version comes first
   and is checked first, so a later version can change what follows it. A node reads
@@ -926,6 +926,12 @@ How to read this record:
   implements it over `std::alloc` for tests, Miri, and `sim`. `block` makes no OS
   call. `reclaim` takes back returned blocks on each loop turn; `purge` gives idle
   pages back on a timer that the shard owns (#2).
+- **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
+  starts `count` bytes later, with no copy and no count change. `Block` is
+  `{ header, start: u32, len: u32 }`, 16 bytes, so a pool has at most 26 size classes
+  and the largest block holds 2 GiB; a budget above that gives more blocks, not larger
+  ones. `slice(&self, range)` lost: it clones the count for every view, and nothing
+  needs a range yet. Decided by `memory`.
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
