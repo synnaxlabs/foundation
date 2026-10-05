@@ -14,7 +14,8 @@ const WIDTH: usize = 88;
 /// What each level of a body or a value goes in by.
 pub(crate) const INDENT: &str = "  ";
 
-/// What follows a value on its line.
+/// What follows a value on its line. In a list, a map, or a call, it is what follows
+/// when each item is on its own line.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum After {
     /// A line end, so the value can be a heredoc.
