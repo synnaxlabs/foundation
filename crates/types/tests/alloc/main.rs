@@ -4,7 +4,7 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use types::channel::Slot;
+use types::channel::Key;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{self, Draft, Form, Path, Range};
 use types::sample::{Scalar, Type};
@@ -21,17 +21,18 @@ fn main() {
         "the allocator counts"
     );
 
-    let data = [(Slot::new(2), F64), (Slot::new(3), F64)];
-    let set = Interner::new().intern(&[
+    let data = [(Key::from_u128(2), F64), (Key::from_u128(3), F64)];
+    let groups = [
         Group {
-            index: Slot::new(1),
+            index: Key::from_u128(1),
             data: &data,
         },
         Group {
-            index: Slot::new(4),
+            index: Key::from_u128(4),
             data: &[],
         },
-    ]);
+    ];
+    let set = Interner::new().intern(&groups);
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let series = [(0, 16), (2, 16)];

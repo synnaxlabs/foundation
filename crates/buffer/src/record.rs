@@ -29,6 +29,9 @@ pub(crate) const ALIGN: usize = 4096;
 #[expect(clippy::as_conversions, reason = "4096 fits any width")]
 pub(crate) const BLOCK: u64 = ALIGN as u64;
 
+/// Where the area starts in the ring file: after the two header blocks.
+pub(crate) const AREA_START: u64 = 2 * BLOCK;
+
 /// Bytes of a record before its body.
 pub(crate) const HEADER_LEN: usize = 9;
 

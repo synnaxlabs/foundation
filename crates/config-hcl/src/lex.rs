@@ -179,6 +179,11 @@ impl<'a> Tokens<'a> {
         self.rest.chars().next()
     }
 
+    /// The next character, or `None` at a line end or the end of the text.
+    fn peek_in_line(&self) -> Option<char> {
+        self.peek().filter(|_| self.line_end() == 0)
+    }
+
     fn bump(&mut self) -> Option<char> {
         let mut chars = self.rest.chars();
         let c = chars.next()?;
@@ -245,16 +250,28 @@ impl<'a> Tokens<'a> {
                 Some(' ' | '\t') => {
                     self.bump();
                 }
-                Some('#') => self.eat_while(|c| c != '\n'),
-                Some('/') if self.second(|c| c == '/') => self.eat_while(|c| c != '\n'),
-                Some('/') if self.second(|c| c == '*') => self.comment()?,
+                Some('#') => self.line_comment(),
+                Some('/') if self.second(|c| c == '/') => self.line_comment(),
+                Some('/') if self.second(|c| c == '*') => self.block_comment()?,
                 _ => return Ok(()),
             }
         }
         unreachable!("invariant: each pass moves past a character")
     }
 
-    fn comment(&mut self) -> Result<(), Error> {
+    /// Moves past a comment up to the end of its line.
+    fn line_comment(&mut self) {
+        // Each pass moves past a character or returns.
+        for _ in 0..=self.rest.len() {
+            if self.peek_in_line().is_none() {
+                return;
+            }
+            self.bump();
+        }
+        unreachable!("invariant: each pass moves past a character")
+    }
+
+    fn block_comment(&mut self) -> Result<(), Error> {
         let start = self.at;
         let end = self.rest.get(2..).and_then(|body| body.find("*/"));
         if let Some(len) = end.and_then(|end| end.checked_add(4)) {
@@ -325,8 +342,8 @@ impl<'a> Tokens<'a> {
         // Each pass moves past a character or returns.
         for _ in 0..=self.rest.len() {
             let at = self.at;
-            match self.peek() {
-                None | Some('\n') => {
+            match self.peek_in_line() {
+                None => {
                     return Err(Error::Syntax {
                         span: self.span(start),
                         expected: Expected::Quote,
@@ -483,7 +500,7 @@ impl<'a> Tokens<'a> {
         } else if self.eat('U') {
             self.unicode(8)
         } else {
-            if self.peek().is_some_and(|c| c != '\n') {
+            if self.peek_in_line().is_some() {
                 self.bump();
             }
             None
@@ -588,6 +605,29 @@ mod tests {
             }
             prop_assert!(false, "more tokens than bytes in {text:?}");
         }
+    }
+
+    #[test]
+    fn ends_a_line_comment_before_its_line_end() {
+        let text = "# a\r\n// b\r\n";
+        let mut tokens = Tokens::new(Source(0), text).unwrap();
+        let mut found = Vec::new();
+        for _ in 0..=text.len() {
+            let token = tokens.next();
+            let end = token.kind == Kind::End;
+            found.push((token.kind, token.text));
+            if end {
+                break;
+            }
+        }
+        assert_eq!(
+            found,
+            [
+                (Kind::Newline, "\r\n"),
+                (Kind::Newline, "\r\n"),
+                (Kind::End, "")
+            ]
+        );
     }
 
     #[test]

@@ -655,6 +655,30 @@ fn an_entry_below_the_tail_is_a_broken_invariant() {
 }
 
 #[test]
+fn an_entry_past_the_last_seq_is_a_broken_invariant() {
+    let (mut sim, _handle) = start(11, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        drop(buffer.append(&[entry(1, a, Path::Live, u64::MAX, 1, None, &[])]));
+    });
+    assert_eq!(
+        sim.run(),
+        Err(sim::Error::Panicked {
+            thread: DIR.into(),
+            message: "invariant: an entry of index \
+                      00000000-0000-0000-0000-000000000001 on path Live starts at \
+                      18446744073709551615 with 1 samples, past the last seq"
+                .into(),
+            seed: 11,
+        })
+    );
+}
+
+#[test]
 fn a_zeroed_file_of_another_length_is_not_made_into_a_ring() {
     run(10, Memory::default(), |shard| async move {
         shard.zeroed(AREA_START + AREA + BLOCK).await;
@@ -664,6 +688,29 @@ fn a_zeroed_file_of_another_length_is_not_made_into_a_ring() {
             Err(Error::Length {
                 expected: AREA_START + AREA,
                 found: AREA_START + AREA + BLOCK,
+            })
+        );
+    });
+}
+
+#[test]
+fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
+    run(107, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let blocks = shard.memory.bytes(RING)[..to_usize(AREA_START)].to_vec();
+        let files = shard.memory.files();
+        files.remove(FilePath::new(RING)).await.expect("removes");
+        shard.zeroed(AREA_START).await;
+        shard.memory.put(RING, 0, &blocks);
+        let opened = shard
+            .open(layout(2 * AREA, BODY_MAX), &mut Slots::new())
+            .await;
+        assert_eq!(
+            opened.map(drop),
+            Err(Error::Length {
+                expected: AREA_START + AREA,
+                found: AREA_START,
             })
         );
     });
@@ -752,6 +799,83 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
     });
+}
+
+#[test]
+fn a_record_with_an_entry_past_the_last_seq_is_invalid() {
+    run(103, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        // `first` of the first entry: after the count, the index, and the path.
+        shard.tamper_record(BLOCK, 4 + 16 + 1, &u64::MAX.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+    });
+}
+
+#[test]
+fn a_record_with_an_entry_below_the_tail_is_invalid() {
+    run(106, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append(&[
+                entry(1, a, Path::Live, 0, 3, Some(30), &[]),
+                entry(1, a, Path::Live, 3, 2, Some(50), &[]),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        // `first` of the second entry: after the count, one table of 51 bytes,
+        // the index, and the path.
+        shard.tamper_record(BLOCK, 4 + 51 + 16 + 1, &1u64.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+    });
+}
+
+#[test]
+fn a_header_with_an_area_at_the_end_of_u64_is_not_read() {
+    run(104, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let area = u64::MAX - 4095;
+        // The area is 8 bytes at offset 10 of a header block.
+        shard.tamper(10, &area.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(
+            opened.map(drop),
+            Err(Error::Unfit(Unfit {
+                area,
+                body_max: BODY_MAX
+            }))
+        );
+    });
+}
+
+#[test]
+fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
+    let area = u64::MAX - 4095;
+    assert_eq!(
+        Layout::new(area, BODY_MAX),
+        Err(Unfit {
+            area,
+            body_max: BODY_MAX
+        })
+    );
 }
 
 #[test]

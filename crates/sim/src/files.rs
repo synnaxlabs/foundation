@@ -247,7 +247,6 @@ impl Files {
             dropped,
             ..
         } = flight;
-        let segments = disk::segments(&path);
         let disk = &mut self.disks[node];
         let result = match &call {
             Call::Sync { inode } if failed => {
@@ -256,12 +255,12 @@ impl Files {
             }
             _ if failed => Err(Cause::Code(IO)),
             Call::Open(mode) => disk
-                .open(key, &segments, *mode)
+                .open(key, &path, *mode)
                 .map(|(inode, len)| Done::Open { inode, len }),
-            Call::List => disk.list(&segments).map(Done::Names),
-            Call::CreateDir => disk.create_dir(key, &segments).map(|()| Done::Unit),
-            Call::Remove => disk.remove(&segments).map(|()| Done::Unit),
-            Call::SyncDir => disk.sync_dir(&segments).map(|()| Done::Unit),
+            Call::List => disk.list(&path).map(Done::Names),
+            Call::CreateDir => disk.create_dir(key, &path).map(|()| Done::Unit),
+            Call::Remove => disk.remove(&path).map(|()| Done::Unit),
+            Call::SyncDir => disk.sync_dir(&path).map(|()| Done::Unit),
             Call::Free => Ok(Done::Free(disk.free())),
             Call::Write {
                 inode,

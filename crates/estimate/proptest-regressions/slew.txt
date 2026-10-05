@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2523b076bc9879f0c2a04d55bf873f04350debdd73ef88eda215d3422089e804 # shrinks to (s, [_, switch, _], drift, target) = (Slew { start: Monotonic(126504811), from: Span(364892844844156), target: Measurement { at: Monotonic(159823935127), offset: Span(1096471174179781), error: Span(737756499) } }, [732461840904, 1014986019744, 1071543002115], Drift(16586619), Measurement { at: Monotonic(65094), offset: Span(364910574961168), error: Span(387001934) })
+cc bb6dfa9b94c544f5deb3d9bae63226dc9b43822ea3227640a44672005850a462 # shrinks to (s, [_, switch, _], drift, target) = (Slew { start: Monotonic(2491036845), from: Span(-406028547877558), target: Measurement { at: Monotonic(639912366861), offset: Span(-659550152516699), error: Span(127018589) } }, [15119547245, 487169262235, 1031307186976], Drift(3447171), Measurement { at: Monotonic(0), offset: Span(-406025947078722), error: Span(920943083) })
+cc 1b31910b39b2f6ebc2e3bcffaeff2cc1b2a87e040a82c5c98b817eb810a564b2 # shrinks to (s, [early, switch, late], drift, target) = (Slew { start: Monotonic(2597149575), from: Span(-365443848376336), target: Measurement { at: Monotonic(451982250383), offset: Span(652058518853479), error: Span(298340035) } }, [301919340831, 956752863470, 1030073890164], Drift(12392387), Measurement { at: Monotonic(124), offset: Span(-974182526516094), error: Span(23283584) })

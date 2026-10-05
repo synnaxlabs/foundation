@@ -139,7 +139,7 @@ mod tests {
 
     use control::{Handoff, Lease, Writer};
     use types::authority::Authority;
-    use types::channel::Slot;
+    use types::channel;
     use types::frame::key_set::{Group, Interner, KeySet};
     use types::frame::{self, Form};
     use types::time::{Span, Stamp};
@@ -156,7 +156,7 @@ mod tests {
     impl Frames {
         fn new() -> Self {
             let index = Group {
-                index: Slot::new(1),
+                index: channel::Key::from_u128(1),
                 data: &[],
             };
             Self {
