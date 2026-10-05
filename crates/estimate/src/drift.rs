@@ -2,6 +2,9 @@ use crate::Error;
 
 const MAX_PPB: u32 = 100_000_000;
 
+/// Billionths of a nanosecond in a nanosecond: the unit of [`Drift::over_exact`].
+pub(crate) const PER_NANO: i128 = 1_000_000_000;
+
 /// The fastest that the local oscillator can drift from true time, in parts per
 /// billion. An error bound grows by this rate as its measurement ages.
 ///
@@ -29,8 +32,9 @@ impl Drift {
         Ok(Self(ppb))
     }
 
-    pub(crate) const fn ppb(self) -> u32 {
-        self.0
+    /// [`Drift::over`] in billionths of a nanosecond, not rounded.
+    pub(crate) fn over_exact(self, elapsed_ns: u64) -> i128 {
+        i128::from(elapsed_ns) * i128::from(self.0)
     }
 
     /// The most that an offset can move in `elapsed_ns`, rounded up. It is at most a

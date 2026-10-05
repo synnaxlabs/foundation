@@ -1,6 +1,5 @@
 use types::time::Monotonic;
 
-use crate::measurement::center;
 use crate::{Drift, Error, Filter, Measurement};
 
 /// Combines the best measurement of each source into one estimate at `now`.
@@ -55,8 +54,7 @@ pub fn combine<'a>(
     if 2 * agreeing <= sources {
         return Err(Error::NoMajority { sources, agreeing });
     }
-    let (offset, error) = center(low, high);
-    Measurement::new(now, offset, error)
+    Measurement::between(now, low, high)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -354,8 +352,8 @@ mod tests {
             ) {
                 match combine(Monotonic(now), drift(ppb), &filters(&sources)) {
                     Ok(_) | Err(Error::Bound { .. } | Error::NoMajority { .. }) => {}
-                    Err(e @ (Error::Disjoint | Error::Drift { .. }
-                        | Error::NoSources)) => {
+                    Err(e @ (Error::Backwards { .. } | Error::Disjoint
+                        | Error::Drift { .. } | Error::NoSources)) => {
                         prop_assert!(false, "unexpected {e}");
                     }
                 }

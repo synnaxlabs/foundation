@@ -1,5 +1,6 @@
 use types::time::{Monotonic, Span};
 
+use crate::drift::PER_NANO;
 use crate::{Drift, Error};
 
 /// The widest error bound. With the largest drift over the longest time, a widened
@@ -69,10 +70,29 @@ impl Measurement {
         let offset = i128::from(self.offset.nanos());
         (offset - error, offset + error)
     }
+
+    /// [`Measurement::bounds_at`] in billionths of a nanosecond, not rounded.
+    pub(crate) fn exact_bounds_at(self, now: Monotonic, drift: Drift) -> (i128, i128) {
+        let growth = drift.over_exact(now.0.abs_diff(self.at.0));
+        let offset = i128::from(self.offset.nanos()) * PER_NANO;
+        let error = i128::from(self.error.nanos()) * PER_NANO + growth;
+        (offset - error, offset + error)
+    }
+
+    /// The measurement at `at` that covers every offset from `low` to `high`, rounded
+    /// outward. The midpoint must lie between the offsets of two measurements.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Bound`] when the half-width is more than 36500 days.
+    pub(crate) fn between(at: Monotonic, low: i128, high: i128) -> Result<Self, Error> {
+        let (offset, error) = center(low, high);
+        Self::new(at, offset, error)
+    }
 }
 
 /// The center and half-width of a hull from `low` to `high`, rounded outward.
-pub(crate) fn center(low: i128, high: i128) -> (Span, Span) {
+fn center(low: i128, high: i128) -> (Span, Span) {
     let offset = (low + high).div_euclid(2);
     let offset = i64::try_from(offset)
         .expect("invariant: the hull's midpoint lies between two bound centers");
