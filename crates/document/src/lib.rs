@@ -15,6 +15,7 @@
 #[cfg(test)]
 mod arbitrary;
 mod block;
+pub mod diagnostic;
 pub mod encoding;
 mod map;
 mod span;
@@ -50,15 +51,25 @@ pub enum Error {
     },
 }
 
+impl Error {
+    fn message(&self) -> String {
+        match self {
+            Self::DuplicateKey { key, .. } => {
+                format!("the key {key:?} repeats an earlier key")
+            }
+        }
+    }
+
+    fn fix(&self) -> &'static str {
+        match self {
+            Self::DuplicateKey { .. } => "Remove it, or give it a different key",
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DuplicateKey { key, .. } => write!(
-                f,
-                "the key {key:?} repeats an earlier key. Remove it, or give it a \
-                 different key"
-            ),
-        }
+        write!(f, "{}. {}", self.message(), self.fix())
     }
 }
 

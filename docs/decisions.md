@@ -750,6 +750,17 @@ How to read this record:
   integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
+- **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
+  Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, an
+  optional span, a message, and a fix. Both texts are required, so the type enforces
+  C7. A code is `<producer>.<problem>`, where the producer is a crate or a kind name
+  (`hcl.syntax`, `document.repeated-key`). `Code::new` is a `const fn`, so a bad code
+  fails the build. Each producer maps its own error type with `From`, so `config`,
+  `ops`, and `node` never match a producer's variants. No severity field: the warnings
+  in K2 and R13-10 belong to plan output. Lost: a `Diagnose` trait behind `Box<dyn>`
+  (not `Clone` or serializable, and a fix is optional); number codes (a central
+  registry, and unreadable). Decided by the `config` builder; approved by the
+  coordinator (#137).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
