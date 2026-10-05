@@ -102,8 +102,8 @@ impl Reader {
     ///
     /// Returns the message, `Pending` when `alloc` or the source is pending, or
     /// `None` when the stream ended between two messages. After `Pending`, the next
-    /// call goes on where this one stopped. After an error of the source, the reader
-    /// holds no block.
+    /// call goes on where this one stopped. After an error inside a message's body,
+    /// the reader holds no block.
     ///
     /// # Errors
     ///
@@ -117,23 +117,6 @@ impl Reader {
     ///
     /// When the source gives no bytes or more than `max`.
     pub(crate) fn read<B: AsRef<[u8]>>(
-        &mut self,
-        alloc: impl FnMut(usize) -> Result<Poll<Unique>, Error>,
-        mut source: impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
-    ) -> Result<Poll<Option<Block>>, Error> {
-        let mut failed = false;
-        let read = self.next(alloc, |max| {
-            let next = source(max);
-            failed = next.is_err();
-            next
-        });
-        if failed {
-            self.state = START;
-        }
-        read
-    }
-
-    fn next<B: AsRef<[u8]>>(
         &mut self,
         mut alloc: impl FnMut(usize) -> Result<Poll<Unique>, Error>,
         mut source: impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
@@ -183,10 +166,15 @@ impl Reader {
                 }
                 State::Body { block, have } => {
                     if *have < block.len() {
-                        match pull(&mut source, block, have)? {
-                            Poll::Pending => return Ok(Poll::Pending),
-                            Poll::Ready(false) => return Err(ended()),
-                            Poll::Ready(true) => {}
+                        let error = match pull(&mut source, block, have) {
+                            Ok(Poll::Pending) => return Ok(Poll::Pending),
+                            Ok(Poll::Ready(true)) => None,
+                            Ok(Poll::Ready(false)) => Some(ended()),
+                            Err(error) => Some(error),
+                        };
+                        if let Some(error) = error {
+                            self.state = START;
+                            return Err(error);
                         }
                     }
                     if *have == block.len() {

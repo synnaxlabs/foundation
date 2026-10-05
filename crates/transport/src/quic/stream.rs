@@ -80,8 +80,8 @@ pub(super) struct Streams {
     /// peer stopped it with.
     senders: Vec<(StreamId, Option<Code>)>,
     /// Pool bytes of the messages this side has started and the streams have not
-    /// taken in full. They stay within the peer's window, so the messages that hold
-    /// a block at the peer never use up the connection's credit.
+    /// taken in full. They stay within the peer's window, so the peer's receive
+    /// budget always has room for one more message.
     sending: Budget,
     /// Pool bytes of the messages that hold a block and have not gone to the caller.
     receiving: Budget,
@@ -1205,13 +1205,17 @@ mod tests {
             assert_eq!(send.write(&body), Ok(MESSAGE_MAX));
             pair.run(RUN);
             let (seen, now) = (pair.server.events.len(), pair.now());
+            let again = next(&mut pair.server, now, &mut receivers[3]);
+            assert_eq!(again, Ok(Poll::Pending));
             let read = drain(&mut pair.server, now, &mut receivers[0]);
             assert_eq!(read, (vec![body], false));
             pair.run(Duration::ZERO);
             let readable = Event::Readable {
                 stream: receivers[3].key(),
             };
-            assert!(got(&pair.server, seen, &readable));
+            let events = &pair.server.events[seen..];
+            let woken = events.iter().filter(|(_, other)| *other == readable);
+            assert_eq!(woken.count(), 1);
         });
     }
 
