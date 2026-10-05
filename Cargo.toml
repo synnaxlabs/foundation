@@ -10,10 +10,12 @@ rust-version = "1.98"
 publish = false
 
 [workspace.dependencies]
+aws-lc-rs = { version = "1.18.1", default-features = false, features = ["aws-lc-sys"] }
 blake3 = "1.8.7"
 divan = "0.1.21"
 loom = { version = "0.7.2", features = ["futures"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+rustls = { version = "0.23.45", default-features = false, features = ["std", "aws_lc_rs"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
