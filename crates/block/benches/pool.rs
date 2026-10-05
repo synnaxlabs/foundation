@@ -1,0 +1,35 @@
+//! Benchmarks of a pool: a block that is used again, and a block that takes the
+//! budget of another size under pressure.
+
+use block::{Config, Heap, Pool};
+use divan::Bencher;
+
+fn main() {
+    divan::main();
+}
+
+fn create_pool(budget: usize) -> Pool {
+    let config = Config { budget };
+    let heap = Heap::new(config.reservation());
+    Pool::new(config, heap)
+}
+
+/// A block of one size, dropped and used again.
+#[divan::bench]
+fn alloc_free(bencher: Bencher<'_, '_>) {
+    let pool = create_pool(1 << 16);
+    bencher.bench_local(|| drop(pool.alloc(1000).expect("the budget has room")));
+}
+
+/// Blocks of two sizes in turn, with a budget for one: each alloc gives back the
+/// range of the other size and carves its own again.
+#[divan::bench]
+fn alloc_under_pressure(bencher: Bencher<'_, '_>) {
+    let pool = create_pool(block::footprint(1000));
+    let mut small = false;
+    bencher.bench_local(|| {
+        small = !small;
+        let len = if small { 100 } else { 1000 };
+        drop(pool.alloc(len).expect("the budget has room"));
+    });
+}

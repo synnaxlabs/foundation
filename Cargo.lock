@@ -122,6 +122,7 @@ version = "0.0.0"
 name = "block"
 version = "0.0.0"
 dependencies = [
+ "divan",
  "loom",
  "proptest",
 ]
