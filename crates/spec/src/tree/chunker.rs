@@ -34,6 +34,7 @@ pub(super) struct Writer {
     scale: u32,
     level: u8,
     chunk: Vec<u8>,
+    last: Vec<u8>,
     done: Vec<Chunk>,
 }
 
@@ -44,6 +45,7 @@ impl Writer {
             scale,
             level,
             chunk: vec![level],
+            last: Vec::new(),
             done: Vec::new(),
         }
     }
@@ -52,8 +54,10 @@ impl Writer {
         let start = self.chunk.len() - 1;
         chunk::write(&mut self.chunk, self.level, key, payload);
         let end = self.chunk.len() - 1;
+        self.last.clear();
+        self.last.extend_from_slice(key);
         if boundary(self.scale, self.level, key, start, end) {
-            self.cut(key);
+            self.cut();
         }
     }
 
@@ -62,18 +66,15 @@ impl Writer {
         self.chunk.len() == 1
     }
 
-    /// Ends the level. `last` is the key of the last entry pushed.
-    pub fn finish(mut self, last: Option<&[u8]>) -> Vec<Chunk> {
-        if let Some(last) = last
-            && !self.at_boundary()
-        {
-            self.cut(last);
+    pub fn finish(mut self) -> Vec<Chunk> {
+        if !self.at_boundary() {
+            self.cut();
         }
         self.done
     }
 
-    fn cut(&mut self, last: &[u8]) {
+    fn cut(&mut self) {
         let chunk = std::mem::replace(&mut self.chunk, vec![self.level]);
-        self.done.push((last.to_vec(), chunk));
+        self.done.push((self.last.clone(), chunk));
     }
 }

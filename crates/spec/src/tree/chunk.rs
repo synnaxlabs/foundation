@@ -69,6 +69,9 @@ impl<'a> Node<'a> {
                 payload: payload.ok_or(corrupt)?,
             });
         }
+        if level > 0 && entries.is_empty() {
+            return Err(corrupt);
+        }
         Ok(Self {
             hash,
             level,
@@ -92,12 +95,17 @@ pub(super) fn write(chunk: &mut Vec<u8>, level: u8, key: &[u8], payload: &[u8]) 
 }
 
 fn write_bytes(chunk: &mut Vec<u8>, bytes: &[u8]) {
-    let mut length = u32::try_from(bytes.len()).expect("invariant: a key or value is under 4 GiB");
-    while length >= 0x80 {
-        chunk.push((length & 0x7F) as u8 | 0x80);
+    let length = u32::try_from(bytes.len());
+    let mut length = length.expect("invariant: a key or value is under 4 GiB");
+    loop {
+        let [low, ..] = length.to_le_bytes();
         length >>= 7;
+        if length == 0 {
+            chunk.push(low & 0x7F);
+            break;
+        }
+        chunk.push(low | 0x80);
     }
-    chunk.push(length as u8);
     chunk.extend_from_slice(bytes);
 }
 
@@ -150,8 +158,9 @@ mod tests {
     fn rejects_bytes_that_are_not_a_chunk() {
         let whole = chunk(0, &[(b"key", b"value")]);
         let short_hash = chunk(1, &[(b"key", &[0; 31])]);
-        let cases: [&[u8]; 5] = [
+        let cases: [&[u8]; 6] = [
             b"",
+            &[1],
             &whole[..whole.len() - 1],
             &whole[..2],
             &short_hash,

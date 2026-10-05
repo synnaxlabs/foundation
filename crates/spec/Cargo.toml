@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+types = { path = "../types" }
 blake3 = { version = "1.8.7", default-features = false }
 
 [dev-dependencies]
