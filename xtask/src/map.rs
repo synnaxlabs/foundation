@@ -257,7 +257,7 @@ impl Crate {
     /// Reports whether this crate comes before `other` in [`CRATES`].
     fn earlier(&self, other: &Crate) -> bool {
         let index = |c: &Crate| CRATES.iter().position(|e| e.name == c.name);
-        index(self) < index(other)
+        matches!((index(self), index(other)), (Some(a), Some(b)) if a < b)
     }
 
     /// Describes the allowed dependencies for an error message.
@@ -303,6 +303,7 @@ mod tests {
             ("node", "ops", true),
             ("node", "connector-modbus", true),
             ("acceptance", "node", true),
+            ("acceptance", "acceptance", false),
         ] {
             let entry = find(name).expect("in the map");
             assert_eq!(entry.allows(dep), allowed, "`{name}` on `{dep}`");
