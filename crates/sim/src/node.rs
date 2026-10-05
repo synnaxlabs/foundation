@@ -69,19 +69,15 @@ impl Node {
 
     /// Sets the error bound of the node's next wall readings, as when the time daemon
     /// updates it. The wall does not move.
-    ///
-    /// # Panics
-    ///
-    /// When `error` is negative.
     pub fn set_wall_error(&self, error: Option<Span>) {
-        check(error);
         lock(&self.0.shared).set_wall_error(self.0.node, error);
     }
 
     /// Runs nothing on the node for `span` of true time while its clocks move, as in
-    /// a VM pause; a negative span is zero. Each wake in the pause, from a timer or
-    /// from another node, polls its task when the pause ends. A pause that overlaps
-    /// another ends at the later end, and one past the end of true time never ends.
+    /// a VM pause or a machine suspend; a negative span is zero. Each wake in the
+    /// pause, from a timer or from another node, polls its task when the pause ends.
+    /// A pause that overlaps another ends at the later end, and one past the end of
+    /// true time never ends.
     pub fn pause(&self, span: Span) {
         lock(&self.0.shared).pause(self.0.node, span);
     }
@@ -110,7 +106,7 @@ pub struct Config {
     /// The wall time when the node is added.
     pub wall: Stamp,
     /// The error bound that the OS gives with each wall reading, or `None` when it
-    /// gives none. Never negative.
+    /// gives none.
     pub wall_error: Option<Span>,
 }
 
@@ -124,12 +120,5 @@ impl Default for Config {
             wall: Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos()),
             wall_error: Some(Span::from_nanos(10 * Span::MILLISECOND.nanos())),
         }
-    }
-}
-
-/// Panics when a wall error is negative.
-pub(crate) fn check(error: Option<Span>) {
-    if let Some(error) = error {
-        assert!(error >= Span::ZERO, "the wall error {error} is negative");
     }
 }

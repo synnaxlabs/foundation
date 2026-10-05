@@ -101,12 +101,7 @@ impl Sim {
 
     /// Adds a node. Its clocks read the values in `config` now, and its entropy is
     /// its own stream from the seed.
-    ///
-    /// # Panics
-    ///
-    /// When [`node::Config::wall_error`] is negative.
     pub fn node(&mut self, config: node::Config) -> Node {
-        node::check(config.wall_error);
         let entropy = Rng::from_seed(self.streams.next_u64());
         let node = lock(&self.shared).add(config, entropy);
         let shared = Arc::clone(&self.shared);

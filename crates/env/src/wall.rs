@@ -47,20 +47,17 @@ impl Wall {
 /// One reading of the OS wall clock.
 ///
 /// ```
-/// use types::time::{Span, Stamp};
-///
-/// let reading = env::wall::Reading {
-///     time: Stamp::EPOCH,
-///     error: Some(Span::MILLISECOND),
-/// };
-/// assert_eq!(reading.error, Some(Span::MILLISECOND));
+/// /// A reading from an OS that gives no error bound.
+/// fn unbounded(time: types::time::Stamp) -> env::wall::Reading {
+///     env::wall::Reading { time, error: None }
+/// }
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reading {
     /// The OS's guess at UTC.
     pub time: Stamp,
     /// The most that `time` can be from UTC, by the OS's own count, or `None` when
-    /// the OS gives no bound. Never negative.
+    /// the OS gives no bound.
     pub error: Option<Span>,
 }
 

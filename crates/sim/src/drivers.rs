@@ -72,7 +72,7 @@ impl env::clock::Driver for Node {
 
 impl env::wall::Driver for Node {
     fn now(&self) -> env::wall::Reading {
-        lock(&self.shared).reading(self.node)
+        lock(&self.shared).wall(self.node)
     }
 }
 

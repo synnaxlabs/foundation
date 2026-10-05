@@ -903,21 +903,38 @@ fn a_wall_step_keeps_the_error() {
 }
 
 #[test]
-#[should_panic(expected = "the wall error -1ns is negative")]
-fn a_negative_wall_error_in_the_config_panics() {
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_error_change_does_not_move_the_wall() {
     let mut sim = sim(0);
-    let _node = sim.node(node::Config {
-        wall_error: Some(Span::from_nanos(-1)),
-        ..node::Config::default()
-    });
+    let node = sim.node(node::Config::default());
+    sim.run_for(Span::SECOND).unwrap();
+    node.set_wall_error(Some(Span::SECOND));
+    sim.run_for(Span::SECOND).unwrap();
+    let config = node::Config::default();
+    let two = Span::from_nanos(2 * Span::SECOND.nanos());
+    assert_eq!(node.wall().now().time, config.wall + two);
+    assert_eq!(node.clock().now(), config.monotonic + two);
 }
 
 #[test]
-#[should_panic(expected = "the wall error -1ns is negative")]
-fn a_negative_wall_error_change_panics() {
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_bad_wall_error_reaches_the_reading() {
     let mut sim = sim(0);
-    let node = sim.node(node::Config::default());
-    node.set_wall_error(Some(Span::from_nanos(-1)));
+    let negative = Some(Span::from_nanos(-1));
+    let a = sim.node(node::Config {
+        wall_error: negative,
+        ..node::Config::default()
+    });
+    let b = sim.node(node::Config::default());
+    b.set_wall_error(negative);
+    assert_eq!(a.wall().now().error, negative);
+    assert_eq!(b.wall().now().error, negative);
 }
 
 #[test]

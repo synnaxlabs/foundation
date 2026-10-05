@@ -486,11 +486,12 @@ How to read this record:
   ends the holdover. Decided by the `time` builder (#142).
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
-  `ntp_adjtime` on macOS). Where it has none (Windows), the reading has the largest
-  error, 36500 days: a node alone still gets OS time, with an error that says
-  "unknown", and in a mesh the reading adds a vote but does not move the estimate. A
-  fixed invented error lost: a wrong value gives a bound that is not true. Amends ENV
-  SEAMS. The person decided on 2026-10-05 ("Use it, error 'unknown'"), #144.
+  `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
+  `clock` reads that as the largest error, 36500 days: a node alone still gets OS
+  time, with an error that says "unknown", and in a mesh the reading adds a vote but
+  does not move the estimate. A fixed invented error lost: a wrong value gives a bound
+  that is not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
+  'unknown'"), #144. The split between `env::wall` and `clock` is from #172.
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
