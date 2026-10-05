@@ -537,6 +537,15 @@ fn a_run_with_no_threads_ends_at_once() {
 }
 
 #[test]
+fn the_digest_holds_each_poll() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let _idle = node.shards().start(shard("idle"), |_| async {}).unwrap();
+    sim.run().unwrap();
+    assert_ne!(sim.digest(), Sim::new(Config::default()).digest());
+}
+
+#[test]
 fn dropping_the_sim_drops_waiting_tasks_and_unstarted_threads() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());

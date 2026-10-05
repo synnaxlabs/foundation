@@ -5,11 +5,12 @@ use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use env::net::udp::{Config as Udp, Meta, Receiver, Sender, Transmit};
-use env::net::{Ecn, Error as Net};
+use env::net::{Ecn, Error as Net, tcp};
 use env::thread::Handle;
 use types::time::{Monotonic, Span};
 
@@ -421,6 +422,32 @@ fn a_receive_joins_only_the_datagrams_that_fit_its_buffer() {
 }
 
 #[test]
+fn a_receive_joins_only_datagrams_of_one_ecn() {
+    let (mut sim, a, b) = pair(batched(64), link::Config::default());
+    let (mut sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let to = at(&b, 4433);
+    let _send = a.shards().start(shard("send"), move |_| async move {
+        for ecn in [Some(Ecn::Ect0), Some(Ecn::Ce), None] {
+            let transmit = Transmit {
+                ecn,
+                ..transmit(to, &[1; 10])
+            };
+            poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+        }
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    let log = Log::default();
+    let _receive = receive(&b, receiver, &log);
+    sim.run_for(Span::SECOND).unwrap();
+    let batches: Vec<_> = (log.lock().unwrap().iter())
+        .map(|(_, meta, _)| (meta.ecn, meta.len))
+        .collect();
+    let ecns = [(Some(Ecn::Ect0), 10), (Some(Ecn::Ce), 10), (None, 10)];
+    assert_eq!(batches, ecns);
+}
+
+#[test]
 fn a_receive_frees_its_bytes_in_the_queue() {
     let (mut sim, a, b) = pair(batched(64), link::Config::default());
     let (sender, _a) = udp(&a, 4433);
@@ -497,6 +524,43 @@ fn a_socket_on_the_unspecified_v6_address_receives_v4() {
     let meta = log[0].1;
     assert_eq!(meta.source, at(&a, 4433));
     assert_eq!(meta.destination, Some(b.addresses()[0]));
+}
+
+/// The source and bytes of each batch in `log`.
+fn arrivals(log: &Log) -> Vec<(SocketAddr, Vec<u8>)> {
+    let log = log.lock().unwrap();
+    (log.iter())
+        .map(|(_, meta, bytes)| (meta.source, bytes.clone()))
+        .collect()
+}
+
+#[test]
+fn a_datagram_reaches_only_the_node_of_its_destination() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let any = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 4433);
+    let (to_a, to_b) = (Log::default(), Log::default());
+    let (sender_a, receiver_a) = bind(&a, any).unwrap();
+    let (sender_b, receiver_b) = bind(&b, any).unwrap();
+    let _receive_a = receive(&a, receiver_a, &to_a);
+    let _receive_b = receive(&b, receiver_b, &to_b);
+    let _send_a = send(&a, sender_a, at(&b, 4433), vec![b"to b".to_vec()]);
+    let _send_b = send(&b, sender_b, at(&a, 4433), vec![b"to a".to_vec()]);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(arrivals(&to_a), [(at(&b, 4433), b"to a".to_vec())]);
+    assert_eq!(arrivals(&to_b), [(at(&a, 4433), b"to b".to_vec())]);
+}
+
+#[test]
+fn a_node_sends_to_itself_over_the_default_link() {
+    let (mut sim, a, _b) = pair(0, link::Config::default());
+    let log = Log::default();
+    let (sender, _one) = udp(&a, 4433);
+    let (_two, receiver) = udp(&a, 4434);
+    let _receive = receive(&a, receiver, &log);
+    let _send = send(&a, sender, at(&a, 4434), vec![b"self".to_vec()]);
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(times(&log), [after(delay())]);
+    assert_eq!(arrivals(&log), [(at(&a, 4433), b"self".to_vec())]);
 }
 
 #[test]
@@ -601,6 +665,31 @@ fn the_same_seed_gives_the_same_digest() {
     assert_ne!(Sim::new(Config::default()).digest(), digest(3));
 }
 
+/// The digest of a run that sends `contents` from `a` over a link with `loss` to a
+/// socket of `b` with a receive queue of `bytes`.
+fn traced(contents: &[u8], loss: f64, bytes: usize) -> u64 {
+    let link = link::Config {
+        loss,
+        ..link::Config::default()
+    };
+    let (mut sim, a, b) = pair(0, link);
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, _receiver) = queue(&b, 4433, bytes);
+    let _send = send(&a, sender, at(&b, 4433), vec![contents.to_vec()]);
+    sim.run_for(Span::SECOND).unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_digest_holds_each_send() {
+    assert_ne!(traced(b"ab", 1.0, 1 << 20), traced(b"abc", 1.0, 1 << 20));
+}
+
+#[test]
+fn the_digest_holds_the_fate_of_each_arrival() {
+    assert_ne!(traced(b"abc", 0.0, 1 << 20), traced(b"abc", 0.0, 2));
+}
+
 /// Sends one datagram with a context that never wakes.
 fn send_once(sender: &mut Sender, _: &mut Receiver) {
     let transmit = transmit(SocketAddr::from(([10, 0, 0, 2], 4433)), b"once");
@@ -668,6 +757,41 @@ fn a_socket_polled_outside_the_sim_panics() {
     let (_sim, a, _b) = pair(0, link::Config::default());
     let (mut sender, mut receiver) = udp(&a, 4433);
     send_once(&mut sender, &mut receiver);
+}
+
+/// TCP options with buffers of 1 MiB.
+fn options() -> tcp::Options {
+    tcp::Options {
+        send_buffer_bytes: 1 << 20,
+        recv_buffer_bytes: 1 << 20,
+        unsent_bytes_max: 1 << 14,
+        delayed: false,
+    }
+}
+
+#[test]
+#[should_panic(expected = "sim does not simulate TCP yet")]
+fn a_tcp_connect_panics() {
+    let (_sim, a, b) = pair(0, link::Config::default());
+    let config = tcp::Config {
+        remote: at(&b, 4433),
+        options: options(),
+    };
+    let net = a.net();
+    let connect = pin!(net.connect(&config));
+    let _tcp = connect.poll(&mut Context::from_waker(Waker::noop()));
+}
+
+#[test]
+#[should_panic(expected = "sim does not simulate TCP yet")]
+fn a_tcp_listen_panics() {
+    let (_sim, a, _b) = pair(0, link::Config::default());
+    let listen = tcp::Listen {
+        local: at(&a, 4433),
+        backlog: 1,
+        options: options(),
+    };
+    let _listener = a.net().listen(&listen);
 }
 
 #[test]
