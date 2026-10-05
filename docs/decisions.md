@@ -383,20 +383,29 @@ How to read this record:
   `first + len` passes `u64::MAX`. The restart record needs one free block: an open
   of a full ring first moves records at the tail to a segment.
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
-  u64][tail chain: u32][seq: u64][zero padding][crc32c: u32]`, one 4096-byte block,
-  magic `FNDNRING`, version 1. The CRC is the last four bytes and covers the rest.
-  The magic, the version, and the place of the CRC are the same in every version, so
-  an older build reads a newer block and reports its version. Two blocks at the
-  start of the ring hold the last two checkpoints: checkpoint `n` goes to block `n
-  mod 2`. Open takes the whole block whose `seq` comes after the other's, wrapped
-  as the writer wraps it (on a tie, the first); one torn block leaves the other. No
-  block with the magic: not a ring. Both with the magic and a wrong CRC: the ring is
-  lost. The header with a new tail is durable
+  u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
+  magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and
+  covers the rest of the first 512-byte sector, so a checkpoint is in one sector and a
+  crash keeps it whole or old. The magic, the version, and the place of the CRC are the
+  same in every version, and a later version puts its fields after the CRC in the same
+  sector, so an older build reads a newer block and reports its version. A decode does
+  not read bytes past the first sector. Two zero blocks are a ring made and not yet
+  written; a zero first sector with other bytes in the block is not a ring. Two blocks
+  at the start of the ring hold the last two checkpoints: checkpoint `n` goes to block
+  `n mod 2`. The second block is for a fault that no crash makes (a bad sector, a stray
+  write), not for a torn write. A crash in the first write can keep only block 1; the
+  ring then has one copy of the checkpoint until checkpoint 2. Open takes the whole
+  block whose `seq` comes after the other's, wrapped as the writer wraps it (on a tie,
+  the first). No block with the magic: not a ring. Both with the magic and a wrong CRC:
+  the ring is lost.
+  The header with a new tail is durable
   before the writer releases the space, so the header's tail is at or before the
   writer's tail and the records between are whole. The layout comes from the header
   at open; configuration sets it at create, and a changed `body_max` takes effect at
-  the next create. The open reports the effective layout, callers bound a commit by
-  it, and the node shows it in status. A new ring has the same block at `seq` 0 in
+  the next create. The open reports the effective layout, and the node shows it in
+  status. `append` refuses a batch that no one record holds (over 1023 entries or
+  parts, or a body over `body_max`) with `Large`, and never splits a batch over
+  records. A new ring has the same block at `seq` 0 in
   both places, with the tail at offset 0 and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
@@ -498,7 +507,11 @@ How to read this record:
   its pages until the purge after idle. A class that a reader keeps partly in use
   keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
-  wait in a follow-up issue.
+  wait in a follow-up issue. When the system refuses to commit pages, the allocation
+  fails with `Error::Refused`, a separate error from a full pool (the person on
+  2026-10-05: "I approve the separate error"). The carve counts do not change, the
+  sizes the pool gave back to make room stay given back, and a later allocation may
+  succeed (#475).
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
@@ -779,7 +792,17 @@ How to read this record:
   protocol when it sends another class byte, ends a stream inside a message, sends a
   message over the limit, or resets or stops a stream with a code over 32 bits. The
   node then closes the connection with application code 2^32 and the reason as text,
-  and the caller gets `Error::Broken`. Proposed by `network` in #55.
+  and the caller gets `Error::Broken`. Each connection keeps two budgets, which count
+  the length of each message. A sender starts a message only when the messages it
+  started and the streams have not taken in full stay within the peer's
+  `window_bytes`; else the write waits for `Writable`. A receiver takes a block only
+  when the messages that hold one stay within `window_bytes` plus
+  `message_bytes_max`; else the read waits for `Readable`. So bytes that wait for a
+  block never use up the credit that a started message needs, and a peer that breaks
+  the send rule holds at most the receive budget and stops only its own connection.
+  Until the hello carries the peer's window, a sender uses its own. Proposed by
+  `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
+  `network` in #228.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -789,19 +812,23 @@ How to read this record:
   limit is part of `foundation/1`: a certificate over it needs a new ALPN. The person
   approved it on 2026-10-05 ("approve"), #383. A node sends its certificate when it
   dials; an SDK client sends none and pins the node key the same way. ALPN is
-  `foundation/1`, and a new session protocol gets a new name. A session that agrees no
-  ALPN, or another name, ends on every carrier. The suites are AES-128-GCM, AES-256-GCM,
-  and ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
-  dialing node offers them in that order, and the client's order decides, so nodes agree
+  `foundation/1`, and a new session protocol gets a new name. During an upgrade, a node
+  accepts its own ALPN name and the previous one, and offers its own name only after
+  every node runs the release (C9d). A session that agrees no ALPN, or a name the node
+  does not accept, ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
+  ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A dialing
+  node offers them in that order, and the client's order decides, so nodes agree
   AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between nodes and
   "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so an SDK may
   offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
   reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS). Decided
-  by `network` in #54; the ALPN check, suites, and groups in #108. A key of small order
-  is not a node key: a signature for it passes with no private key, so every Ed25519
-  check refuses it (BQ12). `types::node::PublicKey` refuses such a key when it is built,
-  so no check site needs its own test. The person decided on 2026-10-05 ("Yeah that's
-  fine"), #227, #277.
+  by `network` in #54; the ALPN check, suites, and groups in #108. The person accepted
+  it as a contract on 2026-10-05 ("yes to both"). The golden certificate, the ALPN name,
+  and the suite and group lists are an oracle in `oracles/conformance/transport/`. A key
+  of small order is not a node key: a signature for it passes with no private key, so
+  every Ed25519 check refuses it (BQ12). `types::node::PublicKey` refuses such a key
+  when it is built, so no check site needs its own test. The person decided on
+  2026-10-05 ("Yeah that's fine"), #227, #277.
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -841,13 +868,14 @@ How to read this record:
   empty entry of its term first, so it can commit what came before. It replicates with
   `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
   (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
-  (its hint for the next `prev`). `step` checks every index a message names, and the
-  order of an append's entries, against the log before it changes state: entries that
-  do not follow `prev` are `Error::EntryOutOfOrder`, and an index past the log is
-  `Error::IndexPastLog`. An `Append` with an entry whose term is above the message's
-  term is `Error::TermBehindLog`: no leader sends one, and a follower that wrote it
-  could not restart. The conformance oracle changed to match; the person decided on
-  2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  (its hint for the next `prev`). `step` checks a message against the log before it
+  changes state: entries that do not follow `prev` are `Error::EntryOutOfOrder`, and a
+  heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
+  log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
+  be past the log of a node that is behind. An `Append` with an entry whose term is
+  above the message's term is `Error::TermBehindLog`: no leader sends one, and a
+  follower that wrote it could not restart. The conformance oracle changed to match; the
+  person decided on 2026-10-05 ("a is fine", #232). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -873,10 +901,14 @@ How to read this record:
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.
-  A node the change removed stays a peer of the leader, and keeps getting appends, until
-  it holds the committed leave: then the leader sends it the commit in a heartbeat and
-  releases it, so the node learns it is out and never campaigns. A removed node that
-  answered nothing over a whole quorum check period is released at that check instead.
+  A node the change removed stays a peer of the leader, and gets appends up to the
+  leave, or up to the leader's first entry when that is later, until it holds them and
+  the leave is committed: then the leader sends it the commit in a heartbeat and
+  releases it, so the node learns it is out and never campaigns. The leader's first
+  entry replaces each entry that an older leader left past the leave on the node, such
+  as a configuration that makes it a voter again. A removed node that answered nothing
+  over a whole quorum check period is released at that check instead, and the next
+  configuration releases any that is still a peer.
   A follower releases the removed nodes when the leave commits. A removed node that
   missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
   only from a voter of the newest configuration in this node's log, and a node whose
@@ -1105,8 +1137,9 @@ How to read this record:
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
   ended the process, `hcl-primitives` read `-18446744073709551615` as 1, and its errors
-  had no fix-it hints. The reader refuses nesting past the Document limit, reads
-  integers exactly, refuses a float that an `f64` cannot hold (past the largest, or
+  had no fix-it hints. The reader refuses nesting past the Document limit, reads a
+  number written with digits only as an exact integer and any other number as a
+  float, refuses a float that an `f64` cannot hold (past the largest, or
   rounded to zero from digits that are not all zero), refuses an object key that is a
   number with a fraction, an exponent, or more than 154 digits (HCL can change such a
   key when it makes a string of it), and gives each unsupported HCL form an error with
@@ -1140,6 +1173,17 @@ How to read this record:
   version. A person runs it by hand when the texts change; CI does not run it and
   needs no Go. It is the only Go code in the repo. The person decided on 2026-10-05
   ("Yeah that's fine", #460); the coordinator approved the plan on #460.
+  The program also writes the values HCL reads from each text with only data, in a
+  small text form. For each such text that reads and is not in `differences.txt`, the
+  test prints the Document in the same form, and the two must be equal. So the test
+  checks which numbers are integers (HCL READER), and it compares the bits of each
+  float with the `f64` nearest to the written number. HCL holds a 512-bit value,
+  and a second rounding to `f64` can miss the nearest one. Lost: cty JSON, which has
+  no value for a reference, a call, or a block, and gives a number as a 512-bit
+  decimal; the shortest decimal of a float, which Go and Rust write differently for
+  some floats; Rust that reads the form into a Document, which is more code than a
+  printer; and Go that writes `document::encoding`, a second implementation of the
+  encoding. Decided by the `config` builder (#497).
 - **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
   a new Document. Each attribute and block that keeps its value and its place keeps its
   bytes, comments, and blank lines. A changed value and a changed block on one line
@@ -1415,8 +1459,9 @@ How to read this record:
   waits for an event only by awaiting a future, so simulation controls every wait. A
   lint denies the std blocking waits (`park`, `Condvar`, `Barrier`, `mpsc` receive).
   `thread::Handle` and `thread::Error`, which `Shards` and `Threads` both return (#129).
+  A `thread::Error` comes from a start, and a `thread::Panicked` from a join (#153).
   When a shard's main future completes, the shard drops its other tasks. A panic in any
-  task ends its shard, and its `Handle::join` returns `Error::Panicked`. A dropped
+  task ends its shard, and its `Handle::join` returns `thread::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
   scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
@@ -1451,12 +1496,22 @@ How to read this record:
   removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
   thread that a crash ended panics, because no process joins its own threads after it
   dies. Built by `simulation` in #114.
+- **SIM PANICS (2026-10-05)** A panic in a poll or in the drop of a future ends the
+  thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
+  future drops in its own `catch_unwind`, so a second panic never aborts the process.
+  The error gives every panic, the first one first: a drop that panics is a defect of
+  its own, even when an earlier panic caused the drop. `Sim::crash` panics with the
+  same messages after the crash ends. Built by `simulation` in #548.
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
   implements it over `std::alloc` for tests, Miri, and `sim`. `block` makes no OS
   call. `reclaim` takes back returned blocks on each loop turn; `purge` gives idle
-  pages back on a timer that the shard owns (#2).
+  pages back on a timer that the shard owns (#2). The first 64 bytes of a `Memory`
+  are usable from the start: they hold the pool's header, so `Pool::new` makes no
+  commit that can fail. A purged page stops counting against the memory the system
+  can commit. On Linux with strict overcommit, `madvise` and `mprotect` keep that
+  charge, so `os` purges with a `MAP_FIXED` remap (#475).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -1469,7 +1524,15 @@ How to read this record:
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
   other way to count allocations. Never in a library or the `node` binary. The
-  `xtask globals` check allows only this case.
+  `xtask globals` check allows only this case. The static also holds the state of
+  `Allocator::freed_holding` (#349): a phase with a count of the frees that scan, the
+  caller's needle while a call runs, and a found count, because Rust has no other way
+  to see a freed block. `freed_holding` is the one exception to "Safe code is sound
+  for every input": the person said "#481 I approve A" on 2026-10-05. A freed block
+  can hold bytes the program never wrote, such as padding or the spare capacity of a
+  `Vec`. Rust defines no read of such a byte on any target, so no sound read exists,
+  and Miri stops at one. This is a patch. The long-term fix is a freeze read (Rust RFC
+  3605); when Rust has one, `freed_holding` uses it and the exception goes.
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
@@ -1630,7 +1693,8 @@ Storage classes used in the table:
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
 | Latest mailbox | Memory: depth 1 per latest reader per index | `delivery` | The reader session | `delivery` |
 | Current value | Memory: the index's newest live frame, one pinned pool block per index (B4, MEMORY BOUNDS) | `delivery` | A new latest reader | `delivery` |
-| Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; the home spends | `delivery` | `delivery`, `wire` |
+| Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; `delivery` spends when the home releases a frame | `delivery` | `delivery`, `wire` |
+| Live frames for complete readers | Memory: the index's live frames not yet on disk, and the frames released to each complete session and not taken, as refcount clones (B1, CREDIT RULES, MEMORY BOUNDS) | `delivery`: the home queues each stored live frame and releases them after a commit | The reader session | `delivery` |
 | Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `delivery` |
 | Death records | Quality channel samples (X19) | `home` | Sinks | `home` |
 | Read copy data | The copy node's index log | `replica` | The copy's readers, served by `home` in copy mode (X43) | `replica`, `home` |
@@ -2213,14 +2277,14 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
-| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, and holds the one `unsafe impl GlobalAlloc`. A dev-dependency only. | none |
+| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
 | 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits, and slews mesh time. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
-| 1 | `delivery` | Keeps each reader's state per index: positions, credits, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
+| 1 | `delivery` | Keeps each reader's state per index: positions, credits, live frames for complete readers, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |

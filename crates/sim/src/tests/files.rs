@@ -959,3 +959,31 @@ fn of_two_creates_in_flight_the_second_to_end_is_busy() {
         assert_eq!(racing_creates(value), Some(busy("a")), "value {value}");
     }
 }
+
+/// The digest of a run in which a shard starts a `free`, drops it, and sleeps `sleep`,
+/// so that it wakes before the call ends or after it.
+fn slept_around_end(sleep: Span) -> u64 {
+    let mut sim = sim(3);
+    let node = sim.node(node::Config::default());
+    let clock = node.clock();
+    let handle = node.shards().start(shard("d"), move |_| async move {
+        let files = node.files();
+        let mut free = Box::pin(files.free());
+        poll_fn(|cx| {
+            assert!(free.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(free);
+        clock.sleep(sleep).await;
+    });
+    sim.run().unwrap();
+    handle.unwrap().join().unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_digest_holds_the_polls_before_a_file_end() {
+    let early = slept_around_end(Span::from_nanos(1));
+    assert_ne!(early, slept_around_end(Span::MILLISECOND));
+}

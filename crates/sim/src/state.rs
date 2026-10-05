@@ -2,25 +2,22 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::IoSliceMut;
 use std::mem;
 use std::num::NonZeroUsize;
-use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::task::{Poll, Wake, Waker};
+use std::task::{Wake, Waker};
 use std::time::Instant;
 
-use env::net::udp::{self, Meta, Transmit};
 use env::rng::Rng;
 use env::shards::Main;
 use env::tasks::Task;
-use env::thread::Error;
+use env::thread::Panicked;
 use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
-use crate::files::{Call, Files, Held};
-use crate::net::{Bound, Network};
-use crate::{Crash, link, node, shard};
+use crate::files::{Files, Held};
+use crate::net::Network;
+use crate::{Crash, node, shard};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
 
@@ -53,8 +50,8 @@ pub(crate) struct State {
     next: u64,
     net: Network,
     files: Files,
-    /// A hash of every pick, every datagram event, and every end of a file call, in
-    /// order.
+    /// A hash of every pick, in order, with the network and file digests at the pick,
+    /// so that it holds where their events fall between the picks.
     digest: DefaultHasher,
 }
 
@@ -95,7 +92,7 @@ struct Thread {
 #[derive(Clone)]
 pub(crate) enum Outcome {
     /// Its first task completed, or a task panicked.
-    Done(Result<(), Error>),
+    Done(Result<(), Panicked>),
     /// A crash of its node ended it.
     Crashed,
 }
@@ -279,63 +276,24 @@ impl State {
             .map(|thread| (thread, self.threads[&thread].node))
     }
 
-    /// Sets the link from node `from` to node `to`.
-    pub(crate) fn link(&mut self, from: usize, to: usize, config: link::Config) {
-        self.net.link(from, to, config);
+    /// True time now.
+    pub(crate) fn now(&self) -> Monotonic {
+        self.now
     }
 
-    /// Binds a UDP socket on `node`.
-    pub(crate) fn bind(
-        &mut self,
-        node: usize,
-        config: &udp::Config,
-    ) -> Result<Bound, env::net::Error> {
-        self.net.bind(node, config)
-    }
-
-    /// Removes socket `socket`, and returns its waker for the caller to drop after it
-    /// releases the lock.
-    pub(crate) fn close(&mut self, socket: u64) -> Option<Waker> {
-        self.net.close(socket)
-    }
-
-    /// Sends `transmit` from socket `socket` now.
-    pub(crate) fn send(
-        &mut self,
-        socket: u64,
-        transmit: &Transmit<'_>,
-    ) -> Result<(), env::net::Error> {
-        self.net.send(self.now, &mut self.digest, socket, transmit)
-    }
-
-    /// Receives from socket `socket`, as [`Network::recv`].
-    pub(crate) fn recv(
-        &mut self,
-        socket: u64,
-        waker: Waker,
-        buffers: &mut [IoSliceMut<'_>],
-        meta: &mut [Meta],
-    ) -> (Poll<usize>, Option<Waker>) {
-        self.net.recv(socket, waker, buffers, meta)
-    }
-
-    /// Starts `call` of `node` on `path` now, as [`Files::submit`].
-    pub(crate) fn submit(
-        &mut self,
-        node: usize,
-        path: &Path,
-        call: Call,
-        held: Option<Held>,
-    ) -> u64 {
-        self.files.submit(self.now, node, path, call, held)
+    pub(crate) fn net(&mut self) -> &mut Network {
+        &mut self.net
     }
 
     pub(crate) fn files(&mut self) -> &mut Files {
         &mut self.files
     }
 
+    /// A hash of the picks, the network, and the files.
     pub(crate) fn digest(&self) -> u64 {
-        self.digest.finish()
+        let mut digest = self.digest.clone();
+        (self.net.digest(), self.files.digest()).hash(&mut digest);
+        digest.finish()
     }
 
     /// Adds a thread whose first task is ready, and returns the thread's key.
@@ -419,7 +377,7 @@ impl State {
         let nth = usize::try_from(rng.below(count))
             .expect("invariant: a value below a usize fits usize");
         let task = runnable[nth];
-        task.hash(&mut self.digest);
+        (task, self.net.digest(), self.files.digest()).hash(&mut self.digest);
         self.ready.remove(&task);
         let thread = self.tasks[&task];
         self.current = Some(thread);
@@ -474,8 +432,8 @@ impl State {
             }
             wakers.push(timer.remove());
         }
-        wakers.extend(self.net.deliver(at, &mut self.digest));
-        let (ended, orphans) = self.files.end(at, &mut self.digest);
+        wakers.extend(self.net.deliver(at));
+        let (ended, orphans) = self.files.end(at);
         wakers.extend(ended);
         (wakers, orphans)
     }
@@ -507,7 +465,7 @@ impl State {
             let booted = &mut self.nodes[node];
             (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
         }
-        self.files.crash(node, now, crash, &mut self.digest)
+        self.files.crash(node, now, crash)
     }
 
     /// Removes the starts of the threads that have not run.
