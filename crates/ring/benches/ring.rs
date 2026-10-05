@@ -3,7 +3,10 @@
 
 use std::hint::spin_loop;
 use std::pin::pin;
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
 use divan::Bencher;
@@ -49,7 +52,7 @@ fn one_thread(bencher: Bencher<'_, '_>) {
     let (mut producer, mut consumer) = create_ring();
     bencher.counter(ItemsCount::new(CAPACITY)).bench_local(|| {
         for value in 0..CAPACITY as u64 {
-            push_spinning(&mut producer, value);
+            assert_eq!(producer.push(value), Ok(()), "the ring has room");
         }
         for _ in 0..CAPACITY {
             divan::black_box(consumer.try_pop());
@@ -57,7 +60,8 @@ fn one_thread(bencher: Bencher<'_, '_>) {
     });
 }
 
-/// One thread pushes one value at a time and the other polls `try_pop`.
+/// One thread pushes one value at a time and the other polls `try_pop`. The time
+/// includes the start and the join of the pushing thread.
 #[divan::bench(sample_count = 20)]
 fn two_threads(bencher: Bencher<'_, '_>) {
     const VALUES: u64 = 1_000_000;
@@ -78,7 +82,8 @@ fn two_threads(bencher: Bencher<'_, '_>) {
         });
 }
 
-/// A value goes to a second thread and comes back. Each item is one hop.
+/// A value goes to a second thread and comes back. Each item is one hop. The time
+/// includes the start and the join of the echo thread.
 #[divan::bench(sample_count = 20)]
 fn round_trip(bencher: Bencher<'_, '_>) {
     const TRIPS: u64 = 100_000;
@@ -105,20 +110,35 @@ fn round_trip(bencher: Bencher<'_, '_>) {
         });
 }
 
+/// Counts the wakes it gets.
+#[derive(Default)]
+struct Tally(AtomicU64);
+
+impl Wake for Tally {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Relaxed);
+    }
+}
+
 /// The consumer parks, the producer pushes and wakes it, and the consumer pops, all
-/// on one thread. The waker does nothing, so this is the cost of the protocol alone.
+/// on one thread. This is a lower bound: no cache line moves between cores, and the
+/// waker only counts.
 #[divan::bench]
 fn park_and_wake(bencher: Bencher<'_, '_>) {
     const CYCLES: u64 = 1024;
     let (mut producer, mut consumer) = create_ring();
-    let mut cx = Context::from_waker(Waker::noop());
+    let tally = Arc::new(Tally::default());
+    let waker = Waker::from(Arc::clone(&tally));
+    let mut cx = Context::from_waker(&waker);
     bencher.counter(ItemsCount::new(CYCLES)).bench_local(|| {
+        let before = tally.0.load(Relaxed);
         for value in 0..CYCLES {
             let parked = pin!(consumer.pop()).poll(&mut cx);
             assert_eq!(parked, Poll::Pending, "the ring was empty");
-            push_spinning(&mut producer, value);
+            assert_eq!(producer.push(value), Ok(()), "the ring has room");
             let popped = pin!(consumer.pop()).poll(&mut cx);
             assert_eq!(popped, Poll::Ready(Some(value)), "the push woke the pop");
         }
+        assert_eq!(tally.0.load(Relaxed) - before, CYCLES, "each cycle parked");
     });
 }
