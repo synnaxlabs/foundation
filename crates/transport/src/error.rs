@@ -77,8 +77,7 @@ pub enum Error {
         available: usize,
     },
     /// The system has no memory for a received message now, though the pool's budget
-    /// has room for it. The message stays queued; call again later. A freed block does
-    /// not help.
+    /// has room for it. The message stays queued; call again later.
     Memory {
         /// The message's size.
         bytes: usize,

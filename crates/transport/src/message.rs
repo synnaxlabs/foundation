@@ -165,7 +165,7 @@ impl Reader {
                     if !admit(len) {
                         return Ok(Poll::Pending);
                     }
-                    let block = alloc(pool, len)?;
+                    let block = pool.alloc(len).map_err(no_block)?;
                     self.state = State::Body { block, have: 0 };
                 }
                 State::Body { block, have } => {
@@ -195,27 +195,14 @@ impl Reader {
     }
 }
 
-/// A block of `len` bytes from `pool`.
-///
-/// # Errors
-///
-/// [`Error::Pool`] when the pool has no room now, and [`Error::Memory`] when the
-/// system has none.
-///
-/// # Panics
-///
-/// When the pool cannot hold `len` bytes.
-fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
-    pool.alloc(len).map_err(error)
-}
-
-/// What to give the caller when the pool gave no block for a message.
+/// What to give the caller when the pool gave no block for a message: [`Error::Pool`]
+/// when the pool has no room now, and [`Error::Memory`] when the system has none.
 ///
 /// # Panics
 ///
 /// When the pool cannot hold the message.
-fn error(error: block::Error) -> Error {
-    match error {
+fn no_block(cause: block::Error) -> Error {
+    match cause {
         block::Error::Exhausted {
             requested,
             available,
@@ -224,8 +211,8 @@ fn error(error: block::Error) -> Error {
             available,
         },
         block::Error::Refused { requested } => Error::Memory { bytes: requested },
-        error @ block::Error::TooLarge { .. } => {
-            panic!("the pool cannot hold a message of `bytes_max`: {error}")
+        cause @ block::Error::TooLarge { .. } => {
+            panic!("the pool cannot hold a message of `bytes_max`: {cause}")
         }
     }
 }
@@ -516,7 +503,7 @@ mod tests {
         #[test]
         fn when_the_system_refuses_memory_it_gives_memory() {
             let refused = block::Error::Refused { requested: 100 };
-            assert_eq!(error(refused), Error::Memory { bytes: 100 });
+            assert_eq!(no_block(refused), Error::Memory { bytes: 100 });
         }
 
         #[test]
