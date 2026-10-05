@@ -405,6 +405,20 @@ How to read this record:
   RANDOMNESS"), from `network`'s proposal on #54.
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
+- **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and
+  accepts; the node's sockets and relays sit in one node-level part (ONE PORT PER
+  NODE). A `Session` goes to one peer over one path, direct or relayed, fixed for its
+  life, and runs every class on one carrier. A second carrier for some classes waits
+  for the measurement in TRANSPORT SHAPE LOCKED, which must show that `Latest` p99
+  holds while `CatchUp` runs on the other carrier. Streams carry whole messages in
+  pool blocks, not bytes; the QUIC carrier benchmark decides whether decode reads
+  chunks in place instead. A stream reaches the peer with its first message, and a
+  `Sender` dropped without `finish` resets it. Each stream has a `Class` (`Command`,
+  `Latest`, `Complete`, `CatchUp`) that sets its priority and preferred carrier. A
+  peer is a node key or a `Client` (an SDK, proved by its signed hello above).
+  Callers admit peers, dispatch streams (STREAM DISPATCH), and cancel stale latest
+  frames. Builds on SIM NETWORK. Proposed by `network` in #45; approved by the
+  coordinator on PR #53.
 
 ### 1.8 Consensus, regions, and the spec
 
