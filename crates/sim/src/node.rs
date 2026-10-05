@@ -115,7 +115,8 @@ impl Node {
     /// `Error::Io` and code 5 (`EIO`). Faults on one path and operation fire in
     /// turn, one per call. The call does not touch the disk, except a sync: each
     /// sector keeps its durable bytes or the bytes of one write that the sync
-    /// covers, and these bytes are then durable and the ones that a read sees.
+    /// covers. These bytes are then durable, and a read sees them unless a later
+    /// write covers the sector.
     ///
     /// # Panics
     ///

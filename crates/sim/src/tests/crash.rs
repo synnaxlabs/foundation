@@ -272,25 +272,32 @@ fn a_failed_sync_keeps_the_durable_bytes_or_the_write_per_sector() {
     assert_eq!(seen, all);
 }
 
-/// Makes a synced file of 1s on `node`, then starts a write of 9s over both its
-/// sectors and waits forever, with a fault that fails the write when `failed`.
-async fn write_in_flight(node: node::Node, failed: bool) {
-    let (file, pool) = (create_synced(&node).await, pool());
-    let clock = node.clock();
-    clock
-        .sleep_until(node::Config::default().monotonic + BEFORE)
-        .await;
-    if failed {
-        node.fail_file(Path::new("a"), Operation::WriteAt);
-    }
-    let parts = [block(&pool, &[9; 1_024])];
-    let mut write = pin!(file.write_at(0, &parts));
+/// Sleeps until the instant of the crash of [`crash_after`].
+async fn until_crash(node: &node::Node) {
+    let crash = node::Config::default().monotonic + BEFORE;
+    node.clock().sleep_until(crash).await;
+}
+
+/// Starts `call`, checks that it is in flight, and waits forever.
+async fn hang(call: impl Future) {
+    let mut call = pin!(call);
     poll_fn(|cx| {
-        assert!(write.as_mut().poll(cx).is_pending());
+        assert!(call.as_mut().poll(cx).is_pending());
         Poll::Ready(())
     })
     .await;
     pending::<()>().await;
+}
+
+/// Makes a synced file of 1s on `node`, then starts a write of 9s over both its
+/// sectors and waits forever, with a fault that fails the write when `failed`.
+async fn write_in_flight(node: node::Node, failed: bool) {
+    let (file, pool) = (create_synced(&node).await, pool());
+    until_crash(&node).await;
+    if failed {
+        node.fail_file(Path::new("a"), Operation::WriteAt);
+    }
+    hang(file.write_at(0, &[block(&pool, &[9; 1_024])])).await;
 }
 
 /// The sectors of the file of [`write_in_flight`] after `crash`.
@@ -323,6 +330,59 @@ fn a_write_that_a_fault_fails_leaves_no_bytes_at_a_crash() {
             (0..64).map(|seed| in_flight(seed, crash, true)).collect();
         assert_eq!(outcomes, BTreeSet::from([vec![1, 1]]), "{crash:?}");
     }
+}
+
+/// A run in which the power is cut with a sync in flight, after an unsynced write of
+/// 2s over the synced file `a` of 1s.
+fn sync_at_cut(seed: u64) -> (Sim, node::Node) {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, Crash::Power, |node| async move {
+        let file = create_synced(&node).await;
+        file.write_at(0, &[block(&pool(), &[2; 1_024])])
+            .await
+            .unwrap();
+        until_crash(&node).await;
+        hang(file.sync()).await;
+    });
+    (sim, node)
+}
+
+#[test]
+fn a_sync_in_flight_at_a_power_cut_has_no_effect() {
+    let outcomes: BTreeSet<Vec<u8>> = (0..64)
+        .map(|seed| {
+            let (mut sim, node) = sync_at_cut(seed);
+            sectors_of(&mut sim, &node)
+        })
+        .collect();
+    let all = BTreeSet::from([vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]]);
+    assert_eq!(outcomes, all);
+}
+
+#[test]
+fn a_power_cut_frees_a_file_that_a_call_in_flight_held() {
+    let (mut sim, node) = sync_at_cut(0);
+    let free = on(&mut sim, &node, |node| async move {
+        let files = node.files();
+        files.remove(Path::new("a")).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        files.free().await.unwrap()
+    });
+    assert_eq!(free, MIB);
+}
+
+#[test]
+fn a_sync_dir_in_flight_at_a_power_cut_has_no_effect() {
+    let (mut sim, node) = disk(0);
+    crash_after(&mut sim, &node, Crash::Power, |node| async move {
+        drop(create(&node, "a", 1_024).await);
+        until_crash(&node).await;
+        hang(node.files().sync_dir(Path::new(""))).await;
+    });
+    let names = on(&mut sim, &node, |node| async move {
+        node.files().list(Path::new("")).await.unwrap()
+    });
+    assert_eq!(names, Vec::<PathBuf>::new());
 }
 
 /// The digest of a run in which the power is cut during [`write_in_flight`].
@@ -397,6 +457,14 @@ fn a_crash_ends_only_the_threads_of_its_node() {
         before,
         "a-0 never polled again"
     );
+}
+
+#[test]
+#[should_panic(expected = "Node(0) belongs to another sim")]
+fn a_crash_of_a_node_of_another_sim_panics() {
+    let (_other, node) = disk(0);
+    let (mut sim, _own) = disk(0);
+    sim.crash(&node, Crash::Power);
 }
 
 /// Binds UDP port 5000 on the IPv4 address of `node`.
