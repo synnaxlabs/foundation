@@ -524,7 +524,9 @@ How to read this record:
   days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
   time as OS CLOCK BOUND says. An error over 36500 days fails only in a new measurement:
   `Measurement::new` gives `None`. The person decided on 2026-10-05 ("Ok that's fine"),
-  #225. `combine` uses each bound with its full growth, so a bound that grew to
+  #225. In an `Interval` from `Measurement::interval`, "unknown" is a half-width of
+  36500 days, and the true time can be outside it. Decided by the `time` builder
+  (#142). `combine` uses each bound with its full growth, so a bound that grew to
   "unknown" never cuts a known one. An exchange with an error over 36500 days fails with
   `Bound`, and an overlap whose readings allow one before drift gives `None`: a stopped
   bound stored as a measurement could miss the true offset. Decided by the `time`

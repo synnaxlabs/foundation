@@ -59,16 +59,17 @@ impl Measurement {
         capped(self.grown(now, drift))
     }
 
-    /// Mesh time at [`Measurement::at`]: `at` plus the offset, within the error. An
-    /// edge past the range of a stamp stops at the nearest stamp.
+    /// Mesh time at [`Measurement::at`]: `at` plus the offset, within the error. With
+    /// an error of 36500 days, the estimate is unknown and the true time can be outside
+    /// the interval. An edge past the range of a stamp stops at the nearest stamp, so
+    /// when mesh time is past that range, both edges are its end.
     #[must_use]
     pub fn interval(self) -> Interval {
         let time = i128::from(self.at.0) + i128::from(self.offset.nanos());
         let error = i128::from(self.error.nanos());
-        let stamp = |nanos| Stamp::from_nanos(saturated(nanos).nanos());
         Interval {
-            earliest: stamp(time - error),
-            latest: stamp(time + error),
+            earliest: Stamp::from_nanos(clamped(time - error)),
+            latest: Stamp::from_nanos(clamped(time + error)),
         }
     }
 
@@ -147,8 +148,13 @@ fn capped(nanos: i128) -> Span {
 
 /// `nanos` as a span, or the nearest span when it is past a span's range.
 fn saturated(nanos: i128) -> Span {
+    Span::from_nanos(clamped(nanos))
+}
+
+/// `nanos`, or the nearest `i64` when it is past that range.
+fn clamped(nanos: i128) -> i64 {
     let nanos = nanos.clamp(i64::MIN.into(), i64::MAX.into());
-    Span::from_nanos(i64::try_from(nanos).expect("invariant: clamped to i64"))
+    i64::try_from(nanos).expect("invariant: clamped to i64")
 }
 
 #[cfg(test)]
@@ -331,6 +337,14 @@ mod tests {
         }
 
         #[test]
+        fn is_100_years_each_way_when_unknown() {
+            let today = 1_791_158_400_000_000_000;
+            let widest = MAX_ERROR.nanos();
+            let unknown = interval(0, today, widest);
+            assert_eq!(unknown, stamps(today - widest, today + widest));
+        }
+
+        #[test]
         fn stops_at_the_latest_stamp() {
             let top = i64::MAX.unsigned_abs();
             assert_eq!(interval(top - 2, 0, 5), stamps(i64::MAX - 7, i64::MAX));
@@ -378,13 +392,17 @@ mod tests {
                     let Interval { earliest, latest } = m.interval();
                     let (low, high) = (earliest.nanos(), latest.nanos());
                     let time = i128::from(m.at().0) + i128::from(m.offset().nanos());
+                    let error = i128::from(m.error().nanos());
                     prop_assert!(low <= high);
                     if let Ok(time) = i64::try_from(time) {
                         prop_assert!(low <= time && time <= high);
                     }
-                    if low != i64::MIN && high != i64::MAX {
-                        let width = i128::from(high) - i128::from(low);
-                        prop_assert_eq!(width, 2 * i128::from(m.error().nanos()));
+                    let inside = |edge| edge != i64::MIN && edge != i64::MAX;
+                    if inside(low) {
+                        prop_assert_eq!(time - i128::from(low), error);
+                    }
+                    if inside(high) {
+                        prop_assert_eq!(i128::from(high) - time, error);
                     }
                 }
             }
