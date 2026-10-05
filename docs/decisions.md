@@ -386,6 +386,20 @@ How to read this record:
   the next create. The open reports the effective layout, callers bound a commit by
   it, and the node shows it in status. A new ring has the same block at `seq` 0 in
   both places, with the tail at offset 0 and a random chain value.
+- **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
+  write: the writer's key set with only that group present, its range, and its
+  encoded series. The home stores it, keeps it as the index's newest frame, and later
+  gives it to readers. B7, the log, the seq, and reader positions are per index.
+- **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
+  `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
+  of the index frame in entry order, then the frame's series bytes, little-endian.
+  `end` is as in FRAME LAYOUT. Kinds: scalar 0, array 1, list 2, string 3, bytes 4.
+  `n` is the array length or the list maximum, else 0. `element` is the scalar (bool
+  0, i8 1, i16 2, i32 3, i64 4, u8 5, u16 6, u32 7, u64 8, f32 9, f64 10, stamp 11,
+  span 12, uuid 13), else 0. The type is the writer's type, so a reader decodes with
+  it after an `apply` changes the channel's type (A15). The header is one pool block
+  and the series bytes are a view of the frame's block, so a write copies no series
+  byte. A slot or key set number is never stored.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
