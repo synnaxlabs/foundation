@@ -20,7 +20,7 @@ use std::ptr::NonNull;
 use std::slice;
 use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 
-pub use memory::{Heap, Memory};
+pub use memory::{Heap, Memory, Refused};
 use sync::{AtomicUsize, Track};
 
 /// Byte alignment of every block.
@@ -195,8 +195,8 @@ impl Pool {
     ///
     /// # Panics
     ///
-    /// If `memory` is shorter than [`Config::reservation`], or is not aligned to
-    /// [`ALIGN`].
+    /// If `memory` is shorter than [`Config::reservation`], is not aligned to
+    /// [`ALIGN`], or refuses to commit the 64 bytes of the pool's header.
     #[must_use]
     #[expect(clippy::needless_pass_by_value, reason = "settings move into a pool")]
     pub fn new(config: Config, memory: impl Memory + 'static) -> Self {
@@ -212,7 +212,9 @@ impl Pool {
             region.is_aligned(),
             "pool memory must be aligned to 64 bytes"
         );
-        memory.commit(0, HEADER);
+        let Ok(()) = memory.commit(0, HEADER) else {
+            panic!("pool memory refused to commit its {HEADER}-byte header");
+        };
         let first = Region {
             returned: AtomicUsize::new(NONE),
             owed: AtomicUsize::new(0),
@@ -244,7 +246,9 @@ impl Pool {
     ///
     /// - [`Error::TooLarge`] when no block of the pool holds `len` bytes. It never
     ///   succeeds later.
-    /// - [`Error::Exhausted`] when the budget has no room for the block now.
+    /// - [`Error::Exhausted`] when the budget has no room for the block now, or the
+    ///   system refused memory for it. The sizes it gave back to make room stay
+    ///   given back.
     pub fn alloc(&self, len: usize) -> Result<Unique, Error> {
         let index = class_of(len);
         if index >= self.classes.len() {
@@ -267,7 +271,12 @@ impl Pool {
                 });
             }
             let offset = self.span_start(index) + class.carved.get();
-            self.shared().memory.commit(offset, size);
+            if let Err(Refused) = self.shared().memory.commit(offset, size) {
+                return Err(Error::Exhausted {
+                    requested: len,
+                    available: 0,
+                });
+            }
             let carved = class.carved.get() + size;
             class.carved.set(carved);
             class.reached.set(class.reached.get().max(carved));
@@ -693,7 +702,8 @@ pub enum Error {
     Exhausted {
         /// Bytes asked for.
         requested: usize,
-        /// Bytes of the budget not committed. A block of `requested` bytes needs more.
+        /// Bytes the pool can commit now: the budget not committed, or 0 when the
+        /// system refused memory. A block of `requested` bytes needs more.
         available: usize,
     },
     /// No block of the pool is large enough. The request can never succeed.
@@ -729,6 +739,7 @@ impl std::error::Error for Error {}
 /// Pools over heap memory for the tests and the models.
 #[cfg(test)]
 mod fixture {
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -744,6 +755,8 @@ mod fixture {
     #[derive(Default)]
     pub(crate) struct Watch {
         pub(crate) drops: AtomicUsize,
+        /// The system has no memory: each `commit` refuses.
+        pub(crate) refusing: AtomicBool,
         calls: Mutex<Vec<Call>>,
     }
 
@@ -760,8 +773,8 @@ mod fixture {
 
     /// Heap memory that records its calls and counts its drops.
     pub(crate) struct Watched {
-        heap: Heap,
-        watch: Arc<Watch>,
+        pub(crate) heap: Heap,
+        pub(crate) watch: Arc<Watch>,
     }
 
     // SAFETY: each method is the one of `Heap`.
@@ -774,9 +787,12 @@ mod fixture {
             self.heap.len()
         }
 
-        fn commit(&self, offset: usize, len: usize) {
+        fn commit(&self, offset: usize, len: usize) -> Result<(), Refused> {
             self.watch.record(Call::Commit { offset, len });
-            self.heap.commit(offset, len);
+            if self.watch.refusing.load(Relaxed) {
+                return Err(Refused);
+            }
+            self.heap.commit(offset, len)
         }
 
         fn purge(&self, offset: usize, len: usize) {
@@ -827,20 +843,23 @@ mod fixture {
                 self.heap.len()
             }
 
-            fn commit(&self, offset: usize, len: usize) {
-                let mut pages = self.pages.lock().expect("no test panicked");
-                for page in offset / PAGE..(offset + len).div_ceil(PAGE) {
-                    pages[page] = true;
-                }
-                self.heap.commit(offset, len);
+            fn commit(&self, offset: usize, len: usize) -> Result<(), Refused> {
+                self.mark(offset / PAGE..(offset + len).div_ceil(PAGE), true);
+                self.heap.commit(offset, len)
             }
 
             fn purge(&self, offset: usize, len: usize) {
-                let mut pages = self.pages.lock().expect("no test panicked");
-                for page in offset.div_ceil(PAGE)..(offset + len) / PAGE {
-                    pages[page] = false;
-                }
+                self.mark(offset.div_ceil(PAGE)..(offset + len) / PAGE, false);
                 self.heap.purge(offset, len);
+            }
+        }
+
+        impl Paged {
+            fn mark(&self, pages: Range<usize>, resident: bool) {
+                let mut marks = self.pages.lock().expect("no test panicked");
+                for page in pages {
+                    marks[page] = resident;
+                }
             }
         }
 
@@ -908,7 +927,9 @@ mod tests {
             self.0.len() - 8
         }
 
-        fn commit(&self, _offset: usize, _len: usize) {}
+        fn commit(&self, _offset: usize, _len: usize) -> Result<(), Refused> {
+            Ok(())
+        }
 
         fn purge(&self, _offset: usize, _len: usize) {}
     }
@@ -1026,6 +1047,9 @@ mod tests {
     }
 
     mod new {
+        use std::sync::Arc;
+
+        use super::fixture::{Watch, Watched};
         use super::*;
 
         #[test]
@@ -1038,6 +1062,18 @@ mod tests {
         #[should_panic(expected = "pool memory must be aligned to 64 bytes")]
         fn panics_when_the_memory_is_misaligned() {
             let memory = Misaligned(Heap::new(256));
+            drop(Pool::new(Config { budget: 128 }, memory));
+        }
+
+        #[test]
+        #[should_panic(expected = "pool memory refused to commit its 64-byte header")]
+        fn panics_when_the_memory_refuses_the_header() {
+            let watch = Arc::new(Watch::default());
+            watch.refusing.store(true, Relaxed);
+            let memory = Watched {
+                heap: Heap::new(192),
+                watch,
+            };
             drop(Pool::new(Config { budget: 128 }, memory));
         }
     }
@@ -1117,6 +1153,23 @@ mod tests {
         }
 
         #[test]
+        fn fails_while_the_system_refuses_memory() {
+            let (pool, watch) = create_watched_pool(256);
+            watch.refusing.store(true, Relaxed);
+            let error = pool.alloc(10).expect_err("the system refuses memory");
+            assert_eq!(error, exhausted(10, 0));
+            assert_eq!(
+                error.to_string(),
+                "pool is full: asked for 10 bytes, 0 bytes free"
+            );
+            assert_eq!(pool.committed(), 0);
+            watch.refusing.store(false, Relaxed);
+            let block = pool.alloc(10).expect("the system has memory again");
+            assert_eq!(block.len(), 10);
+            assert_eq!(pool.committed(), 128);
+        }
+
+        #[test]
         fn fails_for_good_when_the_length_is_above_each_class() {
             let pool = create_pool(256);
             assert_eq!(pool.largest(), 192);
@@ -1172,6 +1225,41 @@ mod tests {
                     offset: 384,
                     len: 192
                 })
+            );
+            drop(block);
+        }
+
+        #[test]
+        fn keeps_its_counts_when_the_system_refuses_after_a_purge() {
+            let (pool, watch) = create_watched_pool(256);
+            drop(pool.alloc(64).expect("the budget has room"));
+            pool.reclaim();
+            watch.refusing.store(true, Relaxed);
+            let error = pool.alloc(128).expect_err("the system refuses memory");
+            assert_eq!(error, exhausted(128, 0));
+            assert_eq!(pool.committed(), 0, "the idle class went back first");
+            watch.refusing.store(false, Relaxed);
+            let block = pool.alloc(128).expect("the system has memory again");
+            assert_eq!(pool.committed(), 192);
+            let carve = Commit {
+                offset: 320,
+                len: 192,
+            };
+            assert_eq!(
+                watch.calls()[1..],
+                [
+                    Commit {
+                        offset: 64,
+                        len: 128
+                    },
+                    Purge {
+                        offset: 64,
+                        len: 128
+                    },
+                    carve,
+                    carve,
+                ],
+                "the refused carve leaves its class to start at the same offset"
             );
             drop(block);
         }
@@ -1440,19 +1528,26 @@ mod tests {
             #![proptest_config(cases())]
 
             /// Each byte of the budget that no size in use holds is room for a block,
-            /// and `committed` is the carved range of each size.
+            /// and `committed` is the carved range of each size. A refused commit
+            /// fails only an alloc that fits, and keeps both.
             #[test]
             fn serves_each_alloc_that_fits_in_the_room_idle_sizes_leave(
                 steps in prop::collection::vec(
-                    (0_usize..=1024, prop::option::of(0_usize..8)),
+                    (
+                        0_usize..=1024,
+                        prop::option::of(0_usize..8),
+                        prop::bool::weighted(0.2),
+                    ),
                     1..24,
                 ),
             ) {
                 const BUDGET: usize = 4096;
-                let pool = create_pool(BUDGET);
+                let (pool, watch) = create_watched_pool(BUDGET);
                 let mut blocks: Vec<(Unique, u8)> = Vec::new();
                 let mut lent = 0;
-                for ((len, dropped), fill) in steps.iter().copied().zip(1_u8..) {
+                for ((len, dropped, refusing), fill) in steps.iter().copied().zip(1_u8..)
+                {
+                    watch.refusing.store(refusing, Relaxed);
                     match pool.alloc(len) {
                         Ok(mut block) => {
                             block.fill(fill);
@@ -1468,9 +1563,13 @@ mod tests {
                                 .sum();
                             let room = BUDGET - held;
                             let need = footprint(len);
-                            prop_assert!(need > room, "{error} with {room} room");
-                            let available = BUDGET - pool.committed();
-                            prop_assert_eq!(error, exhausted(len, available));
+                            if need > room {
+                                let available = BUDGET - pool.committed();
+                                prop_assert_eq!(error, exhausted(len, available));
+                            } else {
+                                prop_assert!(refusing, "{error} with {room} room");
+                                prop_assert_eq!(error, exhausted(len, 0));
+                            }
                         }
                     }
                     let carved: usize =

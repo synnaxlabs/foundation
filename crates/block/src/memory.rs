@@ -17,7 +17,7 @@ use crate::ALIGN;
 ///
 /// - `base` and `len` give the same values on each call. The `len` bytes at `base`
 ///   belong to this value alone, at one address, until it drops.
-/// - When `commit` returns, each byte in its range is readable, writable, and
+/// - When `commit` returns `Ok`, each byte in its range is readable, writable, and
 ///   initialized. It stays so until a `purge` of that byte or the drop.
 /// - A `purge` may change the bytes in its range. It changes no other byte.
 #[expect(
@@ -32,11 +32,20 @@ pub unsafe trait Memory: Send {
     fn len(&self) -> usize;
 
     /// Makes `len` bytes at `offset` usable.
-    fn commit(&self, offset: usize, len: usize);
+    ///
+    /// # Errors
+    ///
+    /// [`Refused`] when the system has no memory for the range now. The range stays
+    /// unusable, and a later call may succeed.
+    fn commit(&self, offset: usize, len: usize) -> Result<(), Refused>;
 
     /// Lets the system take back the pages that lie fully in `len` bytes at `offset`.
     fn purge(&self, offset: usize, len: usize);
 }
+
+/// The system has no memory to commit a range now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Refused;
 
 /// Memory from the heap, committed in full from the start. It never gives pages back.
 /// It serves tests and simulation, where no OS mapping exists.
@@ -80,7 +89,9 @@ unsafe impl Memory for Heap {
         self.layout.size()
     }
 
-    fn commit(&self, _offset: usize, _len: usize) {}
+    fn commit(&self, _offset: usize, _len: usize) -> Result<(), Refused> {
+        Ok(())
+    }
 
     fn purge(&self, _offset: usize, _len: usize) {}
 }

@@ -498,7 +498,8 @@ How to read this record:
   its pages until the purge after idle. A class that a reader keeps partly in use
   keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
-  wait in a follow-up issue.
+  wait in a follow-up issue. When the system refuses to commit pages, the allocation
+  fails as on a full pool, with no count changed, and a later one may succeed (#475).
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
