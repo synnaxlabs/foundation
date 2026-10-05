@@ -1211,6 +1211,19 @@ How to read this record:
   hand-kept list of the 23; own tables generated from HCL's Unicode version; and
   `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
   `ID_Start` and `ID_Continue`.
+- **HCL REFERENCES (2026-10-05)** The reader reads a reference part by part, as HCL
+  reads a traversal: identifiers joined by `.`, with spaces around each `.` and new
+  lines inside `[` and `(`. A first part `true`, `false`, or `null` is a value, so
+  `true.x` is an index. After a `.`, a number is an index (`site_a.1` is `Form::Index`),
+  `*` is a splat, and any other token is a syntax error. A name with a segment that
+  starts with a digit or `-` (`plc.40001`) gets its own HCL form, such as
+  `plc["40001"]`, which HCL accepts (#536). Until then `write` refuses it. Lost: A3
+  segments that start with a letter or `_`, which shrinks the name model to fit one file
+  format. The person decided on 2026-10-05 ("a is fine"), #519. The coordinator ruled on
+  #363 that a file writes a reserved name (`site_a.@changes`) as a string; #536 decides
+  which reader turns that string into a name. Lost: a new `Expected` variant for a name
+  after `.`, a public change when the error already names what may come at the `.`.
+  #363.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
