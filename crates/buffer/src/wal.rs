@@ -655,7 +655,11 @@ mod tests {
             let block = 4096;
             let cases = [
                 ("an area of part blocks", 7 * block + 1, 4087),
-                ("a body under one entry table", 8 * block, 54),
+                (
+                    "a body under one entry table",
+                    8 * block,
+                    entry::table_len(1) - 1,
+                ),
                 ("an area under two records less a block", 2 * block, 4088),
                 ("a body over u32::MAX", u64::MAX - 4095, usize::MAX),
                 ("a record size over u64", u64::MAX - 4095, usize::MAX - 8),
@@ -668,7 +672,8 @@ mod tests {
 
         #[test]
         fn takes_a_body_of_one_entry_table() {
-            assert_eq!(Layout::new(4096, 55).map(|layout| layout.window), Ok(4096));
+            let window = Layout::new(4096, entry::table_len(1)).map(|l| l.window);
+            assert_eq!(window, Ok(4096));
         }
 
         #[test]

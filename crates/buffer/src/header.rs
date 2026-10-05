@@ -161,9 +161,8 @@ impl Header {
     }
 }
 
-/// Whether checkpoint `seq` comes after `than`, with the seq wrapped as
-/// [`Header::next`] wraps it. The two blocks hold consecutive checkpoints, so the
-/// difference is small and its sign orders them.
+/// Whether checkpoint `seq` comes after `than`. The two blocks hold consecutive
+/// checkpoints, so the sign of the wrapped difference orders them.
 fn later(seq: u64, than: u64) -> bool {
     seq.wrapping_sub(than).cast_signed() > 0
 }
@@ -329,11 +328,12 @@ mod tests {
         let unaligned = Error::Unaligned(Unaligned { offset: 4097 });
         let part = (8 * 4096u64 + 1).to_le_bytes();
         let off = 4097u64.to_le_bytes();
+        let small = u32::try_from(table_len(1) - 1).expect("a small size");
         let cases: [(&str, Patch<'_>, Error); 4] = [
             (
                 "a body under one entry table",
-                &[(18, &54u32.to_le_bytes())],
-                unfit(8 * 4096, 54),
+                &[(18, &small.to_le_bytes())],
+                unfit(8 * 4096, table_len(1) - 1),
             ),
             (
                 "an area of a part block",
@@ -358,28 +358,38 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_next_checkpoint_from_either_block() {
+        let old = header(8 * 4096, 4087, 0, 1, 4);
+        let new = old.next(Position::new(4096, 2).expect("aligned"));
+        assert_eq!((old.place(), new.place()), (0, 4096));
+        assert_eq!(Header::decode(&old.encode(), &new.encode()), Ok(new));
+        assert_eq!(Header::decode(&new.encode(), &old.encode()), Ok(new));
+    }
+
+    #[test]
     fn reads_the_checkpoint_after_the_last_seq() {
         let old = header(8 * 4096, 4087, 4096, 3, u64::MAX);
         let new = old.next(Position::new(8192, 4).expect("aligned"));
         assert_eq!((old.place(), new.place()), (4096, 0));
+        assert_eq!(Header::decode(&old.encode(), &new.encode()), Ok(new));
         assert_eq!(Header::decode(&new.encode(), &old.encode()), Ok(new));
     }
 
     proptest! {
-        /// Two seqs exactly `2^63` apart have no order, and consecutive checkpoints
-        /// are never that far apart.
+        /// The newer block is from 1 to `2^63 - 1` checkpoints after the older,
+        /// and most often the next one.
         #[test]
         fn reads_the_newer_valid_block(
-            newer in any_header(),
             older in any_header(),
+            tail in 0..64u64,
+            apart in prop_oneof![1..4u64, 1..(1u64 << 63)],
             swap in any::<bool>(),
         ) {
-            let apart = newer.seq.wrapping_sub(older.seq);
-            prop_assume!(apart != 0 && apart != 1 << 63);
-            let (newer, older) = if later(newer.seq, older.seq) {
-                (newer, older)
-            } else {
-                (older, newer)
+            let newer = Header {
+                tail: Position::new(tail * 4096, older.tail.chain())
+                    .expect("aligned"),
+                seq: older.seq.wrapping_add(apart),
+                ..older
             };
             let (a, b) = (newer.encode(), older.encode());
             let (first, second) = if swap { (&b, &a) } else { (&a, &b) };
