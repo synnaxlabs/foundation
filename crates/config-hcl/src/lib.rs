@@ -18,7 +18,9 @@ mod parse;
 use std::fmt;
 
 use document::Span;
-use types::name;
+use document::diagnostic::{Code, Diagnostic};
+use document::encoding::DEPTH_MAX;
+use types::name::{self, Name};
 
 pub use parse::read;
 
@@ -66,6 +68,8 @@ pub enum Error {
     Document(document::Error),
     /// A file with more bytes than a span can count.
     TooLarge {
+        /// An empty span at the start of the file.
+        span: Span,
         /// The length of the file.
         bytes: usize,
     },
@@ -80,57 +84,103 @@ impl Error {
             | Self::Name { span, .. }
             | Self::Number { span }
             | Self::Escape { span }
-            | Self::TooDeep { span } => span.start().offset,
+            | Self::TooDeep { span }
+            | Self::TooLarge { span, .. } => span.start().offset,
             Self::Document(document::Error::DuplicateKey { second, .. }) => {
                 second
                     .expect("invariant: the reader gives each key a span")
                     .start()
                     .offset
             }
-            Self::TooLarge { .. } => 0,
         }
     }
 }
 
+/// Gives each problem a diagnostic with a stable `hcl.*` code, or `document`'s own
+/// diagnostic for [`Error::Document`].
+impl From<&Error> for Diagnostic {
+    fn from(error: &Error) -> Self {
+        let (code, span, message, fix): (_, _, String, String) = match error {
+            Error::Syntax { span, expected } => (
+                SYNTAX,
+                span,
+                format!("the file needs {expected} here"),
+                "Write it here, or correct the text before it".into(),
+            ),
+            Error::Form { span, form } => {
+                let (code, message, fix) = form.explain();
+                (code, span, message.into(), fix.into())
+            }
+            Error::Name { span, .. } => (
+                NAME,
+                span,
+                "the reference is not a valid name".into(),
+                format!(
+                    "Use segments of ASCII letters, digits, `_`, and `-`, split by \
+                     dots, with at most {} bytes in all",
+                    Name::MAX_BYTES
+                ),
+            ),
+            Error::Number { span } => (
+                NUMBER,
+                span,
+                "the number is out of range".into(),
+                "Use an integer that fits in 128 bits, or a float that fits in 64 bits"
+                    .into(),
+            ),
+            Error::Escape { span } => (
+                ESCAPE,
+                span,
+                "the string has an escape that HCL does not have".into(),
+                "Use `\\n`, `\\r`, `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or \
+                 `\\UNNNNNNNN`"
+                    .into(),
+            ),
+            Error::TooDeep { span } => (
+                TOO_DEEP,
+                span,
+                format!("the file nests deeper than {DEPTH_MAX} levels"),
+                "Make it flatter".into(),
+            ),
+            Error::Document(error) => return Self::from(error),
+            Error::TooLarge { span, bytes } => (
+                TOO_LARGE,
+                span,
+                format!("the file has {bytes} bytes, and the limit is {}", u32::MAX),
+                "Split it into smaller files".into(),
+            ),
+        };
+        Self::new(code, Some(*span), message, fix)
+    }
+}
+
+const SYNTAX: Code = Code::new("hcl.syntax");
+const NULL: Code = Code::new("hcl.null");
+const TEMPLATE: Code = Code::new("hcl.template");
+const OPERATOR: Code = Code::new("hcl.operator");
+const CONDITIONAL: Code = Code::new("hcl.conditional");
+const FOR: Code = Code::new("hcl.for");
+const INDEX: Code = Code::new("hcl.index");
+const SPLAT: Code = Code::new("hcl.splat");
+const PARENTHESES: Code = Code::new("hcl.parentheses");
+const NAMESPACE: Code = Code::new("hcl.namespace");
+const EXPANSION: Code = Code::new("hcl.expansion");
+const NUMBER_KEY: Code = Code::new("hcl.number-key");
+const NAME: Code = Code::new("hcl.name");
+const NUMBER: Code = Code::new("hcl.number");
+const ESCAPE: Code = Code::new("hcl.escape");
+const TOO_DEEP: Code = Code::new("hcl.too-deep");
+const TOO_LARGE: Code = Code::new("hcl.too-large");
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Syntax { expected, .. } => {
-                write!(f, "the file needs {expected} here")
-            }
-            Self::Form { form, .. } => write!(f, "{form}"),
-            Self::Name { error, .. } => {
-                write!(f, "the reference is not a valid name: {error}")
-            }
-            Self::Number { .. } => write!(
-                f,
-                "the number is out of range. Use an integer that fits in 128 bits, \
-                 or a float that fits in 64 bits"
-            ),
-            Self::Escape { .. } => write!(
-                f,
-                "the string has an escape that HCL does not have. Use `\\n`, `\\r`, \
-                 `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or `\\UNNNNNNNN`"
-            ),
-            Self::TooDeep { .. } => write!(
-                f,
-                "the file nests deeper than {} levels. Make it flatter",
-                document::encoding::DEPTH_MAX
-            ),
-            Self::Document(error) => write!(f, "{error}"),
-            Self::TooLarge { bytes } => write!(
-                f,
-                "the file has {bytes} bytes, and the limit is {}. Split it into \
-                 smaller files",
-                u32::MAX
-            ),
-        }
+        fmt::Display::fmt(&Diagnostic::from(self), f)
     }
 }
 
 impl std::error::Error for Error {}
 
-/// An HCL form that a file cannot hold. Each message has its fix.
+/// An HCL form that a file cannot hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Form {
     /// `null`.
@@ -159,49 +209,67 @@ pub enum Form {
     NumberKey,
 }
 
-impl fmt::Display for Form {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Null => {
-                "`null` does not exist in Foundation files. Remove the attribute to \
-                 use its default"
-            }
-            Self::Template => {
-                "templates do not exist in Foundation files. Write `$${` or `%%{` for \
-                 the text `${` or `%{`"
-            }
-            Self::Operator => {
-                "operators do not exist in Foundation files. Write the result as a \
-                 value"
-            }
-            Self::Conditional => {
-                "conditionals do not exist in Foundation files. Write the value that \
-                 applies"
-            }
-            Self::For => {
-                "`for` expressions do not exist in Foundation files. Write each item"
-            }
-            Self::Index => {
-                "indexes and attribute access do not exist in Foundation files. Write \
-                 the value itself"
-            }
-            Self::Splat => "splats do not exist in Foundation files. Write each value",
-            Self::Parentheses => {
-                "parentheses do not exist in Foundation files. Remove them"
-            }
-            Self::Namespace => {
-                "function namespaces do not exist in Foundation files. Call the \
-                 function by its name only"
-            }
-            Self::Expansion => {
-                "argument expansion does not exist in Foundation files. Write each \
-                 argument"
-            }
-            Self::NumberKey => {
-                "number keys with a fraction, an exponent, or more than 154 digits do not \
-                 exist in Foundation files. Write the key as a quoted string"
-            }
-        })
+impl Form {
+    /// The code, the message, and the fix.
+    const fn explain(self) -> (Code, &'static str, &'static str) {
+        match self {
+            Self::Null => (
+                NULL,
+                "`null` does not exist in Foundation files",
+                "Remove the attribute to use its default",
+            ),
+            Self::Template => (
+                TEMPLATE,
+                "templates do not exist in Foundation files",
+                "Write `$${` or `%%{` for the text `${` or `%{`",
+            ),
+            Self::Operator => (
+                OPERATOR,
+                "operators do not exist in Foundation files",
+                "Write the result as a value",
+            ),
+            Self::Conditional => (
+                CONDITIONAL,
+                "conditionals do not exist in Foundation files",
+                "Write the value that applies",
+            ),
+            Self::For => (
+                FOR,
+                "`for` expressions do not exist in Foundation files",
+                "Write each item",
+            ),
+            Self::Index => (
+                INDEX,
+                "indexes and attribute access do not exist in Foundation files",
+                "Write the value itself",
+            ),
+            Self::Splat => (
+                SPLAT,
+                "splats do not exist in Foundation files",
+                "Write each value",
+            ),
+            Self::Parentheses => (
+                PARENTHESES,
+                "parentheses do not exist in Foundation files",
+                "Remove them",
+            ),
+            Self::Namespace => (
+                NAMESPACE,
+                "function namespaces do not exist in Foundation files",
+                "Call the function by its name only",
+            ),
+            Self::Expansion => (
+                EXPANSION,
+                "argument expansion does not exist in Foundation files",
+                "Write each argument",
+            ),
+            Self::NumberKey => (
+                NUMBER_KEY,
+                "number keys with a fraction, an exponent, or more than 154 \
+                 digits do not exist in Foundation files",
+                "Write the key as a quoted string",
+            ),
+        }
     }
 }
 
@@ -270,15 +338,23 @@ impl fmt::Display for Expected {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use document::diagnostic::Note;
     use document::{Position, Source};
 
-    fn span() -> Span {
+    fn span(offset: u32) -> Span {
         let at = Position {
-            offset: 0,
+            offset,
             line: 0,
-            column: 0,
+            column: offset,
         };
         Span::new(Source(0), at, at).unwrap()
+    }
+
+    fn check(error: &Error, code: &'static str, message: &str, fix: &str) {
+        let expected =
+            Diagnostic::new(Code::new(code), Some(span(7)), message.into(), fix.into());
+        assert_eq!(Diagnostic::from(error), expected, "{error:?}");
+        assert_eq!(error.to_string(), format!("{message}. {fix}"), "{error:?}");
     }
 
     #[test]
@@ -312,84 +388,165 @@ mod tests {
         ];
         for (expected, phrase) in cases {
             let error = Error::Syntax {
-                span: span(),
+                span: span(7),
                 expected,
             };
-            assert_eq!(error.to_string(), format!("the file needs {phrase} here"));
+            check(
+                &error,
+                "hcl.syntax",
+                &format!("the file needs {phrase} here"),
+                "Write it here, or correct the text before it",
+            );
+        }
+    }
+
+    const FORMS: [(Form, &str, &str, &str); 11] = [
+        (
+            Form::Null,
+            "hcl.null",
+            "`null` does not exist in Foundation files",
+            "Remove the attribute to use its default",
+        ),
+        (
+            Form::Template,
+            "hcl.template",
+            "templates do not exist in Foundation files",
+            "Write `$${` or `%%{` for the text `${` or `%{`",
+        ),
+        (
+            Form::Operator,
+            "hcl.operator",
+            "operators do not exist in Foundation files",
+            "Write the result as a value",
+        ),
+        (
+            Form::Conditional,
+            "hcl.conditional",
+            "conditionals do not exist in Foundation files",
+            "Write the value that applies",
+        ),
+        (
+            Form::For,
+            "hcl.for",
+            "`for` expressions do not exist in Foundation files",
+            "Write each item",
+        ),
+        (
+            Form::Index,
+            "hcl.index",
+            "indexes and attribute access do not exist in Foundation files",
+            "Write the value itself",
+        ),
+        (
+            Form::Splat,
+            "hcl.splat",
+            "splats do not exist in Foundation files",
+            "Write each value",
+        ),
+        (
+            Form::Parentheses,
+            "hcl.parentheses",
+            "parentheses do not exist in Foundation files",
+            "Remove them",
+        ),
+        (
+            Form::Namespace,
+            "hcl.namespace",
+            "function namespaces do not exist in Foundation files",
+            "Call the function by its name only",
+        ),
+        (
+            Form::Expansion,
+            "hcl.expansion",
+            "argument expansion does not exist in Foundation files",
+            "Write each argument",
+        ),
+        (
+            Form::NumberKey,
+            "hcl.number-key",
+            "number keys with a fraction, an exponent, or more than 154 digits do \
+             not exist in Foundation files",
+            "Write the key as a quoted string",
+        ),
+    ];
+
+    #[test]
+    fn each_form_has_its_code_and_fix() {
+        for (form, code, message, fix) in FORMS {
+            let error = Error::Form {
+                span: span(7),
+                form,
+            };
+            check(&error, code, message, fix);
         }
     }
 
     #[test]
-    fn each_form_has_its_fix() {
+    fn each_error_has_its_code_and_fix() {
         let cases = [
             (
-                Form::Null,
-                "`null` does not exist in Foundation files. Remove the attribute to \
-                 use its default",
+                Error::Name {
+                    span: span(7),
+                    error: "a.@".parse::<Name>().unwrap_err(),
+                },
+                "hcl.name",
+                "the reference is not a valid name".to_owned(),
+                "Use segments of ASCII letters, digits, `_`, and `-`, split by dots, \
+                 with at most 255 bytes in all",
             ),
             (
-                Form::Template,
-                "templates do not exist in Foundation files. Write `$${` or `%%{` for \
-                 the text `${` or `%{`",
+                Error::Number { span: span(7) },
+                "hcl.number",
+                "the number is out of range".to_owned(),
+                "Use an integer that fits in 128 bits, or a float that fits in 64 bits",
             ),
             (
-                Form::Operator,
-                "operators do not exist in Foundation files. Write the result as a \
-                 value",
+                Error::Escape { span: span(7) },
+                "hcl.escape",
+                "the string has an escape that HCL does not have".to_owned(),
+                "Use `\\n`, `\\r`, `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or `\\UNNNNNNNN`",
             ),
             (
-                Form::Conditional,
-                "conditionals do not exist in Foundation files. Write the value that \
-                 applies",
+                Error::TooDeep { span: span(7) },
+                "hcl.too-deep",
+                "the file nests deeper than 64 levels".to_owned(),
+                "Make it flatter",
             ),
             (
-                Form::For,
-                "`for` expressions do not exist in Foundation files. Write each item",
-            ),
-            (
-                Form::Index,
-                "indexes and attribute access do not exist in Foundation files. Write \
-                 the value itself",
-            ),
-            (
-                Form::Splat,
-                "splats do not exist in Foundation files. Write each value",
-            ),
-            (
-                Form::Parentheses,
-                "parentheses do not exist in Foundation files. Remove them",
-            ),
-            (
-                Form::Namespace,
-                "function namespaces do not exist in Foundation files. Call the \
-                 function by its name only",
-            ),
-            (
-                Form::Expansion,
-                "argument expansion does not exist in Foundation files. Write each \
-                 argument",
-            ),
-            (
-                Form::NumberKey,
-                "number keys with a fraction, an exponent, or more than 154 digits do not \
-                 exist in Foundation files. Write the key as a quoted string",
+                Error::TooLarge {
+                    span: span(7),
+                    bytes: 4_294_967_296,
+                },
+                "hcl.too-large",
+                "the file has 4294967296 bytes, and the limit is 4294967295".to_owned(),
+                "Split it into smaller files",
             ),
         ];
-        for (form, message) in cases {
-            let error = Error::Form { span: span(), form };
-            assert_eq!(error.to_string(), message);
+        for (error, code, message, fix) in cases {
+            check(&error, code, &message, fix);
         }
     }
 
     #[test]
-    fn too_large_names_the_limit() {
-        let error = Error::TooLarge {
-            bytes: 4_294_967_296,
+    fn a_document_error_keeps_its_own_diagnostic() {
+        let document = document::Error::DuplicateKey {
+            key: "a".into(),
+            first: Some(span(2)),
+            second: Some(span(7)),
         };
-        assert_eq!(
-            error.to_string(),
-            "the file has 4294967296 bytes, and the limit is 4294967295. Split it into \
-             smaller files"
+        let error = Error::Document(document.clone());
+        let mut expected = Diagnostic::new(
+            Code::new("document.duplicate-key"),
+            Some(span(7)),
+            "the key \"a\" repeats an earlier key".into(),
+            "Remove it, or give it a different key".into(),
         );
+        expected.notes.push(Note {
+            span: span(2),
+            text: "the earlier key".into(),
+        });
+        assert_eq!(Diagnostic::from(&error), expected);
+        assert_eq!(Diagnostic::from(&error), Diagnostic::from(&document));
+        assert_eq!(error.to_string(), document.to_string());
     }
 }

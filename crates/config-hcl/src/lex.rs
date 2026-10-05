@@ -68,7 +68,7 @@ impl<'a> Tokens<'a> {
     ///
     /// Returns [`Error::TooLarge`] when a span cannot count the bytes of `text`.
     pub(crate) fn new(source: Source, text: &'a str) -> Result<Self, Error> {
-        check_size(text.len())?;
+        check_size(source, text.len())?;
         let rest = text.strip_prefix('\u{feff}').unwrap_or(text);
         let offset = text
             .len()
@@ -543,12 +543,18 @@ fn dedent(text: &str) -> String {
 }
 
 /// Refuses a text whose offsets do not fit in a span.
-fn check_size(bytes: usize) -> Result<(), Error> {
+fn check_size(source: Source, bytes: usize) -> Result<(), Error> {
     if u32::try_from(bytes).is_ok() {
-        Ok(())
-    } else {
-        Err(Error::TooLarge { bytes })
+        return Ok(());
     }
+    let start = Position {
+        offset: 0,
+        line: 0,
+        column: 0,
+    };
+    let span =
+        Span::new(source, start, start).expect("invariant: an empty span is ordered");
+    Err(Error::TooLarge { span, bytes })
 }
 
 #[cfg(test)]
@@ -577,8 +583,17 @@ mod tests {
     #[test]
     fn refuses_a_text_past_the_largest_offset() {
         let bytes = usize::try_from(u32::MAX).unwrap();
-        assert_eq!(check_size(bytes), Ok(()));
+        assert_eq!(check_size(Source(3), bytes), Ok(()));
         let bytes = bytes.checked_add(1).unwrap();
-        assert_eq!(check_size(bytes), Err(Error::TooLarge { bytes }));
+        let start = Position {
+            offset: 0,
+            line: 0,
+            column: 0,
+        };
+        let span = Span::new(Source(3), start, start).unwrap();
+        assert_eq!(
+            check_size(Source(3), bytes),
+            Err(Error::TooLarge { span, bytes })
+        );
     }
 }

@@ -716,6 +716,22 @@ mod tests {
         Error::Syntax { span, expected }
     }
 
+    /// The text of a syntax error that needs `phrase`.
+    fn needs(phrase: impl std::fmt::Display) -> String {
+        format!(
+            "the file needs {phrase} here. Write it here, or correct the text before it"
+        )
+    }
+
+    /// The text of an error for `form`.
+    fn refused(form: Form) -> String {
+        Error::Form {
+            span: on(0, 0),
+            form,
+        }
+        .to_string()
+    }
+
     const TEMPLATE: &str = "templates do not exist in Foundation files. Write `$${` \
                             or `%%{` for the text `${` or `%{`";
     const NULL: &str = "`null` does not exist in Foundation files. Remove the \
@@ -1081,10 +1097,9 @@ c = "°C # not a comment"
     mod heredocs {
         use super::*;
 
-        const START: &str = "the file needs a marker, such as `EOT`, and a new line to \
-                             start the heredoc here";
-        const END: &str =
-            "the file needs the marker on a line of its own to end the heredoc here";
+        const START: &str =
+            "a marker, such as `EOT`, and a new line to start the heredoc";
+        const END: &str = "the marker on a line of its own to end the heredoc";
         /// Checks that `a = ` and then each heredoc reads as its string.
         fn reads(cases: &[(&str, &str)]) {
             for &(heredoc, expected) in cases {
@@ -1222,7 +1237,7 @@ c = "°C # not a comment"
             ];
             for (text, end) in cases {
                 let start = syntax(on(4, end), Expected::HeredocStart);
-                check(text, &[(start, START)]);
+                check(text, &[(start, &needs(START))]);
             }
         }
 
@@ -1238,7 +1253,7 @@ c = "°C # not a comment"
             ];
             for (text, end) in cases {
                 let open = syntax(span(at(4, 0, 4), end), Expected::HeredocEnd);
-                check(text, &[(open, END)]);
+                check(text, &[(open, &needs(END))]);
             }
         }
 
@@ -1278,21 +1293,21 @@ c = "°C # not a comment"
                 "b <<EOT\nx\nEOT\n {\n}\n",
                 &[(
                     syntax(span(at(2, 0, 2), at(13, 2, 3)), Expected::AttributeOrBlock),
-                    "the file needs `=`, a label, or `{` after the name here",
+                    &needs("`=`, a label, or `{` after the name"),
                 )],
             );
             check(
                 "b \"l\" <<EOT\nx\nEOT\n {\n}\n",
                 &[(
                     syntax(span(at(6, 0, 6), at(17, 2, 3)), Expected::BlockStart),
-                    "the file needs a label or `{` here",
+                    &needs("a label or `{`"),
                 )],
             );
             check(
                 "a = { <<EOT\nk\nEOT\n = 1 }\n",
                 &[(
                     syntax(span(at(6, 0, 6), at(17, 2, 3)), Expected::Key),
-                    "the file needs a key or `}` here",
+                    &needs("a key or `}`"),
                 )],
             );
         }
@@ -1303,7 +1318,7 @@ c = "°C # not a comment"
                 span,
                 form: Form::Operator,
             };
-            let operator_message = Form::Operator.to_string();
+            let operator_message = refused(Form::Operator);
             check(
                 "a = -<<EOT\nx\nEOT\n",
                 &[(operator(on(4, 5)), &operator_message)],
@@ -1364,9 +1379,9 @@ c = "°C # not a comment"
         const ESCAPE: &str = "the string has an escape that HCL does not have. \
                               Use `\\n`, `\\r`, `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or \
                               `\\UNNNNNNNN`";
-        const NAME: &str = "the reference is not a valid name: \"a.@\" has a segment \
-                            that is not valid: \"@\". Use letters, digits, `_`, and \
-                            `-`, separated by dots";
+        const NAME: &str = "the reference is not a valid name. Use segments of ASCII \
+                            letters, digits, `_`, and `-`, split by dots, with at \
+                            most 255 bytes in all";
         const NUMBER: &str = "the number is out of range. Use an integer that fits \
                               in 128 bits, or a float that fits in 64 bits";
         const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
@@ -1461,7 +1476,7 @@ c = "°C # not a comment"
                 ("a = { -x = 1 }\n", on(6, 7), Form::Operator),
             ];
             for (text, span, form) in cases {
-                let message = form.to_string();
+                let message = refused(form);
                 check(text, &[(Error::Form { span, form }, &message)]);
             }
         }
@@ -1494,7 +1509,7 @@ c = "°C # not a comment"
                 ("a = b[\n  *\n]\n", on(5, 6), Form::Splat),
             ];
             for (text, span, form) in cases {
-                let message = form.to_string();
+                let message = refused(form);
                 check(text, &[(Error::Form { span, form }, &message)]);
             }
         }
@@ -1509,7 +1524,7 @@ c = "°C # not a comment"
                 span: span(at(15, 1, 6), at(16, 1, 7)),
                 form: Form::Operator,
             };
-            let message = Form::Operator.to_string();
+            let message = refused(Form::Operator);
             check(
                 "a = null\nb = 1 + 2\n",
                 &[(null, NULL), (operator, &message)],
@@ -1518,7 +1533,7 @@ c = "°C # not a comment"
 
         #[test]
         fn refuses_a_number_key_that_hcl_rounds_and_reads_on() {
-            let message = Form::NumberKey.to_string();
+            let message = refused(Form::NumberKey);
             let digits = "9".repeat(155);
             let long = Error::Form {
                 span: on(6, 161),
@@ -1541,7 +1556,7 @@ c = "°C # not a comment"
 
         #[test]
         fn refuses_a_string_that_does_not_end() {
-            let quote = "the file needs `\"` to end the string here";
+            let quote = &needs("`\"` to end the string");
             check("s = \"abc", &[(syntax(on(4, 8), Expected::Quote), quote)]);
             check(
                 "s = \"ab\nc\"\n",
@@ -1555,7 +1570,7 @@ c = "°C # not a comment"
                 "a = 1 /* x",
                 &[(
                     syntax(on(6, 10), Expected::CommentEnd),
-                    "the file needs `*/` to end the comment here",
+                    &needs("`*/` to end the comment"),
                 )],
             );
         }
@@ -1605,7 +1620,7 @@ c = "°C # not a comment"
                 ("b 1 {}\n", on(2, 3), Expected::AttributeOrBlock),
             ];
             for (text, span, expected) in cases {
-                let message = format!("the file needs {expected} here");
+                let message = needs(expected);
                 check(text, &[(syntax(span, expected), &message)]);
             }
         }
@@ -1619,7 +1634,7 @@ c = "°C # not a comment"
                 ("a = f(]\n", on(6, 7), Expected::Value),
             ];
             for (text, span, expected) in cases {
-                let message = format!("the file needs {expected} here");
+                let message = needs(expected);
                 check(text, &[(syntax(span, expected), &message)]);
             }
         }
@@ -1627,7 +1642,7 @@ c = "°C # not a comment"
         #[test]
         fn keeps_reading_after_a_form() {
             let form = |span, form: Form| {
-                let message = form.to_string();
+                let message = refused(form);
                 (Error::Form { span, form }, message)
             };
             let null = |span| Error::Form {
@@ -1682,13 +1697,12 @@ c = "°C # not a comment"
 
             for (text, name) in [("r = a.\n", "a."), ("r = a..b\n", "a..b")] {
                 let error = name.parse::<Name>().unwrap_err();
-                let message = format!("the reference is not a valid name: {error}");
                 let end = u32::try_from(name.len()).unwrap() + 4;
                 let name = Error::Name {
                     span: on(4, end),
                     error,
                 };
-                check(text, &[(name, &message)]);
+                check(text, &[(name, NAME)]);
             }
 
             let long = "a".repeat(256);
@@ -1697,9 +1711,7 @@ c = "°C # not a comment"
                 span: on(4, 260),
                 error,
             };
-            let message = "the reference is not a valid name: a name or pattern is 256 \
-                           bytes long. The limit is 255 bytes";
-            check(&format!("r = {long}"), &[(name, message)]);
+            check(&format!("r = {long}"), &[(name, NAME)]);
         }
 
         #[test]
@@ -1769,7 +1781,7 @@ c = "°C # not a comment"
                 };
                 (Error::Document(error), REPEAT)
             };
-            let value = "the file needs a value here";
+            let value = &needs("a value");
             let second = span(at(6, 1, 0), at(7, 1, 1));
             let end = syntax(span(at(16, 2, 4), at(17, 3, 0)), Expected::Value);
             check(
@@ -1828,7 +1840,7 @@ c = "°C # not a comment"
                     (Error::Document(repeat), REPEAT),
                     (null, NULL),
                     (name, NAME),
-                    (value, "the file needs a value here"),
+                    (value, &needs("a value")),
                 ],
             );
 
