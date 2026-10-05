@@ -908,7 +908,11 @@ How to read this record:
   its own voter list votes and follows, but never campaigns while that configuration
   is committed. `step` does not check
   that a sender is a voter (a voter can learn late that a peer joined), so the caller
-  authenticates the sender and decides which nodes may send. When the term of the
+  authenticates the sender and decides which nodes may send. A node that may send can
+  stop a group for good with one message in term `u64::MAX`: each node writes that
+  term, and none can campaign. `raft` takes the term as it is, because no bound on a
+  term jump spares an honest node that was down. Decided on 2026-10-05 (#352 item 2).
+  When the term of the
   last entry is above `hard.term`, `Raft::new` starts at that term with no vote. The
   node sends nothing before its write, so no peer counted a vote or an answer that a
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no

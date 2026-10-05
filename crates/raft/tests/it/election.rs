@@ -3,9 +3,9 @@
 
 use proptest::prelude::*;
 use proptest::sample::Index;
-use raft::Role;
+use raft::{Body, Message, Position, Role, Term};
 
-use crate::network::{ELECTION, Network, run, run_of_many};
+use crate::network::{Action, ELECTION, Network, run, run_of_many};
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(CASES))]
@@ -74,6 +74,34 @@ proptest! {
         let elected: Vec<usize> = elected.map(|(at, _)| at).collect();
         prop_assert!(elected.len() == 1 && elected[0] != leader, "{elected:?}");
     }
+}
+
+// An accepted gap (#352): one message in the last term stops the group for good,
+// because each node writes that term and none can campaign past it.
+#[test]
+fn one_message_in_the_last_term_stops_the_group_for_good() {
+    let mut network = Network::new(&[Position::default(); 3], 0);
+    let agreed = network.settle(&[]).unwrap();
+    let follower = (agreed.0 + 1) % 3;
+    let reply = Message {
+        from: Network::key((agreed.0 + 2) % 3),
+        to: Network::key(follower),
+        term: Term(u64::MAX),
+        body: Body::HeartbeatReply,
+    };
+    network.nodes[follower].step(reply).unwrap();
+    for _ in 0..10 * ELECTION {
+        network.round();
+    }
+    for node in 0..3 {
+        network.apply(&Action::Restart { node });
+    }
+    for _ in 0..10 * ELECTION {
+        network.round();
+    }
+    let states = network.nodes.iter().map(|node| (node.role(), node.term()));
+    let states: Vec<_> = states.collect();
+    assert_eq!(states, [(Role::Follower, Term(u64::MAX)); 3]);
 }
 
 // Enough cases that each election-safety change tried in review fails a run.

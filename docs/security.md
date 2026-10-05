@@ -131,10 +131,13 @@ state on `main`.
   (#483).
 - `raft` counts a reply only from a voter. But it takes a higher term from any
   sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
-  #352 (a reply from a node that is not a voter makes the leader step down; one
-  message with term `u64::MAX` stops the group for good, because each node writes
-  that term to disk and none can campaign). #352 asks to change RAFT SURFACE for
-  replies.
+  #352 (a reply from a node that is not a voter makes the leader step down). #352
+  asks to change RAFT SURFACE for replies.
+- A node that may send to a group and lies can stop the group for good with one
+  message in term `u64::MAX`: each node writes that term to disk, and none can
+  campaign. Only the caller's check of the sender bounds who can (RAFT SURFACE). No
+  change in `raft`, by decision (#352 item 2): no bound on a term jump spares an
+  honest node that was down.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
