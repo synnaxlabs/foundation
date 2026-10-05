@@ -12,6 +12,7 @@ use rustls::pki_types::CertificateDer;
 use types::node::PublicKey;
 
 use super::Event;
+use super::stream::{Fault, Streams};
 use crate::{Code, Error, Peer, tls};
 
 /// Names one connection of an [`Endpoint`](super::Endpoint). No other connection of
@@ -30,6 +31,7 @@ pub(super) struct Connection {
     pub(super) inner: noq_proto::Connection,
     /// It is in the endpoint's queue of connections to poll for a datagram.
     pub(super) queued: bool,
+    pub(super) streams: Streams,
     state: State,
 }
 
@@ -64,14 +66,17 @@ impl Connection {
             key,
             inner,
             queued: false,
+            streams: Streams::default(),
             state,
         }
     }
 
-    /// Moves the connection's events to `endpoint` and to `events`. Returns whether
-    /// it drained: `endpoint` forgot it, and nothing more happens to it.
+    /// Moves the connection's events to `endpoint` and to `events` at `now`.
+    /// Returns whether it drained: `endpoint` forgot it, and nothing more happens to
+    /// it.
     pub(super) fn drive(
         &mut self,
+        now: Instant,
         endpoint: &mut noq_proto::Endpoint,
         events: &mut VecDeque<Event>,
     ) -> bool {
@@ -83,7 +88,7 @@ impl Connection {
                     self.inner.handle_event(event);
                 }
             } else if let Some(event) = self.inner.poll() {
-                events.extend(self.event(event));
+                self.event(now, event, events);
             } else {
                 break;
             }
@@ -95,8 +100,13 @@ impl Connection {
         drained
     }
 
-    /// What `event` means to the caller, if anything.
-    fn event(&mut self, event: noq_proto::Event) -> Option<Event> {
+    /// Queues in `events` what `event` means to the caller, if anything.
+    fn event(
+        &mut self,
+        now: Instant,
+        event: noq_proto::Event,
+        events: &mut VecDeque<Event>,
+    ) {
         let key = self.key;
         match event {
             noq_proto::Event::Connected => {
@@ -105,19 +115,30 @@ impl Connection {
                     "invariant: noq-proto connects a connection once, before it ends"
                 );
                 self.state = State::Open;
-                Some(Event::Connected {
-                    key,
-                    peer: self.peer(),
-                })
+                let peer = self.peer();
+                events.push_back(Event::Connected { key, peer });
             }
             noq_proto::Event::ConnectionLost { reason } => {
                 let expected = match mem::replace(&mut self.state, State::Ended) {
                     State::Dialing { expected } => Some(expected),
                     State::Open => None,
-                    State::Accepting | State::Ended => return None,
+                    State::Accepting | State::Ended => return,
                 };
                 let error = error(reason, expected);
-                Some(Event::Closed { key, error })
+                events.push_back(Event::Closed { key, error });
+            }
+            noq_proto::Event::Stream(event) if self.live() => {
+                assert!(
+                    matches!(self.state, State::Open),
+                    "invariant: noq-proto gives stream events only after it connects"
+                );
+                // A stream event repeats once for each frame, so the same one in a
+                // row merges.
+                match self.streams.event(&mut self.inner, key, &event) {
+                    Ok(Some(event)) if events.back() == Some(&event) => {}
+                    Ok(event) => events.extend(event),
+                    Err(Fault(reason)) => events.push_back(self.fault(now, reason)),
+                }
             }
             noq_proto::Event::HandshakeDataReady
             | noq_proto::Event::HandshakeConfirmed
@@ -125,7 +146,32 @@ impl Connection {
             | noq_proto::Event::DatagramReceived
             | noq_proto::Event::DatagramsUnblocked
             | noq_proto::Event::Path(_)
-            | noq_proto::Event::NatTraversal(_) => None,
+            | noq_proto::Event::NatTraversal(_) => {}
+        }
+    }
+
+    /// Whether the connection has not ended.
+    pub(super) fn live(&self) -> bool {
+        !matches!(self.state, State::Ended)
+    }
+
+    /// Closes the connection on a fault of the peer's, with code 2^32 and `reason`,
+    /// and gives its [`Event::Closed`] with [`Error::Broken`].
+    ///
+    /// # Panics
+    ///
+    /// When the connection is not open.
+    pub(super) fn fault(&mut self, now: Instant, reason: String) -> Event {
+        let state = mem::replace(&mut self.state, State::Ended);
+        assert!(
+            matches!(state, State::Open),
+            "invariant: a fault is found on an open connection"
+        );
+        let code = VarInt::from_u64(1 << 32).expect("invariant: 2^32 is a varint");
+        self.inner.close(now, code, Bytes::from(reason.clone()));
+        Event::Closed {
+            key: self.key,
+            error: Error::Broken { reason },
         }
     }
 

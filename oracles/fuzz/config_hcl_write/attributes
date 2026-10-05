@@ -1,0 +1,5 @@
+a = 1
+b = -2.5e3
+c = true
+d = "x\n\u00b0"
+e = null_ish

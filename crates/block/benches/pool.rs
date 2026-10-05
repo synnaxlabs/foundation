@@ -21,6 +21,35 @@ fn alloc_free(bencher: Bencher<'_, '_>) {
     bencher.bench_local(|| drop(pool.alloc(1000).expect("the budget has room")));
 }
 
+/// A fresh block each time, with room for it. A full pool is replaced.
+#[divan::bench]
+fn carve(bencher: Bencher<'_, '_>) {
+    const BUDGET: usize = (1 << 20) + 64;
+    let mut pool = create_pool(BUDGET);
+    let mut held = Vec::with_capacity(BUDGET / block::footprint(100) + 1);
+    bencher.bench_local(|| {
+        if let Ok(block) = pool.alloc(100) {
+            held.push(block);
+        } else {
+            held.clear();
+            pool = create_pool(BUDGET);
+            held.push(pool.alloc(100).expect("the budget has room"));
+        }
+    });
+}
+
+/// `alloc_under_pressure` with a pool of 52 size classes.
+#[divan::bench]
+fn alloc_under_pressure_at_one_mebibyte(bencher: Bencher<'_, '_>) {
+    let pool = create_pool(block::footprint(1 << 20));
+    let mut small = false;
+    bencher.bench_local(|| {
+        small = !small;
+        let len = if small { 100 } else { 1 << 20 };
+        drop(pool.alloc(len).expect("the budget has room"));
+    });
+}
+
 /// Blocks of two sizes in turn, with a budget for one: each alloc gives back the
 /// range of the other size and carves its own again.
 #[divan::bench]
