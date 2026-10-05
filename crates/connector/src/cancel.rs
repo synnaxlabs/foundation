@@ -459,6 +459,10 @@ mod tests {
                 let mut wait = Box::pin(token.wait());
                 let started = AtomicBool::new(false);
                 let first = std::thread::scope(|scope| {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "a test owns its threads"
+                    )]
                     scope.spawn(|| {
                         started.store(true, SeqCst);
                         token.cancel();
