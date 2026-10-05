@@ -207,7 +207,7 @@ Two cases skip the interface issue:
 
 The coordinator rents benchmark machines within BENCH SPEND (`docs/decisions.md`). The
 coordinator, `verify`, and `red-team` rent test machines within the test budget
-(`docs/decisions.md` 5.5): 1000 USD in total and at most 40 USD a day.
+(`docs/decisions.md` 5.5): 1000 USD in total and at most 100 USD a day.
 
 1. The builder asks on its issue: instance types, count, and hours.
 2. Before launch, the renting session posts the cap on the spend ledger issue (#15):

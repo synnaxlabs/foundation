@@ -1843,8 +1843,9 @@ engine, and performance work past the P1 targets.
 **Test budget (2026-10-05).** The person approved 1000 USD for AWS testing: a nightly
 chaos lab (about 2 USD a day), a spot simulation swarm of four c7i.8xlarge for four
 hours (about 9 USD), a nightly P1 benchmark on a c7i.metal-24xl (about 4 USD), and
-benchmarks for hot-path PRs (about 10 USD). Hard cap: 40 USD a day. Every launch goes
-in the ledger (#15) with its cap and an automatic shutdown first.
+benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day ("test budget
+should be capped at $100 a day"). Every launch goes in the ledger (#15) with its cap
+and an automatic shutdown first.
 
 ### 5.6 First phase
 
