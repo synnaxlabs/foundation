@@ -6,6 +6,9 @@ Authors, Apache License 2.0). `crates/raft` runs them as its `conformance` test.
 `[[test]]` entry in `crates/raft/Cargo.toml` is part of this oracle: to remove it is
 to weaken the oracle.
 
+`LICENSE` is the license of the etcd source. `election.rs` is a modified work: it
+is a port from Go to Rust, and the port rules below list the changes.
+
 ```sh
 cargo test -p raft --test conformance
 ```
