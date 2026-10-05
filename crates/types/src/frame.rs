@@ -68,7 +68,7 @@ impl Draft {
     /// # Panics
     ///
     /// If an entry is out of range or out of order, a present entry's index is absent,
-    /// or the frame would be longer than `u32::MAX` bytes.
+    /// or the frame's length overflows `usize`.
     pub fn new(
         pool: &block::Pool,
         set: &KeySet,
@@ -93,8 +93,7 @@ impl Draft {
             .try_fold(start, |end, &(_, len)| {
                 end.checked_next_multiple_of(SERIES_ALIGN)?.checked_add(len)
             })
-            .filter(|&len| u32::try_from(len).is_ok())
-            .expect("a frame is at most u32::MAX bytes");
+            .expect("the frame's length overflows usize");
         let mut block = pool.alloc(len)?;
         block[..start].fill(0);
         put(&mut block, 0, &set.key().get().to_le_bytes());
@@ -378,7 +377,7 @@ fn to_usize(n: u32) -> usize {
 }
 
 fn to_u32(n: usize) -> u32 {
-    u32::try_from(n).expect("invariant: a frame is at most u32::MAX bytes")
+    u32::try_from(n).expect("invariant: a pool block is at most u32::MAX bytes")
 }
 
 #[cfg(test)]
@@ -567,24 +566,23 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a frame is at most u32::MAX bytes")]
-    fn refuses_a_frame_longer_than_u32_max() {
+    fn returns_the_pool_error_past_u32_max_bytes() {
         let set = Interner::new().intern(&[Group {
             index: slot(1),
             data: &[],
         }]);
-        let series = [(0, usize::try_from(u32::MAX).unwrap() - 64 + 1)];
-        drop(Draft::new(
-            &pool(1 << 16),
-            &set,
-            Path::Live,
-            Form::Raw,
-            &series,
-        ));
+        let pool = pool(1 << 16);
+        let len = usize::try_from(u32::MAX).unwrap() + 1;
+        let result = Draft::new(&pool, &set, Path::Live, Form::Raw, &[(0, len - 64)]);
+        let expected = block::Error::TooLarge {
+            requested: len,
+            largest: pool.largest(),
+        };
+        assert_eq!(result.unwrap_err(), expected);
     }
 
     #[test]
-    #[should_panic(expected = "a frame is at most u32::MAX bytes")]
+    #[should_panic(expected = "the frame's length overflows usize")]
     fn refuses_series_whose_lengths_overflow() {
         let series = [(0, usize::MAX), (2, usize::MAX)];
         drop(Draft::new(
@@ -594,21 +592,6 @@ mod tests {
             Form::Raw,
             &series,
         ));
-    }
-
-    #[test]
-    fn holds_a_frame_of_exactly_u32_max_bytes_in_its_layout() {
-        let set = Interner::new().intern(&[Group {
-            index: slot(1),
-            data: &[],
-        }]);
-        let series = [(0, usize::try_from(u32::MAX).unwrap() - 64)];
-        let result = Draft::new(&pool(1 << 16), &set, Path::Live, Form::Raw, &series);
-        let expected = block::Error::TooLarge {
-            requested: usize::try_from(u32::MAX).unwrap(),
-            largest: pool(1 << 16).largest(),
-        };
-        assert_eq!(result.unwrap_err(), expected);
     }
 
     #[test]
