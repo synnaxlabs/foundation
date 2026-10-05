@@ -12,8 +12,8 @@ use rustls::crypto::{
     CryptoProvider, WebPkiSupportedAlgorithms, verify_tls13_signature,
 };
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
+use rustls::server::ParsedCertificate;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::server::{NoServerSessionStorage, ParsedCertificate};
 use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::time_provider::TimeProvider;
 use rustls::{
@@ -101,7 +101,7 @@ impl Tls {
         .with_client_cert_verifier(Arc::new(AnyKey { algorithms }))
         .with_cert_resolver(Arc::<SingleCertAndKey>::clone(&resolver));
         server.alpn_protocols = vec![ALPN.to_vec()];
-        server.session_storage = Arc::new(NoServerSessionStorage {});
+        server.send_tls13_tickets = 0;
         Self {
             provider,
             resolver,
@@ -272,7 +272,6 @@ mod tests {
 
     use proptest::prelude::*;
     use rustls::client::ResolvesClientCert;
-    use rustls::server::ServerSessionMemoryCache;
     use rustls::{CertificateError, Connection, HandshakeKind};
 
     use super::*;
@@ -397,7 +396,7 @@ mod tests {
             let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
             let client = Tls::new(&a).client(public(&b));
             let mut server = (*Tls::new(&b).server()).clone();
-            server.session_storage = ServerSessionMemoryCache::new(32);
+            server.send_tls13_tickets = 2;
             let server = Arc::new(server);
             for _ in 0..2 {
                 let peers = handshake(Arc::clone(&client), Arc::clone(&server));
