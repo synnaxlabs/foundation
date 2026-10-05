@@ -124,7 +124,8 @@ impl Interner {
     /// 2^32 key sets.
     pub fn intern(&mut self, slots: &mut Slots, groups: &[Group<'_>]) -> Arc<KeySet> {
         let stamp = Type::Scalar(Scalar::Stamp);
-        let mut channels = Vec::new();
+        let len = groups.iter().map(|group| group.data.len()).sum::<usize>();
+        let mut channels = Vec::with_capacity(len.strict_add(groups.len()));
         let mut indexes = Vec::with_capacity(groups.len());
         for group in groups {
             let index = slots.assign(group.index);

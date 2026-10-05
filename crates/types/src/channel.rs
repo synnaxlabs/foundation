@@ -85,8 +85,8 @@ impl Slot {
     }
 }
 
-/// The node's table of channel slots. `node` makes one and injects it into `hub` and
-/// `home`, which assign slots at session open.
+/// The node's table of channel slots. `node` makes one per node and injects it into
+/// `hub` and `home`.
 #[derive(Debug, Default)]
 pub struct Slots(hash::Map<Key, Slot>);
 
