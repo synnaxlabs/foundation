@@ -1,35 +1,26 @@
-//! Starting threads: shards that run tasks, and dedicated threads for blocking code.
+//! Dedicated threads for blocking code, such as vendor libraries, and the handle and
+//! errors of every thread that `env` starts.
 
 use std::fmt;
-use std::future::Future;
 use std::sync::Arc;
 
-use crate::Tasks;
 use crate::tasks::Task;
-
-/// A shard's main function as a driver receives it.
-///
-/// ```
-/// let main: env::threads::Main = Box::new(|_tasks| Box::pin(async {}));
-/// ```
-pub type Main = Box<dyn FnOnce(Tasks) -> Task + Send>;
 
 /// A dedicated thread's body as a driver receives it.
 ///
 /// ```
-/// let body: env::threads::Body = Box::new(|| {});
+/// let body: env::threads::Body = Box::new(|| Box::pin(async {}));
 /// ```
-pub type Body = Box<dyn FnOnce() + Send>;
+pub type Body = Box<dyn FnOnce() -> Task + Send>;
 
-/// Starts threads. Clones start threads in the same place.
+/// Starts dedicated threads. Clones start threads in the same place.
 ///
 /// ```
-/// use env::threads::{Config, Error, Handle};
+/// use env::threads::{Error, Handle};
 ///
-/// fn start(threads: &env::Threads) -> Result<Handle, Error> {
-///     let config = Config { name: "shard-0".into(), core: Some(0) };
-///     threads.shard(config, |tasks| async move {
-///         tasks.spawn(async {});
+/// fn start(threads: &env::threads::Threads) -> Result<Handle, Error> {
+///     threads.start("daqmx-dev1", || async {
+///         // Call the blocking vendor library here, and await between calls.
 ///     })
 /// }
 /// ```
@@ -37,74 +28,46 @@ pub type Body = Box<dyn FnOnce() + Send>;
 pub struct Threads(Arc<dyn Driver>);
 
 impl Threads {
-    /// Wraps a driver.
+    /// Wraps a driver from `os` or `sim`.
     ///
     /// ```
-    /// # use env::threads::{Body, Config, Error, Handle, Main};
-    /// # struct Refuse;
-    /// # impl env::threads::Driver for Refuse {
-    /// #     fn shard(&self, c: Config, _: Main) -> Result<Handle, Error> {
-    /// #         Err(Error::Start { name: c.name, reason: "refused".into() })
-    /// #     }
-    /// #     fn dedicated(&self, c: Config, _: Body) -> Result<Handle, Error> {
-    /// #         Err(Error::Start { name: c.name, reason: "refused".into() })
-    /// #     }
-    /// # }
-    /// let threads = env::Threads::new(Refuse);
+    /// fn wrap(driver: impl env::threads::Driver + 'static) -> env::threads::Threads {
+    ///     env::threads::Threads::new(driver)
+    /// }
     /// ```
     pub fn new(driver: impl Driver + 'static) -> Self {
         Self(Arc::new(driver))
     }
 
-    /// Starts a shard: a thread with its own task executor. `main` runs on the new
-    /// thread and gets the shard's [`Tasks`]. The thread ends when the future that
-    /// `main` returns completes.
+    /// Starts a thread named `name`. `body` runs on the new thread, and the thread
+    /// runs the future it returns to completion, then ends.
+    ///
+    /// The future may block the thread, for example in a vendor call. To wait for an
+    /// event, such as a value from a shard or a deadline, it awaits a future and never
+    /// parks the thread itself, so that simulation controls every wait. It cannot
+    /// spawn tasks.
     ///
     /// # Errors
     ///
-    /// [`Error::Start`] when the thread cannot start.
+    /// [`Error::Start`] when the thread or its executor cannot start, or when `name`
+    /// holds a NUL byte.
     ///
     /// ```
-    /// use env::threads::{Config, Error, Handle};
+    /// use env::threads::{Error, Handle};
     ///
-    /// fn start(threads: &env::Threads) -> Result<Handle, Error> {
-    ///     let config = Config { name: "shard-1".into(), core: Some(1) };
-    ///     threads.shard(config, |_tasks| async {})
+    /// fn start(threads: &env::threads::Threads) -> Result<Handle, Error> {
+    ///     threads.start("modbus-poll", || async {})
     /// }
     /// ```
-    pub fn shard<F>(
+    pub fn start<F>(
         &self,
-        config: Config,
-        main: impl FnOnce(Tasks) -> F + Send + 'static,
+        name: &str,
+        body: impl FnOnce() -> F + Send + 'static,
     ) -> Result<Handle, Error>
     where
         F: Future<Output = ()> + 'static,
     {
-        self.0
-            .shard(config, Box::new(|tasks| Box::pin(main(tasks))))
-    }
-
-    /// Starts a dedicated thread for blocking code, such as a vendor library. The
-    /// thread ends when `body` returns.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Start`] when the thread cannot start.
-    ///
-    /// ```
-    /// use env::threads::{Config, Error, Handle};
-    ///
-    /// fn start(threads: &env::Threads) -> Result<Handle, Error> {
-    ///     let config = Config { name: "daqmx-dev1".into(), core: None };
-    ///     threads.dedicated(config, || {})
-    /// }
-    /// ```
-    pub fn dedicated(
-        &self,
-        config: Config,
-        body: impl FnOnce() + Send + 'static,
-    ) -> Result<Handle, Error> {
-        self.0.dedicated(config, Box::new(body))
+        self.0.start(name, Box::new(|| Box::pin(body())))
     }
 }
 
@@ -114,20 +77,8 @@ impl fmt::Debug for Threads {
     }
 }
 
-/// Settings for one thread.
-///
-/// ```
-/// let config = env::threads::Config { name: "shard-2".into(), core: Some(2) };
-/// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config {
-    /// The thread's name, shown by the OS and in errors.
-    pub name: String,
-    /// The core to pin the thread to, or `None` to let the OS place it.
-    pub core: Option<usize>,
-}
-
-/// A started thread. Dropping it leaves the thread running.
+/// A started thread. Join every handle: a dropped handle leaves its thread running,
+/// and threads are never detached.
 ///
 /// ```
 /// fn stop(handle: env::threads::Handle) {
@@ -136,6 +87,7 @@ pub struct Config {
 ///     }
 /// }
 /// ```
+#[must_use = "a dropped Handle leaves its thread running"]
 pub struct Handle(Box<dyn FnOnce() -> Result<(), Error> + Send>);
 
 impl Handle {
@@ -149,11 +101,12 @@ impl Handle {
         Self(Box::new(join))
     }
 
-    /// Blocks until the thread ends. Never call it on a shard.
+    /// Blocks until the thread ends. Call it only on a thread that `env` did not
+    /// start, such as `node`'s main thread.
     ///
     /// # Errors
     ///
-    /// [`Error::Panicked`] when the thread panicked.
+    /// [`Error::Panicked`] when the thread or one of its tasks panicked.
     ///
     /// ```
     /// fn wait(handle: env::threads::Handle) -> Result<(), env::threads::Error> {
@@ -179,14 +132,21 @@ impl fmt::Debug for Handle {
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The thread could not start.
+    /// The thread or its executor could not start.
     Start {
         /// The thread's name.
         name: String,
         /// What the OS or the simulation reported.
         reason: String,
     },
-    /// The thread panicked.
+    /// A shard could not pin its thread to a core.
+    Pin {
+        /// The thread's name.
+        name: String,
+        /// The core it asked for.
+        core: usize,
+    },
+    /// The thread or one of its tasks panicked.
     Panicked {
         /// The thread's name.
         name: String,
@@ -199,6 +159,9 @@ impl fmt::Display for Error {
             Self::Start { name, reason } => {
                 write!(f, "cannot start thread {name}: {reason}")
             }
+            Self::Pin { name, core } => {
+                write!(f, "cannot pin thread {name} to core {core}")
+            }
             Self::Panicked { name } => write!(f, "thread {name} panicked"),
         }
     }
@@ -206,38 +169,21 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// What `os` and `sim` implement to run [`Threads`].
+/// What `os` and `sim` implement to run [`Threads`]. Only they implement it.
 ///
 /// ```
-/// use env::threads::{Body, Config, Error, Handle, Main};
-///
-/// /// Refuses every thread, for a node that must not start any.
-/// struct Refuse;
-///
-/// impl env::threads::Driver for Refuse {
-///     fn shard(&self, config: Config, _: Main) -> Result<Handle, Error> {
-///         Err(Error::Start { name: config.name, reason: "refused".into() })
-///     }
-///     fn dedicated(&self, config: Config, _: Body) -> Result<Handle, Error> {
-///         Err(Error::Start { name: config.name, reason: "refused".into() })
-///     }
+/// fn wrap(driver: impl env::threads::Driver + 'static) -> env::threads::Threads {
+///     env::threads::Threads::new(driver)
 /// }
 /// ```
 pub trait Driver: Send + Sync {
-    /// Starts a thread that runs a task executor, makes [`Tasks`] for it, and runs
-    /// `main(tasks)` on it until that future completes.
+    /// Starts a thread with an executor for one future, and runs `body()` on it to
+    /// completion, with the rules of [`Threads::start`].
     ///
     /// # Errors
     ///
-    /// [`Error::Start`] when the thread cannot start.
-    fn shard(&self, config: Config, main: Main) -> Result<Handle, Error>;
-
-    /// Starts a thread that runs `body`.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Start`] when the thread cannot start.
-    fn dedicated(&self, config: Config, body: Body) -> Result<Handle, Error>;
+    /// As [`Threads::start`].
+    fn start(&self, name: &str, body: Body) -> Result<Handle, Error>;
 }
 
 #[cfg(test)]
@@ -254,6 +200,15 @@ mod tests {
                 reason: "no core 3".into(),
             };
             assert_eq!(e.to_string(), "cannot start thread shard-3: no core 3");
+        }
+
+        #[test]
+        fn names_the_thread_and_the_core_when_it_cannot_pin() {
+            let e = Error::Pin {
+                name: "shard-3".into(),
+                core: 3,
+            };
+            assert_eq!(e.to_string(), "cannot pin thread shard-3 to core 3");
         }
 
         #[test]

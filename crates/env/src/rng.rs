@@ -4,12 +4,13 @@ use std::fmt;
 
 /// A random generator: xoshiro256++, seeded with `SplitMix64`. The same seed gives the
 /// same values on every platform. It is not cryptographic; keys and nonces come from
-/// [`Entropy::fill`](crate::Entropy::fill).
+/// [`Entropy::fill`](crate::entropy::Entropy::fill).
 ///
-/// Take one from [`Entropy::rng`](crate::Entropy::rng), so that simulation replays it.
+/// Take one from [`Entropy::rng`](crate::entropy::Entropy::rng), so that simulation
+/// replays it.
 ///
 /// ```
-/// let mut rng = env::Rng::from_seed(7);
+/// let mut rng = env::rng::Rng::from_seed(7);
 /// let jitter = rng.below(1_000);
 /// assert!(jitter < 1_000);
 /// ```
@@ -21,8 +22,8 @@ impl Rng {
     /// Makes the generator for `seed`.
     ///
     /// ```
-    /// let mut a = env::Rng::from_seed(1);
-    /// let mut b = env::Rng::from_seed(1);
+    /// let mut a = env::rng::Rng::from_seed(1);
+    /// let mut b = env::rng::Rng::from_seed(1);
     /// assert_eq!(a.next_u64(), b.next_u64());
     /// ```
     #[must_use]
@@ -41,7 +42,7 @@ impl Rng {
     /// Returns the next value, uniform over all of `u64`.
     ///
     /// ```
-    /// let mut rng = env::Rng::from_seed(0);
+    /// let mut rng = env::rng::Rng::from_seed(0);
     /// let value: u64 = rng.next_u64();
     /// ```
     pub fn next_u64(&mut self) -> u64 {
@@ -64,33 +65,30 @@ impl Rng {
     /// When `n` is zero.
     ///
     /// ```
-    /// let mut rng = env::Rng::from_seed(0);
+    /// let mut rng = env::rng::Rng::from_seed(0);
     /// let shard = rng.below(8);
     /// assert!(shard < 8);
     /// ```
     pub fn below(&mut self, n: u64) -> u64 {
         assert!(n > 0, "below(0) has no values");
         // Lemire's method: reject the products whose low half would bias the result.
-        let threshold = n.wrapping_neg() % n;
-        loop {
-            let m = u128::from(self.next_u64()) * u128::from(n);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "splits the product into halves"
-            )]
-            let (high, low) = ((m >> 64) as u64, m as u64);
-            if low >= threshold {
-                return high;
+        // A low half of at least `n` is never biased, so most calls skip the division.
+        let (mut high, mut low) = widening_mul(self.next_u64(), n);
+        if low < n {
+            let threshold = n.wrapping_neg() % n;
+            while low < threshold {
+                (high, low) = widening_mul(self.next_u64(), n);
             }
         }
+        high
     }
 
     /// Fills `bytes` with random values.
     ///
     /// ```
-    /// let mut rng = env::Rng::from_seed(0);
-    /// let mut nonce = [0u8; 12];
-    /// rng.fill(&mut nonce);
+    /// let mut rng = env::rng::Rng::from_seed(0);
+    /// let mut payload = [0u8; 64];
+    /// rng.fill(&mut payload);
     /// ```
     pub fn fill(&mut self, bytes: &mut [u8]) {
         for chunk in bytes.chunks_mut(8) {
@@ -104,6 +102,16 @@ impl fmt::Debug for Rng {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Rng").finish_non_exhaustive()
     }
+}
+
+/// The high and low halves of `a * b`.
+fn widening_mul(a: u64, b: u64) -> (u64, u64) {
+    let m = u128::from(a) * u128::from(b);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "splits the product into halves"
+    )]
+    ((m >> 64) as u64, m as u64)
 }
 
 /// One step of `SplitMix64`.
@@ -184,6 +192,24 @@ mod tests {
                     assert!(rng.below(n) < n, "seed {seed}, n {n}");
                 }
             }
+        }
+
+        // About half of all draws are rejected for this bound. The third value is
+        // the first that differs from a generator that rejects none.
+        #[test]
+        fn rejects_the_draws_that_would_bias_a_large_bound() {
+            let mut rng = Rng::from_seed(0);
+            let n = (1 << 63) + 1;
+            let values = [rng.below(n), rng.below(n), rng.below(n), rng.below(n)];
+            assert_eq!(
+                values,
+                [
+                    0x298b_aeb0_a485_91ef,
+                    0x30ed_379e_e1c0_6a83,
+                    0x6dba_4863_ad5a_8137,
+                    0x25be_d050_11c4_f87f,
+                ]
+            );
         }
 
         #[test]

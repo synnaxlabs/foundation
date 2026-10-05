@@ -3,13 +3,13 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::Rng;
+use crate::rng::Rng;
 
 /// The source of random bytes: the OS in production, the run's seed in simulation.
 /// Clones read the same source.
 ///
 /// ```
-/// fn jitter(entropy: &env::Entropy) -> u64 {
+/// fn jitter(entropy: &env::entropy::Entropy) -> u64 {
 ///     entropy.rng().below(100)
 /// }
 /// ```
@@ -17,14 +17,12 @@ use crate::Rng;
 pub struct Entropy(Arc<dyn Driver>);
 
 impl Entropy {
-    /// Wraps a driver.
+    /// Wraps a driver from `os` or `sim`.
     ///
     /// ```
-    /// # struct Zeros;
-    /// # impl env::entropy::Driver for Zeros {
-    /// #     fn fill(&self, bytes: &mut [u8]) { bytes.fill(0) }
-    /// # }
-    /// let entropy = env::Entropy::new(Zeros);
+    /// fn wrap(driver: impl env::entropy::Driver + 'static) -> env::entropy::Entropy {
+    ///     env::entropy::Entropy::new(driver)
+    /// }
     /// ```
     pub fn new(driver: impl Driver + 'static) -> Self {
         Self(Arc::new(driver))
@@ -34,7 +32,7 @@ impl Entropy {
     /// nonces.
     ///
     /// ```
-    /// fn key(entropy: &env::Entropy) -> [u8; 32] {
+    /// fn key(entropy: &env::entropy::Entropy) -> [u8; 32] {
     ///     let mut key = [0u8; 32];
     ///     entropy.fill(&mut key);
     ///     key
@@ -47,7 +45,7 @@ impl Entropy {
     /// Makes a generator seeded from the source.
     ///
     /// ```
-    /// fn shard(entropy: &env::Entropy, shards: u64) -> u64 {
+    /// fn shard(entropy: &env::entropy::Entropy, shards: u64) -> u64 {
     ///     entropy.rng().below(shards)
     /// }
     /// ```
@@ -65,18 +63,11 @@ impl fmt::Debug for Entropy {
     }
 }
 
-/// What `os` and `sim` implement to run an [`Entropy`].
+/// What `os` and `sim` implement to run an [`Entropy`]. Only they implement it.
 ///
 /// ```
-/// use std::sync::Mutex;
-///
-/// /// Bytes from a seeded generator, so a run replays.
-/// struct Seeded(Mutex<env::Rng>);
-///
-/// impl env::entropy::Driver for Seeded {
-///     fn fill(&self, bytes: &mut [u8]) {
-///         self.0.lock().expect("invariant: no panic while locked").fill(bytes);
-///     }
+/// fn wrap(driver: impl env::entropy::Driver + 'static) -> env::entropy::Entropy {
+///     env::entropy::Entropy::new(driver)
 /// }
 /// ```
 pub trait Driver: Send + Sync {
@@ -93,7 +84,7 @@ mod tests {
     impl Driver for Counting {
         fn fill(&self, bytes: &mut [u8]) {
             for (i, b) in bytes.iter_mut().enumerate() {
-                *b = u8::try_from(i).unwrap();
+                *b = u8::try_from(i).expect("fewer than 256 bytes");
             }
         }
     }

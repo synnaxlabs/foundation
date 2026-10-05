@@ -43,10 +43,11 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   the smallest item. Remove it when the compiler reports it unfulfilled (r16 15, 62).
 - `missing_docs` covers every public item. A public item is a contract.
 - `clippy::pedantic` is on.
-- `clippy.toml` forbids calls to the OS (clock, sleep, threads, environment,
-  arguments, files, sockets, `process::exit`), std `HashMap`, `HashSet`,
-  `RandomState`, and `thread_local!`. Only `os` implements the `env` seams and calls
-  the OS clock, files, randomness, and threads. `transport` owns its sockets. Only
+- `clippy.toml` forbids calls to the OS (clock, sleep, threads, environment, arguments,
+  files, sockets, `process::exit`), the std blocking waits (`park`, `Condvar`,
+  `Barrier`, `mpsc` receive), std `HashMap`, `HashSet`, `RandomState`, `thread_local!`,
+  and `env::wall::Wall::now` outside `clock`. Only `os` implements the `env` seams and
+  calls the OS clock, files, randomness, and threads. `transport` owns its sockets. Only
   `node` reads arguments and exits. Each such call carries one `#[expect]`.
 - A crate's `[lints]` table cannot add to the workspace set, so stricter lints go at
   the top of `lib.rs` as `#![deny(...)]` (r16 63):

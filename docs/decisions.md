@@ -624,15 +624,22 @@ How to read this record:
   only those gates use. The workspace toolchain stays stable. Decided by the advisor
   under the quality delegation.
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
-  trait that `os` and `sim` implement. `Clock`: monotonic time as
-  `types::time::Monotonic`, a `Sleep` future for shards that resets without an
-  allocation, and a blocking wait for dedicated threads. `Wall`: the OS wall clock,
-  which `node` hands only to `clock`. `Entropy`: random bytes from the OS, or from the
-  run's seed in simulation. `Threads`: shards and dedicated threads. `Tasks`: spawns
-  `!Send` tasks on the current shard. `Rng` is concrete (xoshiro256++ seeded from
-  `Entropy`), so simulation replays it. A shard is a thread plus an executor: on `os`,
-  a Tokio `LocalRuntime` whose `spawn_local` runs `Tasks`; on `sim`, the deterministic
-  scheduler. No other crate calls Tokio's timers or spawn. Files come later (S4).
+  trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
+  `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
+  `wall::Wall`: the OS wall clock, which only `clock` reads (a lint).
+  `entropy::Entropy`: random bytes from the OS, or from the run's seed in simulation.
+  `rng::Rng` is concrete (xoshiro256++ seeded from `Entropy`), so simulation replays it.
+  `shards::Shards`, held only by `node`: the core count, and one thread per shard with
+  its own executor. `tasks::Tasks`: spawns `!Send` tasks on the current shard.
+  `threads::Threads`: dedicated threads for blocking code. Each runs one future, and it
+  waits for an event only by awaiting a future, so simulation controls every wait. A
+  lint denies the std blocking waits (`park`, `Condvar`, `Barrier`, `mpsc` receive).
+  When a shard's main future completes, the shard drops its other tasks. A panic in any
+  task ends its shard, and its `Handle::join` returns `Error::Panicked`. A dropped
+  `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
+  Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
+  scheduler runs them. No other crate calls Tokio's timers or spawn. Files come later
+  (S4).
 
 ### 1.15 Releases
 
@@ -1304,7 +1311,11 @@ T2 calls that too strict, and C9c enforces oracles by visibility only. Resolutio
 People still own contracts and oracles; agents may edit them, and every weakening gets
 an adversarial reviewer and a person's merge.
 
-Count: 53 items (X1 to X53).
+**X54. "Clock".** It means `env::clock::Clock`, the monotonic clock of one node, and
+the `clock` crate, which serves mesh time. Resolution: in prose, "monotonic clock" for
+the `env` seam and "mesh clock" for what the `clock` crate serves.
+
+Count: 54 items (X1 to X54).
 
 ---
 

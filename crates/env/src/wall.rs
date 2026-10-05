@@ -11,7 +11,7 @@ use types::time::Stamp;
 /// the OS's guess at UTC: another program may step them in either direction.
 ///
 /// ```
-/// fn read(wall: &env::Wall) -> types::time::Stamp {
+/// fn read(wall: &env::wall::Wall) -> types::time::Stamp {
 ///     wall.now()
 /// }
 /// ```
@@ -19,24 +19,21 @@ use types::time::Stamp;
 pub struct Wall(Arc<dyn Driver>);
 
 impl Wall {
-    /// Wraps a driver.
+    /// Wraps a driver from `os` or `sim`.
     ///
     /// ```
-    /// # struct Epoch;
-    /// # impl env::wall::Driver for Epoch {
-    /// #     fn now(&self) -> types::time::Stamp { types::time::Stamp::EPOCH }
-    /// # }
-    /// let wall = env::Wall::new(Epoch);
-    /// assert_eq!(wall.now(), types::time::Stamp::EPOCH);
+    /// fn wrap(driver: impl env::wall::Driver + 'static) -> env::wall::Wall {
+    ///     env::wall::Wall::new(driver)
+    /// }
     /// ```
     pub fn new(driver: impl Driver + 'static) -> Self {
         Self(Arc::new(driver))
     }
 
-    /// Reads the OS wall clock.
+    /// Reads the OS wall clock. Only `clock` calls it; a lint denies it elsewhere.
     ///
     /// ```
-    /// fn read(wall: &env::Wall) -> i64 {
+    /// fn read(wall: &env::wall::Wall) -> i64 {
     ///     wall.now().nanos()
     /// }
     /// ```
@@ -52,18 +49,11 @@ impl fmt::Debug for Wall {
     }
 }
 
-/// What `os` and `sim` implement to run a [`Wall`].
+/// What `os` and `sim` implement to run a [`Wall`]. Only they implement it.
 ///
 /// ```
-/// use types::time::Stamp;
-///
-/// /// A wall clock stuck at the epoch.
-/// struct Epoch;
-///
-/// impl env::wall::Driver for Epoch {
-///     fn now(&self) -> Stamp {
-///         Stamp::EPOCH
-///     }
+/// fn wrap(driver: impl env::wall::Driver + 'static) -> env::wall::Wall {
+///     env::wall::Wall::new(driver)
 /// }
 /// ```
 pub trait Driver: Send + Sync {

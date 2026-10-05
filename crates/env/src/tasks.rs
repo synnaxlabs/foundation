@@ -1,7 +1,6 @@
 //! Spawning tasks on the current shard.
 
 use std::fmt;
-use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -16,13 +15,14 @@ pub type Task = Pin<Box<dyn Future<Output = ()>>>;
 /// not be `Send`, and the handle cannot leave the thread. Clones spawn on the same
 /// shard.
 ///
-/// A shard's main future receives it from [`Threads::shard`](crate::Threads::shard).
+/// A shard's main function receives it from
+/// [`Shards::start`](crate::shards::Shards::start).
 ///
 /// ```
 /// use std::cell::Cell;
 /// use std::rc::Rc;
 ///
-/// fn count(tasks: &env::Tasks) -> Rc<Cell<u32>> {
+/// fn count(tasks: &env::tasks::Tasks) -> Rc<Cell<u32>> {
 ///     let n = Rc::new(Cell::new(0));
 ///     let shared = Rc::clone(&n);
 ///     tasks.spawn(async move { shared.set(shared.get() + 1) });
@@ -33,25 +33,26 @@ pub type Task = Pin<Box<dyn Future<Output = ()>>>;
 pub struct Tasks(Rc<dyn Driver>);
 
 impl Tasks {
-    /// Wraps a driver.
+    /// Wraps a driver from `os` or `sim`.
     ///
     /// ```
-    /// # struct Discard;
-    /// # impl env::tasks::Driver for Discard {
-    /// #     fn spawn(&self, _: env::tasks::Task) {}
-    /// # }
-    /// let tasks = env::Tasks::new(Discard);
+    /// fn wrap(driver: impl env::tasks::Driver + 'static) -> env::tasks::Tasks {
+    ///     env::tasks::Tasks::new(driver)
+    /// }
     /// ```
     pub fn new(driver: impl Driver + 'static) -> Self {
         Self(Rc::new(driver))
     }
 
-    /// Starts `task` on this shard. It runs until its future completes; it has no
-    /// handle. Stop it through its own cancel token, and send results back through a
-    /// channel.
+    /// Starts `task` on this shard. It has no handle: stop it through its own cancel
+    /// token, and send results back through a channel.
+    ///
+    /// It runs until its future completes or the shard's main future completes,
+    /// which drops it. A panic in it ends the shard (see
+    /// [`Shards::start`](crate::shards::Shards::start)).
     ///
     /// ```
-    /// fn start(tasks: &env::Tasks) {
+    /// fn start(tasks: &env::tasks::Tasks) {
     ///     tasks.spawn(async {});
     /// }
     /// ```
@@ -66,21 +67,14 @@ impl fmt::Debug for Tasks {
     }
 }
 
-/// What `os` and `sim` implement to run [`Tasks`].
+/// What `os` and `sim` implement to run [`Tasks`]. Only they implement it.
 ///
 /// ```
-/// use std::cell::RefCell;
-///
-/// /// Keeps tasks for a test to poll by hand.
-/// struct Queue(RefCell<Vec<env::tasks::Task>>);
-///
-/// impl env::tasks::Driver for Queue {
-///     fn spawn(&self, task: env::tasks::Task) {
-///         self.0.borrow_mut().push(task);
-///     }
+/// fn wrap(driver: impl env::tasks::Driver + 'static) -> env::tasks::Tasks {
+///     env::tasks::Tasks::new(driver)
 /// }
 /// ```
 pub trait Driver {
-    /// Starts `task` on this driver's shard.
+    /// Starts `task` on this driver's shard, with the rules of [`Tasks::spawn`].
     fn spawn(&self, task: Task);
 }
