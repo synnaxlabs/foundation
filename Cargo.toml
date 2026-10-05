@@ -90,6 +90,9 @@ redundant_test_prefix = "warn"
 doc_paragraphs_missing_punctuation = "warn"
 wildcard_dependencies = "deny"
 
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 overflow-checks = true
 panic = "abort"

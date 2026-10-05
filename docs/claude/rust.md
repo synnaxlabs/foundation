@@ -33,6 +33,8 @@ cargo bench -p <crate>
   `debug = "line-tables-only"` (r16 34).
 - Never override `debug-assertions` or `overflow-checks` in the `dev` or `test`
   profile (r16 33).
+- `dev` and `test` also keep only line tables, to save disk. For a debugger, set
+  `debug = true` in your own build, never in the committed `Cargo.toml`.
 
 ## Lints
 
