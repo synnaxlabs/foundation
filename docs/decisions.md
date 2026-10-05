@@ -346,6 +346,12 @@ How to read this record:
   core. The diode carrier is UDP, Noise K, RaptorQ, seq, and codec keyframes: best
   effort with recorded gaps; commands, Raft, and clock exchange cannot cross it.
 - **A4 (wire part)** Each connection swaps keys for short numbers.
+- **STREAM DISPATCH (2026-10-04)** `transport` is blind to protocols. The first
+  message of each stream, and each datagram, starts with a header from `wire` that
+  names the protocol (`clock`, `mesh`, `replica`, `blob`, `hub`). `node` holds the
+  table from protocol to handler and runs one accept loop per session. A protocol
+  that the table does not know comes from a peer, so the loop resets that stream with
+  a code and goes on. Decided by the coordinator (network's review of #53).
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
 
