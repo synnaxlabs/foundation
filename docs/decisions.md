@@ -965,18 +965,24 @@ How to read this record:
   campaigns: the entry may be truncated, and a removed leader that lost its lead before
   the leave reached a peer is the only node that can win the election that commits it.
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
-  files `log-0`, `log-1`, and so on of one directory. One write of `raft` is one
-  record: an 8-byte check (the first bytes of `types::digest::Digest::of` of the rest),
-  the format version (1, C9d), the record's number, the body length, and the body.
-  The body holds the hard state, when it changed, and the entries, so one sync makes
-  both durable; two slots for the hard state lost, because they need a second sync
-  and a second torn-write rule. A later record replaces the entries from its first
-  index. A file is 1 MiB, or the length of its first record when that is more, and a
-  record that does not fit starts the next file. At a restart the first place with no
-  good record is the end of the log, which a power cut can leave. A bad record with a
-  good later record after it is `Error::Corrupt`, and the node does not start. Nothing
-  trims the log until snapshots (#253). `mesh` depends on `block` for the blocks of
-  its file calls. Decided by `consensus`.
+  files `log-0`, `log-1`, and so on of one directory; any other file there is
+  `Error::Stray`. One write of `raft` is one record: a header, then the body. The header
+  is an 8-byte check of the rest of the header (the first bytes of
+  `types::digest::Digest::of`), the format version (1, C9d), the record's number, the
+  body length, and an 8-byte check of the body. The body holds the hard state, when it
+  changed, and the entries, so one sync makes both durable; two slots for the hard state
+  lost, because they need a second sync and a second torn-write rule. A later record
+  replaces the entries from its first index. A file is 1 MiB, or the length of its first
+  record when that is more, and a record that does not fit starts the next file. A
+  header never crosses a `SECTOR`: a record whose header would cross one starts at the
+  next sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a
+  header is whole or absent. At a restart, zeros where a record should start, or a good
+  header with a torn body, are the end of the log. Anything else, or a record after a
+  torn one, is `Error::Corrupt`, and the node does not start. Open zeroes the bytes
+  after the end, so a torn record leaves nothing that a later open reads as a header.
+  One check over the whole record lost: a damaged length then reads as a torn end, and
+  the log drops the good records after it. Nothing trims the log until snapshots (#253).
+  `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
