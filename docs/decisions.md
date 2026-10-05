@@ -750,6 +750,27 @@ How to read this record:
   integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
+- **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
+  Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
+  span, a message, a fix, and notes (other places that explain it). The span is `None`
+  only for a Document with no spans; a problem with a whole file has an empty span at
+  the start of the file. The message and the fix have no final period, and each
+  producer's tests pin both. A code is `<producer>.<problem>`: each part is lower-case
+  ASCII letters and digits, starts with a letter, and may join words with single `-`
+  (`hcl.syntax`, `document.duplicate-key`). The producer is a name it owns: the syntax
+  of a front end, a core crate, or a kind. No two producers share a name. A producer
+  declares each code as a `const` item, so a bad code fails the build. A code never
+  changes between releases. Each producer maps its own errors with `From<&Error>`
+  beside them, so `config`, `ops`, and `node` never match a producer's variants.
+  `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new` breaks
+  no producer. No severity field: the warnings in K2 and R13-10 belong to plan output.
+  `ops` operation error codes use `Code` too, so the grammar has one home. A code
+  crosses the wire as text, and no reader makes a `Code` from it. Lost: a `Diagnose`
+  trait behind `Box<dyn>` (not `Clone`, and a fix is optional); number codes (a
+  central registry, and unreadable); one span only (the first producer has two
+  places). Codes go into `oracles/conformance/document/` at the first stable release;
+  the person decided on 2026-10-05 ("At the first release"). Decided by the `config`
+  builder; approved by the coordinator (#137).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -1130,6 +1151,7 @@ Storage classes used in the table:
 | Subscription | The selector of a reader session, kept live in `hub` against `mesh` watches | The reader | `hub` | `hub` |
 | Effective settings | Memory: a per-node cache of `spec::resolve` results | `mesh` | `home`, `transport`, `clock`, supervisor | `mesh` |
 | Document | Memory: made by a front end from files, or by SDK code | Front ends | `config`, kinds | `document` (X21) |
+| Diagnostic | Memory: made from a producer's error | Front ends, kinds, `document` | `config`, `ops` (text, `--json`, MCP) | `document` (DIAGNOSTICS) |
 | Selector | A value inside policies, readers, connectors, and access | Files, sessions | Every matcher | `types` (one matcher) |
 | Plan | A JSON artifact with stable change kinds | `ops plan` | `ops apply` (commits exactly it) | `config`, `ops` |
 
