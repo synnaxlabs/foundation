@@ -91,9 +91,7 @@ dependencies = [
 name = "buffer"
 version = "0.0.0"
 dependencies = [
- "counting",
  "crc32c",
- "divan",
  "proptest",
 ]
 
