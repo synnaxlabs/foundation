@@ -22,6 +22,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut parser = Parser {
         tokens,
         token,
+        bracketed: false,
         errors: Vec::new(),
         len: text.len(),
     };
@@ -51,6 +52,9 @@ struct Parser<'a> {
     tokens: Tokens<'a>,
     /// The next token, not yet taken.
     token: Token<'a>,
+    /// Inside `[` or `(`, where HCL skips new lines, so `take` never returns one.
+    /// Only [`Parser::enclosed`] sets it.
+    bracketed: bool,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
     /// The length of the text in bytes. Each token but the last has one or more, so
@@ -184,9 +188,6 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let value = self.term(depth)?;
-        if ends == Ends::Comma {
-            self.skip_newlines()?;
-        }
         if let Some(form) = self.trailing_form() {
             self.refuse(form, ends)?;
             return Ok(None);
@@ -196,8 +197,11 @@ impl<'a> Parser<'a> {
 
     /// Reads a value that starts with no HCL form.
     fn term(&mut self, depth: usize) -> Result<Option<Value>, Error> {
-        if self.token.kind == lex::Kind::End {
-            return Err(self.syntax(Expected::Value));
+        match self.token.kind {
+            lex::Kind::End => return Err(self.syntax(Expected::Value)),
+            lex::Kind::OpenBracket => return self.list(depth).map(Some),
+            lex::Kind::OpenBrace => return self.object(depth).map(Some),
+            _ => {}
         }
         let token = self.take()?;
         let kind = match token.kind {
@@ -212,8 +216,6 @@ impl<'a> Parser<'a> {
             lex::Kind::String(text) | lex::Kind::Heredoc(text) => {
                 value::Kind::String(text)
             }
-            lex::Kind::OpenBracket => return self.list(&token, depth).map(Some),
-            lex::Kind::OpenBrace => return self.object(&token, depth).map(Some),
             _ => {
                 return Err(Error::Syntax {
                     span: token.span,
@@ -363,40 +365,66 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn list(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
-        self.refuse_for()?;
-        let (items, close) =
-            self.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)?;
+    fn list(&mut self, depth: usize) -> Result<Value, Error> {
+        let depth = enter(depth).ok_or(Error::TooDeep {
+            span: self.token.span,
+        })?;
+        let (items, span) = self.enclosed(true, |parser| {
+            parser.refuse_for()?;
+            parser.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)
+        })?;
         Ok(Value {
             kind: value::Kind::List(items),
-            span: Some(join(open.span, close.span)),
+            span: Some(span),
         })
     }
 
-    fn object(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
-        let mut attributes = Vec::new();
-        let close = self.entries(&mut attributes, depth);
-        let map = self.map(attributes);
+    fn object(&mut self, depth: usize) -> Result<Value, Error> {
+        let depth = enter(depth).ok_or(Error::TooDeep {
+            span: self.token.span,
+        })?;
+        let (map, span) = self.enclosed(false, |parser| {
+            let mut attributes = Vec::new();
+            let entries = parser.entries(&mut attributes, depth);
+            let map = parser.map(attributes);
+            entries.map(|()| map)
+        })?;
         Ok(Value {
             kind: value::Kind::Map(map),
-            span: Some(join(open.span, close?.span)),
+            span: Some(span),
         })
     }
 
-    /// Reads the entries of an object after its `{`, and returns the `}`.
+    /// Takes the open bracket, reads the inside with `inner` up to the close, and
+    /// takes the close. Inside, `take` skips new lines when `bracketed`. Returns what
+    /// `inner` read and the span from the open to the close.
+    fn enclosed<T>(
+        &mut self,
+        bracketed: bool,
+        inner: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<(T, Span), Error> {
+        // The mode changes before each bracket is taken, because `take` reads the
+        // token after it.
+        let outer = std::mem::replace(&mut self.bracketed, bracketed);
+        let open = self.take()?;
+        let inside = inner(self)?;
+        self.bracketed = outer;
+        let close = self.take()?;
+        Ok((inside, join(open.span, close.span)))
+    }
+
+    /// Reads the entries of an object after its `{`, and leaves the `}`.
     fn entries(
         &mut self,
         attributes: &mut Vec<Attribute>,
         depth: usize,
-    ) -> Result<Token<'a>, Error> {
+    ) -> Result<(), Error> {
         self.refuse_for()?;
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
             self.skip_newlines()?;
             match self.token.kind {
-                lex::Kind::CloseBrace => return self.take(),
+                lex::Kind::CloseBrace => return Ok(()),
                 _ => {
                     if let Some(form) = self.leading_form() {
                         self.refuse(form, Ends::Line)?;
@@ -421,7 +449,7 @@ impl<'a> Parser<'a> {
                 lex::Kind::Comma | lex::Kind::Newline => {
                     self.take()?;
                 }
-                lex::Kind::CloseBrace => return self.take(),
+                lex::Kind::CloseBrace => return Ok(()),
                 _ => return Err(self.syntax(Expected::ObjectEnd)),
             }
         }
@@ -464,40 +492,39 @@ impl<'a> Parser<'a> {
         let depth = enter(depth).ok_or(Error::TooDeep {
             span: function.span,
         })?;
-        self.take()?;
-        let (arguments, close) =
-            self.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)?;
+        let (arguments, span) = self.enclosed(true, |parser| {
+            parser.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)
+        })?;
         Ok(Value {
             kind: value::Kind::Call(Call {
                 function: function.text.into(),
                 function_span: Some(function.span),
                 arguments,
             }),
-            span: Some(join(function.span, close.span)),
+            span: Some(join(function.span, span)),
         })
     }
 
-    /// Reads values split by `,` up to `close`, and returns them and the `close`
-    /// token. Any other token after a value is `expected`.
+    /// Reads values split by `,` up to `close`, and leaves the `close`. Any other
+    /// token after a value is `expected`.
     fn values(
         &mut self,
         close: &lex::Kind,
         expected: Expected,
         depth: usize,
-    ) -> Result<(Vec<Value>, Token<'a>), Error> {
+    ) -> Result<Vec<Value>, Error> {
         let mut values = Vec::new();
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
-            self.skip_newlines()?;
             if self.token.kind == *close {
-                return Ok((values, self.take()?));
+                return Ok(values);
             }
             values.extend(self.value(depth, Ends::Comma)?);
             match &self.token.kind {
                 lex::Kind::Comma => {
                     self.take()?;
                 }
-                kind if kind == close => return Ok((values, self.take()?)),
+                kind if kind == close => return Ok(values),
                 _ => return Err(self.syntax(expected)),
             }
         }
@@ -550,7 +577,11 @@ impl<'a> Parser<'a> {
             "invariant: no rule takes the end, at {:?}",
             self.token.span
         );
-        let next = self.tokens.next();
+        let next = if self.bracketed {
+            self.tokens.next_past_lines()
+        } else {
+            self.tokens.next()
+        };
         Ok(std::mem::replace(&mut self.token, next))
     }
 
@@ -955,6 +986,41 @@ c = "°C # not a comment"
                 ("b", call("null", Vec::new())),
             ]);
             assert_eq!(ok("a = true(1)\nb = null()\n"), expected);
+        }
+
+        #[test]
+        fn reads_past_new_lines_inside_brackets_as_hcl_does() {
+            let list = |items: Vec<value::Kind>| {
+                value::Kind::List(items.into_iter().map(value).collect())
+            };
+            let f = |argument| {
+                value::Kind::Call(Call {
+                    function: "f".into(),
+                    function_span: None,
+                    arguments: vec![value(argument)],
+                })
+            };
+            let cases = [
+                ("a = [-\n5]\n", list(vec![integer(-5)])),
+                ("a = [-\n\n5]\n", list(vec![integer(-5)])),
+                ("a = [-\n# c\n5]\n", list(vec![integer(-5)])),
+                ("a = f(-\n5)\n", f(integer(-5))),
+                ("a = [f\n(1)]\n", list(vec![f(integer(1))])),
+                (
+                    "a = { k = [-\n5] }\n",
+                    value::Kind::Map(map(vec![("k", list(vec![integer(-5)]))])),
+                ),
+                (
+                    "a = [{ k = 1 }\n, 2]\n",
+                    list(vec![
+                        value::Kind::Map(map(vec![("k", integer(1))])),
+                        integer(2),
+                    ]),
+                ),
+            ];
+            for (text, expected) in cases {
+                assert_eq!(ok(text), attributes(vec![("a", expected)]), "{text:?}");
+            }
         }
     }
 
@@ -1618,6 +1684,7 @@ c = "°C # not a comment"
                 ("a = ?\n", on(4, 5), Expected::Value),
                 ("a = .5\n", on(4, 5), Expected::Value),
                 ("a = -\n7\n", on(4, 5), Expected::Value),
+                ("a = [{ k = -\n7 }]\n", on(11, 12), Expected::Value),
                 ("a = 1\rb = 2\n", on(5, 6), Expected::Newline),
                 ("a = 1ex\n", on(5, 7), Expected::Newline),
                 ("a = 1 b = 2\n", on(6, 7), Expected::Newline),
