@@ -68,8 +68,9 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when `config.idle` is not positive, or `config.window_bytes`
-    /// is below `config.message_bytes_max`.
+    /// [`Error::Config`] when `config.idle` is not positive, `config.window_bytes` is
+    /// below `config.message_bytes_max`, or `config.message_bytes_max` is over
+    /// `config.pool.largest()`.
     ///
     /// ```
     /// use transport::{Config, Error, Transport};
@@ -172,7 +173,8 @@ pub struct Config {
     /// The node's key. Peers authenticate the node by its public key.
     pub private_key: PrivateKey,
     /// The largest message this node accepts on a stream. Peers exchange their limits
-    /// in the handshake, and each sender checks the peer's.
+    /// in the handshake, and each sender checks the peer's. Must be at most
+    /// `pool.largest()`, since each message lands in one block.
     pub message_bytes_max: usize,
     /// The most bytes in flight per session in each direction: sent and not yet
     /// acknowledged, or received and not yet taken. It bounds the memory of a session.
