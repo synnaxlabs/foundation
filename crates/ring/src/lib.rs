@@ -326,9 +326,9 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "ring capacity 17592186044416 is too large")]
+        #[should_panic(expected = "ring capacity 1125899906842624 is too large")]
         fn panics_when_the_slots_do_not_fit_in_memory() {
-            drop(new::<[u64; 1024]>(config(1 << 44)));
+            drop(new::<[u64; 1024]>(config(1 << 50)));
         }
     }
 
