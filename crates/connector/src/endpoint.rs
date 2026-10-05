@@ -186,9 +186,11 @@ impl<K: Ord, S, T> Drop for Lease<K, S, T> {
             *slot = Slot::Busy(Vec::new());
         }
         drop(slots);
+        let _free = Free {
+            slots: &self.slots,
+            key: Some(&self.key),
+        };
         drop(endpoint);
-        let busy = lock(&self.slots).remove(&self.key);
-        wake(busy);
     }
 }
 
@@ -200,7 +202,8 @@ impl<K: Ord + fmt::Debug, S, T> fmt::Debug for Lease<K, S, T> {
     }
 }
 
-/// Frees the busy slot of an open that failed or was dropped, and wakes its waiters.
+/// Frees a busy slot and wakes its waiters: after a close, even one that panicked, or
+/// after an open that failed or was dropped.
 struct Free<'a, K: Ord, S, T> {
     slots: &'a Slots<K, S, T>,
     /// `None` after the open succeeded.
@@ -599,6 +602,34 @@ mod tests {
         assert!(unwound.is_err(), "the compare panics");
         drop(lease);
         assert_eq!(closes.load(Relaxed), 1);
+        assert_eq!(format!("{ports:?}"), "{}");
+    }
+
+    /// An endpoint whose first close panics.
+    struct Bomb(bool);
+
+    impl Drop for Bomb {
+        fn drop(&mut self) {
+            assert!(!self.0, "the close failed");
+        }
+    }
+
+    #[test]
+    fn opens_again_after_a_close_that_panicked() {
+        let ports = Registry::<u8, (), Bomb>::new();
+        let open = |(): &()| future::ready(Ok(Bomb(true)));
+        let lease = block_on(ports.acquire(0, (), open)).expect("opens");
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(lease);
+        }));
+        assert!(unwound.is_err(), "the close panics through the drop");
+        let open = |(): &()| future::ready(Ok(Bomb(false)));
+        let mut cx = std::task::Context::from_waker(Waker::noop());
+        let mut again = std::pin::pin!(ports.acquire(0, (), open));
+        let Poll::Ready(again) = again.as_mut().poll(&mut cx) else {
+            panic!("the acquire after the close waits forever: {ports:?}");
+        };
+        drop(again.expect("opens again"));
         assert_eq!(format!("{ports:?}"), "{}");
     }
 
