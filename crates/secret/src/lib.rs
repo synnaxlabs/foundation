@@ -12,8 +12,7 @@ pub mod store;
 pub struct Value(Zeroizing<Vec<u8>>);
 
 impl Value {
-    /// Takes the bytes of a secret. The value keeps `bytes` as it is, so no copy of
-    /// the secret stays behind in a freed buffer.
+    /// Takes the bytes of a secret without a copy.
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(Zeroizing::new(bytes))
