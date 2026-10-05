@@ -657,9 +657,3 @@ fn disruptive_follower_prevote() {
     network.check(2, Role::Follower, 2);
     network.check(3, Role::Follower, 2);
 }
-
-#[cfg(loom)]
-#[test]
-fn deliberate_break_under_loom() {
-    panic!("deliberate break: a loom test under oracles/");
-}
