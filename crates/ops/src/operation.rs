@@ -35,13 +35,22 @@ pub(crate) const TABLE: &[Spec] = &[
 ];
 
 #[derive(Parser)]
-#[command(name = "foundation")]
+#[command(name = "foundation", about = "Run Foundation operations")]
 struct Cli {
     /// Print the output or the error as JSON.
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
-    request: Request,
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    #[command(flatten)]
+    Run(Request),
+    /// Answer MCP messages on standard input, one JSON-RPC message per line, until it
+    /// closes.
+    Mcp,
 }
 
 /// The input of each operation. Clap and serde both name a variant in kebab case.
@@ -78,6 +87,7 @@ pub(crate) struct Reference {
 pub(crate) enum Parsed {
     Run(Request),
     Help(String),
+    Serve,
 }
 
 /// The command tree, with each operation's summary from `TABLE`.
@@ -91,7 +101,10 @@ pub(crate) fn command() -> clap::Command {
 pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, Error> {
     match command().try_get_matches_from(args) {
         Ok(matches) => Cli::from_arg_matches(&matches)
-            .map(|cli| Parsed::Run(cli.request))
+            .map(|cli| match cli.command {
+                Command::Run(request) => Parsed::Run(request),
+                Command::Mcp => Parsed::Serve,
+            })
             .map_err(|e| from_clap(&e)),
         Err(e)
             if matches!(
@@ -123,7 +136,12 @@ pub(crate) fn read(
 /// line would suggest.
 fn unknown(name: &str) -> Error {
     match parse(&["foundation".into(), name.into()]) {
-        Err(error @ Error::Unknown { .. }) => error,
+        // The command line also suggests `mcp`, which is not an operation.
+        Err(Error::Unknown { name, closest }) => Error::Unknown {
+            name,
+            closest: closest
+                .filter(|closest| TABLE.iter().any(|spec| spec.name == closest)),
+        },
         _ => Error::Unknown {
             name: name.to_owned(),
             closest: None,
