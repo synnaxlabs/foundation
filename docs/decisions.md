@@ -1071,6 +1071,13 @@ How to read this record:
   hand-kept list of the 23; own tables generated from HCL's Unicode version; and
   `unicode-id-start`, a second table crate that follows the changes JavaScript makes to
   `ID_Start` and `ID_Continue`.
+- **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
+  the verdict of a pinned HCL version: accepted or refused. A test checks that `read`
+  accepts exactly the accepted texts, and that the output of `write` for each is
+  accepted too. A small Go program next to the texts makes the verdicts and records
+  the HCL version. A person runs it by hand when the texts change; CI does not run it
+  and needs no Go. It is the only Go code in the repo. The person decided on
+  2026-10-05 ("Yeah that's fine", #460).
 - **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
   a new Document. Each attribute and block that keeps its value and its place keeps its
   bytes, comments, and blank lines. A changed value and a changed block on one line
