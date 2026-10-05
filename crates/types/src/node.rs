@@ -32,9 +32,42 @@ impl fmt::Display for Key {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PublicKey(pub [u8; 32]);
 
+impl fmt::Display for PublicKey {
+    /// Writes the key as 64 lowercase hex digits.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
+/// A node's Ed25519 private key. Its `Debug` never writes the key, and it has no
+/// `Display` and no equality, so a log line or a timing difference cannot show it.
+#[derive(Clone)]
+pub struct PrivateKey(pub [u8; 32]);
+
+impl fmt::Debug for PrivateKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PrivateKey(..)")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displays_a_public_key_as_hex() {
+        let mut bytes = [0xab; 32];
+        bytes[0] = 0x01;
+        let text = PublicKey(bytes).to_string();
+        assert_eq!(text.len(), 64);
+        assert_eq!(&text[..6], "01abab");
+    }
+
+    #[test]
+    fn hides_a_private_key_in_debug() {
+        let text = format!("{:?}", PrivateKey([0xcd; 32]));
+        assert_eq!(text, "PrivateKey(..)");
+    }
 
     #[test]
     fn displays_as_a_hyphenated_uuid() {

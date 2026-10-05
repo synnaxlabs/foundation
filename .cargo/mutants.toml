@@ -1,0 +1,8 @@
+# Mutants that no test can catch, each with the reason.
+exclude_re = [
+  # `main` reads the arguments and calls a task. Each task has its own tests.
+  'xtask/src/main\.rs:.*(replace main ->| in main$)',
+  # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
+  # break in that job shows that it fails.
+  'xtask/src/miri\.rs:.*(replace run ->| in run$)',
+]
