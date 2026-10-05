@@ -131,7 +131,8 @@ Labels:
 
 Each builder files the issues for its own crates from `docs/decisions.md` and the RFC
 phases, with the `owner:` and `crate:` labels. The coordinator files only issues that
-cross crates or owners. No two open tasks own the same crate.
+cross crates or owners. One task is in progress per crate. A builder may file the
+next issue for a crate early, labeled `blocked` with a link to the open one.
 
 ## Pull requests
 
@@ -156,8 +157,9 @@ Builders never edit another crate's public surface. To change one:
 
 1. Open an issue labeled `interface` with the proposed signature and the reason.
    Message the coordinator with the link.
-2. The coordinator decides. A change inside the locked decisions becomes a small PR
-   from the coordinator. A change to a locked decision, a contract, or an oracle goes
+2. The coordinator decides. A change inside the locked decisions becomes a small PR:
+   from the owner when no other crate uses the surface yet, else from the
+   coordinator. A change to a locked decision, a contract, or an oracle goes
    to the person first.
 3. After the merge, the coordinator messages the owner of every crate that uses the
    changed surface. Each one rebases.
