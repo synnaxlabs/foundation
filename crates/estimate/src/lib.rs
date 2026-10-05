@@ -3,7 +3,7 @@
 //!
 //! Each time source gives [`Measurement`]s. A [`Filter`] keeps the recent ones of one
 //! source, and [`combine`] intersects the best of each source into one estimate. An
-//! [`Overlap`] keeps what every measurement of one device clock allows. The crate never
+//! [`Overlap`] keeps what every reading of one device clock allows. The crate never
 //! knows what a source is, and it reads no clock: the caller passes the local time.
 
 #![deny(clippy::wildcard_enum_match_arm)]
@@ -36,7 +36,7 @@ pub use overlap::Overlap;
 pub enum Error {
     /// An error bound is negative or more than 36500 days.
     Bound {
-        /// The error bound.
+        /// The error bound, or the largest span when the bound is wider.
         error: Span,
     },
     /// A drift rate is more than 10%.
@@ -62,6 +62,8 @@ pub enum Error {
         /// The most sources whose bounds share an offset.
         agreeing: usize,
     },
+    /// An [`Overlap`] has no low edge or no high edge.
+    Open,
 }
 
 impl fmt::Display for Error {
@@ -88,6 +90,7 @@ impl fmt::Display for Error {
                 f,
                 "no majority of time sources agree: at most {agreeing} of {sources}"
             ),
+            Self::Open => f.write_str("overlap has no low edge or no high edge"),
         }
     }
 }
