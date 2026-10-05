@@ -63,6 +63,9 @@ pub fn decode(bytes: &[u8]) -> Result<Document, Error> {
         len: bytes.len(),
     };
     let [version] = reader.chunk()?;
+    if version > VERSION {
+        return Err(Error::Newer { found: version });
+    }
     if version != VERSION {
         return Err(Error::Version { found: version });
     }
@@ -95,7 +98,12 @@ impl std::error::Error for TooDeep {}
 /// bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The bytes have a format version that this build cannot read.
+    /// The bytes have a format version newer than this build reads.
+    Newer {
+        /// The version in the bytes.
+        found: u8,
+    },
+    /// The bytes have a format version that does not exist.
     Version {
         /// The version in the bytes.
         found: u8,
@@ -153,7 +161,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Version { found } if *found > VERSION => write!(
+            Self::Newer { found } => write!(
                 f,
                 "the document has format version {found}, and this node reads only \
                  version {VERSION}. Upgrade the node"
@@ -759,7 +767,7 @@ mod tests {
         fn refuses_a_newer_version() {
             check(
                 &[2],
-                &Error::Version { found: 2 },
+                &Error::Newer { found: 2 },
                 "the document has format version 2, and this node reads only version \
                  1. Upgrade the node",
             );

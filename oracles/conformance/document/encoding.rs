@@ -185,7 +185,9 @@ fn one(value: &[u8]) -> Vec<u8> {
 #[test]
 fn refuses_another_version() {
     let bytes = [&[2][..], &count(0), &count(0)].concat();
-    assert_eq!(decode(&bytes), Err(Error::Version { found: 2 }));
+    assert_eq!(decode(&bytes), Err(Error::Newer { found: 2 }));
+    let bytes = [&[0][..], &count(0), &count(0)].concat();
+    assert_eq!(decode(&bytes), Err(Error::Version { found: 0 }));
 }
 
 #[test]
