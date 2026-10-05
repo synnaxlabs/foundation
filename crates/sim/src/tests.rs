@@ -1,5 +1,7 @@
 //! Tests of a simulated run through the `env` handles that production code gets.
 
+mod net;
+
 use std::collections::BTreeSet;
 use std::future::pending;
 use std::pin::Pin;
@@ -44,6 +46,7 @@ fn sim(seed: u64) -> Sim {
     Sim::new(Config {
         seed,
         steps_max: 10_000,
+        ..Config::default()
     })
 }
 
@@ -304,6 +307,7 @@ fn a_run_stops_past_the_step_limit() {
     let mut sim = Sim::new(Config {
         seed: 0,
         steps_max: 100,
+        ..Config::default()
     });
     let node = sim.node(node::Config::default());
     let _handle = node.shards().start(shard("shard-0"), |_| async {
@@ -570,7 +574,9 @@ fn debug_names_the_config_and_the_node() {
     let node = sim.node(node::Config::default());
     assert_eq!(
         format!("{sim:?}"),
-        "Sim { config: Config { seed: 0, steps_max: 10000 }, .. }"
+        "Sim { config: Config { seed: 0, steps_max: 10000, link: Config { \
+         delay: Span(250000), jitter: Span(0), loss: 0.0, duplication: 0.0, \
+         mtu: 1500 } }, .. }"
     );
     assert_eq!(format!("{node:?}"), "Node(0)");
 }

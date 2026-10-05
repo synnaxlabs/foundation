@@ -1,5 +1,7 @@
 //! The `env` drivers of a simulated node.
 
+mod net;
+
 use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -49,7 +51,7 @@ impl env::clock::Driver for Node {
 
     fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
         let mut state = lock(&self.shared);
-        let on = state.current();
+        let on = state.current().map(|(_, node)| node);
         let key = state.key();
         drop(state);
         let Some(on) = on else {

@@ -1,0 +1,130 @@
+//! The `env::net` drivers of a simulated node.
+
+use std::io::IoSliceMut;
+use std::net::SocketAddr;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll};
+
+use env::net::udp::{self, Meta, Transmit, sender};
+use env::net::{Connect, Error, listener, tcp};
+
+use super::Node;
+use crate::net::Bound;
+use crate::state::{Shared, State, lock};
+
+impl env::net::Driver for Node {
+    fn udp(&self, config: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
+        let bound = lock(&self.shared).net().bind(self.node, config)?;
+        Ok(Box::new(Socket {
+            shared: Arc::clone(&self.shared),
+            node: self.node,
+            bound,
+            receiver: OnceLock::new(),
+        }))
+    }
+
+    fn connect<'a>(&'a self, _: &'a tcp::Config) -> Connect<'a> {
+        panic!("sim does not simulate TCP yet")
+    }
+
+    fn listen(&self, _: &tcp::Listen) -> Result<Box<dyn listener::Driver>, Error> {
+        panic!("sim does not simulate TCP yet")
+    }
+}
+
+/// Binds a socket half of `node` to the sim thread that polls it first.
+///
+/// # Panics
+///
+/// Outside a thread that the sim started, on a thread of another node, and on a
+/// thread other than the first.
+fn own(shared: &Mutex<State>, node: usize, owner: &OnceLock<u64>) {
+    let current = lock(shared).current();
+    let Some((thread, on)) = current else {
+        panic!("a socket polls only on a thread that the sim started")
+    };
+    assert!(
+        on == node,
+        "a socket of node {node} polls on a thread of node {on}"
+    );
+    let first = *owner.get_or_init(|| thread);
+    assert!(
+        first == thread,
+        "a socket half polls only on the sim thread of its first poll"
+    );
+}
+
+/// One UDP socket. A drop closes it.
+struct Socket {
+    shared: Shared,
+    node: usize,
+    bound: Bound,
+    /// The thread of the first receive.
+    receiver: OnceLock<u64>,
+}
+
+impl udp::Driver for Socket {
+    fn local(&self) -> SocketAddr {
+        self.bound.local
+    }
+
+    fn send_batch_max(&self) -> NonZeroUsize {
+        self.bound.send_batch_max
+    }
+
+    fn recv_batch_max(&self) -> NonZeroUsize {
+        self.bound.recv_batch_max
+    }
+
+    fn sender(&self) -> Box<dyn sender::Driver> {
+        Box::new(Sending {
+            shared: Arc::clone(&self.shared),
+            node: self.node,
+            key: self.bound.key,
+            thread: OnceLock::new(),
+        })
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context<'_>,
+        buffers: &mut [IoSliceMut<'_>],
+        meta: &mut [Meta],
+    ) -> Poll<Result<usize, Error>> {
+        own(&self.shared, self.node, &self.receiver);
+        let waker = cx.waker().clone();
+        let (poll, unused) =
+            lock(&self.shared)
+                .net()
+                .recv(self.bound.key, waker, buffers, meta);
+        drop(unused);
+        poll.map(Ok)
+    }
+}
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        let waker = lock(&self.shared).net().close(self.bound.key);
+        drop(waker);
+    }
+}
+
+/// One sender clone of a socket.
+struct Sending {
+    shared: Shared,
+    node: usize,
+    key: u64,
+    thread: OnceLock<u64>,
+}
+
+impl sender::Driver for Sending {
+    fn poll_send(
+        &mut self,
+        _: &mut Context<'_>,
+        transmit: &Transmit<'_>,
+    ) -> Poll<Result<(), Error>> {
+        own(&self.shared, self.node, &self.thread);
+        Poll::Ready(lock(&self.shared).send(self.key, transmit))
+    }
+}
