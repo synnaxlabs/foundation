@@ -34,7 +34,7 @@ pub const VECTOR_LEN: usize = 1024;
 ///
 /// # Panics
 ///
-/// When the bound does not fit in `usize`.
+/// Panics when the bound is more than `usize::MAX`.
 #[must_use]
 pub fn max_len(scalar: Scalar, count: usize) -> usize {
     Layout::of(scalar).max_len(count)
@@ -60,8 +60,8 @@ impl Encoder {
     ///
     /// # Panics
     ///
-    /// When `values` does not hold whole samples, or `out` is shorter than
-    /// [`max_len`].
+    /// Panics when `values` does not hold whole samples, or when `out` is shorter
+    /// than [`max_len`].
     #[must_use]
     pub fn encode(&mut self, values: &[u8], out: &mut [u8]) -> usize {
         let width = self.layout.width();
@@ -93,7 +93,8 @@ impl Encoder {
 ///
 /// # Errors
 ///
-/// The first vector whose header or length is not valid, or [`Error::Trailing`].
+/// Returns the error of the first vector whose header or length is not valid, or
+/// [`Error::Trailing`].
 pub fn validate(scalar: Scalar, count: usize, bytes: &[u8]) -> Result<(), Error> {
     let layout = Layout::of(scalar);
     let mut rest = bytes;
@@ -108,11 +109,11 @@ pub fn validate(scalar: Scalar, count: usize, bytes: &[u8]) -> Result<(), Error>
 ///
 /// # Errors
 ///
-/// As [`validate`]. The contents of `out` are then unspecified.
+/// Returns the errors of [`validate`]. The contents of `out` are then unspecified.
 ///
 /// # Panics
 ///
-/// When `out` does not hold exactly `count` samples.
+/// Panics when `out` does not hold exactly `count` samples.
 pub fn decode(
     scalar: Scalar,
     count: usize,
@@ -156,38 +157,49 @@ fn end(rest: &[u8]) -> Result<(), Error> {
 /// How the codecs see a sample type.
 #[derive(Clone, Copy, Debug)]
 enum Layout {
-    /// Integers of 1, 2, 4, or 8 bytes. Every codec applies.
-    Int { width: usize, signed: bool },
+    /// Integers of 8, 16, 32, or 64 bits. Every codec applies.
+    Int8 {
+        signed: bool,
+    },
+    Int16 {
+        signed: bool,
+    },
+    Int32 {
+        signed: bool,
+    },
+    Int64 {
+        signed: bool,
+    },
     /// Other samples of `width` bytes, stored raw.
-    Raw { width: usize },
+    Raw {
+        width: usize,
+    },
 }
 
 impl Layout {
     fn of(scalar: Scalar) -> Self {
-        let width = scalar.width();
         match scalar {
-            Scalar::I8
-            | Scalar::I16
-            | Scalar::I32
-            | Scalar::I64
-            | Scalar::Stamp
-            | Scalar::Span => Self::Int {
-                width,
-                signed: true,
+            Scalar::I8 => Self::Int8 { signed: true },
+            Scalar::U8 => Self::Int8 { signed: false },
+            Scalar::I16 => Self::Int16 { signed: true },
+            Scalar::U16 => Self::Int16 { signed: false },
+            Scalar::I32 => Self::Int32 { signed: true },
+            Scalar::U32 => Self::Int32 { signed: false },
+            Scalar::I64 | Scalar::Stamp | Scalar::Span => Self::Int64 { signed: true },
+            Scalar::U64 => Self::Int64 { signed: false },
+            Scalar::Bool | Scalar::F32 | Scalar::F64 | Scalar::Uuid => Self::Raw {
+                width: scalar.width(),
             },
-            Scalar::U8 | Scalar::U16 | Scalar::U32 | Scalar::U64 => Self::Int {
-                width,
-                signed: false,
-            },
-            Scalar::Bool | Scalar::F32 | Scalar::F64 | Scalar::Uuid => {
-                Self::Raw { width }
-            }
         }
     }
 
     fn width(self) -> usize {
         match self {
-            Self::Int { width, .. } | Self::Raw { width } => width,
+            Self::Int8 { .. } => 1,
+            Self::Int16 { .. } => 2,
+            Self::Int32 { .. } => 4,
+            Self::Int64 { .. } => 8,
+            Self::Raw { width } => width,
         }
     }
 
@@ -203,34 +215,39 @@ impl Layout {
                 samples.checked_add(headers)
             })
             .unwrap_or_else(|| {
-                panic!("the encoded size of {count} {width}-byte samples passes usize")
+                panic!(
+                    "the encoded size of {count} {width}-byte samples is more than \
+                     usize::MAX"
+                )
             })
     }
 
     /// Encodes one vector into the front of `out` and returns its length.
     fn encode(self, chunk: &[u8], out: &mut [u8]) -> usize {
         match self {
-            Self::Int { width: 1, signed } => vector::encode::<1>(chunk, signed, out),
-            Self::Int { width: 2, signed } => vector::encode::<2>(chunk, signed, out),
-            Self::Int { width: 4, signed } => vector::encode::<4>(chunk, signed, out),
-            Self::Int { width: 8, signed } => vector::encode::<8>(chunk, signed, out),
-            Self::Int { width, .. } => {
-                unreachable!("invariant: integers are 1, 2, 4, or 8 bytes, not {width}")
+            Self::Int8 { signed } => {
+                vector::write::<1>(chunk, int::plan::<1>(chunk, signed), out)
             }
-            Self::Raw { width } => vector::encode_raw(chunk, width, out),
+            Self::Int16 { signed } => {
+                vector::write::<2>(chunk, int::plan::<2>(chunk, signed), out)
+            }
+            Self::Int32 { signed } => {
+                vector::write::<4>(chunk, int::plan::<4>(chunk, signed), out)
+            }
+            Self::Int64 { signed } => {
+                vector::write::<8>(chunk, int::plan::<8>(chunk, signed), out)
+            }
+            Self::Raw { width } => vector::write_raw(chunk, width, out),
         }
     }
 
     /// Writes the samples of one vector into `out`, which holds exactly them.
     fn decode(self, vector: &Vector<'_>, out: &mut [u8]) {
         match self {
-            Self::Int { width: 1, .. } => vector.decode::<1>(out),
-            Self::Int { width: 2, .. } => vector.decode::<2>(out),
-            Self::Int { width: 4, .. } => vector.decode::<4>(out),
-            Self::Int { width: 8, .. } => vector.decode::<8>(out),
-            Self::Int { width, .. } => {
-                unreachable!("invariant: integers are 1, 2, 4, or 8 bytes, not {width}")
-            }
+            Self::Int8 { .. } => vector.decode::<1>(out),
+            Self::Int16 { .. } => vector.decode::<2>(out),
+            Self::Int32 { .. } => vector.decode::<4>(out),
+            Self::Int64 { .. } => vector.decode::<8>(out),
             Self::Raw { .. } => vector.copy(out),
         }
     }
@@ -243,7 +260,8 @@ pub enum Error {
     Truncated {
         /// The index of the vector in the series.
         vector: usize,
-        /// The bytes the vector needs.
+        /// The bytes the vector needs. When the bytes end before the tag, the bit
+        /// width, or the RLE run count, this is a lower bound.
         needed: usize,
         /// The bytes left from the start of the vector.
         available: usize,
@@ -260,7 +278,7 @@ pub enum Error {
         /// The index of the vector in the series.
         vector: usize,
         /// The bit width.
-        width: u8,
+        bits: u8,
         /// The largest bit width the codec allows.
         max: u8,
     },
@@ -293,11 +311,11 @@ impl fmt::Display for Error {
             ),
             Self::Tag { vector, tag } => write!(
                 f,
-                "vector {vector} has codec tag {tag}, which this sample type does not use"
+                "vector {vector} has tag {tag}, which this sample type does not use"
             ),
-            Self::Width { vector, width, max } => write!(
+            Self::Width { vector, bits, max } => write!(
                 f,
-                "vector {vector} has a bit width of {width}, more than its codec's {max}"
+                "vector {vector} has bit width {bits}, more than its codec's {max}"
             ),
             Self::Runs {
                 vector,
@@ -308,7 +326,7 @@ impl fmt::Display for Error {
                 "vector {vector} has runs of {total} samples in total, not {count}"
             ),
             Self::Trailing { extra } => {
-                write!(f, "{extra} bytes are left after the last vector")
+                write!(f, "bytes after the last vector: {extra}")
             }
         }
     }
@@ -411,6 +429,16 @@ mod tests {
                     100, 0, 100, 0, 0, 0, 0, 0,
                 ],
             );
+        }
+
+        #[test]
+        fn orders_samples_by_signedness() {
+            let values = bytes(2, (0..1_024).map(|n| 0x7ff0 + (n * 7) % 32));
+            assert_eq!(encode(Scalar::U16, &values)[..4], [1, 5, 0xf0, 0x7f]);
+            let values = bytes(8, (0..1_024).map(|n| if n % 2 == 0 { -1 } else { 1 }));
+            for scalar in [Scalar::I64, Scalar::Stamp, Scalar::Span] {
+                assert_eq!(encode(scalar, &values)[..2], [1, 2], "{scalar:?}");
+            }
         }
 
         #[test]
@@ -531,7 +559,7 @@ mod tests {
 
         proptest! {
             #[test]
-            fn every_integer_codec_round_trips(
+            fn every_integer_codec(
                 scalar in select(&INTS),
                 tag in 0..4_u8,
                 len in select(&[0, 1, 1_023, 1_024, 1_025]),
@@ -544,7 +572,7 @@ mod tests {
             }
 
             #[test]
-            fn any_integer_series_round_trips(
+            fn any_integer_series(
                 scalar in select(&INTS),
                 values in proptest::collection::vec(any::<u8>(), 0..2_100 * 8),
             ) {
@@ -553,7 +581,7 @@ mod tests {
             }
 
             #[test]
-            fn other_samples_round_trip_raw(
+            fn other_samples_as_raw(
                 scalar in select(&OTHERS),
                 len in select(&[1, 1_023, 1_024, 1_025]),
                 values in proptest::collection::vec(any::<u8>(), 1_025 * 16),
@@ -588,6 +616,17 @@ mod tests {
             );
         }
 
+        fn accepts(scalar: Scalar, count: usize, bytes: &[u8], samples: &[u8]) {
+            assert_eq!(
+                validate(scalar, count, bytes),
+                Ok(()),
+                "{scalar:?} {bytes:?}"
+            );
+            let mut out = vec![0; samples.len()];
+            assert_eq!(decode(scalar, count, bytes, &mut out), Ok(()), "{scalar:?}");
+            assert_eq!(out, samples, "{scalar:?} {bytes:?}");
+        }
+
         fn truncated(
             vector: usize,
             needed: usize,
@@ -600,17 +639,37 @@ mod tests {
             })
         }
 
-        fn width(width: u8, max: u8) -> Result<(), Error> {
+        fn width(bits: u8, max: u8) -> Result<(), Error> {
             Err(Error::Width {
                 vector: 0,
-                width,
+                bits,
                 max,
             })
         }
 
         #[test]
         fn accepts_an_empty_series() {
-            check(Scalar::U8, 0, &[], &Ok(()));
+            accepts(Scalar::U8, 0, &[], &[]);
+        }
+
+        #[test]
+        fn accepts_the_largest_bit_width() {
+            accepts(Scalar::U8, 1, &[1, 8, 0, 0xff], &[0xff]);
+            let mut delta = [0; 32];
+            delta[..2].copy_from_slice(&[2, 64]);
+            delta[24..].fill(0xff);
+            accepts(Scalar::U64, 2, &delta, &[[0; 8], [0xff; 8]].concat());
+        }
+
+        #[test]
+        fn accepts_runs_of_zero_and_ignores_padding() {
+            accepts(Scalar::U8, 3, &[3, 0, 2, 0, 7, 8, 0, 0, 3, 0], &[8, 8, 8]);
+            accepts(
+                Scalar::U32,
+                3,
+                &[3, 0, 1, 0, 7, 0, 0, 0, 3, 0, 0xff, 0xff],
+                &[7, 0, 0, 0].repeat(3),
+            );
         }
 
         #[test]
@@ -627,7 +686,7 @@ mod tests {
                 &truncated(0, 12, 11),
             );
             check(Scalar::U8, 3, &[3, 0, 1], &truncated(0, 4, 3));
-            check(Scalar::U64, 3, &[3, 0, 1, 0, 0, 0, 0], &truncated(0, 8, 7));
+            check(Scalar::U64, 3, &[3, 0, 1, 0, 0, 0, 0], &truncated(0, 24, 7));
             check(Scalar::U8, 3, &[3, 0, 1, 0, 7], &truncated(0, 7, 5));
             check(Scalar::Uuid, 1, &[0; 31], &truncated(0, 32, 31));
         }
@@ -651,9 +710,10 @@ mod tests {
                 );
             }
             for (scalar, tag) in
-                [(Scalar::F64, 1), (Scalar::Bool, 2), (Scalar::Uuid, 3)]
+                OTHERS.into_iter().flat_map(|s| (1..4).map(move |t| (s, t)))
             {
-                let bytes = [tag, 0, 0, 0];
+                let mut bytes = [0; 32];
+                bytes[0] = tag;
                 check(scalar, 1, &bytes, &Err(Error::Tag { vector: 0, tag }));
             }
         }
@@ -666,10 +726,6 @@ mod tests {
             check(Scalar::U8, 1, &[0, 1, 5], &width(1, 0));
             check(Scalar::F32, 1, &[0, 32, 0, 0, 0, 0, 0, 0], &width(32, 0));
             check(Scalar::U8, 1, &[3, 1, 1, 0, 5, 1, 0], &width(1, 0));
-            check(Scalar::U8, 1, &[1, 8, 0, 0xff], &Ok(()));
-            let mut delta = [0; 32];
-            delta[..2].copy_from_slice(&[2, 64]);
-            check(Scalar::U64, 2, &delta, &Ok(()));
         }
 
         #[test]
@@ -684,7 +740,6 @@ mod tests {
             check(Scalar::U8, 3, &[3, 0, 1, 0, 7, 2, 0], &runs(2));
             check(Scalar::U8, 3, &[3, 0, 1, 0, 7, 4, 0], &runs(4));
             check(Scalar::U8, 3, &[3, 0, 0, 0], &runs(0));
-            check(Scalar::U8, 3, &[3, 0, 2, 0, 7, 8, 0, 0, 3, 0], &Ok(()));
             check(
                 Scalar::U8,
                 3,
@@ -717,15 +772,15 @@ mod tests {
                 ),
                 (
                     Error::Tag { vector: 0, tag: 9 },
-                    "vector 0 has codec tag 9, which this sample type does not use",
+                    "vector 0 has tag 9, which this sample type does not use",
                 ),
                 (
                     Error::Width {
                         vector: 2,
-                        width: 9,
+                        bits: 9,
                         max: 8,
                     },
-                    "vector 2 has a bit width of 9, more than its codec's 8",
+                    "vector 2 has bit width 9, more than its codec's 8",
                 ),
                 (
                     Error::Runs {
@@ -737,7 +792,7 @@ mod tests {
                 ),
                 (
                     Error::Trailing { extra: 1 },
-                    "1 bytes are left after the last vector",
+                    "bytes after the last vector: 1",
                 ),
             ] {
                 assert_eq!(error.to_string(), text);

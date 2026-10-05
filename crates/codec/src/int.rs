@@ -8,7 +8,7 @@ use crate::word;
 ///
 /// # Panics
 ///
-/// When `chunk` holds no sample.
+/// Panics when `chunk` holds no sample.
 pub(crate) fn plan<const W: usize>(chunk: &[u8], signed: bool) -> Plan {
     let mask = word::mask(W);
     let high = mask ^ mask.wrapping_shr(1);
@@ -149,6 +149,15 @@ mod tests {
         };
         assert_eq!(ffor.len(4, 2), delta.len(4, 2), "the sizes must tie");
         assert_eq!(plan::<2>(&chunk, true), ffor);
+        let chunk = [[0; 24], [1; 24], [2; 24], [3; 24]].concat();
+        let delta = Plan::Delta {
+            first: 0,
+            base: 0,
+            bits: 1,
+        };
+        let rle = Plan::Rle { runs: 4 };
+        assert_eq!(delta.len(96, 1), rle.len(96, 1), "the sizes must tie");
+        assert_eq!(plan::<1>(&chunk, false), delta);
     }
 
     proptest! {

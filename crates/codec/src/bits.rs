@@ -40,7 +40,7 @@ pub(crate) fn unpack(bytes: &[u8], bits: u8) -> Unpack<'_> {
         acc: 0,
         filled: 0,
         bits: u32::from(bits),
-        mask: u64::MAX.unbounded_shr(u32::from(64_u8.abs_diff(bits))),
+        mask: u64::MAX.unbounded_shr(u32::from(64_u8.strict_sub(bits))),
     }
 }
 
@@ -107,8 +107,8 @@ mod tests {
 
     #[test]
     fn unpacks_zeros_past_the_bytes() {
-        let values: Vec<u64> = unpack(&[0xe4, 0x01], 2).take(10).collect();
-        assert_eq!(values, [0, 1, 2, 3, 1, 0, 0, 0, 0, 0]);
+        let values: Vec<u64> = unpack(&[0xe4, 0x01], 2).take(40).collect();
+        assert_eq!(values, [[0, 1, 2, 3, 1].as_slice(), &[0; 35]].concat());
     }
 
     proptest! {

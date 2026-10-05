@@ -10,12 +10,13 @@
 //! | 2 | delta | first, base | `sample - previous - base` after the first, packed |
 //! | 3 | RLE | run count (`u16`) | the run values, then the run lengths (`u16`) |
 //!
-//! Fields are samples unless marked. Arithmetic is modulo the sample width, and packed
-//! values are least significant bit first.
+//! Fields are samples unless marked. Sample arithmetic is modulo 2^b, where b is the
+//! bit count of a sample. Delta packs one residual for each sample after the first.
+//! Packed values are least significant bit first.
 
 use std::{iter, mem};
 
-use crate::{Error, Layout, bits, int, word};
+use crate::{Error, Layout, bits, word};
 
 pub(crate) const RAW: u8 = 0;
 pub(crate) const FFOR: u8 = 1;
@@ -75,18 +76,14 @@ pub(crate) fn header_len(fields: usize, width: usize) -> usize {
     fields.strict_add(2).next_multiple_of(width)
 }
 
-/// Encodes one vector of `W`-byte integers into the front of `out` and returns its
-/// length.
-pub(crate) fn encode<const W: usize>(
-    chunk: &[u8],
-    signed: bool,
-    out: &mut [u8],
-) -> usize {
+/// Writes one vector of `W`-byte integers with `plan` into the front of `out` and
+/// returns its length.
+pub(crate) fn write<const W: usize>(chunk: &[u8], plan: Plan, out: &mut [u8]) -> usize {
     let mut out = Writer { out, len: 0 };
     let count = chunk.len().div_euclid(W);
     let samples = word::samples::<W>(chunk);
     let mask = word::mask(W);
-    match int::plan::<W>(chunk, signed) {
+    match plan {
         Plan::Raw => out.raw(chunk, W),
         Plan::Ffor { reference, bits } => {
             out.header::<W>(FFOR, bits, &[reference]);
@@ -105,10 +102,12 @@ pub(crate) fn encode<const W: usize>(
             out.packed::<W>(residuals, count.strict_sub(1), bits);
         }
         Plan::Rle { runs } => {
-            let header =
-                u16::try_from(runs).expect("invariant: a vector holds under 2^16 runs");
             out.put(&[RLE, 0]);
-            out.put(&header.to_le_bytes());
+            out.put(
+                &u16::try_from(runs)
+                    .expect("invariant: a vector holds under 2^16 runs")
+                    .to_le_bytes(),
+            );
             out.pad(W);
             let values = out.take(runs.strict_mul(W)).as_chunks_mut::<W>().0;
             let lengths = out.take(runs.strict_mul(2)).as_chunks_mut::<2>().0;
@@ -139,9 +138,9 @@ fn runs<const W: usize>(chunk: &[u8]) -> impl Iterator<Item = (u64, usize)> + '_
     })
 }
 
-/// Encodes one vector of `width`-byte samples raw into the front of `out` and
-/// returns its length.
-pub(crate) fn encode_raw(chunk: &[u8], width: usize, out: &mut [u8]) -> usize {
+/// Writes one vector of `width`-byte samples raw into the front of `out` and returns
+/// its length.
+pub(crate) fn write_raw(chunk: &[u8], width: usize, out: &mut [u8]) -> usize {
     let mut out = Writer { out, len: 0 };
     out.raw(chunk, width);
     out.len
@@ -202,7 +201,7 @@ pub(crate) struct Vector<'a> {
     body: &'a [u8],
 }
 
-/// Reads vector `index` of a series, holding `count` samples, from the front of
+/// Reads vector `index` of a series, which holds `count` samples, from the front of
 /// `bytes`. Returns it and the bytes after it.
 pub(crate) fn read(
     bytes: &[u8],
@@ -221,6 +220,7 @@ pub(crate) fn read(
     let body = vector.split_at(plan.header_len(width)).1;
     if let Plan::Rle { runs } = plan {
         let lengths = body.split_at(runs.strict_mul(width)).1;
+        // At most 2^16 runs of at most 2^16 samples: the sum fits in 32 bits.
         let total = lengths
             .as_chunks::<2>()
             .0
@@ -240,8 +240,8 @@ pub(crate) fn read(
     Ok((Vector { plan, body }, rest))
 }
 
-/// Reads and checks the header at the front of `bytes`, which may end before the
-/// body.
+/// Reads and checks the header at the front of `bytes`. The bytes may end inside the
+/// header: missing field bytes read as zeros, and [`read`] then rejects the length.
 fn header(bytes: &[u8], layout: Layout, index: usize) -> Result<Plan, Error> {
     let width = layout.width();
     let truncated = |needed| Error::Truncated {
@@ -252,25 +252,24 @@ fn header(bytes: &[u8], layout: Layout, index: usize) -> Result<Plan, Error> {
     let [tag, bits, ..] = *bytes else {
         return Err(truncated(2));
     };
-    let plan = match (layout, tag) {
-        (_, RAW) => Plan::Raw,
-        (Layout::Int { .. }, FFOR) => Plan::Ffor {
-            reference: word::field(bytes, 0, width),
+    let plan = match tag {
+        RAW => Plan::Raw,
+        _ if matches!(layout, Layout::Raw { .. }) => {
+            return Err(Error::Tag { vector: index, tag });
+        }
+        FFOR => Plan::Ffor {
+            reference: field(bytes, 0, width),
             bits,
         },
-        (Layout::Int { .. }, DELTA) => Plan::Delta {
-            first: word::field(bytes, 0, width),
-            base: word::field(bytes, 1, width),
+        DELTA => Plan::Delta {
+            first: field(bytes, 0, width),
+            base: field(bytes, 1, width),
             bits,
         },
-        (Layout::Int { .. }, RLE) => {
-            let header = header_len(2, width);
+        RLE => {
             let [_, _, low, high, ..] = *bytes else {
-                return Err(truncated(header));
+                return Err(truncated(header_len(2, width)));
             };
-            if bytes.len() < header {
-                return Err(truncated(header));
-            }
             Plan::Rle {
                 runs: u16::from_le_bytes([low, high]).into(),
             }
@@ -281,11 +280,22 @@ fn header(bytes: &[u8], layout: Layout, index: usize) -> Result<Plan, Error> {
     if bits > max {
         return Err(Error::Width {
             vector: index,
-            width: bits,
+            bits,
             max,
         });
     }
     Ok(plan)
+}
+
+/// Reads header field `index`: `width` little-endian bytes after the tag and the bit
+/// width. Bytes past the end read as zeros.
+fn field(header: &[u8], index: usize, width: usize) -> u64 {
+    header
+        .iter()
+        .skip(index.strict_mul(width).strict_add(2))
+        .take(width)
+        .rev()
+        .fold(0, |value, byte| value.wrapping_shl(8) | u64::from(*byte))
 }
 
 impl Vector<'_> {
