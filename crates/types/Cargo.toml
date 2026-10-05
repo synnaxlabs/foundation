@@ -13,9 +13,14 @@ block = { path = "../block" }
 workspace = true
 
 [dev-dependencies]
+counting = { path = "../counting" }
 divan = { workspace = true }
 proptest = { workspace = true }
 
 [[bench]]
 name = "frame"
+harness = false
+
+[[test]]
+name = "alloc"
 harness = false
