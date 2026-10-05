@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ae4c663e27d81e2306e69536e4aebf4c5c3bb45aba25764daa098c8a21c02efc # shrinks to (w, sources) = (World { drift: Drift(672248), rate: -6595, start: -565402877386395400, now: 1007076794322 }, [Measurement { at: Monotonic(1118140724), offset: Span(2588197122611704364), error: Span(3153599999998107139) }, Measurement { at: Monotonic(1054850245922), offset: Span(2588197122583071382), error: Span(3153599999976423520) }])
