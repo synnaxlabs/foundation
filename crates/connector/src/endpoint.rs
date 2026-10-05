@@ -149,7 +149,15 @@ impl<K: fmt::Debug, S, T> fmt::Debug for Registry<K, S, T> {
 
 /// A share of one open endpoint. Derefs to the endpoint. When the last lease on it
 /// drops, the endpoint drops (closes) on that thread, and the next
-/// [`Registry::acquire`] of its key opens it again after the close.
+/// [`Registry::acquire`] of its key opens it again after the close. The close runs
+/// after the registry's lock is released, so it may be slow or use the registry.
+///
+/// A lease is not `Clone`: acquire again to share the endpoint.
+///
+/// ```compile_fail
+/// fn cloneable<T: Clone>() {}
+/// cloneable::<connector::endpoint::Lease<u8, (), ()>>();
+/// ```
 pub struct Lease<K: Ord, S, T> {
     /// `None` only inside `drop`.
     endpoint: Option<Arc<T>>,
@@ -175,6 +183,8 @@ impl<K: Ord, S, T> Drop for Lease<K, S, T> {
         };
         if Arc::strong_count(&endpoint) > 1 {
             // Under the lock, so that two last drops never both see a count above 1.
+            // Only `acquire` adds a reference, under the lock, so a count of 1
+            // means no other lease exists.
             drop(endpoint);
             return;
         }
@@ -534,6 +544,27 @@ mod tests {
         }
         assert_eq!(live.load(Relaxed), 0, "every endpoint closed");
         assert_eq!(format!("{ports:?}"), "{}", "no slot left behind");
+    }
+
+    /// An endpoint that records whether the registry's lock was free at its close.
+    struct Probe(Arc<Slots<u8, (), Probe>>, Arc<AtomicUsize>);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            if self.0.try_lock().is_ok() {
+                self.1.fetch_add(1, Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn closes_after_it_releases_the_lock() {
+        let ports = Registry::<u8, (), Probe>::new();
+        let free = Arc::new(AtomicUsize::new(0));
+        let probe = Probe(Arc::clone(&ports.0), Arc::clone(&free));
+        let open = |(): &()| future::ready(Ok(probe));
+        drop(block_on(ports.acquire(0, (), open)).expect("opens"));
+        assert_eq!(free.load(Relaxed), 1, "the lock was free at the close");
     }
 
     #[test]

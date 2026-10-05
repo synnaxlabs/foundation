@@ -946,8 +946,9 @@ How to read this record:
   other keys do not wait. Unequal settings on an open key give `Error::Config`
   (`connector.endpoint-settings`). The endpoint closes when the last `Lease` drops.
   `node` makes one registry per kind that needs it. A FIFO lock (`endpoint::Shared`)
-  composes as `T` later. Decided by the `connector` builder in the plan on #422, after
-  `/eb-review`.
+  composes as `T` later. A `Lease` is not `Clone`, and the close runs after the
+  registry's lock is released. Decided by the `connector` builder in the plan on #422,
+  after `/eb-review`; approved by the coordinator (#422).
 - **PACE (2026-10-05)** `pace::Timer` ticks on a grid of deadlines at `start + n /
   rate`, from a `types::time::Rate`, and skips and counts the ticks a stall missed.
   It has one async `tick(&cancel::Token)`, with no blocking wait and no sleep, hybrid,
