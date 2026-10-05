@@ -8,12 +8,8 @@ use std::{fmt, io, process};
 use rustix::io::Errno;
 use rustix::mm::{self, MapFlags, MprotectFlags, ProtFlags};
 
-/// The protection of reserved pages. Miri takes no `PROT_NONE`, so under it each page
-/// is usable from the start.
-#[cfg(not(miri))]
+/// The protection of reserved pages.
 const RESERVED: ProtFlags = ProtFlags::empty();
-#[cfg(miri)]
-const RESERVED: ProtFlags = ProtFlags::READ.union(ProtFlags::WRITE);
 
 /// Address space from the OS for one block pool. A reserved page takes no memory and
 /// no commit charge. A commit makes pages readable and writable, and the OS charges
@@ -56,7 +52,7 @@ impl Memory {
             page: rustix::param::page_size(),
             leaked: Cell::new(false),
         };
-        #[cfg(all(target_os = "linux", not(miri)))]
+        #[cfg(target_os = "linux")]
         no_huge_pages(memory.at(0), len);
         block::Memory::commit(&memory, 0, 1)
             .map_err(|block::Refused| Error::Refused)?;
@@ -92,7 +88,7 @@ impl Memory {
 /// # Panics
 ///
 /// If the OS fails the advice for another cause.
-#[cfg(all(target_os = "linux", not(miri)))]
+#[cfg(target_os = "linux")]
 fn no_huge_pages(at: *mut c_void, len: usize) {
     let advice = mm::Advice::LinuxNoHugepage;
     // SAFETY: the advice changes no byte of the mapping.
@@ -155,8 +151,7 @@ unsafe impl block::Memory for Memory {
     fn purge(&self, offset: usize, len: usize) {
         let end = self.end("purge", offset, len);
         let pages = offset.div_ceil(self.page)..end / self.page;
-        // Miri takes no `MAP_FIXED`.
-        if pages.is_empty() || cfg!(miri) {
+        if pages.is_empty() {
             return;
         }
         let at = self.at(pages.start);
@@ -169,7 +164,7 @@ unsafe impl block::Memory for Memory {
             self.leaked.set(true);
             panic!("purge of {len} bytes failed: {errno}");
         }
-        #[cfg(all(target_os = "linux", not(miri)))]
+        #[cfg(target_os = "linux")]
         no_huge_pages(at, len);
     }
 }
@@ -338,7 +333,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "Miri takes no PROT_NONE")]
     fn a_commit_makes_each_page_it_touches_usable() {
         let page = page_size();
         let memory = Memory::new(4 * page).unwrap();
@@ -381,7 +375,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "Miri has no MAP_FIXED or mincore")]
     fn a_purge_gives_back_each_page_fully_inside_its_range() {
         let page = page_size();
         let mut memory = Memory::new(4 * page).unwrap();
@@ -417,7 +410,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "Miri has no MAP_FIXED or mincore")]
     fn a_pool_purge_gives_back_the_pages_of_an_idle_block() {
         let page = page_size();
         let config = Config { budget: 1 << 20 };
@@ -449,7 +441,6 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    #[cfg_attr(miri, ignore = "Miri has no /proc")]
     fn only_a_committed_page_takes_a_commit_charge() {
         let page = page_size();
         let memory = Memory::new(4 * page).unwrap();
@@ -472,7 +463,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "Miri has no msync")]
     fn a_drop_gives_back_the_range() {
         // No other mapping of the test binary is large enough to fill the range.
         let len = 1 << 30;
@@ -486,7 +476,6 @@ mod tests {
 
     #[test]
     #[cfg(target_pointer_width = "64")]
-    #[cfg_attr(miri, ignore = "Miri has no address space failure")]
     fn a_reserve_larger_than_the_address_space_fails() {
         let error = Memory::new(1 << 62).unwrap_err();
         assert_eq!(

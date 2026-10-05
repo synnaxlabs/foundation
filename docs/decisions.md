@@ -1576,8 +1576,10 @@ How to read this record:
   and macOS only; Windows waits for #477, and `node` adds no cfg for it. On Linux each
   reserved or purged page has no huge pages (`MADV_NOHUGEPAGE`): the first touch of
   a huge page takes 2 MiB, and a purge of part of one gives memory back only later.
-  A read and write `MAP_NORESERVE` reserve with a commit that does nothing lost:
-  strict overcommit and Windows charge it in full, and it never refuses (#66).
+  A read and write `MAP_NORESERVE` reserve with a commit that does nothing lost: strict
+  overcommit and Windows charge it in full, and it never refuses (#66). The person
+  approved `unsafe` in `os::memory`, checked by tests on the real OS and not by Miri, on
+  2026-10-05 ("Yeah taht's fine"), #461.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
