@@ -21,6 +21,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
         tokens,
         token,
         errors: Vec::new(),
+        len: text.len(),
     };
     let document = parser.file();
     let mut errors = parser.errors;
@@ -50,6 +51,9 @@ struct Parser<'a> {
     token: Token<'a>,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
+    /// The length of the text in bytes. Each token but the last has one or more, so
+    /// this bounds the passes of each loop.
+    len: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -78,7 +82,8 @@ impl<'a> Parser<'a> {
         blocks: &mut Vec<Block>,
         depth: usize,
     ) -> Result<(), Error> {
-        loop {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::End | lex::Kind::CloseBrace => return Ok(()),
@@ -95,26 +100,11 @@ impl<'a> Parser<'a> {
                 blocks.push(self.block(&name, depth)?);
             }
         }
+        unreachable!("invariant: each pass takes a token")
     }
 
     fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
-        let mut labels = Vec::new();
-        loop {
-            match self.token.kind {
-                lex::Kind::String(_) | lex::Kind::Identifier => {}
-                lex::Kind::OpenBrace => break,
-                _ if labels.is_empty() => {
-                    return Err(self.syntax(Expected::AttributeOrBlock));
-                }
-                _ => return Err(self.syntax(Expected::BlockStart)),
-            }
-            let label = self.take()?;
-            let span = Some(label.span);
-            labels.push(Label {
-                text: text(label),
-                span,
-            });
-        }
+        let labels = self.labels()?;
         let depth = enter(depth).ok_or(Error::TooDeep { span: keyword.span })?;
         self.take()?;
         let body = if self.token.kind == lex::Kind::Newline {
@@ -135,6 +125,29 @@ impl<'a> Parser<'a> {
             body,
             span: Some(join(keyword.span, end)),
         })
+    }
+
+    /// Reads the labels of a block up to its `{`, and leaves that token.
+    fn labels(&mut self) -> Result<Vec<Label>, Error> {
+        let mut labels = Vec::new();
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
+            match self.token.kind {
+                lex::Kind::String(_) | lex::Kind::Identifier => {}
+                lex::Kind::OpenBrace => return Ok(labels),
+                _ if labels.is_empty() => {
+                    return Err(self.syntax(Expected::AttributeOrBlock));
+                }
+                _ => return Err(self.syntax(Expected::BlockStart)),
+            }
+            let label = self.take()?;
+            let span = Some(label.span);
+            labels.push(Label {
+                text: text(label),
+                span,
+            });
+        }
+        unreachable!("invariant: each pass takes a token")
     }
 
     /// Reads the body of a one-line block, which holds one attribute or none, and
@@ -261,7 +274,8 @@ impl<'a> Parser<'a> {
             form,
         });
         let mut depth = 0usize;
-        loop {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
             match self.token.kind {
                 lex::Kind::End => return Ok(()),
                 lex::Kind::OpenBrace
@@ -281,6 +295,7 @@ impl<'a> Parser<'a> {
             }
             self.take()?;
         }
+        unreachable!("invariant: each pass takes a token")
     }
 
     fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
@@ -348,22 +363,8 @@ impl<'a> Parser<'a> {
     fn list(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
         let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
         self.refuse_for()?;
-        let mut items = Vec::new();
-        let close = loop {
-            self.skip_newlines()?;
-            if self.token.kind == lex::Kind::CloseBracket {
-                break self.take()?;
-            }
-            items.extend(self.value(depth, Ends::Comma)?);
-            self.skip_newlines()?;
-            match self.token.kind {
-                lex::Kind::Comma => {
-                    self.take()?;
-                }
-                lex::Kind::CloseBracket => break self.take()?,
-                _ => return Err(self.syntax(Expected::ListEnd)),
-            }
-        };
+        let (items, close) =
+            self.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)?;
         Ok(Value {
             kind: value::Kind::List(items),
             span: Some(join(open.span, close.span)),
@@ -388,7 +389,8 @@ impl<'a> Parser<'a> {
         depth: usize,
     ) -> Result<Token<'a>, Error> {
         self.refuse_for()?;
-        loop {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::CloseBrace => return self.take(),
@@ -415,6 +417,7 @@ impl<'a> Parser<'a> {
                 _ => return Err(self.syntax(Expected::ObjectEnd)),
             }
         }
+        unreachable!("invariant: each pass takes a token")
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
@@ -422,22 +425,8 @@ impl<'a> Parser<'a> {
             span: function.span,
         })?;
         self.take()?;
-        let mut arguments = Vec::new();
-        let close = loop {
-            self.skip_newlines()?;
-            if self.token.kind == lex::Kind::CloseParenthesis {
-                break self.take()?;
-            }
-            arguments.extend(self.value(depth, Ends::Comma)?);
-            self.skip_newlines()?;
-            match self.token.kind {
-                lex::Kind::Comma => {
-                    self.take()?;
-                }
-                lex::Kind::CloseParenthesis => break self.take()?,
-                _ => return Err(self.syntax(Expected::ArgumentsEnd)),
-            }
-        };
+        let (arguments, close) =
+            self.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)?;
         Ok(Value {
             kind: value::Kind::Call(Call {
                 function: function.text.into(),
@@ -446,6 +435,34 @@ impl<'a> Parser<'a> {
             }),
             span: Some(join(function.span, close.span)),
         })
+    }
+
+    /// Reads values split by `,` up to `close`, and returns them and the `close`
+    /// token. Any other token after a value is `expected`.
+    fn values(
+        &mut self,
+        close: &lex::Kind,
+        expected: Expected,
+        depth: usize,
+    ) -> Result<(Vec<Value>, Token<'a>), Error> {
+        let mut values = Vec::new();
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
+            self.skip_newlines()?;
+            if self.token.kind == *close {
+                return Ok((values, self.take()?));
+            }
+            values.extend(self.value(depth, Ends::Comma)?);
+            self.skip_newlines()?;
+            match &self.token.kind {
+                lex::Kind::Comma => {
+                    self.take()?;
+                }
+                kind if kind == close => return Ok((values, self.take()?)),
+                _ => return Err(self.syntax(expected)),
+            }
+        }
+        unreachable!("invariant: each pass takes a token")
     }
 
     /// Builds a map, and keeps its problems. The map is empty when it has problems,
@@ -466,10 +483,14 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_newlines(&mut self) -> Result<(), Error> {
-        while self.token.kind == lex::Kind::Newline {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
+            if self.token.kind != lex::Kind::Newline {
+                return Ok(());
+            }
             self.take()?;
         }
-        Ok(())
+        unreachable!("invariant: each pass takes a token")
     }
 
     /// Takes the next token and reads the one after it.
