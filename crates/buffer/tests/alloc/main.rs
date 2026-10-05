@@ -12,8 +12,8 @@ mod memory;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Layout};
+use block::{Heap, Pool};
+use buffer::{Buffer, Config, Entry, Layout, Parts};
 use types::channel::{self, Slots};
 use types::frame::Path;
 use types::time::{Span, Stamp};
@@ -35,7 +35,7 @@ const BODY_MAX: usize = 8183;
 /// Indexes of the wide batch.
 const WIDE: u32 = 64;
 
-fn entry(index: u32, first: u64, parts: &[Block]) -> Entry<'_> {
+fn entry(index: u32, first: u64, parts: Parts) -> Entry {
     Entry {
         index: channel::Key::from_u128(u128::from(index)),
         slot: channel::Slot::new(index),
@@ -85,17 +85,21 @@ fn main() {
             for index in 0..WIDE {
                 slots.assign(channel::Key::from_u128(u128::from(index)));
             }
-            let parts = [pool.alloc(256).expect("a block").freeze()];
-            let half = [pool.alloc(BODY_MAX / 2).expect("a block").freeze()];
+            let parts = Parts::from(pool.alloc(256).expect("a block").freeze());
+            let half = Parts::from(pool.alloc(BODY_MAX / 2).expect("a block").freeze());
             for commit in 0..WARM + COUNTED {
                 let seq = 3 * commit;
-                let wide: Vec<Entry<'_>> =
-                    (2..WIDE).map(|index| entry(index, commit, &[])).collect();
-                let batches: [&[Entry<'_>]; 4] = [
-                    &[entry(0, seq, &parts), entry(1, seq, &parts)],
-                    &wide,
-                    &[entry(0, seq + 1, &half)],
-                    &[entry(0, seq + 2, &half), entry(1, seq + 1, &parts)],
+                let wide: Vec<Entry> = (2..WIDE)
+                    .map(|index| entry(index, commit, Parts::default()))
+                    .collect();
+                let batches: [Vec<Entry>; 4] = [
+                    vec![entry(0, seq, parts.clone()), entry(1, seq, parts.clone())],
+                    wide,
+                    vec![entry(0, seq + 1, half.clone())],
+                    vec![
+                        entry(0, seq + 2, half.clone()),
+                        entry(1, seq + 1, parts.clone()),
+                    ],
                 ];
                 for (shape, batch) in batches.into_iter().enumerate() {
                     let (appended, allocations) =

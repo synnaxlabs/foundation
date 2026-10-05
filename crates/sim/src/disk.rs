@@ -26,7 +26,17 @@ const DIRECTORY: i32 = 21;
 pub(crate) enum Cause {
     NotFound,
     Full,
+    /// A write descriptor or its calls hold the file.
+    Busy,
     Code(i32),
+}
+
+/// An open file, and whether its descriptor may write. A write descriptor and its
+/// calls in flight hold the file against another write open.
+#[derive(Clone, Copy)]
+pub(crate) struct Handle {
+    pub(crate) inode: u64,
+    pub(crate) writable: bool,
 }
 
 pub(crate) struct Disk {
@@ -57,6 +67,8 @@ pub(crate) struct File {
     dirty: BTreeSet<u64>,
     /// The descriptors and the calls in flight that use the file.
     holds: u64,
+    /// The holds of a write descriptor and of its calls.
+    writers: u64,
     /// An entry names the file.
     linked: bool,
     /// A durable entry names the file.
@@ -143,14 +155,14 @@ impl Disk {
         }
     }
 
-    /// Opens the file at `path`, and gives its key and length. The open holds it. A
-    /// file that it makes takes the key `key`.
+    /// Opens the file at `path`, and gives its handle and length. The open holds it.
+    /// A file that it makes takes the key `key`.
     pub(crate) fn open(
         &mut self,
         key: u64,
         path: &Path,
         mode: Mode,
-    ) -> Result<(u64, u64), Cause> {
+    ) -> Result<(Handle, u64), Cause> {
         let (segments, slashed) = (segments(path), slashed(path));
         let Some((name, parent)) = segments.split_last() else {
             return Err(Cause::Code(DIRECTORY));
@@ -167,6 +179,7 @@ impl Disk {
                     sectors: BTreeMap::new(),
                     dirty: BTreeSet::new(),
                     holds: 0,
+                    writers: 0,
                     linked: true,
                     durable: false,
                 };
@@ -176,8 +189,14 @@ impl Disk {
             (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
         };
         let file = self.named(inode, slashed)?;
-        file.holds += 1;
-        Ok((inode, file.len))
+        let writable = mode != Mode::Read;
+        if writable && file.writers > 0 {
+            return Err(Cause::Busy);
+        }
+        let len = file.len;
+        let handle = Handle { inode, writable };
+        self.hold(handle);
+        Ok((handle, len))
     }
 
     /// The names in the directory at `path`.
@@ -229,15 +248,19 @@ impl Disk {
         Ok(())
     }
 
-    /// Adds one hold of open file `inode`.
-    pub(crate) fn hold(&mut self, inode: u64) {
-        self.file(inode).holds += 1;
+    /// Adds one hold of the file of `handle`.
+    pub(crate) fn hold(&mut self, handle: Handle) {
+        let file = self.file(handle.inode);
+        file.holds += 1;
+        file.writers += u64::from(handle.writable);
     }
 
-    /// Drops one hold of file `inode`.
-    pub(crate) fn release(&mut self, inode: u64) {
-        self.file(inode).holds -= 1;
-        self.collect(inode);
+    /// Drops one hold of the file of `handle`.
+    pub(crate) fn release(&mut self, handle: Handle) {
+        let file = self.file(handle.inode);
+        file.holds -= 1;
+        file.writers -= u64::from(handle.writable);
+        self.collect(handle.inode);
     }
 
     /// Frees file `inode` when no entry, no durable entry, and no hold keeps it.
@@ -517,6 +540,7 @@ mod tests {
             sectors: BTreeMap::new(),
             dirty: BTreeSet::new(),
             holds: 0,
+            writers: 0,
             linked: true,
             durable: false,
         }

@@ -98,7 +98,8 @@ proptest! {
         }
     }
 
-    // A stored term behind the log stops the node at its next start. The append
+    // A `Ready` writes no entry above its `hard` term, so a crash between the two
+    // writes leaves the stored term at most one `Ready` behind the log. The append
     // follows the node's log, and its entry terms rise from the last one.
     #[test]
     fn a_node_writes_no_entry_above_its_term(

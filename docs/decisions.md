@@ -282,8 +282,11 @@ How to read this record:
   replay after a disconnect. Frames go out before the disk sync. The current value is
   the index's newest live frame, even when it holds none of the reader's channels (M3).
   The person decided on 2026-10-05: "Newest frame" (#139).
-- **B5** Live writes never wait. If the disk queue or the pool is full, the home records
-  an explicit gap and warns. Backfill waits for room.
+- **B5** Live writes never wait. If the disk queue or the pool is full, or the link to a
+  remote home cannot take the frame now, the home records an explicit gap and warns; on
+  the link, the writer's `hub` drops the frame and sends the gap to the home (RECV
+  WAITS). Backfill waits for room. The person decided on 2026-10-05: "Ok, as long as
+  the end user UX remains the same" (#581).
 - **B6** One write call is one frame. Smart batching is the default. Catch-up may merge
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
@@ -407,7 +410,8 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. A new ring has the same block at `seq` 0 in
+  records. An entry has no part, one, or two; `append` takes them owned and drops
+  them when it fails (#582). A new ring has the same block at `seq` 0 in
   both places, with the tail at offset 0 and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
@@ -445,6 +449,13 @@ How to read this record:
   bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
   record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
+- **LARGE FRAME (#191)** The home refuses a write whose bodies no record of the ring
+  holds, on either path, with `Large`. No seq moves and the home stores no part of
+  the frame. The waiting handoffs of the frame's indexes are still recorded (HANDOFF
+  RECORD). The writer splits the frame by samples or by indexes and writes each part.
+  The home never splits a frame, because a frame applies whole (B7). Each handoff
+  goes in its own append, so a handoff never makes a frame large.
+  Decided by the `write-path` builder (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -509,11 +520,12 @@ How to read this record:
   its pages until the purge after idle. A class that a reader keeps partly in use
   keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
   fine"), #2, #270. Purges per block that give back every page they credit (design P)
-  wait in a follow-up issue. When the system refuses to commit pages, the allocation
-  fails with `Error::Refused`, a separate error from a full pool (the person on
-  2026-10-05: "I approve the separate error"). The carve counts do not change, the
-  sizes the pool gave back to make room stay given back, and a later allocation may
-  succeed (#475).
+  wait in a follow-up issue. When the system refuses to commit pages, the pool gives
+  back one idle size at a time, in the order a purge for room in the budget uses,
+  and tries the commit again; after the last idle size the allocation fails with
+  `Error::Refused`, a separate error from a full pool (the person on 2026-10-05: "I
+  approve the separate error"). The carve counts do not change, the sizes given back
+  back, and a later allocation may succeed (#475, #542).
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
@@ -613,7 +625,10 @@ How to read this record:
   number and one unit with no space (`200GiB`), and a decimal fraction only when it
   gives whole bytes (`1.5GiB`). Its type lives in `types` beside `time::Span`, and the
   `document` reader is an adapter over it. The person decided on 2026-10-05 ("A yes I
-  approve", #479).
+  approve", #479). The units are `B`, `KiB`, `MiB`, `GiB`, and `TiB`, with exact case:
+  `GB` and `Gb` are errors, because they mean other sizes. Input takes no sign. Output
+  uses the largest unit that divides the size, with no fraction: `1.5GiB` is written
+  `1536MiB`, and zero is `0B` (#505).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -700,6 +715,18 @@ How to read this record:
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
   suspend lost: mesh time would fall behind by the time asleep, outside its bound.
   Amends ENV SEAMS. The person decided on 2026-10-05 ("Count time asleep"), #144.
+- **CLOCK RUN (2026-10-05)** Within TIME ADAPTERS. `clock::Clock::run` runs all time
+  sources of one clock in one task on the clock's shard. `node` builds the source table
+  and passes it to `run`. Today the table is the OS clock. Each adapter keeps its own
+  loop and decides when it measures: the OS clock at once, then one second after the
+  last measurement, so once after a suspend. `run` adds a source for each adapter and
+  pushes each measurement. `run` owns every source, so it panics on a clock that has a
+  source already: nothing could push to that source. `run` does not give out each
+  `Status` yet (#598). Lost: a task for each adapter with a shared clock
+  (`Rc<RefCell>` or a queue), because then the caller shares the clock; the loop in
+  `node`, because the peer exchange adds and removes sources, and `node` would pass its
+  events through. Decided by the `time` builder (#144, #600). The coordinator approved
+  it on #144 and #600.
 
 ### 1.7 Transport
 
@@ -805,6 +832,36 @@ How to read this record:
   Until the hello carries the peer's window, a sender uses its own. Proposed by
   `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
   `network` in #228.
+- **RECV WAITS (#581, 2026-10-05)** `stream::Receiver::recv` waits while it has no
+  block, because the pool has no room or the system refused a commit. It gives the
+  next message, `None` at the end, `Error::Reset` when the sender cancelled the
+  stream, or the error that ended the session. It never returns `Error::Pool`, and a
+  refused commit gets no error variant. Its doc says that it waits. The message stays
+  queued, and the carrier's per-stream flow control holds the peer, as a read already
+  waits for `Readable` (STREAM WIRE); TLS over TCP must do the same (TRANSPORT SHAPE
+  LOCKED). One timer for each `Transport` retries all of its waiting reads, for both
+  causes; each retry's `alloc` takes back the blocks returned since the last try. The
+  retry interval is a `transport` constant that simulation tunes (5.3). The waiting
+  reads of one `Transport` take blocks highest class first, then oldest first, so
+  `CatchUp` reads cannot starve `Command` reads; other users of the shard pool (M4)
+  are not in this order. `transport` counts the time that reads wait and each refused
+  commit, and `node` publishes them on status channels (BQ11b); the new counts go
+  through the interface process in #68. A caller ends a wait when it drops the future;
+  it can then call `stop`. `datagram::Receiver::recv` never returns `Error::Pool`
+  either: a datagram with no block drops and is counted, and the read waits for the
+  next one. `hub` writes no retry for a read. B5 on the remote hop: the writer's `hub`
+  never waits on a live send. When the stream cannot take a live frame now, `hub`
+  drops it and adds its samples and stamps to one pending gap for each index. When the
+  stream can take a message again, `hub` sends the pending gap first, and the home
+  records it and warns. The writer gets the same answer as for a frame the home
+  dropped, and never resends it (B7). Backfill waits. This needs a send that does not
+  wait and gives the message back; `network` sets it in #68. `block` gets no wake when
+  a block returns until simulation shows that the resume latency matters; then
+  `memory` proposes one wake, which home backfill shares. Until then, home backfill
+  also retries on a timer. Rejected: each caller retries (each caller writes the same
+  timer, and the pool's states leak into `hub`), and the stream ends (memory pressure
+  becomes stream churn and lost messages, and `Command` streams drop first). Decided
+  by the advisor under the delivery and wire internals delegation.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -875,9 +932,9 @@ How to read this record:
   heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
   log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
   be past the log of a node that is behind. An `Append` with an entry whose term is
-  above the message's term is `Error::TermBehindLog`: no leader sends one, and a
-  follower that wrote it could not restart. The conformance oracle changed to match; the
-  person decided on 2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  above the message's term is `Error::TermBehindLog`: no leader sends one, so the
+  sender is faulty. The conformance oracle changed to match; the person decided on
+  2026-10-05 ("a is fine", #232). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1468,14 +1525,16 @@ How to read this record:
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
   scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
   (#37) gives files under one data directory, with owned blocks and a sync that
-  poisons the file on failure (S4). `env::net` (#44) gives UDP sockets that move GSO
-  and GRO batches with ECN and the local address, TCP streams, and listeners.
-  `env::serial` (#431) gives serial ports that move bytes at the line rate, with 8
-  data bits, a parity, and stop bits. Framing belongs to the protocol: a USB adapter
-  hides the gap between frames, so a seam that split frames would act differently
-  on `os` and `sim`. A socket, listener, or port may move to another thread before its
-  first poll. The first poll binds it to its thread, and a poll on another thread
-  panics.
+  poisons the file on failure (S4). One handle at a time holds a file open to write,
+  until it drops and its calls end; another write open fails with `Busy` (#392). Each
+  `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP sockets
+  that move GSO and GRO batches with ECN and the local address, TCP streams, and
+  listeners. `env::serial` (#431) gives serial ports that move bytes at the line rate,
+  with 8 data bits, a parity, and stop bits. Framing belongs to the protocol: a USB
+  adapter hides the gap between frames, so a seam that split frames would act
+  differently on `os` and `sim`. A socket, listener, or port may move to another
+  thread before its first poll. The first poll binds it to its thread, and a poll on
+  another thread panics.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -1491,7 +1550,8 @@ How to read this record:
   device at run time lost (#569).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
-  crash keeps each file call that ended. A `Power` crash keeps, for each 512-byte
+  crash keeps each file call that ended, and ends each call in flight at the crash, so
+  a restart finds no file held (#392). A `Power` crash keeps, for each 512-byte
   sector, its durable bytes or the bytes of any one write since then, a write in flight
   too. A `sync` makes durable the writes that ended before it started. A failed `sync`
   makes each sector keep its durable bytes or those of one such write, at random. A
@@ -2287,7 +2347,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
@@ -2362,6 +2422,7 @@ Parameters and later choices, recorded and not asked:
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52.
+- Delivery and wire internals: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
@@ -2387,7 +2448,8 @@ Parameters and later choices, recorded and not asked:
 - Time: exchange period, source discovery period, drift rate for bound widening
   (starts at 200 ppm, ESTIMATE COMBINE), stamp limits near 1970 and far future (A5).
 - Transport: default carrier per traffic class (QUIC vs TLS over TCP, measured on
-  Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection.
+  Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection, the retry
+  interval of a read that waits for a block (RECV WAITS).
 - Compression and reduction defaults; retention defaults; disk budget defaults.
 - Benchmark reruns owed: r1 handoff, r10 codecs, r11 memory on Linux x86-64 (pinned)
   and Raspberry Pi 4; `sim` binary size against P1 (BQ19); binary size and idle memory

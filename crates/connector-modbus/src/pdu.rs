@@ -332,6 +332,17 @@ impl Request {
         }
     }
 
+    /// The length of the reply PDU to this request that starts with `head`, or
+    /// `None` when `head` is empty.
+    pub(crate) fn reply_len(&self, head: &[u8]) -> Option<usize> {
+        let &function = head.first()?;
+        Some(if function & EXCEPTION == 0 {
+            self.reply_size()
+        } else {
+            2
+        })
+    }
+
     /// The length of a reply that is not an exception.
     fn reply_size(&self) -> usize {
         match self {
@@ -463,7 +474,9 @@ impl Exception {
             Error::Protocol(_)
             | Error::Length(_)
             | Error::Answer { .. }
-            | Error::Echo { .. } => {
+            | Error::Echo { .. }
+            | Error::Frame(_)
+            | Error::Crc { .. } => {
                 unreachable!("invariant: a request PDU never gives {error}")
             }
         }
@@ -502,6 +515,21 @@ impl From<u8> for Exception {
             11 => Self::GatewayTarget,
             other => Self::Other(other),
         }
+    }
+}
+
+/// The length of the request PDU that starts with `head`, or `None` when `head`
+/// is too short to give it.
+pub(crate) fn request_len(head: &[u8]) -> Result<Option<usize>, Error> {
+    let Some(&function) = head.first() else {
+        return Ok(None);
+    };
+    match function {
+        READ_COILS..=WRITE_REGISTER => Ok(Some(5)),
+        WRITE_COILS | WRITE_REGISTERS => Ok(head
+            .get(5)
+            .map(|&bytes| usize::from(bytes).saturating_add(6))),
+        other => Err(Error::Function(other)),
     }
 }
 
