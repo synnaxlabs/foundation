@@ -1107,6 +1107,15 @@ How to read this record:
   search past the end for a record lost: a body can hold the bytes of a record, so a
   power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
+- **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
+  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a
+  proposal that a follower forwards to the leader, and its two answers (the position
+  of the entry, or "not the leader" with the leader the receiver knows). `wire` does
+  not carry them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and
+  `wire` must not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the
+  format version. A message has one byte form, and a decode takes nothing else. The
+  log (MESH LOG) and the messages share the byte form of an entry. Decided by
+  `consensus`, approved by the coordinator (#471).
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -2519,7 +2528,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
 | 1 | `delivery` | Keeps each reader's state per index: positions, credits, live frames for complete readers, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
-| 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
+| 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |

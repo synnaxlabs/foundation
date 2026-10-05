@@ -13,8 +13,7 @@ const VOTERS: u8 = 2;
 
 /// Adds the byte form of `entry` to `out`.
 pub(crate) fn encode(entry: &Entry, out: &mut Vec<u8>) {
-    out.extend(entry.at.term.0.to_le_bytes());
-    out.extend(entry.at.index.to_le_bytes());
+    position(entry.at, out);
     match &entry.data {
         Data::Empty => out.push(EMPTY),
         Data::Bytes(bytes) => {
@@ -35,8 +34,7 @@ pub(crate) fn encode(entry: &Entry, out: &mut Vec<u8>) {
 /// Takes one entry from the start of `bytes`. `None` when the bytes do not start
 /// with the byte form of an entry; `bytes` is then at no known place.
 pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Entry> {
-    let term = Term(u64::from_le_bytes(take(bytes)?));
-    let index = u64::from_le_bytes(take(bytes)?);
+    let at = take_position(bytes)?;
     let data = match u8::from_le_bytes(take(bytes)?) {
         EMPTY => Data::Empty,
         BYTES => {
@@ -51,8 +49,20 @@ pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Entry> {
         }),
         _ => return None,
     };
-    let at = Position { term, index };
     Some(Entry { at, data })
+}
+
+/// Adds the byte form of `at` to `out`.
+pub(crate) fn position(at: Position, out: &mut Vec<u8>) {
+    out.extend(at.term.0.to_le_bytes());
+    out.extend(at.index.to_le_bytes());
+}
+
+/// Takes a position from the start of `bytes`.
+pub(crate) fn take_position(bytes: &mut &[u8]) -> Option<Position> {
+    let term = Term(u64::from_le_bytes(take(bytes)?));
+    let index = u64::from_le_bytes(take(bytes)?);
+    Some(Position { term, index })
 }
 
 /// Takes `N` bytes from the start of `bytes`.
