@@ -518,11 +518,37 @@ mod mcp {
     }
 
     #[test]
-    fn a_tool_call_never_suggests_mcp() {
+    fn a_request_that_also_has_a_result_is_answered() {
+        let mut message = request(json!(1), "ping", json!({}));
+        message["result"] = json!({});
+        assert_eq!(ask(&message)["result"], json!({}));
+    }
+
+    #[test]
+    fn an_unknown_method_with_positional_params_is_not_found() {
         assert_eq!(
-            ask(&request(json!(1), "tools/call", json!({ "name": "mcpp" })))["error"]["data"]
-                ["fix"],
-            "Use a name from `foundation docs`"
+            ask(&request(json!(8), "nope", json!([1, 2]))),
+            failure(json!(8), -32601, "Method not found")
+        );
+    }
+
+    #[test]
+    fn a_tool_call_suggests_only_operations() {
+        for name in ["mcpp", "hepl", "-h", "--json"] {
+            assert_eq!(
+                ask(&request(json!(1), "tools/call", json!({ "name": name })))["error"]
+                    ["data"]["fix"],
+                "Use a name from `foundation docs`",
+                "{name}"
+            );
+        }
+        assert_eq!(
+            ask(&request(
+                json!(1),
+                "tools/call",
+                json!({ "name": "versoin" })
+            ))["error"]["data"]["fix"],
+            "Use `version`, the closest name"
         );
     }
 }
@@ -576,6 +602,81 @@ mod serve {
             format!(
                 "{}\n{PONG}",
                 r#"{"error":{"code":-32700,"message":"Parse error"},"id":null,"jsonrpc":"2.0"}"#
+            )
+        );
+        assert_eq!((exit.status, exit.stderr.as_str()), (0, ""));
+    }
+
+    /// Keeps written bytes until a flush. A closed writer fails each flush.
+    #[derive(Default)]
+    struct Buffered {
+        pending: Vec<u8>,
+        flushed: Vec<u8>,
+        closed: bool,
+    }
+
+    impl Write for Buffered {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.pending.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.closed {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            self.flushed.append(&mut self.pending);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn each_reply_is_flushed() {
+        let mut output = Buffered::default();
+        let status = crate::cli(
+            ["foundation", "mcp"].map(Into::into),
+            PING.as_bytes(),
+            &mut output,
+            io::sink(),
+        );
+        assert_eq!(status, 0);
+        assert_eq!(
+            (output.pending.as_slice(), output.flushed.as_slice()),
+            (b"".as_slice(), PONG.as_bytes())
+        );
+    }
+
+    #[test]
+    fn a_flush_to_a_reader_that_left_ends_the_run_without_an_error() {
+        let input = format!("{PING}{PING}");
+        let mut rest = input.as_bytes();
+        let mut stderr = Vec::new();
+        let output = Buffered {
+            closed: true,
+            ..Buffered::default()
+        };
+        let status = crate::cli(
+            ["foundation", "mcp"].map(Into::into),
+            &mut rest,
+            output,
+            &mut stderr,
+        );
+        assert_eq!(
+            (status, stderr.as_slice(), rest),
+            (0, b"".as_slice(), PING.as_bytes())
+        );
+    }
+
+    #[test]
+    fn a_line_past_the_limit_is_invalid_and_the_next_line_runs() {
+        let long = format!("{}\n", " ".repeat(crate::mcp::LIMIT));
+        let most = format!("{}{PING}", " ".repeat(crate::mcp::LIMIT - PING.len()));
+        let exit = run(&["mcp"], format!("{long}{most}{PING}").as_bytes());
+        assert_eq!(
+            exit.stdout,
+            format!(
+                "{}\n{PONG}{PONG}",
+                r#"{"error":{"code":-32600,"message":"Invalid Request"},"id":null,"jsonrpc":"2.0"}"#
             )
         );
         assert_eq!((exit.status, exit.stderr.as_str()), (0, ""));
