@@ -136,6 +136,10 @@ const _: () = assert!(
     "the headers fit in the bytes before a payload"
 );
 const _: () = assert!(
+    HEADER <= ALIGN,
+    "the region header fits in the bytes `Memory` makes usable from the start"
+);
+const _: () = assert!(
     class_payload(CLASSES_MAX - 1) <= u32::MAX as usize,
     "the largest payload fits in a u32"
 );
@@ -195,8 +199,8 @@ impl Pool {
     ///
     /// # Panics
     ///
-    /// If `memory` is shorter than [`Config::reservation`], is not aligned to
-    /// [`ALIGN`], or refuses to commit the 64 bytes of the pool's header.
+    /// If `memory` is shorter than [`Config::reservation`], or is not aligned to
+    /// [`ALIGN`].
     #[must_use]
     #[expect(clippy::needless_pass_by_value, reason = "settings move into a pool")]
     pub fn new(config: Config, memory: impl Memory + 'static) -> Self {
@@ -212,16 +216,14 @@ impl Pool {
             region.is_aligned(),
             "pool memory must be aligned to 64 bytes"
         );
-        let Ok(()) = memory.commit(0, HEADER) else {
-            panic!("pool memory refused to commit its {HEADER}-byte header");
-        };
         let first = Region {
             returned: AtomicUsize::new(NONE),
             owed: AtomicUsize::new(0),
             memory: Box::new(memory),
             track: Track::new(),
         };
-        // SAFETY: the memory is committed for `HEADER` bytes, aligned, and unused.
+        // SAFETY: `Memory` makes the first `ALIGN` bytes usable from the start, and
+        // they hold the `HEADER` bytes. The memory is aligned and unused.
         unsafe { region.write(first) };
         Self {
             region,
@@ -698,7 +700,8 @@ impl Drop for Block {
 /// An error from a [`Pool`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The pool's budget has no room for the request now.
+    /// The pool has no room for the request now: its budget is full, or the system
+    /// refused memory. A later request may succeed.
     Exhausted {
         /// Bytes asked for.
         requested: usize,
@@ -773,8 +776,8 @@ mod fixture {
 
     /// Heap memory that records its calls and counts its drops.
     pub(crate) struct Watched {
-        pub(crate) heap: Heap,
-        pub(crate) watch: Arc<Watch>,
+        heap: Heap,
+        watch: Arc<Watch>,
     }
 
     // SAFETY: each method is the one of `Heap`.
@@ -826,8 +829,9 @@ mod fixture {
         /// Which pages are resident.
         pub(crate) type Pages = Arc<Mutex<Vec<bool>>>;
 
-        /// Heap memory with a set of resident pages: `commit` rounds out to
-        /// [`PAGE`] and `purge` rounds in, as an OS mapping does.
+        /// Heap memory with a set of resident pages: the pages of the first
+        /// [`ALIGN`] bytes start resident, `commit` rounds out to [`PAGE`], and
+        /// `purge` rounds in, as an OS mapping does.
         pub(crate) struct Paged {
             heap: Heap,
             pages: Pages,
@@ -866,7 +870,9 @@ mod fixture {
         pub(crate) fn create_paged_pool(budget: usize) -> (Pool, Pages) {
             let config = Config { budget };
             let len = config.reservation();
-            let pages = Arc::new(Mutex::new(vec![false; len.div_ceil(PAGE)]));
+            let mut marks = vec![false; len.div_ceil(PAGE)];
+            marks[..ALIGN.div_ceil(PAGE)].fill(true);
+            let pages = Arc::new(Mutex::new(marks));
             let memory = Paged {
                 heap: Heap::new(len),
                 pages: Arc::clone(&pages),
@@ -1047,9 +1053,6 @@ mod tests {
     }
 
     mod new {
-        use std::sync::Arc;
-
-        use super::fixture::{Watch, Watched};
         use super::*;
 
         #[test]
@@ -1062,18 +1065,6 @@ mod tests {
         #[should_panic(expected = "pool memory must be aligned to 64 bytes")]
         fn panics_when_the_memory_is_misaligned() {
             let memory = Misaligned(Heap::new(256));
-            drop(Pool::new(Config { budget: 128 }, memory));
-        }
-
-        #[test]
-        #[should_panic(expected = "pool memory refused to commit its 64-byte header")]
-        fn panics_when_the_memory_refuses_the_header() {
-            let watch = Arc::new(Watch::default());
-            watch.refusing.store(true, Relaxed);
-            let memory = Watched {
-                heap: Heap::new(192),
-                watch,
-            };
             drop(Pool::new(Config { budget: 128 }, memory));
         }
     }
@@ -1246,7 +1237,7 @@ mod tests {
                 len: 192,
             };
             assert_eq!(
-                watch.calls()[1..],
+                watch.calls(),
                 [
                     Commit {
                         offset: 64,
@@ -1289,7 +1280,6 @@ mod tests {
             assert_eq!(
                 watch.calls(),
                 [
-                    Commit { offset: 0, len: 64 },
                     Commit {
                         offset: 64,
                         len: 128
@@ -1529,7 +1519,8 @@ mod tests {
 
             /// Each byte of the budget that no size in use holds is room for a block,
             /// and `committed` is the carved range of each size. A refused commit
-            /// fails only an alloc that fits, and keeps both.
+            /// fails only an alloc that fits, and keeps both. No block is served
+            /// over a refused commit.
             #[test]
             fn serves_each_alloc_that_fits_in_the_room_idle_sizes_leave(
                 steps in prop::collection::vec(
@@ -1545,11 +1536,19 @@ mod tests {
                 let (pool, watch) = create_watched_pool(BUDGET);
                 let mut blocks: Vec<(Unique, u8)> = Vec::new();
                 let mut lent = 0;
-                for ((len, dropped, refusing), fill) in steps.iter().copied().zip(1_u8..)
-                {
+                for ((len, dropped, refusing), fill) in steps.into_iter().zip(1_u8..) {
                     watch.refusing.store(refusing, Relaxed);
+                    let calls = watch.calls().len();
                     match pool.alloc(len) {
                         Ok(mut block) => {
+                            let commits = watch.calls()[calls..]
+                                .iter()
+                                .filter(|call| matches!(call, Commit { .. }))
+                                .count();
+                            prop_assert!(
+                                !refusing || commits == 0,
+                                "served {len} bytes after a refused commit"
+                            );
                             block.fill(fill);
                             lent += footprint(len);
                             blocks.push((block, fill));

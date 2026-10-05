@@ -8,8 +8,9 @@ use crate::ALIGN;
 
 /// A reserved range of address space that one [`Pool`](crate::Pool) cuts blocks from.
 ///
-/// The pool calls [`commit`](Self::commit) before it first uses a range, and
-/// [`purge`](Self::purge) when a range is idle. Offsets are from
+/// The first [`ALIGN`] bytes are usable from the start. The pool calls
+/// [`commit`](Self::commit) before it uses any other range, first or after a purge,
+/// and [`purge`](Self::purge) when a range is idle. Offsets are from
 /// [`base`](Self::base). A range need not be page-aligned: `commit` rounds it out, and
 /// `purge` rounds it in.
 ///
@@ -17,6 +18,8 @@ use crate::ALIGN;
 ///
 /// - `base` and `len` give the same values on each call. The `len` bytes at `base`
 ///   belong to this value alone, at one address, until it drops.
+/// - The first [`ALIGN`] bytes are as if a `commit` of them returned `Ok` before the
+///   first call.
 /// - When `commit` returns `Ok`, each byte in its range is readable, writable, and
 ///   initialized. It stays so until a `purge` of that byte or the drop.
 /// - A `purge` may change the bytes in its range. It changes no other byte.
@@ -40,6 +43,7 @@ pub unsafe trait Memory: Send {
     fn commit(&self, offset: usize, len: usize) -> Result<(), Refused>;
 
     /// Lets the system take back the pages that lie fully in `len` bytes at `offset`.
+    /// Those pages then stop counting against the memory the system can commit.
     fn purge(&self, offset: usize, len: usize);
 }
 

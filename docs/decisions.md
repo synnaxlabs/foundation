@@ -1370,7 +1370,11 @@ How to read this record:
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
   implements it over `std::alloc` for tests, Miri, and `sim`. `block` makes no OS
   call. `reclaim` takes back returned blocks on each loop turn; `purge` gives idle
-  pages back on a timer that the shard owns (#2).
+  pages back on a timer that the shard owns (#2). The first 64 bytes of a `Memory`
+  are usable from the start: they hold the pool's header, so `Pool::new` makes no
+  commit that can fail. A purged page stops counting against the memory the system
+  can commit. On Linux with strict overcommit, `madvise` and `mprotect` keep that
+  charge, so `os` purges with a `MAP_FIXED` remap (#475).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
