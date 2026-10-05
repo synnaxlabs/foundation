@@ -1,7 +1,7 @@
 //! The time to build a frame (header, ranges, and descriptors, but not the series
 //! bytes), to fill and read every series in order, to look each one up, to give its
-//! charge, and to view the series bytes, for a dense frame and for frames of 100,000
-//! channels.
+//! charge, to view the series bytes, and to give the end of each series, for a dense
+//! frame and for frames of 100,000 channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -186,4 +186,12 @@ fn body(bencher: Bencher<'_, '_>, case: &Case) {
     let pool = pool();
     let frame = frame(&pool, case);
     bencher.bench_local(|| black_box(&frame).body().len());
+}
+
+/// Sums the end of every series.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn ends(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    bencher.bench_local(|| black_box(&frame).ends().map(|(_, end)| end).sum::<usize>());
 }
