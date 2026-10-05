@@ -18,28 +18,16 @@ pub(crate) struct Tail {
     pub(crate) stamp: Option<Stamp>,
 }
 
-/// The tails of every index the log holds, by the node's slot of the index.
+/// The tails of every path the log holds, by the node's slot of the index and
+/// the path.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Tails(hash::Map<Slot, [Tail; 2]>);
-
-fn of(tails: &mut [Tail; 2], path: Path) -> &mut Tail {
-    let [live, backfill] = tails;
-    match path {
-        Path::Live => live,
-        Path::Backfill => backfill,
-    }
-}
+pub(crate) struct Tails(hash::Map<(Slot, Path), Tail>);
 
 impl Tails {
     /// The tail of `path` of the index at `slot`: `Tail::default()` before its
     /// first entry.
     pub(crate) fn get(&self, slot: Slot, path: Path) -> Tail {
-        self.0
-            .get(&slot)
-            .map_or_else(Tail::default, |[live, backfill]| match path {
-                Path::Live => *live,
-                Path::Backfill => *backfill,
-            })
+        self.0.get(&(slot, path)).copied().unwrap_or_default()
     }
 
     /// Moves the tail of the header's path past the entry: `seq` to `first + len`,
@@ -51,7 +39,7 @@ impl Tails {
     /// When `first` is below the tail, with the index, the path, `first`, and the
     /// tail. When `first + len` does not fit in a `u64`.
     pub(crate) fn advance(&mut self, slot: Slot, header: &Header) {
-        let tail = of(self.0.entry(slot).or_default(), header.path);
+        let tail = self.0.entry((slot, header.path)).or_default();
         assert!(
             header.first >= tail.seq,
             "invariant: an entry of index {} on path {:?} starts at {}, below the \
