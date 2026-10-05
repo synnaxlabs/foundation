@@ -260,11 +260,22 @@ How to read this record:
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
   fsync is fatal and never retried.
-  Ring record (starting point): `[len: u32][crc32c: u32][payload]`, one per group
-  commit, starting on a 4096-byte boundary so a commit never rewrites a synced block.
-  The CRC continues from the record before (a chain), and each open of the ring starts
-  a chain from a random value, so bytes of an earlier chain never read as the next
-  record.
+  Ring record (starting point): `[len: u32][crc32c: u32][kind: u8][body]`, starting
+  on a 4096-byte boundary so a commit never rewrites a synced block. The CRC covers
+  `len`, `kind`, and the body. It continues from the record before (a chain), so
+  bytes of an earlier chain never read as the next record.
+  Kinds: data (1), one per group commit; wrap (2), no body, the rest of the area is
+  not used and the next record is at its start; restart (3), written at each open,
+  its body is a random `u32` and the chain continues from that value. A record never
+  crosses the end of the area. Kind 0 is never valid.
+  Offsets count bytes since the ring was made and never wrap; the place in the area
+  is the offset modulo the area length. The area is at least twice the largest record
+  less one block, so an empty ring takes any record. A body is at most `u32::MAX`
+  bytes.
+  Recovery walks from the tail to the first record that does not follow the chain.
+  A record that follows the chain but has an unknown kind or a wrong shape fails the
+  open. The restart record needs one free block: an open of a full ring first moves
+  records at the tail to a segment.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -570,6 +581,14 @@ How to read this record:
   editor exists. `node` builds the front-end table keyed by file extension. Files hold
   data only (no loops, variables, or modules). SDK code may produce a Document directly.
   Never shrink the model to the weakest syntax. Supersedes: r3 plain HCL.
+- **DOCUMENT MODEL (2026-10-04)** A Document is attributes in a map sorted by key
+  (keys unique) plus blocks in order. Values: bool, integer (`i128`), finite float,
+  string, reference (`types::name::Name`), list, map, and call. No null and no
+  expressions. Refines K1: a front end gives every key, keyword, label, function
+  name, and value a span (byte offset, then line and column in Unicode scalar values,
+  from 0); SDK and spec documents have none (section 2.1, kind config). `==` never
+  reads spans, so a Document from a file equals the same Document from the spec.
+  Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
 - **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and

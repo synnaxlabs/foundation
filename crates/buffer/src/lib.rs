@@ -11,3 +11,8 @@ mod crc32c;
     expect(dead_code, reason = "the ring engine is the first user")
 )]
 mod record;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the ring engine is the first user")
+)]
+mod wal;

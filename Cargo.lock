@@ -191,6 +191,10 @@ dependencies = [
 [[package]]
 name = "document"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "env"
