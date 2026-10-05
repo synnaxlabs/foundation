@@ -158,8 +158,10 @@ state on `main`.
   the file: the CRC is not a secret, and a header block has no tie to its ring.
 - The engine landed (#161): `Buffer::open` reads the header blocks and walks the
   ring. #234 and #300 are robustness defects of this boundary, with fixes in
-  review (#356, #348): they need a writer of the file, so they do not have the
-  `security` label.
+  review (#356, #348). They do not have the `security` label: each needs a writer
+  of the file, or, for the small body of #300, a `Layout` from the node's own
+  config (a new ring with a body of 4 to 54 bytes stops the node at its first
+  `append`).
 
 ### Device to connector
 
