@@ -1,5 +1,7 @@
 //! Tests of a simulated run through the `env` handles that production code gets.
 
+mod net;
+
 use std::collections::BTreeSet;
 use std::future::pending;
 use std::pin::Pin;
@@ -44,6 +46,7 @@ fn sim(seed: u64) -> Sim {
     Sim::new(Config {
         seed,
         steps_max: 10_000,
+        ..Config::default()
     })
 }
 
@@ -307,6 +310,7 @@ fn a_run_stops_past_the_step_limit() {
     let mut sim = Sim::new(Config {
         seed: 0,
         steps_max: 100,
+        ..Config::default()
     });
     let node = sim.node(node::Config::default());
     let _handle = node.shards().start(shard("shard-0"), |_| async {
@@ -417,7 +421,7 @@ fn a_sleep_on_the_clock_of_another_node_panics() {
         sim.run(),
         Err(Error::Panicked {
             thread: "b-0".into(),
-            message: "a clock of node 0 sleeps on a thread of node 1".into(),
+            message: "a sleep of node 0 runs on a thread of node 1".into(),
             seed: 0,
         })
     );
@@ -536,6 +540,15 @@ fn a_run_with_no_threads_ends_at_once() {
 }
 
 #[test]
+fn the_digest_holds_each_poll() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let _idle = node.shards().start(shard("idle"), |_| async {}).unwrap();
+    sim.run().unwrap();
+    assert_ne!(sim.digest(), Sim::new(Config::default()).digest());
+}
+
+#[test]
 fn dropping_the_sim_drops_waiting_tasks_and_unstarted_threads() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
@@ -573,7 +586,9 @@ fn debug_names_the_config_and_the_node() {
     let node = sim.node(node::Config::default());
     assert_eq!(
         format!("{sim:?}"),
-        "Sim { config: Config { seed: 0, steps_max: 10000 }, .. }"
+        "Sim { config: Config { seed: 0, steps_max: 10000, link: Config { \
+         delay: Span(250000), jitter: Span(0), loss: 0.0, duplication: 0.0, \
+         mtu: 1500 } }, .. }"
     );
     assert_eq!(format!("{node:?}"), "Node(0)");
 }

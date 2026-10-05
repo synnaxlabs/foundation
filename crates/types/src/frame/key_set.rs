@@ -13,6 +13,10 @@ use crate::sample::{Scalar, Type};
 pub struct Key(u32);
 
 impl Key {
+    pub(super) const fn new(n: u32) -> Self {
+        Self(n)
+    }
+
     /// The key set number.
     #[must_use]
     pub const fn get(self) -> u32 {
@@ -47,6 +51,16 @@ impl KeySet {
     #[must_use]
     pub fn groups(&self) -> &[usize] {
         &self.groups
+    }
+
+    /// The position in [`Self::entries`] of the index of `entry`'s group.
+    ///
+    /// # Panics
+    ///
+    /// If `entry` is out of range.
+    #[must_use]
+    pub fn index(&self, entry: usize) -> usize {
+        self.groups[super::to_usize(self.entries[entry].group)]
     }
 
     /// The position of `slot` in [`Self::entries`], or `None` when the key set does not
@@ -149,7 +163,7 @@ impl Interner {
         let n =
             u32::try_from(self.sets.len()).expect("a node holds at most 2^32 key sets");
         let set = Arc::new(KeySet {
-            key: Key(n),
+            key: Key::new(n),
             entries: Arc::clone(&shape.0),
             groups: Arc::clone(&shape.1),
         });
@@ -228,6 +242,10 @@ mod tests {
             ]
         );
         assert_eq!(set.groups(), [2, 4]);
+        assert_eq!(
+            (0..5).map(|e| set.index(e)).collect::<Vec<_>>(),
+            [2, 4, 2, 2, 4]
+        );
         assert_eq!(set.key().get(), 0);
     }
 
@@ -445,11 +463,13 @@ mod tests {
             let group = entries[at].group;
             let numbered = set.groups().iter().position(|&position| position == at);
             prop_assert_eq!(entries[at].data_type, STAMP);
+            prop_assert_eq!(set.index(at), at);
             prop_assert_eq!(numbered.and_then(|g| u32::try_from(g).ok()), Some(group));
             for (slot, kind) in data {
                 let entry = entries[set.find(*slot).unwrap()];
                 prop_assert_eq!(entry.data_type, *kind);
                 prop_assert_eq!(entry.group, group);
+                prop_assert_eq!(set.index(set.find(*slot).unwrap()), at);
             }
         }
         Ok(())

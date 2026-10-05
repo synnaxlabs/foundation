@@ -384,13 +384,29 @@ How to read this record:
   struct.
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
   home routes by key set.
-- **M3** One pool block per frame: a header (key set id, presence mask, sample count
-  per index group), one descriptor per series, and series bytes back to back. A series
-  is a slice. One refcount per frame. Connectors write straight into `hub.block(len)`.
-  Supersedes: S2 per-series buffer.
+- **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
+  label), a range for each present index group, a descriptor for each present series,
+  and series bytes back to back. Ranges are sorted by group and descriptors by entry.
+  An entry is present when it has a descriptor, so the cost of a frame grows with the
+  series it holds, not with the width of its key set (rule 11). The "presence mask" of
+  S7 and X30 is this list. A series is a slice. One refcount per frame. Connectors
+  write straight into `hub.block(len)`. The person decided on 2026-10-05 ("Sorted
+  lists"), #187, in place of a presence mask over entries. Supersedes: S2 per-series
+  buffer.
 - **M4** Each shard owns a pool that `node` injects. A release returns the block to the
   owner shard. No global pool.
 - **M5** Blocks hold offsets, never pointers.
+- **FRAME LAYOUT (refines M3, X8)** `types::frame`, little-endian, offsets from the
+  start of the payload. A 16-byte header: key set key, range count, and descriptor count
+  (each u32), then form and label (each u8), then zeros. The label is the writer's
+  (B7): live 0, backfill 1, resend 2. Then `{ group: u32, count: u32, seq: u64 }` for
+  each present group, sorted by group, then `{ entry: u32, end: u32 }` for each present
+  series, sorted by entry, then the series. `end` counts from the start of the series
+  bytes. Each series starts at the end before it rounded up to 8, and the first at 0.
+  A group is present when its index is, and a present series needs its index. A lookup
+  by entry or group is a binary search, and a pass in entry order reads each descriptor
+  once. The header holds no entry or group count: an entry or group past the key set
+  is absent. A frame is at most `u32::MAX` bytes.
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -963,7 +979,11 @@ How to read this record:
   message each other through Remote Control ("remote control is fine"). Every session
   name is unique across both machines. There is one coordinator. If Remote Control
   fails, the fallback is one `inbox:<name>` GitHub issue per session, not a new
-  socket.
+  socket. The factory host runs on a second Claude account, so Remote Control cannot
+  reach it, and its sessions use the fallback (2026-10-05, "Yes It was the otehr
+  login"). A host session comments on `inbox:coordinator`, and the coordinator
+  comments on the host session's inbox. Laptop sessions reach host sessions through
+  the coordinator.
 - **QUALITY SESSIONS (2026-10-05)** The person approved `verify` and `red-team` and
   asked for `audit` and `ux`. `verify` owns the MVP acceptance tests (in `acceptance`,
   written before the pieces land) and the chaos lab. `red-team` attacks merged code,
@@ -1152,7 +1172,7 @@ Storage classes used in the table:
 | Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers. Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
-| `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery` | `types` (value) |
+| `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
 | Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
 | Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one | The writer; backfill is its label for late data | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
@@ -1220,7 +1240,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Frame | Memory: one pool block with a header (key set id, presence mask, sample count and seq per index group, X8) and descriptors `{ offset, len }`. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
+| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, label, form), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
 | View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |
@@ -1685,7 +1705,10 @@ but `home` (below `hub`) routes by key set and writes companion samples, so a
 Resolution (memory delegation): both tables are layer-1 data structures, the slot table
 (`types::channel::Slots`) and the interner (`types::frame::key_set::Interner`). `node`
 constructs one of each per node and injects them into `hub` and `home`. Interning
-happens at session open; each shard reads a snapshot.
+happens at session open; each shard reads a snapshot. `buffer` keys its in-memory
+tails, floors, and read cursors by slot, and keeps the key on disk. `Buffer::open`
+takes the slot table and assigns a slot to each index it recovers; `node` opens
+every buffer before it opens sessions (#219, 2026-10-05).
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
@@ -1788,7 +1811,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | Layer | Crate | Job (one sentence) | Allowed dependencies |
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
-| 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
+| 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, and holds the one `unsafe impl GlobalAlloc`. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
@@ -1804,7 +1827,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`, `append_at`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
-| 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `env`, `types`, `estimate`, `wire`, `transport` |
+| 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
 | 2 | `blob` | Stores content by hash and fetches it from peers (spec chunks, binaries). | `env`, `types`, `block`, `wire`, `transport` |
 | 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
 | 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
