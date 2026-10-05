@@ -1,11 +1,27 @@
-//! The complete readers of one index at its home.
+//! The readers of one index at its home.
+
+mod latest;
 
 use std::collections::BTreeMap;
+use std::fmt;
 
+use types::frame::Frame;
 use types::name::Name;
 use types::time::{Span, Stamp};
 
-use crate::{Error, Key, Position, Reader, Record, Start};
+use crate::{Error, Position, Reader, Record, Start};
+
+pub use latest::Latest;
+
+/// One session on one index. Keys are unique within one [`Readers`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Key(u64);
+
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// A session that [`Readers::open`] started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,19 +34,27 @@ pub struct Opened {
     pub replaced: Option<Key>,
 }
 
-/// The complete readers of one index at its home: their positions, the data they hold,
-/// the credit each session has, and the records that let a new home continue. Sans-I/O:
-/// the home passes mesh time in, appends [`Readers::records`] to the index log after
-/// each input, and calls [`Readers::advance`] at [`Readers::deadline`].
+/// The readers of one index at its home, in both modes. For complete readers: their
+/// positions, the data they hold, the credit each session has, and the records that
+/// let a new home continue. For latest readers: the index's newest live frame and the
+/// frame that waits for each session. Sans-I/O: the home passes mesh time in, appends
+/// [`Readers::records`] to the index log after each input, and calls
+/// [`Readers::advance`] at [`Readers::deadline`].
 #[derive(Debug, Default)]
 pub struct Readers {
-    /// Sorted by key.
-    sessions: Vec<Session>,
-    /// The credit of each session, at its index in `sessions`. Apart so that a
+    /// The complete sessions, sorted by key.
+    complete: Vec<Session>,
+    /// The credit of each complete session, at its index in `complete`. Apart so that a
     /// `Session` stays 64 bytes, which `find` indexes with a shift, not a multiply.
     credits: Vec<Credit>,
     /// Named readers that still hold after their session closed.
     closed: Vec<Closed>,
+    /// The latest sessions, sorted by key.
+    latest: Vec<latest::Session>,
+    /// The index's newest live frame.
+    newest: Option<Frame>,
+    /// The last [`Readers::put`]'s result, kept so that a put does not allocate.
+    woken: Vec<Key>,
     next: u64,
     records: Vec<Record>,
 }
@@ -96,7 +120,8 @@ impl Readers {
         readers
     }
 
-    /// Starts a session. A named reader with an open session is taken over.
+    /// Starts a complete session. A named reader's open session in either mode is taken
+    /// over.
     ///
     /// # Panics
     ///
@@ -106,7 +131,7 @@ impl Readers {
             Reader::Unnamed => (None, None),
             Reader::Named { name, hold } => {
                 check(*hold);
-                self.take(name)
+                self.take_over(name)
             }
         };
         let position = match start {
@@ -116,8 +141,7 @@ impl Readers {
                 otherwise,
             } => resume(presented, stored, otherwise),
         };
-        let key = Key(self.next);
-        self.next += 1;
+        let key = self.key();
         let session = Session {
             key,
             reader,
@@ -125,7 +149,7 @@ impl Readers {
             changed: false,
         };
         self.records.extend(session.record());
-        self.sessions.push(session);
+        self.complete.push(session);
         self.credits.push(Credit::default());
         Opened {
             key,
@@ -142,10 +166,10 @@ impl Readers {
     ///
     /// # Panics
     ///
-    /// If the session is not open.
+    /// If the complete session is not open.
     pub fn ack(&mut self, key: Key, position: Position) -> Result<(), Error> {
         let i = self.find(key);
-        let session = &mut self.sessions[i];
+        let session = &mut self.complete[i];
         let from = session.position;
         let forward = position.live >= from.live
             && match (from.backfill, position.backfill) {
@@ -166,7 +190,7 @@ impl Readers {
     ///
     /// # Panics
     ///
-    /// If the session is not open.
+    /// If the complete session is not open.
     pub fn grant(&mut self, key: Key, limit_bytes: u64) {
         let i = self.find(key);
         let credit = &mut self.credits[i];
@@ -181,7 +205,7 @@ impl Readers {
     ///
     /// # Panics
     ///
-    /// If the session is not open.
+    /// If the complete session is not open.
     #[must_use]
     pub fn spend(&mut self, key: Key, bytes: u64) -> bool {
         let i = self.find(key);
@@ -193,13 +217,26 @@ impl Readers {
         true
     }
 
-    /// Ends the session at `now`.
+    /// Ends the session at `now`, in either mode. A latest session's waiting frame does
+    /// not go out.
     ///
     /// # Panics
     ///
     /// If the session is not open.
     pub fn close(&mut self, key: Key, now: Stamp) {
-        let session = self.remove(self.find(key));
+        if let Ok(i) = self.complete.binary_search_by_key(&key, |s| s.key) {
+            self.close_complete(i, now);
+        } else {
+            let i = self
+                .latest
+                .binary_search_by_key(&key, |s| s.key)
+                .unwrap_or_else(|_| panic!("session {key} is not open"));
+            self.latest.remove(i);
+        }
+    }
+
+    fn close_complete(&mut self, i: usize, now: Stamp) {
+        let session = self.remove(i);
         if let Reader::Named { name, hold } = session.reader {
             let closed = Closed {
                 name,
@@ -229,7 +266,7 @@ impl Readers {
     /// reader holds. `buffer` may trim below it. Takes time linear in the readers.
     #[must_use]
     pub fn floor(&self) -> Option<Position> {
-        let open = self.sessions.iter().map(|session| session.position);
+        let open = self.complete.iter().map(|session| session.position);
         let closed = self.closed.iter().map(|closed| closed.position);
         open.chain(closed).reduce(|a, b| Position {
             live: a.live.min(b.live),
@@ -244,7 +281,7 @@ impl Readers {
     /// Queues a record for each named reader whose position changed since its last
     /// record. The home calls it on its position interval.
     pub fn flush(&mut self) {
-        for session in self.sessions.iter_mut().filter(|s| s.changed) {
+        for session in self.complete.iter_mut().filter(|s| s.changed) {
             session.changed = false;
             self.records.extend(session.record());
         }
@@ -255,27 +292,48 @@ impl Readers {
         self.records.drain(..)
     }
 
-    /// Removes the named reader, open or closed. Returns its position and the session
-    /// it had open.
-    fn take(&mut self, name: &Name) -> (Option<Position>, Option<Key>) {
-        let open = self.sessions.iter().position(|s| s.name() == Some(name));
-        if let Some(i) = open {
+    fn key(&mut self) -> Key {
+        let key = Key(self.next);
+        self.next += 1;
+        key
+    }
+
+    /// Removes the named reader: its open session in either mode, and its hold.
+    /// Returns its position, open or closed, and the session it had open.
+    fn take_over(&mut self, name: &Name) -> (Option<Position>, Option<Key>) {
+        if let Some(i) = self.named(name) {
             let session = self.remove(i);
             return (Some(session.position), Some(session.key));
         }
+        let replaced = self.remove_latest(name);
         let closed = self.closed.iter().position(|closed| closed.name == *name);
-        (closed.map(|i| self.closed.remove(i).position), None)
+        (closed.map(|i| self.closed.remove(i).position), replaced)
+    }
+
+    /// Closes the named reader's open session in either mode at `now`. Returns it.
+    fn close_named(&mut self, name: &Name, now: Stamp) -> Option<Key> {
+        let Some(i) = self.named(name) else {
+            return self.remove_latest(name);
+        };
+        let key = self.complete[i].key;
+        self.close_complete(i, now);
+        Some(key)
+    }
+
+    /// The named reader's open complete session.
+    fn named(&self, name: &Name) -> Option<usize> {
+        self.complete.iter().position(|s| s.name() == Some(name))
     }
 
     fn find(&self, key: Key) -> usize {
-        self.sessions
+        self.complete
             .binary_search_by_key(&key, |session| session.key)
-            .unwrap_or_else(|_| panic!("session {key} is not open"))
+            .unwrap_or_else(|_| panic!("complete session {key} is not open"))
     }
 
     fn remove(&mut self, i: usize) -> Session {
         self.credits.remove(i);
-        self.sessions.remove(i)
+        self.complete.remove(i)
     }
 }
 
