@@ -3,7 +3,7 @@
 use std::fmt;
 use std::ops::Range;
 
-use types::time::{Span, Stamp};
+use types::time::{Interval, Span, Stamp};
 
 /// One of an index's two write paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,7 +19,7 @@ pub(crate) enum Path {
 pub(crate) struct Config {
     /// The earliest stamp accepted. A clock that was never set reads near 1970.
     pub(crate) earliest: Stamp,
-    /// How far past mesh time a stamp may be.
+    /// How far past the latest edge of mesh time a stamp may be.
     pub(crate) ahead: Span,
 }
 
@@ -53,17 +53,22 @@ impl Order {
 
     /// Accepts one frame's index stamps on `path` at mesh time `now`, and returns the
     /// seq of its samples. A rejected frame changes nothing. An empty frame gets an
-    /// empty range.
+    /// empty range. Call it after every other check that can reject the frame, because
+    /// the seq it gives is spent.
     ///
     /// # Errors
     ///
     /// [`Error`] names the first stamp that breaks a rule. Each stamp is checked
-    /// against the limits, then the order on its path, then the newest live stamp.
+    /// against the limits, then the order on its path, then the other path.
+    ///
+    /// # Panics
+    ///
+    /// If the path's seq would pass `u64::MAX`.
     pub(crate) fn accept(
         &mut self,
         path: Path,
         stamps: &[Stamp],
-        now: Stamp,
+        now: Interval,
     ) -> Result<Range<u64>, Error> {
         self.check(path, stamps, now)?;
         let tail = match path {
@@ -72,8 +77,10 @@ impl Order {
         };
         let start = tail.seq;
         if let Some(&last) = stamps.last() {
+            tail.seq = start
+                .checked_add(stamps.len() as u64)
+                .expect("invariant: a path takes fewer than 2^64 samples");
             tail.stamp = Some(last);
-            tail.seq += stamps.len() as u64;
         }
         Ok(start..tail.seq)
     }
@@ -86,14 +93,13 @@ impl Order {
         }
     }
 
-    fn check(&self, path: Path, stamps: &[Stamp], now: Stamp) -> Result<(), Error> {
+    fn check(&self, path: Path, stamps: &[Stamp], now: Interval) -> Result<(), Error> {
         let earliest = self.config.earliest;
-        // Past the last stamp, no stamp can be ahead.
-        let latest = now
-            .checked_add(self.config.ahead)
-            .unwrap_or(Stamp::from_nanos(i64::MAX));
-        let live = match path {
-            Path::Live => None,
+        let latest = Stamp::from_nanos(
+            now.latest.nanos().saturating_add(self.config.ahead.nanos()),
+        );
+        let other = match path {
+            Path::Live => self.backfill.stamp,
             Path::Backfill => self.live.stamp,
         };
         let mut before = self.tail(path).stamp;
@@ -113,10 +119,17 @@ impl Order {
                     stamp,
                 });
             }
-            if let Some(live) = live
-                && stamp >= live
+            if let Some(newest) = other
+                && match path {
+                    Path::Live => stamp <= newest,
+                    Path::Backfill => stamp >= newest,
+                }
             {
-                return Err(Error::Overlap { stamp, live });
+                return Err(Error::Overlap {
+                    path,
+                    stamp,
+                    newest,
+                });
             }
             before = Some(stamp);
         }
@@ -147,15 +160,18 @@ pub(crate) enum Error {
     Ahead {
         /// The stamp.
         stamp: Stamp,
-        /// Mesh time plus the limit.
+        /// The latest edge of mesh time plus the limit.
         latest: Stamp,
     },
-    /// A backfill stamp is not before the newest live stamp.
+    /// A stamp is on the wrong side of the other path: backfill ends before the newest
+    /// live stamp, and live starts after the newest backfill stamp.
     Overlap {
+        /// The path of the frame.
+        path: Path,
         /// The stamp.
         stamp: Stamp,
-        /// The newest live stamp.
-        live: Stamp,
+        /// The newest stamp on the other path.
+        newest: Stamp,
     },
 }
 
@@ -191,10 +207,23 @@ impl fmt::Display for Error {
                 "stamp {stamp} is after {latest}, the latest this home accepts now: \
                  check the source's clock"
             ),
-            Self::Overlap { stamp, live } => write!(
+            Self::Overlap {
+                path: Path::Backfill,
+                stamp,
+                newest,
+            } => write!(
                 f,
-                "backfill stamp {stamp} is not before the newest live stamp {live}: \
+                "backfill stamp {stamp} is not before the newest live stamp {newest}: \
                  backfill only data older than live data"
+            ),
+            Self::Overlap {
+                path: Path::Live,
+                stamp,
+                newest,
+            } => write!(
+                f,
+                "live stamp {stamp} is not after the newest backfill stamp {newest}: \
+                 check the source's clock"
             ),
         }
     }
@@ -224,8 +253,11 @@ mod tests {
     }
 
     /// Mesh time in the unit tests: the latest stamp accepted is `s(61)`.
-    fn now() -> Stamp {
-        s(60)
+    fn now() -> Interval {
+        Interval {
+            earliest: s(59),
+            latest: s(60),
+        }
     }
 
     fn order() -> Order {
@@ -370,8 +402,9 @@ mod tests {
             assert_eq!(
                 error,
                 Error::Overlap {
+                    path: Path::Backfill,
                     stamp: s(10),
-                    live: s(10),
+                    newest: s(10),
                 }
             );
             assert_eq!(
@@ -393,11 +426,45 @@ mod tests {
         }
 
         #[test]
+        fn rejects_live_at_or_before_the_newest_backfill_stamp() {
+            let mut order = order();
+            assert_eq!(
+                order.accept(Path::Backfill, &stamps(&[5, 6]), now()),
+                Ok(0..2)
+            );
+            let error = order
+                .accept(Path::Live, &stamps(&[6]), now())
+                .expect_err("live at the newest backfill stamp");
+            assert_eq!(
+                error,
+                Error::Overlap {
+                    path: Path::Live,
+                    stamp: s(6),
+                    newest: s(6),
+                }
+            );
+            assert_eq!(
+                error.to_string(),
+                "live stamp 2026-10-05T00:00:06.000000000Z is not after the newest \
+                 backfill stamp 2026-10-05T00:00:06.000000000Z: check the source's \
+                 clock"
+            );
+            assert_eq!(order.accept(Path::Live, &stamps(&[7]), now()), Ok(0..1));
+        }
+
+        #[test]
         fn changes_nothing_for_a_rejected_frame() {
             let mut order = order();
             assert_eq!(order.accept(Path::Live, &stamps(&[1, 2]), now()), Ok(0..2));
             let rejected = order.accept(Path::Live, &stamps(&[3, 3]), now());
-            assert!(rejected.is_err(), "{rejected:?}");
+            assert_eq!(
+                rejected,
+                Err(Error::Backwards {
+                    path: Path::Live,
+                    before: s(3),
+                    stamp: s(3),
+                })
+            );
             assert_eq!(order.tail(Path::Live), tail(2, 2));
             assert_eq!(order.accept(Path::Live, &stamps(&[3]), now()), Ok(2..3));
         }
@@ -406,7 +473,11 @@ mod tests {
         fn gives_an_empty_frame_no_seq() {
             let mut order = order();
             assert_eq!(order.accept(Path::Live, &stamps(&[1]), now()), Ok(0..1));
-            assert_eq!(order.accept(Path::Live, &[], Stamp::EPOCH), Ok(1..1));
+            let epoch = Interval {
+                earliest: Stamp::EPOCH,
+                latest: Stamp::EPOCH,
+            };
+            assert_eq!(order.accept(Path::Live, &[], epoch), Ok(1..1));
             assert_eq!(order.tail(Path::Live), tail(1, 1));
         }
 
@@ -436,9 +507,48 @@ mod tests {
         }
 
         #[test]
-        fn accepts_any_later_stamp_when_the_limit_passes_the_last_stamp() {
+        fn saturates_the_latest_stamp_at_both_ends() {
+            let at = |nanos| Interval {
+                earliest: Stamp::from_nanos(nanos),
+                latest: Stamp::from_nanos(nanos),
+            };
+            let config = Config {
+                earliest: Stamp::from_nanos(i64::MIN),
+                ahead: Span::SECOND,
+            };
+            let mut order = Order::new(config, Tail::default(), Tail::default());
             let last = Stamp::from_nanos(i64::MAX);
-            assert_eq!(order().accept(Path::Live, &[last], last), Ok(0..1));
+            assert_eq!(
+                order.accept(Path::Live, &[last], at(i64::MAX - 1)),
+                Ok(0..1)
+            );
+            let behind = Config {
+                ahead: Span::from_nanos(-1),
+                ..config
+            };
+            let mut order = Order::new(behind, Tail::default(), Tail::default());
+            assert_eq!(
+                order.accept(Path::Live, &[Stamp::EPOCH], at(i64::MIN)),
+                Err(Error::Ahead {
+                    stamp: Stamp::EPOCH,
+                    latest: Stamp::from_nanos(i64::MIN),
+                })
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "invariant: a path takes fewer than 2^64 samples")]
+        fn panics_past_the_last_seq() {
+            let full = Tail {
+                stamp: None,
+                seq: u64::MAX,
+            };
+            let accepted = Order::new(config(), full, Tail::default()).accept(
+                Path::Live,
+                &stamps(&[1]),
+                now(),
+            );
+            panic!("accepted past the last seq: {accepted:?}");
         }
     }
 
@@ -474,20 +584,26 @@ mod tests {
                 &mut self,
                 path: Path,
                 stamps: &[Stamp],
-                now: Stamp,
+                now: Interval,
             ) -> Result<Range<u64>, Error> {
                 let p = index(path);
                 let earliest = self.config.earliest;
-                let latest = now
-                    .checked_add(self.config.ahead)
-                    .unwrap_or(Stamp::from_nanos(i64::MAX));
+                let limit = i128::from(now.latest.nanos())
+                    + i128::from(self.config.ahead.nanos());
+                let latest =
+                    Stamp::from_nanos(i64::try_from(limit).unwrap_or(if limit > 0 {
+                        i64::MAX
+                    } else {
+                        i64::MIN
+                    }));
                 let live = self.accepted[0].iter().max().copied();
+                let backfill = self.accepted[1].iter().max().copied();
                 for (i, &stamp) in stamps.iter().enumerate() {
                     let before = self.accepted[p].iter().chain(&stamps[..i]).max();
                     if stamp < earliest {
                         return Err(Error::Early { stamp, earliest });
                     }
-                    if stamp > latest {
+                    if i128::from(stamp.nanos()) > limit {
                         return Err(Error::Ahead { stamp, latest });
                     }
                     if let Some(&before) = before
@@ -499,11 +615,25 @@ mod tests {
                             stamp,
                         });
                     }
-                    if let Some(live) = live
-                        && path == Path::Backfill
-                        && stamp >= live
+                    if let Some(newest) = backfill
+                        && path == Path::Live
+                        && stamp <= newest
                     {
-                        return Err(Error::Overlap { stamp, live });
+                        return Err(Error::Overlap {
+                            path,
+                            stamp,
+                            newest,
+                        });
+                    }
+                    if let Some(newest) = live
+                        && path == Path::Backfill
+                        && stamp >= newest
+                    {
+                        return Err(Error::Overlap {
+                            path,
+                            stamp,
+                            newest,
+                        });
                     }
                 }
                 self.accepted[p].extend_from_slice(stamps);
@@ -525,7 +655,7 @@ mod tests {
         }
 
         /// One frame: its path, its stamps, and mesh time.
-        type Frame = (Path, Vec<Stamp>, Stamp);
+        type Frame = (Path, Vec<Stamp>, Interval);
 
         fn check(config: Config, start: [Tail; 2], frames: Vec<Frame>) {
             let mut order = Order::new(config, start[0], start[1]);
@@ -567,16 +697,21 @@ mod tests {
                 prop_oneof![Just(Path::Live), Just(Path::Backfill)],
                 0..240_i64,
                 proptest::collection::vec(-2..12_i64, 0..5),
-                0..240_i64,
+                prop_oneof![8 => 0..240_i64, 1 => Just(i64::MIN), 1 => Just(i64::MAX)],
+                0..20_i64,
             )
-                .prop_map(|(path, first, steps, now)| {
+                .prop_map(|(path, first, steps, latest, width)| {
                     let mut stamp = first;
                     let mut stamps = vec![Stamp::from_nanos(first)];
                     for step in steps {
                         stamp += step;
                         stamps.push(Stamp::from_nanos(stamp));
                     }
-                    (path, stamps, Stamp::from_nanos(now))
+                    let now = Interval {
+                        earliest: Stamp::from_nanos(latest.saturating_sub(width)),
+                        latest: Stamp::from_nanos(latest),
+                    };
+                    (path, stamps, now)
                 })
         }
 
@@ -584,7 +719,11 @@ mod tests {
             #[test]
             fn hold_against_a_model(
                 earliest in 0..20_i64,
-                ahead in 0..20_i64,
+                ahead in prop_oneof![
+                    8 => -20..20_i64,
+                    1 => Just(i64::MIN),
+                    1 => Just(i64::MAX),
+                ],
                 live in tail(),
                 backfill in tail(),
                 frames in proptest::collection::vec(frame(), 0..40),
@@ -596,7 +735,11 @@ mod tests {
                 };
                 let mut frames = frames;
                 if empty {
-                    frames.push((Path::Live, Vec::new(), Stamp::EPOCH));
+                    let epoch = Interval {
+                        earliest: Stamp::EPOCH,
+                        latest: Stamp::EPOCH,
+                    };
+                    frames.push((Path::Live, Vec::new(), epoch));
                 }
                 check(config, [live, backfill], frames);
             }

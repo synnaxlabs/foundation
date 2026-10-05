@@ -8,18 +8,8 @@ publish.workspace = true
 [dependencies]
 types = { path = "../types" }
 
-[features]
-# Entry points for the benchmark. Not a contract.
-bench = []
-
 [dev-dependencies]
-divan = { workspace = true }
 proptest = { workspace = true }
-
-[[bench]]
-name = "order"
-harness = false
-required-features = ["bench"]
 
 [lints]
 workspace = true
