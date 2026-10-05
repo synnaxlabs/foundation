@@ -1,5 +1,5 @@
-//! The cost of one acknowledgment and one spend of credit, which run per message, and of
-//! one floor, which the home reads when `buffer` trims.
+//! The cost of one acknowledgment and one spend of credit, which run per message, and
+//! of one floor, which the home reads when `buffer` trims.
 
 use delivery::{Key, Position, Reader, Readers, Start};
 use divan::Bencher;

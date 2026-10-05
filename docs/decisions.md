@@ -234,19 +234,25 @@ How to read this record:
   when the position changed. A session open at a crash restores as closed at the
   restore. Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
-  `hub` grants credit per session as an absolute byte limit since the session opened, in
-  a `Credit` message apart from the ack. A grant only raises the limit, so a lost,
-  repeated, or reordered grant does no harm. A new session has no credit until its first
-  grant. The home sends a whole frame while the bytes it has spent are below the limit,
-  so it passes the limit by less than one frame and never splits a frame. A byte is one
-  byte of the frame's message on the wire (the `Block` that `transport` carries, without
-  the stream header), which `wire` defines. Credits apply only to complete delivery,
-  which is reliable: a lost frame would leak credit. The `hub` raises the limit only
-  after it releases a frame, and it bounds its decoded copies itself, since a small
-  encoded frame can decode to much more. It sizes the window from the link's
-  bandwidth-delay product and adapts it. Replaces r11 5.2 (a window beyond the
-  acknowledged position): flow control stays apart from durable acks. Basis: B3, MEMORY
-  BOUNDS, r11 5.2, #41.
+  `hub` grants credit to each session on one index as an absolute byte limit since the
+  session opened, in a `Credit` message apart from the ack. Both sides count from zero
+  at each session, including a takeover and a resume at a new home. The open carries the
+  first grant; until then the session has no credit. A grant only raises the limit, so a
+  repeated or reordered grant does no harm. A `Credit` is sent reliably: a blocked
+  session gets no frame, so no later grant would replace a lost one. The home drops a
+  grant for a session it closed. The home sends a whole frame while the bytes it has
+  spent are below the limit, so it passes the limit by less than one frame and never
+  splits a frame. After a refusal, the session gets no later frame until it has the
+  refused one; frames from catch-up spend credit too. A byte is one byte of the frame's
+  encoded series (X35): the home, every connection, and a local reader see the same
+  length, and per-connection framing does not count. Credits apply only to complete
+  delivery, which is reliable: a lost frame would leak credit. The `hub` raises the
+  limit only after it releases a frame, and it bounds its decoded copies itself, since a
+  small encoded frame can decode to much more. It sizes one window per reader from the
+  link's bandwidth-delay product, adapts it, and divides it among the indexes the reader
+  reads, so the memory a reader can pin does not grow with its indexes. Replaces r11 5.2
+  (a window beyond the acknowledged position): flow control stays apart from durable
+  acks. Basis: B3, MEMORY BOUNDS, X35, r11 5.2, #41.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync.
@@ -997,7 +1003,7 @@ Storage classes used in the table:
 | Gaps | Index log records (explicit gap with a count) | `home`, `buffer` | Complete readers | `home`, `buffer` |
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
 | Latest mailbox | Memory: depth 1 per latest reader per index | `delivery` | The reader session | `delivery` |
-| Credits | Memory per reader per index; credit messages on the wire | The reader's `hub` grants | `delivery` | `delivery`, `wire` |
+| Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; the home spends | `delivery` | `delivery`, `wire` |
 | Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `delivery` |
 | Death records | Quality channel samples (X19) | `home` | Sinks | `home` |
 | Read copy data | The copy node's index log | `replica` | The copy's readers, served by `home` in copy mode (X43) | `replica`, `home` |
