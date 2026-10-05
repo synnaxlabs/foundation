@@ -2,7 +2,8 @@
 //! and the wake protocol for a consumer that has nothing to do.
 //!
 //! A producer never waits: a full ring gives the value back. A consumer parks when
-//! the ring is empty, and the producer wakes it.
+//! the ring is empty, and the producer wakes it. A caller that spins before it parks
+//! polls `try_pop` first: `pop` parks at once.
 //!
 //! [`latest`] is a cell of words that one shard replaces and every shard reads.
 
@@ -507,6 +508,17 @@ mod tests {
     mod pop {
         use super::*;
 
+        /// A `pop` that finds a value looks before it parks, so it leaves no clone
+        /// of the waker behind.
+        #[test]
+        fn leaves_no_waker_behind_when_a_value_is_ready() {
+            let (mut producer, mut consumer) = new(config(4));
+            let (tally, waker) = create_waker();
+            assert_eq!(producer.push(1), Ok(()));
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(1)));
+            assert_eq!(Arc::strong_count(&tally), 2);
+        }
+
         #[test]
         fn returns_the_values_left_then_none_when_the_producer_is_gone() {
             let (mut producer, mut consumer) = new(config(4));
@@ -704,7 +716,7 @@ mod tests {
 
     mod threads {
         use std::thread::{self, Thread};
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         use super::*;
 
@@ -716,25 +728,27 @@ mod tests {
             }
         }
 
-        /// Drives `future` on this thread. It panics after `POLLS` polls that each
-        /// waited up to `WAIT`, so a lost wake fails the test in place of a hang.
+        /// Drives `future` on this thread. It panics when the future is not ready
+        /// `WAIT` after the first poll, so a lost wake fails the test in place of a
+        /// hang. A spurious unpark only polls again.
         #[expect(
             clippy::disallowed_methods,
             reason = "this test drives the future on a real thread; `ring` has no `env`"
         )]
         fn block_on<F: Future>(future: F) -> F::Output {
-            const POLLS: u32 = 100;
-            const WAIT: Duration = Duration::from_millis(100);
+            const WAIT: Duration = Duration::from_secs(60);
             let waker = Waker::from(Arc::new(Unpark(thread::current())));
             let mut cx = Context::from_waker(&waker);
             let mut future = pin!(future);
-            for _ in 0..POLLS {
+            let deadline = Instant::now() + WAIT;
+            loop {
                 if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
                     return output;
                 }
-                thread::park_timeout(WAIT);
+                let now = Instant::now();
+                assert!(now < deadline, "no result after {WAIT:?}");
+                thread::park_timeout(deadline - now);
             }
-            panic!("no result after {POLLS} polls");
         }
 
         /// Pushes `value`, and yields while the ring is full. It panics after `YIELDS`
