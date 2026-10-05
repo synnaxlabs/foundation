@@ -891,7 +891,7 @@ fn node_config(node: &sim::node::Node, tasks: Tasks, layout: Layout) -> Config {
     let config = block::Config { budget: POOL };
     let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
     Config {
-        files: node.files(),
+        files: node.files().expect("the files build"),
         dir: PathBuf::from(DIR),
         pool: Rc::new(pool),
         clock: node.clock(),
@@ -917,7 +917,7 @@ fn open_after_a_cut(
     let node = sim.node(sim::node::Config::default());
     let made = node.clone();
     let handle = on_node(&node, "dir", move |_| async move {
-        let files = made.files();
+        let files = made.files().expect("the files build");
         files
             .create_dir(FilePath::new(DIR))
             .await

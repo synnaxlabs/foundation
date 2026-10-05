@@ -879,7 +879,7 @@ fn slept_around_end(sleep: Span) -> u64 {
     let node = sim.node(node::Config::default());
     let clock = node.clock();
     let handle = node.shards().start(shard("d"), move |_| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         let mut free = Box::pin(files.free());
         poll_fn(|cx| {
             assert!(free.as_mut().poll(cx).is_pending());
