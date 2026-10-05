@@ -9,7 +9,7 @@ Every component gets clock, network, disk, and randomness as inputs (`env`). Pro
 passes the real ones. Tests pass the simulated ones from `sim`. Nothing reads the OS
 clock, the network, the disk, or a random source directly. Clippy's
 `disallowed-methods` list in `clippy.toml` enforces this. Only `os` implements the
-`env` seams and calls the OS, and `transport` owns its sockets.
+`env` seams and calls the OS, sockets included.
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide

@@ -18,5 +18,9 @@ loom = { workspace = true }
 name = "ring"
 harness = false
 
+[[test]]
+name = "alloc"
+harness = false
+
 [lints]
 workspace = true

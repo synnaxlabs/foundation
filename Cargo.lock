@@ -173,6 +173,10 @@ dependencies = [
 [[package]]
 name = "estimate"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "find-msvc-tools"
