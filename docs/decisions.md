@@ -312,6 +312,15 @@ How to read this record:
   `Range`. Supersedes: crate name `time`.
 - **R9 keep list** `Stamp - Stamp = Span`; one format and parse grammar for spans,
   ranges, and ns ISO stamps.
+- **TIME TEXT (#3)** A span is one number and one unit (`ns`, `us`, `ms`, `s`, `m`, `h`,
+  `d`). Output uses the largest of `d`, `h`, `m` that divides the span, else the largest
+  of `s`, `ms`, `us`, `ns` not more than the span, with a decimal fraction: `3d`, `90s`,
+  `1.5s`, `250us`, `0s`. Input takes a decimal fraction and a leading `-` and rejects a
+  value that is not a whole number of nanoseconds. A stamp is RFC 3339: output is UTC
+  with nine fraction digits; input needs an offset, takes up to nine fraction digits,
+  and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
+  never ends before it starts (`Range::new` returns `None`), so its text always round
+  trips; input rejects an end before the start.
 
 ### 1.7 Transport
 
