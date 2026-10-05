@@ -594,8 +594,10 @@ How to read this record:
   number and one unit with no space (`200GiB`), and a decimal fraction only when it
   gives whole bytes (`1.5GiB`). Its type lives in `types` beside `time::Span`, and the
   `document` reader is an adapter over it. The person decided on 2026-10-05 ("A yes I
-  approve", #479). Output uses the largest of `TiB`, `GiB`, `MiB`, `KiB`, and `B` that
-  divides the size, with no fraction, so `1.5GiB` is written `1536MiB` (#505).
+  approve", #479). The units are `B`, `KiB`, `MiB`, `GiB`, and `TiB`, with exact case:
+  `GB` and `Gb` are errors, because they mean other sizes. Input takes no sign. Output
+  uses the largest unit that divides the size, with no fraction: `1.5GiB` is written
+  `1536MiB`, and zero is `0B` (#505).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high

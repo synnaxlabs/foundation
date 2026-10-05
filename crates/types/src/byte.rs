@@ -35,19 +35,27 @@ impl Size {
     }
 }
 
-/// Each unit and its size as a power of two, from the largest.
-const UNITS: [(u32, &str); 5] =
-    [(40, "TiB"), (30, "GiB"), (20, "MiB"), (10, "KiB"), (0, "B")];
+/// Each unit, from the largest.
+const UNITS: [(Size, &str); 5] = [
+    (Size::TEBIBYTE, "TiB"),
+    (Size::GIBIBYTE, "GiB"),
+    (Size::MEBIBYTE, "MiB"),
+    (Size::KIBIBYTE, "KiB"),
+    (Size(1), "B"),
+];
 
 impl fmt::Display for Size {
     /// Writes the size in the largest unit that divides it, with no fraction:
     /// `200GiB`, `1536MiB`, `1023B`, `0B`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (shift, unit) = UNITS
+        if self.0 == 0 {
+            return f.write_str("0B");
+        }
+        let (unit, name) = UNITS
             .into_iter()
-            .find(|&(shift, _)| self.0 != 0 && self.0.trailing_zeros() >= shift)
-            .unwrap_or((0, "B"));
-        write!(f, "{}{unit}", self.0 >> shift)
+            .find(|(unit, _)| self.0.is_multiple_of(unit.0))
+            .expect("invariant: the last unit is one byte");
+        write!(f, "{}{name}", self.0 / unit.0)
     }
 }
 
@@ -64,44 +72,41 @@ impl FromStr for Size {
         };
         let syntax = || error("a number and a unit, such as 1023B, 1.5GiB, or 200GiB");
         let number = quantity::split(s).ok_or_else(syntax)?;
-        let (shift, _) = UNITS
+        let (unit, _) = UNITS
             .into_iter()
-            .find(|&(_, unit)| unit == number.unit)
+            .find(|&(_, name)| name == number.unit)
             .ok_or_else(syntax)?;
-        let part = part(number.fraction, shift)
+        let part = fraction(number.fraction, unit.0.trailing_zeros())
             .ok_or_else(|| error("a whole number of bytes"))?;
-        let range = || error("a size that fits in a 64-bit count of bytes");
-        let whole = number
+        number
             .whole
             .bytes()
-            .try_fold(0_u128, |n, b| {
-                n.checked_mul(10)?.checked_add(u128::from(b - b'0'))
+            .try_fold(0_u64, |n, b| {
+                n.checked_mul(10)?.checked_add(u64::from(b - b'0'))
             })
-            .and_then(|n| n.checked_mul(1 << shift))
-            .ok_or_else(range)?;
-        u64::try_from(whole + part)
+            .and_then(|n| n.checked_mul(unit.0)?.checked_add(part))
             .map(Self)
-            .map_err(|_overflow| range())
+            .ok_or_else(|| error("a size that fits in a 64-bit count of bytes"))
     }
 }
 
-/// The bytes that the fraction digits `fraction` give of a unit of `1 << shift` bytes,
+/// The bytes that the fraction digits `digits` give of a unit of `1 << shift` bytes,
 /// or `None` when they are not a whole number.
-fn part(fraction: &str, shift: u32) -> Option<u128> {
-    // The k digits end in a digit other than 0. They give whole bytes only when 5^k
-    // divides them, so they end in 5 and are odd, and k is at most `shift`.
-    let digits = u32::try_from(fraction.len())
-        .ok()
-        .filter(|&digits| digits <= shift)?;
-    let divisor = 5_u128.pow(digits);
+fn fraction(digits: &str, shift: u32) -> Option<u64> {
+    // The k digits do not end in 0. They give whole bytes only when 5^k divides them,
+    // so they are odd, and k is at most `shift`.
+    let k = u32::try_from(digits.len()).ok().filter(|&k| k <= shift)?;
+    let divisor = 5_u128.pow(k);
     let (quotient, remainder) =
-        fraction
+        digits
             .bytes()
             .fold((0_u128, 0_u128), |(quotient, remainder), b| {
                 let dividend = remainder * 10 + u128::from(b - b'0');
                 (quotient * 10 + dividend / divisor, dividend % divisor)
             });
-    (remainder == 0).then_some(quotient << (shift - digits))
+    let quotient = u64::try_from(quotient)
+        .expect("invariant: the digits are below 10^k, so the quotient is below 2^k");
+    (remainder == 0).then_some(quotient << (shift - k))
 }
 
 #[cfg(test)]
