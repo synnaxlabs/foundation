@@ -1,11 +1,11 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -104,12 +104,12 @@ func number(src []byte, literal *hclsyntax.LiteralValueExpr, negative bool) stri
 		return i.String()
 	}
 	// HCL holds a 512-bit value, and rounding it again to a float64 can miss the
-	// nearest float64.
-	text := string(literal.Range().SliceBytes(src))
-	f, err := strconv.ParseFloat(scientific(text), 64)
-	if err != nil && !errors.Is(err, strconv.ErrRange) {
-		log.Fatalf("%s", err)
+	// nearest float64. strconv.ParseFloat stops reading a long exponent.
+	exact, ok := new(big.Rat).SetString(string(literal.Range().SliceBytes(src)))
+	if !ok {
+		log.Fatalf("big.Rat refuses %s", literal.Range())
 	}
+	f, _ := exact.Float64()
 	if negative {
 		f = -f
 	}
@@ -117,30 +117,6 @@ func number(src []byte, literal *hclsyntax.LiteralValueExpr, negative bool) stri
 		f = math.Abs(f)
 	}
 	return fmt.Sprintf("f%016x", math.Float64bits(f))
-}
-
-// scientific is the float that text writes, as `d.ddd` with no leading zero and an
-// exponent in -400..400. strconv.ParseFloat stops reading the digits of a long
-// exponent, and past 400 each float64 is infinite or zero.
-func scientific(text string) string {
-	mantissa, written, found := strings.Cut(strings.ToLower(text), "e")
-	if !found {
-		written = "0"
-	}
-	exponent, err := strconv.ParseInt(written, 10, 64)
-	if err != nil {
-		log.Fatalf("%s", err)
-	}
-	whole, fraction, _ := strings.Cut(mantissa, ".")
-	digits := whole + fraction
-	significant := strings.TrimLeft(digits, "0")
-	if significant == "" {
-		return "0"
-	}
-	zeros := len(digits) - len(significant)
-	place := max(-1<<62, min(exponent, 1<<62)) + int64(len(whole)-zeros-1)
-	place = max(-400, min(place, 400))
-	return fmt.Sprintf("%s.%se%d", significant[:1], significant[1:], place)
 }
 
 // quote puts text in `"`, with `\` before `"` and `\`, and each character outside
