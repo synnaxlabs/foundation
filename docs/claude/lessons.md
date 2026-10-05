@@ -1,0 +1,76 @@
+# Architecture lessons
+
+Each lesson came from a design decision that a person corrected. Apply each one
+before you propose a design, not after someone points it out.
+
+## Library, not framework
+
+The code with the edge cases owns its control flow and composes small shared
+components. A framework that owns the loop and calls plug-in hooks is the exception,
+for places where nothing varies. When a boundary has the shape "the lower part calls
+the upper part's hooks", test the inverted version first. Give the common case a
+ready-made composition built only from the same public pieces.
+
+Evidence: a connector design where a shared actor owned the loop and each kind
+implemented device hooks was rejected. Hardware has edge cases: when devices start, how
+reads are paced, software against hardware timing, socket settings, extra threads. The
+Synnax EtherCAT engine runs its own real-time thread behind a `read` hook. Telegraf
+added `ServiceInput` beside `Gather`. Debezium runs its own reader thread and queue
+behind Kafka Connect's `poll`. OpenTelemetry's `scraperhelper` is an optional helper,
+not a required base.
+
+## Neutral model at the boundary
+
+When a component consumes something that comes in interchangeable forms (file syntaxes,
+transport carriers, time sources, secret stores, SDK languages), the core works on one
+neutral model, and each form is an adapter that reads or writes it. Ship one default
+adapter first.
+
+- The model carries everything the richest form needs (types, case, source positions),
+  never only what the weakest form can say. Viper lowercases every key so sources can
+  merge, and it drops source positions.
+- Parts that only one form could express get their own grammar, so no adapter is
+  privileged. Calculation expressions are strings with their own grammar, like PromQL
+  in YAML or CEL in Kubernetes.
+
+Applied in Foundation: the config `Document` with HCL as the first front end; time
+`Measurement` with sources as adapters; the transport session model with QUIC, TLS over
+TCP, relay, and diode carriers; secret stores.
+
+## The naming tell
+
+A compound name that repeats a responsibility (`home::ControlGate`) means the module
+holds a second job that wants its own module (`control::Gate`). Split until the names
+get simple. Hunt for these in every crate map and review.
+
+## Dependency direction
+
+Before you add a structure, draw its edges: what it points at, and what points at it.
+Keep the core item minimal. Prefer a setting as a selector over many items (a policy)
+to a field on each item. Prefer reusing a core concept to adding a side structure:
+quality became an ordinary channel that many channels can point at, like an index.
+
+## Policies never create channels
+
+A policy (retention, compression, reduction, access) selects existing channels and
+changes how they are handled. Anything that creates a channel (a connector, a
+calculation) is an explicit definition, so it shows up in `plan`.
+
+## A status channel is a published copy
+
+A value inside the core is the truth. Its status channel is a copy for people, agents,
+and outside tools. Core decisions (failover, fencing) use the internal value and never
+read their own status channels back. Rebalancing and other automation are outside
+controllers that read status channels and act through `plan` and `apply`.
+
+## Seating
+
+For every component, ask how deep it reaches into other components' internals, and
+whether a clean boundary can separate it. When it cannot, make the trade explicitly and
+write it down. Replication is the example: it is a separate `replica` component that
+uses two narrow calls into the home, not a reader inside `hub`.
+
+## The repo is the memory
+
+Sessions compact, crash, and get replaced. A decision that lives only in a session's
+context is lost. Write it into `docs/` in the same PR that depends on it.

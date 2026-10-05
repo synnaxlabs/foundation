@@ -1,0 +1,17 @@
+frame filter, one subscriber, 100k-channel universe, ns per frame (median of 5)
+columns: rebuild = new key+series Vecs, one Arc clone per kept series
+         mask = Arc<Frame> clone + bitmask over entries; consumer walks kept entries
+ frame  kept demand    rb-uuid    rb-slot    mk-uuid    mk-slot   mk-merge   mk-cache cache-only
+     8     4     54         35         29         15          8         43          4          5
+    64    32    532        238        193         99         55        379         17          4
+   128    16   1016        203        143        191         75        744         10          4
+  1024    64   1064       1241        747       1383        383       2032         34          5
+  1024  1024   2024       5972       4699       1990       1088       2712        684          4
+ 10000   100   1100      10752       5636      14857       4818       8957        154          4
+ 10000 10000  11000      75870      57777      23820      10194      24732       6480          5
+
+split one frame by home, ns per frame (median of 5)
+ frame   k       rebuild         masks        cached
+    64   2           465           431            12
+  1024   4          6248          1498            19
+ 10000   8         56203         14090            34

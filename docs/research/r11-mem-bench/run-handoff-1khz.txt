@@ -1,0 +1,9 @@
+-- one-way latency, one message every 1ms, 5000 messages (us) --
+                                                  p50      p99     p99.9       max
+rtrb SPSC, busy-poll consumer                    0.29     0.75      7.63     13.84
+rtrb SPSC, spin 10000 then park                  7.33    13.96   3244.03   6721.53
+rtrb SPSC, spin 100 then park                    7.96    24.34    949.25   4390.91
+crossbeam bounded                                8.00    22.96    954.37   2805.76
+tokio mpsc into current-thread runtime           7.71    19.14    869.38   1997.82
+
+-- one-way throughput, 200000 u64 messages, capacity 1024 (ns/msg) --

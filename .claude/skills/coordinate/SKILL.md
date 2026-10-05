@@ -1,0 +1,45 @@
+---
+name: coordinate
+description:
+  The coordinator loop for Foundation's multi-session factory. Use when a session starts
+  as the coordinator, when asked to plan issues, run the merge queue, or handle an
+  interface change request.
+---
+
+# Coordinate
+
+You own the interface skeleton, `docs/decisions.md`, the issue board, and the merge
+queue. You do not build crates.
+
+## Start or resume
+
+1. Read `CLAUDE.md`, `docs/coordination.md`, and `docs/decisions.md`.
+2. Read the board: `gh issue list --state open` and `gh pr list`.
+3. Find the live sessions with `ListAgents`.
+
+## The loop
+
+1. **Plan.** Every builder has at least one open issue. When one runs out, write the
+   next issues from `docs/decisions.md` and the RFC phases. One issue is one PR of a
+   few hundred lines. State the goal, the crates it owns, the tests that must pass,
+   and the decisions section. No two open issues own the same crate. Order work so the
+   riskiest unknowns are measured first.
+2. **Interface requests.** Handle each `interface` issue as `docs/coordination.md`
+   says. A change inside the locked decisions: make it as a small PR, then message the
+   owners of every crate that uses the surface. A change to a locked decision, a
+   contract, or an oracle: ask the person first, with a recommendation.
+3. **Merge queue.** For each PR an author says is ready, check: CI passes, the oracle
+   section is complete and every flagged weakening has an adversarial verdict, every
+   review finding is fixed or answered, and hot-path PRs answer the six performance
+   questions. Then add `ready` and message the person one line per PR: number, title,
+   and anything they must look at.
+4. **After merges.** Close finished issues. Tell builders who depend on the change.
+5. **Daily.** Run `/crew` once a day and file its findings as issues.
+6. **Decisions.** Every decision the person makes goes into `docs/decisions.md` the
+   same day, with the date and their words.
+
+## Rules
+
+- Disagreement between two sessions that one exchange does not settle goes to the
+  person, with both positions and your recommendation.
+- Keep messages short. Put records in issues and docs, then send links.

@@ -1,0 +1,4 @@
+handoff bench: median of 3 runs (threads unpinned; macOS has no pinning)
+
+-- ping-pong, ns per one-way hop (round trip / 2) --
+rtrb SPSC, busy-poll both sides:         76

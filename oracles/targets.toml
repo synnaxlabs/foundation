@@ -1,0 +1,24 @@
+# Performance targets. A person changes these, never an agent.
+
+[throughput]
+# Numeric samples per second per node: disk buffer plus one complete reader.
+samples_per_second = 100_000_000
+# Throughput at 100k channels stays within this factor of throughput at 1 channel.
+channel_count_factor = 2.0
+
+[latency]
+# Latest-mode p99 over one encrypted LAN hop, in microseconds.
+latest_p99_us = 250
+
+[size]
+# Bytes per sample for typical sensor data, timestamps included.
+bytes_per_sample = 4.0
+
+[footprint]
+# Raspberry Pi 4 with 1 GB.
+idle_memory_mb = 50
+start_ms = 1000
+
+[gate]
+# A benchmark regression over this fraction blocks a merge.
+regression = 0.05

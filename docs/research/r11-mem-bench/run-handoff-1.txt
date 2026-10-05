@@ -1,0 +1,27 @@
+handoff bench: median of 3 runs (threads unpinned; macOS has no pinning)
+
+-- ping-pong, ns per one-way hop (round trip / 2) --
+rtrb SPSC, busy-poll both sides:         49
+rtrb SPSC, spin 100 then park:           467
+rtrb SPSC, spin 10000 then park:         54
+rtrb SPSC, park at once (spin 1):        1800
+crossbeam bounded (spin, then park):     80
+std sync_channel:                        1772
+tokio mpsc, 2 current-thread runtimes:   2931
+tokio mpsc, 1 multi-thread rt, 2 workers:61
+
+-- one-way latency, one message every 20µs, 100000 messages (us) --
+                                                  p50      p99     p99.9       max
+rtrb SPSC, busy-poll consumer                    0.08     0.42      9.46    397.82
+rtrb SPSC, spin 10000 then park                  0.08     0.29      3.67     43.94
+rtrb SPSC, spin 100 then park                    5.75     9.46   2594.82   4069.38
+crossbeam bounded                                5.83     8.08     12.63    128.06
+tokio mpsc into current-thread runtime           6.00     8.84     12.26     51.42
+
+-- one-way throughput, 10000000 u64 messages, capacity 1024 (ns/msg) --
+rtrb SPSC, one at a time:                4.32
+rtrb SPSC, chunks of 64:                 0.57
+crossbeam bounded:                       9.58
+std sync_channel:                        5.61
+tokio mpsc, recv one:                    56.55
+tokio mpsc, recv_many 256:               38.18

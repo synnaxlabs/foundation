@@ -1,0 +1,15 @@
+refcount bench: N=10000000, median of 5 runs, ns per clone+drop pair
+Rc<[u8]> clone+drop, 1 thread:            2.84
+Arc<[u8]> clone+drop, 1 thread:           3.77
+bytes::Bytes (shared) clone+drop:         3.85
+bytes::Bytes first clone (Vec promote):   8.32
+Arc clone+drop, 2 threads, ONE shared Arc: 18.04 per thread; private Arcs: 3.90
+Arc clone+drop, 4 threads, ONE shared Arc: 71.20 per thread; private Arcs: 4.02
+Arc clone+drop, 8 threads, ONE shared Arc: 417.75 per thread; private Arcs: 3.97
+
+fan-out of one frame to R readers over SPSC rings, ns per frame on the producer
+readers     series   copy+Arc per series    Arc<Frame>+mask view
+1                8                 217.2                    32.2
+4                8                1149.6                   298.8
+4               64                7605.2                   314.1
+8               64               20592.4                   931.5

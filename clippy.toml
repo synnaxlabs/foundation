@@ -1,0 +1,16 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+# Clock, randomness, threads, and the environment come from `env`. Only the real
+# adapters may allow these, with a reason.
+disallowed-methods = [
+  { path = "std::time::SystemTime::now", reason = "use the injected clock" },
+  { path = "std::time::Instant::now", reason = "use the injected clock" },
+  { path = "std::thread::sleep", reason = "use the injected clock" },
+  { path = "std::thread::spawn", reason = "threads come from env" },
+  { path = "std::env::var", reason = "configuration is an input" },
+  { path = "std::env::var_os", reason = "configuration is an input" },
+]
+
+doc-valid-idents = ["UUIDv7", "PreVote", "CheckQuorum", "OpenSSH", ".."]

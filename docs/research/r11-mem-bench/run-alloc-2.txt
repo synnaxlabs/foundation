@@ -1,0 +1,31 @@
+alloc bench: N=3000000, median of 5 runs, ns per alloc+free pair
+
+== size 64 B ==
+allocator                               LIFO batch1024  cross-thread
+system (macOS libmalloc)                9.52     11.95         32.66
+mimalloc 3.3.2                          4.33      5.08         24.40
+jemalloc 5.3                            7.54     13.77         46.00
+snmalloc 0.7                            3.27      4.63         16.60
+local pool (stack free list)            1.14      0.63          4.38
+
+== size 4096 B ==
+allocator                               LIFO batch1024  cross-thread
+system (macOS libmalloc)               15.38     26.61        130.21
+mimalloc 3.3.2                         11.17     39.58         73.12
+jemalloc 5.3                            9.67     39.21         84.27
+snmalloc 0.7                           15.17    135.07         70.41
+local pool (stack free list)            1.14      3.58          6.59
+
+== size 65536 B ==
+allocator                               LIFO batch1024  cross-thread
+system (macOS libmalloc)               78.55     94.52        545.16
+mimalloc 3.3.2                         12.00    116.43        111.78
+jemalloc 5.3                          131.80   1875.24        365.84
+snmalloc 0.7                          105.86    913.72        170.71
+local pool (stack free list)            1.08      5.47         20.96
+
+ring-only cross-thread baseline (u64 through rtrb, no alloc): 23.91 ns/msg
+shared MPMC pool (ArrayQueue free list), 1 thread: 4.32 ns/pair
+shared MPMC pool, 2 threads contending: 132.09 ns/pair per thread
+shared MPMC pool, 4 threads contending: 327.90 ns/pair per thread
+shared MPMC pool, 8 threads contending: 1176.88 ns/pair per thread

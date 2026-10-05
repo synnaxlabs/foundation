@@ -1,0 +1,42 @@
+
+== 64-byte value, 1 reader(s), writer flat out ==
+                                   ns/read    ns/write    torn
+seqlock                              128.9         8.1       0
+parking_lot Mutex                     47.4         5.9       0
+parking_lot RwLock                  1018.8         4.9       0
+ArcSwap (load + copy)                 19.1       251.5       0
+ArcSwap (load_full, Arc out)          33.9       241.1       0
+triple_buffer (SPSC)                   7.0        56.4       0
+
+== 64-byte value, 4 reader(s), writer flat out ==
+                                   ns/read    ns/write    torn
+seqlock                              451.7        17.0       0
+parking_lot Mutex                    127.8        13.0       0
+parking_lot RwLock                   418.9        10.1       0
+ArcSwap (load + copy)                 13.6       947.2       0
+ArcSwap (load_full, Arc out)         225.1       867.3       0
+
+== 64-byte value, 1 reader(s), writer paced at 100 kHz ==
+                                   ns/read    ns/write    torn
+seqlock                                2.3        98.4       0
+parking_lot Mutex                      7.4       285.8       0
+parking_lot RwLock                     7.5       145.1       0
+ArcSwap (load + copy)                  6.8       338.3       0
+ArcSwap (load_full, Arc out)           6.6       357.4       0
+triple_buffer (SPSC)                   1.9        64.0       0
+
+== 64-byte value, 4 reader(s), writer paced at 100 kHz ==
+                                   ns/read    ns/write    torn
+seqlock                                2.4       165.1       0
+parking_lot Mutex                     65.2      2591.3       0
+parking_lot RwLock                    37.5       272.6       0
+ArcSwap (load + copy)                  6.9       892.2       0
+ArcSwap (load_full, Arc out)         194.6       892.9       0
+
+== 512-byte value, 4 readers, writer flat out ==
+                                   ns/read    ns/write    torn
+seqlock                             6121.1        73.8       0
+parking_lot Mutex                    291.3        48.6       0
+parking_lot RwLock                   799.1        25.5       0
+ArcSwap (load + copy)                 33.1       743.1       0
+ArcSwap (load_full, Arc out)         216.6       558.7       0
