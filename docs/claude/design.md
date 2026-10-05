@@ -95,10 +95,11 @@ Each one is a finding in `/eb-review` and in review.
   that whole abstraction are written against it, before the body exists, so an agent
   cannot write tests that agree with its own bug. A bug fix starts with a failing test,
   which he also asks for.
-- **Comments are short and complete.** Every public item has a doc comment
-  (`missing_docs`), and it is short. Write it before the body: when it cannot be short,
-  the abstraction is wrong (hard to describe). Private code gets a comment only for what
-  the code cannot say.
+- **Comments are few; public APIs are documented clearly.** This is the person's call
+  (2026-10-04) over Ousterhout's higher comment volume. Every public item has a clear
+  doc comment (`missing_docs`), written before the body: when it cannot be short, the
+  abstraction is wrong (hard to describe). Private code gets a comment only where an
+  agent reading it for the first time would likely get it wrong.
 - **Defining an error away is not hiding it.** New semantics that make a case normal
   are fine when a caller wants that result and the doc comment says so. Skipping or
   swallowing an error to hide a defect is still forbidden. Important errors are exposed.

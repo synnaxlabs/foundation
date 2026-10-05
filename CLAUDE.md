@@ -165,7 +165,9 @@ sample or record.
 half, then ask whether the rest is needed.
 
 - Comment only what the code cannot say: a subtle invariant, an upstream bug
-  workaround, an ordering constraint.
+  workaround, an ordering constraint, or anything an agent reading it for the first
+  time would likely get wrong.
+- Every public item gets a clear doc comment. Public APIs are contracts.
 - Banned: restating the next line, narrating steps, section labels, justifying a
   change to a reviewer, history ("this used to..."), filler ("note that", "simply").
 - Doc comments speak to the caller: what it does, arguments, returns, errors, panics,
