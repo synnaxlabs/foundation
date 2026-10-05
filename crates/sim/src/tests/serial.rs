@@ -493,14 +493,25 @@ fn a_crash_closes_the_ports_of_its_node() {
     open(&a, &config(A, 9_600, None)).unwrap();
 }
 
+/// The digest of a run in which [`A`] sends the bytes 0 to 99 over `line` to [`B`],
+/// which holds its port open and never reads, so the fate of a byte changes no poll.
+fn unread(line: line::Config) -> u64 {
+    let (mut sim, a, b) = pair(0, line);
+    let _held = send(&b, config(B, 9_600, None), Vec::new());
+    let _send = send(&a, config(A, 9_600, None), (0..100).collect());
+    sim.run_for(Span::SECOND).unwrap();
+    sim.digest()
+}
+
 #[test]
 fn the_digest_holds_the_fate_of_each_byte() {
     let lost = line::Config {
         loss: 1.0,
         ..line::Config::default()
     };
-    let (kept, _) = noisy(0, line::Config::default(), None);
-    assert_ne!(noisy(0, lost, None).0, kept);
+    let kept = unread(line::Config::default());
+    assert_eq!(unread(line::Config::default()), kept);
+    assert_ne!(unread(lost), kept);
 }
 
 #[test]
