@@ -345,13 +345,15 @@ impl StreamsState {
             self.events.push_back(StreamEvent::Readable { id });
         }
 
+        // A stopped stream already issued credit for all data up to `end`
+        let credited = if stopped { end } else { bytes_read };
         // Update connection-level flow control
-        Ok(if bytes_read != final_offset.into_inner() {
-            // bytes_read is always <= end, so this won't underflow.
+        Ok(if credited != final_offset.into_inner() {
+            // credited is always <= end, so this won't underflow.
             self.data_recvd = self
                 .data_recvd
                 .saturating_add(u64::from(final_offset) - end);
-            self.add_read_credits(u64::from(final_offset) - bytes_read)
+            self.add_read_credits(u64::from(final_offset) - credited)
         } else {
             ShouldTransmit(false)
         })
