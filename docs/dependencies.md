@@ -24,9 +24,16 @@ approval; pin the version you build against there.
 
 One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`
 feature pulls RustCrypto's `aes-gcm`, used only for the QUIC Retry integrity tag, whose
-key is public (RFC 9001 section 5.8). The person accepted it on 2026-10-04 ("Accept +
-upstream patch"). `network` sends `noq-proto` a patch to use the provider's AEAD;
-remove the exception when it lands (#55).
+key is public (RFC 9001 section 5.8). The person accepted it on 2026-10-04 until a
+local patch of `noq-proto` uses the `aws-lc-rs` AEAD for that tag: "no opening github
+issues on other peoples projects. we should do a local patch instead". Remove the
+exception when the patch lands (#55).
+
+## Local patches
+
+We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
+carry a local patch through `[patch.crates-io]` in the root `Cargo.toml`, keep the
+change small, and list it here with its reason.
 
 ## Tests, benchmarks, and tools
 
