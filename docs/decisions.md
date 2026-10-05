@@ -1057,7 +1057,11 @@ How to read this record:
   `entropy::Entropy`: random bytes from the OS, or from the run's seed in simulation.
   `rng::Rng` is concrete (xoshiro256++ seeded from `Entropy`), so simulation replays it.
   `shards::Shards`, held only by `node`: the core count, and one thread per shard with
-  its own executor. `tasks::Tasks`: spawns `!Send` tasks on the current shard.
+  its own executor. A shard's core is an index below the count, never an OS CPU
+  number. `Shards::start` panics past the count: only `node` picks cores, so a bad
+  index is a bug. `os` maps index `i` to the `i`-th CPU of its affinity set, which it
+  reads once, so the count never changes (#116).
+  `tasks::Tasks`: spawns `!Send` tasks on the current shard.
   `threads::Threads`: dedicated threads for blocking code. Each runs one future, and it
   waits for an event only by awaiting a future, so simulation controls every wait. A
   lint denies the std blocking waits (`park`, `Condvar`, `Barrier`, `mpsc` receive).
