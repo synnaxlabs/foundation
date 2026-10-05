@@ -128,7 +128,7 @@ pub(crate) struct Disk {
 }
 
 impl Disk {
-    fn last(&self) -> Position {
+    pub(crate) fn last(&self) -> Position {
         self.entries.last().map_or_else(Position::default, |e| e.at)
     }
 }
