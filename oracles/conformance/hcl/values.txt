@@ -49,6 +49,10 @@ list {"a" = [1, "b", [true], {}], "b" = []}
 negate-float {"a" = fbff8000000000000}
 negate-space-written {"a" = -1}
 negate-space {"a" = -1}
+number-dot-exponent-written {"a" = f40f86a0000000000, "b" = f40f86a0000000000, "c" = f0000000000000000, "d" = fbf847ae147ae147b}
+number-dot-exponent {"a" = f40f86a0000000000, "b" = f40f86a0000000000, "c" = f0000000000000000, "d" = fbf847ae147ae147b}
+number-exponent-i64 {"a" = f0000000000000000, "b" = f0000000000000000}
+number-zero-written {"a" = f0000000000000000, "b" = f0000000000000000}
 object-bool-key-string-written {"a" = {"true" = 1}}
 object-bool-key-string {"a" = {"true" = 1}}
 object-colon {"a" = {"b" = 1, "c" = 2}}
