@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use crate::{Config, Error, Sim, node};
-use env::threads::Error as Thread;
+use env::thread::Error as Thread;
 use proptest::prelude::*;
 use types::time::{Monotonic, Span, Stamp};
 
