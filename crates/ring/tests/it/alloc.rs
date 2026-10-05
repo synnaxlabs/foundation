@@ -42,15 +42,14 @@ fn count(f: impl FnOnce()) -> u64 {
     ALLOCATOR.count.load(Relaxed) - before
 }
 
-/// A waker with a reference count, as a task has.
-struct Ignore;
+/// A waker with a reference count, as a task has. It counts its wakes.
+#[derive(Default)]
+struct Tally(AtomicU64);
 
-impl Wake for Ignore {
-    #[expect(
-        clippy::manual_noop_waker,
-        reason = "the test needs two wakers that differ"
-    )]
-    fn wake(self: Arc<Self>) {}
+impl Wake for Tally {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Relaxed);
+    }
 }
 
 // The count covers every thread, so this binary holds one test: a second test would
@@ -63,7 +62,10 @@ fn push_try_pop_and_pop_do_not_allocate() {
         capacity: 4,
         spins: 0,
     });
-    let wakers = [Waker::from(Arc::new(Ignore)), Waker::from(Arc::new(Ignore))];
+    let tallies = [Arc::new(Tally::default()), Arc::new(Tally::default())];
+    let wakers = tallies
+        .each_ref()
+        .map(|tally| Waker::from(Arc::clone(tally)));
     let allocations = count(|| {
         for value in 0..64_u64 {
             assert_eq!(producer.push(value), Ok(()));
@@ -87,4 +89,6 @@ fn push_try_pop_and_pop_do_not_allocate() {
         }
     });
     assert_eq!(allocations, 0, "the hot path allocated");
+    let wakes = tallies.each_ref().map(|tally| tally.0.load(Relaxed));
+    assert_eq!(wakes, [32, 32], "each park got one wake");
 }
