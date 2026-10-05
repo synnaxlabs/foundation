@@ -325,6 +325,13 @@ impl Frame {
             (to_usize(lead(descriptor)), series)
         })
     }
+
+    /// The credit that sending the frame to a reader spends: the bytes a block of the
+    /// frame's length takes from its pool. It depends only on that length.
+    #[must_use]
+    pub fn charge(&self) -> u64 {
+        to_u64(block::footprint(self.0.len()))
+    }
 }
 
 /// The present groups of a frame of `series`, and the bytes of its series with the
@@ -413,6 +420,11 @@ fn put(bytes: &mut [u8], at: usize, value: &[u8]) {
 
 fn to_usize(n: u32) -> usize {
     usize::try_from(n).expect("invariant: a usize holds a u32")
+}
+
+/// A byte count as a `u64`.
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).expect("invariant: a u64 holds a usize")
 }
 
 /// An entry, count, or offset of a frame as a `u32`. An entry fits because a key set's
@@ -552,6 +564,30 @@ mod tests {
             frame.iter().map(|(entry, _)| entry).collect::<Vec<_>>(),
             [0]
         );
+    }
+
+    #[test]
+    fn charges_the_bytes_its_block_takes() {
+        let set = two_groups();
+        // Fixed values: nodes of two versions must agree on a charge.
+        let cases: [(&[(usize, usize)], u64); 7] = [
+            (&[], 128),
+            (&[(0, 0)], 128),
+            (&[(0, 0), (2, 0)], 128),
+            (&[(0, 24)], 128),
+            (&[(0, 25)], 192),
+            (&[(0, 89)], 320),
+            (&[(0, 8), (1, 8), (2, 4000)], 4160),
+        ];
+        for (series, charge) in cases {
+            let pool = pool(1 << 16);
+            let before = pool.committed();
+            let draft = Draft::new(&pool, &set, Form::Raw, series).unwrap();
+            let taken = to_u64(pool.committed() - before);
+            let frame = draft.freeze(Path::Live);
+            assert_eq!(frame.charge(), charge, "{series:?}");
+            assert_eq!(frame.charge(), taken, "{series:?}");
+        }
     }
 
     #[test]
@@ -808,8 +844,10 @@ mod tests {
         let (set, series) = shape(case);
         let entries = set.entries().len();
         let pool = pool(1 << 20);
+        let before = pool.committed();
         let mut draft = Draft::new(&pool, &set, case.form, &series)
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let taken = to_u64(pool.committed() - before);
         fill(&mut draft, &series, entries, case.in_order)?;
         let mut ranges = Vec::new();
         for ((group, &(seq, count)), &present) in
@@ -827,6 +865,7 @@ mod tests {
         prop_assert_eq!(frame.key_set(), set.key());
         prop_assert_eq!(frame.path(), case.path);
         prop_assert_eq!(frame.form(), case.form);
+        prop_assert_eq!(frame.charge(), taken);
         for (group, range) in (0_u32..).zip(ranges) {
             prop_assert_eq!(frame.range(group), range);
         }
