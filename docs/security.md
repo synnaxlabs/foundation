@@ -257,6 +257,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_stamp` | `Stamp` | Printed text reads back to the same value |
 | `types_span` | `Span` | Printed text reads back to the same value |
 | `types_range` | `Range` | Printed text reads back to the same value |
+| `types_byte_size` | `byte::Size` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 | `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
 
