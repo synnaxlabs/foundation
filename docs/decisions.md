@@ -156,6 +156,14 @@ How to read this record:
   once per handoff. A writer asks for authority at open, capped by access. Authority 255
   cannot be taken. The control lease is an optional writer setting. There is no control
   policy.
+- **GATE RULES (write-path, 2026-10-04)** Writers that do not hold control wait. When
+  the holder closes or its control lease runs out, the waiter with the highest
+  authority takes control; on a tie, the one that opened first. Each accepted write
+  renews the control lease. A writer whose control lease ran out stays out of the gate
+  until it reopens. Lease and grace times are the home's monotonic time. During the
+  X18 grace the recorded holder ranks first: the first writer of its subject takes its
+  place, and a higher authority takes control. A handoff is recorded only when the
+  holder's subject or authority changes. Basis: S11, X18, r8 trace (d).
 - **S13 + BQ13** Quality is an ordinary channel of type `Quality` (OPC UA 32-bit status
   codes) that data channels point at. One quality channel can serve many channels. It
   may sit on its own index (written on change; a value holds until the next) or share
