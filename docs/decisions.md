@@ -393,6 +393,7 @@ How to read this record:
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later
   gives it to readers. B7, the log, the seq, and reader positions are per index.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
 - **STORED BODY (#191)** The bytes of a data entry (S4) are `[count: u32]`, then
   `[channel: u128][kind: u8][element: u8][n: u32][end: u32]` for each present series
   of the index frame in entry order, then the frame's encoded series bytes,
@@ -405,6 +406,7 @@ How to read this record:
   no series byte. A slot or key set number is never stored. The layout is part of the
   disk format version (C9d), as in FRAME LAYOUT. Copy mode checks each stored body
   once where remote records enter (X43), and the read after it panics on a bad body.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
