@@ -170,6 +170,11 @@ impl Writer {
         self.place(Kind::Data, body)
     }
 
+    /// The most bytes a record body holds.
+    pub(crate) fn body_max(&self) -> usize {
+        self.layout.body_max
+    }
+
     /// Checks that a data record with a body of `len` bytes fits before the tail.
     /// [`append`](Self::append) with that body then succeeds.
     ///
