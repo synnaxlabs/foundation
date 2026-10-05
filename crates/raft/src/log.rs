@@ -95,14 +95,16 @@ impl Log {
             .unwrap_or(&self.base)
     }
 
-    // The nodes this log's holder talks to: the voters in force and the voters of
-    // the configuration before them, each once.
+    // The nodes this log's holder talks to: the voters in force and, until their
+    // configuration is committed, the voters of the configuration before them. A
+    // committed configuration released the nodes it removed.
     pub(crate) fn peers(&self) -> BTreeSet<node::Key> {
         let (at, voters) = self.voters();
-        voters
-            .peers()
-            .chain(self.voters_before(at.index).peers())
-            .collect()
+        let before = (at.index > self.committed)
+            .then(|| self.voters_before(at.index).peers())
+            .into_iter()
+            .flatten();
+        voters.peers().chain(before).collect()
     }
 
     // The position at `index`: the zero position for 0, `None` past the end.
@@ -413,6 +415,8 @@ mod tests {
         assert_eq!(log.peers(), keys(&[2, 3]));
         let log = Log::new(voters(1), vec![config(1, 1, 2)], 0).unwrap();
         assert_eq!(log.peers(), keys(&[1, 2]));
+        let log = Log::new(voters(1), vec![config(1, 1, 2)], 1).unwrap();
+        assert_eq!(log.peers(), keys(&[2]));
     }
 
     #[test]

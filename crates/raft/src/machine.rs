@@ -2617,6 +2617,34 @@ mod tests {
             assert_eq!(peers(&restarted), [key(1), key(2), key(3)]);
         }
 
+        // Node 1 restarts with the leave of node 4 applied: the leave is committed
+        // and node 4 was released before the restart. Its campaign asks the voters
+        // alone, and once it leads it sends node 4 no entry.
+        #[test]
+        fn a_restart_with_a_committed_leave_has_released_the_removed_node() {
+            let mut entries = entries(&[(1, 1)]);
+            entries.push(config(1, 2, voters(&[1, 2, 3], &[1, 2, 3, 4])));
+            entries.push(config(1, 3, voters(&[1, 2, 3], &[])));
+            let held = Start {
+                hard: Hard {
+                    term: Term(1),
+                    vote: None,
+                },
+                entries,
+                applied: 3,
+                ..start(&[1, 2, 3, 4], Hard::default())
+            };
+            let mut raft = Raft::new(CONFIG, held).unwrap();
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3], &[]));
+            raft.campaign();
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+            elect(&mut raft, &[3]);
+            raft.step(message(4, 2, Body::AppendReject { hint: 2 }))
+                .unwrap();
+            assert_eq!(raft.role(), Role::Leader);
+            assert_eq!(appended(&mut raft, 4), Vec::<u64>::new());
+        }
+
         // The indexes of the entries in each `Append` to node `to`.
         fn appended(raft: &mut Raft, to: u8) -> Vec<u64> {
             sent(raft)
