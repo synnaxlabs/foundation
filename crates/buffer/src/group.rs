@@ -44,12 +44,12 @@ pub(crate) struct Group {
 /// A limit of one record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limit {
-    /// More than 1023 entries.
+    /// More entries than one record holds.
     Entries {
         /// The entries of the batch.
         count: usize,
     },
-    /// More than 1023 parts in all the entries together.
+    /// More parts, in all the entries together, than one record holds.
     Parts {
         /// The parts of the batch.
         count: usize,
@@ -987,6 +987,38 @@ mod tests {
             prop_assert_eq!(group.push(&area.pool, &area.writer, &batch), expected.clone());
             prop_assert_eq!(group.is_empty(), expected.is_err());
         }
+    }
+
+    #[test]
+    fn a_batch_at_the_most_entries_or_parts_goes_in() {
+        let area = Area::with_body_max(60_000);
+        let batch = vec![entry(header(1, Path::Live, 0), &[]); ENTRIES_MAX];
+        let mut group = Group::default();
+        assert_eq!(group.push(&area.pool, &area.writer, &batch), Ok(()));
+        assert_eq!(group.headers.len(), ENTRIES_MAX);
+        let parts = vec![block(&area.pool, b"a"); ENTRIES_MAX];
+        let batch = [entry(header(1, Path::Live, 0), &parts)];
+        let mut group = Group::default();
+        assert_eq!(group.push(&area.pool, &area.writer, &batch), Ok(()));
+        assert_eq!(group.writes.len(), ENTRIES_MAX);
+    }
+
+    #[test]
+    fn a_batch_over_two_limits_is_large_by_the_first() {
+        let mut area = Area::new();
+        let mut parts = vec![block(&area.pool, b""); ENTRIES_MAX + 1];
+        parts[0] = block(&area.pool, &vec![7; BODY_MAX]);
+        let over_parts = [entry(header(1, Path::Live, 0), &parts)];
+        let limit = Limit::Parts {
+            count: ENTRIES_MAX + 1,
+        };
+        assert_large(&mut area, &over_parts, limit);
+        let mut over_all = vec![entry(header(1, Path::Live, 0), &[]); ENTRIES_MAX + 1];
+        over_all[0] = entry(header(1, Path::Live, 0), &parts);
+        let limit = Limit::Entries {
+            count: ENTRIES_MAX + 1,
+        };
+        assert_large(&mut area, &over_all, limit);
     }
 
     #[test]
