@@ -19,6 +19,10 @@ pub type Request<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
 /// absolute path or a `..` segment. The handle cannot leave the thread that made it,
 /// so each shard has its own. Clones use the same directory.
 ///
+/// One process at a time holds the data directory. `os` and `sim` build `Files` only
+/// while no other process holds it, and give [`Error::Locked`] otherwise. Every
+/// `Files` of one process shares its hold.
+///
 /// ```
 /// use std::path::Path;
 ///
@@ -438,7 +442,8 @@ fn check(path: &Path) {
     }
 }
 
-/// Why a file call failed. Paths are relative to the data directory.
+/// Why a file call or a build of [`Files`] failed. Paths are relative to the data
+/// directory.
 ///
 /// ```
 /// use std::path::PathBuf;
@@ -463,6 +468,9 @@ pub enum Error {
         /// The path of the file.
         path: PathBuf,
     },
+    /// Another process holds the data directory. It holds it until it ends and each
+    /// of its file calls in flight ends.
+    Locked,
     /// [`Mode::Create`] found a file of another length.
     Length {
         /// The path of the file.
@@ -497,6 +505,7 @@ impl fmt::Display for Error {
                 "a sync of file {} failed or was dropped; reopen it and recover",
                 path.display()
             ),
+            Self::Locked => f.write_str("another process holds the data directory"),
             Self::Length {
                 path,
                 expected,
@@ -1107,6 +1116,14 @@ mod tests {
             assert_eq!(
                 e.to_string(),
                 "file ring/0 has 512 bytes, but 4096 bytes were expected"
+            );
+        }
+
+        #[test]
+        fn says_another_process_holds_the_data_directory() {
+            assert_eq!(
+                Error::Locked.to_string(),
+                "another process holds the data directory"
             );
         }
 

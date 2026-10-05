@@ -109,9 +109,16 @@ impl Node {
     /// - A failure gives the code that Linux gives: 20 (`ENOTDIR`) for a path
     ///   through a file, 21 (`EISDIR`) for a file call on a directory, and 17
     ///   (`EEXIST`) for `create_dir` on a file.
-    #[must_use]
-    pub fn files(&self) -> env::files::Files {
-        env::files::Files::new(self.0.clone())
+    ///
+    /// # Errors
+    ///
+    /// `Error::Locked` after a [`Crash::Process`](crate::Crash::Process), until each
+    /// file call in flight of the dead process ends. A power cut ends them at once.
+    pub fn files(&self) -> Result<env::files::Files, env::files::Error> {
+        if lock(&self.0.shared).files().held(self.0.node) {
+            return Err(env::files::Error::Locked);
+        }
+        Ok(env::files::Files::new(self.0.clone()))
     }
 
     /// Makes the next call of `operation` on `path` on the node fail with

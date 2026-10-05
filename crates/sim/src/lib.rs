@@ -336,7 +336,7 @@ impl fmt::Debug for Sim {
 pub enum Crash {
     /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
     /// keeps each call that ended, and each file call in flight still ends, as if
-    /// its future dropped.
+    /// its future dropped. Until then, [`Node::files`] gives `Error::Locked`.
     Process,
     /// The machine loses power and boots again.
     ///

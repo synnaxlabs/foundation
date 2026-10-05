@@ -1433,7 +1433,12 @@ How to read this record:
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
   scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
   (#37) gives files under one data directory, with owned blocks and a sync that
-  poisons the file on failure (S4). `env::net` (#44) gives UDP sockets that move GSO
+  poisons the file on failure (S4). One process at a time holds the data directory,
+  so each store (the ring, the Raft log, the spec) has one owner: `os` locks it with
+  std `File::try_lock` when it builds `Files`, and every `Files` of the process shares
+  the lock. A dead process holds it until each of its file calls in flight ends. A
+  build while another process holds it fails with `Locked`. The person decided on
+  2026-10-05: "option 1" (#566). `env::net` (#44) gives UDP sockets that move GSO
   and GRO batches with ECN and the local address, TCP streams, and listeners.
   `env::serial` (#431) gives serial ports that move bytes at the line rate, with 8
   data bits, a parity, and stop bits. Framing belongs to the protocol: a USB adapter
@@ -1459,7 +1464,9 @@ How to read this record:
   `sync_dir` makes durable the entries at its end. A removed file takes space until the
   removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
   thread that a crash ended panics, because no process joins its own threads after it
-  dies. Built by `simulation` in #114.
+  dies. After a `Process` crash, `Node::files` gives `Locked` until each file call in
+  flight of the dead process ends; a power cut ends them at once (2026-10-05, #566).
+  Built by `simulation` in #114.
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`

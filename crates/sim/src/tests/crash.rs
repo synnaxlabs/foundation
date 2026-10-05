@@ -74,7 +74,12 @@ where
 /// The sectors of the 1 KiB file `a` of `node`.
 fn sectors_of(sim: &mut Sim, node: &node::Node) -> Vec<u8> {
     on(sim, node, |node| async move {
-        let file = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
+        let file = node
+            .files()
+            .unwrap()
+            .open(Path::new("a"), Mode::Read)
+            .await
+            .unwrap();
         sectors(&read(&file, &pool(), 0, 1_024).await)
     })
 }
@@ -82,7 +87,7 @@ fn sectors_of(sim: &mut Sim, node: &node::Node) -> Vec<u8> {
 /// Makes the 1 KiB file `a` durable in the data directory, with each sector 1.
 async fn create_synced(node: &node::Node) -> env::files::File {
     let file = create(node, "a", 1_024).await;
-    node.files().sync_dir(Path::new("")).await.unwrap();
+    node.files().unwrap().sync_dir(Path::new("")).await.unwrap();
     file.write_at(0, &[block(&pool(), &[1; 1_024])])
         .await
         .unwrap();
@@ -99,10 +104,14 @@ fn a_process_crash_keeps_each_call_that_ended() {
             file.write_at(0, &[block(&pool(), &[7; 1_024])])
                 .await
                 .unwrap();
-            node.files().create_dir(Path::new("d")).await.unwrap();
+            node.files()
+                .unwrap()
+                .create_dir(Path::new("d"))
+                .await
+                .unwrap();
         });
         let names = on(&mut sim, &node, |node| async move {
-            node.files().list(Path::new("")).await.unwrap()
+            node.files().unwrap().list(Path::new("")).await.unwrap()
         });
         assert_eq!(
             names,
@@ -195,7 +204,7 @@ fn a_sync_covers_only_the_writes_that_ended_before_it_started() {
 fn changed(seed: u64, synced: bool) -> (Vec<PathBuf>, u64) {
     let (mut sim, node) = disk(seed);
     crash_after(&mut sim, &node, Crash::Power, move |node| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         drop(create(&node, "old", 64 * KIB).await);
         files.sync_dir(Path::new("")).await.unwrap();
         files.remove(Path::new("old")).await.unwrap();
@@ -206,7 +215,7 @@ fn changed(seed: u64, synced: bool) -> (Vec<PathBuf>, u64) {
         }
     });
     on(&mut sim, &node, |node| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         let names = files.list(Path::new("")).await.unwrap();
         (names, files.free().await.unwrap())
     })
@@ -226,13 +235,13 @@ fn a_power_cut_undoes_the_creates_and_removes_that_no_sync_dir_covers() {
 fn a_power_cut_drops_a_directory_whose_parent_was_never_synced() {
     let (mut sim, node) = disk(0);
     crash_after(&mut sim, &node, Crash::Power, |node| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         files.create_dir(Path::new("d")).await.unwrap();
         drop(create(&node, "d/f", 64 * KIB).await);
         files.sync_dir(Path::new("d")).await.unwrap();
     });
     let (names, free, opened) = on(&mut sim, &node, |node| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         let names = files.list(Path::new("")).await.unwrap();
         let opened = files.open(Path::new("d/f"), Mode::Read).await.map(drop);
         (names, files.free().await.unwrap(), opened)
@@ -254,7 +263,7 @@ fn torn(seed: u64) -> (Vec<u8>, Vec<u8>) {
             .unwrap();
         node.fail_file(Path::new("a"), Operation::Sync);
         assert_eq!(file.sync().await, Err(io("a", Operation::Sync, 5)));
-        let reopened = node.files().open(Path::new("a"), Mode::Read).await;
+        let reopened = node.files().unwrap().open(Path::new("a"), Mode::Read).await;
         sectors(&read(&reopened.unwrap(), &pool, 0, 1_024).await)
     });
     sim.crash(&node, Crash::Power);
@@ -289,6 +298,16 @@ async fn hang(call: impl Future) {
     pending::<()>().await;
 }
 
+/// Starts `call`, checks that it is in flight, and drops it.
+async fn abandon(call: impl Future) {
+    let mut call = pin!(call);
+    poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+}
+
 /// Makes a synced file of 1s on `node`, then starts a write of 9s over both its
 /// sectors and waits forever, with a fault that fails the write when `failed`.
 async fn write_in_flight(node: node::Node, failed: bool) {
@@ -308,7 +327,12 @@ fn in_flight(seed: u64, crash: Crash, failed: bool) -> Vec<u8> {
     });
     on(&mut sim, &node, |node| async move {
         node.clock().sleep(Span::MILLISECOND).await;
-        let file = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
+        let file = node
+            .files()
+            .unwrap()
+            .open(Path::new("a"), Mode::Read)
+            .await
+            .unwrap();
         sectors(&read(&file, &pool(), 0, 1_024).await)
     })
 }
@@ -363,7 +387,7 @@ fn a_sync_in_flight_at_a_power_cut_has_no_effect() {
 fn a_power_cut_frees_a_file_that_a_call_in_flight_held() {
     let (mut sim, node) = sync_at_cut(0);
     let free = on(&mut sim, &node, |node| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         files.remove(Path::new("a")).await.unwrap();
         files.sync_dir(Path::new("")).await.unwrap();
         files.free().await.unwrap()
@@ -377,10 +401,10 @@ fn a_sync_dir_in_flight_at_a_power_cut_has_no_effect() {
     crash_after(&mut sim, &node, Crash::Power, |node| async move {
         drop(create(&node, "a", 1_024).await);
         until_crash(&node).await;
-        hang(node.files().sync_dir(Path::new(""))).await;
+        hang(node.files().unwrap().sync_dir(Path::new(""))).await;
     });
     let names = on(&mut sim, &node, |node| async move {
-        node.files().list(Path::new("")).await.unwrap()
+        node.files().unwrap().list(Path::new("")).await.unwrap()
     });
     assert_eq!(names, Vec::<PathBuf>::new());
 }
@@ -503,4 +527,62 @@ fn a_power_cut_restarts_the_monotonic_clock_and_the_wall_runs_on() {
     let ran = (config.monotonic + BEFORE, config.wall + BEFORE);
     assert_eq!(clocks(Crash::Process), ran);
     assert_eq!(clocks(Crash::Power), (config.monotonic, ran.1));
+}
+
+/// The longest file call.
+const LONGEST: Span = Span::from_nanos(100 * Span::MICROSECOND.nanos());
+
+/// What a build of the files of `node` gives after `crash` with a write in flight:
+/// outside the threads, at the first poll of a new shard, and after [`LONGEST`].
+fn builds(seed: u64, crash: Crash) -> [Option<Error>; 3] {
+    let (mut sim, node) = disk(seed);
+    crash_after(&mut sim, &node, crash, |node| write_in_flight(node, false));
+    let outside = node.files().err();
+    let [first, last] = on(&mut sim, &node, |node| async move {
+        let first = node.files().err();
+        node.clock().sleep(LONGEST).await;
+        [first, node.files().err()]
+    });
+    [outside, first, last]
+}
+
+#[test]
+fn a_dead_process_holds_the_data_directory_until_its_calls_end() {
+    for seed in 0..16 {
+        let locked = [Some(Error::Locked), Some(Error::Locked), None];
+        assert_eq!(builds(seed, Crash::Process), locked, "seed {seed}");
+    }
+}
+
+#[test]
+fn a_power_cut_frees_the_data_directory_at_once() {
+    for seed in 0..16 {
+        assert_eq!(
+            builds(seed, Crash::Power),
+            [None, None, None],
+            "seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn a_dead_process_holds_only_the_data_directory_of_its_node() {
+    let (mut sim, node) = disk(0);
+    let other = sim.node(node::Config::default());
+    crash_after(&mut sim, &node, Crash::Process, |node| {
+        write_in_flight(node, false)
+    });
+    assert_eq!(node.files().err(), Some(Error::Locked));
+    assert_eq!(other.files().err(), None);
+}
+
+#[test]
+fn a_dropped_call_of_the_live_process_holds_nothing() {
+    let (mut sim, node) = disk(0);
+    let built = on(&mut sim, &node, |node| async move {
+        let (file, pool) = (create_synced(&node).await, pool());
+        abandon(file.write_at(0, &[block(&pool, &[9; 1_024])])).await;
+        node.files().err()
+    });
+    assert_eq!(built, None);
 }

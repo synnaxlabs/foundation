@@ -106,6 +106,8 @@ struct Flight {
     waker: Option<Waker>,
     /// Its future dropped, so nothing takes its result.
     dropped: bool,
+    /// Its process crashed. It holds the data directory of its node until it ends.
+    dead: bool,
 }
 
 /// The disks of a run and the calls in flight. A call takes effect when it ends,
@@ -190,6 +192,7 @@ impl Files {
             before,
             waker: None,
             dropped: false,
+            dead: false,
         };
         self.flights.insert(key, flight);
         key
@@ -331,6 +334,22 @@ impl Files {
             self.disks[node].release(inode);
         }
         (None, ended.held)
+    }
+
+    /// Gives the calls in flight of `node` to a dead process.
+    pub(crate) fn crash(&mut self, node: usize) {
+        for flight in self
+            .flights
+            .values_mut()
+            .filter(|flight| flight.node == node)
+        {
+            flight.dead = true;
+        }
+    }
+
+    /// Whether a call of a dead process of `node` is in flight.
+    pub(crate) fn held(&self, node: usize) -> bool {
+        (self.flights.values()).any(|flight| flight.node == node && flight.dead)
     }
 
     /// Cuts the power of `node` at true time `at`, whose calls in flight have all

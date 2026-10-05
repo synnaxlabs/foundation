@@ -69,7 +69,11 @@ pub(super) async fn read(file: &File, pool: &Pool, offset: u64, len: usize) -> V
 
 pub(super) async fn create(node: &node::Node, path: &str, len: u64) -> File {
     let mode = Mode::Create { len };
-    node.files().open(Path::new(path), mode).await.unwrap()
+    node.files()
+        .unwrap()
+        .open(Path::new(path), mode)
+        .await
+        .unwrap()
 }
 
 pub(super) fn io(path: &str, operation: Operation, code: i32) -> Error {
@@ -106,7 +110,11 @@ fn a_read_after_a_write_ends_sees_it_and_a_new_file_reads_zeros() {
         file.write_at(100, &parts).await.unwrap();
         let whole = read(&file, &pool, 0, 4_096).await;
         drop(file);
-        let file = node.files().open(Path::new("a"), Mode::Write).await;
+        let file = node
+            .files()
+            .unwrap()
+            .open(Path::new("a"), Mode::Write)
+            .await;
         let reopened = read(&file.unwrap(), &pool, 100, 1_000).await;
         (fresh, whole, reopened)
     });
@@ -120,7 +128,7 @@ fn a_read_after_a_write_ends_sees_it_and_a_new_file_reads_zeros() {
 #[test]
 fn each_call_takes_up_to_100_us() {
     let spans = run(0, MIB, |node, _| async move {
-        let (files, clock) = (node.files(), node.clock());
+        let (files, clock) = (node.files().unwrap(), node.clock());
         let mut spans = Vec::new();
         for _ in 0..32 {
             let start = clock.now();
@@ -137,7 +145,7 @@ fn each_call_takes_up_to_100_us() {
 #[test]
 fn open_reports_each_failure() {
     let results = run(0, 64 * KIB, |node, _| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         files.create_dir(Path::new("d")).await.unwrap();
         let file = create(&node, "f", 4_096).await;
         let mut results = Vec::new();
@@ -185,7 +193,7 @@ fn open_reports_each_failure() {
 #[test]
 fn the_directory_calls_report_each_failure() {
     let results = run(0, 16 * KIB, |node, _| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         drop(create(&node, "f", 4_096).await);
         let mut results = Vec::new();
         for dir in ["d", "d", "", "x/y", "f", "f/y", "e", "g", "h"] {
@@ -227,7 +235,7 @@ fn the_directory_calls_report_each_failure() {
 #[test]
 fn list_gives_the_bare_names_in_a_directory() {
     let results = run(0, MIB, |node, _| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         files.create_dir(Path::new("d")).await.unwrap();
         files.create_dir(Path::new("d/c")).await.unwrap();
         for path in ["d/b", "d/a", "z", "d/c/x"] {
@@ -258,13 +266,13 @@ fn each_node_has_its_own_disk() {
     let a = sim.node(node::Config::default());
     let b = sim.node(node::Config::default());
     let made = a.shards().start(shard("a"), move |_| async move {
-        a.files().create_dir(Path::new("d")).await.unwrap();
+        a.files().unwrap().create_dir(Path::new("d")).await.unwrap();
     });
     let names = Arc::new(Mutex::new(None));
     let slot = Arc::clone(&names);
     let listed = b.shards().start(shard("b"), move |_| async move {
         b.clock().sleep(Span::MILLISECOND).await;
-        *slot.lock().unwrap() = Some(b.files().list(Path::new("")).await);
+        *slot.lock().unwrap() = Some(b.files().unwrap().list(Path::new("")).await);
     });
     sim.run().unwrap();
     for handle in [made, listed] {
@@ -276,7 +284,7 @@ fn each_node_has_its_own_disk() {
 #[test]
 fn free_counts_each_file_and_directory_until_its_last_handle_closes() {
     let frees = run(0, MIB, |node, _| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         let mut frees = vec![files.free().await.unwrap()];
         let file = create(&node, "f", 64 * KIB).await;
         frees.push(files.free().await.unwrap());
@@ -299,7 +307,7 @@ fn free_counts_each_file_and_directory_until_its_last_handle_closes() {
 #[test]
 fn a_remove_frees_a_durable_file_only_after_sync_dir() {
     let frees = run(0, MIB, |node, _| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         drop(create(&node, "f", 64 * KIB).await);
         files.sync_dir(Path::new("")).await.unwrap();
         files.remove(Path::new("f")).await.unwrap();
@@ -313,7 +321,7 @@ fn a_remove_frees_a_durable_file_only_after_sync_dir() {
 #[test]
 fn a_fault_fails_the_next_call_on_its_path_once() {
     let results = run(0, MIB, |node, _| async move {
-        let (files, pool) = (node.files(), pool());
+        let (files, pool) = (node.files().unwrap(), pool());
         let a = create(&node, "a", 4_096).await;
         let b = create(&node, "b", 4_096).await;
         node.fail_file(Path::new("a"), Operation::Sync);
@@ -456,7 +464,7 @@ fn a_dropped_write_still_ends_with_any_subset_of_its_sectors() {
 fn a_file_call_outside_the_sim_panics() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
-    let files = node.files();
+    let files = node.files().unwrap();
     let mut free = pin!(files.free());
     drop(free.as_mut().poll(&mut Context::from_waker(Waker::noop())));
 }
@@ -467,10 +475,9 @@ fn a_file_call_on_a_thread_of_another_node_panics() {
     let a = sim.node(node::Config::default());
     let b = sim.node(node::Config::default());
     let handle: Handle = (b.shards())
-        .start(
-            shard("b"),
-            move |_| async move { drop(a.files().free().await) },
-        )
+        .start(shard("b"), move |_| async move {
+            drop(a.files().unwrap().free().await);
+        })
         .unwrap();
     let e = sim.run().unwrap_err();
     let message = "a file call of node 0 runs on a thread of node 1";
@@ -569,7 +576,7 @@ fn a_read_never_sees_a_write_that_a_fault_fails() {
 /// The span of one `free`, with or without a 1 ns sleep in flight on another task.
 fn free_span(seed: u64, sleep: bool) -> Span {
     run(seed, MIB, move |node, tasks| async move {
-        let (files, clock) = (node.files(), node.clock());
+        let (files, clock) = (node.files().unwrap(), node.clock());
         if sleep {
             let clock = node.clock();
             tasks.spawn(async move { clock.sleep(Span::from_nanos(1)).await });
@@ -617,7 +624,7 @@ fn writes_in_flight_over_filled_sectors_leave_either_bytes() {
 /// drops before or after the call ends, and the file is removed.
 fn free_after_dropped_open(ended: bool) -> u64 {
     run(0, MIB, move |node, _| async move {
-        let (files, clock) = (node.files(), node.clock());
+        let (files, clock) = (node.files().unwrap(), node.clock());
         let mut open =
             Box::pin(files.open(Path::new("a"), Mode::Create { len: 64 * KIB }));
         poll_fn(|cx| {
@@ -651,7 +658,7 @@ fn free_digest(failed: bool) -> u64 {
         node.fail_file(Path::new(""), Operation::Free);
     }
     let handle = node.shards().start(shard("d"), move |_| async move {
-        drop(node.files().free().await);
+        drop(node.files().unwrap().free().await);
     });
     sim.run().unwrap();
     handle.unwrap().join().unwrap();
@@ -706,7 +713,11 @@ fn a_read_of_the_last_sector_of_the_largest_file_ends() {
 fn an_open_of_a_file_with_a_trailing_slash_fails() {
     let opened = run(0, MIB, |node, _| async move {
         drop(create(&node, "a", 1).await);
-        let opened = node.files().open(Path::new("a/"), Mode::Read).await;
+        let opened = node
+            .files()
+            .unwrap()
+            .open(Path::new("a/"), Mode::Read)
+            .await;
         opened.map(drop)
     });
     assert_eq!(opened, Err(io("a/", Operation::Open, 20)));
@@ -755,7 +766,7 @@ fn three_writes_in_flight_leave_the_result_of_each_order() {
 #[test]
 fn a_path_with_a_trailing_slash_names_only_a_directory() {
     let results = run(0, MIB, |node, _| async move {
-        let files = node.files();
+        let files = node.files().unwrap();
         drop(create(&node, "a", 1).await);
         files.create_dir(Path::new("d")).await.unwrap();
         let mut results = Vec::new();
