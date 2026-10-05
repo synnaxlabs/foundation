@@ -1,5 +1,5 @@
-//! The cost of one acknowledgment, the only per-message input, and of one floor, which
-//! the home reads when `buffer` trims.
+//! The cost of one acknowledgment and one spend of credit, which run per message, and
+//! of one floor, which the home reads when `buffer` trims.
 
 use delivery::{Key, Position, Reader, Readers, Start};
 use divan::Bencher;
@@ -34,6 +34,21 @@ fn ack(bencher: Bencher<'_, '_>, sessions: usize) {
             backfill: Some(seq),
         };
         readers.ack(divan::black_box(key), position)
+    });
+}
+
+/// Each of `sessions` recording readers spends credit on one frame, as the home does
+/// for each frame it sends.
+#[divan::bench(args = [1, 16])]
+fn spend(bencher: Bencher<'_, '_>, sessions: usize) {
+    let (mut readers, keys) = opened(sessions);
+    for &key in &keys {
+        readers.grant(key, u64::MAX);
+    }
+    bencher.bench_local(|| {
+        for &key in &keys {
+            divan::black_box(readers.spend(divan::black_box(key), 1_000));
+        }
     });
 }
 
