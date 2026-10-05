@@ -7,6 +7,9 @@ use block::Block;
 use control::{Handoff, Writer};
 use types::authority::Authority;
 
+/// The buffer tag of a handoff entry.
+pub(crate) const TAG: u8 = 1;
+
 /// The parts of the buffer entry that records `handoff`: a block from `pool`, or `None`
 /// when no writer holds control.
 ///

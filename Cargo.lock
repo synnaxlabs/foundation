@@ -687,10 +687,13 @@ name = "home"
 version = "0.0.0"
 dependencies = [
  "block",
+ "buffer",
  "codec",
  "control",
  "delivery",
+ "env",
  "proptest",
+ "sim",
  "types",
 ]
 
@@ -1280,6 +1283,7 @@ name = "secret"
 version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
+ "counting",
  "env",
  "proptest",
  "sim",
