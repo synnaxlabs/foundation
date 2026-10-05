@@ -8,6 +8,8 @@ to weaken the oracle.
 
 `LICENSE` is the license of the etcd source. `election.rs` and `replication.rs` are
 modified works: ports from Go to Rust, and the port rules below list the changes.
+`common.rs` holds the test network and the node disks they share; `main.rs` is the
+root of the test binary.
 
 ```sh
 cargo test -p raft --test conformance
