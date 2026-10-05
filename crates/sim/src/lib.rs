@@ -12,6 +12,7 @@
 pub mod link;
 pub mod node;
 
+mod disk;
 mod drivers;
 mod net;
 mod state;
@@ -30,6 +31,7 @@ use std::time::Instant;
 use env::rng::Rng;
 use types::time::{Monotonic, Span};
 
+use crate::disk::Disks;
 use crate::net::Network;
 use crate::node::Node;
 use crate::state::{Futures, Next, Shared, Start, State, lock};
@@ -104,7 +106,8 @@ impl Sim {
         let mut streams = Rng::from_seed(config.seed);
         let scheduler = Rng::from_seed(streams.next_u64());
         let net = Network::new(config.link, Rng::from_seed(streams.next_u64()));
-        let state = State::new(Instant::now(), net);
+        let disks = Disks::new(Rng::from_seed(streams.next_u64()));
+        let state = State::new(Instant::now(), net, disks);
         Self {
             config,
             shared: Arc::new(Mutex::new(state)),
@@ -138,9 +141,10 @@ impl Sim {
         lock(&self.shared).link(from.0.node, to.0.node, config);
     }
 
-    /// A hash of every scheduler pick and every datagram event so far: the time,
-    /// addresses, length, and fate, never the bytes. In one build, the same seed and
-    /// the same calls give the same digest.
+    /// A hash of every scheduler pick, every datagram event, and every end of a file
+    /// call so far: the time, addresses, length, and fate of a datagram, and the
+    /// time, kind, and success of a call, never the bytes. In one build, the same
+    /// seed and the same calls give the same digest.
     #[must_use]
     pub fn digest(&self) -> u64 {
         lock(&self.shared).digest()
@@ -199,8 +203,9 @@ impl Sim {
             match next {
                 Next::Poll => self.step()?,
                 Next::Advance(at) => {
-                    let wakers = lock(&self.shared).advance(at);
+                    let (wakers, orphans) = lock(&self.shared).advance(at);
                     wakers.into_iter().for_each(Waker::wake);
+                    drop(orphans);
                 }
             }
         }

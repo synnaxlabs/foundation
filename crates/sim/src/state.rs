@@ -17,6 +17,7 @@ use env::thread::Error;
 use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
+use crate::disk::{Disks, Held};
 use crate::net::{Bound, Network};
 use crate::{link, node};
 
@@ -50,7 +51,9 @@ pub(crate) struct State {
     epoch: Instant,
     next: u64,
     net: Network,
-    /// A hash of every pick and every datagram event, in order.
+    disks: Disks,
+    /// A hash of every pick, every datagram event, and every end of a file call, in
+    /// order.
     digest: DefaultHasher,
 }
 
@@ -109,7 +112,7 @@ pub(crate) enum Start {
 }
 
 impl State {
-    pub(crate) fn new(epoch: Instant, net: Network) -> Self {
+    pub(crate) fn new(epoch: Instant, net: Network, disks: Disks) -> Self {
         Self {
             now: Monotonic::default(),
             nodes: Vec::new(),
@@ -122,6 +125,7 @@ impl State {
             epoch,
             next: 0,
             net,
+            disks,
             digest: DefaultHasher::new(),
         }
     }
@@ -149,6 +153,7 @@ impl State {
             entropy,
         };
         self.nodes.push(node);
+        self.disks.add(config.disk_bytes);
         self.nodes.len() - 1
     }
 
@@ -295,6 +300,15 @@ impl State {
         self.net.recv(socket, waker, buffers, meta)
     }
 
+    /// True time now.
+    pub(crate) fn now(&self) -> Monotonic {
+        self.now
+    }
+
+    pub(crate) fn disks(&mut self) -> &mut Disks {
+        &mut self.disks
+    }
+
     pub(crate) fn digest(&self) -> u64 {
         self.digest.finish()
     }
@@ -352,6 +366,7 @@ impl State {
         let at = timer
             .into_iter()
             .chain(self.net.first())
+            .chain(self.disks.first())
             .chain(pauses)
             .filter(|&at| at <= last)
             .min();
@@ -420,9 +435,12 @@ impl State {
         tasks
     }
 
-    /// Moves true time to `at`, delivers the datagrams that arrive by then, and
-    /// returns the wakers of the timers due and of the sockets that receive.
-    pub(crate) fn advance(&mut self, at: Monotonic) -> Vec<Waker> {
+    /// Moves true time to `at`, delivers the datagrams that arrive by then, and ends
+    /// the file calls due by then. Returns the wakers of the timers due, of the
+    /// sockets that receive, and of the file calls that end, and the blocks of the
+    /// file calls whose futures dropped, for the caller to drop after it releases
+    /// the lock.
+    pub(crate) fn advance(&mut self, at: Monotonic) -> (Vec<Waker>, Vec<Held>) {
         self.now = at;
         let mut wakers = Vec::new();
         while let Some(timer) = self.timers.first_entry() {
@@ -432,7 +450,9 @@ impl State {
             wakers.push(timer.remove());
         }
         wakers.extend(self.net.deliver(at, &mut self.digest));
-        wakers
+        let (ended, orphans) = self.disks.end(at, &mut self.digest);
+        wakers.extend(ended);
+        (wakers, orphans)
     }
 
     /// Removes the starts of the threads that have not run.
