@@ -230,7 +230,12 @@ awake=$8
 for feature in generic-receive-offload:gro:$gro \
   generic-segmentation-offload:gso:$gso tcp-segmentation-offload:tso:$tso; do
   IFS=: read -r name flag state <<<"$feature"
-  if ethtool -k "$iface" | grep -q "^$name: .*\[fixed\]"; then
+  # A feature is fixed when it or each of its sub-features is: ENA has no TSO.
+  if ethtool -k "$iface" | awk -v name="$name" '
+    $0 ~ "^" name ":" { found = 1; fixed = /\[fixed\]/; subs = 0; next }
+    found && /^\t/ { subs++; if (!/\[fixed\]/) loose = 1; next }
+    found { exit }
+    END { exit !(fixed || (subs && !loose)) }'; then
     echo "$name is fixed on $iface" >&2
   else
     ethtool -K "$iface" "$flag" "$state"
