@@ -197,11 +197,11 @@ impl Readers {
         credit.limit_bytes = credit.limit_bytes.max(limit_bytes);
     }
 
-    /// Spends credit on one frame whose charge is `bytes`: the bytes its pool block
-    /// pins. Returns `true` and spends when the session has spent less than its limit;
-    /// the frame may take it past the limit. Otherwise returns `false` and spends
-    /// nothing. After a refusal, send the session no later frame until it has the
-    /// refused one.
+    /// Spends credit on one frame whose charge is `bytes`, from
+    /// [`Frame::charge`](types::frame::Frame::charge). Returns `true` and spends when
+    /// the session has spent less than its limit; the frame may take it past the
+    /// limit. Otherwise returns `false` and spends nothing. After a refusal, send the
+    /// session no later frame until it has the refused one.
     ///
     /// # Panics
     ///
