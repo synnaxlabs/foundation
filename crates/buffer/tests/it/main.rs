@@ -583,6 +583,12 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
             .expect("the record has room");
         buffer.committed().await.expect("commits");
         drop(buffer);
+        let count = to_usize(AREA_START + BLOCK) + 9;
+        assert_eq!(
+            shard.memory.bytes(RING)[count..count + 4],
+            2_u32.to_le_bytes(),
+            "the large batches left the group open, so one record holds both"
+        );
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)

@@ -964,8 +964,8 @@ mod tests {
         /// one with the first it is over: entries, then parts, then body.
         #[test]
         fn an_empty_group_takes_any_batch_under_every_limit(
-            count in 1..=ENTRIES_MAX + 4,
-            parts in 1..=ENTRIES_MAX + 4,
+            count in prop_oneof![1..=3usize, ENTRIES_MAX - 2..=ENTRIES_MAX + 4],
+            parts in prop_oneof![1..=3usize, ENTRIES_MAX - 2..=ENTRIES_MAX + 4],
             len in 0..70_000usize,
         ) {
             let area = Area::with_body_max(60_000);
