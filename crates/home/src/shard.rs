@@ -13,7 +13,8 @@ use types::frame::{self, Draft, Label, Path};
 use types::hash;
 use types::time::{Interval, Monotonic, Stamp};
 
-use crate::index::{Accepted, Index, Refusal};
+use crate::Refusal;
+use crate::index::{Accepted, Index};
 use crate::split::Split;
 use crate::writer::{self, Writer};
 use crate::{handoff, order, split, stored};
@@ -254,9 +255,9 @@ impl Shard {
             let index = &mut self.indexes[claim.place];
             let checked = match stamps {
                 Ok(stamps) => index.check(claim.gate, path, stamps, now, mesh),
-                Err(refusal) => Err(match index.gate.check(claim.gate, now) {
-                    Ok(_) => refusal,
-                    Err(error) => Refusal::Control(error),
+                Err(error) => Err(match index.gate.check(claim.gate, now) {
+                    Ok(_) => Refusal::Codec(error),
+                    Err(control) => Refusal::Control(control),
                 }),
             };
             scratch.checks.push((group, checked));
@@ -876,13 +877,13 @@ mod tests {
             let a = shard.open(writer("a", 1, &set), NOW, MESH);
             let short =
                 frame(&test.pool, &set, &[(0, &[10, 20]), (1, &[1]), (2, &[10])]);
-            let refusal = Refusal::Codec {
+            let refusal = Refusal::Codec(split::Error {
                 channel: key(Slot::new(1)),
                 error: codec::Error::Length {
                     expected: 16,
                     actual: 8,
                 },
-            };
+            });
             assert_eq!(
                 refusal.to_string(),
                 "channel 01000000-0000-0000-0000-000000000001: the values hold 8 bytes, \

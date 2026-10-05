@@ -13,6 +13,7 @@ pub mod link;
 pub mod node;
 pub mod shard;
 
+mod chance;
 mod disk;
 mod drivers;
 mod files;
