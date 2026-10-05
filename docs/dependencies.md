@@ -20,6 +20,7 @@ approval; pin the version you build against there.
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
 | `hcl-edit` | `config-hcl` | Parse HCL and keep its formatting (r3 section 2); our own checker compiles the tree | MIT or Apache-2.0 | 0.9.7 | 2026-10-04 |
 | `crc32c` | `buffer` | Hardware CRC32C for write-ahead records (S4, r2 Q4, #48) | Apache-2.0 or MIT | 0.6.8 | 2026-10-04 |
+| `bytes` | `transport` | The buffer type of `noq-proto`'s stream and datagram calls (#55) | MIT | 1.12.1 | 2026-10-04 |
 
 ## Tests, benchmarks, and tools
 

@@ -703,6 +703,11 @@ How to read this record:
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
   other way to count allocations. Never in a library or the `node` binary. The
   `xtask globals` check allows only this case.
+- **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake
+  protocol can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner
+  always on" and said "I have tons of AWS credits". The runner is `foundation-arm-1`,
+  an AWS c7g.2xlarge in us-east-1 with no inbound ports, tagged
+  `project=foundation-ci`, outside BENCH SPEND. The coordinator owns it.
 
 ### 1.15 Releases
 
