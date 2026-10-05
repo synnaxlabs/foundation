@@ -465,7 +465,10 @@ How to read this record:
   (`Overlap`), never to `combine`. Node sources keep `Filter`, not `Overlap`: a network
   exchange puts the true offset at about the same place in each bracket, so an overlap
   gains little, and a broken drift bound would stay wrong for the life of an overlap,
-  not for 8 exchanges. Decided by the coordinator (#84).
+  not for 8 exchanges. Decided by the coordinator (#84). An error that grows past 36500
+  days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
+  time as OS CLOCK BOUND says. `Error::Bound` is only for an input error over 36500
+  days. The person decided on 2026-10-05 ("Ok that's fine"), #225.
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
