@@ -113,13 +113,12 @@ impl Files {
         Ok(names)
     }
 
-    /// Removes the file at `path`. The removal is not durable until
-    /// [`Files::sync_dir`] on its directory ends.
+    /// Removes the file at `path`. A file that is not there counts as removed. The
+    /// removal is not durable until [`Files::sync_dir`] on its directory ends.
     ///
     /// # Errors
     ///
-    /// [`Error::NotFound`] when the file is not there, and [`Error::Io`] for other
-    /// failures.
+    /// [`Error::Io`] when the OS cannot remove the file.
     ///
     /// # Panics
     ///
@@ -135,7 +134,10 @@ impl Files {
     /// ```
     pub async fn remove(&self, path: &Path) -> Result<(), Error> {
         check(path);
-        self.0.remove(path).await
+        match self.0.remove(path).await {
+            Err(Error::NotFound { .. }) => Ok(()),
+            result => result,
+        }
     }
 
     /// Makes the files created and removed in `dir` durable. An empty path is the
@@ -546,7 +548,7 @@ pub trait Driver {
     /// The names of the entries in `dir`, in any order.
     fn list<'a>(&'a self, dir: &'a Path) -> Request<'a, Vec<PathBuf>>;
 
-    /// Removes the file at `path`.
+    /// Removes the file at `path`, or gives [`Error::NotFound`].
     fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()>;
 
     /// Makes the creates and removes in `dir` durable.
@@ -648,7 +650,16 @@ mod tests {
 
         fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
             self.record(format!("remove {}", path.display()));
-            Box::pin(async { Ok(()) })
+            let result = match path.to_str() {
+                Some("gone") => Err(Error::NotFound { path: path.into() }),
+                Some("locked") => Err(Error::Io {
+                    path: path.into(),
+                    operation: Operation::Remove,
+                    code: 13,
+                }),
+                _ => Ok(()),
+            };
+            Box::pin(async { result })
         }
 
         fn sync_dir<'a>(&'a self, dir: &'a Path) -> Request<'a, ()> {
@@ -816,6 +827,30 @@ mod tests {
         fn opens_a_file_of_any_length_to_write() {
             let (files, _) = Fixed::files(512);
             assert_eq!(open(&files, Mode::Write).len(), 512);
+        }
+    }
+
+    mod remove {
+        use super::*;
+
+        #[test]
+        fn succeeds_when_the_file_is_not_there() {
+            let (files, calls) = Fixed::files(0);
+            assert_eq!(ready(files.remove(Path::new("gone"))), Ok(()));
+            assert_eq!(*calls.borrow(), ["remove gone"]);
+        }
+
+        #[test]
+        fn gives_other_errors() {
+            let (files, _) = Fixed::files(0);
+            assert_eq!(
+                ready(files.remove(Path::new("locked"))),
+                Err(Error::Io {
+                    path: "locked".into(),
+                    operation: Operation::Remove,
+                    code: 13,
+                })
+            );
         }
     }
 
