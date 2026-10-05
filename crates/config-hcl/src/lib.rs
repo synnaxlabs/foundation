@@ -154,6 +154,8 @@ pub enum Form {
     Namespace,
     /// An argument expanded with `...`, such as `f(xs...)`.
     Expansion,
+    /// An identifier with a letter or digit outside ASCII, such as `température`.
+    UnicodeIdentifier,
 }
 
 impl fmt::Display for Form {
@@ -193,6 +195,10 @@ impl fmt::Display for Form {
             Self::Expansion => {
                 "argument expansion does not exist in Foundation files. Write each \
                  argument"
+            }
+            Self::UnicodeIdentifier => {
+                "identifiers with letters outside ASCII do not exist in Foundation \
+                 files. Write the key as a quoted string, or use ASCII letters"
             }
         })
     }
@@ -361,6 +367,11 @@ mod tests {
                 Form::Expansion,
                 "argument expansion does not exist in Foundation files. Write each \
                  argument",
+            ),
+            (
+                Form::UnicodeIdentifier,
+                "identifiers with letters outside ASCII do not exist in Foundation \
+                 files. Write the key as a quoted string, or use ASCII letters",
             ),
         ];
         for (form, message) in cases {

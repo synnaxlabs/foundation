@@ -7,13 +7,15 @@ use crate::lex::{self, Token, Tokens};
 use crate::{Error, Expected, Form};
 
 /// Reads HCL text as a Document. Each key, keyword, label, function name, and value
-/// has a span in `source`. A heredoc's lines end in `\n`, whatever the file uses.
+/// has a span in `source`. A heredoc's lines end in `\n`, whatever the file uses. An
+/// integer key in an object reads as HCL reads it: its digits without leading zeros,
+/// after a `-` if it has one.
 ///
 /// # Errors
 ///
 /// Returns each problem found, in source order. A syntax error, a string escape that
-/// HCL does not have, a template, or nesting past the limit stops reading, so it is
-/// the last one.
+/// HCL does not have, a template, an identifier outside ASCII, or nesting past the
+/// limit stops reading, so it is the last one.
 pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut tokens = Tokens::new(source, text).map_err(|error| vec![error])?;
     let token = tokens.next();
@@ -397,17 +399,20 @@ impl<'a> Parser<'a> {
                 lex::Kind::OpenParenthesis => {
                     self.refuse(Form::Parentheses, Ends::Line)?;
                 }
-                lex::Kind::String(_) | lex::Kind::Identifier => {
-                    let key = self.take()?;
+                _ => {
+                    let (key, key_span) = self.key()?;
                     if !matches!(self.token.kind, lex::Kind::Equals | lex::Kind::Colon)
                     {
                         return Err(self.syntax(Expected::ObjectEquals));
                     }
                     self.take()?;
                     let value = self.value(depth, Ends::Line)?;
-                    attributes.extend(value.map(|value| attribute(key, value)));
+                    attributes.extend(value.map(|value| Attribute {
+                        key,
+                        key_span: Some(key_span),
+                        value,
+                    }));
                 }
-                _ => return Err(self.syntax(Expected::Key)),
             }
             match self.token.kind {
                 lex::Kind::Comma | lex::Kind::Newline => {
@@ -417,6 +422,39 @@ impl<'a> Parser<'a> {
                 _ => return Err(self.syntax(Expected::ObjectEnd)),
             }
         }
+    }
+
+    /// Reads an object key: a string, an identifier, or an integer. An integer reads
+    /// as HCL reads it: its digits without leading zeros, after a `-` if it has one.
+    /// Any other token is `Expected::Key`.
+    fn key(&mut self) -> Result<(Box<str>, Span), Error> {
+        if matches!(
+            self.token.kind,
+            lex::Kind::String(_) | lex::Kind::Identifier
+        ) {
+            let key = self.take()?;
+            let span = key.span;
+            return Ok((text(key), span));
+        }
+        let minus = if self.token.kind == lex::Kind::Minus {
+            Some(self.take()?)
+        } else {
+            None
+        };
+        let integer = self.token.kind == lex::Kind::Number
+            && self.token.text.bytes().all(|b| b.is_ascii_digit());
+        if !integer {
+            return Err(self.syntax(Expected::Key));
+        }
+        let number = self.take()?;
+        let digits = match number.text.trim_start_matches('0') {
+            "" => "0",
+            digits => digits,
+        };
+        Ok(match minus {
+            Some(minus) => (format!("-{digits}").into(), join(minus.span, number.span)),
+            None => (digits.into(), number.span),
+        })
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
@@ -650,6 +688,9 @@ mod tests {
                             or `%%{` for the text `${` or `%{`";
     const NULL: &str = "`null` does not exist in Foundation files. Remove the \
                         attribute to use its default";
+    const UNICODE: &str = "identifiers with letters outside ASCII do not exist in \
+                           Foundation files. Write the key as a quoted string, or use \
+                           ASCII letters";
 
     mod values {
         use super::*;
@@ -756,6 +797,46 @@ c = "°C # not a comment"
                 ),
             ]);
             assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_integer_keys_as_hcl_does() {
+            let digits = "123456789012345678901234567890123456789012345678901";
+            let text =
+                format!("a = {{ 40001 = 1, 007 = 2, -12 = 3, -0 = 4, {digits} = 5 }}");
+            let document = ok(&text);
+            let a = document.attributes.get("a").unwrap();
+            let value::Kind::Map(object) = &a.value.kind else {
+                panic!("not a map: {a:?}");
+            };
+            let keys = [
+                ("40001", 6, 11, 1),
+                ("7", 17, 20, 2),
+                ("-12", 26, 29, 3),
+                ("-0", 35, 37, 4),
+                (digits, 43, 94, 5),
+            ];
+            assert_eq!(object.iter().len(), keys.len());
+            for (key, start, end, n) in keys {
+                let entry = object.get(key).unwrap();
+                assert_eq!(entry.key_span, Some(on(start, end)), "{key}");
+                assert_eq!(entry.value.kind, integer(n), "{key}");
+            }
+        }
+
+        #[test]
+        fn reads_non_ascii_text_in_strings() {
+            let expected = attributes(vec![
+                ("a", string("température")),
+                (
+                    "b",
+                    value::Kind::Map(map(vec![("température", integer(1))])),
+                ),
+            ]);
+            assert_eq!(
+                ok("a = \"température\"\nb = { \"température\" = 1 }\n"),
+                expected
+            );
         }
 
         #[test]
@@ -1401,6 +1482,29 @@ c = "°C # not a comment"
         }
 
         #[test]
+        fn refuses_an_identifier_outside_ascii() {
+            let unicode = |span| {
+                let error = Error::Form {
+                    span,
+                    form: Form::UnicodeIdentifier,
+                };
+                (error, UNICODE)
+            };
+            let cases = [
+                ("température = 1\n", at(0, 0, 0), at(12, 0, 11)),
+                ("a = { température = 1 }\n", at(6, 0, 6), at(18, 0, 17)),
+                ("a = température\n", at(4, 0, 4), at(16, 0, 15)),
+                ("a = x.température\n", at(4, 0, 4), at(18, 0, 17)),
+                ("b température {}\n", at(2, 0, 2), at(14, 0, 13)),
+                ("a = 1\nb = é\n", at(10, 1, 4), at(12, 1, 5)),
+                ("a = f(x, 温度)\n", at(9, 0, 9), at(15, 0, 11)),
+            ];
+            for (text, start, end) in cases {
+                check(text, &[unicode(span(start, end))]);
+            }
+        }
+
+        #[test]
         fn refuses_a_string_that_does_not_end() {
             let quote = "the file needs `\"` to end the string here";
             check("s = \"abc", &[(syntax(on(4, 8), Expected::Quote), quote)]);
@@ -1462,6 +1566,13 @@ c = "°C # not a comment"
                 ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
                 ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
                 ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
+                ("a = { 1.5 = 1 }\n", on(6, 9), Expected::Key),
+                ("a = { 1e3 = 1 }\n", on(6, 9), Expected::Key),
+                ("a = { -1.5 = 1 }\n", on(7, 10), Expected::Key),
+                ("a = { - = 1 }\n", on(8, 9), Expected::Key),
+                ("a = { -x = 1 }\n", on(7, 8), Expected::Key),
+                ("40001 = 1\n", on(0, 5), Expected::Item),
+                ("b 1 {}\n", on(2, 3), Expected::AttributeOrBlock),
             ];
             for (text, span, expected) in cases {
                 let message = format!("the file needs {expected} here");
@@ -1588,6 +1699,19 @@ c = "°C # not a comment"
             let second = span(at(6, 1, 0), at(7, 1, 1));
             check("a = 1\na = 2\n", &[repeat(on(0, 1), second)]);
             check("m = { a = 1, a = 2 }", &[repeat(on(6, 7), on(13, 14))]);
+            let error = document::Error::DuplicateKey {
+                key: "1".into(),
+                first: Some(on(6, 8)),
+                second: Some(on(14, 17)),
+            };
+            check(
+                "m = { 01 = 1, \"1\" = 2 }",
+                &[(
+                    Error::Document(error),
+                    "the key \"1\" repeats an earlier key. Remove it, or give it a \
+                     different key",
+                )],
+            );
             assert_eq!(ok("b { a = 1 }\nb { a = 2 }\n").blocks.len(), 2);
         }
 
