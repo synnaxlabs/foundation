@@ -507,8 +507,8 @@ How to read this record:
 - **PROTOCOL HEADER (#75)** The header of STREAM DISPATCH is 3 bytes: the wire
   version (`u16`, little-endian), then the protocol number (`u8`): clock 1, mesh 2,
   replica 3, blob 4, hub 5. On a stream, the header is the whole first message, so
-  later messages carry no prefix. A datagram starts with it; its handler reads from
-  `wire::header::LEN` until `block` has a view that skips a prefix (#110). The
+  later messages carry no prefix. A datagram starts with it; its handler calls
+  `Block::skip(wire::header::LEN)` on the rest (BLOCK VIEW). The
   version covers every message on that stream, encoded series included: each wire
   version fixes one codec version (wire 1 carries codec 1). The version comes first
   and is checked first, so a later version can change what follows it. A node reads
@@ -567,9 +567,15 @@ How to read this record:
   the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
   issuer are not checked. A node sends its certificate when it dials; an SDK client
   sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
-  session protocol gets a new name. Resumption and 0-RTT are off, so rustls gets a
-  fixed time and never reads the OS clock. Randomness inside TLS comes from aws-lc
-  (TLS RANDOMNESS). Decided by `network` in #54.
+  session protocol gets a new name. A session that agrees no ALPN, or another name,
+  ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
+  ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
+  dialing node offers them in that order, and the client's order decides, so nodes
+  agree AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between
+  nodes and "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so
+  an SDK may offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
+  reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS).
+  Decided by `network` in #54; the ALPN check, suites, and groups in #108.
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -750,6 +756,27 @@ How to read this record:
   integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
+- **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
+  Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
+  span, a message, a fix, and notes (other places that explain it). The span is `None`
+  only for a Document with no spans; a problem with a whole file has an empty span at
+  the start of the file. The message and the fix have no final period, and each
+  producer's tests pin both. A code is `<producer>.<problem>`: each part is lower-case
+  ASCII letters and digits, starts with a letter, and may join words with single `-`
+  (`hcl.syntax`, `document.duplicate-key`). The producer is a name it owns: the syntax
+  of a front end, a core crate, or a kind. No two producers share a name. A producer
+  declares each code as a `const` item, so a bad code fails the build. A code never
+  changes between releases. Each producer maps its own errors with `From<&Error>`
+  beside them, so `config`, `ops`, and `node` never match a producer's variants.
+  `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new` breaks
+  no producer. No severity field: the warnings in K2 and R13-10 belong to plan output.
+  `ops` operation error codes use `Code` too, so the grammar has one home. A code
+  crosses the wire as text, and no reader makes a `Code` from it. Lost: a `Diagnose`
+  trait behind `Box<dyn>` (not `Clone`, and a fix is optional); number codes (a
+  central registry, and unreadable); one span only (the first producer has two
+  places). Codes go into `oracles/conformance/document/` at the first stable release;
+  the person decided on 2026-10-05 ("At the first release"). Decided by the `config`
+  builder; approved by the coordinator (#137).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -857,7 +884,12 @@ How to read this record:
   starts the daily run.
 - **C9c** Oracles are enforced by visibility. A script writes an oracle section at the
   top of each PR summary and flags weakening. Each flagged change gets its own
-  adversarial reviewer. A person merges every PR. Supersedes: T2 enforcement level.
+  adversarial reviewer. A person merges every PR, except routine PRs (MERGE RULE).
+  Supersedes: T2 enforcement level.
+- **MERGE RULE (2026-10-05)** The coordinator merges a routine PR that the person has
+  not merged 30 minutes after `ready`, and then tells the person; `docs/coordination.md`
+  defines routine. It lets builders go on while the person is away. The person decided
+  on 2026-10-05 ("Yes, that narrow set").
 - **AGENT REQUIREMENT** Every task must be easy to do with agents. C7 carries it.
 - **R16-1 (2026-10-04)** Release builds keep integer overflow checks
   (`overflow-checks = true`), so R9-D10 holds in release too. An intended wrap uses
@@ -987,6 +1019,12 @@ How to read this record:
   implements it over `std::alloc` for tests, Miri, and `sim`. `block` makes no OS
   call. `reclaim` takes back returned blocks on each loop turn; `purge` gives idle
   pages back on a timer that the shard owns (#2).
+- **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
+  starts `count` bytes later, with no copy and no count change. `Block` is
+  `{ header, start: u32, len: u32 }`, 16 bytes, so a pool has at most 26 size classes
+  and the largest block holds 2 GiB; a budget above that gives more blocks, not larger
+  ones. `slice(&self, range)` lost: it clones the count for every view, and nothing
+  needs a range yet. Decided by `memory`.
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
@@ -1012,6 +1050,12 @@ How to read this record:
 - **BQ18** The desired version is in the spec. Nodes report versions with lease
   renewals. A rollout lock upgrades one node at a time. Finalize when all report.
   Multi-region scope: 5.1.
+- **CPU BASELINE (2026-10-05)** Builds assume x86-64-v2 on x86-64 (every CPU since
+  2009) and the CRC instruction on aarch64 Linux (Raspberry Pi 3 and later, Graviton;
+  Apple chips have it already). `.cargo/config.toml` sets both, so tests, benchmarks,
+  and releases build the same code. A binary fails on an older CPU. Without the flags,
+  the `crc32c` kernels ran 2x slower (#140). The person decided on 2026-10-05 ("Raise
+  the minimum").
 
 ### 1.16 Retired entries
 
@@ -1078,8 +1122,9 @@ Storage classes used in the table:
 | Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers. Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
-| `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's interner when the node learns a channel (owner: X42) | `hub`, `home`, `delivery` | `types` (value) |
+| `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery` | `types` (value) |
 | Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
+| Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one | The writer; backfill is its label for late data | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
 | Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (meaning) |
 | Enum and flags definitions | Files, then Spec as named types with fingerprints | People, `discover` | Sinks, SDK code generation, `plan` | `spec` |
@@ -1154,6 +1199,7 @@ Storage classes used in the table:
 | Subscription | The selector of a reader session, kept live in `hub` against `mesh` watches | The reader | `hub` | `hub` |
 | Effective settings | Memory: a per-node cache of `spec::resolve` results | `mesh` | `home`, `transport`, `clock`, supervisor | `mesh` |
 | Document | Memory: made by a front end from files, or by SDK code | Front ends | `config`, kinds | `document` (X21) |
+| Diagnostic | Memory: made from a producer's error | Front ends, kinds, `document` | `config`, `ops` (text, `--json`, MCP) | `document` (DIAGNOSTICS) |
 | Selector | A value inside policies, readers, connectors, and access | Files, sessions | Every matcher | `types` (one matcher) |
 | Plan | A JSON artifact with stable change kinds | `ops plan` | `ops apply` (commits exactly it) | `config`, `ops` |
 
@@ -1600,9 +1646,10 @@ Basis: BQ7, B7.
 Conflict: M1 needs one node-wide slot table and key set interner. `hub` opens sessions,
 but `home` (below `hub`) routes by key set and writes companion samples, so a
 `hub`-owned table would point upward.
-Resolution (memory delegation): the interner is a layer-1 data structure
-(`types::frame::Interner`). `node` constructs one instance per node and injects it into
-`hub` and `home`. Interning happens at session open; each shard reads a snapshot.
+Resolution (memory delegation): both tables are layer-1 data structures, the slot table
+(`types::channel::Slots`) and the interner (`types::frame::key_set::Interner`). `node`
+constructs one of each per node and injects them into `hub` and `home`. Interning
+happens at session open; each shard reads a snapshot.
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
