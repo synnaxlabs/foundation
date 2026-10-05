@@ -352,6 +352,19 @@ How to read this record:
   table from protocol to handler and runs one accept loop per session. A protocol
   that the table does not know comes from a peer, so the loop resets that stream with
   a code and goes on. Decided by the coordinator (network's review of #53).
+- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
+  however many shards it runs, so each site's firewall needs one known port per
+  conduit. Each QUIC connection belongs to one shard, and every connection ID a node
+  issues encodes that shard. A receive loop on one shard reads the UDP socket in
+  batches and hands each batch to the owning shard over the C2 ring; every shard
+  sends on the same socket. The TCP listener accepts and moves each stream to its
+  shard. `env::net` therefore splits a UDP socket into a receive half with one owner
+  and a send half that any shard may use, and `sim` models the split. Rejected: a
+  port per shard (a port range in every firewall), kernel reuse-port hashing (routes
+  by address, breaks on NAT rebinding), and one shard doing all network work. If the
+  receive loop saturates on Linux, add a reuse-port group steered by the same
+  connection ID. Decided by the design session under the architecture delegation
+  (#53).
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
 
