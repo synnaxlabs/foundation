@@ -914,7 +914,13 @@ How to read this record:
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no
   atomic write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that
   each caller must keep and that shows only at a restart. The person decided on
-  2026-10-05 ("I approve long term fix on 522"), #522.
+  2026-10-05 ("I approve long term fix on 522"), #522. `raft` is safe only when a disk
+  keeps what it synced. A follower whose disk lost synced entries gets
+  `Error::IndexPastLog` from each heartbeat of a leader that counted them, and stays
+  out of the group while that leader leads; the others go on. The node keeps running
+  and shows the error in its status (#648). Lost: the leader sends again from below
+  what it counted, which lowers its count under a commit that a quorum may no longer
+  hold. Decided on 2026-10-05 (#352 item 3).
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
