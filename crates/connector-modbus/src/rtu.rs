@@ -27,10 +27,7 @@ pub fn encode(unit: u8, request: &Request, out: &mut Vec<u8>) -> Result<(), Erro
     let start = out.len();
     out.push(unit);
     request.write_to(out);
-    let crc = out
-        .iter()
-        .skip(start)
-        .fold(INIT, |crc, &byte| step(crc, byte));
+    let crc = crc(out.iter().skip(start));
     out.extend_from_slice(&crc.to_le_bytes());
     Ok(())
 }
@@ -40,25 +37,31 @@ pub fn encode(unit: u8, request: &Request, out: &mut Vec<u8>) -> Result<(), Erro
 ///
 /// # Errors
 ///
-/// [`Error::Function`] or [`Error::Crc`]. The caller drops its bytes up to the
-/// next silence on the line then.
+/// [`Error::Function`], [`Error::Frame`], or [`Error::Crc`]. The caller drops its
+/// bytes up to the next silence on the line then.
 pub fn decode_request(bytes: &[u8]) -> Result<Option<Frame<'_>>, Error> {
     decode(bytes, pdu::request_len)
 }
 
-/// Reads the first reply frame in `bytes`, or `None` when `bytes` holds less than
-/// one frame.
+/// Reads the first frame in `bytes` as the reply to `request`, or `None` when
+/// `bytes` holds less than one frame. Only an exception flag in the function code
+/// changes the reply's length, so a reply of another function reads here and
+/// [`Request::decode_reply`] refuses it.
 ///
 /// # Errors
 ///
-/// As [`decode_request`].
-pub fn decode_reply(bytes: &[u8]) -> Result<Option<Frame<'_>>, Error> {
-    decode(bytes, pdu::reply_len)
+/// [`Error::Crc`]. The caller drops its bytes up to the next silence on the line
+/// then.
+pub fn decode_reply<'a>(
+    request: &Request,
+    bytes: &'a [u8],
+) -> Result<Option<Frame<'a>>, Error> {
+    decode(bytes, |head| Ok(request.reply_len(head)))
 }
 
 fn decode(
     bytes: &[u8],
-    pdu_len: fn(&[u8]) -> Result<Option<usize>, Error>,
+    pdu_len: impl FnOnce(&[u8]) -> Result<Option<usize>, Error>,
 ) -> Result<Option<Frame<'_>>, Error> {
     let Some((&unit, rest)) = bytes.split_first() else {
         return Ok(None);
@@ -66,29 +69,32 @@ fn decode(
     let Some(size) = pdu_len(rest)? else {
         return Ok(None);
     };
+    let len = size.saturating_add(3);
+    if len > MAX {
+        return Err(Error::Frame(len));
+    }
     let Some((pdu, tail)) = rest.split_at_checked(size) else {
         return Ok(None);
     };
     let Some(&field) = tail.first_chunk::<2>() else {
         return Ok(None);
     };
-    let want = pdu
-        .iter()
-        .fold(step(INIT, unit), |crc, &byte| step(crc, byte));
+    let want = crc(std::iter::once(&unit).chain(pdu));
     let got = u16::from_le_bytes(field);
     if got != want {
         return Err(Error::Crc { want, got });
     }
-    Ok(Some(Frame {
-        unit,
-        pdu,
-        len: size.saturating_add(3),
-    }))
+    Ok(Some(Frame { unit, pdu, len }))
 }
 
+const MAX: usize = 256;
 const INIT: u16 = 0xFFFF;
 const POLYNOMIAL: u16 = 0xA001;
 const TABLE: [u16; 256] = table();
+
+fn crc<'a>(bytes: impl IntoIterator<Item = &'a u8>) -> u16 {
+    bytes.into_iter().fold(INIT, |crc, &byte| step(crc, byte))
+}
 
 /// The CRC after `byte`, from the CRC before it.
 fn step(crc: u16, byte: u8) -> u16 {

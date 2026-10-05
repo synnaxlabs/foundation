@@ -61,6 +61,8 @@ pub enum Error {
     },
     /// A last bit byte whose unused high bits are not 0.
     Padding(u8),
+    /// An RTU frame whose function and byte count give more than 256 bytes.
+    Frame(usize),
     /// An RTU frame whose CRC field is not the CRC of its bytes.
     Crc {
         /// The CRC of the frame's address and PDU.
@@ -121,6 +123,9 @@ impl fmt::Display for Error {
                     f,
                     "a last bit byte of {byte:#04x} whose unused bits are not 0"
                 )
+            }
+            Self::Frame(len) => {
+                write!(f, "an RTU frame of {len} bytes, over 256")
             }
             Self::Crc { want, got } => {
                 write!(f, "a CRC of {got:#06x} where the frame gives {want:#06x}")

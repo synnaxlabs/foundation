@@ -317,6 +317,17 @@ impl Request {
         }
     }
 
+    /// The length of the reply PDU to this request that starts with `head`, or
+    /// `None` when `head` is empty.
+    pub(crate) fn reply_len(&self, head: &[u8]) -> Option<usize> {
+        let &function = head.first()?;
+        Some(if function & EXCEPTION == 0 {
+            self.reply_size()
+        } else {
+            2
+        })
+    }
+
     /// The length of a reply that is not an exception.
     fn reply_size(&self) -> usize {
         match self {
@@ -459,22 +470,6 @@ pub(crate) fn request_len(head: &[u8]) -> Result<Option<usize>, Error> {
         WRITE_COILS | WRITE_REGISTERS => Ok(head
             .get(5)
             .map(|&bytes| usize::from(bytes).saturating_add(6))),
-        other => Err(Error::Function(other)),
-    }
-}
-
-/// The length of the reply PDU that starts with `head`, or `None` when `head` is
-/// too short to give it.
-pub(crate) fn reply_len(head: &[u8]) -> Result<Option<usize>, Error> {
-    let Some(&function) = head.first() else {
-        return Ok(None);
-    };
-    match function {
-        EXCEPTION.. => Ok(Some(2)),
-        READ_COILS..=READ_INPUT_REGISTERS => Ok(head
-            .get(1)
-            .map(|&bytes| usize::from(bytes).saturating_add(2))),
-        WRITE_COIL | WRITE_REGISTER | WRITE_COILS | WRITE_REGISTERS => Ok(Some(5)),
         other => Err(Error::Function(other)),
     }
 }

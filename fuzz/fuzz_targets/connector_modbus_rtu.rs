@@ -21,7 +21,7 @@ fuzz_target!(|bytes: &[u8]| {
     rtu::encode(frame.unit, &request, &mut out).expect("a decoded request encodes");
     assert_eq!(out, bytes[..frame.len], "the frame changed");
 
-    let Ok(Some(reply)) = rtu::decode_reply(&bytes[frame.len..]) else {
+    let Ok(Some(reply)) = rtu::decode_reply(&request, &bytes[frame.len..]) else {
         return;
     };
     let want = match &request {
