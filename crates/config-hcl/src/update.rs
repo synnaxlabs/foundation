@@ -240,8 +240,8 @@ impl<'a> File<'a> {
             .expect("invariant: the last token is the end")
     }
 
-    /// The edit that puts the text of `writer` at `at`, which takes no other insert.
-    /// At the end of a text with no final new line, the text starts a new line.
+    /// The edit that puts the text of `writer` at `at`. At the end of a text with no
+    /// final new line, the text starts a new line, so the end takes no other insert.
     fn insert(&self, at: usize, writer: Writer<'_>) -> Edit {
         let mut text = written(writer);
         let open =
@@ -257,7 +257,7 @@ impl<'a> File<'a> {
 
     /// Applies `edits`, which do not overlap, to the text.
     fn apply(&self, mut edits: Vec<Edit>) -> String {
-        // An insert comes before a cut at its place.
+        // An insert comes before a cut at its place, and inserts keep their order.
         edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
         let mut out = String::with_capacity(self.text.len());
         let mut at = 0;
@@ -286,7 +286,8 @@ impl Diff<'_, '_> {
     /// Adds the edits that change a body from `old` to `new`. Walks the attributes in
     /// key order, then the blocks in order, and puts each new item after the kept
     /// item before it, or else before the first kept item, or else at the end of the
-    /// body.
+    /// body. When a block is kept, a new block takes its place from the kept blocks
+    /// only, as block order is part of the Document.
     fn body(&mut self, old: &Document, new: &Document, body: &Body) {
         let file = self.file;
         let mut cuts = Vec::new();
@@ -308,6 +309,14 @@ impl Diff<'_, '_> {
             }
         }
         let pairs = pair(&old.blocks, &new.blocks);
+        if !pairs.is_empty()
+            && let Some(at) = pending.anchor
+        {
+            if let Some(writer) = pending.writer(body) {
+                self.edits.push(file.insert(at, writer));
+            }
+            pending.anchor = None;
+        }
         let mut kept = pairs.iter().map(|&(o, _)| o).peekable();
         for (o, block) in old.blocks.iter().enumerate() {
             if kept.next_if_eq(&o).is_none() {
@@ -561,6 +570,22 @@ mod tests {
         }
     }
 
+    /// The text of `document` from `write`, or with its attributes after its blocks.
+    fn text_of(document: &Document, attributes_last: bool) -> String {
+        if !attributes_last {
+            return write(document).unwrap();
+        }
+        let blocks = Document {
+            attributes: Map::default(),
+            blocks: document.blocks.clone(),
+        };
+        let attributes = Document {
+            attributes: document.attributes.clone(),
+            blocks: Vec::new(),
+        };
+        write(&blocks).unwrap() + &write(&attributes).unwrap()
+    }
+
     /// Adds blank lines and comments to `text`, which `write` gave, and maybe a byte
     /// order mark, `\r\n` line ends, or no final new line.
     fn annotate(text: &str, picks: &mut Picks) -> String {
@@ -683,8 +708,9 @@ mod tests {
         fn keeps_a_text_whose_document_does_not_change(
             a in document(),
             picks in prop::collection::vec(any::<u8>(), 0..64),
+            attributes_last in any::<bool>(),
         ) {
-            let text = annotate(&write(&a).unwrap(), &mut Picks(picks.into_iter()));
+            let text = annotate(&text_of(&a, attributes_last), &mut Picks(picks.into_iter()));
             prop_assert_eq!(read(Source(0), &text), Ok(a.clone()), "{}", text);
             prop_assert_eq!(update(Source(0), &text, &a), Ok(text));
         }
@@ -694,9 +720,10 @@ mod tests {
             a in document(),
             b in document(),
             picks in prop::collection::vec(any::<u8>(), 0..256),
+            attributes_last in any::<bool>(),
         ) {
             let mut picks = Picks(picks.into_iter());
-            let text = annotate(&write(&a).unwrap(), &mut picks);
+            let text = annotate(&text_of(&a, attributes_last), &mut picks);
             let document = mix(&a, &b, &mut picks);
             let out = update(Source(0), &text, &document).unwrap();
             prop_assert_eq!(read(Source(0), &out), Ok(document), "{}\n{}", text, out);
@@ -713,8 +740,9 @@ mod tests {
             b in document(),
             k in any::<usize>(),
             picks in prop::collection::vec(any::<u8>(), 0..64),
+            attributes_last in any::<bool>(),
         ) {
-            let text = annotate(&write(&a).unwrap(), &mut Picks(picks.into_iter()));
+            let text = annotate(&text_of(&a, attributes_last), &mut Picks(picks.into_iter()));
             let mut document = read(Source(0), &text).unwrap();
             let Some(mut k) = k.checked_rem(count(&document)) else {
                 return Ok(());
@@ -800,6 +828,20 @@ mod tests {
         assert_eq!(
             updated(text, "x \"l\" {}\nx \"l\" {\na = 2\n}\n"),
             "x \"l\" {}\n\nx \"l\" {\n  # a\n  a = 2\n}\n"
+        );
+    }
+
+    #[test]
+    fn puts_a_new_block_by_the_kept_blocks_only() {
+        // The kept attribute `b` is below the kept block `d`.
+        assert_eq!(
+            updated("d{}\nb=1\n", "e{}\nd{}\nn{}\nb=2\n"),
+            "e {}\n\nd{}\n\nn {}\nb=2\n"
+        );
+        // `c` goes after `b`, and `e` before `d`, at one place.
+        assert_eq!(
+            updated("b=1\nd{}\n", "e{}\nd{}\nb=1\nc=2\n"),
+            "b=1\nc = 2\ne {}\n\nd{}\n"
         );
     }
 
