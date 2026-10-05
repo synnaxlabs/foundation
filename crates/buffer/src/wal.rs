@@ -163,8 +163,30 @@ impl Writer {
     /// # Panics
     ///
     /// When `body` holds more bytes than the layout's maximum.
-    pub(crate) fn append(&mut self, body: &[&[u8]]) -> Result<Plan, Full> {
+    pub(crate) fn append<'a>(
+        &mut self,
+        body: impl IntoIterator<Item = &'a [u8], IntoIter: Clone>,
+    ) -> Result<Plan, Full> {
         self.place(Kind::Data, body)
+    }
+
+    /// The most bytes a record body holds.
+    pub(crate) fn body_max(&self) -> usize {
+        self.layout.body_max
+    }
+
+    /// Checks that a data record with a body of `len` bytes fits before the tail.
+    /// [`append`](Self::append) with that body then succeeds.
+    ///
+    /// # Errors
+    ///
+    /// [`Full`], as `append` gives it.
+    ///
+    /// # Panics
+    ///
+    /// When `len` is more than the layout's maximum.
+    pub(crate) fn fits(&self, len: usize) -> Result<(), Full> {
+        self.cost(len).map(drop)
     }
 
     /// Frees the records before `tail`, a boundary that an earlier plan gave.
@@ -183,8 +205,9 @@ impl Writer {
         self.tail = tail.offset;
     }
 
-    fn place(&mut self, kind: Kind, body: &[&[u8]]) -> Result<Plan, Full> {
-        let len = body.iter().map(|part| part.len()).sum::<usize>();
+    /// The bytes a record with a body of `len` bytes skips at the end of the area
+    /// and the bytes it takes.
+    fn cost(&self, len: usize) -> Result<(u64, u64), Full> {
         assert!(
             len <= self.layout.body_max,
             "invariant: a body of {len} bytes is over the maximum of {}",
@@ -199,9 +222,21 @@ impl Writer {
         if needed > free {
             return Err(Full { needed, free });
         }
+        Ok((skipped, size))
+    }
+
+    fn place<'a>(
+        &mut self,
+        kind: Kind,
+        body: impl IntoIterator<Item = &'a [u8], IntoIter: Clone>,
+    ) -> Result<Plan, Full> {
+        let body = body.into_iter();
+        let len = body.clone().map(<[u8]>::len).sum::<usize>();
+        let (skipped, size) = self.cost(len)?;
+        let area = self.layout.area;
         let mut start = self.head;
         let wrap = (skipped > 0).then(|| {
-            let (header, chain) = record::header(start.chain, Kind::Wrap, &[]);
+            let (header, chain) = record::header(start.chain, Kind::Wrap, []);
             let place = start.offset % area;
             start = Position {
                 offset: start.offset + skipped,
@@ -386,7 +421,7 @@ impl Cursor {
             head: self.at,
         };
         writer.release(tail);
-        let mut plan = writer.place(Kind::Restart, &[&chain.to_le_bytes()])?;
+        let mut plan = writer.place(Kind::Restart, [chain.to_le_bytes().as_slice()])?;
         plan.next.chain = chain;
         writer.head = plan.next;
         Ok((writer, plan))
@@ -508,7 +543,7 @@ mod tests {
 
         fn append(&mut self, body: &[u8]) -> Result<Plan, Full> {
             let start = self.writer.head();
-            let plan = self.writer.append(&[body])?;
+            let plan = self.writer.append([body])?;
             self.apply(start, &plan, body, true);
             Ok(plan)
         }
@@ -642,7 +677,7 @@ mod tests {
                     cursor.writer(at(head, 0), 1).expect("the ring is empty");
                 writer.release(restart.next);
                 let body = vec![0; body_max];
-                prop_assert_eq!(writer.append(&[&body]).map(drop), Ok(()));
+                prop_assert_eq!(writer.append([body.as_slice()]).map(drop), Ok(()));
             }
         }
     }
@@ -664,11 +699,29 @@ mod tests {
             cursor.writer(at(tail, 9), 9).expect("the ring has room").0
         }
 
+        proptest! {
+            #[test]
+            fn fits_agrees_with_append(
+                tail in 0..BLOCKS,
+                used in 1..=BLOCKS,
+                len in 0..=BODY_MAX,
+            ) {
+                let head = tail + used;
+                let mut writer = writer(tail, head);
+                let fits = writer.fits(len);
+                let body = vec![7; len];
+                let appended = writer.append([body.as_slice()]).map(drop);
+                prop_assert_eq!(fits, appended);
+            }
+        }
+
         #[test]
         fn places_records_back_to_back_from_the_head() {
             let mut writer = writer(0, 1);
-            let first = writer.append(&[b"a"]).expect("the ring has room");
-            let second = writer.append(&[&[7; ALIGN]]).expect("the ring has room");
+            let first = writer.append([b"a".as_slice()]).expect("the ring has room");
+            let second = writer
+                .append([[7; ALIGN].as_slice()])
+                .expect("the ring has room");
             assert_eq!((first.wrap, first.record.place), (None, 4096));
             assert_eq!(first.next.offset, 2 * 4096);
             assert_eq!((second.wrap, second.record.place), (None, 2 * 4096));
@@ -679,8 +732,12 @@ mod tests {
         #[test]
         fn fills_a_block_with_a_body_of_4087_bytes() {
             let mut writer = writer(0, 1);
-            let fits = writer.append(&[&[7; 4087]]).expect("the ring has room");
-            let spills = writer.append(&[&[7; 4088]]).expect("the ring has room");
+            let fits = writer
+                .append([[7; 4087].as_slice()])
+                .expect("the ring has room");
+            let spills = writer
+                .append([[7; 4088].as_slice()])
+                .expect("the ring has room");
             assert_eq!(fits.next.offset, 2 * 4096);
             assert_eq!(spills.next.offset, 4 * 4096);
         }
@@ -688,7 +745,9 @@ mod tests {
         #[test]
         fn puts_a_wrap_record_when_a_record_does_not_fit_in_the_rest() {
             let mut writer = writer(6, 7);
-            let plan = writer.append(&[&[7; ALIGN]]).expect("the ring has room");
+            let plan = writer
+                .append([[7; ALIGN].as_slice()])
+                .expect("the ring has room");
             assert_eq!(plan.wrap.map(|wrap| wrap.place), Some(7 * 4096));
             assert_eq!((plan.record.place, plan.next.offset), (0, 10 * 4096));
         }
@@ -701,17 +760,17 @@ mod tests {
                 needed: 3 * 4096,
                 free: 2 * 4096,
             };
-            assert_eq!(writer.append(&[&[7; ALIGN]]), Err(full));
+            assert_eq!(writer.append([[7; ALIGN].as_slice()]), Err(full));
             assert_eq!(writer.head(), head);
             writer.release(at(2, 0));
-            let plan = writer.append(&[&[7; ALIGN]]);
+            let plan = writer.append([[7; ALIGN].as_slice()]);
             assert_eq!(plan.map(|plan| plan.record.place), Ok(0));
         }
 
         #[test]
         #[should_panic(expected = "a body of 12289 bytes is over the maximum of 12288")]
         fn panics_on_a_body_over_the_maximum() {
-            let _plan = writer(0, 1).append(&[&[0; BODY_MAX + 1]]);
+            let _plan = writer(0, 1).append([[0; BODY_MAX + 1].as_slice()]);
         }
 
         #[test]
@@ -739,7 +798,7 @@ mod tests {
             kind: u8,
             body: &[u8],
         ) -> u32 {
-            let (mut header, _) = record::header(chain, Kind::Data, &[]);
+            let (mut header, _) = record::header(chain, Kind::Data, []);
             let len = u32::try_from(body.len()).expect("a short body");
             header[..4].copy_from_slice(&len.to_le_bytes());
             header[8] = kind;
@@ -765,8 +824,11 @@ mod tests {
             let area = vec![0; index(AREA)];
             let (_, cursor) = walk(&area, START).expect("a zeroed area is valid");
             let (writer, plan) = cursor.writer(START, 77).expect("the ring is empty");
-            let (header, _) =
-                record::header(START.chain, Kind::Restart, &[&77u32.to_le_bytes()]);
+            let (header, _) = record::header(
+                START.chain,
+                Kind::Restart,
+                [77u32.to_le_bytes().as_slice()],
+            );
             let record = Write { place: 0, header };
             assert_eq!((plan.wrap, plan.record), (None, record));
             assert_eq!((plan.next, writer.head()), (at(1, 77), at(1, 77)));
@@ -918,7 +980,7 @@ mod tests {
             let mut cursor = Cursor::new(layout(), START);
             assert_eq!(cursor.next(&area[..ALIGN]), Ok(Step::End));
             let last = at(BLOCKS - 1, 5);
-            let (header, _) = record::header(5, Kind::Data, &[&[1; ALIGN]]);
+            let (header, _) = record::header(5, Kind::Data, [[1; ALIGN].as_slice()]);
             area[7 * ALIGN..7 * ALIGN + HEADER_LEN].copy_from_slice(&header);
             let mut cursor = Cursor::new(layout(), last);
             assert_eq!(cursor.next(&area[7 * ALIGN..]), Ok(Step::End));

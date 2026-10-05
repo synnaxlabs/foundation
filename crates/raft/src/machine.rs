@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::ops::RangeBounds;
+
 use types::node;
 
 use crate::log;
@@ -21,6 +24,25 @@ pub enum Role {
 // Entries in one `Append`.
 const BATCH: usize = 64;
 
+// One voter: the leader's view of its log, its answer to the current campaign, and
+// whether it answered this leader since the last quorum check.
+#[derive(Debug)]
+struct Peer {
+    progress: Progress,
+    vote: Option<bool>,
+    active: bool,
+}
+
+impl Peer {
+    fn new() -> Self {
+        Self {
+            progress: Progress::new(0),
+            vote: None,
+            active: false,
+        }
+    }
+}
+
 /// What the caller must do after an input, in this order: write `hard` and `entries`
 /// to disk, send `messages`, then apply `committed`.
 #[must_use = "a dropped Ready loses its messages and its hard state"]
@@ -43,8 +65,7 @@ pub struct Ready {
 #[derive(Debug)]
 pub struct Raft {
     key: node::Key,
-    // Sorted. `votes`, `active`, and `progress` are parallel to it.
-    voters: Vec<node::Key>,
+    peers: BTreeMap<node::Key, Peer>,
     election_ticks: u64,
     heartbeat_ticks: u64,
     term: Term,
@@ -58,11 +79,6 @@ pub struct Raft {
     heartbeat_elapsed: u64,
     // The randomized election timeout. `None` until the first tick after a reset.
     timeout: Option<u64>,
-    votes: Vec<Option<bool>>,
-    // The voters a leader heard from since its last quorum check.
-    active: Vec<bool>,
-    // A leader's view of each voter's log, in voter order.
-    progress: Vec<Progress>,
     outbox: Vec<Message>,
 }
 
@@ -86,7 +102,7 @@ impl Raft {
         } = config;
         let Start {
             hard,
-            mut voters,
+            voters,
             entries,
             applied,
         } = start;
@@ -96,10 +112,11 @@ impl Raft {
                 heartbeat: heartbeat_ticks,
             });
         }
-        voters.sort_unstable();
-        let mut pairs = voters.iter().zip(voters.iter().skip(1));
-        if let Some((&twice, _)) = pairs.find(|(a, b)| a == b) {
-            return Err(Error::DuplicateVoter(twice));
+        let mut peers = BTreeMap::new();
+        for voter in voters {
+            if peers.insert(voter, Peer::new()).is_some() {
+                return Err(Error::DuplicateVoter(voter));
+            }
         }
         let log = Log::new(entries, applied)?;
         let last = log.last();
@@ -111,11 +128,8 @@ impl Raft {
         }
         Ok(Self {
             key,
-            votes: vec![None; voters.len()],
-            active: vec![false; voters.len()],
-            progress: vec![Progress::new(0); voters.len()],
+            peers,
             outbox: Vec::new(),
-            voters,
             election_ticks: u64::from(election_ticks),
             heartbeat_ticks: u64::from(heartbeat_ticks),
             term: hard.term,
@@ -278,13 +292,15 @@ impl Raft {
             }
             Body::Heartbeat { commit } => self.heartbeat(from, commit)?,
             Body::HeartbeatReply => {
-                if let Some(voter) = self.heard_from(from) {
-                    self.progress[voter].heard();
-                    // A follower that lacks entries gets an append even when every
-                    // entry is in flight: a lost append is found this way.
-                    if self.progress[voter].matched() < self.log.last().index {
-                        self.send_append(voter);
-                    }
+                let last = self.log.last().index;
+                let behind = self.heard_from(from).is_some_and(|peer| {
+                    peer.progress.heard();
+                    peer.progress.matched() < last
+                });
+                // A follower that lacks entries gets an append even when every
+                // entry is in flight: a lost append is found this way.
+                if behind {
+                    self.send_appends(from..=from);
                 }
             }
             Body::Append {
@@ -298,9 +314,9 @@ impl Raft {
             }
             Body::AppendReply { last } => self.accepted(from, last),
             Body::AppendReject { hint } => {
-                if let Some(voter) = self.heard_from(from) {
-                    self.progress[voter].rejected(hint);
-                    self.catch_up(voter);
+                if let Some(peer) = self.heard_from(from) {
+                    peer.progress.rejected(hint);
+                    self.catch_up(from);
                 }
             }
         }
@@ -335,40 +351,40 @@ impl Raft {
 
     // Records that a follower holds the leader's log up to `last`, as the leader.
     fn accepted(&mut self, from: node::Key, last: u64) {
-        if let Some(voter) = self.heard_from(from)
-            && self.progress[voter].accepted(last)
-        {
+        let accepted = self
+            .heard_from(from)
+            .is_some_and(|peer| peer.progress.accepted(last));
+        if accepted {
             if self.commit() {
                 self.replicate();
             } else {
-                self.catch_up(voter);
+                self.catch_up(from);
             }
         }
     }
 
     // Notes that a voter answered this leader. `None` when this node does not lead
     // or `from` is not a voter.
-    fn heard_from(&mut self, from: node::Key) -> Option<usize> {
+    fn heard_from(&mut self, from: node::Key) -> Option<&mut Peer> {
         if self.role != Role::Leader {
             return None;
         }
-        let voter = self.voters.binary_search(&from).ok()?;
-        self.active[voter] = true;
-        Some(voter)
+        let peer = self.peers.get_mut(&from)?;
+        peer.active = true;
+        Some(peer)
     }
 
     // Commits the highest index that a quorum holds, when an entry of the leader's
     // own term is there. Returns whether the commit index moved.
     fn commit(&mut self) -> bool {
         let mut matched: Vec<u64> = self
-            .progress
+            .peers
             .iter()
-            .zip(&self.voters)
-            .map(|(progress, &voter)| {
-                if voter == self.key {
+            .map(|(&key, peer)| {
+                if key == self.key {
                     self.log.last().index
                 } else {
-                    progress.matched()
+                    peer.progress.matched()
                 }
             })
             .collect();
@@ -384,43 +400,48 @@ impl Raft {
 
     // Sends each follower the entries it lacks and the commit index.
     fn replicate(&mut self) {
-        for voter in 0..self.voters.len() {
-            self.send_append(voter);
-        }
+        self.send_appends(..);
     }
 
     // Sends one follower the entries it lacks, when it lacks any.
-    fn catch_up(&mut self, voter: usize) {
-        if self.progress[voter].behind(self.log.last().index) {
-            self.send_append(voter);
+    fn catch_up(&mut self, to: node::Key) {
+        let last = self.log.last().index;
+        if self
+            .peers
+            .get(&to)
+            .is_some_and(|peer| peer.progress.behind(last))
+        {
+            self.send_appends(to..=to);
         }
     }
 
-    // Sends one follower the entries from its `next` and the commit index, unless
-    // the leader waits for its reply.
-    fn send_append(&mut self, voter: usize) {
-        let to = self.voters[voter];
-        if to == self.key || self.progress[voter].paused() {
-            return;
-        }
-        let next = self.progress[voter].next();
-        let prev = self
-            .log
-            .at(next - 1)
-            .expect("invariant: a follower's next entry follows the leader's log");
-        let entries = self.log.slice(next, BATCH);
-        let last = entries.last().map_or(prev.index, |entry| entry.at.index);
-        self.progress[voter].sent(last);
+    // Sends each follower in `range` the entries from its `next` and the commit
+    // index, unless the leader waits for its reply.
+    fn send_appends<R: RangeBounds<node::Key>>(&mut self, range: R) {
         let commit = self.log.committed();
-        self.send(
-            to,
-            self.term,
-            Body::Append {
-                prev,
-                entries,
-                commit,
-            },
-        );
+        for (&to, peer) in self.peers.range_mut(range) {
+            if to == self.key || peer.progress.paused() {
+                continue;
+            }
+            let next = peer.progress.next();
+            let prev = self
+                .log
+                .at(next - 1)
+                .expect("invariant: a follower's next entry follows the leader's log");
+            let entries = self.log.slice(next, BATCH);
+            let last = entries.last().map_or(prev.index, |entry| entry.at.index);
+            peer.progress.sent(last);
+            self.outbox.push(Message {
+                from: self.key,
+                to,
+                term: self.term,
+                body: Body::Append {
+                    prev,
+                    entries,
+                    commit,
+                },
+            });
+        }
     }
 
     // Compares the message's term with the node's term, and steps down for a higher
@@ -472,12 +493,13 @@ impl Raft {
         if self.election_elapsed >= self.election_ticks {
             self.election_elapsed = 0;
             let heard = self
-                .voters
+                .peers
                 .iter()
-                .zip(&self.active)
-                .filter(|&(&voter, &active)| active || voter == self.key)
+                .filter(|(key, peer)| peer.active || **key == self.key)
                 .count();
-            self.active.fill(false);
+            for peer in self.peers.values_mut() {
+                peer.active = false;
+            }
             if heard < self.quorum() {
                 self.become_follower(self.term, None);
                 return;
@@ -487,12 +509,15 @@ impl Raft {
             self.heartbeat_elapsed = 0;
             // A follower commits what the heartbeat says, so it names only entries
             // the follower is known to hold.
-            for voter in 0..self.voters.len() {
-                let to = self.voters[voter];
+            for (&to, peer) in &self.peers {
                 if to != self.key {
-                    let commit =
-                        self.log.committed().min(self.progress[voter].matched());
-                    self.send(to, self.term, Body::Heartbeat { commit });
+                    let commit = self.log.committed().min(peer.progress.matched());
+                    self.outbox.push(Message {
+                        from: self.key,
+                        to,
+                        term: self.term,
+                        body: Body::Heartbeat { commit },
+                    });
                 }
             }
         }
@@ -523,7 +548,9 @@ impl Raft {
         let Some(next) = self.term.next() else {
             return;
         };
-        self.votes.fill(None);
+        for peer in self.peers.values_mut() {
+            peer.vote = None;
+        }
         self.leader = None;
         self.role = Role::PreCandidate;
         self.broadcast(
@@ -557,7 +584,9 @@ impl Raft {
         self.leader = Some(self.key);
         self.role = Role::Leader;
         let last = self.log.last().index;
-        self.progress.fill(Progress::new(last));
+        for peer in self.peers.values_mut() {
+            peer.progress = Progress::new(last);
+        }
         // An entry of the leader's own term lets it commit the ones before it.
         self.log.push(self.term, Vec::new());
         self.commit();
@@ -579,21 +608,23 @@ impl Raft {
         self.election_elapsed = 0;
         self.heartbeat_elapsed = 0;
         self.timeout = None;
-        self.votes.fill(None);
-        self.active.fill(false);
+        for peer in self.peers.values_mut() {
+            peer.vote = None;
+            peer.active = false;
+        }
     }
 
     // Records one answer to the current campaign and acts when the answers decide it.
     // The first answer of a voter counts.
     fn poll(&mut self, from: node::Key, granted: bool) {
-        let Ok(voter) = self.voters.binary_search(&from) else {
+        let Some(peer) = self.peers.get_mut(&from) else {
             return;
         };
-        self.votes[voter].get_or_insert(granted);
+        peer.vote.get_or_insert(granted);
         let count = |answer| {
-            self.votes
-                .iter()
-                .filter(|&&vote| vote == Some(answer))
+            self.peers
+                .values()
+                .filter(|peer| peer.vote == Some(answer))
                 .count()
         };
         let (yes, no) = (count(true), count(false));
@@ -605,7 +636,7 @@ impl Raft {
                     unreachable!("invariant: only a campaign counts votes")
                 }
             }
-        } else if self.voters.len() - no < self.quorum() {
+        } else if self.peers.len() - no < self.quorum() {
             self.become_follower(self.term, None);
         }
     }
@@ -620,18 +651,22 @@ impl Raft {
     }
 
     fn promotable(&self) -> bool {
-        self.voters.binary_search(&self.key).is_ok()
+        self.peers.contains_key(&self.key)
     }
 
     fn quorum(&self) -> usize {
-        self.voters.len() / 2 + 1
+        self.peers.len() / 2 + 1
     }
 
     fn broadcast(&mut self, term: Term, body: &Body) {
-        for voter in 0..self.voters.len() {
-            let to = self.voters[voter];
+        for &to in self.peers.keys() {
             if to != self.key {
-                self.send(to, term, body.clone());
+                self.outbox.push(Message {
+                    from: self.key,
+                    to,
+                    term,
+                    body: body.clone(),
+                });
             }
         }
     }
@@ -905,12 +940,13 @@ mod tests {
 
         fn ticks_to_campaign(random: u64) -> u32 {
             let mut raft = raft(&[1, 2, 3], Hard::default());
-            let mut ticks = 0;
-            while raft.role() == Role::Follower {
+            for ticks in 1..=20 {
                 raft.tick(random);
-                ticks += 1;
+                if raft.role() != Role::Follower {
+                    return ticks;
+                }
             }
-            ticks
+            panic!("no campaign in 20 ticks");
         }
 
         #[test]
@@ -1649,6 +1685,99 @@ mod tests {
                 body: accepted(1),
             };
             assert_eq!(ready.messages, [reply]);
+        }
+    }
+
+    mod peers {
+        use super::*;
+
+        fn committed(raft: &mut Raft) -> Vec<u64> {
+            raft.ready()
+                .committed
+                .iter()
+                .map(|entry| entry.at.index)
+                .collect()
+        }
+
+        #[test]
+        fn finds_each_voter_when_the_start_list_is_unsorted() {
+            let mut raft = raft(&[5, 1, 3], Hard::default());
+            elect(&mut raft, &[5, 3]);
+            raft.step(message(3, 1, Body::HeartbeatReply)).unwrap();
+            raft.step(message(5, 1, Body::HeartbeatReply)).unwrap();
+            tick_times(&mut raft, 10);
+            assert_eq!(raft.role(), Role::Leader);
+            let to: std::collections::BTreeSet<node::Key> =
+                sent(&mut raft).iter().map(|m| m.to).collect();
+            assert_eq!(to.into_iter().collect::<Vec<_>>(), [key(3), key(5)]);
+        }
+
+        #[test]
+        fn rejects_a_duplicate_in_an_unsorted_list() {
+            let error = Raft::new(CONFIG, start(&[3, 1, 3], Hard::default()))
+                .err()
+                .unwrap();
+            assert_eq!(error, Error::DuplicateVoter(key(3)));
+        }
+
+        #[test]
+        fn a_non_voter_does_not_count_for_a_commit_or_the_quorum_check() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            raft.propose(b"x".to_vec()).unwrap();
+            sent(&mut raft);
+            raft.step(message(9, 1, Body::AppendReply { last: 2 }))
+                .unwrap();
+            assert_eq!(committed(&mut raft), []);
+            raft.step(message(9, 1, Body::HeartbeatReply)).unwrap();
+            tick_times(&mut raft, 10);
+            assert_eq!(raft.role(), Role::Follower);
+        }
+
+        #[test]
+        fn a_non_voter_answer_does_not_move_a_campaign() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.campaign();
+            let grant = Body::PreVoteReply { granted: true };
+            raft.step(message(9, 1, grant.clone())).unwrap();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            raft.step(message(2, 1, grant)).unwrap();
+            assert_eq!(raft.role(), Role::Candidate);
+            let grant = Body::VoteReply { granted: true };
+            raft.step(message(9, 1, grant.clone())).unwrap();
+            assert_eq!(raft.role(), Role::Candidate);
+            raft.step(message(3, 1, grant)).unwrap();
+            assert_eq!(raft.role(), Role::Leader);
+        }
+
+        #[test]
+        fn a_heartbeat_names_the_commit_each_follower_holds() {
+            let mut raft = raft(&[1, 2, 3, 4, 5], at_term(1));
+            elect(&mut raft, &[2, 3]);
+            raft.step(message(3, 2, Body::AppendReply { last: 1 }))
+                .unwrap();
+            raft.step(message(5, 2, Body::AppendReply { last: 1 }))
+                .unwrap();
+            assert_eq!(committed(&mut raft), [1]);
+            raft.tick(0);
+            let heartbeats: Vec<(node::Key, u64)> = sent(&mut raft)
+                .iter()
+                .filter_map(|m| match m.body {
+                    Body::Heartbeat { commit } => Some((m.to, commit)),
+                    Body::PreVote { .. }
+                    | Body::PreVoteReply { .. }
+                    | Body::Vote { .. }
+                    | Body::VoteReply { .. }
+                    | Body::HeartbeatReply
+                    | Body::Append { .. }
+                    | Body::AppendReply { .. }
+                    | Body::AppendReject { .. } => None,
+                })
+                .collect();
+            assert_eq!(
+                heartbeats,
+                [(key(2), 0), (key(3), 1), (key(4), 0), (key(5), 1)]
+            );
         }
     }
 }

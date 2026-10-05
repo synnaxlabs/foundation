@@ -7,7 +7,9 @@ use crate::lex::{self, Token, Tokens};
 use crate::{Error, Expected, Form};
 
 /// Reads HCL text as a Document. Each key, keyword, label, function name, and value
-/// has a span in `source`.
+/// has a span in `source`. A heredoc's lines end in `\n`, whatever the file uses. An
+/// integer key in an object reads as HCL reads it: its digits without leading zeros,
+/// after a `-` if it has one.
 ///
 /// # Errors
 ///
@@ -21,6 +23,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
         tokens,
         token,
         errors: Vec::new(),
+        len: text.len(),
     };
     let document = parser.file();
     let mut errors = parser.errors;
@@ -50,6 +53,9 @@ struct Parser<'a> {
     token: Token<'a>,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
+    /// The length of the text in bytes. Each token but the last has one or more, so
+    /// this bounds the passes of each loop.
+    len: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -78,7 +84,8 @@ impl<'a> Parser<'a> {
         blocks: &mut Vec<Block>,
         depth: usize,
     ) -> Result<(), Error> {
-        loop {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::End | lex::Kind::CloseBrace => return Ok(()),
@@ -95,26 +102,11 @@ impl<'a> Parser<'a> {
                 blocks.push(self.block(&name, depth)?);
             }
         }
+        unreachable!("invariant: each pass takes a token")
     }
 
     fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
-        let mut labels = Vec::new();
-        loop {
-            match self.token.kind {
-                lex::Kind::String(_) | lex::Kind::Identifier => {}
-                lex::Kind::OpenBrace => break,
-                _ if labels.is_empty() => {
-                    return Err(self.syntax(Expected::AttributeOrBlock));
-                }
-                _ => return Err(self.syntax(Expected::BlockStart)),
-            }
-            let label = self.take()?;
-            let span = Some(label.span);
-            labels.push(Label {
-                text: text(label),
-                span,
-            });
-        }
+        let labels = self.labels()?;
         let depth = enter(depth).ok_or(Error::TooDeep { span: keyword.span })?;
         self.take()?;
         let body = if self.token.kind == lex::Kind::Newline {
@@ -135,6 +127,29 @@ impl<'a> Parser<'a> {
             body,
             span: Some(join(keyword.span, end)),
         })
+    }
+
+    /// Reads the labels of a block up to its `{`, and leaves that token.
+    fn labels(&mut self) -> Result<Vec<Label>, Error> {
+        let mut labels = Vec::new();
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
+            match self.token.kind {
+                lex::Kind::String(_) | lex::Kind::Identifier => {}
+                lex::Kind::OpenBrace => return Ok(labels),
+                _ if labels.is_empty() => {
+                    return Err(self.syntax(Expected::AttributeOrBlock));
+                }
+                _ => return Err(self.syntax(Expected::BlockStart)),
+            }
+            let label = self.take()?;
+            let span = Some(label.span);
+            labels.push(Label {
+                text: text(label),
+                span,
+            });
+        }
+        unreachable!("invariant: each pass takes a token")
     }
 
     /// Reads the body of a one-line block, which holds one attribute or none, and
@@ -194,7 +209,9 @@ impl<'a> Parser<'a> {
                 let digits = self.take()?;
                 return Ok(self.number(&digits, Some(token.span)));
             }
-            lex::Kind::String(text) => value::Kind::String(text),
+            lex::Kind::String(text) | lex::Kind::Heredoc(text) => {
+                value::Kind::String(text)
+            }
             lex::Kind::OpenBracket => return self.list(&token, depth).map(Some),
             lex::Kind::OpenBrace => return self.object(&token, depth).map(Some),
             _ => {
@@ -261,7 +278,8 @@ impl<'a> Parser<'a> {
             form,
         });
         let mut depth = 0usize;
-        loop {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
             match self.token.kind {
                 lex::Kind::End => return Ok(()),
                 lex::Kind::OpenBrace
@@ -281,6 +299,7 @@ impl<'a> Parser<'a> {
             }
             self.take()?;
         }
+        unreachable!("invariant: each pass takes a token")
     }
 
     fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
@@ -348,22 +367,8 @@ impl<'a> Parser<'a> {
     fn list(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
         let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
         self.refuse_for()?;
-        let mut items = Vec::new();
-        let close = loop {
-            self.skip_newlines()?;
-            if self.token.kind == lex::Kind::CloseBracket {
-                break self.take()?;
-            }
-            items.extend(self.value(depth, Ends::Comma)?);
-            self.skip_newlines()?;
-            match self.token.kind {
-                lex::Kind::Comma => {
-                    self.take()?;
-                }
-                lex::Kind::CloseBracket => break self.take()?,
-                _ => return Err(self.syntax(Expected::ListEnd)),
-            }
-        };
+        let (items, close) =
+            self.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)?;
         Ok(Value {
             kind: value::Kind::List(items),
             span: Some(join(open.span, close.span)),
@@ -388,24 +393,30 @@ impl<'a> Parser<'a> {
         depth: usize,
     ) -> Result<Token<'a>, Error> {
         self.refuse_for()?;
-        loop {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::CloseBrace => return self.take(),
-                lex::Kind::OpenParenthesis => {
-                    self.refuse(Form::Parentheses, Ends::Line)?;
-                }
-                lex::Kind::String(_) | lex::Kind::Identifier => {
-                    let key = self.take()?;
-                    if !matches!(self.token.kind, lex::Kind::Equals | lex::Kind::Colon)
-                    {
-                        return Err(self.syntax(Expected::ObjectEquals));
+                _ => {
+                    if let Some(form) = self.leading_form() {
+                        self.refuse(form, Ends::Line)?;
+                    } else if let Some((key, key_span)) = self.key()? {
+                        if !matches!(
+                            self.token.kind,
+                            lex::Kind::Equals | lex::Kind::Colon
+                        ) {
+                            return Err(self.syntax(Expected::ObjectEquals));
+                        }
+                        self.take()?;
+                        let value = self.value(depth, Ends::Line)?;
+                        attributes.extend(value.map(|value| Attribute {
+                            key,
+                            key_span: Some(key_span),
+                            value,
+                        }));
                     }
-                    self.take()?;
-                    let value = self.value(depth, Ends::Line)?;
-                    attributes.extend(value.map(|value| attribute(key, value)));
                 }
-                _ => return Err(self.syntax(Expected::Key)),
             }
             match self.token.kind {
                 lex::Kind::Comma | lex::Kind::Newline => {
@@ -415,6 +426,39 @@ impl<'a> Parser<'a> {
                 _ => return Err(self.syntax(Expected::ObjectEnd)),
             }
         }
+        unreachable!("invariant: each pass takes a token")
+    }
+
+    /// Reads an object key, where no HCL form starts: a string, an identifier, or an
+    /// integer, which reads as HCL reads it: its digits without leading zeros, after a
+    /// `-` if it has one. Returns `None` for a number that HCL rounds, after it keeps
+    /// the problem and moves past the entry. Any other token is `Expected::Key`.
+    fn key(&mut self) -> Result<Option<(Box<str>, Span)>, Error> {
+        if matches!(
+            self.token.kind,
+            lex::Kind::String(_) | lex::Kind::Identifier
+        ) {
+            let key = self.take()?;
+            let span = key.span;
+            return Ok(Some((text(key), span)));
+        }
+        let minus = if self.token.kind == lex::Kind::Minus {
+            Some(self.take()?)
+        } else {
+            None
+        };
+        if self.token.kind != lex::Kind::Number {
+            return Err(self.syntax(Expected::Key));
+        }
+        let Some(digits) = integer_key(self.token.text) else {
+            self.refuse(Form::NumberKey, Ends::Line)?;
+            return Ok(None);
+        };
+        let number = self.take()?;
+        Ok(Some(match minus {
+            Some(minus) => (format!("-{digits}").into(), join(minus.span, number.span)),
+            None => (digits.into(), number.span),
+        }))
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
@@ -422,22 +466,8 @@ impl<'a> Parser<'a> {
             span: function.span,
         })?;
         self.take()?;
-        let mut arguments = Vec::new();
-        let close = loop {
-            self.skip_newlines()?;
-            if self.token.kind == lex::Kind::CloseParenthesis {
-                break self.take()?;
-            }
-            arguments.extend(self.value(depth, Ends::Comma)?);
-            self.skip_newlines()?;
-            match self.token.kind {
-                lex::Kind::Comma => {
-                    self.take()?;
-                }
-                lex::Kind::CloseParenthesis => break self.take()?,
-                _ => return Err(self.syntax(Expected::ArgumentsEnd)),
-            }
-        };
+        let (arguments, close) =
+            self.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)?;
         Ok(Value {
             kind: value::Kind::Call(Call {
                 function: function.text.into(),
@@ -446,6 +476,33 @@ impl<'a> Parser<'a> {
             }),
             span: Some(join(function.span, close.span)),
         })
+    }
+
+    /// Reads values split by `,` up to `close`, and returns them and the `close`
+    /// token. Any other token after a value is `expected`.
+    fn values(
+        &mut self,
+        close: &lex::Kind,
+        expected: Expected,
+        depth: usize,
+    ) -> Result<(Vec<Value>, Token<'a>), Error> {
+        let mut values = Vec::new();
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
+            self.skip_newlines()?;
+            if self.token.kind == *close {
+                return Ok((values, self.take()?));
+            }
+            values.extend(self.value(depth, Ends::Comma)?);
+            match &self.token.kind {
+                lex::Kind::Comma => {
+                    self.take()?;
+                }
+                kind if kind == close => return Ok((values, self.take()?)),
+                _ => return Err(self.syntax(expected)),
+            }
+        }
+        unreachable!("invariant: each pass takes a token")
     }
 
     /// Builds a map, and keeps its problems. The map is empty when it has problems,
@@ -466,10 +523,14 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_newlines(&mut self) -> Result<(), Error> {
-        while self.token.kind == lex::Kind::Newline {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
+            if self.token.kind != lex::Kind::Newline {
+                return Ok(());
+            }
             self.take()?;
         }
-        Ok(())
+        unreachable!("invariant: each pass takes a token")
     }
 
     /// Takes the next token and reads the one after it.
@@ -480,8 +541,7 @@ impl<'a> Parser<'a> {
     ///
     /// # Panics
     ///
-    /// Panics at the end of the text, which no rule takes. So every loop that takes
-    /// tokens ends.
+    /// Panics at the end of the text, which no rule takes.
     fn take(&mut self) -> Result<Token<'a>, Error> {
         if let lex::Kind::Error(error) = &self.token.kind {
             return Err(error.clone());
@@ -512,6 +572,18 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The digits of an integer key without leading zeros, or `None` when HCL rounds the
+/// number. HCL reads a number key through a 512-bit float, which holds each integer of
+/// up to 154 digits.
+fn integer_key(number: &str) -> Option<&str> {
+    let digits = match number.trim_start_matches('0') {
+        "" => "0",
+        digits => digits,
+    };
+    (digits.len() <= 154 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(digits)
+}
+
 fn attribute(key: Token<'_>, value: Value) -> Attribute {
     let key_span = Some(key.span);
     Attribute {
@@ -525,7 +597,8 @@ fn attribute(key: Token<'_>, value: Value) -> Attribute {
 fn text(token: Token<'_>) -> Box<str> {
     match token.kind {
         lex::Kind::String(text) => text,
-        _ => token.text.into(),
+        lex::Kind::Identifier => token.text.into(),
+        kind => unreachable!("invariant: a key or a label is not {kind:?}"),
     }
 }
 
@@ -643,6 +716,11 @@ mod tests {
         Error::Syntax { span, expected }
     }
 
+    const TEMPLATE: &str = "templates do not exist in Foundation files. Write `$${` \
+                            or `%%{` for the text `${` or `%{`";
+    const NULL: &str = "`null` does not exist in Foundation files. Remove the \
+                        attribute to use its default";
+
     mod values {
         use super::*;
 
@@ -748,6 +826,47 @@ c = "°C # not a comment"
                 ),
             ]);
             assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_integer_keys_as_hcl_does() {
+            let digits = "9".repeat(154);
+            let text = format!(
+                "a = {{ 40001 = 1, 007 = 2, -12 = 3, -0 = 4, 00{digits} = 5 }}"
+            );
+            let document = ok(&text);
+            let a = document.attributes.get("a").unwrap();
+            let value::Kind::Map(object) = &a.value.kind else {
+                panic!("not a map: {a:?}");
+            };
+            let keys = [
+                ("40001", 6, 11, 1),
+                ("7", 17, 20, 2),
+                ("-12", 26, 29, 3),
+                ("-0", 35, 37, 4),
+                (digits.as_str(), 43, 199, 5),
+            ];
+            assert_eq!(object.iter().len(), keys.len());
+            for (key, start, end, n) in keys {
+                let entry = object.get(key).unwrap();
+                assert_eq!(entry.key_span, Some(on(start, end)), "{key}");
+                assert_eq!(entry.value.kind, integer(n), "{key}");
+            }
+        }
+
+        #[test]
+        fn reads_non_ascii_text_in_strings() {
+            let expected = attributes(vec![
+                ("a", string("température")),
+                (
+                    "b",
+                    value::Kind::Map(map(vec![("température", integer(1))])),
+                ),
+            ]);
+            assert_eq!(
+                ok("a = \"température\"\nb = { \"température\" = 1 }\n"),
+                expected
+            );
         }
 
         #[test]
@@ -959,21 +1078,297 @@ c = "°C # not a comment"
         }
     }
 
+    mod heredocs {
+        use super::*;
+
+        const START: &str = "the file needs a marker, such as `EOT`, and a new line to \
+                             start the heredoc here";
+        const END: &str =
+            "the file needs the marker on a line of its own to end the heredoc here";
+        /// Checks that `a = ` and then each heredoc reads as its string.
+        fn reads(cases: &[(&str, &str)]) {
+            for &(heredoc, expected) in cases {
+                let document = ok(&format!("a = {heredoc}"));
+                let expected = attributes(vec![("a", string(expected))]);
+                assert_eq!(document, expected, "{heredoc:?}");
+            }
+        }
+
+        #[test]
+        fn reads_lines_as_written() {
+            reads(&[
+                ("<<EOT\nhello\n  world\nEOT\n", "hello\n  world\n"),
+                ("<<EOT\nEOT\n", ""),
+                ("<<EOT\n\nEOT\n", "\n"),
+                ("<<EOT\nx\n \t EOT\t \n", "x\n"),
+                ("<<EOT\nx\n\u{a0}\u{b}EOT\u{3000}\n", "x\n"),
+                (
+                    "<<EOT\nEOT x\nxEOT\nEOTX\neot\nEOT\n",
+                    "EOT x\nxEOT\nEOTX\neot\n",
+                ),
+                ("<<EOT\nx\nEOT", "x\n"),
+                ("<<END-1_a\nx\nEND-1_a\n", "x\n"),
+                ("<<_\nx\n_\n", "x\n"),
+                ("<<EOT\n°C\nEOT\n", "°C\n"),
+                (
+                    "<<EOT\n\\n \\\" # a // b /* c \"\nEOT\n",
+                    "\\n \\\" # a // b /* c \"\n",
+                ),
+                (
+                    "<<EOT\n$${x} %%{y} $ % $$ %% $$${z}\nEOT\n",
+                    "${x} %{y} $ % $$ %% $${z}\n",
+                ),
+            ]);
+        }
+
+        #[test]
+        fn reads_crlf_line_ends_as_new_lines() {
+            reads(&[
+                ("<<EOT\r\nx\r\ny\rz\r\nEOT\r\n", "x\ny\rz\n"),
+                ("<<EOT\r\nx\r\n EOT \r\n", "x\n"),
+                ("<<EOT\nEOT\rx\nEOT\n", "EOT\rx\n"),
+                ("<<-EOT\r\n  a\r\n    b\r\n  EOT\r\n", "a\n  b\n"),
+            ]);
+            let expected = attributes(vec![("a", string("x\n")), ("b", integer(1))]);
+            assert_eq!(ok("a = <<EOT\r\nx\r\nEOT\r\nb = 1\r\n"), expected);
+        }
+
+        #[test]
+        fn removes_the_indent_that_lines_share() {
+            reads(&[
+                ("<<-EOT\n    a\n      b\n    EOT\n", "a\n  b\n"),
+                ("<<-EOT\n\ta\n\t\tb\nEOT\n", "a\n\tb\n"),
+                ("<<-EOT\n \ta\n  b\nEOT\n", "a\nb\n"),
+                ("<<-EOT\n\u{3000}a\n\u{3000}b\nEOT\n", "a\nb\n"),
+                ("<<-EOT\n\u{3000}a\n\u{b} b\nEOT\n", "a\n b\n"),
+                ("<<-EOT\na\n  b\nEOT\n", "a\n  b\n"),
+                ("<<-EOT\n  $${a}\n    b\nEOT\n", "${a}\n  b\n"),
+                ("<<EOT\n  a\n  EOT\n", "  a\n"),
+            ]);
+        }
+
+        #[test]
+        fn keeps_blank_lines_as_written() {
+            reads(&[
+                ("<<-EOT\n    a\n\n   \n      b\nEOT\n", "a\n\n   \n  b\n"),
+                ("<<-EOT\n  \n\nEOT\n", "  \n\n"),
+                ("<<-EOT\n  a\n\u{3000}\n  b\nEOT\n", "a\n\u{3000}\nb\n"),
+            ]);
+        }
+
+        #[test]
+        fn reads_a_heredoc_where_a_value_can_be() {
+            let text = "a = [<<EOT\nx\nEOT\n, 1]\nb = f(\n  <<EOT\ny\nEOT\n)\n\
+                        c = { k = <<EOT\nz\nEOT\n  j = 2 }\nd {\n  e = <<-EOT\n    \
+                        w\n    EOT\n}\n";
+            let document = ok(text);
+            let call = value::Kind::Call(Call {
+                function: "f".into(),
+                function_span: None,
+                arguments: vec![value(string("y\n"))],
+            });
+            let expected = Document {
+                attributes: map(vec![
+                    (
+                        "a",
+                        value::Kind::List(vec![
+                            value(string("x\n")),
+                            value(integer(1)),
+                        ]),
+                    ),
+                    ("b", call),
+                    (
+                        "c",
+                        value::Kind::Map(map(vec![
+                            ("k", string("z\n")),
+                            ("j", integer(2)),
+                        ])),
+                    ),
+                ]),
+                blocks: vec![block("d", &[], attributes(vec![("e", string("w\n"))]))],
+            };
+            assert_eq!(document, expected);
+        }
+
+        #[test]
+        fn covers_the_opener_to_the_marker_line() {
+            let document = ok("a = <<EOT\nx\nEOT\nb = 1\n");
+            let a = document.attributes.get("a").unwrap();
+            assert_eq!(a.value.span, Some(span(at(4, 0, 4), at(15, 2, 3))));
+            let b = document.attributes.get("b").unwrap();
+            assert_eq!(b.key_span, Some(span(at(16, 3, 0), at(17, 3, 1))));
+            assert_eq!(b.value.span, Some(span(at(20, 3, 4), at(21, 3, 5))));
+
+            let document = ok("a = <<-EOT\n  x\n  EOT\n");
+            let a = document.attributes.get("a").unwrap();
+            assert_eq!(a.value.span, Some(span(at(4, 0, 4), at(20, 2, 5))));
+
+            let document = ok("a = <<EOT\nx\nEOT \t\r\n");
+            let a = document.attributes.get("a").unwrap();
+            assert_eq!(a.value.span, Some(span(at(4, 0, 4), at(17, 2, 5))));
+        }
+
+        #[test]
+        fn refuses_an_opener_without_a_marker_and_a_new_line() {
+            let cases = [
+                ("a = << EOT\nx\nEOT\n", 6),
+                ("a = <<\"EOT\"\nx\nEOT\n", 6),
+                ("a = <<1\n", 6),
+                ("a = <<-\nx\n-\n", 7),
+                ("a = <<--EOT\n", 7),
+                ("a = <<EOT x\nx\nEOT\n", 9),
+                ("a = <<EOT # c\nx\nEOT\n", 9),
+                ("a = <<EOT", 9),
+            ];
+            for (text, end) in cases {
+                let start = syntax(on(4, end), Expected::HeredocStart);
+                check(text, &[(start, START)]);
+            }
+        }
+
+        #[test]
+        fn refuses_a_heredoc_that_does_not_end() {
+            let cases = [
+                ("a = <<EOT\n", at(10, 1, 0)),
+                ("a = <<EOT\nx", at(11, 1, 1)),
+                ("a = <<EOT\nx\n", at(12, 2, 0)),
+                ("a = <<EOT\nEOTX\nEOT x\n", at(21, 3, 0)),
+                ("a = <<-EOT\n  x\n  eot\n", at(21, 3, 0)),
+                ("a = <<EOT\nx\nEOT\r", at(16, 2, 4)),
+            ];
+            for (text, end) in cases {
+                let open = syntax(span(at(4, 0, 4), end), Expected::HeredocEnd);
+                check(text, &[(open, END)]);
+            }
+        }
+
+        #[test]
+        fn refuses_a_template() {
+            let template = |start, end| {
+                let form = Form::Template;
+                (
+                    Error::Form {
+                        span: span(start, end),
+                        form,
+                    },
+                    TEMPLATE,
+                )
+            };
+            check(
+                "a = <<EOT\nx ${y}\nEOT\n",
+                &[template(at(12, 1, 2), at(14, 1, 4))],
+            );
+            check(
+                "a = <<-EOT\n  %{ if x }\n  EOT\n",
+                &[template(at(13, 1, 2), at(15, 1, 4))],
+            );
+            let null = Error::Form {
+                span: on(4, 8),
+                form: Form::Null,
+            };
+            check(
+                "a = null\nb = <<EOT\n${x}\nEOT\nc = null\n",
+                &[(null, NULL), template(at(19, 2, 0), at(21, 2, 2))],
+            );
+        }
+
+        #[test]
+        fn refuses_a_heredoc_as_a_label_or_a_key() {
+            check(
+                "b <<EOT\nx\nEOT\n {\n}\n",
+                &[(
+                    syntax(span(at(2, 0, 2), at(13, 2, 3)), Expected::AttributeOrBlock),
+                    "the file needs `=`, a label, or `{` after the name here",
+                )],
+            );
+            check(
+                "b \"l\" <<EOT\nx\nEOT\n {\n}\n",
+                &[(
+                    syntax(span(at(6, 0, 6), at(17, 2, 3)), Expected::BlockStart),
+                    "the file needs a label or `{` here",
+                )],
+            );
+            check(
+                "a = { <<EOT\nk\nEOT\n = 1 }\n",
+                &[(
+                    syntax(span(at(6, 0, 6), at(17, 2, 3)), Expected::Key),
+                    "the file needs a key or `}` here",
+                )],
+            );
+        }
+
+        #[test]
+        fn reads_on_after_a_form_before_a_heredoc() {
+            let operator = |span| Error::Form {
+                span,
+                form: Form::Operator,
+            };
+            let operator_message = Form::Operator.to_string();
+            check(
+                "a = -<<EOT\nx\nEOT\n",
+                &[(operator(on(4, 5)), &operator_message)],
+            );
+            let null = Error::Form {
+                span: span(at(24, 3, 4), at(28, 3, 8)),
+                form: Form::Null,
+            };
+            check(
+                "a = 1 + <<EOT\nx\nEOT\nb = null\n",
+                &[(operator(on(6, 7)), &operator_message), (null, NULL)],
+            );
+        }
+
+        /// Lines with no `{`, so no line starts a template.
+        fn lines() -> impl Strategy<Value = Vec<String>> {
+            prop::collection::vec(
+                "[ \t\u{b}\u{3000}]{0,3}[a-z$% \t\u{3000}]{0,5}",
+                0..6,
+            )
+        }
+
+        /// Writes `a = ` and a heredoc of `lines`, with `indent` before each line
+        /// that is not blank and before the marker.
+        fn heredoc(opener: &str, lines: &[String], indent: &str) -> String {
+            let mut text = format!("a = {opener}EOT\n");
+            for line in lines {
+                if !line.trim_start_matches(char::is_whitespace).is_empty() {
+                    text.push_str(indent);
+                }
+                text.push_str(line);
+                text.push('\n');
+            }
+            text.push_str(indent);
+            text.push_str("EOT\n");
+            text
+        }
+
+        proptest! {
+            #[test]
+            fn reads_an_indented_heredoc_as_the_heredoc_it_indents(
+                mut lines in lines(),
+                line in "[a-z$%][a-z$% \t\u{3000}]{0,5}",
+                at in any::<prop::sample::Index>(),
+                indent in "[ \t\u{b}\u{a0}\u{3000}]{0,4}",
+            ) {
+                lines.insert(at.index(lines.len().saturating_add(1)), line);
+                let indented = read(Source(0), &heredoc("<<-", &lines, &indent));
+                let plain = read(Source(0), &heredoc("<<", &lines, ""));
+                prop_assert_eq!(indented, plain);
+            }
+        }
+    }
+
     mod errors {
         use super::*;
 
         const ESCAPE: &str = "the string has an escape that HCL does not have. \
                               Use `\\n`, `\\r`, `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or \
                               `\\UNNNNNNNN`";
-        const TEMPLATE: &str = "templates do not exist in Foundation files. Write \
-                                `$${` or `%%{` for the text `${` or `%{`";
         const NAME: &str = "the reference is not a valid name: \"a.@\" has a segment \
                             that is not valid: \"@\". Use letters, digits, `_`, and \
                             `-`, separated by dots";
         const NUMBER: &str = "the number is out of range. Use an integer that fits \
                               in 128 bits, or a float that fits in 64 bits";
-        const NULL: &str = "`null` does not exist in Foundation files. Remove the \
-                            attribute to use its default";
         const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
                               give it a different key";
 
@@ -1059,6 +1454,11 @@ c = "°C # not a comment"
                     Form::Operator,
                 ),
                 ("a = { (k) = 1 }\n", on(6, 7), Form::Parentheses),
+                ("a = { 1.5 = 1 }\n", on(6, 9), Form::NumberKey),
+                ("a = { 1e3 = 1 }\n", on(6, 9), Form::NumberKey),
+                ("a = { -1.5 = 1 }\n", on(7, 10), Form::NumberKey),
+                ("a = { - = 1 }\n", on(6, 7), Form::Operator),
+                ("a = { -x = 1 }\n", on(6, 7), Form::Operator),
             ];
             for (text, span, form) in cases {
                 let message = form.to_string();
@@ -1113,6 +1513,29 @@ c = "°C # not a comment"
             check(
                 "a = null\nb = 1 + 2\n",
                 &[(null, NULL), (operator, &message)],
+            );
+        }
+
+        #[test]
+        fn refuses_a_number_key_that_hcl_rounds_and_reads_on() {
+            let message = Form::NumberKey.to_string();
+            let digits = "9".repeat(155);
+            let long = Error::Form {
+                span: on(6, 161),
+                form: Form::NumberKey,
+            };
+            check(&format!("a = {{ {digits} = 1 }}\n"), &[(long, &message)]);
+            let key = Error::Form {
+                span: on(6, 9),
+                form: Form::NumberKey,
+            };
+            let null = Error::Form {
+                span: span(at(27, 1, 4), at(31, 1, 8)),
+                form: Form::Null,
+            };
+            check(
+                "a = { 1.5 = 1, b = 2 }\nc = null\n",
+                &[(key, &message), (null, NULL)],
             );
         }
 
@@ -1178,6 +1601,22 @@ c = "°C # not a comment"
                 ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
                 ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
                 ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
+                ("40001 = 1\n", on(0, 5), Expected::Item),
+                ("b 1 {}\n", on(2, 3), Expected::AttributeOrBlock),
+            ];
+            for (text, span, expected) in cases {
+                let message = format!("the file needs {expected} here");
+                check(text, &[(syntax(span, expected), &message)]);
+            }
+        }
+
+        #[test]
+        fn refuses_the_close_of_another_bracket() {
+            let cases = [
+                ("a = [1)\n", on(6, 7), Expected::ListEnd),
+                ("a = [)\n", on(5, 6), Expected::Value),
+                ("a = f(1]\n", on(7, 8), Expected::ArgumentsEnd),
+                ("a = f(]\n", on(6, 7), Expected::Value),
             ];
             for (text, span, expected) in cases {
                 let message = format!("the file needs {expected} here");
@@ -1304,6 +1743,19 @@ c = "°C # not a comment"
             let second = span(at(6, 1, 0), at(7, 1, 1));
             check("a = 1\na = 2\n", &[repeat(on(0, 1), second)]);
             check("m = { a = 1, a = 2 }", &[repeat(on(6, 7), on(13, 14))]);
+            let error = document::Error::DuplicateKey {
+                key: "1".into(),
+                first: Some(on(6, 8)),
+                second: Some(on(14, 17)),
+            };
+            check(
+                "m = { 01 = 1, \"1\" = 2 }",
+                &[(
+                    Error::Document(error),
+                    "the key \"1\" repeats an earlier key. Remove it, or give it a \
+                     different key",
+                )],
+            );
             assert_eq!(ok("b { a = 1 }\nb { a = 2 }\n").blocks.len(), 2);
         }
 
@@ -1565,7 +2017,7 @@ c = "°C # not a comment"
             let c = prop::sample::select(
                 &[
                     '{', '}', '[', ']', '(', ')', '"', '=', ',', '.', ':', '#', '/',
-                    '*', '$', '%', '\\', '-', '\n', '\r', ' ', 'a', '1', '°',
+                    '*', '$', '%', '\\', '-', '\n', '\r', ' ', 'a', '1', '°', '<',
                 ][..],
             );
             (any::<prop::sample::Index>(), prop::option::of(c))

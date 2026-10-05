@@ -84,13 +84,14 @@ pub(crate) struct Record<'a> {
 /// # Panics
 ///
 /// When the parts hold more than `u32::MAX` bytes together.
-pub(crate) fn header(
+pub(crate) fn header<'a>(
     chain: u32,
     kind: Kind,
-    body: &[&[u8]],
+    body: impl IntoIterator<Item = &'a [u8], IntoIter: Clone>,
 ) -> ([u8; HEADER_LEN], u32) {
+    let body = body.into_iter();
     let len = body
-        .iter()
+        .clone()
         .try_fold(0u32, |len, part| {
             len.checked_add(u32::try_from(part.len()).ok()?)
         })
@@ -165,7 +166,7 @@ mod tests {
     /// A whole record as the writer puts it on disk, padded with `fill`, and the
     /// chain value of the next record.
     fn image(chain: u32, kind: Kind, parts: &[&[u8]], fill: u8) -> (Vec<u8>, u32) {
-        let (header, crc) = header(chain, kind, parts);
+        let (header, crc) = header(chain, kind, parts.iter().copied());
         let mut image = header.to_vec();
         for part in parts {
             image.extend_from_slice(part);
@@ -213,16 +214,16 @@ mod tests {
         #[should_panic(expected = "a record holds at most u32::MAX bytes")]
         fn panics_on_a_body_over_u32_max() {
             let part = vec![0; 1 << 20];
-            let _ = header(7, Kind::Data, &vec![part.as_slice(); 1 << 12]);
+            let _ = header(7, Kind::Data, vec![part.as_slice(); 1 << 12]);
         }
 
         /// The CRC values come from another CRC32C implementation.
         #[test]
         fn lays_out_len_crc_and_kind_little_endian() {
-            let first = header(0x0102_0304, Kind::Data, &[b"ab", b"c"]);
+            let first = header(0x0102_0304, Kind::Data, [b"ab".as_slice(), b"c"]);
             let bytes = [3, 0, 0, 0, 0xCC, 0x3B, 0x83, 0xA6, 1];
             assert_eq!(first, (bytes, 0xA683_3BCC));
-            let second = header(first.1, Kind::Wrap, &[b"defg"]);
+            let second = header(first.1, Kind::Wrap, [b"defg".as_slice()]);
             let bytes = [4, 0, 0, 0, 0x5C, 0x6F, 0xB9, 0xEF, 2];
             assert_eq!(second, (bytes, 0xEFB9_6F5C));
         }

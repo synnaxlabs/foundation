@@ -1,12 +1,15 @@
 //! The state of one run, shared by the scheduler and the drivers.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::IoSliceMut;
 use std::mem;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::task::{Wake, Waker};
+use std::task::{Poll, Wake, Waker};
 use std::time::Instant;
 
+use env::net::udp::{self, Meta, Transmit};
 use env::rng::Rng;
 use env::shards::Main;
 use env::tasks::Task;
@@ -14,7 +17,8 @@ use env::thread::Error;
 use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
-use crate::node;
+use crate::net::{Bound, Network};
+use crate::{link, node};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
 
@@ -45,6 +49,9 @@ pub(crate) struct State {
     /// The `Instant` at `Monotonic(0)` on every node.
     epoch: Instant,
     next: u64,
+    net: Network,
+    /// A hash of every pick and every datagram event, in order.
+    digest: DefaultHasher,
 }
 
 struct Node {
@@ -52,6 +59,7 @@ struct Node {
     base: Monotonic,
     monotonic: Monotonic,
     wall: Stamp,
+    wall_error: Option<Span>,
     /// The true time at which the node runs again after its pause, or `None` when the
     /// pause never ends.
     resumes: Option<Monotonic>,
@@ -80,8 +88,8 @@ struct Thread {
 pub(crate) enum Next {
     /// Poll a ready task.
     Poll,
-    /// Move true time to the first timer or the first end of a pause that holds a
-    /// ready task.
+    /// Move true time to the first timer, the first arrival, or the first end of a
+    /// pause that holds a ready task.
     Advance(Monotonic),
 }
 
@@ -101,7 +109,7 @@ pub(crate) enum Start {
 }
 
 impl State {
-    pub(crate) fn new(epoch: Instant) -> Self {
+    pub(crate) fn new(epoch: Instant, net: Network) -> Self {
         Self {
             now: Monotonic::default(),
             nodes: Vec::new(),
@@ -113,6 +121,8 @@ impl State {
             current: None,
             epoch,
             next: 0,
+            net,
+            digest: DefaultHasher::new(),
         }
     }
 
@@ -133,6 +143,7 @@ impl State {
             base: self.now,
             monotonic: config.monotonic,
             wall: config.wall,
+            wall_error: config.wall_error,
             resumes: Some(self.now),
             cores: config.cores,
             entropy,
@@ -161,12 +172,19 @@ impl State {
         Monotonic(self.nodes[node].monotonic.0 + self.since(node))
     }
 
-    pub(crate) fn wall(&self, node: usize) -> Stamp {
+    pub(crate) fn wall(&self, node: usize) -> env::wall::Reading {
         let nanos =
             i128::from(self.nodes[node].wall.nanos()) + i128::from(self.since(node));
         let nanos = i64::try_from(nanos)
             .expect("invariant: true time ends before a wall clock");
-        Stamp::from_nanos(nanos)
+        env::wall::Reading {
+            time: Stamp::from_nanos(nanos),
+            error: self.nodes[node].wall_error,
+        }
+    }
+
+    pub(crate) fn set_wall_error(&mut self, node: usize, error: Option<Span>) {
+        self.nodes[node].wall_error = error;
     }
 
     pub(crate) fn cores(&self, node: usize) -> NonZeroUsize {
@@ -180,7 +198,7 @@ impl State {
     /// Steps the wall of `node` by `span`, or returns `false` when the wall would
     /// leave the range of a [`Stamp`].
     pub(crate) fn step_wall(&mut self, node: usize, span: Span) -> bool {
-        let Some(wall) = self.wall(node).checked_add(span) else {
+        let Some(wall) = self.wall(node).time.checked_add(span) else {
             return false;
         };
         let (now, monotonic) = (self.now, self.monotonic(node));
@@ -231,9 +249,54 @@ impl State {
         self.timers.remove(&(at, key))
     }
 
-    /// The node of the thread that the scheduler polls now, if any.
-    pub(crate) fn current(&self) -> Option<usize> {
-        self.current.map(|thread| self.threads[&thread].node)
+    /// The thread that the scheduler polls now and its node, if any.
+    pub(crate) fn current(&self) -> Option<(u64, usize)> {
+        self.current
+            .map(|thread| (thread, self.threads[&thread].node))
+    }
+
+    /// Sets the link from node `from` to node `to`.
+    pub(crate) fn link(&mut self, from: usize, to: usize, config: link::Config) {
+        self.net.link(from, to, config);
+    }
+
+    /// Binds a UDP socket on `node`.
+    pub(crate) fn bind(
+        &mut self,
+        node: usize,
+        config: &udp::Config,
+    ) -> Result<Bound, env::net::Error> {
+        self.net.bind(node, config)
+    }
+
+    /// Removes socket `socket`, and returns its waker for the caller to drop after it
+    /// releases the lock.
+    pub(crate) fn close(&mut self, socket: u64) -> Option<Waker> {
+        self.net.close(socket)
+    }
+
+    /// Sends `transmit` from socket `socket` now.
+    pub(crate) fn send(
+        &mut self,
+        socket: u64,
+        transmit: &Transmit<'_>,
+    ) -> Result<(), env::net::Error> {
+        self.net.send(self.now, &mut self.digest, socket, transmit)
+    }
+
+    /// Receives from socket `socket`, as [`Network::recv`].
+    pub(crate) fn recv(
+        &mut self,
+        socket: u64,
+        waker: Waker,
+        buffers: &mut [IoSliceMut<'_>],
+        meta: &mut [Meta],
+    ) -> (Poll<usize>, Option<Waker>) {
+        self.net.recv(socket, waker, buffers, meta)
+    }
+
+    pub(crate) fn digest(&self) -> u64 {
+        self.digest.finish()
     }
 
     /// Adds a thread whose first task is ready, and returns the thread's key.
@@ -288,6 +351,7 @@ impl State {
         let pauses = (self.ready.iter()).filter_map(|&task| self.resumes(task));
         let at = timer
             .into_iter()
+            .chain(self.net.first())
             .chain(pauses)
             .filter(|&at| at <= last)
             .min();
@@ -315,6 +379,7 @@ impl State {
         let nth = usize::try_from(rng.below(count))
             .expect("invariant: a value below a usize fits usize");
         let task = runnable[nth];
+        task.hash(&mut self.digest);
         self.ready.remove(&task);
         let thread = self.tasks[&task];
         self.current = Some(thread);
@@ -355,7 +420,8 @@ impl State {
         tasks
     }
 
-    /// Moves true time to `at` and returns the wakers of the timers due by then.
+    /// Moves true time to `at`, delivers the datagrams that arrive by then, and
+    /// returns the wakers of the timers due and of the sockets that receive.
     pub(crate) fn advance(&mut self, at: Monotonic) -> Vec<Waker> {
         self.now = at;
         let mut wakers = Vec::new();
@@ -365,6 +431,7 @@ impl State {
             }
             wakers.push(timer.remove());
         }
+        wakers.extend(self.net.deliver(at, &mut self.digest));
         wakers
     }
 
