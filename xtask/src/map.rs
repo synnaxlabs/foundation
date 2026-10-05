@@ -113,7 +113,7 @@ pub(crate) const CRATES: &[Crate] = &[
     Crate {
         name: "clock",
         layer: 2,
-        deps: Deps::Only(&["env", "types", "estimate", "wire", "transport"]),
+        deps: Deps::Only(&["env", "types", "ring", "estimate", "wire", "transport"]),
     },
     Crate {
         name: "blob",
