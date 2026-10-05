@@ -397,7 +397,7 @@ Rules for every component:
 | `pace::Timer` | Ticks at a period anchored to deadlines, reports missed and late ticks, and picks sleep, hybrid, or spin by period. | SY-4693 anchor, SY-4694 Windows, non-cancellable sleep, Arc's second timer |
 | `clock::Software` | Stamps one sample from the mesh-time interval around its request (midpoint, with the half width as error). | Modbus midpoint, OPC UA unary reads |
 | `clock::Window` | Stamps a block of samples evenly across the window its read took. | OPC UA arrays (SY-3310), EtherCAT batches |
-| `clock::Fit` | Fits a device oscillator to mesh time from the lower envelope of read-return times; never steps back; reports skew (r6 Q5). | P controller, back correction, skew warnings |
+| `clock::Fit` | Fits a device oscillator to mesh time from the lower envelope of read-return times; never steps back; reports skew (r6 Q5). | PID controller (P only as deployed), back correction, skew warnings |
 | `retry::Backoff` | Waits with capped exponential backoff and jitter; resets on success. | HTTP 761-retry config, breaker reset hacks |
 | `retry::Breaker` | Opens after N failures on one endpoint and probes after a cooldown. | OPC UA reconnect storms (SY-3902) |
 | `endpoint::Registry<T>` | Keeps one live endpoint per key, serializes opens, refuses a second open with different settings, closes on the last release. | LabJack handle race, OPC UA session pool, EtherCAT master pool, bus registry [unmerged] |
