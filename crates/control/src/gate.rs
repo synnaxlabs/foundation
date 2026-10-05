@@ -31,6 +31,8 @@ pub struct Gate {
     /// The holder differs from `recorded`. Kept at each change of seat, so that a
     /// frame does not compare subjects.
     unrecorded: bool,
+    /// The writer and time of the newest check that passed on this seat.
+    checked: Option<(Key, Monotonic)>,
 }
 
 /// A write that passed [`Gate::check`]. [`Gate::renew`] spends it.
@@ -161,6 +163,7 @@ impl Gate {
     pub fn check(&mut self, key: Key, now: Monotonic) -> Result<Permit, Error> {
         self.advance(now);
         if matches!(self.seat, Seat::Held { key: held, .. } if held == key) {
+            self.checked = Some((key, now));
             return Ok(Permit { key, at: now });
         }
         if self.claim(key).expired {
@@ -172,25 +175,27 @@ impl Gate {
         }
     }
 
-    /// Renews the holder's control lease from the time of `permit`, and never
-    /// shortens it. `permit` must come from [`Gate::check`] on this gate. Call it when
-    /// the caller accepts the write. Takes O(1) time and does not allocate.
+    /// Renews the holder's control lease from the time of `permit`. Call it when the
+    /// caller accepts the write, before the gate checks another write. `permit` must
+    /// come from [`Gate::check`] on this gate. Takes O(1) time and does not allocate.
     ///
     /// # Panics
     ///
-    /// When the writer of `permit` does not hold control.
+    /// When the gate checked another write or changed holder after the check of
+    /// `permit`.
     #[expect(clippy::needless_pass_by_value, reason = "a permit is spent once")]
     pub fn renew(&mut self, permit: Permit) {
         let Permit { key, at } = permit;
-        match &mut self.seat {
-            Seat::Held { key: held, expiry } if *held == key => {
-                if let Some(expiry) = expiry {
-                    expiry.at = expiry.at.max(deadline(at, expiry.lease));
-                }
-            }
-            Seat::Empty | Seat::Held { .. } | Seat::Recovered { .. } => {
-                panic!("invariant: writer {key} lost control after its check")
-            }
+        assert!(
+            self.checked == Some((key, at)),
+            "invariant: the gate changed after the check of writer {key}"
+        );
+        if let Seat::Held {
+            expiry: Some(expiry),
+            ..
+        } = &mut self.seat
+        {
+            expiry.at = deadline(at, expiry.lease);
         }
     }
 
@@ -269,6 +274,7 @@ impl Gate {
 
     fn sit(&mut self, seat: Seat) {
         self.seat = seat;
+        self.checked = None;
         self.unrecorded = self.holder() != self.recorded.as_ref();
     }
 
@@ -482,7 +488,9 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "invariant: writer 0 lost control after its check")]
+        #[should_panic(
+            expected = "invariant: the gate changed after the check of writer 0"
+        )]
         fn panics_when_renewed_after_the_holder_changed() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 100), Some(lease(10)), at(0));
@@ -492,30 +500,35 @@ mod tests {
         }
 
         #[test]
-        fn is_not_shortened_by_a_permit_from_before_a_handoff_and_back() {
+        #[should_panic(
+            expected = "invariant: the gate changed after the check of writer 0"
+        )]
+        fn panics_when_renewed_after_a_handoff_and_back() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 100), Some(lease(10)), at(0));
             let permit = gate.check(a, at(1)).expect("a holds control");
             let b = gate.open(writer("b", 200), None, at(5));
             gate.close(b, at(8));
-            assert_eq!(gate.deadline(), Some(at(18)));
             gate.renew(permit);
-            assert_eq!(gate.deadline(), Some(at(18)));
         }
 
         #[test]
-        fn is_not_shortened_by_permits_spent_out_of_order() {
+        #[should_panic(
+            expected = "invariant: the gate changed after the check of writer 0"
+        )]
+        fn panics_when_an_older_permit_is_renewed() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 100), Some(lease(10)), at(0));
             let first = gate.check(a, at(1)).expect("a holds control");
             let second = gate.check(a, at(9)).expect("a holds control");
             gate.renew(second);
             gate.renew(first);
-            assert_eq!(gate.deadline(), Some(at(19)));
         }
 
         #[test]
-        #[should_panic(expected = "invariant: writer 0 lost control after its check")]
+        #[should_panic(
+            expected = "invariant: the gate changed after the check of writer 0"
+        )]
         fn panics_when_renewed_after_the_holder_closed() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 100), Some(lease(10)), at(0));
