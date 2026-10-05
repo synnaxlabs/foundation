@@ -46,6 +46,11 @@ fn main() {
         draft.set_count(0, 2);
         draft.set_seq(0, 9);
         assert_eq!(
+            draft.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
+            32,
+            "the draft reads both series"
+        );
+        assert_eq!(
             draft.range(0),
             Some(Range { seq: 9, count: 2 }),
             "the draft reads its range"

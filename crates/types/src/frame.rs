@@ -1259,7 +1259,9 @@ mod tests {
             .collect();
         let mut drafted = Vec::new();
         for (entry, bytes) in draft.iter() {
-            prop_assert!(draft.range(set.entries()[entry].group).is_some());
+            let group = set.entries()[entry].group;
+            let at = usize::try_from(group).expect("groups are few");
+            prop_assert_eq!(draft.range(group), ranges[at]);
             drafted.push((entry, bytes.to_vec()));
         }
         prop_assert_eq!(&drafted, &written);
