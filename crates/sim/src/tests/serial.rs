@@ -193,6 +193,26 @@ fn a_long_run_of_bytes_keeps_the_exact_line_rate() {
     assert_eq!(*log.lock().unwrap(), expected);
 }
 
+#[test]
+fn a_byte_written_on_an_idle_line_arrives_one_character_after_the_write() {
+    let (mut sim, a, b) = pair(0, line::Config::default());
+    let (clock, serial, log) = (a.clock(), a.serial(), Log::default());
+    let _send = a.shards().start(shard("send"), move |_| async move {
+        let mut port = serial.open(&config(A, 9_600, None)).await.unwrap();
+        clock.sleep(Span::SECOND).await;
+        write(&mut port, &[7]).await;
+        pending::<()>().await;
+    });
+    let _receive = receive(&b, config(B, 9_600, None), Span::ZERO, &log);
+    sim.run_for(Span::from_nanos(2 * Span::SECOND.nanos()))
+        .unwrap();
+    let nanos = Span::SECOND.nanos() + 10 * 1_000_000_000 / 9_600;
+    assert_eq!(
+        *log.lock().unwrap(),
+        [(after(Span::from_nanos(nanos)), vec![7])]
+    );
+}
+
 /// Starts a shard on `node` that opens `path` at 19,200 baud, writes `bytes`, and
 /// reads into `log` forever.
 fn duplex(node: &node::Node, path: &str, bytes: Vec<u8>, log: &Log) -> Handle {
