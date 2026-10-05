@@ -1,7 +1,7 @@
 //! As the global allocator, the count covers every thread. This binary has no test
 //! harness, because a harness allocates on its own threads at any time.
 
-#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR allows it here")]
+#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use std::hint::black_box;
 use std::sync::atomic::AtomicBool;

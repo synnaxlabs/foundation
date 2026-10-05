@@ -2,10 +2,7 @@
 //! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(unsafe_code, reason = "a counting allocator implements `GlobalAlloc`")]
-#![expect(
-    clippy::disallowed_macros,
-    reason = "COUNTING ALLOCATOR allows it here"
-)]
+#![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::AtomicU64;
