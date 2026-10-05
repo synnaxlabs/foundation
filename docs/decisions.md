@@ -267,15 +267,20 @@ How to read this record:
 - **B6** One write call is one frame. Smart batching is the default. Catch-up may merge
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
-- **B7** A frame applies whole or not at all, per index. Live writes are never retried.
-  A writer may resend unconfirmed live data as backfill. The home finds a repeat by
-  timestamp: it checks a backfill frame that starts at or before the last backfill
-  stamp against the index on both paths. When every sample exists with the same
-  values, the frame is a repeat, and the home drops and confirms it. When no sample
-  exists, the frame is out of order. Some samples stored and some not, a stored
-  timestamp with other values, or a range below the buffer's floor is an error. Writers
-  assign no numbers: a resend comes in a new session, and the writer never learned
-  them. The person decided on 2026-10-05 ("By timestamp + same values"), #148.
+- **B7** A frame applies whole or not at all, per index. A writer never resends on the
+  live path. After a reconnect, it resends each unconfirmed live frame, with its
+  original boundaries, labeled `resend`. `resend` is a frame label, not a third path:
+  the home checks a resend frame by timestamp against both paths of the index, and it
+  lands on one of them or on none. When every sample exists with the same values, the
+  frame is a repeat, and the home drops and confirms it. When no sample exists and the
+  frame starts after the newest live stamp, it never landed, and the home applies it
+  to the live path. When no sample exists and the frame fits A6, it applies as
+  backfill. Anything else is an error: some samples stored and some not, a stored
+  timestamp with other values, a frame that fits neither path, or a range below the
+  buffer's floor. Live and backfill frames pay no check. Values are compared decoded,
+  not as bytes. Writers assign no numbers: a resend comes in a new session, and the
+  writer never learned them. The person decided on 2026-10-05: "By timestamp + same
+  values" (#148), then "A `resend` label" (#168).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -1615,8 +1620,8 @@ SIMPLICITY DIRECTIVE.
 Conflict: A1 and A20 say "writes to the home are never buffered". BQ7 and r13 let a
 writer keep unconfirmed frames and resend them after failover.
 Resolution: live delivery is never queued for retry. A writer may keep unconfirmed
-frames in a bounded memory window only to resend them as backfill after failover (B7).
-Basis: BQ7, B7.
+frames in a bounded memory window only to resend them, labeled `resend`, after
+failover (B7). Basis: BQ7, B7.
 
 **X42. The owner of the slot and key set tables.**
 Conflict: M1 needs one node-wide slot table and key set interner. `hub` opens sessions,
