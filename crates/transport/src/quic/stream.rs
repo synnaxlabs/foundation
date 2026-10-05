@@ -473,8 +473,9 @@ impl Streams {
     /// # Errors
     ///
     /// [`Error::Reset`] when the peer reset the stream, [`Error::Pool`] when `pool`
-    /// has no room now, and [`Error::Broken`] when the peer broke the framing or
-    /// reset with a code over 32 bits.
+    /// has no room now, [`Error::Memory`] when the system has none, and
+    /// [`Error::Broken`] when the peer broke the framing or reset with a code over 32
+    /// bits.
     #[expect(
         clippy::unwrap_in_result,
         reason = "a receiver never reads its stream after the end"

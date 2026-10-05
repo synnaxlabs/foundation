@@ -76,6 +76,13 @@ pub enum Error {
         /// more.
         available: usize,
     },
+    /// The system has no memory for a received message now, though the pool's budget
+    /// has room for it. The message stays queued; call again later. A freed block does
+    /// not help.
+    Memory {
+        /// The message's size.
+        bytes: usize,
+    },
     /// A [`Config`](crate::Config) value is out of range.
     Config {
         /// The field's name.
@@ -119,6 +126,9 @@ impl fmt::Display for Error {
                 f,
                 "no room for a received message of {bytes} bytes ({available} free)"
             ),
+            Self::Memory { bytes } => {
+                write!(f, "no memory for a received message of {bytes} bytes")
+            }
             Self::Config { field, rule } => write!(f, "config {field} {rule}"),
         }
     }
@@ -234,6 +244,12 @@ mod tests {
                 &error,
                 "no room for a received message of 10 bytes (4 free)",
             );
+        }
+
+        #[test]
+        fn gives_the_size_of_a_message_with_no_memory() {
+            let error = Error::Memory { bytes: 10 };
+            check(&error, "no memory for a received message of 10 bytes");
         }
 
         #[test]

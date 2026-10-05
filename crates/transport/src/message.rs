@@ -109,8 +109,9 @@ impl Reader {
     ///
     /// - [`Error::Broken`] when the peer breaks the framing: a message over
     ///   `bytes_max`, or a stream that ends inside a message. The stream cannot go on.
-    /// - [`Error::Pool`] when `pool` has no room for the message now. Its bytes stay
-    ///   with the source; call again when the pool has room.
+    /// - [`Error::Pool`] when `pool` has no room for the message now, or
+    ///   [`Error::Memory`] when the system has none. Its bytes stay with the source;
+    ///   call again later.
     /// - The source's error.
     ///
     /// # Panics
@@ -198,26 +199,32 @@ impl Reader {
 ///
 /// # Errors
 ///
-/// [`Error::Pool`] when the pool has no room now.
+/// [`Error::Pool`] when the pool has no room now, and [`Error::Memory`] when the
+/// system has none.
 ///
 /// # Panics
 ///
 /// When the pool cannot hold `len` bytes.
 fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
-    match pool.alloc(len) {
-        Ok(block) => Ok(block),
-        Err(block::Error::Exhausted {
+    pool.alloc(len).map_err(error)
+}
+
+/// What to give the caller when the pool gave no block for a message.
+///
+/// # Panics
+///
+/// When the pool cannot hold the message.
+fn error(error: block::Error) -> Error {
+    match error {
+        block::Error::Exhausted {
             requested,
             available,
-        }) => Err(Error::Pool {
+        } => Error::Pool {
             bytes: requested,
             available,
-        }),
-        Err(block::Error::Refused { requested }) => Err(Error::Pool {
-            bytes: requested,
-            available: 0,
-        }),
-        Err(error @ block::Error::TooLarge { .. }) => {
+        },
+        block::Error::Refused { requested } => Error::Memory { bytes: requested },
+        error @ block::Error::TooLarge { .. } => {
             panic!("the pool cannot hold a message of `bytes_max`: {error}")
         }
     }
@@ -504,6 +511,12 @@ mod tests {
                 read_all(&mut reader, &pool, &mut source),
                 Ok(vec![vec![9; 100]])
             );
+        }
+
+        #[test]
+        fn when_the_system_refuses_memory_it_gives_memory() {
+            let refused = block::Error::Refused { requested: 100 };
+            assert_eq!(error(refused), Error::Memory { bytes: 100 });
         }
 
         #[test]

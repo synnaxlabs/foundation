@@ -357,8 +357,8 @@ impl Endpoint {
     ///
     /// - [`Error::Reset`] when the peer reset the stream. Each later read gives it
     ///   too.
-    /// - [`Error::Pool`] when the pool has no room for the message now. Call again
-    ///   when it has.
+    /// - [`Error::Pool`] when the pool has no room for the message now, or
+    ///   [`Error::Memory`] when the system has none. Call again later.
     pub(crate) fn read(
         &mut self,
         now: Monotonic,

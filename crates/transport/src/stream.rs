@@ -131,8 +131,8 @@ impl Receiver {
     /// # Errors
     ///
     /// [`Error::Reset`] when the sender cancelled the stream, [`Error::Pool`] when the
-    /// pool has no room for the next message (it stays queued), or the error that
-    /// ended the session.
+    /// pool has no room for the next message, [`Error::Memory`] when the system has no
+    /// memory for it (each time it stays queued), or the error that ended the session.
     ///
     /// ```
     /// use block::Block;
