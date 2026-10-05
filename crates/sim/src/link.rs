@@ -18,7 +18,8 @@ pub struct Config {
     pub loss: f64,
     /// The chance, from 0 to 1, that a datagram arrives twice.
     pub duplication: f64,
-    /// The largest IP packet in bytes. A larger datagram is lost.
+    /// The largest IP packet in bytes. A datagram is lost when it is larger with its
+    /// headers: 28 bytes on IPv4, 48 on IPv6.
     pub mtu: usize,
 }
 

@@ -60,10 +60,10 @@ impl Node {
     ///   49152.
     /// - A send to the other family than the socket's gives `Error::Unreachable`.
     /// - Each socket draws its send and receive batch maxes from 1, 8, and 64.
-    /// - A datagram is lost when it is over the link's MTU with its headers (28
-    ///   bytes on IPv4, 48 on IPv6), when nothing is bound at its destination, or
-    ///   when it would fill the receive queue past `recv_buffer_bytes`. The send
-    ///   buffer never fills.
+    /// - A datagram is lost when it is over the link's
+    ///   [`mtu`](crate::link::Config::mtu), when nothing is bound at its
+    ///   destination, or when it would fill the receive queue past
+    ///   `recv_buffer_bytes`. The send buffer never fills.
     /// - A socket half panics when it polls outside the node's threads.
     #[must_use]
     pub fn net(&self) -> env::net::Net {

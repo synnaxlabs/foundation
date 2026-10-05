@@ -24,6 +24,10 @@ const BROADCAST: u32 = 0x00ff_ffff;
 const EPHEMERAL: u16 = 49_152;
 /// The Linux code for an address that is not on the node (`EADDRNOTAVAIL`).
 const NOT_AVAILABLE: i32 = 99;
+/// The IPv4 and UDP header bytes of a datagram.
+const V4_HEADERS: usize = 28;
+/// The IPv6 and UDP header bytes of a datagram.
+const V6_HEADERS: usize = 48;
 /// The batch maxes that each socket draws from, for sends and for receives.
 const BATCH_MAXES: [usize; 3] = [1, 8, 64];
 
@@ -285,9 +289,9 @@ impl Network {
     /// Puts `datagram` in flight on `link`, as the link's faults decide.
     fn fly(&mut self, now: Monotonic, link: &link::Config, datagram: Datagram) -> Fate {
         let header = if datagram.destination.is_ipv4() {
-            28
+            V4_HEADERS
         } else {
-            48
+            V6_HEADERS
         };
         if datagram.contents.len() + header > link.mtu || self.chance(link.loss) {
             return Fate::Lost;

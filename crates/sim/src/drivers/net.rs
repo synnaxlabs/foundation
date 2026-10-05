@@ -19,7 +19,7 @@ impl env::net::Driver for Node {
         Ok(Box::new(Socket {
             node: self.clone(),
             bound,
-            receiver: OnceLock::new(),
+            thread: OnceLock::new(),
         }))
     }
 
@@ -52,7 +52,7 @@ struct Socket {
     node: Node,
     bound: Bound,
     /// The thread of the first receive.
-    receiver: OnceLock<u64>,
+    thread: OnceLock<u64>,
 }
 
 impl udp::Driver for Socket {
@@ -82,7 +82,7 @@ impl udp::Driver for Socket {
         buffers: &mut [IoSliceMut<'_>],
         meta: &mut [Meta],
     ) -> Poll<Result<usize, Error>> {
-        own(&self.node, &self.receiver);
+        own(&self.node, &self.thread);
         let waker = cx.waker().clone();
         let (poll, unused) =
             lock(&self.node.shared).recv(self.bound.key, waker, buffers, meta);
