@@ -37,6 +37,8 @@ pub(crate) enum Cause {
 pub(crate) struct Handle {
     pub(crate) inode: u64,
     pub(crate) writable: bool,
+    /// The key of the open that made it. No other handle of the run has it.
+    pub(crate) key: u64,
 }
 
 pub(crate) struct Disk {
@@ -194,7 +196,11 @@ impl Disk {
             return Err(Cause::Busy);
         }
         let len = file.len;
-        let handle = Handle { inode, writable };
+        let handle = Handle {
+            inode,
+            writable,
+            key,
+        };
         self.hold(handle);
         Ok((handle, len))
     }

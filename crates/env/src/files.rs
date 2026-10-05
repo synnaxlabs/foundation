@@ -248,14 +248,14 @@ pub enum Mode {
 /// One open file. Its length does not change, and every read and write stays inside
 /// it. A failed or dropped [`File::sync`] poisons the file: every later call fails
 /// with [`Error::Poisoned`], because a second sync can report success for lost data.
-/// Reopen the file and recover.
+/// Close the file, then reopen it and recover.
 ///
 /// Calls may overlap in time. A [`File::sync`] covers the writes that ended before it
 /// started. Where the ranges of calls in flight at the same time overlap, the bytes
 /// are unknown.
 ///
 /// Dropping it closes the file without a wait, after the calls of dropped futures
-/// end.
+/// end. [`File::close`] waits for them.
 ///
 /// ```
 /// async fn commit(
@@ -386,6 +386,29 @@ impl File {
         result
     }
 
+    /// Closes the file. The future ends after every call of the file ends, those of
+    /// dropped futures too, and the file is closed. A write open of the same path
+    /// then succeeds, unless another handle holds the file. A drop closes the file
+    /// too, but without a wait, so a reopen before its calls end gives
+    /// [`Error::Busy`].
+    ///
+    /// It gives no error: [`File::sync`] makes the bytes durable, and a close after
+    /// it loses nothing. A drop of the future closes the file without a wait.
+    ///
+    /// ```
+    /// async fn reopen(
+    ///     files: &env::files::Files,
+    ///     file: env::files::File,
+    ///     path: &std::path::Path,
+    /// ) -> Result<env::files::File, env::files::Error> {
+    ///     file.close().await;
+    ///     files.open(path, env::files::Mode::Write).await
+    /// }
+    /// ```
+    pub async fn close(self) {
+        self.descriptor.close().await;
+    }
+
     fn check_poison(&self) -> Result<(), Error> {
         if self.poisoned.get() {
             return Err(Error::Poisoned {
@@ -467,7 +490,8 @@ pub enum Error {
         /// The path of the call.
         path: PathBuf,
     },
-    /// A sync of this file failed or was dropped earlier. Reopen it and recover.
+    /// A sync of this file failed or was dropped earlier. Close it, then reopen it and
+    /// recover.
     Poisoned {
         /// The path of the file.
         path: PathBuf,
@@ -508,7 +532,8 @@ impl fmt::Display for Error {
             }
             Self::Poisoned { path } => write!(
                 f,
-                "a sync of file {} failed or was dropped; reopen it and recover",
+                "a sync of file {} failed or was dropped; close it, then reopen it and \
+                 recover",
                 path.display()
             ),
             Self::Busy { path } => write!(
@@ -654,6 +679,10 @@ pub trait Descriptor {
 
     /// Makes the writes that ended before the call durable.
     fn sync(&self) -> Request<'_, ()>;
+
+    /// Closes the file. The future ends after the calls of the descriptor end and the
+    /// file is closed.
+    fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>>;
 }
 
 #[cfg(test)]
@@ -763,6 +792,11 @@ mod tests {
             self.record("sync".into());
             Box::pin(async { self.sync.clone() })
         }
+
+        fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
+            self.record("close".into());
+            Box::pin(async {})
+        }
     }
 
     /// Never ends a sync.
@@ -783,6 +817,10 @@ mod tests {
 
         fn sync(&self) -> Request<'_, ()> {
             Box::pin(std::future::pending())
+        }
+
+        fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
+            Box::pin(async {})
         }
     }
 
@@ -1056,6 +1094,26 @@ mod tests {
         }
     }
 
+    mod close {
+        use super::*;
+
+        #[test]
+        fn closes_the_descriptor_once() {
+            let (files, calls) = Fixed::files(8);
+            ready(open(&files, Mode::Write).close());
+            assert_eq!(calls.borrow()[1..], ["close"]);
+        }
+
+        #[test]
+        fn closes_a_poisoned_file() {
+            let (files, calls) = Fixed::with_sync(8, Err(io(Operation::Sync)));
+            let file = open(&files, Mode::Write);
+            assert_eq!(ready(file.sync()), Err(io(Operation::Sync)));
+            ready(file.close());
+            assert_eq!(calls.borrow()[1..], ["sync", "close"]);
+        }
+    }
+
     mod check_range {
         use super::*;
 
@@ -1114,7 +1172,8 @@ mod tests {
             };
             assert_eq!(
                 e.to_string(),
-                "a sync of file ring/0 failed or was dropped; reopen it and recover"
+                "a sync of file ring/0 failed or was dropped; close it, then reopen \
+                 it and recover"
             );
         }
 

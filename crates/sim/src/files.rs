@@ -121,6 +121,9 @@ pub(crate) struct Files {
     queue: BTreeSet<(Monotonic, u64)>,
     /// The calls that ended, until their futures take the result.
     done: BTreeMap<u64, Ended>,
+    /// The waker of each close that waits for the calls of its descriptor, by the key
+    /// of its handle.
+    closes: BTreeMap<u64, Waker>,
     rng: Rng,
     /// The last tick. A call's key is the tick of its start, a file or directory
     /// that it makes takes the same key, and a write takes a tick when it ends. One
@@ -139,6 +142,7 @@ impl Files {
             flights: BTreeMap::new(),
             queue: BTreeSet::new(),
             done: BTreeMap::new(),
+            closes: BTreeMap::new(),
             rng,
             tick: disk::ROOT,
             digest: DefaultHasher::new(),
@@ -223,6 +227,8 @@ impl Files {
             let (node, dropped, waker) =
                 (flight.node, flight.dropped, flight.waker.take());
             let kind = mem::discriminant(&flight.call);
+            let close = flight.call.handle().map(|handle| handle.key);
+            wakers.extend(close.and_then(|key| self.closes.remove(&key)));
             let ended = self.apply(key, flight);
             (due, key, kind, ended.result.is_ok()).hash(&mut self.digest);
             if dropped {
@@ -387,9 +393,29 @@ impl Files {
         orphans
     }
 
-    /// Closes descriptor `handle` of `node`.
-    pub(crate) fn close(&mut self, node: usize, handle: Handle) {
+    /// Polls the close of descriptor `handle`: ready when none of its calls is in
+    /// flight. Else it keeps `waker` to wake when one of them ends. Returns the waker
+    /// to drop after the lock is released.
+    pub(crate) fn settle(
+        &mut self,
+        handle: Handle,
+        waker: Waker,
+    ) -> (Poll<()>, Option<Waker>) {
+        let mut calls = self
+            .flights
+            .values()
+            .filter_map(|flight| flight.call.handle());
+        if calls.all(|held| held.key != handle.key) {
+            return (Poll::Ready(()), Some(waker));
+        }
+        (Poll::Pending, self.closes.insert(handle.key, waker))
+    }
+
+    /// Closes descriptor `handle` of `node`. Returns the waker of its close, to drop
+    /// after the lock is released.
+    pub(crate) fn close(&mut self, node: usize, handle: Handle) -> Option<Waker> {
         self.disks[node].release(handle);
+        self.closes.remove(&handle.key)
     }
 }
 

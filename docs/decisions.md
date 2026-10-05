@@ -1519,15 +1519,16 @@ How to read this record:
   scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
   (#37) gives files under one data directory, with owned blocks and a sync that
   poisons the file on failure (S4). One handle at a time holds a file open to write,
-  until it drops and its calls end; another write open fails with `Busy` (#392). Each
-  `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP sockets
-  that move GSO and GRO batches with ECN and the local address, TCP streams, and
+  until it drops and its calls end; another write open fails with `Busy` (#392).
+  `File::close` ends after the calls of the file end; a drop closes without a wait
+  (#516). Each `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP
+  sockets that move GSO and GRO batches with ECN and the local address, TCP streams, and
   listeners. `env::serial` (#431) gives serial ports that move bytes at the line rate,
   with 8 data bits, a parity, and stop bits. Framing belongs to the protocol: a USB
   adapter hides the gap between frames, so a seam that split frames would act
-  differently on `os` and `sim`. A socket, listener, or port may move to another
-  thread before its first poll. The first poll binds it to its thread, and a poll on
-  another thread panics.
+  differently on `os` and `sim`. A socket, listener, or port may move to another thread
+  before its first poll. The first poll binds it to its thread, and a poll on another
+  thread panics.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
