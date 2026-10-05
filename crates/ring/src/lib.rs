@@ -3,9 +3,12 @@
 //!
 //! A producer never waits: a full ring gives the value back. A consumer spins for a
 //! set number of checks before it parks, and the producer wakes it.
+//!
+//! [`latest`] is a cell of words that one shard replaces and every shard reads.
 
 #![expect(unsafe_code, reason = "two threads share the slots and the waker cell")]
 
+pub mod latest;
 mod slots;
 mod sync;
 mod wake;
