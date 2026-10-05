@@ -503,10 +503,13 @@ How to read this record:
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
   agent, and every adversarial reviewer.
-- **C2 (working assumption)** One shard per core owns its indexes with no locks. Each
-  shard runs one Tokio `LocalRuntime`. Vendor libraries run on dedicated threads. A
-  connector's shard is chosen by its index (R12-8). The `memory` builder measures the
-  handoff on Linux before this locks.
+- **C2 (2026-10-05)** One shard per core owns its indexes with no locks. Each shard
+  runs one Tokio `LocalRuntime`. Vendor libraries run on dedicated threads. A
+  connector's shard is chosen by its index (R12-8). Network data and vendor-thread
+  frames reach the owning shard as one batch with one wake per batch. On Linux the
+  parked wake adds 4 to 9 us per batch with no millisecond tail (#9, r1). The spin
+  window stays a per-node setting with a default of 0; the sweep in 5.3 sets it. The
+  person locked it on 2026-10-05 ("Ok I approve lcoking C2").
 
 ### 1.6 Time
 
@@ -659,6 +662,24 @@ How to read this record:
   bound. An error over 36500 days reads as unknown, the same as no bound (the
   coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
   lint denies it elsewhere (BQ20).
+- **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its
+  OS reading and its OS bound. Cold nodes then vote with each other's OS clocks, and
+  each waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown
+  bound (an unknown estimate, or an OS clock with no bound) says "unknown" and carries
+  its offset. The asking node pushes a `Measurement::unknown` that it builds itself,
+  so the answer cannot narrow into a known bound. A peer that never answers counts
+  against a majority, and `node` removes no source. Lost: a node with no time does
+  not answer, because then a mesh that starts cold never syncs; an answer of "no
+  time" that takes the source out of the vote, because a node with a bad OS clock then
+  syncs on itself; `node` removes a silent source after a timeout, a patch that puts
+  time policy in layer 4. The person decided on 2026-10-05 ("Yeah that's fine"), #145.
+  So a node that starts while no peer answers stays unsynced, even with a good OS
+  bound. Its samples keep their local monotonic reading, and the node stamps them in
+  mesh time when the first estimate comes, with the error of that estimate at each
+  reading (200 ppm: 0.72 s after 1 h). The buffer holds the samples until then, and a
+  node that never syncs fills it. Lost: drop the samples, a patch that loses data;
+  stamp them with OS time at once, a patch that writes a time the clock refused and
+  cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
@@ -808,7 +829,13 @@ How to read this record:
   its own voter list votes and follows, but never campaigns while that configuration
   is committed. `step` does not check
   that a sender is a voter (a voter can learn late that a peer joined), so the caller
-  authenticates the sender and decides which nodes may send.
+  authenticates the sender and decides which nodes may send. When the term of the
+  last entry is above `hard.term`, `Raft::new` starts at that term with no vote. The
+  node sends nothing before its write, so no peer counted a vote or an answer that a
+  lost `hard` held. The caller writes `hard` and `entries` in any order, with no
+  atomic write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that
+  each caller must keep and that shows only at a restart. The person decided on
+  2026-10-05 ("I approve long term fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -855,14 +882,19 @@ How to read this record:
   only from a voter of the newest configuration in this node's log, and a node whose
   committed configuration lacks the sender answers `removed`. The removed node takes
   that answer only from a voter of its own region, and stops its `raft` group for that
-  region. `raft` sends nothing to a node outside its configuration; until `mesh` sends
-  the answer, such a node campaigns with no effect. Readmit in `raft` (#414) lost: it
-  sent the log to a sender that `raft` cannot check. The person decided on 2026-10-05
-  ("Ok B is fine", #193). A leader outside the committed final set sends the commit
-  and steps down. A node outside an uncommitted
-  configuration still campaigns: the entry may be truncated, and a removed leader that
-  lost its lead before the leave reached a peer is the only node that can win the
-  election that commits it.
+  region. `raft` sends such a node no entries, only answers. A voter with a lease drops
+  its campaign or refuses it with a `PreVoteReply { granted: false }` at the voter's
+  term. Until `mesh` sends the answer, the node campaigns. While a voter has a lease,
+  this has no effect. Once no voter has a lease, as after the leader fails, the voters
+  can elect the node: it commits an entry of its term, which commits the leave, and
+  steps down, and the voters follow it until their election timeout (#483). This gap
+  stays, pinned by a test, until #483; keeping readmit until then lost. The person
+  decided on 2026-10-05 ("(a)"), #482. Readmit in
+  `raft` (#414) lost: it sent the log to a sender that `raft` cannot check. The person
+  decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set
+  sends the commit and steps down. A node outside an uncommitted configuration still
+  campaigns: the entry may be truncated, and a removed leader that lost its lead before
+  the leave reached a peer is the only node that can win the election that commits it.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -2226,24 +2258,22 @@ Shapes that need the person:
 
 Measured before they lock:
 
-2. **C2, thread model.** The working assumption is in 1.5. The `memory` builder
-   measures the handoff on Linux first (#9).
-3. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
+2. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
 
 Parameters and later choices, recorded and not asked:
 
-4. Struct template storage: whether the spec stores templates and instance records for
+3. Struct template storage: whether the spec stores templates and instance records for
    SDK code generation and `export`.
-5. The transmission policy target: links, indexes, or both (B6).
-6. Upgrades across regions: which region holds the desired version and the format
+4. The transmission policy target: links, indexes, or both (B6).
+5. Upgrades across regions: which region holds the desired version and the format
    flag, and how finalization waits for every region (BQ18, C9d).
-7. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
+6. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
    path.
-8. A20: whether a channel may carry a default max age.
-9. A3: partial-segment wildcards.
-10. A13: bounded lists.
-11. D3: license, free tier, monetization.
-12. D5: a plugin system.
+7. A20: whether a channel may carry a default max age.
+8. A3: partial-segment wildcards.
+9. A13: bounded lists.
+10. D3: license, free tier, monetization.
+11. D5: a plugin system.
 
 ### 5.2 Settled under a delegation
 
