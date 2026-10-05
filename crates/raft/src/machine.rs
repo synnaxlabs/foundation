@@ -230,7 +230,9 @@ impl Raft {
     /// joint entry commits, the leader proposes the entry that leaves the joint phase
     /// on its own. Returns the position of the joint entry. A node outside the new
     /// set gets the leave and its commit, then votes and follows but never
-    /// campaigns; a leader outside it steps down when the leave commits.
+    /// campaigns; until the leave commits, it still campaigns, since it may yet have
+    /// to lead the commit. A leader outside the new set steps down when the leave
+    /// commits.
     ///
     /// # Errors
     ///
@@ -763,8 +765,12 @@ impl Raft {
         self.leader.is_some() && self.election_elapsed < self.election_ticks
     }
 
+    // Whether this node may campaign: it is in the configuration in force, or that
+    // configuration is not committed yet. An uncommitted configuration may still be
+    // truncated, and a removed leader whose leave is not committed must be able to
+    // win the election that commits it.
     fn promotable(&self) -> bool {
-        self.voters.contains(self.key)
+        self.voters.contains(self.key) || !self.settled()
     }
 
     fn peer(&self, key: node::Key) -> &Peer {
@@ -1964,6 +1970,12 @@ mod tests {
             ]);
             assert_eq!(raft.voters(), &new);
             assert_eq!(raft.ready().committed, []);
+            // The entry may still be truncated, so the node campaigns until it commits.
+            tick_times(&mut raft, 40);
+            assert_eq!(raft.role(), Role::PreCandidate);
+            raft.step(message(2, 1, Body::Heartbeat { commit: 2 }))
+                .unwrap();
+            assert_eq!(raft.ready().committed.last(), Some(&config(1, 2, new)));
             tick_times(&mut raft, 40);
             assert_eq!(raft.role(), Role::Follower);
         }

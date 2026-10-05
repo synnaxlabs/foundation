@@ -693,7 +693,8 @@ How to read this record:
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
   enters only through `tick`: a node draws its election timeout on the first tick
   after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
-  its own voter list votes and follows, but never campaigns. `step` does not check
+  its own voter list votes and follows, but never campaigns while that configuration
+  is committed. `step` does not check
   that a sender is a voter (a voter can learn late that a peer joined), so the caller
   authenticates the sender and decides which nodes may send.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
@@ -728,7 +729,10 @@ How to read this record:
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.
   The leader sends a node the change removed the leave and its commit, then drops
-  it. A leader outside the committed final set sends the commit and steps down.
+  it. A leader outside the committed final set sends the commit and steps down. A
+  node outside an uncommitted configuration still campaigns: the entry may be
+  truncated, and a removed leader that lost its lead before the leave reached a peer
+  is the only node that can win the election that commits it.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
