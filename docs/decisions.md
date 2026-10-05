@@ -276,6 +276,16 @@ How to read this record:
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open. The restart record needs one free block: an open of a full ring first moves
   records at the tail to a segment.
+  Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
+  u64][tail chain: u32][seq: u64][crc32c: u32]`, zero padding to 4096 bytes, magic
+  `FNDNRING`, version 1. Two blocks at the start of the ring hold the last two
+  checkpoints: checkpoint `n` goes to block `n mod 2`. Open takes the valid block
+  with the higher `seq`; one torn block leaves the other. The header with a new tail
+  is durable before the writer releases the space, so the header's tail is at or
+  before the writer's tail and the records between are whole. The layout comes from
+  the header at open; configuration sets it at create, and a changed `body_max`
+  takes effect at the next create. A new ring has both blocks at `seq` 0 with the
+  tail at offset 0 and a random chain value.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
