@@ -115,6 +115,9 @@ dependencies = [
 [[package]]
 name = "raft"
 version = "0.0.0"
+dependencies = [
+ "types",
+]
 
 [[package]]
 name = "replica"

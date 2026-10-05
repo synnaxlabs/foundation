@@ -337,6 +337,12 @@ How to read this record:
   prolly tree keyed by full name, about 4 KiB chunks, BLAKE3. Each change record lists
   its new chunks. A region's voters sit on one LAN. A node fetches only the regions and
   ranges it uses.
+- **RAFT SURFACE (#5)** `raft::Raft` takes `tick(random)`, `step(message)`, and
+  `campaign()`, and gives `hard()` (term and vote) and `messages()`. The caller writes
+  `hard()` to disk before it sends `messages()`, so a candidate counts its own vote at
+  once. Randomness enters only through `tick`: a node draws its election timeout on
+  the first tick after a reset. PreVote and CheckQuorum have no off switch. Until log
+  replication lands, a new leader announces itself with a heartbeat.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
