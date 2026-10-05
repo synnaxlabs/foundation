@@ -73,14 +73,33 @@ fn classes(budget: usize) -> usize {
 }
 
 /// The smallest class with a payload of at least `len` bytes.
-fn class_of(len: usize) -> Option<usize> {
-    let payload = len.max(ALIGN).checked_next_power_of_two()?;
-    Some((payload.trailing_zeros() - ALIGN.trailing_zeros()) as usize)
+const fn class_of(len: usize) -> Option<usize> {
+    let least = if len < ALIGN { ALIGN } else { len };
+    match least.checked_next_power_of_two() {
+        Some(payload) => {
+            Some((payload.trailing_zeros() - ALIGN.trailing_zeros()) as usize)
+        }
+        None => None,
+    }
 }
 
 /// Bytes that one block of class `index` takes.
-const fn footprint(index: usize) -> usize {
+const fn class_footprint(index: usize) -> usize {
     HEADER + (ALIGN << index)
+}
+
+/// Bytes that a block with a payload of `len` bytes takes from its pool: the header
+/// plus the payload of the smallest size class that holds `len`.
+///
+/// # Panics
+///
+/// If no size class holds `len` (the next power of two overflows a `usize`).
+#[must_use]
+pub const fn footprint(len: usize) -> usize {
+    match class_of(len) {
+        Some(index) => class_footprint(index),
+        None => panic!("no size class holds that many bytes"),
+    }
 }
 
 /// The start of a pool's memory. Any thread that drops a block reaches it.
@@ -219,7 +238,7 @@ impl Pool {
             self.reclaim();
         }
         let header = if class.free.get() == NONE {
-            let size = footprint(index);
+            let size = class_footprint(index);
             let available = self.budget - self.committed.get();
             if size > available {
                 return Err(Error::Exhausted {
@@ -725,6 +744,29 @@ mod tests {
         }
     }
 
+    mod footprint {
+        use super::*;
+
+        const FRAME: usize = footprint(1000);
+
+        #[test]
+        fn is_the_header_and_the_class_payload() {
+            assert_eq!(FRAME, 64 + 1024);
+            assert_eq!(footprint(0), 128);
+            assert_eq!(footprint(1), 128);
+            assert_eq!(footprint(64), 128);
+            assert_eq!(footprint(65), 192);
+            assert_eq!(footprint(128), 192);
+            assert_eq!(footprint(129), 320);
+        }
+
+        #[test]
+        #[should_panic(expected = "no size class holds that many bytes")]
+        fn panics_above_the_largest_power_of_two() {
+            assert_eq!(footprint(usize::MAX), 0);
+        }
+    }
+
     mod new {
         use super::*;
 
@@ -787,7 +829,9 @@ mod tests {
                 let pool = create_pool(1 << 16);
                 let mut blocks = Vec::new();
                 for (len, fill) in lens.iter().copied().zip(1_u8..) {
+                    let before = pool.committed();
                     let mut block = pool.alloc(len).expect("the budget has room");
+                    prop_assert_eq!(pool.committed() - before, footprint(len));
                     prop_assert_eq!(block.len(), len);
                     prop_assert_eq!(block.as_ptr().addr() % ALIGN, 0);
                     block.fill(fill);
