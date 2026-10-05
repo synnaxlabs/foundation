@@ -25,6 +25,8 @@ pub type Request<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
 /// use env::files::{Error, Mode};
 ///
 /// async fn ring(files: &env::files::Files) -> Result<env::files::File, Error> {
+///     files.create_dir(Path::new("ring")).await?;
+///     files.sync_dir(Path::new("")).await?;
 ///     let mode = Mode::Create { len: 1 << 26 };
 ///     let file = files.open(Path::new("ring/0"), mode).await?;
 ///     files.sync_dir(Path::new("ring")).await?;
@@ -47,7 +49,8 @@ impl Files {
     }
 
     /// Opens the file at `path`. A file that [`Mode::Create`] makes is not durable
-    /// until [`Files::sync_dir`] on its directory ends.
+    /// until [`Files::sync_dir`] on its directory ends. After that, a crash leaves it
+    /// whole, with `len` zero bytes.
     ///
     /// # Errors
     ///
@@ -88,7 +91,8 @@ impl Files {
         })
     }
 
-    /// The names of the entries in `dir`, sorted.
+    /// The names of the files and directories directly in `dir`, sorted. Each is a
+    /// bare name, not joined with `dir`. It does not list inside subdirectories.
     ///
     /// # Errors
     ///
@@ -111,6 +115,32 @@ impl Files {
         let mut names = self.0.list(dir).await?;
         names.sort_unstable();
         Ok(names)
+    }
+
+    /// Makes the directory `dir`. A directory that is there counts as made. It is not
+    /// durable until [`Files::sync_dir`] on its parent ends.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotFound`] when the parent of `dir` is not there.
+    /// - [`Error::Full`] when the disk has no room.
+    /// - [`Error::Io`] for other failures.
+    ///
+    /// # Panics
+    ///
+    /// When `dir` is absolute or has a `..` segment.
+    ///
+    /// ```
+    /// use std::path::Path;
+    ///
+    /// async fn make(files: &env::files::Files) -> Result<(), env::files::Error> {
+    ///     files.create_dir(Path::new("segments")).await?;
+    ///     files.sync_dir(Path::new("")).await
+    /// }
+    /// ```
+    pub async fn create_dir(&self, dir: &Path) -> Result<(), Error> {
+        check(dir);
+        self.0.create_dir(dir).await
     }
 
     /// Removes the file at `path`. A file that is not there counts as removed. The
@@ -140,8 +170,8 @@ impl Files {
         }
     }
 
-    /// Makes the files created and removed in `dir` durable. An empty path is the
-    /// data directory.
+    /// Makes the files and directories created and removed in `dir` durable. An empty
+    /// path is the data directory.
     ///
     /// # Errors
     ///
@@ -198,8 +228,8 @@ pub enum Mode {
     /// Reads and writes a file that is there.
     Write,
     /// Reads and writes a file. When it is not there, makes it with `len` bytes,
-    /// allocated and zeroed. A file that is there keeps its bytes and must have `len`
-    /// bytes.
+    /// allocated and zeroed, and makes the allocation durable before the open ends. A
+    /// file that is there keeps its bytes and must have `len` bytes.
     Create {
         /// The length of the file.
         len: u64,
@@ -210,6 +240,10 @@ pub enum Mode {
 /// it. A failed or dropped [`File::sync`] poisons the file: every later call fails
 /// with [`Error::Poisoned`], because a second sync can report success for lost data.
 /// Reopen the file and recover.
+///
+/// Calls may overlap in time. A [`File::sync`] covers the writes that ended before it
+/// started. Where the ranges of calls in flight at the same time overlap, the bytes
+/// are unknown.
 ///
 /// Dropping it closes the file without a wait, after the calls of dropped futures
 /// end.
@@ -248,9 +282,11 @@ impl File {
         self.descriptor.len()
     }
 
-    /// Writes `parts` back to back at `offset`, as one vectored write. The bytes are
-    /// not durable until a later [`File::sync`] ends. A crash before then may keep
-    /// all of them, none, or a part cut at a 512-byte sector boundary.
+    /// Writes `parts` back to back at `offset`, as one vectored write. A read after
+    /// the write ends sees the bytes. They are not durable until a later
+    /// [`File::sync`] ends. A crash before then keeps any subset of the 512-byte
+    /// sectors of the write, independently of other writes not yet synced and of
+    /// their order.
     ///
     /// The future may be dropped before it ends. The driver keeps a clone of each
     /// part until the write ends, so the drop is sound, but the bytes may then be
@@ -496,6 +532,8 @@ pub enum Operation {
     Open,
     /// [`Files::list`].
     List,
+    /// [`Files::create_dir`].
+    CreateDir,
     /// [`Files::remove`].
     Remove,
     /// [`Files::sync_dir`].
@@ -515,6 +553,7 @@ impl fmt::Display for Operation {
         f.write_str(match self {
             Self::Open => "open",
             Self::List => "list",
+            Self::CreateDir => "create_dir",
             Self::Remove => "remove",
             Self::SyncDir => "sync_dir",
             Self::Free => "free",
@@ -538,20 +577,25 @@ impl fmt::Display for Operation {
 /// ```
 pub trait Driver {
     /// Opens the file at `path`. [`Mode::Create`] makes a missing file with `len`
-    /// zeroed bytes, and opens a file that is there as it is.
+    /// zeroed bytes, and opens a file that is there as it is. It makes the allocation
+    /// durable before it ends (`os`: `fallocate`, then `fsync` the file), so a
+    /// `sync_dir` alone makes the file whole.
     fn open<'a>(
         &'a self,
         path: &'a Path,
         mode: Mode,
     ) -> Request<'a, Box<dyn Descriptor>>;
 
-    /// The names of the entries in `dir`, in any order.
+    /// The bare names of the files and directories directly in `dir`, in any order.
     fn list<'a>(&'a self, dir: &'a Path) -> Request<'a, Vec<PathBuf>>;
+
+    /// Makes the directory `dir`, or gives `Ok` when a directory is there.
+    fn create_dir<'a>(&'a self, dir: &'a Path) -> Request<'a, ()>;
 
     /// Removes the file at `path`, or gives [`Error::NotFound`].
     fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()>;
 
-    /// Makes the creates and removes in `dir` durable.
+    /// Makes the creates and removes in `dir`, of files and directories, durable.
     fn sync_dir<'a>(&'a self, dir: &'a Path) -> Request<'a, ()>;
 
     /// The bytes free on the disk of the data directory.
@@ -564,6 +608,9 @@ pub trait Driver {
 /// A [`Request`] may be dropped before it ends. The descriptor then keeps the blocks
 /// of the call (a clone of each [`Block`], or the [`Unique`]) until the call ends.
 /// Dropping the descriptor closes the file without a wait, after its calls end.
+///
+/// Its calls follow the overlap and crash rules of [`File`] and [`File::write_at`];
+/// `sim` models exactly those rules.
 ///
 /// ```
 /// fn len(descriptor: &dyn env::files::Descriptor) -> u64 {
@@ -646,6 +693,11 @@ mod tests {
         fn list<'a>(&'a self, dir: &'a Path) -> Request<'a, Vec<PathBuf>> {
             self.record(format!("list {}", dir.display()));
             Box::pin(async { Ok(self.names.clone()) })
+        }
+
+        fn create_dir<'a>(&'a self, dir: &'a Path) -> Request<'a, ()> {
+            self.record(format!("create_dir {}", dir.display()));
+            Box::pin(async { Ok(()) })
         }
 
         fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
@@ -774,6 +826,13 @@ mod tests {
         }
 
         #[test]
+        #[should_panic(expected = "path segments/.. has a `..` segment")]
+        fn create_dir_panics_on_a_parent_segment() {
+            let (files, _) = Fixed::files(0);
+            drop(ready(files.create_dir(Path::new("segments/.."))));
+        }
+
+        #[test]
         #[should_panic(expected = "path /segments is absolute")]
         fn sync_dir_panics_on_an_absolute_path() {
             let (files, _) = Fixed::files(0);
@@ -785,6 +844,7 @@ mod tests {
             let (files, calls) = Fixed::files(8);
             open(&files, Mode::Write);
             ready(files.list(Path::new(""))).expect("the driver lists");
+            ready(files.create_dir(Path::new("segments"))).expect("the driver makes");
             ready(files.remove(Path::new("./segments/7"))).expect("the driver removes");
             ready(files.sync_dir(Path::new("segments"))).expect("the driver syncs");
             assert_eq!(
@@ -792,6 +852,7 @@ mod tests {
                 [
                     "open ring/0 Write",
                     "list ",
+                    "create_dir segments",
                     "remove ./segments/7",
                     "sync_dir segments"
                 ]
@@ -1047,6 +1108,11 @@ mod tests {
                 e.to_string(),
                 "file ring/0 has 512 bytes, but 4096 bytes were expected"
             );
+        }
+
+        #[test]
+        fn names_create_dir() {
+            assert_eq!(Operation::CreateDir.to_string(), "create_dir");
         }
 
         #[test]
