@@ -858,9 +858,9 @@ How to read this record:
   heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
   log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
   be past the log of a node that is behind. An `Append` with an entry whose term is
-  above the message's term is `Error::TermBehindLog`: no leader sends one, and a
-  follower that wrote it could not restart. The conformance oracle changed to match; the
-  person decided on 2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  above the message's term is `Error::TermBehindLog`: no leader sends one, so the
+  sender is faulty. The conformance oracle changed to match; the person decided on
+  2026-10-05 ("a is fine", #232). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last

@@ -1,6 +1,6 @@
 //! A network of nodes that cuts nodes off and loses, delays, reorders, and repeats
-//! messages, with nodes that restart from a modeled disk. It checks the safety
-//! properties of Raft after every input.
+//! messages, with nodes that restart from a modeled disk, with or without their last
+//! write. It checks the safety properties of Raft after every input.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,7 +34,7 @@ pub(crate) enum Action {
     ChangeVoters { node: usize, voters: Vec<bool> },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kept {
     Hard,
     Entries,
@@ -306,7 +306,7 @@ impl Network {
                 assert_eq!(at.term, term);
                 let disk = &self.disks[node];
                 assert_eq!(at.index, u64::try_from(disk.entries.len()).unwrap() + 1);
-                let crashed = self.crash[node].is_some();
+                let lost = self.crash[node] == Some(Kept::Hard);
                 self.collect();
                 let joint = Voters {
                     incoming: voters,
@@ -314,9 +314,8 @@ impl Network {
                 };
                 let index = usize::try_from(at.index - 1).unwrap();
                 let written = self.disks[node].entries.get(index).map(|e| &e.data);
-                if !crashed {
-                    assert_eq!(written, Some(&Data::Voters(joint)), "the joint entry");
-                }
+                let joint = Data::Voters(joint);
+                assert_eq!(written, (!lost).then_some(&joint), "the joint entry");
             }
             (role, Err(Error::NotLeader { leader })) if role != Role::Leader => {
                 assert_eq!(leader, self.nodes[node].leader());
@@ -367,19 +366,19 @@ impl Network {
         for at in 0..self.nodes.len() {
             let ready = self.nodes[at].ready();
             let pending = ready.hard.is_some() || !ready.entries.is_empty();
-            if let Some(kept) = self.crash[at].take_if(|_| pending) {
-                match (kept, ready.hard) {
-                    (Kept::Hard, Some(hard)) => self.disks[at].hard = hard,
-                    (Kept::Hard, None) => {}
-                    (Kept::Entries, _) => self.write(at, ready.entries),
-                }
+            let kept = self.crash[at].take_if(|_| pending);
+            if let Some(hard) = ready.hard
+                && kept != Some(Kept::Entries)
+            {
+                self.disks[at].hard = hard;
+            }
+            if kept != Some(Kept::Hard) {
+                self.write(at, ready.entries);
+            }
+            if kept.is_some() {
                 self.nodes[at] = self.build(at);
                 continue;
             }
-            if let Some(hard) = ready.hard {
-                self.disks[at].hard = hard;
-            }
-            self.write(at, ready.entries);
             for message in ready.messages {
                 self.note(at, &message);
                 self.flight.push(message);
