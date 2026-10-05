@@ -154,6 +154,9 @@ pub enum Form {
     Namespace,
     /// An argument expanded with `...`, such as `f(xs...)`.
     Expansion,
+    /// An object key that is a number HCL rounds: one with a fraction or an exponent,
+    /// or an integer of more than 154 digits, such as `{ 1.5 = 1 }`.
+    NumberKey,
 }
 
 impl fmt::Display for Form {
@@ -193,6 +196,10 @@ impl fmt::Display for Form {
             Self::Expansion => {
                 "argument expansion does not exist in Foundation files. Write each \
                  argument"
+            }
+            Self::NumberKey => {
+                "number keys with a fraction, an exponent, or more than 154 digits do not \
+                 exist in Foundation files. Write the key as a quoted string"
             }
         })
     }
@@ -361,6 +368,11 @@ mod tests {
                 Form::Expansion,
                 "argument expansion does not exist in Foundation files. Write each \
                  argument",
+            ),
+            (
+                Form::NumberKey,
+                "number keys with a fraction, an exponent, or more than 154 digits do not \
+                 exist in Foundation files. Write the key as a quoted string",
             ),
         ];
         for (form, message) in cases {

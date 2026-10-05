@@ -2,6 +2,7 @@
 //! and through a park and a wake.
 
 use std::hint::spin_loop;
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -23,8 +24,7 @@ fn main() {
 
 fn create_ring() -> (Producer<u64>, Consumer<u64>) {
     ring::new(Config {
-        capacity: CAPACITY,
-        spins: 0,
+        capacity: NonZeroUsize::new(CAPACITY).expect("not zero"),
     })
 }
 
@@ -63,6 +63,10 @@ fn one_thread(bencher: Bencher<'_, '_>) {
 /// One thread pushes one value at a time and the other polls `try_pop`. The time
 /// includes the start and the join of the pushing thread.
 #[divan::bench(sample_count = 20)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a benchmark; `ring` has no `env`"
+)]
 fn two_threads(bencher: Bencher<'_, '_>) {
     const VALUES: u64 = 1_000_000;
     bencher
@@ -85,6 +89,10 @@ fn two_threads(bencher: Bencher<'_, '_>) {
 /// One thread stages up to `BATCH` values and publishes them, and the other polls
 /// `try_pop`. The time includes the start and the join of the pushing thread.
 #[divan::bench(sample_count = 20)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a benchmark; `ring` has no `env`"
+)]
 fn two_threads_batch(bencher: Bencher<'_, '_>) {
     const VALUES: u64 = 1_000_000;
     const BATCH: u64 = 64;
@@ -119,6 +127,10 @@ fn two_threads_batch(bencher: Bencher<'_, '_>) {
 /// A value goes to a second thread and comes back. Each item is one hop. The time
 /// includes the start and the join of the echo thread.
 #[divan::bench(sample_count = 20)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a benchmark; `ring` has no `env`"
+)]
 fn round_trip(bencher: Bencher<'_, '_>) {
     const TRIPS: u64 = 100_000;
     bencher

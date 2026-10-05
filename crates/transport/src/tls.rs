@@ -292,10 +292,11 @@ impl ClientCertVerifier for AnyKey {
     }
 }
 
-/// rustls reads wall time on each handshake, and its default reads the OS clock.
-/// Nothing here uses the time: the verifiers ignore dates and resumption is off.
+/// The wall time this crate gives a library that asks for one: `UNIX_EPOCH`. The
+/// defaults read the OS clock. Nothing here uses the time: the verifiers ignore
+/// dates, and resumption, Retry, and `NEW_TOKEN` are off.
 #[derive(Debug)]
-struct Epoch;
+pub(crate) struct Epoch;
 
 impl TimeProvider for Epoch {
     fn current_time(&self) -> Option<UnixTime> {
