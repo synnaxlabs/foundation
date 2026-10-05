@@ -26,7 +26,7 @@ impl Node {
         env::clock::Clock::new(self.0.clone())
     }
 
-    /// The node's wall clock.
+    /// The node's wall clock. Each reading has the node's current wall error.
     #[must_use]
     pub fn wall(&self) -> env::wall::Wall {
         env::wall::Wall::new(self.0.clone())
@@ -67,6 +67,17 @@ impl Node {
         );
     }
 
+    /// Sets the error bound of the node's next wall readings, as when the time daemon
+    /// updates it. The wall does not move.
+    ///
+    /// # Panics
+    ///
+    /// When `error` is negative.
+    pub fn set_wall_error(&self, error: Option<Span>) {
+        check(error);
+        lock(&self.0.shared).set_wall_error(self.0.node, error);
+    }
+
     /// Runs nothing on the node for `span` of true time while its clocks move, as in
     /// a VM pause; a negative span is zero. Each wake in the pause, from a timer or
     /// from another node, polls its task when the pause ends. A pause that overlaps
@@ -98,15 +109,27 @@ pub struct Config {
     pub monotonic: Monotonic,
     /// The wall time when the node is added.
     pub wall: Stamp,
+    /// The error bound that the OS gives with each wall reading, or `None` when it
+    /// gives none. Never negative.
+    pub wall_error: Option<Span>,
 }
 
 impl Default for Config {
-    /// Four cores, one hour after boot, at 2026-01-01T00:00:00Z.
+    /// Four cores, one hour after boot, at 2026-01-01T00:00:00Z, with a wall error
+    /// of 10 ms.
     fn default() -> Self {
         Self {
             cores: NonZeroUsize::new(4).expect("four is not zero"),
             monotonic: Monotonic::default() + Span::HOUR,
             wall: Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos()),
+            wall_error: Some(Span::from_nanos(10 * Span::MILLISECOND.nanos())),
         }
+    }
+}
+
+/// Panics when a wall error is negative.
+pub(crate) fn check(error: Option<Span>) {
+    if let Some(error) = error {
+        assert!(error >= Span::ZERO, "the wall error {error} is negative");
     }
 }

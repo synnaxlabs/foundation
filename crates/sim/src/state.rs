@@ -52,6 +52,7 @@ struct Node {
     base: Monotonic,
     monotonic: Monotonic,
     wall: Stamp,
+    wall_error: Option<Span>,
     /// The true time at which the node runs again after its pause, or `None` when the
     /// pause never ends.
     resumes: Option<Monotonic>,
@@ -133,6 +134,7 @@ impl State {
             base: self.now,
             monotonic: config.monotonic,
             wall: config.wall,
+            wall_error: config.wall_error,
             resumes: Some(self.now),
             cores: config.cores,
             entropy,
@@ -167,6 +169,18 @@ impl State {
         let nanos = i64::try_from(nanos)
             .expect("invariant: true time ends before a wall clock");
         Stamp::from_nanos(nanos)
+    }
+
+    pub(crate) fn reading(&self, node: usize) -> env::wall::Reading {
+        let error = self.nodes[node].wall_error;
+        env::wall::Reading {
+            time: self.wall(node),
+            error,
+        }
+    }
+
+    pub(crate) fn set_wall_error(&mut self, node: usize, error: Option<Span>) {
+        self.nodes[node].wall_error = error;
     }
 
     pub(crate) fn cores(&self, node: usize) -> NonZeroUsize {

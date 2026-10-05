@@ -211,8 +211,11 @@ fn each_node_reads_its_own_wall_clock() {
         ..node::Config::default()
     });
     sim.run_for(Span::SECOND).unwrap();
-    assert_eq!(a.wall().now(), node::Config::default().wall + Span::SECOND);
-    assert_eq!(b.wall().now(), Stamp::from_nanos(-7) + Span::SECOND);
+    assert_eq!(
+        a.wall().now().time,
+        node::Config::default().wall + Span::SECOND
+    );
+    assert_eq!(b.wall().now().time, Stamp::from_nanos(-7) + Span::SECOND);
 }
 
 fn bytes(seed: u64) -> ([u8; 16], [u8; 16]) {
@@ -720,7 +723,7 @@ fn the_clocks_read_up_to_the_end_of_true_time() {
     let mut sim = sim(0);
     let node = ending(&mut sim);
     sim.run_for(Span::SECOND).unwrap();
-    assert_eq!(node.wall().now(), Stamp::from_nanos(i64::MAX));
+    assert_eq!(node.wall().now().time, Stamp::from_nanos(i64::MAX));
     let start = node::Config::default().monotonic;
     assert_eq!(node.clock().now(), start + Span::SECOND);
 }
@@ -746,7 +749,7 @@ fn a_node_added_later_reads_its_config_now() {
     let config = node::Config::default();
     let node = sim.node(config);
     assert_eq!(node.clock().now(), config.monotonic);
-    assert_eq!(node.wall().now(), config.wall);
+    assert_eq!(node.wall().now().time, config.wall);
     sim.run_for(Span::SECOND).unwrap();
     assert_eq!(node.clock().now(), config.monotonic + Span::SECOND);
 }
@@ -808,14 +811,14 @@ fn a_wall_step_moves_only_the_wall_of_its_node() {
     let b = sim.node(node::Config::default());
     let config = node::Config::default();
     a.step_wall(Span::HOUR);
-    assert_eq!(a.wall().now(), config.wall + Span::HOUR);
+    assert_eq!(a.wall().now().time, config.wall + Span::HOUR);
     assert_eq!(a.clock().now(), config.monotonic);
-    assert_eq!(b.wall().now(), config.wall);
+    assert_eq!(b.wall().now().time, config.wall);
     a.step_wall(Span::from_nanos(-Span::DAY.nanos()));
     sim.run_for(Span::SECOND).unwrap();
     let wall = config.wall + Span::HOUR - Span::DAY + Span::SECOND;
-    assert_eq!(a.wall().now(), wall);
-    assert_eq!(b.wall().now(), config.wall + Span::SECOND);
+    assert_eq!(a.wall().now().time, wall);
+    assert_eq!(b.wall().now().time, config.wall + Span::SECOND);
 }
 
 #[test]
@@ -824,6 +827,97 @@ fn a_wall_step_out_of_range_panics() {
     let mut sim = sim(0);
     let node = ending(&mut sim);
     node.step_wall(Span::from_nanos(2 * Span::SECOND.nanos()));
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn each_node_reads_its_own_wall_error() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config {
+        wall_error: None,
+        ..node::Config::default()
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    let config = node::Config::default();
+    let reading = env::wall::Reading {
+        time: config.wall + Span::SECOND,
+        error: Some(millis(10)),
+    };
+    assert_eq!(a.wall().now(), reading);
+    assert_eq!(
+        b.wall().now(),
+        env::wall::Reading {
+            error: None,
+            ..reading
+        }
+    );
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_error_change_applies_to_the_next_reading_of_its_node() {
+    let mut sim = sim(0);
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config::default());
+    let wall = a.wall();
+    a.set_wall_error(Some(Span::SECOND));
+    let config = node::Config::default();
+    let reading = env::wall::Reading {
+        time: config.wall,
+        error: Some(Span::SECOND),
+    };
+    assert_eq!(wall.now(), reading);
+    assert_eq!(b.wall().now().error, config.wall_error);
+    a.set_wall_error(None);
+    assert_eq!(
+        wall.now(),
+        env::wall::Reading {
+            error: None,
+            ..reading
+        }
+    );
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test reads the simulated wall"
+)]
+fn a_wall_step_keeps_the_error() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    node.set_wall_error(Some(Span::ZERO));
+    node.step_wall(Span::HOUR);
+    let reading = env::wall::Reading {
+        time: node::Config::default().wall + Span::HOUR,
+        error: Some(Span::ZERO),
+    };
+    assert_eq!(node.wall().now(), reading);
+}
+
+#[test]
+#[should_panic(expected = "the wall error -1ns is negative")]
+fn a_negative_wall_error_in_the_config_panics() {
+    let mut sim = sim(0);
+    let _node = sim.node(node::Config {
+        wall_error: Some(Span::from_nanos(-1)),
+        ..node::Config::default()
+    });
+}
+
+#[test]
+#[should_panic(expected = "the wall error -1ns is negative")]
+fn a_negative_wall_error_change_panics() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    node.set_wall_error(Some(Span::from_nanos(-1)));
 }
 
 #[test]
@@ -939,7 +1033,7 @@ fn a_wall_step_in_a_run_ends_it_at_the_new_end_of_true_time() {
     });
     sim.run_for(millis(900)).unwrap();
     handle.unwrap().join().unwrap();
-    assert_eq!(node.wall().now(), Stamp::from_nanos(i64::MAX));
+    assert_eq!(node.wall().now().time, Stamp::from_nanos(i64::MAX));
     let start = node::Config::default().monotonic;
     assert_eq!(node.clock().now(), start + millis(500));
 }
