@@ -343,9 +343,14 @@ How to read this record:
   M3 Max, about 1.9% of a core at 100M samples/s. FastLanes order can come later as a
   new tag. Raw and RLE have bit width 0. Integers, `Stamp`, and `Span` use all four
   tags; other scalars use raw. Timestamp stride (BQ4) comes later as a new tag. The
-  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len`
-  (raw plus one raw header per vector) sizes the output, and the encoder makes one
-  pass. `codec/src/vector.rs` is the full spec.
+  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len` of
+  the raw length (raw plus one raw header per vector) sizes the output, and the
+  encoder makes one pass. `codec/src/vector.rs` is the full spec. `codec` is the one
+  place that checks a series against its count (#359): `encode` refuses raw values
+  that do not hold `count` samples, and `validate` refuses encoded bytes that do not
+  parse as `count` samples. The bytes do not carry the count, so a wrong count passes
+  when the vectors also parse at it: a vector with bit width 0 holds any count up to
+  1024.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
