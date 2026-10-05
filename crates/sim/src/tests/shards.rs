@@ -102,8 +102,16 @@ fn ran_before_panic(seed: u64) -> bool {
             main.store(true, Ordering::Relaxed);
             pending::<()>().await;
         });
-    assert!(matches!(sim.run(), Err(Error::Panicked { .. })));
+    assert_eq!(sim.run(), Err(panicked(seed)));
     ran.load(Ordering::Relaxed)
+}
+
+fn panicked(seed: u64) -> Error {
+    Error::Panicked {
+        thread: "shard-0".into(),
+        message: "injected".into(),
+        seed,
+    }
 }
 
 #[test]
@@ -113,17 +121,44 @@ fn the_panic_runs_before_or_after_the_main_future_by_the_seed() {
 }
 
 #[test]
-fn a_shard_whose_main_future_completes_first_drops_the_panic() {
-    let outcomes: BTreeSet<bool> = (0..32)
+fn a_panic_fault_fires_when_the_main_future_completes_first() {
+    let completed: BTreeSet<bool> = (0..32)
         .map(|seed| {
             let mut sim = sim(seed);
             let node = sim.node(node::Config::default());
             node.fail_shard(0, Fault::Panic);
-            let _handle = node.shards().start(pinned("shard-0", 0), |_| async {});
-            sim.run().is_ok()
+            let ran = Arc::new(AtomicBool::new(false));
+            let main = Arc::clone(&ran);
+            let handle =
+                node.shards()
+                    .start(pinned("shard-0", 0), move |_| async move {
+                        main.store(true, Ordering::Relaxed);
+                    });
+            assert_eq!(sim.run(), Err(panicked(seed)));
+            assert_eq!(
+                handle.unwrap().join(),
+                Err(thread::Error::Panicked {
+                    name: "shard-0".into()
+                })
+            );
+            ran.load(Ordering::Relaxed)
         })
         .collect();
-    assert_eq!(outcomes, BTreeSet::from([false, true]));
+    assert_eq!(completed, BTreeSet::from([false, true]));
+}
+
+#[test]
+fn a_panic_fault_fails_only_the_next_start_on_its_core() {
+    let mut sim = sim(5);
+    let node = sim.node(node::Config::default());
+    node.fail_shard(0, Fault::Panic);
+    let _failed = node
+        .shards()
+        .start(pinned("shard-0", 0), |_| pending::<()>());
+    assert_eq!(sim.run(), Err(panicked(5)));
+    let again = node.shards().start(pinned("shard-0", 0), |_| async {});
+    sim.run().unwrap();
+    again.unwrap().join().unwrap();
 }
 
 #[test]

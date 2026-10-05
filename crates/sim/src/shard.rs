@@ -9,9 +9,9 @@ pub enum Fault {
     Start,
     /// `start` gives `thread::Error::Pin` with the core.
     Pin,
-    /// A task of the shard panics with message `injected`. The scheduler picks
-    /// whether it runs before or after the first poll of the main future. A main
-    /// future that completes first drops it, as a shard drops each of its tasks.
+    /// The shard panics with message `injected`: in a task that the scheduler runs
+    /// before or after the first poll of the main future, or as the main future
+    /// completes, when that comes first.
     Panic,
 }
 

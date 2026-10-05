@@ -117,6 +117,7 @@ impl env::shards::Driver for Node {
                 Box::pin(async move {
                     yield_now().await;
                     main.await;
+                    panic!("injected");
                 })
             }),
         };
