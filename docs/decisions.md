@@ -432,7 +432,13 @@ How to read this record:
   is, and a present series needs its index. A lookup by entry or group is a binary
   search, and a pass in entry order reads each descriptor once. The header holds no
   entry or group count: an entry or group past the key set is absent. A frame is at
-  most `u32::MAX` bytes.
+  most `u32::MAX` bytes. The series bytes are stored and sent as they are (X35), so
+  their order and padding are part of the disk and wire format version (C9d). A change
+  to either needs a new version. The padding is at most 7 bytes for each present
+  series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
+  (measured on #317). `frame::series` reads a body from `(entry, end)` pairs and panics
+  on ends that do not fit. Copy mode runs `frame::check` once where remote records
+  enter (X43). Decided by the coordinator (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
