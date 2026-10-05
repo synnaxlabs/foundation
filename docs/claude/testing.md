@@ -71,7 +71,8 @@ again once to prove that the failure replays (r16 59).
 - **No tautological tests.** Never repeat the implementation's formula or assert that
   a constant equals itself. Assert properties: order, round trip, bounds (r16 56).
 - **No `#[ignore]`.** A known bug is a test that asserts today's wrong result, with a
-  comment and an issue link (r16 53).
+  comment and an issue link (r16 53). One exception: an `acceptance` scenario waiting on
+  a surface is `#[ignore = "waits on #<n>"]`.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
   so a signature change edits one helper (r16 50).
 - **Snapshot tests for text output** (`plan`, diagnostics, formatted HCL, error
