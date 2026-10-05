@@ -828,10 +828,15 @@ How to read this record:
   releases it, so the node learns it is out and never campaigns. A removed node that
   answered nothing over a whole quorum check period is released at that check instead.
   A follower releases the removed nodes when the leave commits. A removed node that
-  campaigns at the leader's term did not learn the commit: the leader takes it back
-  as a peer and probes it from the end of its log, so it gets the leave and is
-  released again. A leader outside the
-  committed final set sends the commit and steps down. A node outside an uncommitted
+  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
+  only from a voter of the newest configuration in this node's log, and a node whose
+  committed configuration lacks the sender answers `removed`. The removed node takes
+  that answer only from a voter of its own region, and stops its `raft` group for that
+  region. `raft` sends nothing to a node outside its configuration; until `mesh` sends
+  the answer, such a node campaigns with no effect. Readmit in `raft` (#414) lost: it
+  sent the log to a sender that `raft` cannot check. The person decided on 2026-10-05
+  ("Ok B is fine", #193). A leader outside the committed final set sends the commit
+  and steps down. A node outside an uncommitted
   configuration still campaigns: the entry may be truncated, and a removed leader that
   lost its lead before the leave reached a peer is the only node that can win the
   election that commits it.
