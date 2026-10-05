@@ -12,26 +12,11 @@ mod gate;
 
 use std::fmt;
 
+use types::authority::Authority;
 use types::name::Name;
 use types::time::Span;
 
 pub use gate::{Gate, Key};
-
-/// How strongly a writer claims control. A higher authority takes control from a lower
-/// one; an equal one waits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Authority(pub u8);
-
-impl Authority {
-    /// The highest authority. Nothing can take control from it.
-    pub const ABSOLUTE: Self = Self(u8::MAX);
-}
-
-impl fmt::Display for Authority {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
 
 /// A writer as the gate sees it. The holder's value is what the home records and
 /// publishes.

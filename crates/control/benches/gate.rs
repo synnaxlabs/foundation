@@ -1,7 +1,8 @@
 //! The per-frame cost of the gate: one write from the holder.
 
-use control::{Authority, Gate, Lease, Writer};
+use control::{Gate, Lease, Writer};
 use divan::Bencher;
+use types::authority::Authority;
 use types::time::{Monotonic, Span};
 
 fn main() {

@@ -36,6 +36,11 @@ pub mod datagram;
 mod error;
 mod session;
 pub mod stream;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the TCP and QUIC carriers are the first users")
+)]
+mod tls;
 
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
