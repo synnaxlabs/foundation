@@ -378,8 +378,9 @@ How to read this record:
   unknown path or presence byte, or bytes after the last entry is a wrong shape.
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
-  open. The restart record needs one free block: an open of a full ring first moves
-  records at the tail to a segment.
+  open, and so does an entry whose `first` is below the tail of its path or whose
+  `first + len` passes `u64::MAX`. The restart record needs one free block: an open
+  of a full ring first moves records at the tail to a segment.
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][zero padding][crc32c: u32]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is the last four bytes and covers the rest.
