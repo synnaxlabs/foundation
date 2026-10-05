@@ -516,16 +516,22 @@ collect() {
   rsync -az -e "$SSH" --remove-source-files "$CLIENT:carrier-samples/" "$OUT/samples/"
 }
 
-# Writes the header of a table.
+# Writes a table header: the columns before `--`, the client's columns for a kind of
+# test, then the columns after `--`.
 header() {
-  local file=$1
+  local file=$1 kind=$2 line="|" column count
+  shift 2
+  while [[ $1 != -- ]]; do
+    line+=" $1 |"
+    shift
+  done
   shift
-  local line="|" rule="|" column
+  line+=$(on "$CLIENT" "$BIN" columns "$kind" | cut -c2-)
   for column in "$@"; do
     line+=" $column |"
-    rule+="---|"
   done
-  printf '%s\n%s\n' "$line" "$rule" >"$OUT/$file"
+  count=$(tr -cd '|' <<<"$line" | wc -c)
+  printf '%s\n|%s\n' "$line" "$(printf -- '---|%.0s' $(seq 2 "$count"))" >"$OUT/$file"
 }
 
 trap cleanup EXIT
@@ -571,12 +577,9 @@ record "$CLIENT" "$CLIENT_IF" client
 
 COUNTERS=("TCP retrans" "UDP rcvbuf errors" "UDP sndbuf errors" "UDP in errors"
   "ENA allowance drops" "qdisc drops")
-BULK=(carrier Gbit/s "lost packets" "client core %" "client thread ns/B"
-  "client CPUs ns/B" "server core %" "server thread ns/B" "server CPUs ns/B")
-header bulk.md rep profile options "${BULK[@]}" "${COUNTERS[@]}"
-header load.md rep profile load "${BULK[@]}"
-header latency.md rep profile load carrier frames test size rate "load Gbit/s" n lost \
-  "p50 us" "p99 us" "p99.9 us" "max us" "delay p99 us" "delay max us" "${COUNTERS[@]}"
+header bulk.md bulk rep profile options -- "${COUNTERS[@]}"
+header load.md bulk rep profile load --
+header latency.md latency rep profile load -- "${COUNTERS[@]}"
 
 for REP in $(seq 1 "$REPS"); do
   for PROFILE in $PROFILES; do

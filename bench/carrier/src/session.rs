@@ -383,6 +383,13 @@ impl Listener {
         }
     }
 
+    pub(crate) fn local_addr(&self) -> Result<SocketAddr, Error> {
+        match self {
+            Self::Quic(endpoint) => Ok(endpoint.local_addr()?),
+            Self::Tls { listener, .. } => Ok(listener.local_addr()?),
+        }
+    }
+
     /// The next connection. Its handshake runs in [`Handshake::finish`], so a slow
     /// one does not hold up the next accept.
     pub(crate) async fn accept(&self) -> Result<Handshake, Error> {

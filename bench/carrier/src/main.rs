@@ -18,8 +18,6 @@ mod test;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use rustls::crypto::CryptoProvider;
-
 use session::{Config, Listener, Session};
 use test::Test;
 
@@ -27,6 +25,7 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 const USAGE: &str = "\
 usage:
+  carrier columns <bulk|latency>    the header of the client's table lines
   carrier server <quic|tls> <listen> <cert.pem> <key.pem> [options]
   carrier client <quic|tls> <server> <ca.pem> <test> [options]
 tests:
@@ -50,20 +49,44 @@ fn main() -> Result<(), Error> {
         .build()?;
     let provider = Arc::new(Config::provider());
     match args.as_slice() {
+        ["columns", "bulk"] => println!("{}", test::BULK_COLUMNS),
+        ["columns", "latency"] => println!("{}", test::LATENCY_COLUMNS),
         ["server", carrier, listen, cert, key, rest @ ..] => {
-            let options = Options::parse(rest, false)?;
-            let config = options.config(carrier.parse()?, provider)?;
-            let cpus = options.cpus.into();
-            runtime.block_on(serve(&config, listen.parse()?, cert, key, cpus))
+            let options = Options::parse(rest, Role::Server)?;
+            let config = Config::new(
+                carrier.parse()?,
+                provider,
+                options.unsegmented,
+                options.mtu,
+            )?;
+            runtime.block_on(async {
+                let listener =
+                    Listener::bind(&config, listen.parse()?, cert, key).await?;
+                eprintln!("server on {}: {config}", listener.local_addr()?);
+                serve(listener, options.cpus.into()).await
+            })?;
         }
         ["client", carrier, server, ca, rest @ ..] => {
             let (test, rest) = Test::parse(rest)?;
-            let options = Options::parse(rest, true)?;
-            let config = options.config(carrier.parse()?, provider)?;
-            runtime.block_on(client(&config, server.parse()?, ca, &test, &options))
+            let options = Options::parse(rest, Role::Client)?;
+            let config = Config::new(
+                carrier.parse()?,
+                provider,
+                options.unsegmented,
+                options.mtu,
+            )?;
+            runtime.block_on(client(&config, server.parse()?, ca, &test, &options))?;
         }
-        _ => Err(USAGE.into()),
+        _ => return Err(USAGE.into()),
     }
+    Ok(())
+}
+
+/// Which end of a session the options are for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Server,
+    Client,
 }
 
 /// The arguments after the positional ones.
@@ -75,7 +98,7 @@ struct Options {
 }
 
 impl Options {
-    fn parse(args: &[&str], client: bool) -> Result<Self, Error> {
+    fn parse(args: &[&str], role: Role) -> Result<Self, Error> {
         let mut options = Self {
             unsegmented: false,
             mtu: 1500,
@@ -90,7 +113,7 @@ impl Options {
                     options.cpus =
                         list.split(',').map(str::parse).collect::<Result<_, _>>()?;
                 }
-                Some(("samples", path)) if client => {
+                Some(("samples", path)) if role == Role::Client => {
                     options.samples = Some(path.into());
                 }
                 _ => return Err(format!("unknown option {arg:?}\n{USAGE}").into()),
@@ -98,25 +121,10 @@ impl Options {
         }
         Ok(options)
     }
-
-    fn config(
-        &self,
-        carrier: session::Carrier,
-        provider: Arc<CryptoProvider>,
-    ) -> Result<Config, Error> {
-        Config::new(carrier, provider, self.unsegmented, self.mtu)
-    }
 }
 
-async fn serve(
-    config: &Config,
-    listen: SocketAddr,
-    cert: &str,
-    key: &str,
-    cpus: Arc<[usize]>,
-) -> Result<(), Error> {
-    let listener = Listener::bind(config, listen, cert, key).await?;
-    eprintln!("server on {listen}: {config}");
+/// Serves each session the listener accepts on its own task.
+async fn serve(listener: Listener, cpus: Arc<[usize]>) -> Result<(), Error> {
     loop {
         let handshake = listener.accept().await?;
         let cpus = Arc::clone(&cpus);
@@ -159,7 +167,10 @@ mod tests {
 
     #[test]
     fn options_reject_an_unknown_option() {
-        let error = Options::parse(&["nogso"], false).err().unwrap().to_string();
+        let error = Options::parse(&["nogso"], Role::Server)
+            .err()
+            .unwrap()
+            .to_string();
         assert!(
             error.starts_with("unknown option \"nogso\"\nusage:"),
             "{error}"
@@ -168,7 +179,7 @@ mod tests {
 
     #[test]
     fn options_reject_samples_on_the_server() {
-        let error = Options::parse(&["samples=x"], false)
+        let error = Options::parse(&["samples=x"], Role::Server)
             .err()
             .unwrap()
             .to_string();
@@ -178,7 +189,7 @@ mod tests {
     #[test]
     fn options_parse_each_option() {
         let args = ["unsegmented", "mtu=9001", "cpus=2,6", "samples=out"];
-        let options = Options::parse(&args, true).unwrap();
+        let options = Options::parse(&args, Role::Client).unwrap();
         assert!(options.unsegmented);
         assert_eq!(options.mtu, 9001);
         assert_eq!(options.cpus, [2, 6]);
@@ -187,10 +198,8 @@ mod tests {
 
     #[test]
     fn config_rejects_an_mtu_below_the_quic_minimum() {
-        let options = Options::parse(&["mtu=1227"], false).unwrap();
         let provider = Arc::new(Config::provider());
-        let error = options
-            .config(session::Carrier::Quic, provider)
+        let error = Config::new(session::Carrier::Quic, provider, false, 1227)
             .err()
             .unwrap();
         assert_eq!(

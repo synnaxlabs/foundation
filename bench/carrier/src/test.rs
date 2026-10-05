@@ -806,7 +806,9 @@ async fn mux_send(
                 }
                 if offset == bulk.len() {
                     offset = 0;
-                    frames += u64::from(mark.is_some());
+                    if mark.is_some() {
+                        frames += 1;
+                    }
                 }
             }
         }
@@ -832,6 +834,16 @@ fn paced_echoes(rtts: &[(u64, Duration)], delays: &[u64]) -> Result<Vec<Echo>, E
         })
         .collect()
 }
+
+/// The header of [`Outcome::line`] for a bulk test.
+pub(crate) const BULK_COLUMNS: &str = "| carrier | Gbit/s | lost packets | client core % \
+| client thread ns/B | client CPUs ns/B | server core % | server thread ns/B \
+| server CPUs ns/B |";
+
+/// The header of [`Outcome::line`] for a ping or paced test, in microseconds.
+pub(crate) const LATENCY_COLUMNS: &str = "| carrier | frames | test | size | rate \
+| load Gbit/s | n | lost | p50 us | p99 us | p99.9 us | max us | delay p99 us \
+| delay max us |";
 
 /// What the client measured.
 pub(crate) enum Outcome {
@@ -981,6 +993,172 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::session::{Config, Listener};
+
+    const MS: Duration = Duration::from_millis(100);
+
+    /// Runs `test` against a loopback server.
+    async fn loopback(carrier: Carrier, test: Test) -> Result<Outcome, Error> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata");
+        let provider = Arc::new(Config::provider());
+        let config = Config::new(carrier, provider, false, 1500)?;
+        let (cert, key) = (format!("{dir}/cert.pem"), format!("{dir}/key.pem"));
+        let listener =
+            Listener::bind(&config, "127.0.0.1:0".parse()?, &cert, &key).await?;
+        let server = listener.local_addr()?;
+        let serving = tokio::spawn(crate::serve(listener, Arc::from([])));
+        let mut session =
+            Session::connect(&config, server, &format!("{dir}/ca.pem")).await?;
+        // A broken protocol waits forever; this makes it fail.
+        let outcome =
+            timeout(Duration::from_secs(10), run(&mut session, &test, &[])).await?;
+        session.close().await;
+        serving.abort();
+        outcome
+    }
+
+    fn assert_bulk(outcome: &Outcome) {
+        let Outcome::Bulk { bulk, .. } = outcome else {
+            panic!("not a bulk outcome");
+        };
+        assert!(bulk.bytes > 0, "the server counted no bytes");
+    }
+
+    /// Asserts measured echoes, a send delay for each paced one, and the bulk flow of
+    /// a shared load.
+    fn assert_latency(outcome: &Outcome, paced: bool, shared: bool) {
+        let Outcome::Latency { echoes, load, .. } = outcome else {
+            panic!("not a latency outcome");
+        };
+        assert!(!echoes.is_empty(), "no echo was measured");
+        assert!(
+            echoes.iter().all(|e| e.delay.is_some() == paced),
+            "wrong delays"
+        );
+        assert_eq!(load.as_ref().map(|b| b.bytes > 0), shared.then_some(true));
+    }
+
+    #[tokio::test]
+    async fn bulk_counts_match_over_quic() {
+        assert_bulk(
+            &loopback(Carrier::Quic, Test::Bulk { secs: MS })
+                .await
+                .unwrap(),
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_counts_match_over_tls() {
+        assert_bulk(
+            &loopback(Carrier::Tls, Test::Bulk { secs: MS })
+                .await
+                .unwrap(),
+        );
+    }
+
+    fn ping(frames: Frames) -> Test {
+        Test::Ping {
+            frames,
+            size: 64,
+            secs: MS,
+        }
+    }
+
+    fn paced(frames: Frames) -> Test {
+        Test::Paced {
+            frames,
+            size: 256,
+            rate: 1000,
+            secs: MS,
+            load: Load::Shared,
+        }
+    }
+
+    #[tokio::test]
+    async fn ping_echoes_quic_streams() {
+        let outcome = loopback(Carrier::Quic, ping(Frames::Stream)).await.unwrap();
+        assert_latency(&outcome, false, false);
+    }
+
+    #[tokio::test]
+    async fn ping_echoes_quic_datagrams() {
+        let outcome = loopback(Carrier::Quic, ping(Frames::Datagram))
+            .await
+            .unwrap();
+        assert_latency(&outcome, false, false);
+    }
+
+    #[tokio::test]
+    async fn ping_echoes_the_tls_stream() {
+        let outcome = loopback(Carrier::Tls, ping(Frames::Stream)).await.unwrap();
+        assert_latency(&outcome, false, false);
+    }
+
+    #[tokio::test]
+    async fn ping_rejects_datagrams_over_tls() {
+        let error = loopback(Carrier::Tls, ping(Frames::Datagram))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "TLS has no datagrams");
+    }
+
+    #[tokio::test]
+    async fn paced_shares_a_quic_connection_with_bulk_streams() {
+        let outcome = loopback(Carrier::Quic, paced(Frames::Stream))
+            .await
+            .unwrap();
+        assert_latency(&outcome, true, true);
+    }
+
+    #[tokio::test]
+    async fn paced_shares_a_quic_connection_with_bulk_datagrams() {
+        let outcome = loopback(Carrier::Quic, paced(Frames::Datagram))
+            .await
+            .unwrap();
+        assert_latency(&outcome, true, true);
+    }
+
+    #[tokio::test]
+    async fn paced_multiplexes_bulk_on_the_tls_stream() {
+        let outcome = loopback(Carrier::Tls, paced(Frames::Stream)).await.unwrap();
+        assert_latency(&outcome, true, true);
+    }
+
+    #[test]
+    fn columns_match_the_lines() {
+        let bulk = Outcome::Bulk {
+            carrier: Carrier::Tls,
+            bulk: Bulk {
+                bytes: 1,
+                elapsed: Duration::from_secs(1),
+                client: Sample {
+                    thread: None,
+                    cpus: None,
+                },
+                server: Sample {
+                    thread: None,
+                    cpus: None,
+                },
+            },
+            lost: None,
+        };
+        let pipes = |line: &str| line.matches('|').count();
+        assert_eq!(pipes(&bulk.line()), pipes(BULK_COLUMNS));
+        let latency = Outcome::Latency {
+            label: Label {
+                carrier: Carrier::Quic,
+                frames: Frames::Stream,
+                test: "ping",
+                size: 64,
+                rate: None,
+            },
+            echoes: Vec::new(),
+            lost: 0,
+            load: None,
+        };
+        assert_eq!(pipes(&latency.line()), pipes(LATENCY_COLUMNS));
+    }
 
     fn reader(bytes: Vec<u8>) -> Reader {
         Box::new(Cursor::new(bytes))
