@@ -107,8 +107,7 @@ impl<'a> Parser<'a> {
 
     fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
         let labels = self.labels()?;
-        let depth = enter(depth).ok_or(Error::TooDeep { span: keyword.span })?;
-        let (body, span) = self.enclosed(|parser| {
+        let (body, span) = self.level(keyword.span, depth, |parser, depth| {
             if parser.token.kind != lex::Kind::Newline {
                 return parser.one_line(depth);
             }
@@ -124,7 +123,7 @@ impl<'a> Parser<'a> {
             keyword_span: Some(keyword.span),
             labels,
             body,
-            span: Some(join(keyword.span, span)),
+            span: Some(span),
         })
     }
 
@@ -364,10 +363,7 @@ impl<'a> Parser<'a> {
     }
 
     fn list(&mut self, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep {
-            span: self.token.span,
-        })?;
-        let (items, span) = self.enclosed(|parser| {
+        let (items, span) = self.level(self.token.span, depth, |parser, depth| {
             parser.refuse_for()?;
             parser.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)
         })?;
@@ -378,10 +374,7 @@ impl<'a> Parser<'a> {
     }
 
     fn object(&mut self, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep {
-            span: self.token.span,
-        })?;
-        let (map, span) = self.enclosed(|parser| {
+        let (map, span) = self.level(self.token.span, depth, |parser, depth| {
             let mut attributes = Vec::new();
             let entries = parser.entries(&mut attributes, depth);
             let map = parser.map(attributes);
@@ -393,17 +386,22 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Takes the open bracket, reads the inside with `inner` up to the close, and
-    /// takes the close. Returns what `inner` read and the span from the open to the
-    /// close.
-    fn enclosed<T>(
+    /// Reads one level of nesting that starts at `start`, the keyword, function
+    /// name, or open bracket before the open bracket: takes the open bracket, reads
+    /// the inside with `inner` at the depth inside, and takes the close. Returns what
+    /// `inner` read and the span from `start` to the close, or [`Error::TooDeep`] at
+    /// `start` when the level is past [`DEPTH_MAX`].
+    fn level<T>(
         &mut self,
-        inner: impl FnOnce(&mut Self) -> Result<T, Error>,
+        start: Span,
+        depth: usize,
+        inner: impl FnOnce(&mut Self, usize) -> Result<T, Error>,
     ) -> Result<(T, Span), Error> {
-        let open = self.take()?;
-        let inside = inner(self)?;
+        let depth = enter(depth).ok_or(Error::TooDeep { span: start })?;
+        self.take()?;
+        let inside = inner(self, depth)?;
         let close = self.take()?;
-        Ok((inside, join(open.span, close.span)))
+        Ok((inside, join(start, close.span)))
     }
 
     /// Reads the entries of an object after its `{`, and leaves the `}`.
@@ -482,10 +480,7 @@ impl<'a> Parser<'a> {
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
-        let depth = enter(depth).ok_or(Error::TooDeep {
-            span: function.span,
-        })?;
-        let (arguments, span) = self.enclosed(|parser| {
+        let (arguments, span) = self.level(function.span, depth, |parser, depth| {
             parser.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)
         })?;
         Ok(Value {
@@ -494,7 +489,7 @@ impl<'a> Parser<'a> {
                 function_span: Some(function.span),
                 arguments,
             }),
-            span: Some(join(function.span, span)),
+            span: Some(span),
         })
     }
 
