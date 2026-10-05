@@ -3,16 +3,8 @@
 use std::fmt;
 use std::ops::Range;
 
+use types::frame::Path;
 use types::time::{Interval, Span, Stamp};
-
-/// One of an index's two write paths.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Path {
-    /// Data in time order, as it happens.
-    Live,
-    /// Late data, labeled by the writer. Live readers never see it.
-    Backfill,
-}
 
 /// Limits on the stamps an index accepts.
 #[derive(Clone, Copy, Debug)]
@@ -81,7 +73,7 @@ impl Order {
             tail.seq = start
                 .checked_add(stamps.len() as u64)
                 .expect("invariant: a path takes fewer than 2^64 samples");
-            tail.stamp = Some(stamp(last));
+            tail.stamp = Some(stamp(*last));
         }
         Ok(start..tail.seq)
     }
@@ -103,7 +95,7 @@ impl Order {
         let (Some(first), Some(last)) = (stamps.first(), stamps.last()) else {
             return Ok(());
         };
-        let (first, last) = (stamp(first), stamp(last));
+        let (first, last) = (stamp(*first), stamp(*last));
         let latest = Stamp::from_nanos(
             now.latest.nanos().saturating_add(self.config.ahead.nanos()),
         );
@@ -113,8 +105,8 @@ impl Order {
         };
         // States the rules a second time, as one pass with no early exit, so that it
         // vectorizes. `breach` names the error only for a frame that fails it.
-        let increasing = stamps.windows(2).fold(true, |increasing, pair| {
-            increasing & (i64::from_le_bytes(pair[0]) < i64::from_le_bytes(pair[1]))
+        let increasing = stamps.array_windows().fold(true, |increasing, [a, b]| {
+            increasing & (i64::from_le_bytes(*a) < i64::from_le_bytes(*b))
         });
         if increasing
             && first >= self.config.earliest
@@ -135,7 +127,7 @@ impl Order {
             Path::Backfill => self.live.stamp,
         };
         let mut before = self.tail(path).stamp;
-        for stamp in stamps.iter().map(stamp) {
+        for stamp in stamps.iter().copied().map(stamp) {
             if stamp < earliest {
                 return Error::Early { stamp, earliest };
             }
@@ -169,8 +161,8 @@ impl Order {
     }
 }
 
-fn stamp(bytes: &[u8; 8]) -> Stamp {
-    Stamp::from_nanos(i64::from_le_bytes(*bytes))
+fn stamp(bytes: [u8; 8]) -> Stamp {
+    Stamp::from_nanos(i64::from_le_bytes(bytes))
 }
 
 /// A frame's stamps break a rule. The frame is rejected whole.
