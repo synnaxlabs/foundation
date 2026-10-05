@@ -81,7 +81,7 @@ pub enum Error {
         /// The position of the last configuration entry in the log.
         at: Position,
     },
-    /// A term is lower than the term of an entry it must cover.
+    /// An append's term is lower than the term of an entry it carries.
     TermBehindLog {
         /// The covering term.
         term: Term,

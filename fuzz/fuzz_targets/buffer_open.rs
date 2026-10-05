@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Error, Layout, Tail};
+use buffer::{Buffer, Config, Entry, Error, Layout, Parts, Tail};
 use env::files::{File, Mode};
 use env::tasks::Tasks;
 use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
@@ -199,19 +199,12 @@ async fn build(
         (0..INDEXES).map(|index| slots.assign(key(index))).collect();
     let mut next = vec![[0u64; 2]; INDEXES];
     for batch in &input.batches {
-        let parts: Vec<Block> = batch
+        let mut firsts = next.clone();
+        let entries: Vec<Entry> = batch
             .iter()
             .map(|append| {
                 let mut part = pool.alloc(append.part).expect("the pool has a block");
                 part.fill(0x5a);
-                part.freeze()
-            })
-            .collect();
-        let mut firsts = next.clone();
-        let entries: Vec<Entry<'_>> = batch
-            .iter()
-            .zip(&parts)
-            .map(|(append, part)| {
                 let path = usize::from(append.path == frame::Path::Backfill);
                 let first = firsts[append.index][path];
                 firsts[append.index][path] += u64::from(append.len);
@@ -224,11 +217,11 @@ async fn build(
                     stored_at: Stamp::from_nanos(7),
                     last: Some(Stamp::from_nanos(i64::try_from(first).expect("small"))),
                     tag: 0,
-                    parts: std::slice::from_ref(part),
+                    parts: Parts::from(part.freeze()),
                 }
             })
             .collect();
-        match buffer.append(&entries) {
+        match buffer.append(entries) {
             Ok(()) => next = firsts,
             Err(Error::Full { .. }) => break,
             Err(other) => panic!("append failed: {other}"),
