@@ -42,6 +42,33 @@ proptest! {
             prop_assert!(disk.applied >= at.index, "applied {}", disk.applied);
         }
     }
+
+    #[test]
+    fn the_voters_of_a_mended_network_hold_the_leaders_configuration_and_log(
+        (logs, actions) in run(),
+        random in any::<u64>(),
+    ) {
+        let mut network = Network::new(&logs, random);
+        let (leader, _) = network.settle(&actions)?;
+        let at = network.propose(leader).unwrap();
+        let voters: Vec<usize> = network.voters(leader).collect();
+        for _ in 0..4 * ELECTION {
+            network.round();
+            if voters.iter().all(|&node| network.disks[node].applied >= at.index) {
+                break;
+            }
+        }
+        let configuration = network.nodes[leader].voters().clone();
+        for &node in &voters {
+            prop_assert_eq!(network.nodes[node].voters(), &configuration);
+            prop_assert!(network.disks[node].applied >= at.index, "node {node}");
+            let applied = usize::try_from(network.disks[node].applied).unwrap();
+            prop_assert_eq!(
+                &network.disks[node].entries[..applied],
+                &network.disks[leader].entries[..applied]
+            );
+        }
+    }
 }
 
 const CASES: u32 = 1000;
