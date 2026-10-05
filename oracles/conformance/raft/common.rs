@@ -9,13 +9,13 @@ use raft::{
 };
 use types::node;
 
-pub(super) const ELECTION: u32 = 10;
+pub(crate) const ELECTION: u32 = 10;
 
-pub(super) fn key(id: u8) -> node::Key {
+pub(crate) fn key(id: u8) -> node::Key {
     node::Key::from_u128(u128::from(id))
 }
 
-pub(super) fn at_term(term: u64) -> Hard {
+pub(crate) fn at_term(term: u64) -> Hard {
     Hard {
         term: Term(term),
         vote: None,
@@ -23,7 +23,7 @@ pub(super) fn at_term(term: u64) -> Hard {
 }
 
 /// Node `id` with a log of `last.index` entries, all in `last.term`, and its disk.
-pub(super) fn build(
+pub(crate) fn build(
     id: u8,
     voters: &[u8],
     election: u32,
@@ -44,15 +44,15 @@ pub(super) fn build(
 
 /// What one node has stored: its log and the entries it applied, in order.
 #[derive(Debug, Default)]
-pub(super) struct Disk {
-    pub(super) hard: Hard,
-    pub(super) entries: Vec<Entry>,
-    pub(super) committed: Vec<Entry>,
+pub(crate) struct Disk {
+    pub(crate) hard: Hard,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) committed: Vec<Entry>,
 }
 
 impl Disk {
     /// Does what a `Ready` asks for and returns its messages.
-    pub(super) fn store(&mut self, ready: Ready) -> Vec<Message> {
+    pub(crate) fn store(&mut self, ready: Ready) -> Vec<Message> {
         let Ready {
             hard,
             entries,
@@ -75,22 +75,22 @@ impl Disk {
         messages
     }
 
-    pub(super) fn last(&self) -> u64 {
+    pub(crate) fn last(&self) -> u64 {
         count(self.entries.len())
     }
 
-    pub(super) fn committed(&self) -> u64 {
+    pub(crate) fn committed(&self) -> u64 {
         count(self.committed.len())
     }
 }
 
-pub(super) fn count(n: usize) -> u64 {
+pub(crate) fn count(n: usize) -> u64 {
     u64::try_from(n).unwrap()
 }
 
 /// Node `id` with the stored state `hard`, the log `entries`, and `applied` of them
 /// applied, with the disk that holds the same.
-pub(super) fn start(
+pub(crate) fn start(
     id: u8,
     voters: &[u8],
     election: u32,
@@ -119,14 +119,14 @@ pub(super) fn start(
 
 /// The etcd test network: it delivers messages in order until none remain. A voter
 /// with no peer never answers.
-pub(super) struct Network {
+pub(crate) struct Network {
     peers: BTreeMap<node::Key, Raft>,
     disks: BTreeMap<node::Key, Disk>,
     cuts: BTreeSet<(node::Key, node::Key)>,
 }
 
 impl Network {
-    pub(super) fn new(peers: impl IntoIterator<Item = (Raft, Disk)>) -> Self {
+    pub(crate) fn new(peers: impl IntoIterator<Item = (Raft, Disk)>) -> Self {
         let (peers, disks) = peers
             .into_iter()
             .map(|(peer, disk)| {
@@ -142,7 +142,7 @@ impl Network {
     }
 
     /// `size` voters, all with the stored state `hard`. Only `present` have a peer.
-    pub(super) fn of(size: u8, present: &[u8], hard: Hard) -> Self {
+    pub(crate) fn of(size: u8, present: &[u8], hard: Hard) -> Self {
         let voters: Vec<u8> = (1..=size).collect();
         Self::new(
             present
@@ -151,12 +151,12 @@ impl Network {
         )
     }
 
-    pub(super) fn peer(&self, id: u8) -> &Raft {
+    pub(crate) fn peer(&self, id: u8) -> &Raft {
         &self.peers[&key(id)]
     }
 
     /// Makes each node campaign, then delivers until quiet.
-    pub(super) fn campaign(&mut self, ids: &[u8]) {
+    pub(crate) fn campaign(&mut self, ids: &[u8]) {
         let mut queue = VecDeque::new();
         for &id in ids {
             self.peers.get_mut(&key(id)).unwrap().campaign();
@@ -166,12 +166,12 @@ impl Network {
     }
 
     /// Delivers one message, then delivers until quiet.
-    pub(super) fn send(&mut self, message: Message) {
+    pub(crate) fn send(&mut self, message: Message) {
         self.run(VecDeque::from([message]));
     }
 
     /// Ticks one node. Its messages wait until the node next handles a message.
-    pub(super) fn tick(&mut self, id: u8, random: u64, times: u32) {
+    pub(crate) fn tick(&mut self, id: u8, random: u64, times: u32) {
         let peer = self.peers.get_mut(&key(id)).unwrap();
         for _ in 0..times {
             peer.tick(random);
@@ -179,17 +179,17 @@ impl Network {
     }
 
     /// Delivers what a node has waiting, then delivers until quiet.
-    pub(super) fn flush(&mut self, id: u8) {
+    pub(crate) fn flush(&mut self, id: u8) {
         let queue = self.take(key(id)).into();
         self.run(queue);
     }
 
-    pub(super) fn cut(&mut self, a: u8, b: u8) {
+    pub(crate) fn cut(&mut self, a: u8, b: u8) {
         self.cuts.insert((key(a), key(b)));
         self.cuts.insert((key(b), key(a)));
     }
 
-    pub(super) fn isolate(&mut self, id: u8) {
+    pub(crate) fn isolate(&mut self, id: u8) {
         for other in 1..=u8::MAX {
             if other != id {
                 self.cut(id, other);
@@ -197,7 +197,7 @@ impl Network {
         }
     }
 
-    pub(super) fn recover(&mut self) {
+    pub(crate) fn recover(&mut self) {
         self.cuts.clear();
     }
 
@@ -220,24 +220,24 @@ impl Network {
     }
 
     #[track_caller]
-    pub(super) fn check(&self, id: u8, role: Role, term: u64) {
+    pub(crate) fn check(&self, id: u8, role: Role, term: u64) {
         let peer = self.peer(id);
         assert_eq!((peer.role(), peer.term()), (role, Term(term)), "node {id}");
     }
 
     /// Proposes `data` to a node, then delivers until quiet.
-    pub(super) fn propose(&mut self, id: u8, data: &[u8]) {
+    pub(crate) fn propose(&mut self, id: u8, data: &[u8]) {
         let peer = self.peers.get_mut(&key(id)).unwrap();
         peer.propose(data.to_vec()).unwrap();
         self.flush(id);
     }
 
-    pub(super) fn disk(&self, id: u8) -> &Disk {
+    pub(crate) fn disk(&self, id: u8) -> &Disk {
         &self.disks[&key(id)]
     }
 }
 
-pub(super) fn heartbeat(from: u8, to: u8, term: Term) -> Message {
+pub(crate) fn heartbeat(from: u8, to: u8, term: Term) -> Message {
     Message {
         from: key(from),
         to: key(to),
