@@ -33,7 +33,7 @@ impl Sender {
     /// # Errors
     ///
     /// [`Error::TooLarge`] when `message` is over [`bytes_max`](Self::bytes_max), or
-    /// the error that ended the session.
+    /// the peer takes no datagrams, or the error that ended the session.
     ///
     /// ```
     /// use transport::{Error, datagram::Sender};
@@ -49,7 +49,7 @@ impl Sender {
 
     /// The largest datagram the session sends now. It changes with the path and the
     /// carrier. It is never over the peer's `message_bytes_max`, and never so large
-    /// that a datagram cannot drop.
+    /// that a datagram cannot drop. It is 0 when the peer takes no datagrams.
     ///
     /// ```
     /// fn fits(sender: &transport::datagram::Sender, frame: &block::Block) -> bool {
@@ -82,12 +82,13 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    /// Waits for the next datagram. It lands in one block from the shard's pool.
+    /// Waits for the next datagram. It lands in one block from the shard's pool. A
+    /// datagram drops when the pool has no room for it, or when the receivers fall
+    /// behind: then the oldest untaken one drops.
     ///
     /// # Errors
     ///
-    /// [`Error::Pool`] when the pool has no room for the next datagram, or the error
-    /// that ended the session.
+    /// The error that ended the session.
     ///
     /// ```
     /// use block::Block;

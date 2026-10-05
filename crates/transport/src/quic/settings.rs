@@ -35,6 +35,10 @@ const PAYLOAD_IPV4: u16 = 1472;
 /// discovery tries, so it fits both IP versions.
 const PAYLOAD_IPV6: u16 = 1452;
 
+/// The bytes of datagrams that wait to be sent on one connection. When a new one
+/// does not fit, the oldest drops.
+const DATAGRAMS_QUEUED: usize = 64 << 10;
+
 /// What each dial from one shard needs.
 pub(super) struct Settings {
     transport: Arc<TransportConfig>,
@@ -165,7 +169,8 @@ fn transport(config: &Config) -> TransportConfig {
         .max_outgoing_bytes_per_second(None)
         .crypto_buffer_size(16 << 10)
         .allow_spin(false)
-        .datagram_receive_buffer_size(None)
+        .datagram_receive_buffer_size(Some(config.message_bytes_max.get()))
+        .datagram_send_buffer_size(DATAGRAMS_QUEUED)
         .max_concurrent_multipath_paths(0)
         .max_remote_nat_traversal_addresses(0)
         .server_handshake_migration(false)
@@ -588,6 +593,35 @@ mod tests {
         }
 
         const ROUND_TRIP: Duration = Duration::from_millis(125);
+    }
+
+    mod datagrams {
+        use super::*;
+
+        #[test]
+        fn to_a_peer_that_takes_none_are_too_large_at_any_size() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let client = &mut pair.client.endpoint.settings.transport;
+                Arc::make_mut(client).datagram_receive_buffer_size(None);
+                pair.dial(tls::public(&testing::SERVER_KEY));
+                pair.run(Duration::from_millis(100));
+                let key = pair.server.key.expect("a connection");
+                let server = &mut pair.server.endpoint;
+                let mut datagrams = server.datagrams(key).expect("connected");
+                assert_eq!(datagrams.bytes_max(), 0);
+                for bytes in [0, 10] {
+                    let sent = datagrams.send(shard.block(&vec![1; bytes]));
+                    assert_eq!(
+                        sent,
+                        Err(Error::TooLarge {
+                            bytes,
+                            bytes_max: 0
+                        })
+                    );
+                }
+            });
+        }
     }
 
     mod restart {

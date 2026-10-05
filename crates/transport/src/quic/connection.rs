@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::mem;
 use std::time::Instant;
 
+use block::Pool;
 use bytes::Bytes;
 use noq_proto::crypto::rustls::HandshakeData;
 use noq_proto::{ConnectionError, ConnectionHandle, VarInt};
@@ -12,6 +13,7 @@ use rustls::pki_types::CertificateDer;
 use types::node::PublicKey;
 
 use super::Event;
+use super::datagrams::Received;
 use super::stream::{Fault, Streams};
 use crate::{Code, Error, Peer, tls};
 
@@ -32,6 +34,8 @@ pub(super) struct Connection {
     /// It is in the endpoint's queue of connections to poll for a datagram.
     pub(super) queued: bool,
     pub(super) streams: Streams,
+    /// The datagrams that arrived and wait to be taken.
+    pub(super) received: Received,
     state: State,
 }
 
@@ -77,17 +81,19 @@ impl Connection {
             inner,
             queued: false,
             streams,
+            received: Received::default(),
             state,
         }
     }
 
-    /// Moves the connection's events to `endpoint` and to `events` at `now`.
-    /// Returns whether it drained: `endpoint` forgot it, and nothing more happens to
-    /// it.
+    /// Moves the connection's events to `endpoint` and to `events` at `now`, and
+    /// each datagram that arrives into a block from `pool`. Returns whether it
+    /// drained: `endpoint` forgot it, and nothing more happens to it.
     pub(super) fn drive(
         &mut self,
         now: Instant,
         endpoint: &mut noq_proto::Endpoint,
+        pool: &Pool,
         events: &mut VecDeque<Event>,
     ) -> bool {
         let mut drained = false;
@@ -98,7 +104,7 @@ impl Connection {
                     self.inner.handle_event(event);
                 }
             } else if let Some(event) = self.inner.poll() {
-                self.event(now, event, events);
+                self.event(now, event, pool, events);
             } else {
                 break;
             }
@@ -115,6 +121,7 @@ impl Connection {
         &mut self,
         now: Instant,
         event: noq_proto::Event,
+        pool: &Pool,
         events: &mut VecDeque<Event>,
     ) {
         let key = self.key;
@@ -150,6 +157,13 @@ impl Connection {
                     Err(Fault(reason)) => events.push_back(self.fault(now, reason)),
                 }
             }
+            noq_proto::Event::DatagramReceived if self.live() => {
+                assert!(
+                    self.connected(),
+                    "invariant: noq-proto gives datagrams only after it connects"
+                );
+                self.received.pull(&mut self.inner, pool, key, events);
+            }
             noq_proto::Event::HandshakeDataReady
             | noq_proto::Event::HandshakeConfirmed
             | noq_proto::Event::Stream(_)
@@ -163,6 +177,11 @@ impl Connection {
     /// Whether the connection has not ended.
     pub(super) fn live(&self) -> bool {
         !matches!(self.state, State::Ended)
+    }
+
+    /// Whether the handshake finished and the connection has not ended.
+    pub(super) fn connected(&self) -> bool {
+        matches!(self.state, State::Open)
     }
 
     /// Closes the connection on a fault of the peer's, with code 2^32 and `reason`,

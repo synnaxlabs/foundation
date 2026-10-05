@@ -2,6 +2,7 @@
 
 mod cid;
 pub(crate) mod connection;
+pub(crate) mod datagrams;
 mod settings;
 pub(crate) mod stream;
 #[cfg(test)]
@@ -23,6 +24,7 @@ use types::node::PublicKey;
 use types::time::Monotonic;
 
 use self::connection::Connection;
+use self::datagrams::Datagrams;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
 use crate::{Class, Code, Config, Error, Peer};
@@ -83,6 +85,9 @@ pub(crate) enum Event {
     /// `stream` may take more, or the peer stopped it. It can repeat, and it can
     /// name a stream the caller no longer holds or has not accepted yet.
     Writable { stream: stream::Key },
+    /// [`Endpoint::datagrams`] has a datagram of `key` to take. It comes when one
+    /// arrives and none waited, so take them all after it.
+    Datagram { key: connection::Key },
 }
 
 impl Endpoint {
@@ -403,6 +408,13 @@ impl Endpoint {
         self.drive(key.handle, self.instant(now));
     }
 
+    /// The datagrams of `key`'s connection. `None` until it connects, and after it
+    /// ends.
+    pub(crate) fn datagrams(&mut self, key: connection::Key) -> Option<Datagrams<'_>> {
+        let connection = find(&mut self.connections, key).filter(|c| c.connected())?;
+        Some(Datagrams::new(connection, &mut self.ready))
+    }
+
     /// The next event, in the order they happened.
     pub(crate) fn poll(&mut self) -> Option<Event> {
         self.events.pop_front()
@@ -528,7 +540,7 @@ impl Endpoint {
     fn drive(&mut self, handle: ConnectionHandle, now: Instant) {
         let entry = &mut self.connections[handle.0];
         let connection = entry.as_mut().expect("invariant: a live handle");
-        if connection.drive(now, &mut self.inner, &mut self.events) {
+        if connection.drive(now, &mut self.inner, &self.pool, &mut self.events) {
             *entry = None;
         } else {
             queue(&mut self.ready, connection);
@@ -552,6 +564,15 @@ fn find(
 ) -> Option<&mut Connection> {
     let connection = connections.get_mut(key.handle.0)?.as_mut()?;
     (connection.key == key).then_some(connection)
+}
+
+/// A message that noq-proto holds until it needs the bytes no more.
+struct Body(Block);
+
+impl AsRef<[u8]> for Body {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 fn outgoing<'a>(transmit: &noq_proto::Transmit, buffer: &'a [u8]) -> Transmit<'a> {
