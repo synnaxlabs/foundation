@@ -360,8 +360,9 @@ How to read this record:
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
   is the offset modulo the area length. The area is at least twice the largest record
-  less one block, so an empty ring takes any record. A body is at most `u32::MAX`
-  bytes.
+  less one block, so an empty ring takes any record. A ring whose head reaches the
+  end of the offsets is full for good. A body is at most `u32::MAX` bytes and at
+  least the table of one entry.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
@@ -380,9 +381,10 @@ How to read this record:
   The magic, the version, and the place of the CRC are the same in every version, so
   an older build reads a newer block and reports its version. Two blocks at the
   start of the ring hold the last two checkpoints: checkpoint `n` goes to block `n
-  mod 2`. Open takes the whole block with the higher `seq` (on a tie, the first);
-  one torn block leaves the other. No block with the magic: not a ring. Both with
-  the magic and a wrong CRC: the ring is lost. The header with a new tail is durable
+  mod 2`. Open takes the whole block whose `seq` comes after the other's, wrapped
+  as the writer wraps it (on a tie, the first); one torn block leaves the other. No
+  block with the magic: not a ring. Both with the magic and a wrong CRC: the ring is
+  lost. The header with a new tail is durable
   before the writer releases the space, so the header's tail is at or before the
   writer's tail and the records between are whole. The layout comes from the header
   at open; configuration sets it at create, and a changed `body_max` takes effect at
@@ -432,7 +434,13 @@ How to read this record:
   is, and a present series needs its index. A lookup by entry or group is a binary
   search, and a pass in entry order reads each descriptor once. The header holds no
   entry or group count: an entry or group past the key set is absent. A frame is at
-  most `u32::MAX` bytes.
+  most `u32::MAX` bytes. The series bytes are stored and sent as they are (X35), so
+  their order and padding are part of the disk and wire format version (C9d). A change
+  to either needs a new version. The padding is at most 7 bytes for each present
+  series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
+  (measured on #317). `frame::series` reads a body from `(entry, end)` pairs and panics
+  on ends that do not fit. Copy mode runs `frame::check` once where remote records
+  enter (X43). Decided by the coordinator (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -496,12 +504,16 @@ How to read this record:
   gains little, and a broken drift bound would stay wrong for the life of an overlap,
   not for 8 exchanges. Decided by the coordinator (#84). An error that grows past 36500
   days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
-  time as OS CLOCK BOUND says. `Error::Bound` is only for an input error over 36500
-  days. The person decided on 2026-10-05 ("Ok that's fine"), #225. `combine` uses
-  each bound with its full growth, so a bound that grew to "unknown" never cuts a
-  known one. An exchange with an error over 36500 days, or an overlap whose readings
-  allow one before drift, fails with `Bound`: a stopped bound stored as a measurement
-  could miss the true offset. Decided by the `time` builder (#258).
+  time as OS CLOCK BOUND says. An error over 36500 days fails only in a new measurement:
+  `Measurement::new` gives `None`. The person decided on 2026-10-05 ("Ok that's fine"),
+  #225. `combine` uses each bound with its full growth, so a bound that grew to
+  "unknown" never cuts a known one. An exchange with an error over 36500 days fails with
+  `Bound`, and an overlap whose readings allow one before drift gives `None`: a stopped
+  bound stored as a measurement could miss the true offset. Decided by the `time`
+  builder (#258). Each function returns only the errors it can give: one `Error` per
+  module (`exchange`, `overlap`, `combine`), and `Option` where a caller does the same
+  for each cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the
+  coordinator (#272).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -534,10 +546,10 @@ How to read this record:
   edge comes from a mesh stamp before the device acts (a start command or a request),
   from a device counter read between two mesh stamps, or from a latency that the
   hardware guarantees. The overlap gives a bound only when it has both a low edge and a
-  high edge (`Open` before that). Decided by the `time` builder; the person accepted it
-  on 2026-10-05 ('#1 is fine'). The person accepted one-sided readings on 2026-10-05
-  ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper
-  bounds).
+  high edge (`Overlap::at` gives `None` before that). Decided by the `time` builder; the
+  person accepted it on 2026-10-05 ('#1 is fine'). The person accepted one-sided
+  readings on 2026-10-05 ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from
+  read-return upper bounds).
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
   a reader gets no mesh time. After it, when `combine` fails (no majority, or no sources
   after a remove), the clock holds over: it keeps its last estimate and its error grows
@@ -707,7 +719,13 @@ How to read this record:
   `outgoing` is `Error::EmptyIncoming`; both empty is a node that only follows.
   etcd's quorum tables are the oracle for the quorum math
   (`oracles/conformance/raft/quorum/`). A node only in `outgoing` still campaigns, so
-  a leader keeps its lead through its own removal.
+  a leader keeps its lead through its own removal. A configuration travels in the
+  log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
+  term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
+  its log from the time it writes it; `Start.voters` is the configuration before
+  `Start.entries`. A `Voters` entry with an empty `incoming` set, in `Start.entries`
+  or in an `Append`, is `Error::NoVoters`: a group with no voter can never commit or
+  elect.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -1500,7 +1518,7 @@ the oscillator fit move to a layer-1 crate (`estimate`), used by both
 (`stamp::Midpoint`, `stamp::Window`, `stamp::Fit`). Basis: R9-D13, TIME ADAPTERS, the
 SRP PASS layer-1 rule, BQ21 (names).
 Amended (2026-10-05, #143): there is no exchange state machine. The request carries
-`sent` and the peer echoes it, so `estimate::Exchange` is plain data, and
+`sent` and the peer echoes it, so `estimate::exchange::Exchange` is plain data, and
 `Exchange::measure` turns one round trip into a `Measurement`. `clock` sends requests
 on a fixed timer and keeps no state for each one: a late answer is still an exchange,
 and a lost one needs no timeout. The person approved it on 2026-10-05 ("Yeah I
