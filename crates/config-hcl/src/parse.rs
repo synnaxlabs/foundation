@@ -527,7 +527,8 @@ fn attribute(key: Token<'_>, value: Value) -> Attribute {
 fn text(token: Token<'_>) -> Box<str> {
     match token.kind {
         lex::Kind::String(text) => text,
-        _ => token.text.into(),
+        lex::Kind::Identifier => token.text.into(),
+        kind => unreachable!("invariant: a key or a label is not {kind:?}"),
     }
 }
 
@@ -969,8 +970,8 @@ c = "°C # not a comment"
     mod heredocs {
         use super::*;
 
-        const START: &str =
-            "the file needs a marker and a new line to start the heredoc here";
+        const START: &str = "the file needs a marker, such as `EOT`, and a new line to start the \
+             heredoc here";
         const END: &str =
             "the file needs the marker on a line of its own to end the heredoc here";
         /// Checks that `a = ` and then each heredoc reads as its string.
@@ -989,6 +990,7 @@ c = "°C # not a comment"
                 ("<<EOT\nEOT\n", ""),
                 ("<<EOT\n\nEOT\n", "\n"),
                 ("<<EOT\nx\n \t EOT\t \n", "x\n"),
+                ("<<EOT\nx\n\u{a0}\u{b}EOT\u{3000}\n", "x\n"),
                 (
                     "<<EOT\nEOT x\nxEOT\nEOTX\neot\nEOT\n",
                     "EOT x\nxEOT\nEOTX\neot\n",
@@ -1012,6 +1014,8 @@ c = "°C # not a comment"
         fn reads_crlf_line_ends_as_new_lines() {
             reads(&[
                 ("<<EOT\r\nx\r\ny\rz\r\nEOT\r\n", "x\ny\rz\n"),
+                ("<<EOT\r\nx\r\n EOT \r\n", "x\n"),
+                ("<<EOT\nEOT\rx\nEOT\n", "EOT\rx\n"),
                 ("<<-EOT\r\n  a\r\n    b\r\n  EOT\r\n", "a\n  b\n"),
             ]);
             let expected = attributes(vec![("a", string("x\n")), ("b", integer(1))]);
@@ -1024,6 +1028,8 @@ c = "°C # not a comment"
                 ("<<-EOT\n    a\n      b\n    EOT\n", "a\n  b\n"),
                 ("<<-EOT\n\ta\n\t\tb\nEOT\n", "a\n\tb\n"),
                 ("<<-EOT\n \ta\n  b\nEOT\n", "a\nb\n"),
+                ("<<-EOT\n\u{3000}a\n\u{3000}b\nEOT\n", "a\nb\n"),
+                ("<<-EOT\n\u{3000}a\n\u{b} b\nEOT\n", "a\n b\n"),
                 ("<<-EOT\na\n  b\nEOT\n", "a\n  b\n"),
                 ("<<-EOT\n  $${a}\n    b\nEOT\n", "${a}\n  b\n"),
                 ("<<EOT\n  a\n  EOT\n", "  a\n"),
@@ -1035,6 +1041,7 @@ c = "°C # not a comment"
             reads(&[
                 ("<<-EOT\n    a\n\n   \n      b\nEOT\n", "a\n\n   \n  b\n"),
                 ("<<-EOT\n  \n\nEOT\n", "  \n\n"),
+                ("<<-EOT\n  a\n\u{3000}\n  b\nEOT\n", "a\n\u{3000}\nb\n"),
             ]);
         }
 
@@ -1073,7 +1080,7 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn covers_the_opener_to_the_marker() {
+        fn covers_the_opener_to_the_marker_line() {
             let document = ok("a = <<EOT\nx\nEOT\nb = 1\n");
             let a = document.attributes.get("a").unwrap();
             assert_eq!(a.value.span, Some(span(at(4, 0, 4), at(15, 2, 3))));
@@ -1084,6 +1091,10 @@ c = "°C # not a comment"
             let document = ok("a = <<-EOT\n  x\n  EOT\n");
             let a = document.attributes.get("a").unwrap();
             assert_eq!(a.value.span, Some(span(at(4, 0, 4), at(20, 2, 5))));
+
+            let document = ok("a = <<EOT\nx\nEOT \t\r\n");
+            let a = document.attributes.get("a").unwrap();
+            assert_eq!(a.value.span, Some(span(at(4, 0, 4), at(17, 2, 5))));
         }
 
         #[test]
@@ -1112,6 +1123,7 @@ c = "°C # not a comment"
                 ("a = <<EOT\nx\n", at(12, 2, 0)),
                 ("a = <<EOT\nEOTX\nEOT x\n", at(21, 3, 0)),
                 ("a = <<-EOT\n  x\n  eot\n", at(21, 3, 0)),
+                ("a = <<EOT\nx\nEOT\r", at(16, 2, 4)),
             ];
             for (text, end) in cases {
                 let open = syntax(span(at(4, 0, 4), end), Expected::HeredocEnd);
@@ -1197,7 +1209,10 @@ c = "°C # not a comment"
 
         /// Lines with no `{`, so no line starts a template.
         fn lines() -> impl Strategy<Value = Vec<String>> {
-            prop::collection::vec("[ \t]{0,3}[a-z$% \t]{0,5}", 0..6)
+            prop::collection::vec(
+                "[ \t\u{b}\u{3000}]{0,3}[a-z$% \t\u{3000}]{0,5}",
+                0..6,
+            )
         }
 
         /// Writes `a = ` and a heredoc of `lines`, with `indent` before each line
@@ -1205,7 +1220,7 @@ c = "°C # not a comment"
         fn heredoc(opener: &str, lines: &[String], indent: &str) -> String {
             let mut text = format!("a = {opener}EOT\n");
             for line in lines {
-                if !line.trim_start_matches([' ', '\t']).is_empty() {
+                if !line.trim_start_matches(char::is_whitespace).is_empty() {
                     text.push_str(indent);
                 }
                 text.push_str(line);
@@ -1220,9 +1235,9 @@ c = "°C # not a comment"
             #[test]
             fn reads_an_indented_heredoc_as_the_heredoc_it_indents(
                 mut lines in lines(),
-                line in "[a-z$%][a-z$% \t]{0,5}",
+                line in "[a-z$%][a-z$% \t\u{3000}]{0,5}",
                 at in any::<prop::sample::Index>(),
-                indent in "[ \t]{0,4}",
+                indent in "[ \t\u{b}\u{a0}\u{3000}]{0,4}",
             ) {
                 lines.insert(at.index(lines.len().saturating_add(1)), line);
                 let indented = read(Source(0), &heredoc("<<-", &lines, &indent));

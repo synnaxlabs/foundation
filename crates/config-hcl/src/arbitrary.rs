@@ -6,12 +6,17 @@ use document::value::{Call, Float, Kind, Value};
 use document::{Attribute, Block, Document, Label, Map};
 use proptest::prelude::*;
 
+use crate::lex;
+
 fn identifier() -> impl Strategy<Value = String> {
     "[a-z_][a-z0-9_-]{0,6}"
 }
 
 fn text() -> impl Strategy<Value = String> {
-    prop_oneof!["\\PC{0,8}", "[\"\\\\$%{}\n\r\t\u{1}a]{0,8}"]
+    prop_oneof![
+        "\\PC{0,8}",
+        "[\"\\\\$%{}\n\r\t\u{1}\u{b}\u{3000} aEOT]{0,8}"
+    ]
 }
 
 fn name() -> impl Strategy<Value = Kind> {
@@ -178,18 +183,15 @@ fn values(out: &mut String, values: &[Value]) {
 
 fn identifier_text(text: &str) -> bool {
     let mut chars = text.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    chars.next().is_some_and(lex::identifier_start) && chars.all(lex::identifier_part)
 }
 
 /// Writes `text`, which ends in `\n` and has no `\r\n`, as a heredoc and a new line.
 fn heredoc(out: &mut String, text: &str) {
     let mut marker = String::from("EOT");
     while text
-        .lines()
-        .any(|line| line.trim_matches([' ', '\t']) == marker)
+        .split('\n')
+        .any(|line| line.trim_matches(lex::space) == marker)
     {
         marker.push('_');
     }

@@ -49,8 +49,7 @@ pub(crate) enum Kind {
     Other,
     /// The end of the text.
     End,
-    /// A string, heredoc, or comment that does not end, a heredoc with no marker, a
-    /// string escape that HCL does not have, or a template. Reading stops here.
+    /// A problem that stops reading.
     Error(Error),
 }
 
@@ -112,7 +111,7 @@ impl<'a> Tokens<'a> {
         self.skip()?;
         let start = self.at;
         let rest = self.rest;
-        if self.newline() {
+        if self.eat_newline() {
             return Ok(self.token(Kind::Newline, rest, start));
         }
         let Some(c) = self.bump() else {
@@ -298,24 +297,21 @@ impl<'a> Tokens<'a> {
 
     /// Moves past the rest of a word after its first character, `first`.
     fn word(&mut self, first: char) -> Kind {
-        let bytes = self.rest.as_bytes();
-        let part = |b: u8| identifier_part(char::from(b)) || b == b'@';
+        let rest = self.rest;
         // A dot is part of the word unless it starts a splat or an expansion.
         let dot = |i: usize| {
-            let rest = bytes.get(i..).unwrap_or_default();
-            !rest.starts_with(b".*") && !rest.starts_with(b"...")
+            let after = rest.get(i..).unwrap_or_default();
+            !after.starts_with(".*") && !after.starts_with("...")
         };
-        let len = bytes
-            .iter()
-            .enumerate()
-            .position(|(i, &b)| !(part(b) || b == b'.' && dot(i)))
-            .unwrap_or(bytes.len());
-        let reference = first == '@'
-            || bytes
-                .get(..len)
-                .is_some_and(|rest| rest.iter().any(|b| matches!(b, b'.' | b'@')));
+        let len = rest
+            .char_indices()
+            .find(|&(i, c)| !(identifier_part(c) || c == '@' || c == '.' && dot(i)))
+            .map_or(rest.len(), |(i, _)| i);
+        let word = rest
+            .get(..len)
+            .expect("invariant: a word ends on a character boundary");
         self.skip_bytes(len);
-        if reference {
+        if first == '@' || word.contains(['.', '@']) {
             Kind::Reference
         } else {
             Kind::Identifier
@@ -387,31 +383,37 @@ impl<'a> Tokens<'a> {
     fn heredoc(&mut self, start: Position) -> Result<Box<str>, Error> {
         let indented = self.eat('-');
         let marker = self.marker();
-        if marker.is_empty() || !self.newline() {
+        if marker.is_empty() || !self.eat_newline() {
             return Err(Error::Syntax {
                 span: self.span(start),
                 expected: Expected::HeredocStart,
             });
         }
         let mut text = String::new();
-        // Each pass moves past a line or returns.
+        let mut line_start = true;
+        // Each pass moves past a character or returns.
         for _ in 0..=self.rest.len() {
-            if self.rest.is_empty() {
-                return Err(Error::Syntax {
-                    span: self.span(start),
-                    expected: Expected::HeredocEnd,
-                });
-            }
-            let line = self.rest.split('\n').next().unwrap_or_default();
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            if line.trim_matches([' ', '\t']) == marker {
-                self.eat_while(|c| matches!(c, ' ' | '\t'));
-                self.skip_bytes(marker.len());
+            if line_start && self.close(marker) {
                 return Ok(if indented { dedent(&text) } else { text }.into());
             }
-            self.heredoc_line(&mut text)?;
+            let at = self.at;
+            line_start = self.eat_newline();
+            if line_start {
+                text.push('\n');
+                continue;
+            }
+            match self.bump() {
+                None => {
+                    return Err(Error::Syntax {
+                        span: self.span(start),
+                        expected: Expected::HeredocEnd,
+                    });
+                }
+                Some(c @ ('$' | '%')) => self.sigil(c, at, &mut text)?,
+                Some(c) => text.push(c),
+            }
         }
-        unreachable!("invariant: each pass moves past a line")
+        unreachable!("invariant: each pass moves past a character")
     }
 
     /// Moves past an identifier, and returns it, or `""` when none starts here.
@@ -427,35 +429,39 @@ impl<'a> Tokens<'a> {
             .expect("invariant: an identifier ends on a character boundary")
     }
 
-    /// Moves past a `\n` or `\r\n`, and reports whether one was there.
-    fn newline(&mut self) -> bool {
-        let len = if self.rest.starts_with('\n') {
+    /// Moves past the rest of the line when it holds only `marker`, with whitespace
+    /// around it, and reports whether it did.
+    fn close(&mut self, marker: &str) -> bool {
+        let mut end = self.clone();
+        end.eat_while(space);
+        if !end.rest.starts_with(marker) {
+            return false;
+        }
+        end.skip_bytes(marker.len());
+        end.eat_while(space);
+        let closed = end.rest.is_empty() || end.line_end() > 0;
+        if closed {
+            *self = end;
+        }
+        closed
+    }
+
+    /// Returns the length of the line end here: 1 for `\n`, 2 for `\r\n`, else 0.
+    fn line_end(&self) -> usize {
+        if self.rest.starts_with('\n') {
             1
         } else if self.rest.starts_with("\r\n") {
             2
         } else {
             0
-        };
-        self.skip_bytes(len);
-        len > 0
+        }
     }
 
-    /// Reads one line of a heredoc into `text`, with `\n` for its line end.
-    fn heredoc_line(&mut self, text: &mut String) -> Result<(), Error> {
-        // Each pass moves past a character or returns.
-        for _ in 0..=self.rest.len() {
-            let at = self.at;
-            if self.newline() {
-                text.push('\n');
-                return Ok(());
-            }
-            match self.bump() {
-                None => return Ok(()),
-                Some(c @ ('$' | '%')) => self.sigil(c, at, text)?,
-                Some(c) => text.push(c),
-            }
-        }
-        unreachable!("invariant: each pass moves past a character")
+    /// Moves past a `\n` or `\r\n`, and reports whether one was there.
+    fn eat_newline(&mut self) -> bool {
+        let len = self.line_end();
+        self.skip_bytes(len);
+        len > 0
     }
 
     /// Reads an escape after its backslash at `start`.
@@ -497,35 +503,40 @@ impl<'a> Tokens<'a> {
     }
 }
 
-fn identifier_start(c: char) -> bool {
+/// Reports whether `c` can start an identifier.
+pub(crate) fn identifier_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
-fn identifier_part(c: char) -> bool {
+/// Reports whether `c` can follow the first character of an identifier.
+pub(crate) fn identifier_part(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
 }
 
-/// Removes the indent that the lines of `text` that are not blank share. A blank line
-/// holds only spaces and tabs, and stays as written, as in HCL.
+/// Reports whether `c` is whitespace inside a line, as a heredoc counts it: Unicode
+/// whitespace other than `\n` and `\r`.
+pub(crate) fn space(c: char) -> bool {
+    c.is_whitespace() && !matches!(c, '\n' | '\r')
+}
+
+/// Removes the indent, in characters, that the lines of `text` that are not blank
+/// share. A blank line holds only whitespace, and stays as written, as in HCL.
 fn dedent(text: &str) -> String {
-    fn content(line: &str) -> &str {
-        line.trim_start_matches([' ', '\t'])
-    }
-    let blank = |line: &str| content(line) == "\n";
+    let blank = |line: &str| line.trim_start_matches(space) == "\n";
     let shared = text
         .split_inclusive('\n')
         .filter(|line| !blank(line))
-        .map(|line| line.len().saturating_sub(content(line).len()))
+        .map(|line| line.chars().take_while(|&c| space(c)).count())
         .min()
         .unwrap_or(0);
     text.split_inclusive('\n')
         .map(|line| {
             if blank(line) {
-                line
-            } else {
-                line.get(shared..)
-                    .expect("invariant: each line that is not blank has the indent")
+                return line;
             }
+            let mut chars = line.chars();
+            chars.by_ref().take(shared).for_each(drop);
+            chars.as_str()
         })
         .collect()
 }
