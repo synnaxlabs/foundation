@@ -99,8 +99,9 @@ impl Node {
     ///
     /// - Each call takes up to 100 us of true time and takes effect when it ends.
     ///   A file call panics outside the node's threads.
-    /// - A directory takes 4 KiB, and a file its length, until it is removed and no
-    ///   descriptor or call in flight uses it.
+    /// - A directory takes 4 KiB. A file takes its length until it is removed, a
+    ///   `sync_dir` makes the removal durable, and no descriptor or call in flight
+    ///   uses it.
     /// - Where calls in flight at the same time overlap, each 512-byte sector of a
     ///   read gives the old bytes or the bytes of one of the writes, and each sector
     ///   keeps the bytes of one write. A write whose future dropped still ends, with
@@ -114,8 +115,11 @@ impl Node {
     }
 
     /// Makes the next call of `operation` on `path` on the node fail with
-    /// `Error::Io` and code 5 (`EIO`). The call does not touch the disk. Faults on
-    /// one path and operation fire in turn, one per call.
+    /// `Error::Io` and code 5 (`EIO`). Faults on one path and operation fire in
+    /// turn, one per call. The call does not touch the disk, except a sync: each
+    /// sector keeps its durable bytes or the bytes of one write that the sync
+    /// covers. These bytes are then durable, and a read sees them unless a later
+    /// write covers the sector.
     ///
     /// # Panics
     ///

@@ -1217,6 +1217,16 @@ How to read this record:
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
   session under the architecture delegation.
+- **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
+  between runs; a test restarts the node with new threads on the same disk. A `Process`
+  crash keeps each file call that ended. A `Power` crash keeps, for each 512-byte
+  sector, its durable bytes or the bytes of any one write since then, a write in flight
+  too. A `sync` makes durable the writes that ended before it started. A failed `sync`
+  makes each sector keep its durable bytes or those of one such write, at random. A
+  `sync_dir` makes durable the entries at its end. A removed file takes space until the
+  removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
+  thread that a crash ended panics, because no process joins its own threads after it
+  dies. Built by `simulation` in #114.
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
