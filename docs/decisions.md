@@ -348,6 +348,13 @@ How to read this record:
 - **A4 (wire part)** Each connection swaps keys for short numbers.
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
+- **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard. A `Session` goes to
+  one peer and may run each traffic class on a different carrier; callers never see
+  carriers, only `relayed()`. Streams carry whole messages in pool blocks, not bytes.
+  Each stream has a `Class` (`Command`, `Latest`, `Complete`, `CatchUp`) that sets its
+  priority and preferred carrier. A peer is a node key or a `Client` (an SDK, proved
+  by its signed hello above). Callers decide admission and cancel stale latest frames.
+  Decided by `network` under the delivery and wire delegation.
 
 ### 1.8 Consensus, regions, and the spec
 
