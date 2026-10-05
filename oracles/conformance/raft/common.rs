@@ -249,3 +249,99 @@ pub(crate) fn heartbeat(from: u8, to: u8, term: Term) -> Message {
         body: Body::Heartbeat { commit: 0 },
     }
 }
+
+/// A leader's first entry of its term; etcd's noop entry.
+pub(crate) fn noop(term: u64, index: u64) -> Entry {
+    Entry {
+        at: position(term, index),
+        data: Data::Empty,
+    }
+}
+
+/// Elects node 1 with the votes of `others`. The leader's first `Ready` is left for
+/// the caller. etcd's tests call `becomeLeader` and send nothing.
+pub(crate) fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
+    let term = Term(raft.term().0 + 1);
+    raft.campaign();
+    disk.store(raft.ready());
+    for granted in [
+        Body::PreVoteReply { granted: true },
+        Body::VoteReply { granted: true },
+    ] {
+        let vote = granted == Body::VoteReply { granted: true };
+        for &from in others {
+            raft.step(Message {
+                from: key(from),
+                to: key(1),
+                term,
+                body: granted.clone(),
+            })
+            .unwrap();
+        }
+        if !vote {
+            disk.store(raft.ready());
+        }
+    }
+    assert_eq!(raft.role(), Role::Leader);
+}
+
+/// Node 1 at term 1 as the leader of `size` voters, with its first `Ready` left.
+pub(crate) fn leader(size: u8) -> (Raft, Disk) {
+    let voters: Vec<u8> = (1..=size).collect();
+    let others: Vec<u8> = (2..=size / 2 + 1).collect();
+    let (mut raft, mut disk) = start(1, &voters, ELECTION, Hard::default(), vec![], 0);
+    elect(&mut raft, &mut disk, &others);
+    (raft, disk)
+}
+
+/// etcd's `acceptAndReply`: the reply of a follower that took an `Append`.
+pub(crate) fn accept(message: &Message) -> Message {
+    let Body::Append { prev, entries, .. } = &message.body else {
+        panic!("type should be Append");
+    };
+    Message {
+        from: message.to,
+        to: message.from,
+        term: message.term,
+        body: Body::AppendReply {
+            last: prev.index + count(entries.len()),
+        },
+    }
+}
+
+/// Every follower accepts each `Append` until the leader sends none.
+pub(crate) fn accept_all(raft: &mut Raft, disk: &mut Disk) {
+    loop {
+        let messages = disk.store(raft.ready());
+        let appends: Vec<&Message> = messages
+            .iter()
+            .filter(|message| matches!(message.body, Body::Append { .. }))
+            .collect();
+        if appends.is_empty() {
+            return;
+        }
+        for message in appends {
+            raft.step(accept(message)).unwrap();
+        }
+    }
+}
+
+pub(crate) fn reply(from: u8, term: u64, body: Body) -> Message {
+    Message {
+        from: key(from),
+        to: key(1),
+        term: Term(term),
+        body,
+    }
+}
+
+pub(crate) fn position(term: u64, index: u64) -> Position {
+    Position {
+        term: Term(term),
+        index,
+    }
+}
+
+pub(crate) fn set(ids: &[u8]) -> BTreeSet<node::Key> {
+    ids.iter().copied().map(key).collect()
+}

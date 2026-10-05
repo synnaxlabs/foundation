@@ -38,8 +38,10 @@ cargo test -p raft --lib voters
   writes each phase of a change. Here a node uses a configuration from the time it
   writes the entry, and the leader writes the leave on its own, so a change scenario
   sees the joint entry and the leave where etcd sees one entry. A second change while
-  one is pending is `Error::ChangePending`, and an empty voter set is
-  `Error::NoVoters`, where etcd writes an empty entry or panics.
+  one is pending is `Error::ChangePending`, and an empty voter set is `Error::NoVoters`,
+  where etcd writes an empty entry or panics. Only an uncommitted configuration entry
+  blocks a change; etcd also blocks one until the new leader commits an entry of its
+  term.
 
 ## Scenarios
 

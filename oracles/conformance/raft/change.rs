@@ -1,20 +1,12 @@
 //! Membership change scenarios ported from the tests of etcd/raft (Copyright 2015
 //! The etcd Authors, Apache License 2.0, see `LICENSE`). This file is modified from
-//! the etcd source: `README.md` lists each source and the changes. etcd applies a
-//! configuration when the caller applies its entry; here a node uses it from the
-//! time it writes the entry, and the leader writes the leave on its own.
+//! the etcd source: `README.md` lists each source and the changes.
 
-use std::collections::BTreeSet;
+use raft::{Body, Data, Entry, Error, Hard, Role, Voters};
 
-use raft::{Body, Data, Entry, Error, Hard, Message, Role, Term, Voters};
-use types::node;
-
-use crate::common::{ELECTION, at_term, key, start};
-use crate::replication::{accept_all, elect, leader, noop, position};
-
-fn set(ids: &[u8]) -> BTreeSet<node::Key> {
-    ids.iter().copied().map(key).collect()
-}
+use crate::common::{
+    ELECTION, accept_all, at_term, elect, leader, noop, position, reply, set, start,
+};
 
 fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
     Voters {
@@ -30,16 +22,6 @@ fn config(term: u64, index: u64, voters: Voters) -> Entry {
     }
 }
 
-fn reply(from: u8, term: u64, last: u64) -> Message {
-    Message {
-        from: key(from),
-        to: key(1),
-        term: Term(term),
-        body: Body::AppendReply { last },
-    }
-}
-
-/// `TestStepConfig`: a change adds one entry, and the change is pending.
 #[test]
 fn step_config() {
     let (mut raft, mut disk) = leader(2);
@@ -59,8 +41,8 @@ fn step_config() {
     );
 }
 
-/// `TestStepIgnoreConfig`: a second change while the first is uncommitted. etcd
-/// turns it into an empty entry; here it is an error and the log does not change.
+/// etcd turns a second change into an empty entry; here it is an error and the log
+/// does not change.
 #[test]
 fn step_ignore_config() {
     let (mut raft, mut disk) = leader(2);
@@ -78,9 +60,8 @@ fn step_ignore_config() {
     assert_eq!(disk.last(), index);
 }
 
-/// `TestNewLeaderPendingConfig`: etcd blocks a change until the new leader commits
-/// an entry of its term. Here only an uncommitted configuration entry blocks one:
-/// a new leader with a plain entry in its log takes a change at once.
+/// etcd blocks a change until the new leader commits an entry of its term. Here only
+/// an uncommitted configuration entry blocks one.
 #[test]
 fn new_leader_pending_config() {
     for (entries, pending) in [
@@ -97,8 +78,8 @@ fn new_leader_pending_config() {
     }
 }
 
-/// `TestAddNode`: a group of one adds a node. etcd applies the change directly;
-/// here node 2 acknowledges the joint entry and the leave.
+/// etcd applies the change directly; here node 2 acknowledges the joint entry and
+/// the leave.
 #[test]
 fn add_node() {
     let (mut raft, mut disk) = leader(1);
@@ -117,8 +98,6 @@ fn add_node() {
     );
 }
 
-/// `TestAddNodeCheckQuorum`: a node a change adds counts as active until the next
-/// quorum check, so the leader does not step down at once.
 #[test]
 fn add_node_check_quorum() {
     let (mut raft, mut disk) = leader(1);
@@ -135,24 +114,23 @@ fn add_node_check_quorum() {
     assert_eq!(raft.role(), Role::Follower);
 }
 
-/// `TestRemoveNode`: removing a node leaves the voters without it. etcd panics on
-/// removing the last voter; here the proposal is `Error::NoVoters`.
+/// etcd panics on removing the last voter; here the proposal is `Error::NoVoters`.
 #[test]
 fn remove_node() {
     let (mut raft, mut disk) = leader(2);
     disk.store(raft.ready());
     raft.propose_voters(set(&[1])).unwrap();
     disk.store(raft.ready());
-    raft.step(reply(2, 1, 2)).unwrap();
+    raft.step(reply(2, 1, Body::AppendReply { last: 2 }))
+        .unwrap();
     assert_eq!(raft.voters(), &voters(&[1], &[]));
     assert_eq!(disk.store(raft.ready()).len(), 1);
     assert_eq!(disk.committed(), 3);
     assert_eq!(raft.propose_voters(set(&[])), Err(Error::NoVoters));
 }
 
-/// `TestCommitAfterRemoveNode`: a proposal made while a removal is pending commits
-/// once the removal does. etcd commits it after the caller applies the change;
-/// here the leave is in force at once, so both commit in one step.
+/// etcd commits the proposal after the caller applies the change; here the leave is
+/// in force at once, so both commit in one step.
 #[test]
 fn commit_after_remove_node() {
     let (mut raft, mut disk) = leader(2);
@@ -161,7 +139,8 @@ fn commit_after_remove_node() {
     disk.store(raft.ready());
     assert_eq!(disk.committed(), 0);
     raft.propose(b"hello".to_vec()).unwrap();
-    raft.step(reply(2, 1, joint.index)).unwrap();
+    raft.step(reply(2, 1, Body::AppendReply { last: joint.index }))
+        .unwrap();
     disk.store(raft.ready());
     assert_eq!(
         disk.committed,
@@ -180,7 +159,6 @@ fn commit_after_remove_node() {
     assert_eq!(disk.committed(), 5);
 }
 
-/// `TestPromotable`: a node campaigns only when it is one of its own voters.
 #[test]
 fn promotable() {
     for (voters, promotable) in [

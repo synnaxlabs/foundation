@@ -4,7 +4,10 @@
 
 use raft::{Body, Data, Entry, Hard, Message, Position, Raft, Role, Term};
 
-use crate::common::{Disk, ELECTION, Network, at_term, count, key, start};
+use crate::common::{
+    Disk, ELECTION, Network, accept, accept_all, at_term, count, elect, key, leader,
+    noop, position, reply, start,
+};
 
 /// A log with one entry per term in `terms`, from index 1, with no data.
 fn log(terms: &[u64]) -> Vec<Entry> {
@@ -17,90 +20,8 @@ fn log(terms: &[u64]) -> Vec<Entry> {
 
 fn entry(term: u64, index: u64, data: &[u8]) -> Entry {
     Entry {
-        at: Position {
-            term: Term(term),
-            index,
-        },
+        at: position(term, index),
         data: Data::Bytes(data.to_vec()),
-    }
-}
-
-/// A leader's first entry of its term; etcd's noop entry.
-pub(crate) fn noop(term: u64, index: u64) -> Entry {
-    Entry {
-        at: Position {
-            term: Term(term),
-            index,
-        },
-        data: Data::Empty,
-    }
-}
-
-/// Elects node 1 with the votes of `others`. The leader's first `Ready` is left for
-/// the caller. etcd's tests call `becomeLeader` and send nothing.
-pub(crate) fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
-    let term = Term(raft.term().0 + 1);
-    raft.campaign();
-    disk.store(raft.ready());
-    for granted in [
-        Body::PreVoteReply { granted: true },
-        Body::VoteReply { granted: true },
-    ] {
-        let vote = granted == Body::VoteReply { granted: true };
-        for &from in others {
-            raft.step(Message {
-                from: key(from),
-                to: key(1),
-                term,
-                body: granted.clone(),
-            })
-            .unwrap();
-        }
-        if !vote {
-            disk.store(raft.ready());
-        }
-    }
-    assert_eq!(raft.role(), Role::Leader);
-}
-
-/// Node 1 at term 1 as the leader of `size` voters, with its first `Ready` left.
-pub(crate) fn leader(size: u8) -> (Raft, Disk) {
-    let voters: Vec<u8> = (1..=size).collect();
-    let others: Vec<u8> = (2..=size / 2 + 1).collect();
-    let (mut raft, mut disk) = start(1, &voters, ELECTION, Hard::default(), vec![], 0);
-    elect(&mut raft, &mut disk, &others);
-    (raft, disk)
-}
-
-/// etcd's `acceptAndReply`: the reply of a follower that took an `Append`.
-fn accept(message: &Message) -> Message {
-    let Body::Append { prev, entries, .. } = &message.body else {
-        panic!("type should be Append");
-    };
-    Message {
-        from: message.to,
-        to: message.from,
-        term: message.term,
-        body: Body::AppendReply {
-            last: prev.index + count(entries.len()),
-        },
-    }
-}
-
-/// Every follower accepts each `Append` until the leader sends none.
-pub(crate) fn accept_all(raft: &mut Raft, disk: &mut Disk) {
-    loop {
-        let messages = disk.store(raft.ready());
-        let appends: Vec<&Message> = messages
-            .iter()
-            .filter(|message| matches!(message.body, Body::Append { .. }))
-            .collect();
-        if appends.is_empty() {
-            return;
-        }
-        for message in appends {
-            raft.step(accept(message)).unwrap();
-        }
     }
 }
 
@@ -116,15 +37,6 @@ fn commit_noop(raft: &mut Raft, disk: &mut Disk) {
     disk.store(raft.ready());
 }
 
-fn reply(from: u8, term: u64, body: Body) -> Message {
-    Message {
-        from: key(from),
-        to: key(1),
-        term: Term(term),
-        body,
-    }
-}
-
 fn append(term: u64, prev: Position, entries: Vec<Entry>, commit: u64) -> Message {
     reply(
         2,
@@ -135,13 +47,6 @@ fn append(term: u64, prev: Position, entries: Vec<Entry>, commit: u64) -> Messag
             commit,
         },
     )
-}
-
-pub(crate) fn position(term: u64, index: u64) -> Position {
-    Position {
-        term: Term(term),
-        index,
-    }
 }
 
 #[test]
