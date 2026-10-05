@@ -28,8 +28,7 @@ const AREA: u64 = 16 * BLOCK;
 const BODY_MAX: usize = 4087;
 /// The two header blocks come before the area.
 const AREA_START: u64 = 2 * BLOCK;
-const COMMIT_NANOS: i64 = 10_000_000;
-const COMMIT: Span = Span::from_nanos(COMMIT_NANOS);
+const COMMIT: Span = Span::from_nanos(10_000_000);
 const POOL: usize = 1 << 21;
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
@@ -118,8 +117,10 @@ fn to_usize(value: u64) -> usize {
 }
 
 /// `halves` half commit spans.
-fn half_commits(halves: i64) -> Span {
-    Span::from_nanos(COMMIT_NANOS / 2 * halves)
+/// `count` commit spans, where `count` is in halves: `commits(21)` is ten and a
+/// half.
+fn commits(halves: i64) -> Span {
+    Span::from_nanos(COMMIT.nanos() / 2 * halves)
 }
 
 fn layout(area: u64, body_max: usize) -> Layout {
@@ -309,12 +310,12 @@ fn an_idle_buffer_wakes_no_task() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        shard.clock.sleep(half_commits(2000)).await;
+        shard.clock.sleep(commits(2000)).await;
         drop(buffer);
     });
     sim.run_for(COMMIT).expect("the open ends");
     let idle = sim.digest();
-    sim.run_for(half_commits(200)).expect("the buffer idles");
+    sim.run_for(commits(200)).expect("the buffer idles");
     assert_eq!(sim.digest(), idle, "a task ran while the buffer idled");
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
@@ -328,7 +329,7 @@ fn committed_on_an_idle_buffer_resolves_after_one_commit() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        shard.clock.sleep(half_commits(21)).await;
+        shard.clock.sleep(commits(21)).await;
         let before = shard.clock.now();
         buffer.committed().await.expect("commits");
         assert_eq!(shard.clock.now() - before, COMMIT);
@@ -344,7 +345,7 @@ fn the_first_append_after_an_idle_span_commits_after_one_commit() {
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        shard.clock.sleep(half_commits(21)).await;
+        shard.clock.sleep(commits(21)).await;
         let before = shard.clock.now();
         buffer
             .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
@@ -364,10 +365,13 @@ fn a_dropped_idle_buffer_ends_its_task_at_once() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        shard.clock.sleep(half_commits(21)).await;
+        shard.clock.sleep(commits(21)).await;
         assert_eq!(shard.memory.open_files(), 1);
         drop(buffer);
-        shard.clock.sleep(Span::from_nanos(COMMIT_NANOS / 4)).await;
+        shard
+            .clock
+            .sleep(Span::from_nanos(COMMIT.nanos() / 4))
+            .await;
         assert_eq!(shard.memory.open_files(), 0, "the task holds the ring open");
     });
 }
@@ -524,10 +528,7 @@ fn a_drop_ends_the_commit_task() {
             .append(&[entry(1, a, Path::Live, 3, 1, None, &[])])
             .expect("queues");
         drop(buffer);
-        shard
-            .clock
-            .sleep(Span::from_nanos(5 * COMMIT.nanos()))
-            .await;
+        shard.clock.sleep(commits(10)).await;
         assert_eq!(shard.memory.syncs(), 2, "no deadline runs after the drop");
         let mut slots = Slots::new();
         let buffer = shard
@@ -915,4 +916,86 @@ proptest! {
     ) {
         run(seed, Memory::default(), |shard| follow(shard, steps));
     }
+}
+
+#[test]
+fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_once() {
+    run(40, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.clock.sleep(commits(21)).await;
+        buffer
+            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .expect("queues");
+        drop(buffer);
+        shard
+            .clock
+            .sleep(Span::from_nanos(COMMIT.nanos() / 4))
+            .await;
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        shard.clock.sleep(commits(10)).await;
+        assert_eq!(shard.memory.syncs(), 1, "no deadline runs after the drop");
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        assert_eq!(
+            buffer.tail(slots.assign(key(1)), Path::Live),
+            tail(0, None),
+            "the entry queued at the drop was not written"
+        );
+    });
+}
+
+#[test]
+fn a_drop_during_a_commit_ends_the_task_after_the_sync() {
+    run(41, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let sync = Span::from_nanos(4_000_000);
+        shard.memory.slow_syncs(shard.clock.clone(), sync);
+        buffer
+            .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &[])])
+            .expect("queues");
+        shard
+            .clock
+            .sleep(Span::from_nanos(COMMIT.nanos() + sync.nanos() / 2))
+            .await;
+        buffer
+            .append(&[entry(1, a, Path::Live, 1, 1, Some(2), &[])])
+            .expect("queues while the first sync runs");
+        drop(buffer);
+        assert_eq!(
+            shard.memory.open_files(),
+            1,
+            "the task syncs the first entry"
+        );
+        shard.clock.sleep(sync).await;
+        assert_eq!(
+            shard.memory.open_files(),
+            0,
+            "the task ended after the sync"
+        );
+        shard.clock.sleep(commits(10)).await;
+        assert_eq!(shard.memory.syncs(), 2, "no deadline runs after the drop");
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        assert_eq!(
+            buffer.tail(slots.assign(key(1)), Path::Live),
+            tail(1, Some(1)),
+            "the entry queued at the drop was not written"
+        );
+    });
 }
