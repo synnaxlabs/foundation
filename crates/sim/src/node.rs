@@ -95,6 +95,14 @@ impl Node {
         env::net::Net::new(self.0.clone())
     }
 
+    /// The node's serial ports: one at each end of a line that
+    /// [`Sim::line`](crate::Sim::line) joins to the node. A port panics when it
+    /// polls outside the node's threads.
+    #[must_use]
+    pub fn serial(&self) -> env::serial::Serial {
+        env::serial::Serial::new(self.0.clone())
+    }
+
     /// The node's disk: [`Config::disk_bytes`] bytes, with an empty data directory.
     ///
     /// - Each call takes up to 100 us of true time and takes effect when it ends.

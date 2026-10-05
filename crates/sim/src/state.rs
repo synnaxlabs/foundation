@@ -20,6 +20,7 @@ use types::time::{Monotonic, Span, Stamp};
 
 use crate::files::{Call, Files, Held};
 use crate::net::{Bound, Network};
+use crate::serial::{Serial, Side};
 use crate::{link, node, shard};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
@@ -53,8 +54,9 @@ pub(crate) struct State {
     next: u64,
     net: Network,
     files: Files,
-    /// A hash of every pick, every datagram event, and every end of a file call, in
-    /// order.
+    serial: Serial,
+    /// A hash of every pick, every datagram event, every byte arrival, and every end
+    /// of a file call, in order.
     digest: DefaultHasher,
 }
 
@@ -139,6 +141,7 @@ impl State {
             next: 0,
             net,
             files,
+            serial: Serial::default(),
             digest: DefaultHasher::new(),
         }
     }
@@ -334,6 +337,20 @@ impl State {
         &mut self.files
     }
 
+    pub(crate) fn serial(&mut self) -> &mut Serial {
+        &mut self.serial
+    }
+
+    /// Sends from `bytes` on `side` now, as [`Serial::write`].
+    pub(crate) fn write(
+        &mut self,
+        side: Side,
+        waker: Waker,
+        bytes: &[u8],
+    ) -> (Poll<usize>, Option<Waker>) {
+        self.serial.write(self.now, side, waker, bytes)
+    }
+
     pub(crate) fn digest(&self) -> u64 {
         self.digest.finish()
     }
@@ -391,6 +408,7 @@ impl State {
         let at = timer
             .into_iter()
             .chain(self.net.first())
+            .chain(self.serial.first())
             .chain(self.files.first())
             .chain(pauses)
             .filter(|&at| at <= last)
@@ -460,11 +478,11 @@ impl State {
         tasks
     }
 
-    /// Moves true time to `at`, delivers the datagrams that arrive by then, and ends
-    /// the file calls due by then. Returns the wakers of the timers due, of the
-    /// sockets that receive, and of the file calls that end, and the blocks of the
-    /// file calls whose futures dropped, for the caller to drop after it releases
-    /// the lock.
+    /// Moves true time to `at`, delivers the datagrams and bytes that arrive by then,
+    /// and ends the file calls due by then. Returns the wakers of the timers due, of
+    /// the sockets and ports that the arrivals wake, and of the file calls that end,
+    /// and the blocks of the file calls whose futures dropped, for the caller to drop
+    /// after it releases the lock.
     pub(crate) fn advance(&mut self, at: Monotonic) -> (Vec<Waker>, Vec<Held>) {
         self.now = at;
         let mut wakers = Vec::new();
@@ -475,6 +493,7 @@ impl State {
             wakers.push(timer.remove());
         }
         wakers.extend(self.net.deliver(at, &mut self.digest));
+        wakers.extend(self.serial.deliver(at, &mut self.digest));
         let (ended, orphans) = self.files.end(at, &mut self.digest);
         wakers.extend(ended);
         (wakers, orphans)

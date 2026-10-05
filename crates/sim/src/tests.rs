@@ -4,6 +4,7 @@ mod chance;
 mod crash;
 mod files;
 mod net;
+mod serial;
 mod shards;
 
 use std::collections::BTreeSet;
