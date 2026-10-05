@@ -160,7 +160,7 @@ impl Endpoint {
             if let Some(transmit) =
                 connection.inner.poll_transmit(now, datagrams_max, buffer)
             {
-                self.drive(ConnectionHandle(key.slot));
+                self.drive(key.handle);
                 return Some(outgoing(&transmit, buffer));
             }
         }
@@ -181,8 +181,8 @@ impl Endpoint {
     /// timeout.
     pub(crate) fn timeout(&mut self, now: Monotonic) {
         let now = self.instant(now);
-        for slot in 0..self.connections.len() {
-            let Some(connection) = &mut self.connections[slot] else {
+        for handle in (0..self.connections.len()).map(ConnectionHandle) {
+            let Some(connection) = &mut self.connections[handle.0] else {
                 continue;
             };
             if connection
@@ -191,7 +191,7 @@ impl Endpoint {
                 .is_some_and(|deadline| deadline <= now)
             {
                 connection.inner.handle_timeout(now);
-                self.drive(ConnectionHandle(slot));
+                self.drive(handle);
             }
         }
     }
@@ -206,7 +206,7 @@ impl Endpoint {
         };
         let closed = connection.close(now, code);
         self.events.extend(closed);
-        self.drive(ConnectionHandle(key.slot));
+        self.drive(key.handle);
     }
 
     /// The next event, in the order they happened.
@@ -221,7 +221,7 @@ impl Endpoint {
     /// When the connection ended and drained.
     #[cfg(test)]
     fn connection(&mut self, key: connection::Key) -> &mut noq_proto::Connection {
-        self.drive(ConnectionHandle(key.slot));
+        self.drive(key.handle);
         &mut self.get(key).expect("a connection").inner
     }
 
@@ -230,7 +230,7 @@ impl Endpoint {
     }
 
     fn get(&mut self, key: connection::Key) -> Option<&mut Connection> {
-        let connection = self.connections.get_mut(key.slot)?.as_mut()?;
+        let connection = self.connections.get_mut(key.handle.0)?.as_mut()?;
         (connection.key == key).then_some(connection)
     }
 
@@ -240,19 +240,19 @@ impl Endpoint {
         connection: impl FnOnce(connection::Key) -> Connection,
     ) -> connection::Key {
         let key = connection::Key {
-            slot: handle.0,
+            handle,
             serial: self.serial,
         };
         self.serial += 1;
         if self.connections.len() <= handle.0 {
             self.connections.resize_with(handle.0 + 1, || None);
         }
-        let slot = &mut self.connections[handle.0];
+        let entry = &mut self.connections[handle.0];
         assert!(
-            slot.is_none(),
+            entry.is_none(),
             "invariant: noq-proto reuses a drained handle"
         );
-        *slot = Some(connection(key));
+        *entry = Some(connection(key));
         key
     }
 
@@ -293,38 +293,17 @@ impl Endpoint {
         }
     }
 
-    /// Moves the events of `handle`'s connection to noq-proto's endpoint and to the
-    /// caller. Frees the connection once it drained, and else queues it for
-    /// [`Endpoint::transmit`]: each call that can give it a datagram to send ends
+    /// Drives `handle`'s connection. Frees it once it drained, and else queues it
+    /// for [`Endpoint::transmit`]: each call that can give it a datagram to send ends
     /// here.
     fn drive(&mut self, handle: ConnectionHandle) {
-        let Self {
-            connections,
-            inner: endpoint,
-            ready,
-            events,
-            ..
-        } = self;
-        let slot = &mut connections[handle.0];
-        let connection = slot.as_mut().expect("invariant: a live handle");
-        let mut drained = false;
-        loop {
-            if let Some(event) = connection.inner.poll_endpoint_events() {
-                drained |= event.is_drained();
-                if let Some(event) = endpoint.handle_event(handle, event) {
-                    connection.inner.handle_event(event);
-                }
-            } else if let Some(event) = connection.inner.poll() {
-                events.extend(connection.event(event));
-            } else {
-                break;
-            }
-        }
-        if drained {
-            *slot = None;
+        let entry = &mut self.connections[handle.0];
+        let connection = entry.as_mut().expect("invariant: a live handle");
+        if connection.drive(&mut self.inner, &mut self.events) {
+            *entry = None;
         } else if !connection.queued {
             connection.queued = true;
-            ready.push_back(connection.key);
+            self.ready.push_back(connection.key);
         }
     }
 }
@@ -496,7 +475,7 @@ mod tests {
         }
 
         #[test]
-        fn frees_the_slot_for_a_new_key_that_the_old_key_cannot_close() {
+        fn frees_the_handle_for_a_new_key_that_the_old_key_cannot_close() {
             testing::run(1, |shard| {
                 let mut pair = dial(shard, server());
                 let old = pair.client.key.expect("a key");
@@ -504,7 +483,7 @@ mod tests {
                 pair.run(Duration::from_secs(3));
                 pair.dial(server());
                 let new = pair.client.key.expect("a key");
-                assert_eq!((new.slot, new == old), (old.slot, false));
+                assert_eq!((new.handle, new == old), (old.handle, false));
                 pair.client.endpoint.close(pair.now(), old, Code(8));
                 pair.run(Duration::from_millis(100));
                 let peer = Peer::Node(server());

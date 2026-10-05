@@ -1,12 +1,13 @@
 //! One connection of an [`Endpoint`](super::Endpoint), and what its events mean to
 //! the caller.
 
+use std::collections::VecDeque;
 use std::mem;
 use std::time::Instant;
 
 use bytes::Bytes;
 use noq_proto::crypto::rustls::HandshakeData;
-use noq_proto::{ConnectionError, VarInt};
+use noq_proto::{ConnectionError, ConnectionHandle, VarInt};
 use rustls::pki_types::CertificateDer;
 use types::node::PublicKey;
 
@@ -15,10 +16,10 @@ use crate::{Code, Error, Peer, tls};
 
 /// Names one connection of an [`Endpoint`](super::Endpoint). No other connection of
 /// that endpoint gets the same key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Key {
-    /// The connection's slot, which is noq-proto's handle.
-    pub(super) slot: usize,
+    /// noq-proto's handle, which it gives to a new connection after this one drains.
+    pub(super) handle: ConnectionHandle,
     /// How many connections the endpoint made before this one.
     pub(super) serial: u64,
 }
@@ -67,8 +68,35 @@ impl Connection {
         }
     }
 
+    /// Moves the connection's events to `endpoint` and to `events`. Returns whether
+    /// it drained: `endpoint` forgot it, and nothing more happens to it.
+    pub(super) fn drive(
+        &mut self,
+        endpoint: &mut noq_proto::Endpoint,
+        events: &mut VecDeque<Event>,
+    ) -> bool {
+        let mut drained = false;
+        loop {
+            if let Some(event) = self.inner.poll_endpoint_events() {
+                drained |= event.is_drained();
+                if let Some(event) = endpoint.handle_event(self.key.handle, event) {
+                    self.inner.handle_event(event);
+                }
+            } else if let Some(event) = self.inner.poll() {
+                events.extend(self.event(event));
+            } else {
+                break;
+            }
+        }
+        assert!(
+            !drained || matches!(self.state, State::Ended),
+            "invariant: noq-proto ends a connection before it drains"
+        );
+        drained
+    }
+
     /// What `event` means to the caller, if anything.
-    pub(super) fn event(&mut self, event: noq_proto::Event) -> Option<Event> {
+    fn event(&mut self, event: noq_proto::Event) -> Option<Event> {
         let key = self.key;
         match event {
             noq_proto::Event::Connected => {
