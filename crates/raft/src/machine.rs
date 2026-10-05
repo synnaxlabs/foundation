@@ -72,8 +72,8 @@ pub struct Raft {
     // `Start.voters`: in force while no entry in the log holds a configuration.
     base: Voters,
     voters: Voters,
-    // The voters in force, plus the nodes a change removed until `release_removed`
-    // drops them.
+    // The voters in force, plus the nodes that the configuration in force removed,
+    // until a release, a quorum check, or the next configuration drops them.
     peers: BTreeMap<node::Key, Peer>,
     election_ticks: u64,
     heartbeat_ticks: u64,
@@ -589,6 +589,9 @@ impl Raft {
         }
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
+        // A removed node that is still a peer is released here, so the leave of
+        // each one is the configuration in force.
+        self.peers.retain(|&key, _| old.contains(key));
         for key in self.voters.peers() {
             let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
             // A node a change adds counts as heard until the next quorum check, even
@@ -618,9 +621,11 @@ impl Raft {
     }
 
     // Sends each follower in `range` the entries from its `next` and the commit
-    // index, unless the leader waits for its reply.
+    // index, unless the leader waits for its reply. A node that a change removed
+    // gets entries only up to its leave.
     fn send_appends<R: RangeBounds<node::Key>>(&mut self, range: R) {
         let commit = self.log.committed();
+        let leave = self.log.voters().map_or(0, |(at, _)| at.index);
         for (&to, peer) in self.peers.range_mut(range) {
             if to == self.key || peer.progress.paused() {
                 continue;
@@ -630,7 +635,13 @@ impl Raft {
                 .log
                 .at(next - 1)
                 .expect("invariant: a follower's next entry follows the leader's log");
-            let entries = self.log.slice(next, BATCH);
+            let end = if self.voters.contains(to) {
+                self.log.last().index
+            } else {
+                leave
+            };
+            let room = usize::try_from((end + 1).saturating_sub(next)).unwrap_or(BATCH);
+            let entries = self.log.slice(next, room.min(BATCH));
             let last = entries.last().map_or(prev.index, |entry| entry.at.index);
             peer.progress.sent(last);
             self.outbox.push(Message {
@@ -2501,6 +2512,74 @@ mod tests {
             assert_eq!(to_3, [&Body::Heartbeat { commit: 3 }]);
             raft.tick(0);
             assert_eq!(to(&raft.ready().messages), [key(2), key(4)]);
+        }
+
+        // The indexes of the entries in each `Append` to node 3.
+        fn appended_to_3(raft: &mut Raft) -> Vec<u64> {
+            sent(raft)
+                .into_iter()
+                .filter(|m| m.to == key(3))
+                .filter_map(|m| {
+                    let Body::Append { entries, .. } = m.body else {
+                        return None;
+                    };
+                    Some(entries)
+                })
+                .flatten()
+                .map(|entry| entry.at.index)
+                .collect()
+        }
+
+        // Node 3 lags when the change removes it, and its answers to appends are
+        // lost. Whether it answers each heartbeat or nothing, the leader sends it no
+        // entry past the leave at index 3.
+        #[test]
+        fn a_leader_sends_a_removed_node_no_entry_past_the_leave() {
+            for answers in [true, false] {
+                let mut raft = leader();
+                raft.propose_voters(set(&[1, 2])).unwrap();
+                accept(&mut raft, &[2], 2);
+                accept(&mut raft, &[2], 3);
+                assert_eq!(raft.voters(), &voters(&[1, 2], &[]));
+                let mut past = Vec::new();
+                for round in 0..30_u8 {
+                    let at = raft.propose(vec![round]).unwrap();
+                    accept(&mut raft, &[2], at.index);
+                    raft.tick(0);
+                    if answers {
+                        raft.step(message(3, 1, Body::HeartbeatReply)).unwrap();
+                    }
+                    past.extend(
+                        appended_to_3(&mut raft).into_iter().filter(|&i| i > 3),
+                    );
+                }
+                assert_eq!(raft.role(), Role::Leader);
+                assert_eq!(past, Vec::<u64>::new(), "answers: {answers}");
+            }
+        }
+
+        // Node 3 lags and answers each heartbeat, so it is still a peer when the
+        // next change comes into force. That change releases it: node 3 gets
+        // nothing more.
+        #[test]
+        fn the_next_change_releases_a_removed_node_that_is_still_a_peer() {
+            let mut raft = leader();
+            raft.propose_voters(set(&[1, 2])).unwrap();
+            accept(&mut raft, &[2], 2);
+            accept(&mut raft, &[2], 3);
+            raft.step(message(3, 1, Body::HeartbeatReply)).unwrap();
+            sent(&mut raft);
+            raft.propose_voters(set(&[1, 2, 4])).unwrap();
+            let mut to_3 = Vec::new();
+            for _ in 0..30 {
+                raft.tick(0);
+                for from in [2, 3, 4] {
+                    raft.step(message(from, 1, Body::HeartbeatReply)).unwrap();
+                }
+                to_3.extend(sent(&mut raft).into_iter().filter(|m| m.to == key(3)));
+            }
+            assert_eq!(raft.role(), Role::Leader);
+            assert_eq!(to_3, []);
         }
 
         // Node 3 missed its release, so it campaigns. The leader sends it nothing:
