@@ -10,7 +10,7 @@ const WRITE_COIL: u8 = 5;
 const WRITE_REGISTER: u8 = 6;
 const WRITE_COILS: u8 = 15;
 const WRITE_REGISTERS: u8 = 16;
-const EXCEPTION: u8 = 0x80;
+pub(crate) const EXCEPTION: u8 = 0x80;
 
 const MAX_READ_BITS: u16 = 2000;
 const MAX_READ_REGISTERS: u16 = 125;
@@ -167,7 +167,6 @@ impl Request {
         } else {
             MAX_WRITE_REGISTERS
         };
-        check(start, usize::from(count), max)?;
         let want = data_bytes(coils, usize::from(count));
         if usize::from(*bytes) != want {
             return Err(Error::ByteCount {
@@ -181,7 +180,7 @@ impl Request {
                 got: pdu.len(),
             });
         }
-        Ok(if coils {
+        let request = if coils {
             Self::WriteCoils {
                 start,
                 values: Bits::new(data, count)?.iter().collect(),
@@ -191,7 +190,10 @@ impl Request {
                 start,
                 values: Registers(data).iter().collect(),
             }
-        })
+        };
+        // The specification checks every value before the range.
+        check(start, usize::from(count), max)?;
+        Ok(request)
     }
 
     /// Reads the device's reply PDU to this request, in place. The request is one
@@ -459,7 +461,7 @@ fn check(start: u16, count: usize, max: u16) -> Result<(), Error> {
 }
 
 /// The bytes that `count` bits or registers take in a PDU.
-fn data_bytes(bits: bool, count: usize) -> usize {
+pub(crate) fn data_bytes(bits: bool, count: usize) -> usize {
     if bits {
         count.div_ceil(8)
     } else {
@@ -469,25 +471,25 @@ fn data_bytes(bits: bool, count: usize) -> usize {
 
 /// The count field for `values`. It saturates for a list that no check accepts,
 /// so such a request's echo never matches.
-fn count<T>(values: &[T]) -> u16 {
+pub(crate) fn count<T>(values: &[T]) -> u16 {
     u16::try_from(values.len()).unwrap_or(u16::MAX)
 }
 
-fn byte_count(n: usize) -> u8 {
+pub(crate) fn byte_count(n: usize) -> u8 {
     u8::try_from(n).expect("invariant: a checked count fits a byte count")
 }
 
-fn coil(value: bool) -> u16 {
+pub(crate) fn coil(value: bool) -> u16 {
     if value { ON } else { 0 }
 }
 
-fn pack(bits: &[bool]) -> u8 {
+pub(crate) fn pack(bits: &[bool]) -> u8 {
     bits.iter()
         .rev()
         .fold(0, |byte, &bit| byte << 1 | u8::from(bit))
 }
 
-fn put(out: &mut Vec<u8>, fields: [u16; 2]) {
+pub(crate) fn put(out: &mut Vec<u8>, fields: [u16; 2]) {
     for field in fields {
         out.extend_from_slice(&field.to_be_bytes());
     }
