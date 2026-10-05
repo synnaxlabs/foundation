@@ -256,13 +256,15 @@ How to read this record:
   refused one; frames from catch-up spend credit too. A frame costs its charge,
   `Frame::charge`: the bytes a block of the frame's length takes from a pool. That is
   `block`'s header plus the whole frame (M3), rounded up to its size class, so a frame
-  just past a class costs about twice its length, and a frame with only empty series
-  still costs its headers. The charge depends only on the frame's length, so the home
-  and the `hub` compute the same charge for the same frame. A remote complete reader
-  gets only the series of its view (M2): the home sends a frame of those series, and
-  both ends charge that frame. The person chose this on 2026-10-05 ("B is approved ...
-  send only partial frames"), #267. The charge is part of the wire contract: a change to
-  `block`'s header or size classes needs a new wire version (C9d). The window counts
+  costs its length plus the header and at most 64 bytes or a quarter of its length
+  more, and a frame with only empty series still costs its headers. The charge depends
+  only on the frame's length, so the home and the `hub` compute the same charge for
+  the same frame. A remote complete reader gets only the series of its view (M2): the
+  home sends a frame of those series, and both ends charge that frame. The person
+  chose this on 2026-10-05 ("B is approved ... send only partial frames"), #267. The
+  charge is part of the wire contract: a change to `block`'s header or size classes
+  needs a new wire version (C9d). The classes changed to four per doubling under wire
+  version 1 (#188), because no release carries that version. The window counts
   charges, not wire bytes. Per-connection framing in `wire` (X35) pins no pool memory
   and does not count. Credits apply only to complete delivery, which is reliable: a lost
   frame would leak credit. The `hub` raises the limit only after it releases a frame,
@@ -708,6 +710,18 @@ How to read this record:
   is a node key or a `Client` (an SDK, proved by its signed hello above). Callers admit
   peers, dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on
   SIM NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
+- **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
+  class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
+  `CatchUp`. The byte goes with the first message, so a stream reaches the peer with
+  its first message. A stream that ends or resets before its class byte drops: the
+  peer never accepts it, and resets the reply half of a two-way stream with code 0.
+  Each message is a QUIC varint length, then that many bytes, at most
+  `message_bytes_max`. A node accepts the waiting streams highest class first. A node
+  resets a stream with the stop's code when the stop arrives. A peer breaks the
+  protocol when it sends another class byte, ends a stream inside a message, sends a
+  message over the limit, or resets or stops a stream with a code over 32 bits. The
+  node then closes the connection with application code 2^32 and the reason as text,
+  and the caller gets `Error::Broken`. Proposed by `network` in #55.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -953,6 +967,15 @@ How to read this record:
   calc align) and compositions (polled, clocked, pushed, cyclic, out, calc). The
   kind's `&self` holds process-lifetime parts that `node` injects; `ctx` holds one
   run's capabilities. Group-based parts need revision (X5).
+- **ENDPOINT REGISTRY** `endpoint::Registry<K, S, T>` keeps at most one open
+  endpoint per key on a node. `acquire(key, settings, open)` shares the open endpoint,
+  or calls `open` when none is open. Opens and closes of one key run one at a time;
+  other keys do not wait. Unequal settings on an open key give `Error::Config`
+  (`connector.endpoint-settings`). The endpoint closes when the last `Lease` drops.
+  `node` makes one registry per kind that needs it. A FIFO lock (`endpoint::Shared`)
+  composes as `T` later. A `Lease` is not `Clone`, and the close runs after the
+  registry's lock is released. Decided by the `connector` builder in the plan on #422,
+  after `/eb-review`; approved by the coordinator (#422).
 - **PACE (2026-10-05)** `pace::Timer` ticks on a grid of deadlines at `start + n /
   rate`, from a `types::time::Rate`, and skips and counts the ticks a stall missed.
   It has one async `tick(&cancel::Token)`, with no blocking wait and no sleep, hybrid,
@@ -1061,8 +1084,18 @@ How to read this record:
   connectors, policies, and access. Most specific pattern wins; equal specificity is a
   plan error; `explain` shows each effective value and its source. A rename can move a
   channel under other policies, and `plan` shows it. Current policy kinds: retention,
-  placement, transmission, compression, reduction, time, access, and secret store.
-  Targets and combination rules: X25, X26. Specificity: SPECIFICITY (#3).
+  placement, transmission, compression, reduction, time, access, secret store, and node
+  settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
+  SPECIFICITY (#3).
+- **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
+  that selects node names: `node_settings { select = "site-a/*" disk = "200 GiB" }`.
+  A node that no policy selects computes a default from its free disk and memory at
+  start, so a mesh with no policy works. Before it reads the spec, a node uses the last
+  budget it applied, which it keeps in its data directory; the first start uses the
+  default. The data directory is node-local: a start argument of `foundation`, with a
+  default, because the spec is stored in it. Node-local config for the budgets lost:
+  `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
+  decided on 2026-10-05 ("Yeah mesh node"), #342.
 
 ### 1.12 Access, identity, and secrets
 
@@ -1309,10 +1342,12 @@ How to read this record:
   pages back on a timer that the shard owns (#2).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
-  `{ header, start: u32, len: u32 }`, 16 bytes, so a pool has at most 26 size classes
-  and the largest block holds 2 GiB; a budget above that gives more blocks, not larger
-  ones. `slice(&self, range)` lost: it clones the count for every view, and nothing
-  needs a range yet. Decided by `memory`.
+  `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
+  budget above that gives more blocks, not larger ones. A pool has at most 96 size
+  classes, four per doubling, so a payload is at most 64 bytes or a quarter above its
+  length (#188; 26 power-of-two classes wasted up to 100%). `slice(&self, range)`
+  lost: it clones the count for every view, and nothing needs a range yet. Decided
+  by `memory`.
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
@@ -1337,7 +1372,10 @@ How to read this record:
   is an ordinary operation, rolling one node at a time; nodes fetch the signed binary by
   hash from a nearby peer. Each wire and disk format has one integer version; a node
   reads its own and the previous one; new formats turn on only after every node runs the
-  release. Compatibility is owed only to stable releases.
+  release. Compatibility is owed only to stable releases. Until the first stable
+  release, each wire and disk format stays at version 1, and a breaking change does not
+  add a version. The person decided on 2026-10-05 ("keep version 1. we should only make
+  breaking changes until we release v1"), #374.
 - **BQ18** The desired version is in the spec. Nodes report versions with lease
   renewals. A rollout lock upgrades one node at a time. Finalize when all report.
   Multi-region scope: 5.1.
@@ -1513,7 +1551,7 @@ Storage classes used in the table:
 | Mesh clock state | Memory per node; published as `<node>.clock.offset` and `.clock.error` | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
 | Operation table | Binary | The build | CLI, MCP, embedded docs | `ops` |
 | Node key material | Node-local disk | `node` at join | `transport`, `node` | `node` |
-| Per-node settings (disk budget, pool budget, data directory) | Open (5.1) | | `buffer`, `block` | Open |
+| Per-node settings (disk budget, pool budget, data directory) | Budgets: a policy in the spec; data directory: a start argument (NODE SETTINGS) | `apply`; whoever starts the node | `buffer`, `block` | `node` |
 | SDK guide, JSON schemas for editors | Generated from kinds and the operation table | `ops`, `init` | Agents, editors | `ops` |
 
 ---
@@ -2112,18 +2150,16 @@ Parameters and later choices, recorded and not asked:
 
 4. Struct template storage: whether the spec stores templates and instance records for
    SDK code generation and `export`.
-5. Per-node settings (disk budget, pool budget, data directory): node-local config or a
-   policy that selects node names.
-6. The transmission policy target: links, indexes, or both (B6).
-7. Upgrades across regions: which region holds the desired version and the format
+5. The transmission policy target: links, indexes, or both (B6).
+6. Upgrades across regions: which region holds the desired version and the format
    flag, and how finalization waits for every region (BQ18, C9d).
-8. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
+7. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
    path.
-9. A20: whether a channel may carry a default max age.
-10. A3: partial-segment wildcards.
-11. A13: bounded lists.
-12. D3: license, free tier, monetization.
-13. D5: a plugin system.
+8. A20: whether a channel may carry a default max age.
+9. A3: partial-segment wildcards.
+10. A13: bounded lists.
+11. D3: license, free tier, monetization.
+12. D5: a plugin system.
 
 ### 5.2 Settled under a delegation
 
