@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use types::time::Span;
 
 use super::{shard, sim};
-use crate::{Error, node};
+use crate::{Error, node, shard::Fault};
 
 #[test]
 fn run_on_gives_the_value_of_the_body() {
@@ -83,4 +83,23 @@ fn a_body_that_waits_forever_is_stuck() {
 fn run_on_a_node_of_another_run_panics() {
     let node = sim(0).node(node::Config::default());
     drop(sim(0).run_on(&node, |_, _| async {}));
+}
+
+#[test]
+fn a_shard_fault_never_reaches_the_shard_of_run_on() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    node.fail_shard(0, Fault::Start);
+    assert_eq!(sim.run_on(&node, |_, _| async { 1 }), Ok(1));
+    let pinned = env::shards::Config {
+        name: "pinned".into(),
+        core: Some(0),
+    };
+    let e = node.shards().start(pinned, |_| async {}).err();
+    let reason = "injected".into();
+    let start = env::thread::Error::Start {
+        name: "pinned".into(),
+        reason,
+    };
+    assert_eq!(e, Some(start));
 }

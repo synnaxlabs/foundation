@@ -70,7 +70,7 @@ impl Default for Config {
 
 /// A deterministic run of one or more nodes on the calling thread. Make nodes with
 /// [`Sim::node`], start their shards and threads through the `env` handles, then
-/// drive the run with [`Sim::run`] or [`Sim::run_for`].
+/// drive the run with [`Sim::run`], [`Sim::run_for`], or [`Sim::run_on`].
 ///
 /// ```
 /// use types::time::{Monotonic, Span};
@@ -188,9 +188,10 @@ impl Sim {
         self.drive(None)
     }
 
-    /// Starts a shard named `run_on` on `node` that runs `body`, runs until every
-    /// thread of every node has ended, and returns what `body` gave. `body` gets the
-    /// node and the shard's tasks.
+    /// Starts a shard named `run_on`, with no core, on `node` that runs `body`, runs
+    /// until every thread of every node has ended, and returns what `body` gave.
+    /// `body` gets the node and the shard's tasks. Every call names its shard
+    /// `run_on`.
     ///
     /// ```
     /// let mut sim = sim::Sim::new(sim::Config::default());
