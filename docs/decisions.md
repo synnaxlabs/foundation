@@ -616,11 +616,23 @@ How to read this record:
   only delays the next round trip. A candidate counts its own vote at once because
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
   enters only through `tick`: a node draws its election timeout on the first tick
-  after a reset. PreVote and CheckQuorum have no off switch. Until replication lands,
-  a new leader announces itself with a heartbeat. A node that is not in its own voter
-  list votes and follows, but never campaigns. `step` does not check that a sender is
-  a voter (a voter can learn late that a peer joined), so the caller authenticates
-  the sender and decides which nodes may send.
+  after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
+  its own voter list votes and follows, but never campaigns. `step` does not check
+  that a sender is a voter (a voter can learn late that a peer joined), so the caller
+  authenticates the sender and decides which nodes may send.
+- **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
+  or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
+  empty entry of its term first, so it can commit what came before. It replicates with
+  `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
+  (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
+  (its hint for the next `prev`). A malformed `Append` (entries that do not follow
+  `prev`) is `Error::EntryOutOfOrder`. `Body::Heartbeat { commit }` carries the commit
+  index, capped at what that follower is known to hold. A leader commits an index only
+  when a quorum holds it and its entry is of the leader's own term. A follower commits
+  no further than the last entry the leader sent it. `Ready.committed` gives each entry
+  once, after it is written. Batch size (64 entries) and the number of appends in flight
+  per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
+  `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
