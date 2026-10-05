@@ -542,8 +542,13 @@ How to read this record:
   half of the bounds that vote. This reads C6's "follows the smallest measured bound":
   when sources agree, the result is never wider than the narrowest. The result holds the
   true offset when the bounds that hold it are a majority of the bounds that vote, and
-  every other bound that votes misses them. Decided by the `time` builder (#49). A
-  device's readings go to the oscillator fit (`Overlap`), never to `combine`. Node
+  every other bound that votes misses them. Decided by the `time` builder (#49). Each
+  source votes: a source with no measurement agrees with no offset, and it votes beside
+  the known bounds, or beside the unknown bounds when no bound is known. So before its
+  first estimate a clock waits until more than half of its sources agree, and one
+  source that answers first cannot set mesh time. The person decided on 2026-10-05
+  ("clock question si approved at whatever path you think"), #488. A device's readings
+  go to the oscillator fit (`Overlap`), never to `combine`. Node
   sources keep `Filter`, not `Overlap`: a network exchange puts the true offset at about
   the same place in each bracket, so an overlap gains little, and a broken drift bound
   would stay wrong for the life of an overlap, not for 8 exchanges. Decided by the
