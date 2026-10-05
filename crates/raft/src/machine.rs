@@ -940,12 +940,13 @@ mod tests {
 
         fn ticks_to_campaign(random: u64) -> u32 {
             let mut raft = raft(&[1, 2, 3], Hard::default());
-            let mut ticks = 0;
-            while raft.role() == Role::Follower {
+            for ticks in 1..=20 {
                 raft.tick(random);
-                ticks += 1;
+                if raft.role() != Role::Follower {
+                    return ticks;
+                }
             }
-            ticks
+            panic!("no campaign in 20 ticks");
         }
 
         #[test]
