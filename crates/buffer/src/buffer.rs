@@ -291,7 +291,6 @@ impl Buffer {
         let mut tails = Tails::default();
         loop {
             let Window { place, len } = cursor.window();
-            let len = usize::try_from(len).expect("invariant: a window fits in memory");
             let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
             let offset = cursor.offset();
             match cursor.next(&bytes)? {

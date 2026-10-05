@@ -15,18 +15,17 @@
 
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
-use crate::record::{self, ALIGN, BLOCK, Body, HEADER_LEN, Head, Kind};
-use crate::{crc32c, entry};
+use crate::entry;
+use crate::record::{self, ALIGN, BLOCK, Body, Check, HEADER_LEN, Head, Kind, Record};
 
 /// The body of a restart record: one chain value.
 const RESTART_LEN: usize = 4;
 
+/// Bytes of the whole blocks that hold a record header and the largest entry table.
+const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
+
 fn to_u64(len: usize) -> u64 {
     u64::try_from(len).expect("invariant: a length in memory fits in u64")
-}
-
-fn to_usize(len: u64) -> usize {
-    usize::try_from(len).expect("invariant: a window fits in memory")
 }
 
 /// An offset that is not on a block boundary.
@@ -313,7 +312,7 @@ impl Writer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Window {
     pub(crate) place: u64,
-    pub(crate) len: u64,
+    pub(crate) len: usize,
 }
 
 /// One step of a [`Cursor`].
@@ -339,18 +338,56 @@ pub(crate) struct Invalid {
     pub(crate) kind: u8,
 }
 
+/// A record longer than one block, partly read.
+#[derive(Clone, Copy, Debug)]
+struct Partial {
+    head: Head,
+    /// Bytes of the record read so far, whole blocks.
+    read: usize,
+    /// The CRC over the bytes read.
+    check: Check,
+    /// `check` at [`TABLE`] bytes, or at the end of a shorter record.
+    table: Check,
+}
+
+impl Partial {
+    /// The record with header `head` that follows `chain`, with nothing read.
+    fn new(head: Head, chain: u32) -> Self {
+        let check = Check::new(head, chain);
+        Self {
+            head,
+            read: 0,
+            check,
+            table: check,
+        }
+    }
+
+    /// Takes the next window of the record, `bytes`, and gives its body part.
+    fn feed<'a>(&mut self, bytes: &'a [u8]) -> &'a [u8] {
+        let from = HEADER_LEN.saturating_sub(self.read);
+        let to = (HEADER_LEN + self.head.len - self.read).min(bytes.len());
+        let body = bytes
+            .get(from..to)
+            .expect("invariant: the body part is within the window");
+        self.check.feed(body);
+        self.read += bytes.len();
+        if self.read <= TABLE {
+            self.table = self.check;
+        }
+        body
+    }
+}
+
 /// Where a [`Cursor`] is in the record at its offset.
 #[derive(Clone, Copy, Debug)]
 enum Phase {
     /// The next window is the first block of the record.
     Head,
-    /// The record is longer than one block. `read` bytes of it are read, and
-    /// `crc` runs over them; the next window continues the body.
-    Body { head: Head, read: u64, crc: u32 },
+    /// The next window continues the body of the record.
+    Body(Partial),
     /// The body checked out. The next window is the start of the record again,
-    /// for the first bytes of the body. No writer runs during a walk, so those
-    /// bytes are the ones the CRC covered.
-    Table(Head),
+    /// up to [`TABLE`] bytes, which must check out as `table` once more.
+    Table { head: Head, table: Check },
 }
 
 /// Walks the records of a ring from its tail at each open. Loop: read the bytes of
@@ -361,15 +398,15 @@ enum Phase {
 /// A window is one block, or a piece of a record longer than one block, at most
 /// `piece` bytes. The cursor reads such a record in three parts: its first block,
 /// the rest of its body in pieces while the CRC runs, then its start again, up to
-/// one piece, for the first bytes of the body. A walk reads at most twice the live
-/// bytes, plus one block and one largest record for a torn record at the end, and
-/// holds one window at a time.
+/// [`TABLE`] bytes, for the first bytes of the body. A walk reads at most twice
+/// the live bytes, plus one block and one largest record for a torn record at the
+/// end, and holds one window at a time.
 #[derive(Debug)]
 pub(crate) struct Cursor {
     layout: Layout,
     tail: u64,
     at: Position,
-    piece: u64,
+    piece: usize,
     phase: Phase,
     ended: bool,
 }
@@ -377,22 +414,22 @@ pub(crate) struct Cursor {
 impl Cursor {
     /// Starts at `tail`, the boundary before the oldest live record. A ring that
     /// was just made has its tail at offset 0 with a random chain value. `piece`
-    /// bounds a window, as the largest block the reader can hold. It must hold the
-    /// largest entry table, so that [`Step::Data`] gives the whole table.
+    /// bounds a window, as the largest block the reader can hold, so
+    /// [`Step::Data`] gives at least the whole entry table.
     ///
     /// # Panics
     ///
-    /// When `piece` is under one block or not a multiple of [`ALIGN`].
+    /// When `piece` is under [`TABLE`] bytes or not a multiple of [`ALIGN`].
     pub(crate) fn new(layout: Layout, tail: Position, piece: usize) -> Self {
         assert!(
-            piece >= ALIGN && piece.is_multiple_of(ALIGN),
-            "invariant: a piece of {piece} bytes is not whole blocks"
+            piece >= TABLE && piece.is_multiple_of(ALIGN),
+            "invariant: a piece of {piece} bytes is not whole blocks of at least {TABLE}"
         );
         Self {
             layout,
             tail: tail.offset,
             at: tail,
-            piece: to_u64(piece),
+            piece,
             phase: Phase::Head,
             ended: false,
         }
@@ -408,15 +445,22 @@ impl Cursor {
         match self.phase {
             Phase::Head => Window {
                 place,
-                len: len.min(BLOCK),
+                len: len.min(ALIGN),
             },
-            Phase::Body { head, read, .. } => Window {
-                place: place + read,
-                len: (to_u64(head.size) - read).min(self.piece),
-            },
-            Phase::Table(head) => Window {
+            Phase::Body(Partial { head, read, .. }) => {
+                let end = if read < TABLE {
+                    head.size.min(TABLE)
+                } else {
+                    head.size.min(read + self.piece)
+                };
+                Window {
+                    place: place + to_u64(read),
+                    len: end - read,
+                }
+            }
+            Phase::Table { head, .. } => Window {
                 place,
-                len: to_u64(head.size).min(self.piece),
+                len: head.size.min(TABLE),
             },
         }
     }
@@ -427,6 +471,7 @@ impl Cursor {
         let area = self.layout.area;
         let place = self.at.offset % area;
         let len = self.layout.window.min(area - place).min(self.unread());
+        let len = usize::try_from(len).expect("invariant: a window fits in memory");
         Window { place, len }
     }
 
@@ -443,11 +488,13 @@ impl Cursor {
     ///
     /// # Panics
     ///
-    /// When `bytes` is not the window.
+    /// When `bytes` is not the window, or when the start of a record reads
+    /// differently the second time: no writer runs during a walk, so the bytes
+    /// the CRC covered must come back.
     pub(crate) fn next<'a>(&mut self, bytes: &'a [u8]) -> Result<Step<'a>, Invalid> {
         let Window { place, len } = self.window();
         assert!(
-            to_u64(bytes.len()) == len,
+            bytes.len() == len,
             "invariant: got {} bytes for a window of {len} at {place}",
             bytes.len()
         );
@@ -455,68 +502,70 @@ impl Cursor {
             Phase::Head => {
                 let bound = self.bound().len;
                 if let Some(head) = record::head(bytes)
-                    && to_u64(head.size) > len
-                    && to_u64(head.size) <= bound
+                    && head.size > len
+                    && head.size <= bound
                 {
-                    let (_, body) = bytes
-                        .split_at_checked(HEADER_LEN)
-                        .expect("invariant: the header came from these bytes");
-                    let crc = crc32c::append(head.chain(self.at.chain), body);
-                    self.phase = Phase::Body {
-                        head,
-                        read: len,
-                        crc,
-                    };
+                    let mut partial = Partial::new(head, self.at.chain);
+                    partial.feed(bytes);
+                    self.phase = Phase::Body(partial);
                     return Ok(Step::More);
                 }
                 let Some(record) = record::read(bytes, self.at.chain) else {
                     self.ended = true;
                     return Ok(Step::End);
                 };
-                self.step(record.kind, record.body, record.size, record.crc)
+                self.step(record)
             }
-            Phase::Body { head, read, crc } => {
-                let body_end = to_u64(HEADER_LEN + head.len);
-                let (body, _) = bytes
-                    .split_at_checked(to_usize((body_end - read).min(len)))
-                    .expect("invariant: the body part is within the window");
-                let crc = crc32c::append(crc, body);
-                let read = read + len;
-                if read < to_u64(head.size) {
-                    self.phase = Phase::Body { head, read, crc };
+            Phase::Body(mut partial) => {
+                partial.feed(bytes);
+                let Partial {
+                    head,
+                    read,
+                    check,
+                    table,
+                } = partial;
+                if read < head.size {
+                    self.phase = Phase::Body(partial);
                     return Ok(Step::More);
                 }
-                if crc != head.crc {
+                if !check.passes() {
                     self.phase = Phase::Head;
                     self.ended = true;
                     return Ok(Step::End);
                 }
-                self.phase = Phase::Table(head);
+                self.phase = Phase::Table { head, table };
                 Ok(Step::More)
             }
-            Phase::Table(head) => {
+            Phase::Table { head, table } => {
                 self.phase = Phase::Head;
-                let (_, rest) = bytes
-                    .split_at_checked(HEADER_LEN)
-                    .expect("invariant: the window holds the header");
-                let (start, _) = rest.split_at_checked(head.len).unwrap_or((rest, &[]));
-                let body = Body {
-                    start,
-                    len: head.len,
-                };
-                self.step(head.kind, body, head.size, head.crc)
+                let mut again = Partial::new(head, self.at.chain);
+                let start = again.feed(bytes);
+                assert!(
+                    again.check == table,
+                    "invariant: the start of a checked record at {} read the same twice",
+                    self.at.offset
+                );
+                self.step(Record {
+                    kind: head.kind,
+                    body: Body {
+                        start,
+                        len: head.len,
+                    },
+                    size: head.size,
+                    crc: head.crc,
+                })
             }
         }
     }
 
     /// Moves past a record whose body checked out.
-    fn step<'a>(
-        &mut self,
-        kind: u8,
-        body: Body<'a>,
-        size: usize,
-        crc: u32,
-    ) -> Result<Step<'a>, Invalid> {
+    fn step<'a>(&mut self, record: Record<'a>) -> Result<Step<'a>, Invalid> {
+        let Record {
+            kind,
+            body,
+            size,
+            crc,
+        } = record;
         let offset = self.at.offset;
         let unread = self.unread();
         let rest = self.layout.area - offset % self.layout.area;
@@ -581,8 +630,9 @@ mod tests {
     /// The unit a crash keeps or loses of an unsynced write.
     const SECTOR: usize = 512;
 
-    /// The largest window the test reader holds: a record of `BODY_MAX` takes two.
-    const PIECE: usize = 2 * ALIGN;
+    /// The smallest piece the test reader holds. Every record of the fixture
+    /// fits in it; the long fixture below does not.
+    const PIECE: usize = TABLE;
 
     const START: Position = Position {
         offset: 0,
@@ -624,8 +674,8 @@ mod tests {
         let mut asked = 0;
         for _ in 0..=6 * BLOCKS {
             let Window { place, len } = cursor.window();
-            asked += len;
-            match cursor.next(&area[index(place)..index(place + len)])? {
+            asked += to_u64(len);
+            match cursor.next(&area[index(place)..index(place) + len])? {
                 Step::Data(body) => data.push(whole(area, place, body)),
                 Step::Moved | Step::More => {}
                 Step::End => {
@@ -637,7 +687,7 @@ mod tests {
                 }
             }
         }
-        panic!("the cursor did not end within three steps per block");
+        panic!("the cursor did not end within six steps per block");
     }
 
     /// A live record of the model: the boundary before it and its data body.
@@ -858,7 +908,7 @@ mod tests {
                 let area = (2 * blocks - 1) * 4096;
                 let layout = Layout::new(area, body_max).expect("the smallest area");
                 let mut cursor = Cursor::new(layout, at(head, 0), PIECE);
-                let zeros = vec![0; index(cursor.window().len)];
+                let zeros = vec![0; cursor.window().len];
                 prop_assert_eq!(cursor.next(&zeros), Ok(Step::End));
                 let (mut writer, _) =
                     cursor.writer(head * 4096, 1).expect("the ring is empty");
@@ -875,7 +925,7 @@ mod tests {
         /// record of one block.
         fn writer(tail: u64, head: u64) -> Writer {
             let mut cursor = Cursor::new(layout(), at(head - 1, 9), PIECE);
-            let zeros = vec![0; index(cursor.window().len)];
+            let zeros = vec![0; cursor.window().len];
             assert_eq!(cursor.next(&zeros), Ok(Step::End));
             let mut cursor = Cursor {
                 tail: tail * 4096,
@@ -995,7 +1045,7 @@ mod tests {
         fn opened(layout: Layout, offset: u64) -> Writer {
             let tail = Position::new(offset, 9).expect("aligned");
             let mut cursor = Cursor::new(layout, tail, PIECE);
-            let zeros = vec![0; index(cursor.window().len)];
+            let zeros = vec![0; cursor.window().len];
             assert_eq!(cursor.next(&zeros), Ok(Step::End));
             cursor.writer(offset, 9).expect("the restart record fits").0
         }
@@ -1072,6 +1122,26 @@ mod tests {
 
     mod cursor {
         use super::*;
+
+        /// The size of a record longer than one piece.
+        const LONG: usize = 28 * ALIGN;
+
+        /// A ring that holds the long record and its restart record.
+        fn long_layout() -> Layout {
+            let area = to_u64(2 * LONG - ALIGN);
+            Layout::new(area, LONG - HEADER_LEN).expect("the long sizes make a ring")
+        }
+
+        /// The area of [`long_layout`] with one long data record at its start.
+        fn long_area() -> Vec<u8> {
+            let mut area = vec![0; 2 * LONG - ALIGN];
+            let body = vec![7; LONG - HEADER_LEN];
+            put(&mut area, 0, START.chain, Kind::Data.byte(), &body);
+            area
+        }
+
+        /// The windows that read the long record from its start: block and blocks.
+        const LONG_WINDOWS: [(usize, usize); 4] = [(0, 1), (1, 12), (13, 13), (26, 2)];
 
         fn put(
             area: &mut [u8],
@@ -1163,7 +1233,7 @@ mod tests {
             let mut cursor = Cursor::new(layout(), START, PIECE);
             for _ in 1..BLOCKS {
                 let Window { place, len } = cursor.window();
-                let step = cursor.next(&ring.area[index(place)..index(place + len)]);
+                let step = cursor.next(&ring.area[index(place)..index(place) + len]);
                 assert!(matches!(step, Ok(Step::Data(_) | Step::Moved)), "{step:?}");
             }
             let last = Window {
@@ -1283,39 +1353,32 @@ mod tests {
             let _step = Cursor::new(layout(), START, PIECE).next(&[0; 2 * ALIGN]);
         }
 
+        /// A record within the table bound reads in two windows, its first block
+        /// and the rest, then its start again, which is all of it.
         #[test]
-        fn reads_a_long_record_in_pieces_then_its_start_again() {
+        fn reads_a_record_within_the_table_bound_whole() {
             let mut ring = Ring::new();
             ring.append(&[7; BODY_MAX]).expect("the ring has room");
             let mut cursor = Cursor::new(layout(), START, PIECE);
-            let window = |place: u64, len: u64| Window { place, len };
-            assert_eq!(cursor.window(), window(0, 4096));
+            let window = |place: u64, len: usize| Window { place, len };
+            assert_eq!(cursor.window(), window(0, ALIGN));
             assert_eq!(cursor.next(&ring.area[..ALIGN]), Ok(Step::Moved));
-            assert_eq!(cursor.window(), window(4096, 4096));
+            assert_eq!(cursor.window(), window(4096, ALIGN));
             assert_eq!(cursor.next(&ring.area[ALIGN..2 * ALIGN]), Ok(Step::More));
-            assert_eq!(cursor.window(), window(2 * 4096, 2 * 4096), "a piece");
+            assert_eq!(cursor.window(), window(2 * 4096, 3 * ALIGN), "the rest");
             assert_eq!(
-                cursor.next(&ring.area[2 * ALIGN..4 * ALIGN]),
+                cursor.next(&ring.area[2 * ALIGN..5 * ALIGN]),
                 Ok(Step::More)
             );
-            assert_eq!(cursor.window(), window(4 * 4096, 4096), "the rest");
-            assert_eq!(
-                cursor.next(&ring.area[4 * ALIGN..5 * ALIGN]),
-                Ok(Step::More)
-            );
-            assert_eq!(cursor.window(), window(4096, 2 * 4096), "the start again");
-            let step = cursor.next(&ring.area[ALIGN..3 * ALIGN]);
-            let body = Body {
-                start: &[7; 2 * ALIGN - HEADER_LEN],
-                len: BODY_MAX,
-            };
-            assert_eq!(step, Ok(Step::Data(body)));
-            assert_eq!(cursor.window(), window(5 * 4096, 4096));
+            assert_eq!(cursor.window(), window(4096, 4 * ALIGN), "the start again");
+            let step = cursor.next(&ring.area[ALIGN..5 * ALIGN]);
+            assert_eq!(step, Ok(data(&[7; BODY_MAX])));
+            assert_eq!(cursor.window(), window(5 * 4096, ALIGN));
             assert_eq!(cursor.next(&ring.area[5 * ALIGN..6 * ALIGN]), Ok(Step::End));
         }
 
         #[test]
-        fn ends_at_a_long_record_whose_body_is_torn() {
+        fn ends_at_a_record_whose_body_is_torn() {
             let mut ring = Ring::new();
             ring.append(&[7; 2 * ALIGN + 5]).expect("the ring has room");
             ring.area[3 * ALIGN] ^= 1;
@@ -1328,29 +1391,83 @@ mod tests {
             assert_eq!(cursor.offset(), 4096);
         }
 
-        /// A piece that is the whole largest record reads it in two windows: its
-        /// first block, then the rest, then the start again for the body.
+        /// The body pieces end at the table bound, then every piece; the start
+        /// comes again up to the table bound.
         #[test]
-        fn a_piece_of_the_largest_record_reads_it_whole() {
-            let mut ring = Ring::new();
-            ring.append(&[7; BODY_MAX]).expect("the ring has room");
-            let mut cursor = Cursor::new(layout(), START, 4 * ALIGN);
-            assert_eq!(cursor.next(&ring.area[..ALIGN]), Ok(Step::Moved));
-            assert_eq!(cursor.next(&ring.area[ALIGN..2 * ALIGN]), Ok(Step::More));
-            assert_eq!(cursor.window().len, 3 * 4096);
+        fn reads_a_long_record_in_pieces_then_its_start_again() {
+            let area = long_area();
+            let mut cursor = Cursor::new(long_layout(), START, PIECE);
+            for (block, blocks) in LONG_WINDOWS {
+                let window = Window {
+                    place: to_u64(block * ALIGN),
+                    len: blocks * ALIGN,
+                };
+                assert_eq!(cursor.window(), window, "block {block}");
+                let piece = &area[block * ALIGN..(block + blocks) * ALIGN];
+                assert_eq!(cursor.next(piece), Ok(Step::More), "block {block}");
+            }
             assert_eq!(
-                cursor.next(&ring.area[2 * ALIGN..5 * ALIGN]),
-                Ok(Step::More)
+                cursor.window(),
+                Window {
+                    place: 0,
+                    len: TABLE
+                }
             );
-            assert_eq!(cursor.window().len, 4 * 4096);
-            let step = cursor.next(&ring.area[ALIGN..5 * ALIGN]);
-            assert_eq!(step, Ok(data(&[7; BODY_MAX])));
+            let start = vec![7; TABLE - HEADER_LEN];
+            let body = Body {
+                start: &start,
+                len: LONG - HEADER_LEN,
+            };
+            assert_eq!(cursor.next(&area[..TABLE]), Ok(Step::Data(body)));
+            let next = Window {
+                place: to_u64(LONG),
+                len: ALIGN,
+            };
+            assert_eq!(cursor.window(), next);
+            assert_eq!(cursor.next(&area[LONG..LONG + ALIGN]), Ok(Step::End));
+        }
+
+        #[test]
+        fn ends_at_a_long_record_whose_body_is_torn() {
+            let mut area = long_area();
+            area[20 * ALIGN] ^= 1;
+            let mut cursor = Cursor::new(long_layout(), START, PIECE);
+            let steps = LONG_WINDOWS.map(|(block, blocks)| {
+                cursor.next(&area[block * ALIGN..(block + blocks) * ALIGN])
+            });
+            let more = Ok(Step::More);
+            assert_eq!(steps, [more, more, more, Ok(Step::End)]);
+            assert_eq!(cursor.offset(), 0, "the head is at the torn record");
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "the start of a checked record at 0 read the same twice"
+        )]
+        fn panics_when_the_start_of_a_record_reads_differently() {
+            let area = long_area();
+            let mut cursor = Cursor::new(long_layout(), START, PIECE);
+            for (block, blocks) in LONG_WINDOWS {
+                let step = cursor.next(&area[block * ALIGN..(block + blocks) * ALIGN]);
+                assert_eq!(step, Ok(Step::More));
+            }
+            let mut start = area[..TABLE].to_vec();
+            start[TABLE - 1] ^= 1;
+            let _step = cursor.next(&start);
         }
 
         #[test]
         #[should_panic(expected = "a piece of 4097 bytes is not whole blocks")]
         fn panics_on_a_piece_that_is_not_whole_blocks() {
             let _cursor = Cursor::new(layout(), START, ALIGN + 1);
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "a piece of 49152 bytes is not whole blocks of at least 53248"
+        )]
+        fn panics_on_a_piece_under_the_table_bound() {
+            let _cursor = Cursor::new(layout(), START, TABLE - ALIGN);
         }
 
         /// A header that claims a size past the largest window, the end of the

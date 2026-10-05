@@ -26,6 +26,13 @@ use types::time::Stamp;
 /// The encoded size of one [`Header`].
 pub(crate) const HEADER_LEN: usize = 16 + 1 + 8 + 4 + 8 + 9 + 1 + 4;
 
+/// The most entries one record holds, and the most parts: with the header block,
+/// one record is one vectored write within `IOV_MAX`.
+pub(crate) const ENTRIES_MAX: usize = 1023;
+
+/// Bytes of the largest table, `table_len(ENTRIES_MAX)`.
+pub(crate) const TABLE_MAX: usize = 4 + ENTRIES_MAX * HEADER_LEN;
+
 /// What one `append` stores: one frame's samples of one index on one path, or a
 /// record the caller owns (a position, a handoff, a gap).
 #[derive(Clone, Copy, Debug)]

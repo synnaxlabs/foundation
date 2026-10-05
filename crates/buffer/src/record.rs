@@ -78,18 +78,38 @@ pub(crate) struct Head {
     pub(crate) crc: u32,
 }
 
-impl Head {
-    /// The chain value after the header fields, which the body continues.
-    pub(crate) fn chain(self, chain: u32) -> u32 {
-        let len = u32::try_from(self.len).expect("invariant: a body length fits u32");
+/// The CRC of a record read in parts, against the one its header claims.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Check {
+    crc: u32,
+    claimed: u32,
+}
+
+impl Check {
+    /// Starts the CRC of the record with header `head` that follows `chain`.
+    pub(crate) fn new(head: Head, chain: u32) -> Self {
+        let len = u32::try_from(head.len).expect("invariant: a body length fits u32");
         let [l0, l1, l2, l3] = len.to_le_bytes();
-        crc32c::append(chain, &[l0, l1, l2, l3, self.kind])
+        Self {
+            crc: crc32c::append(chain, &[l0, l1, l2, l3, head.kind]),
+            claimed: head.crc,
+        }
+    }
+
+    /// Continues the CRC over the next bytes of the body.
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        self.crc = crc32c::append(self.crc, bytes);
+    }
+
+    /// Whether the bytes fed are the body the header claims.
+    pub(crate) fn passes(self) -> bool {
+        self.crc == self.claimed
     }
 }
 
 /// The body of a record: the bytes that the writer gave to [`header`], joined.
-/// `start` is its first bytes, in the first block of the record; `len` is its
-/// whole length. A body read in one window has it all in `start`.
+/// `start` is the first bytes of the body, as many as the reader's window held;
+/// `len` is its whole length. A body read in one window has it all in `start`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Body<'a> {
     pub(crate) start: &'a [u8],
@@ -181,7 +201,9 @@ pub(crate) fn read(bytes: &[u8], chain: u32) -> Option<Record<'_>> {
     );
     let head = self::head(bytes)?;
     let body = bytes.get(HEADER_LEN..)?.get(..head.len)?;
-    if crc32c::append(head.chain(chain), body) != head.crc {
+    let mut check = Check::new(head, chain);
+    check.feed(body);
+    if !check.passes() {
         return None;
     }
     Some(Record {
@@ -295,10 +317,19 @@ mod tests {
         }
 
         #[test]
-        fn continues_the_chain_with_the_header_fields() {
-            let (image, crc) = data(1, b"abc");
+        fn checks_a_body_fed_in_parts() {
+            let (image, _) = data(1, b"abc");
             let head = head(&image).expect("a header");
-            assert_eq!(crc32c::append(head.chain(1), b"abc"), crc);
+            let mut check = Check::new(head, 1);
+            check.feed(b"a");
+            assert!(!check.passes(), "a part is not the body");
+            check.feed(b"bc");
+            assert!(check.passes());
+            check.feed(b"");
+            assert!(check.passes(), "no bytes change nothing");
+            let mut other = Check::new(head, 2);
+            other.feed(b"abc");
+            assert!(!other.passes(), "another chain");
             assert_eq!(
                 Body {
                     start: b"ab",

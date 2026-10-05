@@ -8,18 +8,13 @@ use std::slice;
 use block::{Block, Pool, Unique};
 use types::channel::Slot;
 
-use crate::entry::{self, Entry, Header};
+use crate::entry::{self, ENTRIES_MAX, Entry, Header};
 use crate::record;
 use crate::wal::{Full, Plan, Writer};
 
-/// The most entries one record holds, and the most parts: with the header block,
-/// one record is one vectored write within `IOV_MAX`.
-pub(crate) const ENTRIES_MAX: usize = 1023;
-
 /// Bytes of the block that holds a record header and the largest entry table: one
 /// block of the pool's 64 KiB class.
-pub(crate) const META_LEN: usize =
-    record::HEADER_LEN + 4 + ENTRIES_MAX * entry::HEADER_LEN;
+pub(crate) const META_LEN: usize = record::HEADER_LEN + entry::TABLE_MAX;
 const _: () = assert!(META_LEN <= 1 << 16, "the table fits one 64 KiB block");
 
 /// The entries of one group commit, in append order. The first push takes the block
@@ -378,7 +373,7 @@ mod tests {
         let bytes = vec![0; index(AREA)];
         let mut cursor = Cursor::new(opened.layout, opened.tail, 1 << 16);
         let Window { place, len } = cursor.window();
-        let step = cursor.next(&bytes[index(place)..index(place + len)]);
+        let step = cursor.next(&bytes[index(place)..index(place) + len]);
         assert_eq!(step, Ok(Step::End));
         let (writer, _) = cursor
             .writer(opened.tail.offset(), 1)
@@ -408,7 +403,7 @@ mod tests {
             let layout = Layout::new(AREA, body_max).expect("the sizes make a ring");
             let mut cursor = Cursor::new(layout, start(), 1 << 16);
             let Window { place, len } = cursor.window();
-            let step = cursor.next(&bytes[index(place)..index(place + len)]);
+            let step = cursor.next(&bytes[index(place)..index(place) + len]);
             assert_eq!(step, Ok(Step::End), "a zeroed area ends at once");
             let (writer, sealed) = cursor.writer(0, 1).expect("the ring is empty");
             let body = 1u32.to_le_bytes();
@@ -477,7 +472,7 @@ mod tests {
             let mut bodies = Vec::new();
             loop {
                 let Window { place, len } = cursor.window();
-                let window = &self.bytes[index(place)..index(place + len)];
+                let window = &self.bytes[index(place)..index(place) + len];
                 match cursor
                     .next(window)
                     .expect("the ring holds what was written")
