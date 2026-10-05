@@ -21,8 +21,31 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Layers
         run: cargo xtask layers
+      - name: Oracles
+        run: cargo xtask oracles
       - name: Test
         run: cargo test --workspace
+
+  features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack@0.6.45
+      - name: Each feature alone
+        run: cargo hack check --workspace --each-feature --no-dev-deps
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Dependencies
+        run: cargo deny check advisories bans licenses sources
 
   loom:
     runs-on: ubuntu-latest
@@ -33,18 +56,41 @@ jobs:
         run: cargo clippy -p ring -p block --all-targets -- -D warnings
         env:
           RUSTFLAGS: --cfg loom
-      - name: Model tests
-        run: cargo test -p ring -p block --lib --release
-        env:
-          RUSTFLAGS: --cfg loom
+      - name: Loom
+        run: cargo xtask loom
+
+  shuttle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Shuttle
+        run: cargo xtask shuttle
 
   miri:
     runs-on: ubuntu-latest
-    env:
-      NIGHTLY: nightly-2026-10-01
     steps:
       - uses: actions/checkout@v4
       - name: Install the pinned nightly
-        run: rustup toolchain install "$NIGHTLY" --component miri
+        run: |
+          rustup toolchain install "$(cat rust-toolchain-nightly)" --profile minimal \
+            --component miri,rust-src
+      - uses: Swatinem/rust-cache@v2
       - name: Miri
-        run: cargo "+$NIGHTLY" miri test -p ring -p block
+        run: cargo xtask miri
+
+  mutants:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Mutants in the diff
+        run: |
+          git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
+          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch"
