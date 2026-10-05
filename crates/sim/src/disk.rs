@@ -539,6 +539,36 @@ mod tests {
     }
 
     #[test]
+    fn a_write_that_starts_at_the_tick_another_ends_may_go_before_it() {
+        let last: BTreeSet<Vec<u8>> = (0..64)
+            .map(|seed| {
+                let mut rng = Rng::from_seed(seed);
+                let mut file = file();
+                file.write(0, &[1; 512], 1, 2, false, &mut rng);
+                file.write(0, &[2; 512], 2, 3, false, &mut rng);
+                file.bytes(0..SECTOR)
+            })
+            .collect();
+        assert_eq!(last, BTreeSet::from([vec![1; 512], vec![2; 512]]));
+    }
+
+    #[test]
+    fn a_sync_that_fails_keeps_each_write_that_ended_after_it_started() {
+        let kept: BTreeSet<Vec<u8>> = (0..64)
+            .map(|seed| {
+                let mut rng = Rng::from_seed(seed);
+                let mut file = file();
+                file.write(256, &[1; 256], 2, 3, false, &mut rng);
+                file.write(0, &[2; 256], 1, 5, false, &mut rng);
+                file.tear(4, &mut rng);
+                file.bytes(0..SECTOR)
+            })
+            .collect();
+        let expected = [[[2; 256], [0; 256]].concat(), [[2; 256], [1; 256]].concat()];
+        assert_eq!(kept, BTreeSet::from(expected));
+    }
+
+    #[test]
     fn a_sync_leaves_dirty_only_the_sectors_with_a_later_write() {
         let mut rng = Rng::from_seed(0);
         let mut file = file();
