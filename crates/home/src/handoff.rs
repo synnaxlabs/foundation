@@ -7,8 +7,8 @@ use block::Block;
 use control::{Handoff, Writer};
 use types::authority::Authority;
 
-/// The bytes of the handoff record of `handoff`: `None` when no writer holds control,
-/// else a block from `pool` with the holder's authority and then its subject.
+/// The parts of the buffer entry that records `handoff`: a block from `pool`, or `None`
+/// when no writer holds control.
 ///
 /// # Errors
 ///
@@ -52,12 +52,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-
-    fn pool(budget: usize) -> block::Pool {
-        let config = block::Config { budget };
-        let memory = block::Heap::new(config.reservation());
-        block::Pool::new(config, memory)
-    }
+    use crate::common::pool;
 
     fn writer(subject: &str, authority: u8) -> Writer {
         Writer {

@@ -411,14 +411,20 @@ How to read this record:
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **HANDOFF RECORD (#191)** The home records each handoff that `Gate::handoff` gives
   (GATE RULES) as a buffer entry on the live path of the index, with tag `HANDOFF`,
-  `len` 0, and `first` at the live tail. A record is in the log before the first frame
-  its holder writes. Its bytes are empty when no writer holds control, else
-  `[authority: u8]` then the holder's subject as UTF-8; the entry length gives the
-  subject's length. A restart or a failover starts the gate from the last record
-  (X18): `Gate::recover` with its holder, or `Gate::new` when it names none. Entry
-  tags: `DATA` 0, `HANDOFF` 1. The layout is part of the disk format version (C9d).
-  Copy mode checks each record once where remote records enter (X43), and the read
-  after it panics on a bad record.
+  `len` 0, and `first` at the live tail. It records a handoff after the gate input
+  that gave it and before the next input or frame. Its bytes are empty when no writer
+  holds control, else `[authority: u8]` then the holder's subject as UTF-8; the entry
+  length gives the subject's length. A restart or a failover starts the gate from the
+  last record (X18): `Gate::recover` with its holder, or `Gate::new` when it names
+  none. Trimming must keep the last record of each index (#406). Until it does,
+  retention can remove that record, and a holder that held control for longer than
+  the retention gets no grace after a restart. The layout is part of the disk format
+  version (C9d). Copy mode checks each record once where remote records enter (X43),
+  and the read after it panics on a bad record.
+  Decided by the `write-path` builder; approved by the coordinator (#191).
+- **ENTRY TAGS (#191)** Each entry of an index log has a tag (S4) that says what its
+  bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
+  record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
