@@ -170,7 +170,7 @@ impl Lab {
 
     /// Attaches a simulated device to `node` at `address`.
     pub(crate) fn device(&mut self, _node: Node, _protocol: Protocol, _address: &str) {
-        todo!("waits on #338")
+        todo!("waits on #432, #434, #435, #436")
     }
 
     /// Attaches a simulated Influx store to `node` at `address`.
@@ -180,12 +180,12 @@ impl Lab {
 
     /// The value of `point` on the device at `address`.
     pub(crate) fn point(&self, _address: &str, _point: &str) -> f64 {
-        todo!("waits on #338")
+        todo!("waits on #432, #434, #435, #436")
     }
 
     /// Sets the value of `point` on the device at `address`.
     pub(crate) fn set_point(&mut self, _address: &str, _point: &str, _value: f64) {
-        todo!("waits on #338")
+        todo!("waits on #432, #434, #435, #436")
     }
 
     /// Writes `count` samples to `channel` on `node` at `rate` samples per second,
