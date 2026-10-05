@@ -172,7 +172,7 @@ impl Shard {
     /// # Panics
     ///
     /// If an index of the key set is not carried.
-    pub(crate) fn open(
+    pub(crate) fn open_writer(
         &mut self,
         writer: Writer,
         now: Monotonic,
@@ -205,12 +205,17 @@ impl Shard {
     }
 
     /// Closes the writer at monotonic time `now`, and appends a handoff for each index
-    /// it held, as [`open`](Self::open) does.
+    /// it held, as [`open_writer`](Self::open_writer) does.
     ///
     /// # Panics
     ///
     /// If the writer is not open.
-    pub(crate) fn close(&mut self, key: writer::Key, now: Monotonic, mesh: Interval) {
+    pub(crate) fn close_writer(
+        &mut self,
+        key: writer::Key,
+        now: Monotonic,
+        mesh: Interval,
+    ) {
         let Some(session) = self.writers.remove(&key) else {
             panic!("writer {} is not open", key.0);
         };
@@ -769,7 +774,7 @@ mod tests {
         run(1, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             let both = frame(
                 &test.pool,
                 &set,
@@ -797,13 +802,13 @@ mod tests {
         run(2, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             let write = frame(&test.pool, &set, &[(0, &[10, 20]), (1, &[1, 2])]);
             shard.write(a, LIVE, write, NOW, MESH).expect("written");
             shard.committed().await.expect("the commit ends");
             drop(shard);
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             let late = frame(&test.pool, &set, &[(0, &[15]), (1, &[3])]);
             let backwards = order::Error::Backwards {
                 path: Path::Live,
@@ -827,8 +832,8 @@ mod tests {
         run(3, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("a", 2, &set), NOW, MESH);
-            let b = shard.open(writer("b", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 2, &set), NOW, MESH);
+            let b = shard.open_writer(writer("b", 1, &set), NOW, MESH);
             let short =
                 frame(&test.pool, &set, &[(0, &[10, 20]), (1, &[1]), (2, &[10])]);
             let waiting = Refusal::Control(control::Error::Waiting);
@@ -853,7 +858,7 @@ mod tests {
         run(4, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             let write = frame(&test.pool, &set, &[(0, &[20]), (1, &[1]), (2, &[20])]);
             shard.write(a, LIVE, write, NOW, MESH).expect("written");
             let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[2]), (2, &[30])]);
@@ -874,7 +879,7 @@ mod tests {
         run(5, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             let short =
                 frame(&test.pool, &set, &[(0, &[10, 20]), (1, &[1]), (2, &[10])]);
             let refusal = Refusal::Codec(split::Error {
@@ -906,7 +911,7 @@ mod tests {
         run(6, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(1 << 16).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             let mut outcomes = Vec::new();
             for n in 0..24_i64 {
                 let stamps: Vec<i64> = (0..400).map(|k| 10 + n * 400 + k).collect();
@@ -950,7 +955,7 @@ mod tests {
         run(7, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             let live = frame(&test.pool, &set, &[(0, &[10, 20]), (1, &[1, 2])]);
             let backfill = frame(&test.pool, &set, &[(0, &[1, 2]), (1, &[1, 2])]);
             let blocks = test.fill();
@@ -981,16 +986,16 @@ mod tests {
         run(8, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("subject-a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("subject-a", 1, &set), NOW, MESH);
             shard.committed().await.expect("the commit ends");
             let handoffs = find(&test.ring().await, &handoff_to("subject-a"));
             assert_eq!(handoffs.len(), 2, "a handoff on each index");
-            let b = shard.open(writer("subject-b", 1, &set), NOW, MESH);
-            shard.close(a, NOW, MESH);
+            let b = shard.open_writer(writer("subject-b", 1, &set), NOW, MESH);
+            shard.close_writer(a, NOW, MESH);
             shard.committed().await.expect("the commit ends");
             let handoffs = find(&test.ring().await, &handoff_to("subject-b"));
             assert_eq!(handoffs.len(), 2, "b takes each index at the close of a");
-            shard.close(b, NOW, MESH);
+            shard.close_writer(b, NOW, MESH);
         });
     }
 
@@ -999,7 +1004,7 @@ mod tests {
         run(13, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(1 << 16).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             let mut seq = 0;
             loop {
                 let stamp = 10 + i64::try_from(seq).expect("a short test");
@@ -1012,7 +1017,7 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
             }
             let subject = "b".repeat(64);
-            let b = shard.open(writer(&subject, 2, &set), NOW, MESH);
+            let b = shard.open_writer(writer(&subject, 2, &set), NOW, MESH);
             let waiting = |shard: &Shard| {
                 shard
                     .indexes
@@ -1038,7 +1043,7 @@ mod tests {
                 earliest: Stamp::from_nanos(0x0123_4567_89AB_CDEF),
                 latest: Stamp::from_nanos(0x0FED_CBA9_8765_4321),
             };
-            let a = shard.open(writer("a", 1, &set), NOW, mesh);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, mesh);
             let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
             shard.write(a, LIVE, write, NOW, mesh).expect("written");
             shard.committed().await.expect("the commit ends");
@@ -1056,7 +1061,7 @@ mod tests {
             let mut shard = test.shard(AREA).await;
             let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
             let blocks = test.fill();
-            let a = shard.open(writer("subject-a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("subject-a", 1, &set), NOW, MESH);
             drop(blocks);
             assert_eq!(
                 shard.write(a, LIVE, first, NOW, MESH),
@@ -1087,7 +1092,7 @@ mod tests {
         run(10, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             test.node.fail_file(FilePath::new(RING), Operation::Sync);
             let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
             assert_eq!(
@@ -1118,7 +1123,7 @@ mod tests {
         run(11, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
             let write = frame(&test.pool, &set, &[(2, &[10])]);
             assert_eq!(
                 shard.write(a, Label::Resend, write, NOW, MESH),
@@ -1162,7 +1167,7 @@ mod tests {
                 data: &[],
             }]);
             let mut shard = test.shard(AREA).await;
-            shard.open(writer("a", 1, &set), NOW, MESH);
+            shard.open_writer(writer("a", 1, &set), NOW, MESH);
         });
         assert_eq!(
             sim.run(),
