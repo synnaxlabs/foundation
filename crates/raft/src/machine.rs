@@ -69,8 +69,9 @@ impl Raft {
             });
         }
         voters.sort_unstable();
-        if let Some(pair) = voters.windows(2).find(|pair| pair[0] == pair[1]) {
-            return Err(Error::DuplicateVoter(pair[0]));
+        let mut pairs = voters.iter().zip(voters.iter().skip(1));
+        if let Some((&twice, _)) = pairs.find(|(a, b)| a == b) {
+            return Err(Error::DuplicateVoter(twice));
         }
         if hard.term < last.term {
             return Err(Error::TermBehindLog {
@@ -189,34 +190,7 @@ impl Raft {
         if from == self.key {
             return Err(Error::Loopback);
         }
-        if term > self.term {
-            match body {
-                // A voter that heard from a leader within the election timeout does
-                // not help to replace it.
-                Body::PreVote { .. } | Body::Vote { .. } if self.leased() => {
-                    return Ok(());
-                }
-                // A PreVote, or its grant, carries a term that no node is in yet.
-                Body::PreVote { .. } | Body::PreVoteReply { granted: true } => {}
-                Body::Heartbeat => self.become_follower(term, Some(from)),
-                Body::Vote { .. }
-                | Body::PreVoteReply { granted: false }
-                | Body::VoteReply { .. }
-                | Body::HeartbeatReply => self.become_follower(term, None),
-            }
-        } else if term < self.term {
-            match body {
-                // The reply carries the higher term, so a stale leader steps down and
-                // a node that is ahead of its group can be elected.
-                Body::Heartbeat => self.send(from, self.term, Body::HeartbeatReply),
-                Body::PreVote { .. } => {
-                    self.send(from, self.term, Body::PreVoteReply { granted: false });
-                }
-                Body::Vote { .. }
-                | Body::PreVoteReply { .. }
-                | Body::VoteReply { .. }
-                | Body::HeartbeatReply => {}
-            }
+        if !self.meet(from, term, body) {
             return Ok(());
         }
         match body {
@@ -254,6 +228,42 @@ impl Raft {
             }
         }
         Ok(())
+    }
+
+    // Compares the message's term with the node's term, and steps down for a higher
+    // one. Returns whether the message still needs its normal handling.
+    fn meet(&mut self, from: node::Key, term: Term, body: Body) -> bool {
+        if term > self.term {
+            match body {
+                // A voter that heard from a leader within the election timeout does
+                // not help to replace it.
+                Body::PreVote { .. } | Body::Vote { .. } if self.leased() => {
+                    return false;
+                }
+                // A PreVote, or its grant, carries a term that no node is in yet.
+                Body::PreVote { .. } | Body::PreVoteReply { granted: true } => {}
+                Body::Heartbeat => self.become_follower(term, Some(from)),
+                Body::Vote { .. }
+                | Body::PreVoteReply { granted: false }
+                | Body::VoteReply { .. }
+                | Body::HeartbeatReply => self.become_follower(term, None),
+            }
+        } else if term < self.term {
+            match body {
+                // The reply carries the higher term, so a stale leader steps down and
+                // a node that is ahead of its group can be elected.
+                Body::Heartbeat => self.send(from, self.term, Body::HeartbeatReply),
+                Body::PreVote { .. } => {
+                    self.send(from, self.term, Body::PreVoteReply { granted: false });
+                }
+                Body::Vote { .. }
+                | Body::PreVoteReply { .. }
+                | Body::VoteReply { .. }
+                | Body::HeartbeatReply => {}
+            }
+            return false;
+        }
+        true
     }
 
     fn tick_leader(&mut self) {

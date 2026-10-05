@@ -6,6 +6,8 @@
 //! the caller writes [`Raft::hard`] to disk if it changed, and only then sends
 //! [`Raft::messages`].
 
+#![deny(clippy::wildcard_enum_match_arm)]
+
 mod config;
 mod machine;
 mod message;

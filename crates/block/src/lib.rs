@@ -25,6 +25,7 @@ pub struct Config {
 ///
 /// A pool is not `Sync`: only its owner shard allocates from it. Blocks it hands out
 /// may move to and drop on any thread.
+#[derive(Debug)]
 pub struct Pool {
     _owner: PhantomData<std::cell::Cell<()>>,
 }
@@ -64,6 +65,7 @@ impl Pool {
 }
 
 /// A block with one owner, which may write to it.
+#[derive(Debug)]
 pub struct Unique {
     _private: (),
 }
@@ -91,7 +93,7 @@ impl DerefMut for Unique {
 }
 
 /// An immutable block shared by reference count. Cloning it adds one reference.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Block {
     _private: (),
 }

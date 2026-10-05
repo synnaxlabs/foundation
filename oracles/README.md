@@ -9,3 +9,5 @@ and never weaken them (see `docs/claude/testing.md`).
 - `conformance/` -> vectors every codec and SDK must match, and scenario suites a
   crate must pass (`conformance/raft/`).
 - `fuzz/` -> fuzz inputs. Crashes become permanent inputs here.
+- `proptest-regressions/` in each crate -> committed proptest failure files. Agents
+  add them and never delete them.
