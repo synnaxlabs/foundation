@@ -63,10 +63,12 @@ impl Log {
         self.committed
     }
 
-    // The last configuration in the log, or `None` with no configuration entry.
-    pub(crate) fn voters(&self) -> Option<&Voters> {
+    // The last configuration in the log and its position, or `None` with no
+    // configuration entry.
+    pub(crate) fn voters(&self) -> Option<(Position, &Voters)> {
         let at = usize::try_from(self.voters.checked_sub(1)?).ok()?;
-        self.entries.get(at).and_then(voters_in)
+        let entry = self.entries.get(at)?;
+        voters_in(entry).map(|voters| (entry.at, voters))
     }
 
     // The position at `index`: the zero position for 0, `None` past the end.
@@ -337,9 +339,9 @@ mod tests {
         log.push(Term(1), Data::Voters(voters(1)));
         log.push(Term(1), Data::Voters(voters(2)));
         log.push(Term(1), Data::Bytes(vec![9]));
-        assert_eq!(log.voters(), Some(&voters(2)));
+        assert_eq!(log.voters(), Some((position(1, 3), &voters(2))));
         let log = Log::new(vec![entry(1, 1), config(1, 2, 3)], 0).unwrap();
-        assert_eq!(log.voters(), Some(&voters(3)));
+        assert_eq!(log.voters(), Some((position(1, 2), &voters(3))));
     }
 
     #[test]
@@ -347,11 +349,11 @@ mod tests {
         let mut log =
             Log::new(vec![entry(1, 1), config(1, 2, 1), config(1, 3, 2)], 0).unwrap();
         assert_eq!(log.append(position(1, 3), vec![entry(2, 4)]), Ok(4));
-        assert_eq!(log.voters(), Some(&voters(2)));
+        assert_eq!(log.voters(), Some((position(1, 3), &voters(2))));
         assert_eq!(log.append(position(1, 2), vec![entry(3, 3)]), Ok(3));
-        assert_eq!(log.voters(), Some(&voters(1)));
+        assert_eq!(log.voters(), Some((position(1, 2), &voters(1))));
         assert_eq!(log.append(position(3, 3), vec![config(3, 4, 4)]), Ok(4));
-        assert_eq!(log.voters(), Some(&voters(4)));
+        assert_eq!(log.voters(), Some((position(3, 4), &voters(4))));
         assert_eq!(log.append(position(1, 1), vec![entry(4, 2)]), Ok(2));
         assert_eq!(log.voters(), None);
     }

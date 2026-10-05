@@ -115,12 +115,14 @@ impl Shape {
     /// If the encoding does not validate or decode to the samples.
     fn encoded(&self, len: usize) -> Vec<u8> {
         let values = self.values(len);
-        let mut out = vec![0; max_len(self.scalar, len)];
-        let written = Encoder::new(self.scalar).encode(&values, &mut out);
+        let mut out = vec![0; max_len(self.scalar, values.len())];
+        let written = Encoder::new(self.scalar)
+            .encode(len, &values, &mut out)
+            .expect("the values fit the count");
         out.truncate(written);
         let mut decoded = vec![0; values.len()];
         let valid = codec::validate(self.scalar, len, &out);
-        assert_eq!(valid, Ok(()), "{}", self.name);
+        assert_eq!(valid, Ok(values.len()), "{}", self.name);
         let result = codec::decode(self.scalar, len, &out, &mut decoded);
         assert_eq!(result, Ok(()), "{}", self.name);
         assert!(decoded == values, "{} decodes to other samples", self.name);
@@ -280,10 +282,14 @@ fn create_uniform<const BITS: u32>() -> Vec<i64> {
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn encode(bencher: Bencher<'_, '_>, case: Case) {
     let values = case.shape.values(case.len);
-    let mut out = vec![0; max_len(case.shape.scalar, case.len)];
+    let mut out = vec![0; max_len(case.shape.scalar, values.len())];
     let mut encoder = Encoder::new(case.shape.scalar);
     bencher.counter(ItemsCount::new(case.len)).bench_local(|| {
-        encoder.encode(divan::black_box(&values), divan::black_box(&mut out))
+        encoder.encode(
+            divan::black_box(case.len),
+            divan::black_box(&values),
+            divan::black_box(&mut out),
+        )
     });
 }
 

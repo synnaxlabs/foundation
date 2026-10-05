@@ -90,7 +90,7 @@ fn round_trip(scalar: Scalar) -> [bool; 4] {
     let width = scalar.width();
     let most = COUNTS[COUNTS.len() - 1];
     let mut encoder = Encoder::new(scalar);
-    let mut series = vec![0; max_len(scalar, most)];
+    let mut series = vec![0; max_len(scalar, most * width)];
     let mut decoded = vec![0; most * width];
     let mut tags = [false; 4];
     let bits = u32::try_from(8 * width).expect("widths are small").min(64);
@@ -109,16 +109,18 @@ fn round_trip(scalar: Scalar) -> [bool; 4] {
                 .filter_map(|(n, byte)| (n % 16 < width).then_some(byte))
                 .collect();
             let case = format!("{scalar:?}, {shape:?}, {count} samples");
-            let (len, allocations) = ALLOCATOR.count(|| {
-                let bound = max_len(scalar, count);
-                encoder.encode(&values, &mut series[..bound])
+            let (written, allocations) = ALLOCATOR.count(|| {
+                let bound = max_len(scalar, values.len());
+                encoder.encode(count, &values, &mut series[..bound])
             });
             assert_eq!(allocations, 0, "encoding {case} allocated");
+            let len =
+                written.unwrap_or_else(|error| panic!("encoding {case}: {error}"));
             let bytes = &series[..len];
             let (valid, allocations) =
                 ALLOCATOR.count(|| codec::validate(scalar, count, bytes));
             assert_eq!(allocations, 0, "checking {case} allocated");
-            assert_eq!(valid, Ok(()), "{case} is valid");
+            assert_eq!(valid, Ok(values.len()), "{case} is valid");
             let out = &mut decoded[..values.len()];
             let (result, allocations) =
                 ALLOCATOR.count(|| codec::decode(scalar, count, bytes, out));
@@ -198,6 +200,17 @@ fn refuse() {
         assert_eq!(allocations, 0, "refusing {bytes:?} allocated");
         assert_eq!(results, (Err(error.clone()), Err(error)), "{bytes:?}");
     }
+    let (result, allocations) =
+        ALLOCATOR.count(|| Encoder::new(Scalar::U16).encode(2, &[1, 2, 3], &mut out));
+    assert_eq!(allocations, 0, "refusing values allocated");
+    assert_eq!(
+        result,
+        Err(Error::Length {
+            expected: 4,
+            actual: 3,
+        }),
+        "values that do not fit the count"
+    );
 }
 
 /// A fixed pseudo-random value for `i` (the splitmix64 finalizer).
