@@ -9,12 +9,12 @@ use env::net::udp::{self, Meta, Transmit, sender};
 use env::net::{Connect, Error, listener, tcp};
 
 use super::{Node, Owner};
-use crate::net::Bound;
+use crate::net::udp::Bound;
 use crate::state::lock;
 
 impl env::net::Driver for Node {
     fn udp(&self, config: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
-        let bound = lock(&self.shared).net().bind(self.node, config)?;
+        let bound = lock(&self.shared).net().udp().bind(self.node, config)?;
         Ok(Box::new(Socket {
             node: self.clone(),
             bound,
@@ -70,10 +70,12 @@ impl udp::Driver for Socket {
     ) -> Poll<Result<usize, Error>> {
         self.owner.check(&self.node);
         let waker = cx.waker().clone();
-        let (poll, unused) =
-            lock(&self.node.shared)
-                .net()
-                .recv(self.bound.key, waker, buffers, meta);
+        let (poll, unused) = lock(&self.node.shared).net().udp().recv(
+            self.bound.key,
+            waker,
+            buffers,
+            meta,
+        );
         drop(unused);
         poll.map(Ok)
     }
@@ -81,7 +83,7 @@ impl udp::Driver for Socket {
 
 impl Drop for Socket {
     fn drop(&mut self) {
-        let waker = lock(&self.node.shared).net().close(self.bound.key);
+        let waker = lock(&self.node.shared).net().udp().close(self.bound.key);
         drop(waker);
     }
 }
@@ -102,6 +104,6 @@ impl sender::Driver for Sender {
         self.owner.check(&self.node);
         let mut state = lock(&self.node.shared);
         let now = state.now();
-        Poll::Ready(state.net().send(now, self.key, transmit))
+        Poll::Ready(state.net().udp().send(now, self.key, transmit))
     }
 }

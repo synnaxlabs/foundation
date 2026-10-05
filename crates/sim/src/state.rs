@@ -50,7 +50,8 @@ pub(crate) struct State {
     next: u64,
     net: Network,
     files: Files,
-    /// A hash of every pick, in order.
+    /// A hash of every pick, in order, with the network and file digests at the pick,
+    /// so that it holds where their events fall between the picks.
     digest: DefaultHasher,
 }
 
@@ -376,7 +377,7 @@ impl State {
         let nth = usize::try_from(rng.below(count))
             .expect("invariant: a value below a usize fits usize");
         let task = runnable[nth];
-        task.hash(&mut self.digest);
+        (task, self.net.digest(), self.files.digest()).hash(&mut self.digest);
         self.ready.remove(&task);
         let thread = self.tasks[&task];
         self.current = Some(thread);

@@ -1,20 +1,17 @@
-//! The network of a run: node addresses, links, and packets in flight. Each protocol
-//! has its own module.
+//! The network of a run: node addresses, the wire between them, and a module for each
+//! protocol.
 
-mod udp;
+pub(crate) mod udp;
+mod wire;
 
-use std::collections::BTreeMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::task::Waker;
 
 use env::rng::Rng;
-use types::time::{Monotonic, Span};
+use types::time::Monotonic;
 
 use crate::link;
-use udp::{Binding, Datagram};
-
-pub(crate) use udp::Bound;
+use wire::Wire;
 
 /// `10.0.0.0`: node `k` has `10.0.0.0` plus `k + 1`.
 const V4: u32 = 0x0a00_0000;
@@ -77,85 +74,47 @@ enum Fate {
     Dropped,
 }
 
-/// The network of a run. Each fate comes from the network's own stream of the seed.
+/// The network of a run.
 pub(crate) struct Network {
-    /// The link of each ordered pair of nodes that has no link of its own.
-    default: link::Config,
-    links: BTreeMap<(usize, usize), link::Config>,
-    bindings: BTreeMap<u64, Binding>,
-    /// Datagrams by true arrival time, then by a key in the order they were sent.
-    flights: BTreeMap<(Monotonic, u64), Datagram>,
-    rng: Rng,
-    next: u64,
-    /// A hash of every send and arrival, in order.
-    digest: DefaultHasher,
+    wire: Wire,
+    udp: udp::Sockets,
 }
 
 impl Network {
     pub(crate) fn new(default: link::Config, rng: Rng) -> Self {
         Self {
-            default,
-            links: BTreeMap::new(),
-            bindings: BTreeMap::new(),
-            flights: BTreeMap::new(),
-            rng,
-            next: 0,
-            digest: DefaultHasher::new(),
+            wire: Wire::new(default, rng),
+            udp: udp::Sockets::default(),
         }
-    }
-
-    fn key(&mut self) -> u64 {
-        self.next += 1;
-        self.next
     }
 
     /// Sets the link from node `from` to node `to`.
     pub(crate) fn link(&mut self, from: usize, to: usize, config: link::Config) {
-        self.links.insert((from, to), config);
+        self.wire.link(from, to, config);
     }
 
-    /// The link from node `from` to `ip`.
-    fn route(&self, from: usize, ip: IpAddr) -> link::Config {
-        let to = node(ip);
-        *(to.and_then(|to| self.links.get(&(from, to)))).unwrap_or(&self.default)
-    }
-
-    /// Schedules the arrival of `datagram` after the delay of `link` and a draw of its
-    /// jitter. One that would arrive past `u64` nanoseconds never arrives.
-    fn arrive(&mut self, now: Monotonic, link: &link::Config, datagram: Datagram) {
-        let jitter = u64::try_from(link.jitter.nanos())
-            .expect("invariant: a checked link has no negative jitter");
-        let extra = i64::try_from(self.rng.below(jitter + 1))
-            .expect("invariant: a draw up to a jitter fits i64");
-        let at = (now.checked_add(link.delay))
-            .and_then(|at| at.checked_add(Span::from_nanos(extra)));
-        if let Some(at) = at {
-            let key = self.key();
-            self.flights.insert((at, key), datagram);
-        }
+    /// The UDP sockets.
+    pub(crate) fn udp(&mut self) -> udp::Udp<'_> {
+        udp::Udp::new(&mut self.udp, &mut self.wire)
     }
 
     /// The true time of the first arrival.
     pub(crate) fn first(&self) -> Option<Monotonic> {
-        self.flights.first_key_value().map(|(&(at, _), _)| at)
+        self.wire.first()
     }
 
     /// Delivers the packets that arrive by true time `at`, and returns the wakers of
     /// the ends that receive them.
     pub(crate) fn deliver(&mut self, at: Monotonic) -> Vec<Waker> {
         let mut wakers = Vec::new();
-        while let Some(flight) = self.flights.first_entry() {
-            if flight.key().0 > at {
-                break;
-            }
-            let datagram = flight.remove();
-            wakers.extend(self.receive(at, datagram));
+        while let Some(datagram) = self.wire.pop(at) {
+            wakers.extend(self.udp().queue(at, datagram));
         }
         wakers
     }
 
     /// A hash of every send and arrival so far.
     pub(crate) fn digest(&self) -> u64 {
-        self.digest.finish()
+        self.wire.digest()
     }
 }

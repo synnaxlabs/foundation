@@ -1,7 +1,6 @@
 //! UDP sockets and their datagrams.
 
-use std::collections::VecDeque;
-use std::hash::Hash;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::IoSliceMut;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -11,9 +10,8 @@ use env::net::udp::{Config, Meta, Transmit};
 use env::net::{Ecn, Error};
 use types::time::Monotonic;
 
-use super::{EPHEMERAL, Fate, NOT_AVAILABLE, Network, addresses, covers, node};
-use crate::chance::roll;
-use crate::link;
+use super::wire::Wire;
+use super::{EPHEMERAL, Fate, NOT_AVAILABLE, addresses, covers, node};
 
 /// The IPv4 and UDP header bytes of a datagram.
 const V4_HEADERS: usize = 28;
@@ -33,6 +31,7 @@ pub(crate) struct Bound {
     pub(crate) recv_batch_max: NonZeroUsize,
 }
 
+#[derive(Clone)]
 pub(super) struct Datagram {
     source: SocketAddr,
     destination: SocketAddr,
@@ -47,8 +46,21 @@ impl Datagram {
     }
 }
 
+/// The bound UDP sockets of a run.
+#[derive(Default)]
+pub(super) struct Sockets {
+    bindings: BTreeMap<u64, Binding>,
+    next: u64,
+}
+
+/// The UDP sockets of a run, with the wire they send on.
+pub(crate) struct Udp<'a> {
+    sockets: &'a mut Sockets,
+    wire: &'a mut Wire,
+}
+
 /// A bound UDP socket and its receive queue.
-pub(super) struct Binding {
+struct Binding {
     node: usize,
     local: SocketAddr,
     recv_batch_max: NonZeroUsize,
@@ -123,7 +135,11 @@ impl Binding {
     }
 }
 
-impl Network {
+impl<'a> Udp<'a> {
+    pub(super) fn new(sockets: &'a mut Sockets, wire: &'a mut Wire) -> Self {
+        Self { sockets, wire }
+    }
+
     /// Binds a UDP socket on `node`.
     pub(crate) fn bind(
         &mut self,
@@ -138,7 +154,7 @@ impl Network {
             });
         }
         let taken = |port: u16| {
-            (self.bindings.values()).any(|binding| {
+            (self.sockets.bindings.values()).any(|binding| {
                 let other = binding.local.ip();
                 binding.node == node
                     && binding.local.port() == port
@@ -154,7 +170,7 @@ impl Network {
         };
         let local = SocketAddr::new(ip, port);
         let [send_batch_max, recv_batch_max] = [(); 2].map(|()| {
-            let index = self.rng.below(3);
+            let index = self.wire.rng().below(3);
             let index = usize::try_from(index).expect("invariant: below 3 fits usize");
             NonZeroUsize::new(BATCH_MAXES[index]).expect("invariant: not zero")
         });
@@ -167,8 +183,9 @@ impl Network {
             queued: 0,
             waker: None,
         };
-        let key = self.key();
-        self.bindings.insert(key, binding);
+        self.sockets.next += 1;
+        let key = self.sockets.next;
+        self.sockets.bindings.insert(key, binding);
         Ok(Bound {
             key,
             local,
@@ -180,7 +197,7 @@ impl Network {
     /// Removes socket `key`, and returns its waker for the caller to drop after it
     /// releases the lock.
     pub(crate) fn close(&mut self, key: u64) -> Option<Waker> {
-        self.bindings.remove(&key).and_then(|binding| binding.waker)
+        (self.sockets.bindings.remove(&key)).and_then(|binding| binding.waker)
     }
 
     /// Sends the datagrams of `transmit` from socket `key` at true time `now`.
@@ -190,9 +207,14 @@ impl Network {
         key: u64,
         transmit: &Transmit<'_>,
     ) -> Result<(), Error> {
-        let binding = &self.bindings[&key];
+        let binding = &self.sockets.bindings[&key];
         let (source, destination) = route(binding.node, binding.local, transmit)?;
-        let link = self.route(binding.node, destination.ip());
+        let link = self.wire.path(binding.node, destination.ip());
+        let header = if destination.is_ipv4() {
+            V4_HEADERS
+        } else {
+            V6_HEADERS
+        };
         let contents = transmit.contents;
         let size = transmit.segment.map_or(usize::MAX, NonZeroUsize::get);
         for n in 0..contents.len().div_ceil(size).max(1) {
@@ -204,55 +226,28 @@ impl Network {
                 ecn: transmit.ecn,
                 contents: part.to_vec(),
             };
-            let fate = self.fly(now, &link, datagram);
-            (now, source, destination, part.len(), fate).hash(&mut self.digest);
+            let fate = if part.len() + header > link.mtu {
+                Fate::Lost
+            } else {
+                self.wire.fly(now, &link, datagram)
+            };
+            (self.wire).record((now, source, destination, part.len(), fate));
         }
         Ok(())
     }
 
-    /// Puts `datagram` in flight on `link`, as the link's faults decide.
-    fn fly(&mut self, now: Monotonic, link: &link::Config, datagram: Datagram) -> Fate {
-        let header = if datagram.destination.is_ipv4() {
-            V4_HEADERS
-        } else {
-            V6_HEADERS
-        };
-        if datagram.contents.len() + header > link.mtu || roll(&mut self.rng, link.loss)
-        {
-            return Fate::Lost;
-        }
-        let duplicated = roll(&mut self.rng, link.duplication);
-        if duplicated {
-            let copy = Datagram {
-                contents: datagram.contents.clone(),
-                ..datagram
-            };
-            self.arrive(now, link, copy);
-        }
-        self.arrive(now, link, datagram);
-        if duplicated {
-            Fate::Duplicated
-        } else {
-            Fate::Sent
-        }
-    }
-
     /// Queues `datagram`, which arrives at true time `at`, at the socket that
     /// receives it. Returns the waker of a receive to wake.
-    pub(super) fn receive(
-        &mut self,
-        at: Monotonic,
-        datagram: Datagram,
-    ) -> Option<Waker> {
+    pub(super) fn queue(&mut self, at: Monotonic, datagram: Datagram) -> Option<Waker> {
         let (source, destination) = (datagram.source, datagram.destination);
         let len = datagram.contents.len();
-        let binding =
-            (self.bindings.values_mut()).find(|binding| binding.receives(destination));
+        let binding = (self.sockets.bindings.values_mut())
+            .find(|binding| binding.receives(destination));
         let (fate, waker) = match binding {
             Some(binding) => binding.push(datagram),
             None => (Fate::Dropped, None),
         };
-        (at, source, destination, len, fate).hash(&mut self.digest);
+        self.wire.record((at, source, destination, len, fate));
         waker
     }
 
@@ -266,7 +261,7 @@ impl Network {
         buffers: &mut [IoSliceMut<'_>],
         meta: &mut [Meta],
     ) -> (Poll<usize>, Option<Waker>) {
-        let binding = (self.bindings.get_mut(&key))
+        let binding = (self.sockets.bindings.get_mut(&key))
             .expect("invariant: a socket lives while its driver does");
         if binding.queue.is_empty() {
             return (Poll::Pending, binding.waker.replace(waker));
