@@ -1,10 +1,10 @@
 use std::fmt::Write as _;
 
-use document::value::{Kind, Value};
-use document::{Block, Document, Span};
+use document::value::{Call, Kind, Value};
+use document::{Block, Document, Map, Span};
 
 use crate::lex;
-use crate::parse::{enter, literal};
+use crate::parse::{Ends, enter, literal};
 use crate::{Error, Unwritable};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
@@ -18,6 +18,9 @@ const WIDTH: usize = 88;
 /// item is on its own line, 2 spaces in. A string that ends in a new line and holds
 /// no control character but new lines and tabs is a heredoc where it is the value of
 /// a key.
+///
+/// A text of more than `u32::MAX` bytes is written too, and `read` refuses it with
+/// [`Error::TooLarge`].
 ///
 /// # Errors
 ///
@@ -33,13 +36,43 @@ pub fn write(document: &Document) -> Result<String, Vec<Error>> {
     }
 }
 
-/// Where a value is, which sets how it ends.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Place {
-    /// The value of a key, which a new line can end.
-    Key,
-    /// An item of a list or a call, which a `,` ends.
-    Item,
+/// A value with items.
+#[derive(Clone, Copy)]
+enum Items<'a> {
+    List(&'a [Value]),
+    Call(&'a Call),
+    Map(&'a Map),
+}
+
+impl<'a> Items<'a> {
+    fn of(kind: &'a Kind) -> Option<Self> {
+        match kind {
+            Kind::List(values) => Some(Self::List(values)),
+            Kind::Call(call) => Some(Self::Call(call)),
+            Kind::Map(map) => Some(Self::Map(map)),
+            Kind::Bool(_)
+            | Kind::Integer(_)
+            | Kind::Float(_)
+            | Kind::String(_)
+            | Kind::Reference(_) => None,
+        }
+    }
+
+    fn len(self) -> usize {
+        match self {
+            Self::List(values) => values.len(),
+            Self::Call(call) => call.arguments.len(),
+            Self::Map(map) => map.iter().len(),
+        }
+    }
+
+    fn close(self) -> char {
+        match self {
+            Self::List(_) => ']',
+            Self::Call(_) => ')',
+            Self::Map(_) => '}',
+        }
+    }
 }
 
 #[derive(Default)]
@@ -58,7 +91,7 @@ impl Writer {
             }
             self.out.push_str(&attribute.key);
             self.out.push_str(" = ");
-            self.value(&attribute.value, depth, indent, Place::Key);
+            self.value(&attribute.value, depth, indent, Ends::Line);
             self.out.push('\n');
         }
         for (i, block) in document.blocks.iter().enumerate() {
@@ -80,7 +113,7 @@ impl Writer {
             quoted(&mut self.out, &label.text);
         }
         let Some(depth) = enter(depth) else {
-            return self.refuse(block.keyword_span, Unwritable::Depth);
+            return self.refuse(block.span, Unwritable::Depth);
         };
         if block.body == Document::default() {
             self.out.push_str(" {}\n");
@@ -93,14 +126,15 @@ impl Writer {
     }
 
     /// Writes a value on one line when the line fits, and otherwise with each item on
-    /// its own line.
-    fn value(&mut self, value: &Value, depth: usize, indent: usize, place: Place) {
-        if !matches!(value.kind, Kind::List(_) | Kind::Map(_) | Kind::Call(_)) {
-            return self.line(value, depth, place);
-        }
+    /// its own line. A line with a heredoc in it is more than one line, so it does not
+    /// fit.
+    fn value(&mut self, value: &Value, depth: usize, indent: usize, ends: Ends) {
+        let Some(items) = Items::of(&value.kind) else {
+            return self.line(value, depth, ends);
+        };
         let mut line = Self::default();
-        line.line(value, depth, place);
-        let comma = usize::from(place == Place::Item);
+        line.line(value, depth, ends);
+        let comma = usize::from(ends == Ends::Comma);
         let width = self
             .column()
             .saturating_add(line.out.chars().count())
@@ -114,128 +148,112 @@ impl Writer {
             return self.refuse(value.span, Unwritable::Depth);
         };
         let inner = indent.saturating_add(1);
-        match &value.kind {
-            Kind::List(items) => {
-                self.out.push('[');
-                self.items(items, depth, indent);
-                self.out.push(']');
-            }
-            Kind::Call(call) => {
-                self.function(&call.function, call.function_span);
-                self.out.push('(');
-                self.items(&call.arguments, depth, indent);
-                self.out.push(')');
-            }
-            Kind::Map(map) => {
-                self.out.push('{');
+        self.open(items);
+        match items {
+            Items::List(values) => self.items(values, depth, inner),
+            Items::Call(call) => self.items(&call.arguments, depth, inner),
+            Items::Map(map) => {
                 for attribute in map.iter() {
                     self.out.push('\n');
                     self.pad(inner);
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.value(&attribute.value, depth, inner, Place::Key);
+                    self.value(&attribute.value, depth, inner, Ends::Line);
                 }
-                self.end(map.iter().len(), indent);
-                self.out.push('}');
             }
-            _ => unreachable!("invariant: only a list, a map, or a call has items"),
         }
-    }
-
-    /// Writes each item on its own line, with a `,` after it.
-    fn items(&mut self, items: &[Value], depth: usize, indent: usize) {
-        let inner = indent.saturating_add(1);
-        for item in items {
-            self.out.push('\n');
-            self.pad(inner);
-            self.value(item, depth, inner, Place::Item);
-            self.out.push(',');
-        }
-        self.end(items.len(), indent);
-    }
-
-    /// Starts the line of the close bracket after `len` items, `indent` levels in. With
-    /// no items, the bracket stays on the line of the open one.
-    fn end(&mut self, len: usize, indent: usize) {
-        if len > 0 {
+        if items.len() > 0 {
             self.out.push('\n');
             self.pad(indent);
+        }
+        self.out.push(items.close());
+    }
+
+    /// Writes each item on its own line, `indent` levels in, with a `,` after it.
+    fn items(&mut self, values: &[Value], depth: usize, indent: usize) {
+        for item in values {
+            self.out.push('\n');
+            self.pad(indent);
+            self.value(item, depth, indent, Ends::Comma);
+            self.out.push(',');
         }
     }
 
     /// Writes a value on one line, except a heredoc.
-    fn line(&mut self, value: &Value, depth: usize, place: Place) {
-        match &value.kind {
-            Kind::Bool(b) => self.out.push_str(if *b { "true" } else { "false" }),
+    fn line(&mut self, value: &Value, depth: usize, ends: Ends) {
+        let items = match &value.kind {
+            Kind::Bool(b) => {
+                return self.out.push_str(if *b { "true" } else { "false" });
+            }
             Kind::Integer(n) => {
-                write!(self.out, "{n}").expect("invariant: a String takes any text");
+                return write!(self.out, "{n}")
+                    .expect("invariant: a String takes any text");
             }
             Kind::Float(float) => {
                 // Debug gives the shortest text that reads back as the same bits, with
                 // a `.` or an `e`, so it never reads as an integer.
-                write!(self.out, "{:?}", float.get())
+                return write!(self.out, "{:?}", float.get())
                     .expect("invariant: a String takes any text");
             }
-            Kind::String(text) if place == Place::Key && heredoc(text) => {
-                write_heredoc(&mut self.out, text);
+            Kind::String(text) if ends == Ends::Line && whole_lines(text) => {
+                return heredoc(&mut self.out, text);
             }
-            Kind::String(text) => quoted(&mut self.out, text),
+            Kind::String(text) => return quoted(&mut self.out, text),
             Kind::Reference(name) => {
                 let name = name.as_str();
                 if lex::word(name).is_none() || literal(name).is_some() {
                     self.refuse(value.span, Unwritable::Reference);
                 }
-                self.out.push_str(name);
+                return self.out.push_str(name);
             }
-            Kind::List(_) | Kind::Map(_) | Kind::Call(_) => {
-                let Some(depth) = enter(depth) else {
-                    return self.refuse(value.span, Unwritable::Depth);
-                };
-                self.line_items(value, depth);
-            }
-        }
-    }
-
-    /// Writes a list, a map, or a call on one line, inside the limit at `depth`.
-    fn line_items(&mut self, value: &Value, depth: usize) {
-        let (items, close) = match &value.kind {
-            Kind::List(items) => {
-                self.out.push('[');
-                (items, ']')
-            }
-            Kind::Call(call) => {
-                self.function(&call.function, call.function_span);
-                self.out.push('(');
-                (&call.arguments, ')')
-            }
-            Kind::Map(map) => {
-                self.out.push('{');
+            Kind::List(values) => Items::List(values),
+            Kind::Call(call) => Items::Call(call),
+            Kind::Map(map) => Items::Map(map),
+        };
+        let Some(depth) = enter(depth) else {
+            return self.refuse(value.span, Unwritable::Depth);
+        };
+        self.open(items);
+        match items {
+            Items::List(values) => self.line_items(values, depth),
+            Items::Call(call) => self.line_items(&call.arguments, depth),
+            Items::Map(map) => {
                 for (i, attribute) in map.iter().enumerate() {
                     self.out.push_str(if i == 0 { " " } else { ", " });
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.line(&attribute.value, depth, Place::Key);
+                    self.line(&attribute.value, depth, Ends::Line);
                 }
-                self.out
-                    .push_str(if map.iter().len() > 0 { " }" } else { "}" });
-                return;
+                if items.len() > 0 {
+                    self.out.push(' ');
+                }
             }
-            _ => unreachable!("invariant: only a list, a map, or a call has items"),
-        };
-        for (i, item) in items.iter().enumerate() {
+        }
+        self.out.push(items.close());
+    }
+
+    fn line_items(&mut self, values: &[Value], depth: usize) {
+        for (i, item) in values.iter().enumerate() {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            self.line(item, depth, Place::Item);
+            self.line(item, depth, Ends::Comma);
         }
-        self.out.push(close);
     }
 
-    fn function(&mut self, function: &str, span: Option<Span>) {
-        if lex::word(function) != Some(lex::Kind::Identifier) {
-            self.refuse(span, Unwritable::Function);
+    /// Writes what comes before the items: `[`, the function and `(`, or `{`.
+    fn open(&mut self, items: Items<'_>) {
+        match items {
+            Items::List(_) => self.out.push('['),
+            Items::Call(call) => {
+                if lex::word(&call.function) != Some(lex::Kind::Identifier) {
+                    self.refuse(call.function_span, Unwritable::Function);
+                }
+                self.out.push_str(&call.function);
+                self.out.push('(');
+            }
+            Items::Map(_) => self.out.push('{'),
         }
-        self.out.push_str(function);
     }
 
     fn refuse(&mut self, span: Option<Span>, part: Unwritable) {
@@ -267,17 +285,17 @@ fn key(out: &mut String, key: &str) {
     }
 }
 
-/// Reports whether `text` reads well as a heredoc: it ends in a new line and has no
-/// control character but new lines and tabs.
-fn heredoc(text: &str) -> bool {
+/// Reports whether `text` is whole lines, each ended by a new line, with no control
+/// character but tabs.
+fn whole_lines(text: &str) -> bool {
     text.ends_with('\n')
         && !text
             .chars()
             .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
 }
 
-/// Writes `text`, which ends in a new line, as a heredoc, up to its marker.
-fn write_heredoc(out: &mut String, text: &str) {
+/// Writes whole lines of text as a heredoc, up to its marker.
+fn heredoc(out: &mut String, text: &str) {
     let mut marker = String::from("EOT");
     while text
         .split('\n')
@@ -288,7 +306,13 @@ fn write_heredoc(out: &mut String, text: &str) {
     out.push_str("<<");
     out.push_str(&marker);
     out.push('\n');
-    escape_templates(out, text);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if opens_template(c, chars.peek()) {
+            out.push(c);
+        }
+    }
     out.push_str(&marker);
 }
 
@@ -302,7 +326,7 @@ fn quoted(out: &mut String, text: &str) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            '$' | '%' if chars.peek() == Some(&'{') => {
+            c if opens_template(c, chars.peek()) => {
                 out.push(c);
                 out.push(c);
             }
@@ -314,21 +338,16 @@ fn quoted(out: &mut String, text: &str) {
     out.push('"');
 }
 
-/// Writes `text`, with `$${` for `${` and `%%{` for `%{`.
-fn escape_templates(out: &mut String, text: &str) {
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        out.push(c);
-        if matches!(c, '$' | '%') && chars.peek() == Some(&'{') {
-            out.push(c);
-        }
-    }
+/// Reports whether `c` before `next` opens a template, `${` or `%{`, which HCL text
+/// writes as `$${` or `%%{`.
+fn opens_template(c: char, next: Option<&char>) -> bool {
+    matches!(c, '$' | '%') && next == Some(&'{')
 }
 
 #[cfg(test)]
 mod tests {
-    use document::value::{Call, Float};
-    use document::{Attribute, Label, Map, Position, Source};
+    use document::value::Float;
+    use document::{Attribute, Label, Position, Source};
     use proptest::prelude::*;
 
     use super::*;
@@ -457,6 +476,24 @@ mod tests {
              \x20 x \"1\" {}\n\
              }\n"
         );
+        let blocks = Document {
+            attributes: Map::default(),
+            blocks: vec![
+                block("a", &[], Document::default()),
+                block("b", &[], Document::default()),
+            ],
+        };
+        assert_eq!(written(&blocks), "a {}\n\nb {}\n");
+    }
+
+    #[test]
+    fn quotes_a_new_line_in_a_list_in_a_block() {
+        let body = attributes(vec![("a", list(vec![string("\n")]))]);
+        let document = Document {
+            attributes: Map::default(),
+            blocks: vec![block("a", &[], body)],
+        };
+        assert_eq!(written(&document), "a {\n  a = [\"\\n\"]\n}\n");
     }
 
     #[test]
@@ -511,10 +548,15 @@ mod tests {
             ("map", Kind::Map(map(vec![("run", string(script))]))),
             ("list", list(vec![string(script)])),
             ("crlf", string("a\r\n")),
+            ("dollar", string("$a %b c{ ${x}\n")),
+            ("tab", string("x\ty\n")),
         ]);
         assert_eq!(
             written(&document),
             "crlf = \"a\\r\\n\"\n\
+             dollar = <<EOT\n\
+             $a %b c{ $${x}\n\
+             EOT\n\
              list = [\"#!/bin/sh\\necho $${HOME}\\n  EOT \\n\"]\n\
              map = {\n\
              \x20 run = <<EOT_\n\
@@ -527,7 +569,10 @@ mod tests {
              #!/bin/sh\n\
              echo $${HOME}\n\
              \x20 EOT \n\
-             EOT_\n"
+             EOT_\n\
+             tab = <<EOT\n\
+             x\ty\n\
+             EOT\n"
         );
     }
 
@@ -542,6 +587,11 @@ mod tests {
         assert_eq!(
             written(&document),
             format!("a = [\"{fits}\"]\nb = [\n  \"{long}\",\n]\n")
+        );
+        let key = "k".repeat(90);
+        assert_eq!(
+            written(&attributes(vec![(&key, list(Vec::new()))])),
+            format!("{key} = []\n")
         );
     }
 
@@ -636,6 +686,19 @@ mod tests {
                 unwritable(None, Unwritable::Reference),
             ])
         );
+
+        // One word each, but not an identifier.
+        let words = Document {
+            attributes: map(vec![("a.b", Kind::Integer(1))]),
+            blocks: vec![block("@c", &[], Document::default())],
+        };
+        assert_eq!(
+            write(&words),
+            Err(vec![
+                unwritable(None, Unwritable::Key),
+                unwritable(None, Unwritable::Keyword),
+            ])
+        );
     }
 
     #[test]
@@ -716,7 +779,7 @@ mod tests {
         assert_eq!(write(&document), refused(on(1, 2)));
 
         let mut blocks = Block {
-            keyword_span: Some(on(3, 4)),
+            span: Some(on(3, 4)),
             ..block("b", &[], attributes(vec![("x", Kind::Integer(1))]))
         };
         for _ in 0..64 {

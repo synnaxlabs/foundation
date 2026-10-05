@@ -38,7 +38,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
 
 /// What ends an item, besides a close bracket at its level and the end of the text.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Ends {
+pub(crate) enum Ends {
     /// A `,` or a new line, as in a body or an object.
     Line,
     /// A `,`, as in a list or a call, where new lines do not end an item.

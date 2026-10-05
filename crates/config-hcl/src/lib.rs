@@ -19,6 +19,7 @@ mod write;
 use std::fmt;
 
 use document::Span;
+use document::encoding::TooDeep;
 use types::name;
 
 pub use parse::read;
@@ -81,7 +82,7 @@ pub enum Error {
 }
 
 impl Error {
-    /// Where the problem starts, to sort problems in source order.
+    /// Where the problem starts, to sort the problems that `read` gives in source order.
     fn offset(&self) -> u32 {
         match self {
             Self::Syntax { span, .. }
@@ -97,7 +98,9 @@ impl Error {
                     .offset
             }
             Self::TooLarge { .. } => 0,
-            Self::Unwritable { span, .. } => span.map_or(0, |span| span.start().offset),
+            Self::Unwritable { .. } => {
+                unreachable!("invariant: read gives no Unwritable")
+            }
         }
     }
 }
@@ -254,11 +257,7 @@ impl fmt::Display for Unwritable {
                 "HCL does not read this name as a reference. Start it with a letter, `_`, \
                  or `@`, and do not use `true`, `false`, or `null`",
             ),
-            Self::Depth => write!(
-                f,
-                "the document nests deeper than {} levels. Make it flatter",
-                document::encoding::DEPTH_MAX
-            ),
+            Self::Depth => fmt::Display::fmt(&TooDeep { span: None }, f),
         }
     }
 }
