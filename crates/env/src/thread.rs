@@ -1,5 +1,5 @@
-//! One thread that `env` started, from [`shards`](crate::shards) or
-//! [`threads`](crate::threads): its handle and why it failed.
+//! A thread that `env` starts, from [`shards`](crate::shards) or
+//! [`threads`](crate::threads): its handle, and why its start or its run failed.
 
 use std::fmt;
 
@@ -13,11 +13,17 @@ use std::fmt;
 ///     }
 /// }
 /// ```
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// env::thread::Handle::new(|| Ok(()));
+/// ```
 #[must_use = "a dropped Handle leaves its thread running"]
 pub struct Handle(Box<dyn FnOnce() -> Result<(), Error> + Send>);
 
 impl Handle {
-    /// Wraps the driver's way to wait for the thread.
+    /// Wraps the way a [`shards::Driver`](crate::shards::Driver) or a
+    /// [`threads::Driver`](crate::threads::Driver) waits for its thread.
     ///
     /// ```
     /// let handle = env::thread::Handle::new(|| Ok(()));
