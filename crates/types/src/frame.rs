@@ -317,13 +317,8 @@ impl Frame {
     /// Each present entry and its series bytes, in entry order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
         let (_, descriptors, body) = split(&self.0);
-        let mut start = 0;
-        descriptors.iter().map(move |descriptor| {
-            let end = end_of(*descriptor);
-            let series = &body[start..end];
-            start = end.next_multiple_of(SERIES_ALIGN);
-            (to_usize(lead(descriptor)), series)
-        })
+        let entries = descriptors.iter().map(lead).map(to_usize);
+        entries.zip(series(body, descriptors.iter().copied().map(end_of)))
     }
 
     /// The credit that sending the frame to a reader spends: the bytes a block of the
@@ -343,6 +338,37 @@ impl Frame {
         let (ranges, series) = counts(&self.0);
         self.0.clone().skip(body_start(ranges, series))
     }
+
+    /// Each present entry and the end of its series, as `(entry, end)`, in the order
+    /// of [`Frame::iter`]. `end` counts from the start of [`Frame::body`], and
+    /// [`series`] reads each series back from the body and these ends.
+    pub fn ends(&self) -> impl Iterator<Item = (usize, usize)> {
+        let (_, descriptors, _) = split(&self.0);
+        descriptors
+            .iter()
+            .map(|descriptor| (to_usize(lead(descriptor)), end_of(*descriptor)))
+    }
+}
+
+/// Each series in `body`, the series bytes of a frame, from the end of each, in
+/// order. Copies nothing.
+///
+/// # Panics
+///
+/// The iterator panics when an end is past `body` or before the start of its series.
+/// The body and ends of one frame never panic.
+pub fn series(
+    body: &[u8],
+    ends: impl IntoIterator<Item = usize>,
+) -> impl Iterator<Item = &[u8]> {
+    let mut start = 0;
+    ends.into_iter().map(move |end| {
+        let series = body.get(start..end).unwrap_or_else(|| {
+            panic!("the end {end} is outside {start}..={}", body.len())
+        });
+        start = end.next_multiple_of(SERIES_ALIGN);
+        series
+    })
 }
 
 /// The present groups of a frame of `series`, and the bytes of its series with the
@@ -620,6 +646,38 @@ mod tests {
         assert_eq!(&*frame.body(), expected.as_slice());
         let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
         assert!(empty.freeze(Path::Live).body().is_empty());
+    }
+
+    #[test]
+    fn gives_each_end_and_reads_the_series_back_from_the_view() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        let lens = [(0, 3), (1, 0), (2, 9)];
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &lens).unwrap();
+        draft.series(0).unwrap().fill(1);
+        draft.series(2).unwrap().fill(2);
+        let frame = draft.freeze(Path::Live);
+        let ends: Vec<_> = frame.ends().collect();
+        assert_eq!(ends, [(0, 3), (1, 8), (2, 17)]);
+        let body = frame.body();
+        let read: Vec<_> = series(&body, ends.iter().map(|&(_, end)| end)).collect();
+        assert_eq!(read, [[1; 3].as_slice(), &[], &[2; 9]]);
+        let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
+        let empty = empty.freeze(Path::Live);
+        assert_eq!(empty.ends().count(), 0);
+        assert_eq!(series(&empty.body(), []).count(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "the end 5 is outside 0..=4")]
+    fn panics_on_an_end_past_the_body() {
+        series(&[0; 4], [5]).for_each(drop);
+    }
+
+    #[test]
+    #[should_panic(expected = "the end 2 is outside 8..=16")]
+    fn panics_on_an_end_before_the_start_of_its_series() {
+        series(&[0; 16], [3, 2]).for_each(drop);
     }
 
     #[test]
@@ -942,6 +1000,15 @@ mod tests {
             body.extend(bytes);
         }
         prop_assert_eq!(&*frame.body(), body.as_slice());
+        let view = frame.body();
+        let ends: Vec<(usize, usize)> = frame.ends().collect();
+        let from_ends: Vec<(usize, Vec<u8>)> = ends
+            .iter()
+            .map(|&(entry, _)| entry)
+            .zip(super::series(&view, ends.iter().map(|&(_, end)| end)))
+            .map(|(entry, bytes)| (entry, bytes.to_vec()))
+            .collect();
+        prop_assert_eq!(&from_ends, &written);
         prop_assert_eq!(read, written);
         Ok(())
     }

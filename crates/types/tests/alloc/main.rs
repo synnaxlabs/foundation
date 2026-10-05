@@ -6,7 +6,7 @@
 
 use types::channel::Slot;
 use types::frame::key_set::{Group, Interner};
-use types::frame::{Draft, Form, Path, Range};
+use types::frame::{self, Draft, Form, Path, Range};
 use types::sample::{Scalar, Type};
 
 #[global_allocator]
@@ -56,7 +56,14 @@ fn main() {
             Some([2; 16].as_slice()),
             "entry 2 reads back"
         );
-        assert_eq!(frame.body().len(), 32, "the body views both series");
+        let body = frame.body();
+        assert_eq!(body.len(), 32, "the body views both series");
+        let ends = frame.ends().map(|(_, end)| end);
+        assert_eq!(
+            frame::series(&body, ends).map(<[u8]>::len).sum::<usize>(),
+            32,
+            "the ends give both series"
+        );
         let range = copy.range(0).expect("group 0 is present");
         copy.iter()
             .flat_map(|(_, bytes)| bytes)
