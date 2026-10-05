@@ -1,0 +1,6 @@
+# <name> <outcome> <decision>: each text where read differs from HCL on purpose.
+integer-past-i128 hcl.number DOCUMENT MODEL: an integer is an i128
+object-duplicate-key document.duplicate-key DOCUMENT MODEL: keys are unique
+reference-unicode hcl.name A3: names are ASCII
+float-past-f64 hcl.number DOCUMENT MODEL: a float is a finite f64
+float-to-zero hcl.number DOCUMENT MODEL: a float is a finite f64
