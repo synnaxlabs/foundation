@@ -1,73 +1,14 @@
-//! The datagrams of one connection: whole messages, each in one QUIC DATAGRAM
-//! frame, that may be lost.
+//! The datagrams that arrived on one connection: whole messages, each in one QUIC
+//! DATAGRAM frame, that may be lost.
 
 use std::collections::VecDeque;
 
 use block::{Block, Pool};
-use bytes::Bytes;
 
-use super::connection::{self, Connection};
-use super::{Body, Event, queue};
-use crate::{Error, message};
+use super::{Event, connection};
 
 /// The most datagrams that wait untaken on one connection.
 const WAITING_MAX: usize = 64;
-
-/// The datagrams of one connected connection.
-pub(crate) struct Datagrams<'a> {
-    connection: &'a mut Connection,
-    /// The endpoint's queue for [`Endpoint::transmit`](super::Endpoint::transmit).
-    ready: &'a mut VecDeque<connection::Key>,
-}
-
-impl<'a> Datagrams<'a> {
-    pub(super) fn new(
-        connection: &'a mut Connection,
-        ready: &'a mut VecDeque<connection::Key>,
-    ) -> Self {
-        Self { connection, ready }
-    }
-
-    /// Queues `message` as one datagram. It never waits: when the queue is full, the
-    /// oldest unsent datagram drops.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::TooLarge`] when `message` is over [`Datagrams::bytes_max`], or the
-    /// peer takes no datagrams.
-    #[expect(
-        clippy::unwrap_in_result,
-        reason = "datagrams are on, the size is checked, and a send that drops never \
-                  blocks"
-    )]
-    pub(crate) fn send(&mut self, message: Block) -> Result<(), Error> {
-        let bytes = message.len();
-        let mut datagrams = self.connection.inner.datagrams();
-        match datagrams.max_size() {
-            Some(bytes_max) if bytes <= bytes_max => {}
-            bytes_max => {
-                let bytes_max = bytes_max.unwrap_or(0);
-                return Err(Error::TooLarge { bytes, bytes_max });
-            }
-        }
-        datagrams
-            .send(Bytes::from_owner(Body(message)), true)
-            .expect("invariant: noq-proto takes a datagram that fits");
-        queue(self.ready, self.connection);
-        Ok(())
-    }
-
-    /// The oldest datagram that arrived and was not taken.
-    pub(crate) fn receive(&mut self) -> Option<Block> {
-        self.connection.received.0.pop_front()
-    }
-
-    /// The largest datagram [`Datagrams::send`] takes now. It changes with the path,
-    /// and is 0 when the peer takes no datagrams.
-    pub(crate) fn bytes_max(&mut self) -> usize {
-        self.connection.inner.datagrams().max_size().unwrap_or(0)
-    }
-}
 
 /// The datagrams that arrived on one connection and wait to be taken, oldest first.
 #[derive(Default)]
@@ -76,8 +17,12 @@ pub(super) struct Received(VecDeque<Block>);
 impl Received {
     /// Moves each datagram that `inner` holds into a block from `pool`, and gives
     /// [`Event::Datagram`] when none waited. A datagram drops when it gets no block
-    /// (`pool` or the system has no room). When [`WAITING_MAX`] wait, the oldest
-    /// drops.
+    /// (`pool` or the system has no room). When [`WAITING_MAX`] wait, a new one drops
+    /// the oldest.
+    ///
+    /// # Panics
+    ///
+    /// When `pool` cannot hold a datagram that `inner` took.
     pub(super) fn pull(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -88,18 +33,29 @@ impl Received {
         let waited = !self.0.is_empty();
         let mut datagrams = inner.datagrams();
         while let Some(datagram) = datagrams.recv() {
+            let mut block = match pool.alloc(datagram.len()) {
+                Ok(block) => block,
+                Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
+                    continue;
+                }
+                Err(error @ block::Error::TooLarge { .. }) => {
+                    panic!("invariant: the pool holds `message_bytes_max`: {error}")
+                }
+            };
+            block.copy_from_slice(&datagram);
             if self.0.len() == WAITING_MAX {
                 self.0.pop_front();
             }
-            let Ok(mut block) = message::alloc(pool, datagram.len()) else {
-                continue;
-            };
-            block.copy_from_slice(&datagram);
             self.0.push_back(block.freeze());
         }
         if !waited && !self.0.is_empty() {
             events.push_back(Event::Datagram { key });
         }
+    }
+
+    /// Takes the oldest datagram.
+    pub(super) fn pop(&mut self) -> Option<Block> {
+        self.0.pop_front()
     }
 }
 
@@ -114,9 +70,9 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::quic::Endpoint;
     use crate::quic::testing::{self, Pair, Side};
-    use crate::{Code, Config, tls};
+    use crate::quic::{Datagrams, Endpoint};
+    use crate::{Code, Config, Error, tls};
 
     /// The link delay each way.
     const DELAY: Duration = Duration::from_millis(10);
@@ -137,12 +93,16 @@ mod tests {
         dial_with(shard, &shard.config(testing::SERVER_KEY, Span::SECOND))
     }
 
-    /// A pool with room for one block of 100 bytes and not two.
-    fn small() -> Rc<Pool> {
-        // A 100-byte block takes 192 bytes of the budget.
-        let config = block::Config { budget: 300 };
+    /// A pool with `budget` bytes. A 100-byte block takes 192 of them.
+    fn pool(budget: usize) -> Rc<Pool> {
+        let config = block::Config { budget };
         let memory = Heap::new(config.reservation());
         Rc::new(Pool::new(config, memory))
+    }
+
+    /// A pool with room for one block of 100 bytes and not two.
+    fn small() -> Rc<Pool> {
+        pool(300)
     }
 
     /// A server config that takes messages from `pool`.
@@ -241,24 +201,42 @@ mod tests {
     }
 
     #[test]
-    fn take_up_to_a_smaller_peer_limit_less_the_frame_header() {
+    #[should_panic(
+        expected = "a largest message of 1471 bytes is below the largest UDP payload, \
+                    1472 bytes"
+    )]
+    fn a_largest_message_below_one_packet_panics() {
         testing::run(1, |shard| {
             let config = Config {
-                message_bytes_max: NonZeroUsize::new(500).expect("not zero"),
+                message_bytes_max: NonZeroUsize::new(1_471).expect("not zero"),
+                ..shard.config(testing::SERVER_KEY, Span::SECOND)
+            };
+            drop(Endpoint::new(
+                &config,
+                testing::SERVER_SHARD,
+                NonZeroUsize::MIN,
+            ));
+        });
+    }
+
+    #[test]
+    fn a_full_packet_of_small_ones_all_arrive_at_the_smallest_limit() {
+        testing::run(1, |shard| {
+            let config = Config {
+                message_bytes_max: NonZeroUsize::new(1_472).expect("not zero"),
                 ..shard.config(testing::SERVER_KEY, Span::SECOND)
             };
             let mut pair = dial_with(shard, &config);
+            pair.run(Duration::from_secs(1));
             let mut client = datagrams(&mut pair.client);
-            assert_eq!(client.bytes_max(), 491);
-            let over = client.send(shard.block(&[1; 492]));
-            let too_large = Error::TooLarge {
-                bytes: 492,
-                bytes_max: 491,
-            };
-            assert_eq!(over, Err(too_large));
-            client.send(shard.block(&[2; 491])).expect("sent");
+            // 10 frames of 1 + 2 + 138 bytes fit in one packet.
+            for byte in 0..10 {
+                client.send(shard.block(&[byte; 138])).expect("sent");
+            }
             pair.run(RUN);
-            assert_eq!(take(&mut pair.server), [vec![2; 491]]);
+            assert_eq!(arrivals(&pair.server), 1);
+            let all = (0..10).map(|byte| vec![byte; 138]);
+            assert_eq!(take(&mut pair.server), all.collect::<Vec<_>>());
         });
     }
 
@@ -315,7 +293,47 @@ mod tests {
     }
 
     #[test]
-    fn are_there_only_while_connected_and_free_when_the_connection_drains() {
+    fn one_with_no_block_drops_no_other() {
+        testing::run(1, |shard| {
+            // Room for 64 blocks of 100 bytes, and not for one of 1000.
+            let pool = pool(64 * 192 + 500);
+            let mut pair = dial_with(shard, &with_pool(shard, &pool));
+            let mut client = datagrams(&mut pair.client);
+            for byte in 0..64 {
+                client.send(shard.block(&[byte; 100])).expect("sent");
+            }
+            pair.run(RUN);
+            datagrams(&mut pair.client)
+                .send(shard.block(&[64; 1_000]))
+                .expect("sent");
+            pair.run(RUN);
+            let all = (0..64).map(|byte| vec![byte; 100]);
+            assert_eq!(take(&mut pair.server), all.collect::<Vec<_>>());
+        });
+    }
+
+    #[test]
+    fn the_ones_after_one_with_no_block_still_arrive() {
+        testing::run(1, |shard| {
+            let pool = small();
+            let mut pair = dial_with(shard, &with_pool(shard, &pool));
+            let mut client = datagrams(&mut pair.client);
+            for byte in 1..=3 {
+                client.send(shard.block(&[byte; 100])).expect("sent");
+            }
+            pair.run(RUN);
+            assert_eq!(take(&mut pair.server), [vec![1; 100]]);
+            datagrams(&mut pair.client)
+                .send(shard.block(&[4; 100]))
+                .expect("sent");
+            pair.run(RUN);
+            assert_eq!(arrivals(&pair.server), 2);
+            assert_eq!(take(&mut pair.server), [vec![4; 100]]);
+        });
+    }
+
+    #[test]
+    fn are_there_only_while_connected_and_free_when_the_connection_ends() {
         testing::run(1, |shard| {
             let pool = small();
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
@@ -333,17 +351,16 @@ mod tests {
                 .expect("sent");
             pair.run(RUN);
             let server = pair.server.key.expect("a key");
-            pair.server.endpoint.close(pair.now(), server, Code(7));
-            assert!(pair.server.endpoint.datagrams(server).is_none());
-            pair.run(RUN);
-            assert!(pair.client.endpoint.datagrams(client).is_none());
             let full = block::Error::Exhausted {
                 requested: 100,
                 available: 108,
             };
             assert_eq!(pool.alloc(100).err(), Some(full));
-            pair.run(Duration::from_secs(3));
-            pool.alloc(100).expect("the drain freed the datagram");
+            pair.server.endpoint.close(pair.now(), server, Code(7));
+            assert!(pair.server.endpoint.datagrams(server).is_none());
+            pool.alloc(100).expect("the close freed the datagram");
+            pair.run(RUN);
+            assert!(pair.client.endpoint.datagrams(client).is_none());
         });
     }
 }

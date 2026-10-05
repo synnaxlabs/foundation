@@ -2,7 +2,7 @@
 
 mod cid;
 pub(crate) mod connection;
-pub(crate) mod datagrams;
+mod datagram;
 mod settings;
 pub(crate) mod stream;
 #[cfg(test)]
@@ -16,15 +16,16 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use block::{Block, Pool};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use env::net::Ecn;
 use env::net::udp::{Meta, Transmit};
-use noq_proto::{ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple};
+use noq_proto::{
+    ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple, SendDatagramError,
+};
 use types::node::PublicKey;
 use types::time::Monotonic;
 
 use self::connection::Connection;
-use self::datagrams::Datagrams;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
 use crate::{Class, Code, Config, Error, Peer};
@@ -97,9 +98,16 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `config.idle` is not positive, or `config.window_bytes` is below
-    /// `config.message_bytes_max`. `Transport::new` refuses both first.
+    /// When `config.idle` is not positive, `config.window_bytes` is below
+    /// `config.message_bytes_max`, or `config.message_bytes_max` is below 1472.
+    /// `Transport::new` refuses each first.
     pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
+        assert!(
+            config.message_bytes_max.get() >= usize::from(settings::PAYLOAD_IPV4),
+            "a largest message of {} bytes is below the largest UDP payload, {} bytes",
+            config.message_bytes_max,
+            settings::PAYLOAD_IPV4
+        );
         assert!(
             config.window_bytes >= config.message_bytes_max.get(),
             "a window of {} bytes is below the largest message, {} bytes",
@@ -177,7 +185,7 @@ impl Endpoint {
 
     /// The next datagrams to send, all to one destination, written into `buffer`.
     /// `None` when nothing is due. Call it until `None` after each other call but
-    /// [`Endpoint::deadline`] and [`Endpoint::poll`].
+    /// [`Endpoint::deadline`] and [`Endpoint::poll`], and after [`Datagrams::send`].
     pub(crate) fn transmit<'a>(
         &mut self,
         now: Monotonic,
@@ -415,7 +423,8 @@ impl Endpoint {
     /// ends.
     pub(crate) fn datagrams(&mut self, key: connection::Key) -> Option<Datagrams<'_>> {
         let connection = find(&mut self.connections, key).filter(|c| c.connected())?;
-        Some(Datagrams::new(connection, &mut self.ready))
+        let ready = &mut self.ready;
+        Some(Datagrams { connection, ready })
     }
 
     /// The next event, in the order they happened.
@@ -541,8 +550,8 @@ impl Endpoint {
     }
 
     /// Drives `handle`'s connection at `now`. Frees it once it drained, and else
-    /// queues it for [`Endpoint::transmit`]: each call that can give it a datagram to
-    /// send ends here.
+    /// queues it for [`Endpoint::transmit`]. Each call that can give it a datagram to
+    /// send ends here, but [`Datagrams::send`], which queues it itself.
     fn drive(&mut self, handle: ConnectionHandle, now: Instant) {
         let entry = &mut self.connections[handle.0];
         let connection = entry.as_mut().expect("invariant: a live handle");
@@ -551,6 +560,55 @@ impl Endpoint {
         } else {
             queue(&mut self.ready, connection);
         }
+    }
+}
+
+/// The datagrams of one connected connection: whole messages, each in one QUIC
+/// DATAGRAM frame, that may be lost.
+pub(crate) struct Datagrams<'a> {
+    connection: &'a mut Connection,
+    /// The endpoint's queue for [`Endpoint::transmit`].
+    ready: &'a mut VecDeque<connection::Key>,
+}
+
+impl Datagrams<'_> {
+    /// Queues `message` as one datagram. It never waits: when the queue is full, the
+    /// oldest unsent datagram drops.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooLarge`] when `message` is over [`Datagrams::bytes_max`], or the
+    /// peer takes no datagrams.
+    pub(crate) fn send(&mut self, message: Block) -> Result<(), Error> {
+        let bytes = message.len();
+        let mut datagrams = self.connection.inner.datagrams();
+        match datagrams.send(Bytes::from_owner(Body(message)), true) {
+            Ok(()) => {}
+            Err(SendDatagramError::TooLarge | SendDatagramError::UnsupportedByPeer) => {
+                let bytes_max = datagrams.max_size().unwrap_or(0);
+                return Err(Error::TooLarge { bytes, bytes_max });
+            }
+            Err(
+                error @ (SendDatagramError::Disabled | SendDatagramError::Blocked(_)),
+            ) => {
+                panic!(
+                    "invariant: datagrams are on, and a send that drops never blocks: {error}"
+                )
+            }
+        }
+        queue(self.ready, self.connection);
+        Ok(())
+    }
+
+    /// The oldest datagram that arrived and was not taken.
+    pub(crate) fn receive(&mut self) -> Option<Block> {
+        self.connection.datagrams.pop()
+    }
+
+    /// The largest datagram [`Datagrams::send`] takes now. It changes with the path,
+    /// and is 0 when the peer takes no datagrams.
+    pub(crate) fn bytes_max(&mut self) -> usize {
+        self.connection.inner.datagrams().max_size().unwrap_or(0)
     }
 }
 

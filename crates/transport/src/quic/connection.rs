@@ -13,7 +13,7 @@ use rustls::pki_types::CertificateDer;
 use types::node::PublicKey;
 
 use super::Event;
-use super::datagrams::Received;
+use super::datagram::Received;
 use super::stream::{Fault, Streams};
 use crate::{Code, Error, Peer, tls};
 
@@ -35,7 +35,7 @@ pub(super) struct Connection {
     pub(super) queued: bool,
     pub(super) streams: Streams,
     /// The datagrams that arrived and wait to be taken.
-    pub(super) received: Received,
+    pub(super) datagrams: Received,
     state: State,
 }
 
@@ -81,7 +81,7 @@ impl Connection {
             inner,
             queued: false,
             streams,
-            received: Received::default(),
+            datagrams: Received::default(),
             state,
         }
     }
@@ -136,7 +136,7 @@ impl Connection {
                 events.push_back(Event::Connected { key, peer });
             }
             noq_proto::Event::ConnectionLost { reason } => {
-                let expected = match mem::replace(&mut self.state, State::Ended) {
+                let expected = match self.end() {
                     State::Dialing { expected } => Some(expected),
                     State::Open => None,
                     State::Accepting | State::Ended => return,
@@ -146,7 +146,7 @@ impl Connection {
             }
             noq_proto::Event::Stream(event) if self.live() => {
                 assert!(
-                    matches!(self.state, State::Open),
+                    self.connected(),
                     "invariant: noq-proto gives stream events only after it connects"
                 );
                 // A stream event repeats once for each frame, so the same one in a
@@ -162,7 +162,7 @@ impl Connection {
                     self.connected(),
                     "invariant: noq-proto gives datagrams only after it connects"
                 );
-                self.received.pull(&mut self.inner, pool, key, events);
+                self.datagrams.pull(&mut self.inner, pool, key, events);
             }
             noq_proto::Event::HandshakeDataReady
             | noq_proto::Event::HandshakeConfirmed
@@ -191,7 +191,7 @@ impl Connection {
     ///
     /// When the connection is not open.
     pub(super) fn fault(&mut self, now: Instant, reason: String) -> Event {
-        let state = mem::replace(&mut self.state, State::Ended);
+        let state = self.end();
         assert!(
             matches!(state, State::Open),
             "invariant: a fault is found on an open connection"
@@ -211,7 +211,7 @@ impl Connection {
     ///
     /// When the caller does not have the key yet.
     pub(super) fn close(&mut self, now: Instant, code: Code) -> Option<Event> {
-        match mem::replace(&mut self.state, State::Ended) {
+        match self.end() {
             State::Dialing { .. } | State::Open => {
                 self.inner
                     .close(now, VarInt::from_u32(code.0), Bytes::new());
@@ -226,6 +226,13 @@ impl Connection {
                 panic!("invariant: the caller has no key for a connection it never got")
             }
         }
+    }
+
+    /// Ends the connection, frees the datagrams that no caller can take now, and
+    /// gives the state it had.
+    fn end(&mut self) -> State {
+        self.datagrams = Received::default();
+        mem::replace(&mut self.state, State::Ended)
     }
 
     /// The peer of a connected connection.

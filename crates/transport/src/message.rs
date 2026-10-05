@@ -203,7 +203,7 @@ impl Reader {
 /// # Panics
 ///
 /// When the pool cannot hold `len` bytes.
-pub(crate) fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
+fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
     match pool.alloc(len) {
         Ok(block) => Ok(block),
         Err(block::Error::Exhausted {

@@ -32,15 +32,19 @@ pub(super) const MTU_MIN: u16 = 1200;
 
 /// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
 /// node takes.
-const PAYLOAD_IPV4: u16 = 1472;
+pub(super) const PAYLOAD_IPV4: u16 = 1472;
 
 /// Ethernet's 1500 bytes less the IPv6 and UDP headers: the largest datagram MTU
 /// discovery tries, so it fits both IP versions.
 const PAYLOAD_IPV6: u16 = 1452;
 
-/// The bytes of datagrams that wait to be sent on one connection. When a new one
-/// does not fit, the oldest drops.
-const DATAGRAMS_QUEUED: usize = 64 << 10;
+/// The most bytes of QUIC datagrams that wait to be sent on one connection. When a
+/// new one does not fit, the oldest drops.
+const DATAGRAM_QUEUE_BYTES_MAX: usize = 64 << 10;
+const _: () = assert!(
+    DATAGRAM_QUEUE_BYTES_MAX >= PAYLOAD_IPV4 as usize,
+    "noq-proto refuses a datagram over the queue, so it must hold the path's largest"
+);
 
 /// What each dial from one shard needs.
 pub(super) struct Settings {
@@ -178,7 +182,7 @@ fn transport(config: &Config) -> TransportConfig {
         .crypto_buffer_size(16 << 10)
         .allow_spin(false)
         .datagram_receive_buffer_size(Some(config.message_bytes_max.get()))
-        .datagram_send_buffer_size(DATAGRAMS_QUEUED)
+        .datagram_send_buffer_size(DATAGRAM_QUEUE_BYTES_MAX)
         .max_concurrent_multipath_paths(0)
         .max_remote_nat_traversal_addresses(0)
         .server_handshake_migration(false)
@@ -696,6 +700,35 @@ mod tests {
                         })
                     );
                 }
+            });
+        }
+
+        #[test]
+        fn to_a_peer_that_takes_fewer_bytes_are_too_large_over_its_limit() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let client = &mut pair.client.endpoint.settings.transport;
+                Arc::make_mut(client).datagram_receive_buffer_size(Some(500));
+                pair.dial(tls::public(&testing::SERVER_KEY));
+                pair.run(Duration::from_millis(100));
+                let key = pair.server.key.expect("a connection");
+                let server = &mut pair.server.endpoint;
+                let mut datagrams = server.datagrams(key).expect("connected");
+                // The peer's limit less the frame header.
+                assert_eq!(datagrams.bytes_max(), 491);
+                let over = datagrams.send(shard.block(&[1; 492]));
+                let too_large = Error::TooLarge {
+                    bytes: 492,
+                    bytes_max: 491,
+                };
+                assert_eq!(over, Err(too_large));
+                datagrams.send(shard.block(&[2; 491])).expect("sent");
+                pair.run(Duration::from_millis(100));
+                let key = pair.client.key.expect("a connection");
+                let client = &mut pair.client.endpoint;
+                let mut datagrams = client.datagrams(key).expect("connected");
+                let arrived = datagrams.receive().map(|block| block.to_vec());
+                assert_eq!(arrived, Some(vec![2; 491]));
             });
         }
     }
