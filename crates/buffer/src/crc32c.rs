@@ -1,4 +1,4 @@
-//! CRC32C (Castagnoli), the checksum of iSCSI and ext4.
+//! CRC32C (Castagnoli).
 
 /// The Castagnoli polynomial, bit-reflected.
 const POLY: u32 = 0x82F6_3B78;
@@ -34,6 +34,11 @@ impl Crc32c {
         Self(!0)
     }
 
+    /// Continues from the `finish` value of earlier bytes.
+    pub(crate) const fn resume(crc: u32) -> Self {
+        Self(!crc)
+    }
+
     pub(crate) fn update(&mut self, bytes: &[u8]) {
         self.0 = bytes.iter().fold(self.0, |crc, &byte| {
             let [low, ..] = crc.to_le_bytes();
@@ -59,7 +64,7 @@ mod tests {
         crc.finish()
     }
 
-    /// The check value of the CRC catalogue, then the vectors of RFC 3720, B.4.
+    /// The check value of the CRC catalogue, then the iSCSI test vectors.
     #[test]
     fn matches_the_standard_vectors() {
         let up: Vec<u8> = (0..32).collect();
@@ -78,12 +83,15 @@ mod tests {
 
     proptest! {
         #[test]
-        fn a_split_update_equals_one_update(
+        fn a_split_or_resumed_update_equals_one_update(
             bytes in prop::collection::vec(any::<u8>(), 0..512),
             cut in any::<prop::sample::Index>(),
         ) {
             let (head, tail) = bytes.split_at(cut.index(bytes.len() + 1));
             prop_assert_eq!(crc(&[head, tail]), crc(&[&bytes]));
+            let mut resumed = Crc32c::resume(crc(&[head]));
+            resumed.update(tail);
+            prop_assert_eq!(resumed.finish(), crc(&[&bytes]));
         }
     }
 }
