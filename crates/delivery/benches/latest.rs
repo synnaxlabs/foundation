@@ -23,7 +23,7 @@ fn opened(sessions: usize) -> (Frame, Readers, Vec<Key>) {
     let frame = Draft::new(&pool, &set, Form::Raw, &[(0, 8)])
         .expect("the pool holds the frame")
         .freeze(Path::Live);
-    let mut readers = Readers::new();
+    let mut readers = Readers::new(0);
     let keys = (0..sessions)
         .map(|_| readers.open_latest(None, Stamp::from_nanos(0)).key)
         .collect();

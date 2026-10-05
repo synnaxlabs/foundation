@@ -167,7 +167,6 @@ impl Request {
         } else {
             MAX_WRITE_REGISTERS
         };
-        check(start, usize::from(count), max)?;
         let want = data_bytes(coils, usize::from(count));
         if usize::from(*bytes) != want {
             return Err(Error::ByteCount {
@@ -181,7 +180,7 @@ impl Request {
                 got: pdu.len(),
             });
         }
-        Ok(if coils {
+        let request = if coils {
             Self::WriteCoils {
                 start,
                 values: Bits::new(data, count)?.iter().collect(),
@@ -191,7 +190,10 @@ impl Request {
                 start,
                 values: Registers(data).iter().collect(),
             }
-        })
+        };
+        // The specification checks every value before the range.
+        check(start, usize::from(count), max)?;
+        Ok(request)
     }
 
     /// Reads the device's reply PDU to this request, in place. The request is one
@@ -246,12 +248,7 @@ impl Request {
                     Reply::Registers(Registers(data))
                 })
             }
-            Self::WriteCoil { address, value } => echo(pdu, [*address, coil(*value)]),
-            Self::WriteRegister { address, value } => echo(pdu, [*address, *value]),
-            Self::WriteCoils { start, values } => echo(pdu, [*start, count(values)]),
-            Self::WriteRegisters { start, values } => {
-                echo(pdu, [*start, count(values)])
-            }
+            _ => echo(pdu, self.head()),
         }
     }
 
@@ -296,24 +293,42 @@ impl Request {
     /// Appends the PDU of a request that [`Request::size`] accepted.
     pub(crate) fn write_to(&self, out: &mut Vec<u8>) {
         out.push(self.function());
+        put(out, self.head());
         match self {
-            Self::Read { start, count, .. } => put(out, [*start, *count]),
-            Self::WriteCoil { address, value } => put(out, [*address, coil(*value)]),
-            Self::WriteRegister { address, value } => put(out, [*address, *value]),
-            Self::WriteCoils { start, values } => {
-                put(out, [*start, count(values)]);
-                out.push(byte_count(data_bytes(true, values.len())));
-                for byte in values.chunks(8) {
-                    out.push(pack(byte));
-                }
-            }
-            Self::WriteRegisters { start, values } => {
-                put(out, [*start, count(values)]);
-                out.push(byte_count(data_bytes(false, values.len())));
-                for value in values {
-                    out.extend_from_slice(&value.to_be_bytes());
-                }
-            }
+            Self::WriteCoils { values, .. } => put_bits(out, values),
+            Self::WriteRegisters { values, .. } => put_registers(out, values),
+            _ => {}
+        }
+    }
+
+    /// Appends a device's reply to this read, of `bits` read from coils or
+    /// discrete inputs.
+    pub(crate) fn reply_bits(&self, bits: &[bool], out: &mut Vec<u8>) {
+        out.push(self.function());
+        put_bits(out, bits);
+    }
+
+    /// Appends a device's reply to this read, of `registers` read.
+    pub(crate) fn reply_registers(&self, registers: &[u16], out: &mut Vec<u8>) {
+        out.push(self.function());
+        put_registers(out, registers);
+    }
+
+    /// Appends a device's reply to this write: its function and the echo.
+    pub(crate) fn reply_written(&self, out: &mut Vec<u8>) {
+        out.push(self.function());
+        put(out, self.head());
+    }
+
+    /// The two fields after the function code: the first address, then the count
+    /// or the single value. A write reply echoes them.
+    fn head(&self) -> [u16; 2] {
+        match self {
+            Self::Read { start, count, .. } => [*start, *count],
+            Self::WriteCoil { address, value } => [*address, coil(*value)],
+            Self::WriteRegister { address, value } => [*address, *value],
+            Self::WriteCoils { start, values } => [*start, count(values)],
+            Self::WriteRegisters { start, values } => [*start, count(values)],
         }
     }
 
@@ -443,6 +458,50 @@ pub enum Exception {
     Other(u8),
 }
 
+impl Exception {
+    /// The exception a device gives for a request PDU that [`Request::decode`]
+    /// refused. It is right because `decode` checks in the specification's order:
+    /// the function, then every value, then the range.
+    pub(crate) fn of(error: &Error) -> Self {
+        match error {
+            Error::Function(_) => Self::IllegalFunction,
+            Error::Range { .. } => Self::IllegalAddress,
+            Error::Size { .. }
+            | Error::Count { .. }
+            | Error::ByteCount { .. }
+            | Error::Padding(_)
+            | Error::Coil(_) => Self::IllegalValue,
+            Error::Protocol(_)
+            | Error::Length(_)
+            | Error::Answer { .. }
+            | Error::Echo { .. }
+            | Error::Frame(_)
+            | Error::Crc { .. } => {
+                unreachable!("invariant: a request PDU never gives {error}")
+            }
+        }
+    }
+
+    /// Appends the exception reply to a request of `function`.
+    pub(crate) fn write_to(self, function: u8, out: &mut Vec<u8>) {
+        out.extend_from_slice(&[function | EXCEPTION, self.code()]);
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::IllegalFunction => 1,
+            Self::IllegalAddress => 2,
+            Self::IllegalValue => 3,
+            Self::DeviceFailure => 4,
+            Self::Acknowledge => 5,
+            Self::Busy => 6,
+            Self::GatewayPath => 10,
+            Self::GatewayTarget => 11,
+            Self::Other(code) => code,
+        }
+    }
+}
+
 impl From<u8> for Exception {
     fn from(code: u8) -> Self {
         match code {
@@ -516,6 +575,20 @@ fn pack(bits: &[bool]) -> u8 {
 fn put(out: &mut Vec<u8>, fields: [u16; 2]) {
     for field in fields {
         out.extend_from_slice(&field.to_be_bytes());
+    }
+}
+
+/// Appends the byte count and the packed `bits`.
+fn put_bits(out: &mut Vec<u8>, bits: &[bool]) {
+    out.push(byte_count(data_bytes(true, bits.len())));
+    out.extend(bits.chunks(8).map(pack));
+}
+
+/// Appends the byte count and the `registers`.
+fn put_registers(out: &mut Vec<u8>, registers: &[u16]) {
+    out.push(byte_count(data_bytes(false, registers.len())));
+    for register in registers {
+        out.extend_from_slice(&register.to_be_bytes());
     }
 }
 
@@ -804,7 +877,17 @@ mod tests {
 
     #[test]
     fn refuses_a_request_pdu_that_is_not_valid() {
-        let cases: [(&[u8], Error, &str); 10] = [
+        let cases: [(&[u8], Error, &str); 12] = [
+            (
+                &[0x10, 0xFF, 0xFF, 0x00, 0x02, 0x03, 0, 0, 0],
+                Error::ByteCount { want: 4, got: 3 },
+                "a byte count of 3 where the item count gives 4",
+            ),
+            (
+                &[0x0F, 0xFF, 0xFF, 0x00, 0x02, 0x01, 0xFF],
+                Error::Padding(0xFF),
+                "a last bit byte of 0xff whose unused bits are not 0",
+            ),
             (
                 &[0x0F, 0x00, 0x00, 0x00, 0x01, 0x01, 0xFF],
                 Error::Padding(0xFF),
@@ -862,6 +945,15 @@ mod tests {
         for (pdu, error, message) in cases {
             assert_eq!(Request::decode(pdu), Err(error.clone()), "{pdu:x?}");
             assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[test]
+    fn writes_each_exception_code_it_reads() {
+        for code in 0..=u8::MAX {
+            let mut out = Vec::new();
+            Exception::from(code).write_to(0x03, &mut out);
+            assert_eq!(out, [0x83, code]);
         }
     }
 

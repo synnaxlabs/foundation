@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+pub mod device;
 pub mod pdu;
 pub mod rtu;
 pub mod tcp;
