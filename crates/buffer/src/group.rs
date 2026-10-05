@@ -2,6 +2,7 @@
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
+use std::fmt;
 use std::iter;
 use std::slice;
 
@@ -40,12 +41,58 @@ pub(crate) struct Group {
     wrap: Option<Unique>,
 }
 
+/// A limit of one record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    /// More than 1023 entries.
+    Entries {
+        /// The entries of the batch.
+        count: usize,
+    },
+    /// More than 1023 parts in all the entries together.
+    Parts {
+        /// The parts of the batch.
+        count: usize,
+    },
+    /// A record body, the entry table and the parts, over the layout's `body_max`.
+    Body {
+        /// Bytes of the body.
+        len: usize,
+        /// The layout's `body_max`.
+        max: usize,
+    },
+}
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Entries { count } => write!(
+                f,
+                "the batch has {count} entries, and a record holds at most \
+                 {ENTRIES_MAX}"
+            ),
+            Self::Parts { count } => write!(
+                f,
+                "the batch has {count} parts, and a record holds at most {ENTRIES_MAX}"
+            ),
+            Self::Body { len, max } => write!(
+                f,
+                "the batch needs a record body of {len} bytes, and a record of this \
+                 ring holds at most {max}"
+            ),
+        }
+    }
+}
+
 /// Why a group did not take a batch. Nothing changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Rejected {
-    /// The record with the batch would be over the layout's maximum body, over
-    /// [`ENTRIES_MAX`] entries or parts, or past the room in the ring. The caller
-    /// closes the group and pushes the batch into the next one.
+    /// The batch alone is over `Limit`, so no record holds it.
+    Large(Limit),
+    /// The record with the batch and the group's entries would be over the
+    /// layout's maximum body, over [`ENTRIES_MAX`] entries or parts, or past the
+    /// room in the ring. The caller closes the group and pushes the batch into the
+    /// next one.
     Record,
     /// The ring has no room for the batch's own record. The group is empty.
     Ring(Full),
@@ -78,10 +125,6 @@ impl Group {
     ///
     /// [`Rejected`] when the batch does not fit or the pool has no block. Nothing
     /// changes.
-    ///
-    /// # Panics
-    ///
-    /// When the batch alone is over the layout's maximum body or [`ENTRIES_MAX`].
     pub(crate) fn push<'a>(
         &mut self,
         pool: &Pool,
@@ -99,23 +142,25 @@ impl Group {
             .flat_map(|entry| entry.parts)
             .map(|part| part.len())
             .sum::<usize>();
-        let body = self.body_len_with(count, len);
-        if body > writer.body_max() {
-            assert!(
-                !self.is_empty(),
-                "invariant: a batch of {count} entries and {len} bytes is over the \
-                 maximum body of {} bytes",
-                writer.body_max()
-            );
-            return Err(Rejected::Record);
+        if count > ENTRIES_MAX {
+            return Err(Rejected::Large(Limit::Entries { count }));
         }
+        if parts > ENTRIES_MAX {
+            return Err(Rejected::Large(Limit::Parts { count: parts }));
+        }
+        let max = writer.body_max();
+        let alone = entry::table_len(count)
+            .checked_add(len)
+            .expect("invariant: a body fits in usize");
+        if alone > max {
+            return Err(Rejected::Large(Limit::Body { len: alone, max }));
+        }
+        let body = self.body_len_with(count, len);
         let over = |have: usize, more: usize| have.saturating_add(more) > ENTRIES_MAX;
-        if over(self.headers.len(), count) || over(self.writes.len(), parts) {
-            assert!(
-                !self.is_empty(),
-                "invariant: a batch of {count} entries and {parts} parts is over \
-                 the most of {ENTRIES_MAX}"
-            );
+        if body > max
+            || over(self.headers.len(), count)
+            || over(self.writes.len(), parts)
+        {
             return Err(Rejected::Record);
         }
         if let Err(full) = writer.fits(body) {
@@ -853,34 +898,95 @@ mod tests {
         let _closed = Group::default().close(&mut area.writer);
     }
 
+    /// Pushes `batch` into an empty group and into a group with one entry, and
+    /// checks that each refuses it with `limit` and stays as it was.
+    fn assert_large(area: &mut Area, batch: &[Entry<'_>], limit: Limit) {
+        let mut empty = Group::default();
+        let pushed = empty.push(&area.pool, &area.writer, batch);
+        assert_eq!(pushed, Err(Rejected::Large(limit)));
+        assert!(empty.is_empty());
+        assert!(empty.meta.is_none(), "a large batch takes no block");
+        let mut group = Group::default();
+        area.push(&mut group, header(9, Path::Live, 0), &[]);
+        let pushed = group.push(&area.pool, &area.writer, batch);
+        assert_eq!(pushed, Err(Rejected::Large(limit)));
+        assert_eq!(group.headers.len(), 1);
+        assert_eq!(group.writes.len(), 0);
+        assert_eq!(group.bytes, 0);
+    }
+
     #[test]
-    #[should_panic(
-        expected = "invariant: a batch of 1 entries and 8138 bytes is over the maximum \
-                    body of 8192 bytes"
-    )]
-    fn a_batch_alone_over_the_record_is_a_broken_invariant() {
-        let area = Area::new();
-        let part = block(&area.pool, &vec![7; BODY_MAX - table_len(1) + 1]);
-        let _rejected = Group::default().push(
-            &area.pool,
-            &area.writer,
-            &[entry(header(1, Path::Live, 0), &[part])],
+    fn a_batch_alone_over_the_body_is_large() {
+        let mut area = Area::new();
+        let parts = [block(&area.pool, &vec![7; BODY_MAX - table_len(1) + 1])];
+        let batch = [entry(header(1, Path::Live, 0), &parts)];
+        let limit = Limit::Body {
+            len: BODY_MAX + 1,
+            max: BODY_MAX,
+        };
+        assert_large(&mut area, &batch, limit);
+        assert_eq!(
+            limit.to_string(),
+            "the batch needs a record body of 8193 bytes, and a record of this ring \
+             holds at most 8192"
         );
     }
 
     #[test]
-    #[should_panic(
-        expected = "invariant: a batch of 1 entries and 1024 parts is over the most \
-                    of 1023"
-    )]
-    fn a_batch_alone_over_the_most_parts_is_a_broken_invariant() {
-        let area = Area::new();
-        let parts = vec![block(&area.pool, b""); ENTRIES_MAX + 1];
-        let _rejected = Group::default().push(
-            &area.pool,
-            &area.writer,
-            &[entry(header(1, Path::Live, 0), &parts)],
+    fn a_batch_alone_over_the_most_entries_is_large() {
+        let mut area = Area::with_body_max(60_000);
+        let batch = vec![entry(header(1, Path::Live, 0), &[]); ENTRIES_MAX + 1];
+        let limit = Limit::Entries { count: 1024 };
+        assert_large(&mut area, &batch, limit);
+        assert_eq!(
+            limit.to_string(),
+            "the batch has 1024 entries, and a record holds at most 1023"
         );
+    }
+
+    #[test]
+    fn a_batch_alone_over_the_most_parts_is_large() {
+        let mut area = Area::new();
+        let parts = vec![block(&area.pool, b""); ENTRIES_MAX + 1];
+        let batch = [entry(header(1, Path::Live, 0), &parts)];
+        let limit = Limit::Parts { count: 1024 };
+        assert_large(&mut area, &batch, limit);
+        assert_eq!(
+            limit.to_string(),
+            "the batch has 1024 parts, and a record holds at most 1023"
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// An empty group takes a batch under every limit, and refuses a batch over
+        /// one with the first it is over: entries, then parts, then body.
+        #[test]
+        fn an_empty_group_takes_any_batch_under_every_limit(
+            count in 1..=ENTRIES_MAX + 4,
+            parts in 1..=ENTRIES_MAX + 4,
+            len in 0..70_000usize,
+        ) {
+            let area = Area::with_body_max(60_000);
+            let mut blocks = vec![block(&area.pool, b""); parts];
+            blocks[0] = block(&area.pool, &vec![7; len]);
+            let mut batch = vec![entry(header(1, Path::Live, 0), &[]); count];
+            batch[0] = entry(header(1, Path::Live, 0), &blocks);
+            let body = table_len(count) + len;
+            let expected = if count > ENTRIES_MAX {
+                Err(Rejected::Large(Limit::Entries { count }))
+            } else if parts > ENTRIES_MAX {
+                Err(Rejected::Large(Limit::Parts { count: parts }))
+            } else if body > 60_000 {
+                Err(Rejected::Large(Limit::Body { len: body, max: 60_000 }))
+            } else {
+                Ok(())
+            };
+            let mut group = Group::default();
+            prop_assert_eq!(group.push(&area.pool, &area.writer, &batch), expected.clone());
+            prop_assert_eq!(group.is_empty(), expected.is_err());
+        }
     }
 
     #[test]
