@@ -62,6 +62,11 @@ negate-float accepted
 negate-space-written accepted
 negate-space accepted
 null accepted hcl.null
+number-dot-e accepted hcl.index
+number-dot-end refused
+number-dot-exponent-key accepted hcl.number-key
+number-dot-exponent-written accepted
+number-dot-exponent accepted
 number-key accepted hcl.number-key
 object-bool-key-string-written accepted
 object-bool-key-string accepted

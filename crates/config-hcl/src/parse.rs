@@ -828,7 +828,8 @@ mod tests {
 
         #[test]
         fn reads_floats() {
-            let text = "a = 1.5\nb = -0.25\nc = 1e3\nd = 2.5E-3\ne = -0.0\nf = 1e+2\n";
+            let text = "a = 1.5\nb = -0.25\nc = 1e3\nd = 2.5E-3\ne = -0.0\nf = 1e+2\n\
+                        g = 1.e5\nh = 1.E+5\ni = 0.e5\nj = -1.e-2\n";
             let expected = attributes(vec![
                 ("a", float(1.5)),
                 ("b", float(-0.25)),
@@ -836,6 +837,10 @@ mod tests {
                 ("d", float(0.0025)),
                 ("e", float(0.0)),
                 ("f", float(100.0)),
+                ("g", float(100_000.0)),
+                ("h", float(100_000.0)),
+                ("i", float(0.0)),
+                ("j", float(-0.01)),
             ]);
             assert_eq!(ok(text), expected);
         }
@@ -1656,6 +1661,7 @@ c = "°C # not a comment"
                 ("a = { (k) = 1 }\n", on(6, 7), Form::Parentheses),
                 ("a = { 1.5 = 1 }\n", on(6, 9), Form::NumberKey),
                 ("a = { 1e3 = 1 }\n", on(6, 9), Form::NumberKey),
+                ("a = { 1.e5 = 1 }\n", on(6, 10), Form::NumberKey),
                 ("a = { -1.5 = 1 }\n", on(7, 10), Form::NumberKey),
                 ("a = { - = 1 }\n", on(6, 7), Form::Operator),
                 ("a = { -x = 1 }\n", on(6, 7), Form::Operator),

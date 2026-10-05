@@ -295,22 +295,31 @@ impl<'a> Tokens<'a> {
             });
             from.saturating_add(run)
         };
-        let mut len = digits(0);
-        let fraction = len.saturating_add(1);
-        if bytes.get(len) == Some(&b'.') && digits(fraction) > fraction {
-            len = digits(fraction);
-        }
-        if matches!(bytes.get(len), Some(b'e' | b'E')) {
-            let sign = len.saturating_add(1);
+        // The end of an exponent that starts at `from`, or `from` when none does.
+        let exponent = |from: usize| {
+            if !matches!(bytes.get(from), Some(b'e' | b'E')) {
+                return from;
+            }
+            let sign = from.saturating_add(1);
             let start = sign.saturating_add(usize::from(matches!(
                 bytes.get(sign),
                 Some(b'+' | b'-')
             )));
             if digits(start) > start {
-                len = digits(start);
+                digits(start)
+            } else {
+                from
             }
+        };
+        let mut len = digits(0);
+        let fraction = len.saturating_add(1);
+        // HCL takes a `.` with no digit after it when an exponent follows, as in `1.e5`.
+        if bytes.get(len) == Some(&b'.')
+            && (digits(fraction) > fraction || exponent(fraction) > fraction)
+        {
+            len = digits(fraction);
         }
-        self.skip_bytes(len);
+        self.skip_bytes(exponent(len));
     }
 
     /// Moves past the rest of a word after its first character, `first`.
@@ -604,6 +613,32 @@ mod tests {
                 prop_assert!(!token.text.is_empty(), "{:?} has no text", token.kind);
             }
             prop_assert!(false, "more tokens than bytes in {text:?}");
+        }
+    }
+
+    #[test]
+    fn takes_a_dot_into_a_number_only_before_a_digit_or_an_exponent() {
+        let cases: [(&str, &[&str]); 8] = [
+            ("1.e5", &["1.e5"]),
+            ("1.E+5", &["1.E+5"]),
+            ("0.e-5", &["0.e-5"]),
+            ("1.5e3", &["1.5e3"]),
+            ("1.", &["1", "."]),
+            ("1.e", &["1", ".", "e"]),
+            ("1.e+", &["1", ".", "e", "+"]),
+            ("1.ex", &["1", ".", "ex"]),
+        ];
+        for (text, expected) in cases {
+            let mut tokens = Tokens::new(Source(0), text).unwrap();
+            let mut found = Vec::new();
+            for _ in 0..=text.len() {
+                let token = tokens.next();
+                if token.kind == Kind::End {
+                    break;
+                }
+                found.push(token.text);
+            }
+            assert_eq!(found, expected, "{text:?}");
         }
     }
 
