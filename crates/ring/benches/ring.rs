@@ -82,6 +82,40 @@ fn two_threads(bencher: Bencher<'_, '_>) {
         });
 }
 
+/// One thread stages up to `BATCH` values and publishes them, and the other polls
+/// `try_pop`. The time includes the start and the join of the pushing thread.
+#[divan::bench(sample_count = 20)]
+fn two_threads_batch(bencher: Bencher<'_, '_>) {
+    const VALUES: u64 = 1_000_000;
+    const BATCH: u64 = 64;
+    bencher
+        .counter(ItemsCount::new(VALUES))
+        .with_inputs(create_ring)
+        .bench_local_values(|(mut producer, mut consumer)| {
+            thread::scope(|scope| {
+                scope.spawn(move || {
+                    let mut value = 0;
+                    while value < VALUES {
+                        let end = (value + BATCH).min(VALUES);
+                        while value < end {
+                            if let Err(Full(back)) = producer.stage(value) {
+                                value = back;
+                                producer.publish();
+                                spin_loop();
+                            } else {
+                                value += 1;
+                            }
+                        }
+                        producer.publish();
+                    }
+                });
+                for _ in 0..VALUES {
+                    divan::black_box(pop_spinning(&mut consumer));
+                }
+            });
+        });
+}
+
 /// A value goes to a second thread and comes back. Each item is one hop. The time
 /// includes the start and the join of the echo thread.
 #[divan::bench(sample_count = 20)]
