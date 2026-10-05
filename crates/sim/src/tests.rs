@@ -691,6 +691,34 @@ fn a_panic_in_the_drop_of_a_task_ends_the_run_and_its_thread() {
 }
 
 #[test]
+fn a_panic_in_a_drop_after_a_panic_in_a_poll_gives_the_first_panic() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let handle = node.shards().start(shard("shard-0"), |tasks| async move {
+        let bomb = Bomb;
+        tasks.spawn(async move {
+            let _bomb = bomb;
+            pending::<()>().await;
+        });
+        panic!("boom");
+    });
+    assert_eq!(
+        sim.run(),
+        Err(Error::Panicked {
+            thread: "shard-0".into(),
+            message: "boom".into(),
+            seed: 0,
+        })
+    );
+    assert_eq!(
+        handle.unwrap().join(),
+        Err(thread::Error::Panicked {
+            name: "shard-0".into()
+        })
+    );
+}
+
+#[test]
 fn a_sleep_past_the_end_of_true_time_never_fires() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());

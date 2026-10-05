@@ -253,7 +253,10 @@ impl Sim {
         let name = lock(&self.shared).name(thread);
         let panicked = env::thread::Error::Panicked { name: name.clone() };
         let tasks = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
-        self.drop_futures(&tasks);
+        // A panic in these drops follows from the first, which the run reports.
+        let second =
+            panic::catch_unwind(AssertUnwindSafe(|| self.drop_futures(&tasks)));
+        drop(second);
         Err(Error::Panicked {
             thread: name,
             message: message(&*payload),
