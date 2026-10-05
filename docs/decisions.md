@@ -623,6 +623,16 @@ How to read this record:
 - **R16-9 (2026-10-04)** Miri and cargo-fuzz run on one pinned nightly toolchain that
   only those gates use. The workspace toolchain stays stable. Decided by the advisor
   under the quality delegation.
+- **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
+  trait that `os` and `sim` implement. `Clock`: monotonic time as
+  `types::time::Monotonic`, a `Sleep` future for shards that resets without an
+  allocation, and a blocking wait for dedicated threads. `Wall`: the OS wall clock,
+  which `node` hands only to `clock`. `Entropy`: random bytes from the OS, or from the
+  run's seed in simulation. `Threads`: shards and dedicated threads. `Tasks`: spawns
+  `!Send` tasks on the current shard. `Rng` is concrete (xoshiro256++ seeded from
+  `Entropy`), so simulation replays it. A shard is a thread plus an executor: on `os`,
+  a Tokio `LocalRuntime` whose `spawn_local` runs `Tasks`; on `sim`, the deterministic
+  scheduler. No other crate calls Tokio's timers or spawn. Files come later (S4).
 
 ### 1.15 Releases
 
