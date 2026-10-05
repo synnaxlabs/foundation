@@ -260,11 +260,22 @@ How to read this record:
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
   fsync is fatal and never retried.
-  Ring record (starting point): `[len: u32][crc32c: u32][payload]`, one per group
-  commit, starting on a 4096-byte boundary so a commit never rewrites a synced block.
-  The CRC continues from the record before (a chain), and each open of the ring starts
-  a chain from a random value, so bytes of an earlier chain never read as the next
-  record.
+  Ring record (starting point): `[len: u32][crc32c: u32][kind: u8][body]`, starting
+  on a 4096-byte boundary so a commit never rewrites a synced block. The CRC covers
+  `len`, `kind`, and the body. It continues from the record before (a chain), so
+  bytes of an earlier chain never read as the next record.
+  Kinds: data (1), one per group commit; wrap (2), no body, the rest of the area is
+  not used and the next record is at its start; restart (3), written at each open,
+  its body is a random `u32` and the chain continues from that value. A record never
+  crosses the end of the area. Kind 0 is never valid.
+  Offsets count bytes since the ring was made and never wrap; the place in the area
+  is the offset modulo the area length. The area is at least twice the largest record
+  less one block, so an empty ring takes any record. A body is at most `u32::MAX`
+  bytes.
+  Recovery walks from the tail to the first record that does not follow the chain.
+  A record that follows the chain but has an unknown kind or a wrong shape fails the
+  open. The restart record needs one free block: an open of a full ring first moves
+  records at the tail to a segment.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
