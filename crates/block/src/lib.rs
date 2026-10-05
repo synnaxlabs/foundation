@@ -787,7 +787,7 @@ mod fixture {
         watch: Arc<Watch>,
     }
 
-    // SAFETY: each method is the one of `Heap`.
+    // SAFETY: each method is the one of `Heap`, or a `commit` that refuses.
     unsafe impl Memory for Watched {
         fn base(&self) -> NonNull<u8> {
             self.heap.base()
@@ -1267,6 +1267,27 @@ mod tests {
         }
 
         #[test]
+        fn gives_back_only_what_it_carved_after_a_refusal() {
+            let (pool, watch) = create_watched_pool(256);
+            let held = pool.alloc(64).expect("the budget has room");
+            watch.refusing.store(true, Relaxed);
+            let error = pool.alloc(64).expect_err("the system refuses memory");
+            assert_eq!(error, refused(64));
+            drop(held);
+            assert_eq!(pool.purge(), 0, "the first purge marks the idle class");
+            assert_eq!(pool.purge(), 128);
+            assert_eq!(pool.committed(), 0);
+            assert_eq!(
+                watch.calls().last(),
+                Some(&Purge {
+                    offset: 64,
+                    len: 128
+                }),
+                "the refused carve is not in the range that goes back"
+            );
+        }
+
+        #[test]
         fn moves_the_budget_of_a_free_block_to_another_class() {
             let pool = create_pool(256);
             drop(pool.alloc(64).expect("the budget has room"));
@@ -1535,19 +1556,18 @@ mod tests {
             #[test]
             fn serves_each_alloc_that_fits_in_the_room_idle_sizes_leave(
                 steps in prop::collection::vec(
-                    (
-                        0_usize..=1024,
-                        prop::option::of(0_usize..8),
-                        prop::bool::weighted(0.2),
-                    ),
+                    (0_usize..=1024, prop::option::of(0_usize..8)),
                     1..24,
                 ),
+                // Drawn after `steps`, so a saved failure replays the same steps.
+                refusals in prop::collection::vec(prop::bool::weighted(0.2), 24),
             ) {
                 const BUDGET: usize = 4096;
                 let (pool, watch) = create_watched_pool(BUDGET);
                 let mut blocks: Vec<(Unique, u8)> = Vec::new();
                 let mut lent = 0;
-                for ((len, dropped, refusing), fill) in steps.into_iter().zip(1_u8..) {
+                let steps = steps.into_iter().zip(refusals).zip(1_u8..);
+                for (((len, dropped), refusing), fill) in steps {
                     watch.refusing.store(refusing, Relaxed);
                     let calls = watch.calls().len();
                     match pool.alloc(len) {
