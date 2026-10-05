@@ -251,6 +251,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
+| `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
