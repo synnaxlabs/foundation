@@ -152,9 +152,9 @@ impl Sim {
     /// bytes sent from now on. An open of either path on its node opens that end.
     ///
     /// - Byte `k` of a run of bytes sent back to back, from 1, arrives
-    ///   [`span(k)`](types::time::Rate::span) of the
-    ///   [`rate`](env::serial::Settings::rate) of the sender's settings after the
-    ///   run starts.
+    ///   [`rate.span(k)`](types::time::Rate::span) after the run starts, where
+    ///   `rate` is the [`rate`](env::serial::Settings::rate) of the sender's
+    ///   settings.
     /// - A byte arrives intact only when both ends have the same settings. Otherwise
     ///   it arrives as a random byte.
     /// - Each line draws its faults from its own stream as each byte is sent.
