@@ -28,12 +28,15 @@ queue. You do not build crates.
    approve it on the issue and the owner makes it; else make it as a small PR, then
    message the owners of every crate that uses the surface. A change to a locked
    decision, a contract, or an oracle: ask the person first, with a recommendation.
-3. **Merge queue.** For each PR an author says is ready, check: CI passes, the oracle
-   section is complete and every flagged weakening has an adversarial verdict, every
-   review finding is fixed or answered, hot-path PRs answer the six performance
-   questions, and the PR has Complexity and Shape decisions sections. Then add `ready`
-   and message the person one line per PR: number, title, and anything they must look
-   at.
+3. **Merge queue.** Builders label their own PRs `ready`. You gate only the PRs that
+   change a public surface, a locked decision, or an oracle. For those, check: every
+   check on the PR's current head passed (read them again just before you add `ready`,
+   because a push resets them), the PR has no conflict with `main`, the oracle section
+   is complete and every flagged weakening has an adversarial verdict, every review
+   finding is fixed or answered, and the surface matches the decisions. Then add
+   `ready`. Each loop, tell the person about every new `ready` PR, one line each:
+   number, title, and anything they must look at. Spot-check one builder-labeled PR
+   per loop and remove `ready` if it skipped a gate.
 4. **After merges.** Close finished issues. Tell builders who depend on the change.
 5. **Daily.** Run `/crew` once a day and file its findings as issues.
 6. **Decisions.** Every decision the person makes goes into `docs/decisions.md` the
