@@ -366,12 +366,10 @@ impl File {
             let Sector(versions) = (self.sectors.get_mut(&sector))
                 .expect("invariant: a dirty sector is written");
             let before = versions.partition_point(|version| version.written < started);
-            if before > 1 {
-                let count = u64::try_from(before).expect("invariant: usize fits u64");
-                let kept = index(pick(count));
-                versions.drain(kept + 1..before);
-                versions.drain(..kept);
-            }
+            let count = u64::try_from(before).expect("invariant: usize fits u64");
+            let kept = index(pick(count));
+            versions.drain(kept + 1..before);
+            versions.drain(..kept);
             if versions.len() > 1 {
                 self.dirty.insert(sector);
             }
@@ -461,4 +459,46 @@ fn index(at: u64) -> usize {
 
 fn len(bytes: &[u8]) -> u64 {
     u64::try_from(bytes.len()).expect("invariant: usize fits u64")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file() -> File {
+        File {
+            len: 2 * SECTOR,
+            sectors: BTreeMap::new(),
+            dirty: BTreeSet::new(),
+            holds: 0,
+            linked: true,
+            durable: false,
+        }
+    }
+
+    #[test]
+    fn a_write_that_ends_at_the_tick_a_sync_starts_is_not_durable() {
+        let kept: BTreeSet<Vec<u8>> = (0..64)
+            .map(|seed| {
+                let mut rng = Rng::from_seed(seed);
+                let mut file = file();
+                file.write(0, &[1; 512], 1, 2, false, &mut rng);
+                file.sync(2);
+                // As at a power cut: keep one version that is still in play.
+                file.tear(u64::MAX, &mut rng);
+                file.bytes(0..SECTOR)
+            })
+            .collect();
+        assert_eq!(kept, BTreeSet::from([vec![0; 512], vec![1; 512]]));
+    }
+
+    #[test]
+    fn a_sync_leaves_dirty_only_the_sectors_with_a_later_write() {
+        let mut rng = Rng::from_seed(0);
+        let mut file = file();
+        file.write(0, &[1; 1024], 1, 2, false, &mut rng);
+        file.write(SECTOR, &[2; 512], 3, 5, false, &mut rng);
+        file.sync(4);
+        assert_eq!(file.dirty, BTreeSet::from([1]));
+    }
 }
