@@ -107,9 +107,6 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - `unsafe_code` is denied. Only the crates the crate map names may hold `unsafe`:
   `block`, `ring`, `counting`, and later FFI connectors. Such a module uses
   `#[expect(unsafe_code, reason = "...")]` and runs under Miri (r16 24).
-- The one allowed global: a test or benchmark binary may declare
-  `#[global_allocator] static ALLOCATOR: counting::Allocator`. Rust requires a static
-  for a global allocator. Nothing else holds state in a static.
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The
   comment relies only on earlier checks, type invariants, and well-formed inputs
   (r16 25).
@@ -149,8 +146,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - Hash iteration order never decides behavior. Sort, or use a `BTreeMap` (r16 44).
 - Never print a pointer. Addresses change from run to run (r16 45).
 - No mutable globals: no `thread_local!` and no `static` with interior mutability
-  (r16 46). The one exception is a counting `#[global_allocator]` in a test or
-  benchmark binary, never in a library or the `node` binary.
+  (r16 46). The one exception is `#[global_allocator] static ALLOCATOR:
+  counting::Allocator` in a test or benchmark binary, never in a library or the
+  `node` binary.
 
 ## Async and threads
 

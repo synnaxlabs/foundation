@@ -1543,12 +1543,11 @@ Rules:
    else asks `clock`. Only `node` builds real seams, and only `sim` builds simulated
    ones. Below `hub`, only `home` writes channels, and only its companion samples.
 
-Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `estimate`,
-`control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2 `os` ->
-(`transport`, `buffer`) -> (`clock`, `blob`, `sim`) -> `mesh` -> (`home`, `replica`) ->
-`hub`; layer 3 `secret`
--> `connector` -> `connector-<kind>`; layer 4 (`config-hcl`, `config`) -> `ops` ->
-`node`.
+Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
+`estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
+`os` -> (`transport`, `buffer`) -> (`clock`, `blob`, `sim`) -> `mesh` -> (`home`,
+`replica`) -> `hub`; layer 3 `secret` -> `connector` -> `connector-<kind>`; layer 4
+(`config-hcl`, `config`) -> `ops` -> `node`.
 
 | Layer | Crate | Job (one sentence) | Allowed dependencies |
 | --- | --- | --- | --- |
