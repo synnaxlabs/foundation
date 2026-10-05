@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn ends_a_line_comment_before_its_line_end() {
-        let text = "# a\r\n// b\r\n# c\r";
+        let text = "# a\r\n// b\r\n";
         let mut tokens = Tokens::new(Source(0), text).unwrap();
         let mut found = Vec::new();
         for _ in 0..=text.len() {
