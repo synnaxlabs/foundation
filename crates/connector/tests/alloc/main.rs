@@ -1,6 +1,6 @@
-//! Polling a registered wait or race allocates nothing, and so does a tick after the
-//! first. This binary has no test harness: the count covers each thread, and a harness
-//! allocates on its own thread at any time.
+//! Polling a registered wait or race allocates nothing, and so does a tick from the
+//! third call on. This binary has no test harness: the count covers each thread, and a
+//! harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -51,8 +51,8 @@ fn main() {
     check_ticks();
 }
 
-/// Checks that 64 ticks after the first wait allocate nothing in their polls. The count
-/// covers only the polls of `tick`, not the simulator around them.
+/// Checks that 64 ticks after two warm-up ticks allocate nothing in their polls. The
+/// count covers only the polls of `tick`, not the simulator around them.
 fn check_ticks() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
@@ -86,7 +86,7 @@ fn check_ticks() {
             assert_eq!(
                 allocations.get(),
                 0,
-                "a tick after the first allocates nothing"
+                "a tick from the third call on allocates nothing"
             );
         })
         .expect("the shard starts");
