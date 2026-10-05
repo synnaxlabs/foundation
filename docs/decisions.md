@@ -311,7 +311,7 @@ How to read this record:
   drift bound (default 200 ppm) times the time from `at`, in both directions. Each
   source keeps its last 8 measurements and offers the one with the smallest bound now.
   `combine` returns the hull of the offsets inside the most bounds, and fails when no
-  offset is inside more than half of them. Decided by the `time` builder (#TBD).
+  offset is inside more than half of them. Decided by the `time` builder (#49).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
