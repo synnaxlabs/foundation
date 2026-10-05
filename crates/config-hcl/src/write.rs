@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use document::encoding::{self, TooDeep};
 use document::value::{Call, Kind, Value};
-use document::{Block, Document, Map, Span};
+use document::{Attribute, Block, Document, Map, Span};
 
 use crate::lex;
 use crate::parse::{Ends, literal};
@@ -36,7 +36,7 @@ pub fn write(document: &Document) -> Result<String, Vec<Error>> {
         }]);
     }
     let mut writer = Writer::default();
-    writer.body(document, 0);
+    writer.body(document.attributes.iter(), &document.blocks, 0);
     if writer.errors.is_empty() {
         Ok(writer.out)
     } else {
@@ -86,15 +86,36 @@ impl<'a> Items<'a> {
 /// Recurses once per level, so it runs only on a Document that [`encoding::check`]
 /// accepts.
 #[derive(Default)]
-struct Writer {
-    out: String,
+pub(crate) struct Writer<'a> {
+    pub(crate) out: String,
     errors: Vec<Error>,
+    /// What each line starts with, before its indent.
+    margin: &'a str,
+    /// The column where the first line starts.
+    start: usize,
 }
 
-impl Writer {
-    /// Writes the attributes and blocks of a body, `indent` levels in.
-    fn body(&mut self, document: &Document, indent: usize) {
-        for attribute in document.attributes.iter() {
+impl<'a> Writer<'a> {
+    /// A writer for text that goes at column `start` of a line that starts with
+    /// `margin`.
+    pub(crate) fn new(margin: &'a str, start: usize) -> Self {
+        Self {
+            margin,
+            start,
+            ..Self::default()
+        }
+    }
+
+    /// Writes each attribute on its own lines, then each block after a blank line,
+    /// `indent` levels in.
+    pub(crate) fn body<'d>(
+        &mut self,
+        attributes: impl IntoIterator<Item = &'d Attribute>,
+        blocks: impl IntoIterator<Item = &'d Block>,
+        indent: usize,
+    ) {
+        let mut written = false;
+        for attribute in attributes {
             self.pad(indent);
             if lex::word(&attribute.key) != Some(lex::Kind::Identifier) {
                 self.refuse(attribute.key_span, Unwritable::Key);
@@ -103,17 +124,22 @@ impl Writer {
             self.out.push_str(" = ");
             self.value(&attribute.value, indent, Ends::Line);
             self.out.push('\n');
+            written = true;
         }
-        for (i, block) in document.blocks.iter().enumerate() {
-            if i > 0 || document.attributes.iter().len() > 0 {
+        for block in blocks {
+            if written {
                 self.out.push('\n');
             }
+            self.pad(indent);
             self.block(block, indent);
+            self.out.push('\n');
+            written = true;
         }
     }
 
-    fn block(&mut self, block: &Block, indent: usize) {
-        self.pad(indent);
+    /// Writes a block from its keyword to its `}`, with its inner lines `indent`
+    /// levels in.
+    pub(crate) fn block(&mut self, block: &Block, indent: usize) {
         if lex::word(&block.keyword) != Some(lex::Kind::Identifier) {
             self.refuse(block.keyword_span, Unwritable::Keyword);
         }
@@ -123,19 +149,24 @@ impl Writer {
             quoted(&mut self.out, &label.text);
         }
         if block.body == Document::default() {
-            self.out.push_str(" {}\n");
+            self.out.push_str(" {}");
             return;
         }
         self.out.push_str(" {\n");
-        self.body(&block.body, indent.saturating_add(1));
+        let body = &block.body;
+        self.body(
+            body.attributes.iter(),
+            &body.blocks,
+            indent.saturating_add(1),
+        );
         self.pad(indent);
-        self.out.push_str("}\n");
+        self.out.push('}');
     }
 
     /// Writes a value on one line when the line fits, and otherwise with each item on
     /// its own line. A line with a heredoc in it is more than one line, so it does not
     /// fit.
-    fn value(&mut self, value: &Value, indent: usize, ends: Ends) {
+    pub(crate) fn value(&mut self, value: &Value, indent: usize, ends: Ends) {
         let Some(items) = Items::of(&value.kind) else {
             return self.line(value, ends);
         };
@@ -262,17 +293,18 @@ impl Writer {
     }
 
     fn pad(&mut self, indent: usize) {
+        self.out.push_str(self.margin);
         for _ in 0..indent {
             self.out.push_str("  ");
         }
     }
 
-    /// The characters on the last line so far.
+    /// The column after the last character so far.
     fn column(&self) -> usize {
-        self.out
-            .rsplit('\n')
-            .next()
-            .map_or(0, |line| line.chars().count())
+        match self.out.rsplit_once('\n') {
+            Some((_, line)) => line.chars().count(),
+            None => self.start.saturating_add(self.out.chars().count()),
+        }
     }
 }
 
@@ -348,7 +380,7 @@ fn opens_template(c: char, next: Option<&char>) -> bool {
 #[cfg(test)]
 mod tests {
     use document::value::Float;
-    use document::{Attribute, Label, Position, Source};
+    use document::{Label, Position, Source};
     use proptest::prelude::*;
 
     use super::*;
