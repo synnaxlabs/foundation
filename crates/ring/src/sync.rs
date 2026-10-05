@@ -1,13 +1,13 @@
 //! Atomics and cells. The model tests swap in loom's checked versions.
 
-#[cfg(all(test, loom))]
+#[cfg(loom)]
 pub(crate) use loom::{
     cell::UnsafeCell,
     hint::spin_loop,
     sync::Arc,
     sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, fence},
 };
-#[cfg(not(all(test, loom)))]
+#[cfg(not(loom))]
 pub(crate) use std::{
     hint::spin_loop,
     sync::Arc,
@@ -15,10 +15,10 @@ pub(crate) use std::{
 };
 
 /// A cell with loom's closure interface, so one body serves both builds.
-#[cfg(not(all(test, loom)))]
+#[cfg(not(loom))]
 pub(crate) struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
 
-#[cfg(not(all(test, loom)))]
+#[cfg(not(loom))]
 impl<T> UnsafeCell<T> {
     pub(crate) const fn new(value: T) -> Self {
         Self(std::cell::UnsafeCell::new(value))

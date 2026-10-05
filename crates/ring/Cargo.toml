@@ -10,7 +10,7 @@ publish.workspace = true
 [dev-dependencies]
 proptest = { workspace = true }
 
-[target.'cfg(loom)'.dev-dependencies]
+[target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
 
 [lints]

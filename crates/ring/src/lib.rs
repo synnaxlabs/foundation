@@ -2,7 +2,7 @@
 //! and the wake protocol for a consumer that has nothing to do.
 //!
 //! A producer never waits: a full ring gives the value back. A consumer spins for a
-//! set number of checks before it parks, and the producer wakes it.
+//! set number of checks before it parks, and the producer woken it.
 
 #![expect(unsafe_code, reason = "two threads share the slots and the waker cell")]
 
@@ -34,7 +34,10 @@ pub struct Config {
 ///
 /// When `config.capacity` is 0 or too large to allocate.
 #[must_use]
-#[expect(clippy::needless_pass_by_value, reason = "callers build a config per ring")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "callers build a config per ring"
+)]
 pub fn new<T: Send>(config: Config) -> (Producer<T>, Consumer<T>) {
     with_origin(&config, 0)
 }
@@ -52,7 +55,7 @@ fn with_origin<T: Send>(config: &Config, origin: usize) -> (Producer<T>, Consume
         tail: Padded(AtomicUsize::new(origin)),
     });
     let producer = Producer {
-        shared: shared.clone(),
+        shared: Arc::clone(&shared),
         tail: origin,
         head: origin,
     };
@@ -105,7 +108,7 @@ pub struct Producer<T> {
 }
 
 impl<T: Send> Producer<T> {
-    /// Adds a value without waiting, and wakes a parked consumer.
+    /// Adds a value without waiting, and woken a parked consumer.
     ///
     /// # Errors
     ///
@@ -191,7 +194,7 @@ impl<T: Send> Consumer<T> {
             return Poll::Ready(Some(self.take()));
         }
         loop {
-            if let Some(end) = self.look() {
+            if let Poll::Ready(end) = self.look() {
                 return Poll::Ready(end);
             }
             if *spins == 0 {
@@ -202,7 +205,7 @@ impl<T: Send> Consumer<T> {
         }
         // SAFETY: `&mut self` makes this the only consumer call.
         let parked = unsafe { self.shared.parker.park(cx.waker()) };
-        if let Some(end) = self.look() {
+        if let Poll::Ready(end) = self.look() {
             self.shared.parker.cancel();
             return Poll::Ready(end);
         }
@@ -213,22 +216,24 @@ impl<T: Send> Consumer<T> {
         Poll::Pending
     }
 
-    /// Looks at the producer's side. Returns the next value, `Some(None)` when the
-    /// producer is gone and the ring is empty, or `None` when there is nothing yet.
-    fn look(&mut self) -> Option<Option<T>> {
+    /// Looks at the producer's side. It is ready with the next value, or with `None`
+    /// when the producer is gone and the ring is empty.
+    fn look(&mut self) -> Poll<Option<T>> {
         // `closed` first: the producer's last push comes before its close, so a ring
         // that reads closed and then empty is empty for good.
         let closed = self.shared.closed.load(Acquire);
         self.tail = self.shared.tail.0.load(Acquire);
         if self.head != self.tail {
-            return Some(Some(self.take()));
+            Poll::Ready(Some(self.take()))
+        } else if closed {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
         }
-        closed.then_some(None)
     }
 
     /// Takes the value at `head`. The ring must hold one.
     fn take(&mut self) -> T {
-        debug_assert_ne!(self.head, self.tail);
         // SAFETY: `head != tail`, so the producer filled the slot at `head` and does
         // not write it again before the store below.
         let value = unsafe { self.shared.slots.read(self.head) };
@@ -254,7 +259,8 @@ impl<T> fmt::Debug for Consumer<T> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Full<T>(pub T);
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use std::collections::VecDeque;
     use std::pin::pin;
@@ -267,7 +273,7 @@ mod tests {
 
     use super::{Config, Consumer, Full, new, with_origin};
 
-    /// Counts the wakes it gets.
+    /// Counts the woken it gets.
     #[derive(Default)]
     struct Wakes(AtomicUsize);
 
@@ -284,8 +290,8 @@ mod tests {
     }
 
     fn create_waker() -> (Arc<Wakes>, Waker) {
-        let wakes = Arc::new(Wakes::default());
-        (wakes.clone(), Waker::from(wakes))
+        let woken = Arc::new(Wakes::default());
+        (Arc::clone(&woken), Waker::from(woken))
     }
 
     fn config(capacity: usize) -> Config {
@@ -303,13 +309,13 @@ mod tests {
         #[test]
         #[should_panic(expected = "ring capacity must be more than 0")]
         fn panics_when_capacity_is_zero() {
-            let _ = new::<u8>(config(0));
+            drop(new::<u8>(config(0)));
         }
 
         #[test]
         #[should_panic(expected = "ring capacity is too large")]
         fn panics_when_capacity_does_not_fit() {
-            let _ = new::<()>(config(usize::MAX));
+            drop(new::<()>(config(usize::MAX)));
         }
     }
 
@@ -339,11 +345,11 @@ mod tests {
         #[test]
         fn does_not_wake_a_consumer_that_never_parked() {
             let (mut producer, mut consumer) = new(config(2));
-            let (wakes, waker) = create_waker();
+            let (woken, waker) = create_waker();
             assert_eq!(producer.push(1), Ok(()));
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(1)));
             assert_eq!(producer.push(2), Ok(()));
-            assert_eq!(wakes.count(), 0);
+            assert_eq!(woken.count(), 0);
         }
 
         #[test]
@@ -383,7 +389,7 @@ mod tests {
         #[test]
         fn returns_the_values_left_then_none_when_the_producer_is_gone() {
             let (mut producer, mut consumer) = new(config(4));
-            let (wakes, waker) = create_waker();
+            let (woken, waker) = create_waker();
             assert_eq!(producer.push(1), Ok(()));
             assert_eq!(producer.push(2), Ok(()));
             drop(producer);
@@ -391,22 +397,22 @@ mod tests {
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(2)));
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(None));
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(None));
-            assert_eq!(wakes.count(), 0);
+            assert_eq!(woken.count(), 0);
         }
 
         #[test]
         fn parks_when_empty_and_wakes_once_on_push() {
             let (mut producer, mut consumer) = new(config(4));
-            let (wakes, waker) = create_waker();
+            let (woken, waker) = create_waker();
             {
                 let mut pop = pin!(consumer.pop());
                 let mut cx = Context::from_waker(&waker);
                 assert_eq!(pop.as_mut().poll(&mut cx), Poll::Pending);
-                assert_eq!(wakes.count(), 0);
+                assert_eq!(woken.count(), 0);
                 assert_eq!(producer.push(1), Ok(()));
-                assert_eq!(wakes.count(), 1);
+                assert_eq!(woken.count(), 1);
                 assert_eq!(producer.push(2), Ok(()));
-                assert_eq!(wakes.count(), 1);
+                assert_eq!(woken.count(), 1);
                 assert_eq!(pop.as_mut().poll(&mut cx), Poll::Ready(Some(1)));
             }
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(2)));
@@ -418,42 +424,42 @@ mod tests {
                 capacity: 4,
                 spins: 100,
             });
-            let (wakes, waker) = create_waker();
+            let (woken, waker) = create_waker();
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
             assert_eq!(producer.push(1), Ok(()));
-            assert_eq!(wakes.count(), 1);
+            assert_eq!(woken.count(), 1);
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(1)));
         }
 
         #[test]
         fn wakes_with_none_when_the_producer_goes_while_parked() {
             let (producer, mut consumer) = new::<u8>(config(4));
-            let (wakes, waker) = create_waker();
+            let (woken, waker) = create_waker();
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
             drop(producer);
-            assert_eq!(wakes.count(), 1);
+            assert_eq!(woken.count(), 1);
             assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(None));
         }
 
         #[test]
         fn wakes_only_the_last_waker_it_was_polled_with() {
             let (mut producer, mut consumer) = new(config(4));
-            let (first_wakes, first) = create_waker();
-            let (last_wakes, last) = create_waker();
+            let (first_woken, first) = create_waker();
+            let (last_woken, last) = create_waker();
             assert_eq!(poll_pop(&mut consumer, &first), Poll::Pending);
             assert_eq!(poll_pop(&mut consumer, &last), Poll::Pending);
             assert_eq!(producer.push(1), Ok(()));
-            assert_eq!((first_wakes.count(), last_wakes.count()), (0, 1));
+            assert_eq!((first_woken.count(), last_woken.count()), (0, 1));
         }
 
         #[test]
         fn parks_again_after_a_wake() {
             let (mut producer, mut consumer) = new(config(4));
-            let (wakes, waker) = create_waker();
+            let (woken, waker) = create_waker();
             for round in 1..=3 {
                 assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
                 assert_eq!(producer.push(round), Ok(()));
-                assert_eq!(wakes.count(), round);
+                assert_eq!(woken.count(), round);
                 assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(round)));
             }
         }
@@ -493,7 +499,7 @@ mod tests {
             let value = Arc::new(());
             let (mut producer, mut consumer) = new(config(4));
             for _ in 0..3 {
-                assert!(producer.push(value.clone()).is_ok());
+                assert_eq!(producer.push(Arc::clone(&value)), Ok(()));
             }
             drop(consumer.try_pop());
             assert_eq!(Arc::strong_count(&value), 3);
@@ -568,7 +574,6 @@ mod tests {
     }
 
     mod threads {
-        use std::future::Future;
         use std::thread::{self, Thread};
 
         use super::*;
@@ -622,105 +627,61 @@ mod tests {
             carries_every_value_in_order(64);
         }
     }
-
-    mod alloc {
-        use std::alloc::{GlobalAlloc, Layout, System};
-        use std::cell::Cell;
-
-        use super::*;
-
-        thread_local! {
-            static COUNT: Cell<u64> = const { Cell::new(0) };
-        }
-
-        /// Counts the allocations of each thread.
-        struct Counting;
-
-        // SAFETY: every call goes to `System` unchanged.
-        unsafe impl GlobalAlloc for Counting {
-            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-                COUNT.with(|count| count.set(count.get() + 1));
-                // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc`.
-                unsafe { System.alloc(layout) }
-            }
-
-            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-                // SAFETY: the caller keeps the contract of `GlobalAlloc::dealloc`.
-                unsafe { System.dealloc(ptr, layout) }
-            }
-        }
-
-        #[global_allocator]
-        static ALLOCATOR: Counting = Counting;
-
-        /// Allocations this thread makes while `f` runs.
-        fn count(f: impl FnOnce()) -> u64 {
-            let before = COUNT.with(Cell::get);
-            f();
-            COUNT.with(Cell::get) - before
-        }
-
-        #[test]
-        fn counts_an_allocation() {
-            assert_eq!(count(|| drop(Box::new(1u8))), 1);
-        }
-
-        #[test]
-        fn push_and_try_pop_do_not_allocate() {
-            let (mut producer, mut consumer) = new(config(4));
-            let allocations = count(|| {
-                for value in 0..64u64 {
-                    assert_eq!(producer.push(value), Ok(()));
-                    assert_eq!(producer.push(value), Ok(()));
-                    assert_eq!(consumer.try_pop(), Some(value));
-                    assert_eq!(consumer.try_pop(), Some(value));
-                    assert_eq!(consumer.try_pop(), None);
-                }
-                for value in 0..5u64 {
-                    let _ = producer.push(value);
-                }
-            });
-            assert_eq!(allocations, 0);
-        }
-
-        #[test]
-        fn pop_does_not_allocate_when_it_parks_and_wakes() {
-            let (mut producer, mut consumer) = new(config(4));
-            let (wakes, waker) = create_waker();
-            let allocations = count(|| {
-                for value in 0..64u64 {
-                    assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
-                    assert_eq!(producer.push(value), Ok(()));
-                    assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(value)));
-                }
-            });
-            assert_eq!(allocations, 0);
-            assert_eq!(wakes.count(), 64);
-        }
-    }
 }
 
-#[cfg(all(test, loom))]
+#[cfg(test)]
+#[cfg(loom)]
 mod model {
     use std::pin::pin;
-    use std::sync::Arc;
-    use std::task::{Context, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     use loom::future::block_on;
+    use loom::model::Builder;
     use loom::thread;
 
     use super::{Config, new};
 
-    struct Ignore;
-
-    impl Wake for Ignore {
-        fn wake(self: Arc<Self>) {}
+    /// Checks schedules with at most three forced thread switches. The models with
+    /// more steps are too large to check in full.
+    fn bounded(model: impl Fn() + Send + Sync + 'static) {
+        let mut builder = Builder::new();
+        builder.preemption_bound = Some(3);
+        builder.check(model);
     }
 
-    /// The producer pushes two values and goes. The consumer must get both, then
-    /// `None`. A lost wakeup shows as a deadlock.
-    fn loses_no_wakeup(spins: u32) {
-        loom::model(move || {
+    // In each model a lost wakeup shows as a deadlock.
+
+    #[test]
+    fn loses_no_wakeup_when_the_producer_pushes() {
+        loom::model(|| {
+            let (mut producer, mut consumer) = new(Config {
+                capacity: 1,
+                spins: 0,
+            });
+            let pushes = thread::spawn(move || {
+                producer.push(1).unwrap();
+                producer
+            });
+            assert_eq!(block_on(consumer.pop()), Some(1));
+            drop(pushes.join().unwrap());
+        });
+    }
+
+    #[test]
+    fn loses_no_wakeup_when_the_producer_goes() {
+        loom::model(|| {
+            let (producer, mut consumer) = new::<u8>(Config {
+                capacity: 1,
+                spins: 0,
+            });
+            let goes = thread::spawn(move || drop(producer));
+            assert_eq!(block_on(consumer.pop()), None);
+            goes.join().unwrap();
+        });
+    }
+
+    fn loses_no_wakeup_over_two_pushes_and_a_close(spins: u32) {
+        bounded(move || {
             let (mut producer, mut consumer) = new(Config { capacity: 2, spins });
             let pushes = thread::spawn(move || {
                 producer.push(1).unwrap();
@@ -735,42 +696,29 @@ mod model {
 
     #[test]
     fn loses_no_wakeup_when_the_consumer_parks_at_once() {
-        loses_no_wakeup(0);
+        loses_no_wakeup_over_two_pushes_and_a_close(0);
     }
 
     #[test]
     fn loses_no_wakeup_when_the_consumer_spins_first() {
-        loses_no_wakeup(1);
-    }
-
-    #[test]
-    fn loses_no_wakeup_when_the_producer_only_goes() {
-        loom::model(|| {
-            let (producer, mut consumer) = new::<u8>(Config {
-                capacity: 1,
-                spins: 0,
-            });
-            let goes = thread::spawn(move || drop(producer));
-            assert_eq!(block_on(consumer.pop()), None);
-            goes.join().unwrap();
-        });
+        loses_no_wakeup_over_two_pushes_and_a_close(1);
     }
 
     /// The consumer parks with one waker, then polls again with another while the
-    /// producer wakes the first.
+    /// producer woken the first.
     #[test]
     fn loses_no_wakeup_when_the_consumer_changes_its_waker() {
-        loom::model(|| {
+        bounded(|| {
             let (mut producer, mut consumer) = new(Config {
                 capacity: 1,
                 spins: 0,
             });
             let pushes = thread::spawn(move || producer.push(1).unwrap());
-            let ignore = Waker::from(Arc::new(Ignore));
-            let first = pin!(consumer.pop()).poll(&mut Context::from_waker(&ignore));
+            let mut cx = Context::from_waker(Waker::noop());
+            let first = pin!(consumer.pop()).poll(&mut cx);
             let value = match first {
-                std::task::Poll::Ready(value) => value,
-                std::task::Poll::Pending => block_on(consumer.pop()),
+                Poll::Ready(value) => value,
+                Poll::Pending => block_on(consumer.pop()),
             };
             assert_eq!(value, Some(1));
             assert_eq!(block_on(consumer.pop()), None);

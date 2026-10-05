@@ -23,3 +23,24 @@ jobs:
         run: cargo xtask layers
       - name: Test
         run: cargo test --workspace
+
+  loom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Model tests
+        run: cargo test -p ring --lib --release
+        env:
+          RUSTFLAGS: --cfg loom
+
+  miri:
+    runs-on: ubuntu-latest
+    env:
+      NIGHTLY: nightly-2026-10-01
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned nightly
+        run: rustup toolchain install "$NIGHTLY" --component miri
+      - name: Miri
+        run: cargo "+$NIGHTLY" miri test -p ring

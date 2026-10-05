@@ -53,8 +53,11 @@ impl<T> Slots<T> {
     #[inline]
     pub(crate) unsafe fn read(&self, position: usize) -> T {
         self.cells[position & self.mask].with(|slot| {
-            // SAFETY: the caller has sole access to the slot, and it holds a value.
-            unsafe { (*slot).assume_init_read() }
+            // SAFETY: the caller has sole access to the slot.
+            let slot = unsafe { &*slot };
+            // SAFETY: the caller says that the slot holds a value, and it treats the
+            // slot as empty from here.
+            unsafe { slot.assume_init_read() }
         })
     }
 }

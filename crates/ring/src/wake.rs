@@ -43,10 +43,7 @@ impl Parker {
     ///
     /// Only the one consumer calls this, from one thread at a time.
     pub(crate) unsafe fn park(&self, waker: &Waker) -> bool {
-        match self
-            .state
-            .compare_exchange(PARKED, AWAKE, Acquire, Acquire)
-        {
+        match self.state.compare_exchange(PARKED, AWAKE, Acquire, Acquire) {
             Ok(_) | Err(AWAKE) => {}
             Err(_) => return false,
         }
@@ -66,9 +63,8 @@ impl Parker {
     /// Takes back a park when the consumer found work without a wake.
     pub(crate) fn cancel(&self) {
         // A failure means the producer saw the park, and it wakes the consumer.
-        let _ = self
-            .state
-            .compare_exchange(PARKED, AWAKE, Relaxed, Relaxed);
+        let (Ok(_) | Err(_)) =
+            self.state.compare_exchange(PARKED, AWAKE, Relaxed, Relaxed);
     }
 
     /// Wakes the consumer if it parked. The caller must publish its work first.
