@@ -9,9 +9,9 @@ pub enum Fault {
     Start,
     /// `start` gives `thread::Error::Pin` with the core.
     Pin,
-    /// The shard starts with one more task, which panics with message `injected`
-    /// when it runs. The scheduler picks when it runs against the main future,
-    /// which may complete first and drop it, as a shard drops each of its tasks.
+    /// A task of the shard panics with message `injected`. The scheduler picks
+    /// whether it runs before or after the first poll of the main future. A main
+    /// future that completes first drops it, as a shard drops each of its tasks.
     Panic,
 }
 
@@ -31,7 +31,7 @@ impl Starts {
 
     /// Records a start with `config`, and takes the first fault aimed at its core,
     /// with the core.
-    pub(crate) fn start(&mut self, config: &Config) -> Option<(usize, Fault)> {
+    pub(crate) fn record(&mut self, config: &Config) -> Option<(usize, Fault)> {
         self.configs.push(config.clone());
         let core = config.core?;
         let at = self.faults.iter().position(|&(aimed, _)| aimed == core)?;

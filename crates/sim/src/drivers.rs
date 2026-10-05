@@ -102,7 +102,7 @@ impl env::shards::Driver for Node {
     }
 
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error> {
-        let fault = lock(&self.shared).shards(self.node).start(&config);
+        let fault = lock(&self.shared).shards(self.node).record(&config);
         let name = config.name;
         let main = match fault {
             None => main,
@@ -126,7 +126,7 @@ impl env::shards::Driver for Node {
 
 /// Pending at its first poll, with its task woken, so the scheduler picks the next
 /// task to run.
-fn yield_now() -> impl Future<Output = ()> {
+pub(crate) fn yield_now() -> impl Future<Output = ()> {
     let mut yielded = false;
     poll_fn(move |cx| {
         if mem::replace(&mut yielded, true) {
