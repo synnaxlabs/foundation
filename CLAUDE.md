@@ -32,6 +32,8 @@ lessons. Never copy Synnax code into this repo.
   re-run a study without a reason.
 - `docs/history/interview-log.md` -> the design interview in order, with the person's
   words. Read it to learn why; `docs/decisions.md` wins where they differ.
+- `docs/security.md` -> the threat model: assets, attackers, trust boundaries, and fuzz
+  targets.
 - `docs/rfc/` -> RFCs.
 
 ## 🚨 The repo is the memory 🚨

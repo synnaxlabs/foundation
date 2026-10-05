@@ -1,5 +1,4 @@
 use std::fmt;
-use std::mem;
 
 use types::time::Monotonic;
 
@@ -27,8 +26,19 @@ pub struct Gate {
     claims: Vec<Claim>,
     seat: Seat,
     next: u64,
-    published: Option<Writer>,
-    changed: bool,
+    /// The holder named by the newest handoff record in the index log.
+    recorded: Option<Writer>,
+    /// The holder differs from `recorded`. Kept at each change of seat, so that a
+    /// frame does not compare subjects.
+    unrecorded: bool,
+}
+
+/// A write that passed [`Gate::check`]. [`Gate::renew`] spends it.
+#[must_use]
+#[derive(Debug)]
+pub struct Permit {
+    key: Key,
+    at: Monotonic,
 }
 
 #[derive(Debug)]
@@ -78,7 +88,7 @@ impl Gate {
                 writer: last.clone(),
                 until: deadline(now, grace),
             },
-            published: Some(last),
+            recorded: Some(last),
             ..Self::default()
         }
     }
@@ -134,8 +144,9 @@ impl Gate {
         }
     }
 
-    /// Checks a write from `key` at `now`, and renews the holder's control lease when
-    /// it passes. Takes O(1) time and does not allocate.
+    /// Checks a write from `key` at `now`. It applies what came due by `now`, as
+    /// [`Gate::advance`] does, and does not renew the control lease. Takes O(1) time
+    /// and does not allocate.
     ///
     /// # Errors
     ///
@@ -146,15 +157,10 @@ impl Gate {
     /// # Panics
     ///
     /// When `key` is not open in this gate.
-    pub fn write(&mut self, key: Key, now: Monotonic) -> Result<(), Error> {
+    pub fn check(&mut self, key: Key, now: Monotonic) -> Result<Permit, Error> {
         self.advance(now);
-        if let Seat::Held { key: held, expiry } = &mut self.seat
-            && *held == key
-        {
-            if let Some(expiry) = expiry {
-                expiry.at = deadline(now, expiry.lease);
-            }
-            return Ok(());
+        if matches!(self.seat, Seat::Held { key: held, .. } if held == key) {
+            return Ok(Permit { key, at: now });
         }
         if self.claim(key).expired {
             Err(Error::Expired)
@@ -162,6 +168,27 @@ impl Gate {
             Err(Error::Reserved)
         } else {
             Err(Error::Waiting)
+        }
+    }
+
+    /// Renews the holder's control lease from the time of `permit`. Call it when the
+    /// caller accepts the write. Takes O(1) time and does not allocate.
+    ///
+    /// # Panics
+    ///
+    /// When the holder changed after the check.
+    #[expect(clippy::needless_pass_by_value, reason = "a permit is spent once")]
+    pub fn renew(&mut self, permit: Permit) {
+        let Permit { key, at } = permit;
+        let Seat::Held { key: held, expiry } = &mut self.seat else {
+            panic!("invariant: writer {key} lost control after its check");
+        };
+        assert_eq!(
+            *held, key,
+            "invariant: writer {key} lost control after its check"
+        );
+        if let Some(expiry) = expiry {
+            expiry.at = deadline(at, expiry.lease);
         }
     }
 
@@ -203,20 +230,21 @@ impl Gate {
         }
     }
 
-    /// Takes the change of holder since the last call, or `None` when the holder's
-    /// subject and authority are the same.
-    pub fn handoff(&mut self) -> Option<Handoff> {
-        if !mem::take(&mut self.changed) {
-            return None;
-        }
-        let holder = self.holder();
-        if holder == self.published.as_ref() {
-            return None;
-        }
-        self.published = holder.cloned();
-        Some(Handoff {
-            to: self.published.clone(),
+    /// The holder, when its subject or authority differs from the last holder given
+    /// to [`Gate::recorded`] or [`Gate::recover`]. A new gate starts with no holder
+    /// recorded. Changes nothing. Takes O(1) time, and does not allocate when it
+    /// returns `None`.
+    #[must_use]
+    pub fn handoff(&self) -> Option<Handoff> {
+        self.unrecorded.then(|| Handoff {
+            to: self.holder().cloned(),
         })
+    }
+
+    /// Marks `handoff` as the newest record in the index log.
+    pub fn recorded(&mut self, handoff: &Handoff) {
+        self.recorded.clone_from(&handoff.to);
+        self.compare();
     }
 
     fn take(&mut self, key: Key, now: Monotonic) {
@@ -225,7 +253,7 @@ impl Gate {
             at: deadline(now, lease),
         });
         self.seat = Seat::Held { key, expiry };
-        self.changed = true;
+        self.compare();
     }
 
     fn elect(&mut self, now: Monotonic) {
@@ -233,8 +261,13 @@ impl Gate {
             self.take(key, now);
         } else {
             self.seat = Seat::Empty;
-            self.changed = true;
+            self.compare();
         }
+    }
+
+    /// Call it after each change of `seat` or `recorded`.
+    fn compare(&mut self) {
+        self.unrecorded = self.holder() != self.recorded.as_ref();
     }
 
     /// The waiting claim with the highest authority, and on a tie the first opened.
@@ -295,6 +328,18 @@ mod tests {
 
     const EMPTY: Option<Handoff> = Some(Handoff { to: None });
 
+    /// Checks a write and renews the lease, as the caller does for a write it accepts.
+    fn write(gate: &mut Gate, key: Key, now: Monotonic) -> Result<(), Error> {
+        gate.check(key, now).map(|permit| gate.renew(permit))
+    }
+
+    /// Records the waiting handoff, if any.
+    fn record(gate: &mut Gate) {
+        if let Some(handoff) = gate.handoff() {
+            gate.recorded(&handoff);
+        }
+    }
+
     mod open {
         use super::*;
 
@@ -303,57 +348,57 @@ mod tests {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 0), None, at(0));
             assert_eq!(gate.handoff(), Some(to("a", 0)));
-            assert_eq!(gate.write(a, at(1)), Ok(()));
+            assert_eq!(write(&mut gate, a, at(1)), Ok(()));
         }
 
         #[test]
         fn higher_authority_takes_control() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 100), None, at(0));
-            gate.handoff();
+            record(&mut gate);
             let b = gate.open(writer("b", 101), None, at(1));
             assert_eq!(gate.handoff(), Some(to("b", 101)));
-            assert_eq!(gate.write(a, at(2)), Err(Error::Waiting));
-            assert_eq!(gate.write(b, at(2)), Ok(()));
+            assert_eq!(write(&mut gate, a, at(2)), Err(Error::Waiting));
+            assert_eq!(write(&mut gate, b, at(2)), Ok(()));
         }
 
         #[test]
         fn equal_authority_waits() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 100), None, at(0));
-            gate.handoff();
+            record(&mut gate);
             let b = gate.open(writer("b", 100), None, at(1));
             assert_eq!(gate.handoff(), None);
-            assert_eq!(gate.write(a, at(2)), Ok(()));
-            assert_eq!(gate.write(b, at(2)), Err(Error::Waiting));
+            assert_eq!(write(&mut gate, a, at(2)), Ok(()));
+            assert_eq!(write(&mut gate, b, at(2)), Err(Error::Waiting));
         }
 
         #[test]
         fn lower_authority_waits() {
             let mut gate = Gate::new();
             gate.open(writer("a", 100), None, at(0));
-            gate.handoff();
+            record(&mut gate);
             let b = gate.open(writer("b", 99), None, at(1));
             assert_eq!(gate.handoff(), None);
-            assert_eq!(gate.write(b, at(2)), Err(Error::Waiting));
+            assert_eq!(write(&mut gate, b, at(2)), Err(Error::Waiting));
         }
 
         #[test]
         fn absolute_authority_is_never_taken() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 255), None, at(0));
-            gate.handoff();
+            record(&mut gate);
             gate.open(writer("b", 255), None, at(1));
             assert_eq!(gate.handoff(), None);
             assert_eq!(gate.holder(), Some(&writer("a", 255)));
-            assert_eq!(gate.write(a, at(2)), Ok(()));
+            assert_eq!(write(&mut gate, a, at(2)), Ok(()));
         }
 
         #[test]
         fn absolute_authority_takes_from_lower() {
             let mut gate = Gate::new();
             gate.open(writer("a", 254), None, at(0));
-            gate.handoff();
+            record(&mut gate);
             gate.open(writer("b", 255), None, at(1));
             assert_eq!(gate.handoff(), Some(to("b", 255)));
         }
@@ -368,10 +413,10 @@ mod tests {
             let a = gate.open(writer("a", 200), None, at(0));
             gate.open(writer("b", 100), None, at(1));
             let c = gate.open(writer("c", 150), None, at(2));
-            gate.handoff();
+            record(&mut gate);
             gate.close(a, at(3));
             assert_eq!(gate.handoff(), Some(to("c", 150)));
-            assert_eq!(gate.write(c, at(4)), Ok(()));
+            assert_eq!(write(&mut gate, c, at(4)), Ok(()));
         }
 
         #[test]
@@ -380,17 +425,17 @@ mod tests {
             let a = gate.open(writer("a", 200), None, at(0));
             let b = gate.open(writer("b", 100), None, at(1));
             gate.open(writer("c", 100), None, at(2));
-            gate.handoff();
+            record(&mut gate);
             gate.close(a, at(3));
             assert_eq!(gate.handoff(), Some(to("b", 100)));
-            assert_eq!(gate.write(b, at(4)), Ok(()));
+            assert_eq!(write(&mut gate, b, at(4)), Ok(()));
         }
 
         #[test]
         fn empties_the_gate_after_the_last_writer() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 0), None, at(0));
-            gate.handoff();
+            record(&mut gate);
             gate.close(a, at(1));
             assert_eq!(gate.handoff(), EMPTY);
             assert_eq!(gate.holder(), None);
@@ -401,7 +446,7 @@ mod tests {
             let mut gate = Gate::new();
             gate.open(writer("a", 100), None, at(0));
             let b = gate.open(writer("b", 100), None, at(1));
-            gate.handoff();
+            record(&mut gate);
             gate.close(b, at(2));
             assert_eq!(gate.handoff(), None);
             assert_eq!(gate.holder(), Some(&writer("a", 100)));
@@ -424,22 +469,52 @@ mod tests {
         fn runs_out_at_the_deadline() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 100), Some(lease(10)), at(0));
-            gate.handoff();
+            record(&mut gate);
             assert_eq!(gate.deadline(), Some(at(10)));
             gate.advance(at(9));
             assert_eq!(gate.handoff(), None);
             gate.advance(at(10));
             assert_eq!(gate.handoff(), EMPTY);
-            assert_eq!(gate.write(a, at(11)), Err(Error::Expired));
+            assert_eq!(write(&mut gate, a, at(11)), Err(Error::Expired));
+        }
+
+        #[test]
+        fn is_not_renewed_by_a_check() {
+            let mut gate = Gate::new();
+            let a = gate.open(writer("a", 100), Some(lease(10)), at(0));
+            let permit = gate.check(a, at(8)).expect("a holds control");
+            assert_eq!(gate.deadline(), Some(at(10)));
+            gate.renew(permit);
+            assert_eq!(gate.deadline(), Some(at(18)));
+        }
+
+        #[test]
+        #[should_panic(expected = "invariant: writer 0 lost control after its check")]
+        fn panics_when_renewed_after_the_holder_changed() {
+            let mut gate = Gate::new();
+            let a = gate.open(writer("a", 100), Some(lease(10)), at(0));
+            let permit = gate.check(a, at(1)).expect("a holds control");
+            gate.open(writer("b", 200), None, at(1));
+            gate.renew(permit);
+        }
+
+        #[test]
+        #[should_panic(expected = "invariant: writer 0 lost control after its check")]
+        fn panics_when_renewed_after_the_holder_closed() {
+            let mut gate = Gate::new();
+            let a = gate.open(writer("a", 100), Some(lease(10)), at(0));
+            let permit = gate.check(a, at(1)).expect("a holds control");
+            gate.close(a, at(1));
+            gate.renew(permit);
         }
 
         #[test]
         fn is_renewed_by_each_write() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 100), Some(lease(10)), at(0));
-            assert_eq!(gate.write(a, at(8)), Ok(()));
+            assert_eq!(write(&mut gate, a, at(8)), Ok(()));
             assert_eq!(gate.deadline(), Some(at(18)));
-            assert_eq!(gate.write(a, at(17)), Ok(()));
+            assert_eq!(write(&mut gate, a, at(17)), Ok(()));
             assert_eq!(gate.deadline(), Some(at(27)));
         }
 
@@ -448,11 +523,11 @@ mod tests {
             let mut gate = Gate::new();
             gate.open(writer("a", 200), Some(lease(10)), at(0));
             let b = gate.open(writer("b", 100), Some(lease(5)), at(1));
-            gate.handoff();
+            record(&mut gate);
             gate.advance(at(12));
             assert_eq!(gate.handoff(), Some(to("b", 100)));
             assert_eq!(gate.deadline(), Some(at(17)));
-            assert_eq!(gate.write(b, at(13)), Ok(()));
+            assert_eq!(write(&mut gate, b, at(13)), Ok(()));
         }
 
         #[test]
@@ -461,8 +536,8 @@ mod tests {
             let a = gate.open(writer("a", 200), Some(lease(10)), at(0));
             gate.open(writer("b", 100), None, at(1));
             gate.advance(at(10));
-            gate.handoff();
-            assert_eq!(gate.write(a, at(11)), Err(Error::Expired));
+            record(&mut gate);
+            assert_eq!(write(&mut gate, a, at(11)), Err(Error::Expired));
             assert_eq!(gate.holder(), Some(&writer("b", 100)));
             gate.close(a, at(12));
             gate.open(writer("a", 200), Some(lease(10)), at(13));
@@ -474,8 +549,8 @@ mod tests {
             let mut gate = Gate::new();
             gate.open(writer("a", 200), Some(lease(10)), at(0));
             let b = gate.open(writer("b", 100), None, at(1));
-            gate.handoff();
-            assert_eq!(gate.write(b, at(10)), Ok(()));
+            record(&mut gate);
+            assert_eq!(write(&mut gate, b, at(10)), Ok(()));
             assert_eq!(gate.handoff(), Some(to("b", 100)));
         }
 
@@ -484,7 +559,7 @@ mod tests {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 0), None, at(0));
             assert_eq!(gate.deadline(), None);
-            assert_eq!(gate.write(a, at(u64::MAX)), Ok(()));
+            assert_eq!(write(&mut gate, a, at(u64::MAX)), Ok(()));
         }
 
         #[test]
@@ -492,8 +567,8 @@ mod tests {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 0), Some(lease(i64::MAX)), at(u64::MAX - 1));
             assert_eq!(gate.deadline(), Some(at(u64::MAX)));
-            assert_eq!(gate.write(a, at(u64::MAX - 1)), Ok(()));
-            assert_eq!(gate.write(a, at(u64::MAX)), Err(Error::Expired));
+            assert_eq!(write(&mut gate, a, at(u64::MAX - 1)), Ok(()));
+            assert_eq!(write(&mut gate, a, at(u64::MAX)), Err(Error::Expired));
         }
 
         #[test]
@@ -502,7 +577,7 @@ mod tests {
             gate.open(writer("a", 100), Some(lease(10)), at(0));
             let b = gate.open(writer("b", 100), None, at(1));
             let c = gate.open(writer("c", 50), None, at(2));
-            assert_eq!(gate.write(b, at(3)), Err(Error::Waiting));
+            assert_eq!(write(&mut gate, b, at(3)), Err(Error::Waiting));
             gate.close(c, at(4));
             gate.advance(at(5));
             assert_eq!(gate.deadline(), Some(at(10)));
@@ -532,7 +607,7 @@ mod tests {
             let a = gate.open(writer("a", 100), None, at(5));
             assert_eq!(gate.handoff(), None);
             assert_eq!(gate.deadline(), None);
-            assert_eq!(gate.write(a, at(6)), Ok(()));
+            assert_eq!(write(&mut gate, a, at(6)), Ok(()));
         }
 
         #[test]
@@ -541,7 +616,7 @@ mod tests {
             gate.open(writer("b", 100), None, at(1));
             let a = gate.open(writer("a", 100), None, at(2));
             assert_eq!(gate.handoff(), None);
-            assert_eq!(gate.write(a, at(3)), Ok(()));
+            assert_eq!(write(&mut gate, a, at(3)), Ok(()));
         }
 
         #[test]
@@ -550,7 +625,7 @@ mod tests {
             let b = gate.open(writer("b", 90), None, at(1));
             gate.open(writer("a", 80), None, at(2));
             assert_eq!(gate.handoff(), Some(to("b", 90)));
-            assert_eq!(gate.write(b, at(3)), Ok(()));
+            assert_eq!(write(&mut gate, b, at(3)), Ok(()));
         }
 
         #[test]
@@ -558,7 +633,7 @@ mod tests {
             let mut gate = recovered();
             let b = gate.open(writer("b", 100), None, at(1));
             assert_eq!(gate.handoff(), None);
-            assert_eq!(gate.write(b, at(2)), Err(Error::Reserved));
+            assert_eq!(write(&mut gate, b, at(2)), Err(Error::Reserved));
         }
 
         #[test]
@@ -566,14 +641,14 @@ mod tests {
             let mut gate = recovered();
             let b = gate.open(writer("b", 101), None, at(1));
             assert_eq!(gate.handoff(), Some(to("b", 101)));
-            assert_eq!(gate.write(b, at(2)), Ok(()));
+            assert_eq!(write(&mut gate, b, at(2)), Ok(()));
         }
 
         #[test]
         fn hands_control_to_a_waiter_when_the_grace_ends() {
             let mut gate = recovered();
             let b = gate.open(writer("b", 100), None, at(1));
-            assert_eq!(gate.write(b, at(10)), Ok(()));
+            assert_eq!(write(&mut gate, b, at(10)), Ok(()));
             assert_eq!(gate.handoff(), Some(to("b", 100)));
         }
     }
@@ -586,7 +661,7 @@ mod tests {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 100), None, at(0));
             gate.open(writer("a", 100), None, at(1));
-            gate.handoff();
+            record(&mut gate);
             gate.close(a, at(2));
             assert_eq!(gate.handoff(), None);
         }
@@ -596,17 +671,48 @@ mod tests {
             let mut gate = Gate::new();
             gate.open(writer("a", 200), Some(lease(10)), at(0));
             gate.open(writer("b", 100), None, at(1));
-            gate.handoff();
+            record(&mut gate);
             gate.open(writer("c", 150), None, at(10));
             assert_eq!(gate.handoff(), Some(to("c", 150)));
         }
 
         #[test]
-        fn is_taken_once() {
+        fn is_kept_until_recorded() {
             let mut gate = Gate::new();
             gate.open(writer("a", 0), None, at(0));
             assert_eq!(gate.handoff(), Some(to("a", 0)));
+            assert_eq!(gate.handoff(), Some(to("a", 0)));
+            gate.recorded(&to("a", 0));
             assert_eq!(gate.handoff(), None);
+        }
+
+        #[test]
+        fn is_none_when_the_recorded_holder_is_back() {
+            let mut gate = Gate::new();
+            gate.open(writer("a", 100), None, at(0));
+            record(&mut gate);
+            let b = gate.open(writer("b", 200), None, at(1));
+            assert_eq!(gate.handoff(), Some(to("b", 200)));
+            gate.close(b, at(2));
+            assert_eq!(gate.handoff(), None);
+        }
+
+        #[test]
+        fn is_none_when_a_new_gate_is_empty_again() {
+            let mut gate = Gate::new();
+            let a = gate.open(writer("a", 100), None, at(0));
+            gate.close(a, at(1));
+            assert_eq!(gate.handoff(), None);
+        }
+
+        #[test]
+        fn names_a_newer_holder_than_the_one_recorded() {
+            let mut gate = Gate::new();
+            gate.open(writer("a", 100), None, at(0));
+            let handoff = gate.handoff().expect("a took control");
+            gate.open(writer("b", 200), None, at(1));
+            gate.recorded(&handoff);
+            assert_eq!(gate.handoff(), Some(to("b", 200)));
         }
     }
 
@@ -625,7 +731,10 @@ mod tests {
                 lease: Option<i64>,
             },
             Close(usize),
+            /// A write the caller refuses after the check: no renewal.
+            Check(usize),
             Write(usize),
+            Record,
             Advance,
         }
 
@@ -737,7 +846,7 @@ mod tests {
                 }
             }
 
-            fn write(&mut self, key: Key, now: Monotonic) -> Result<(), Error> {
+            fn check(&mut self, key: Key, now: Monotonic) -> Result<(), Error> {
                 self.due(now);
                 if self.expired.contains(&key) {
                     return Err(Error::Expired);
@@ -746,7 +855,6 @@ mod tests {
                     return Err(Error::Reserved);
                 }
                 if self.holder.is_some_and(|(k, _)| k == key) {
-                    self.seat(key, now);
                     return Ok(());
                 }
                 Err(Error::Waiting)
@@ -769,7 +877,9 @@ mod tests {
                         }
                     }),
                 any::<usize>().prop_map(Input::Close),
+                any::<usize>().prop_map(Input::Check),
                 any::<usize>().prop_map(Input::Write),
+                Just(Input::Record),
                 Just(Input::Advance),
             ]
         }
@@ -796,10 +906,13 @@ mod tests {
                     (Gate::recover(last, now, lease(grace)), model)
                 }
             };
-            let mut published = gate.holder().cloned();
+            let mut recorded = gate.holder().cloned();
             let mut keys: Vec<Key> = Vec::new();
             for (step, input) in steps {
-                now = Monotonic(now.0 + step);
+                // A record is not a gate input, so it takes no time.
+                if !matches!(input, Input::Record) {
+                    now = Monotonic(now.0 + step);
+                }
                 match input {
                     Input::Open {
                         subject,
@@ -817,11 +930,29 @@ mod tests {
                         gate.close(key, now);
                         model.close(key, now);
                     }
+                    Input::Check(i) if !keys.is_empty() => {
+                        let key = keys[i % keys.len()];
+                        let checked = gate.check(key, now).map(drop);
+                        assert_eq!(checked, model.check(key, now));
+                    }
                     Input::Write(i) if !keys.is_empty() => {
                         let key = keys[i % keys.len()];
-                        assert_eq!(gate.write(key, now), model.write(key, now));
+                        let checked = model.check(key, now);
+                        if checked.is_ok() {
+                            model.seat(key, now);
+                        }
+                        assert_eq!(write(&mut gate, key, now), checked);
                     }
-                    Input::Close(_) | Input::Write(_) | Input::Advance => {
+                    Input::Record => {
+                        if let Some(handoff) = gate.handoff() {
+                            gate.recorded(&handoff);
+                            recorded = handoff.to;
+                        }
+                    }
+                    Input::Close(_)
+                    | Input::Check(_)
+                    | Input::Write(_)
+                    | Input::Advance => {
                         gate.advance(now);
                         model.due(now);
                     }
@@ -830,10 +961,8 @@ mod tests {
                 assert_eq!(gate.holder(), holder.as_ref());
                 assert_eq!(gate.deadline(), model.deadline());
                 assert!(gate.deadline().is_none_or(|due| now < due));
-                let expected =
-                    (holder != published).then(|| Handoff { to: holder.clone() });
+                let expected = (holder != recorded).then_some(Handoff { to: holder });
                 assert_eq!(gate.handoff(), expected);
-                published = holder;
             }
         }
 
