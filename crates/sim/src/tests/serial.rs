@@ -317,6 +317,20 @@ fn a_flip_changes_one_bit_with_no_parity() {
 }
 
 #[test]
+fn a_flip_of_every_byte_changes_one_bit_of_any_position() {
+    let flip = line::Config {
+        flip: 1.0,
+        ..line::Config::default()
+    };
+    let (_, bytes) = noisy(3, flip, None);
+    assert_eq!(bytes.len(), 200);
+    let changes: Vec<u8> = (bytes.iter().zip(0u8..)).map(|(b, s)| b ^ s).collect();
+    assert!(changes.iter().all(|c| c.is_power_of_two()), "{changes:?}");
+    let positions: BTreeSet<u32> = changes.iter().map(|c| c.trailing_zeros()).collect();
+    assert_eq!(positions.len(), 8, "{positions:?}");
+}
+
+#[test]
 fn a_flip_loses_the_byte_with_parity() {
     let flip = line::Config {
         flip: 0.1,
@@ -488,6 +502,16 @@ fn a_line_to_an_end_of_another_line_panics() {
         Path::new(B),
         line::Config::default(),
     );
+}
+
+#[test]
+#[should_panic(expected = "port /dev/ttyS0 of node 0 is on another line")]
+fn a_line_between_ends_of_two_lines_panics() {
+    let (mut sim, a, _b) = pair(0, line::Config::default());
+    let c = sim.node(node::Config::default());
+    let d = sim.node(node::Config::default());
+    sim.line(&c, Path::new(A), &d, Path::new(B), line::Config::default());
+    sim.line(&a, Path::new(A), &d, Path::new(B), line::Config::default());
 }
 
 #[test]
