@@ -3,6 +3,8 @@
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
+mod change;
+mod config;
 mod election;
 mod network;
 mod replication;

@@ -3,18 +3,20 @@
 
 use std::fmt;
 
+use zeroize::Zeroizing;
+
 pub mod seal;
 pub mod store;
 
-/// A secret value. `Debug` prints `<secret>`, never the bytes.
-pub struct Value(Vec<u8>);
+/// A secret value. `Debug` prints `<secret>`, never the bytes. Its buffer is
+/// overwritten with zeros when it drops.
+pub struct Value(Zeroizing<Vec<u8>>);
 
 impl Value {
-    /// Takes the bytes of a secret. The value keeps `bytes` as it is, so no copy of
-    /// the secret stays behind in a freed buffer.
+    /// Takes the bytes of a secret without a copy.
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self(Zeroizing::new(bytes))
     }
 
     /// The bytes. Send them only to the system they unlock.
