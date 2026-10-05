@@ -72,10 +72,14 @@ state on `main`.
   reset for it. The router is not built. #77 asks that it hands such a datagram
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
-  byte arrives), #298 (datagrams that are not valid, from one address, stop every
-  stateless reset; a small datagram of an unknown version gets a reply).
+  byte arrives), #607 (a stranger keeps the ID from a failed dial and makes the node
+  send a reset to each address it spoofs, with no limit), #620 (a stop after the
+  peer's reset gives the peer the stream's window twice, so a peer grows the
+  connection's receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
-  session). A chain is one certificate of at most 1 KiB.
+  session). A chain is one certificate of at most 1 KiB. #298 (datagrams that are
+  not valid, from one address, stopped every stateless reset; a small datagram of an
+  unknown version got a reply).
 - Not decided: a limit on handshakes before admission. Each one costs the node a key
   exchange and one signature, and one signature check more when the peer sends a
   certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
