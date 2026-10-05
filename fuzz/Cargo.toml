@@ -19,6 +19,13 @@ types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
 
 [[bin]]
+name = "codec_encoder"
+path = "fuzz_targets/codec_encoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "codec_series"
 path = "fuzz_targets/codec_series.rs"
 test = false
@@ -54,8 +61,29 @@ doc = false
 bench = false
 
 [[bin]]
-name = "types_time"
-path = "fuzz_targets/types_time.rs"
+name = "types_range"
+path = "fuzz_targets/types_range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "types_selector"
+path = "fuzz_targets/types_selector.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "types_span"
+path = "fuzz_targets/types_span.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "types_stamp"
+path = "fuzz_targets/types_stamp.rs"
 test = false
 doc = false
 bench = false
