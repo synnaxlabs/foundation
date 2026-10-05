@@ -866,6 +866,31 @@ mod tests {
         }
     }
 
+    mod free {
+        use super::*;
+
+        #[test]
+        fn gives_the_bytes_that_the_driver_finds() {
+            let (files, _) = Fixed::files(0);
+            assert_eq!(ready(files.free()), Ok(7));
+        }
+    }
+
+    mod debug {
+        use super::*;
+
+        #[test]
+        fn shows_the_path_mode_and_poison_of_a_file() {
+            let (files, _) = Fixed::files(8);
+            assert_eq!(format!("{files:?}"), "Files { .. }");
+            let file = open(&files, Mode::Write);
+            assert_eq!(
+                format!("{file:?}"),
+                r#"File { path: "ring/0", mode: Write, poisoned: false, .. }"#
+            );
+        }
+    }
+
     mod write_at {
         use super::*;
 
