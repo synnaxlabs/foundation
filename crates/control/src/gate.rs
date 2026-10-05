@@ -270,7 +270,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::Authority;
+    use types::authority::Authority;
 
     fn writer(subject: &str, authority: u8) -> Writer {
         Writer {
