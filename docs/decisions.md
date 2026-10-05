@@ -395,8 +395,10 @@ How to read this record:
   before the writer releases the space, so the header's tail is at or before the
   writer's tail and the records between are whole. The layout comes from the header
   at open; configuration sets it at create, and a changed `body_max` takes effect at
-  the next create. The open reports the effective layout, callers bound a commit by
-  it, and the node shows it in status. A new ring has the same block at `seq` 0 in
+  the next create. The open reports the effective layout, and the node shows it in
+  status. `append` refuses a batch that no one record holds (over 1023 entries or
+  parts, or a body over `body_max`) with `Large`, and never splits a batch over
+  records. A new ring has the same block at `seq` 0 in
   both places, with the tail at offset 0 and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
@@ -503,10 +505,13 @@ How to read this record:
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
   agent, and every adversarial reviewer.
-- **C2 (working assumption)** One shard per core owns its indexes with no locks. Each
-  shard runs one Tokio `LocalRuntime`. Vendor libraries run on dedicated threads. A
-  connector's shard is chosen by its index (R12-8). The `memory` builder measures the
-  handoff on Linux before this locks.
+- **C2 (2026-10-05)** One shard per core owns its indexes with no locks. Each shard
+  runs one Tokio `LocalRuntime`. Vendor libraries run on dedicated threads. A
+  connector's shard is chosen by its index (R12-8). Network data and vendor-thread
+  frames reach the owning shard as one batch with one wake per batch. On Linux the
+  parked wake adds 4 to 9 us per batch with no millisecond tail (#9, r1). The spin
+  window stays a per-node setting with a default of 0; the sweep in 5.3 sets it. The
+  person locked it on 2026-10-05 ("Ok I approve lcoking C2").
 
 ### 1.6 Time
 
@@ -776,7 +781,17 @@ How to read this record:
   protocol when it sends another class byte, ends a stream inside a message, sends a
   message over the limit, or resets or stops a stream with a code over 32 bits. The
   node then closes the connection with application code 2^32 and the reason as text,
-  and the caller gets `Error::Broken`. Proposed by `network` in #55.
+  and the caller gets `Error::Broken`. Each connection keeps two budgets, which count
+  the length of each message. A sender starts a message only when the messages it
+  started and the streams have not taken in full stay within the peer's
+  `window_bytes`; else the write waits for `Writable`. A receiver takes a block only
+  when the messages that hold one stay within `window_bytes` plus
+  `message_bytes_max`; else the read waits for `Readable`. So bytes that wait for a
+  block never use up the credit that a started message needs, and a peer that breaks
+  the send rule holds at most the receive budget and stops only its own connection.
+  Until the hello carries the peer's window, a sender uses its own. Proposed by
+  `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
+  `network` in #228.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -838,13 +853,14 @@ How to read this record:
   empty entry of its term first, so it can commit what came before. It replicates with
   `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
   (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
-  (its hint for the next `prev`). `step` checks every index a message names, and the
-  order of an append's entries, against the log before it changes state: entries that
-  do not follow `prev` are `Error::EntryOutOfOrder`, and an index past the log is
-  `Error::IndexPastLog`. An `Append` with an entry whose term is above the message's
-  term is `Error::TermBehindLog`: no leader sends one, and a follower that wrote it
-  could not restart. The conformance oracle changed to match; the person decided on
-  2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  (its hint for the next `prev`). `step` checks a message against the log before it
+  changes state: entries that do not follow `prev` are `Error::EntryOutOfOrder`, and a
+  heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
+  log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
+  be past the log of a node that is behind. An `Append` with an entry whose term is
+  above the message's term is `Error::TermBehindLog`: no leader sends one, and a
+  follower that wrote it could not restart. The conformance oracle changed to match; the
+  person decided on 2026-10-05 ("a is fine", #232). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -884,7 +900,9 @@ How to read this record:
   term. Until `mesh` sends the answer, the node campaigns. While a voter has a lease,
   this has no effect. Once no voter has a lease, as after the leader fails, the voters
   can elect the node: it commits an entry of its term, which commits the leave, and
-  steps down, and the voters follow it until their election timeout (#483). Readmit in
+  steps down, and the voters follow it until their election timeout (#483). This gap
+  stays, pinned by a test, until #483; keeping readmit until then lost. The person
+  decided on 2026-10-05 ("(a)"), #482. Readmit in
   `raft` (#414) lost: it sent the log to a sender that `raft` cannot check. The person
   decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set
   sends the commit and steps down. A node outside an uncommitted configuration still
@@ -1461,7 +1479,15 @@ How to read this record:
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
   other way to count allocations. Never in a library or the `node` binary. The
-  `xtask globals` check allows only this case.
+  `xtask globals` check allows only this case. The static also holds the state of
+  `Allocator::freed_holding` (#349): a phase with a count of the frees that scan, the
+  caller's needle while a call runs, and a found count, because Rust has no other way
+  to see a freed block. `freed_holding` is the one exception to "Safe code is sound
+  for every input": the person said "#481 I approve A" on 2026-10-05. A freed block
+  can hold bytes the program never wrote, such as padding or the spare capacity of a
+  `Vec`. Rust defines no read of such a byte on any target, so no sound read exists,
+  and Miri stops at one. This is a patch. The long-term fix is a freeze read (Rust RFC
+  3605); when Rust has one, `freed_holding` uses it and the exception goes.
 - **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake protocol
   can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner always on" and
   said "I have tons of AWS credits". Three runners (`foundation-arm-a`, `-b`, `-c`)
@@ -1622,7 +1648,8 @@ Storage classes used in the table:
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
 | Latest mailbox | Memory: depth 1 per latest reader per index | `delivery` | The reader session | `delivery` |
 | Current value | Memory: the index's newest live frame, one pinned pool block per index (B4, MEMORY BOUNDS) | `delivery` | A new latest reader | `delivery` |
-| Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; the home spends | `delivery` | `delivery`, `wire` |
+| Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; `delivery` spends when the home releases a frame | `delivery` | `delivery`, `wire` |
+| Live frames for complete readers | Memory: the index's live frames not yet on disk, and the frames released to each complete session and not taken, as refcount clones (B1, CREDIT RULES, MEMORY BOUNDS) | `delivery`: the home queues each stored live frame and releases them after a commit | The reader session | `delivery` |
 | Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `delivery` |
 | Death records | Quality channel samples (X19) | `home` | Sinks | `home` |
 | Read copy data | The copy node's index log | `replica` | The copy's readers, served by `home` in copy mode (X43) | `replica`, `home` |
@@ -2205,14 +2232,14 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
-| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, and holds the one `unsafe impl GlobalAlloc`. A dev-dependency only. | none |
+| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
 | 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits, and slews mesh time. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
-| 1 | `delivery` | Keeps each reader's state per index: positions, credits, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
+| 1 | `delivery` | Keeps each reader's state per index: positions, credits, live frames for complete readers, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
@@ -2253,24 +2280,22 @@ Shapes that need the person:
 
 Measured before they lock:
 
-2. **C2, thread model.** The working assumption is in 1.5. The `memory` builder
-   measures the handoff on Linux first (#9).
-3. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
+2. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
 
 Parameters and later choices, recorded and not asked:
 
-4. Struct template storage: whether the spec stores templates and instance records for
+3. Struct template storage: whether the spec stores templates and instance records for
    SDK code generation and `export`.
-5. The transmission policy target: links, indexes, or both (B6).
-6. Upgrades across regions: which region holds the desired version and the format
+4. The transmission policy target: links, indexes, or both (B6).
+5. Upgrades across regions: which region holds the desired version and the format
    flag, and how finalization waits for every region (BQ18, C9d).
-7. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
+6. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
    path.
-8. A20: whether a channel may carry a default max age.
-9. A3: partial-segment wildcards.
-10. A13: bounded lists.
-11. D3: license, free tier, monetization.
-12. D5: a plugin system.
+7. A20: whether a channel may carry a default max age.
+8. A3: partial-segment wildcards.
+9. A13: bounded lists.
+10. D3: license, free tier, monetization.
+11. D5: a plugin system.
 
 ### 5.2 Settled under a delegation
 
