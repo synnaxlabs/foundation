@@ -411,8 +411,9 @@ How to read this record:
   adapter must give each measurement a two-sided bound. The return time of a read
   bounds its last sample only from above. The lower bound comes from a device counter
   read between two mesh stamps, or from a latency that the hardware guarantees: one
-  read over a stated latency gives a low edge above the truth, and the overlap keeps
-  it. Decided by the `time` builder (#84).
+  read over a stated latency gives a low edge above the truth, and the overlap keeps it.
+  Decided by the `time` builder; the person accepted it on 2026-10-05 ('#1 is fine').
+  Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper bounds).
 
 ### 1.7 Transport
 
