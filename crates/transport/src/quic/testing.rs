@@ -36,14 +36,13 @@ pub(super) const CLIENT_KEY: PrivateKey = PrivateKey([1; 32]);
 /// The server's node key.
 pub(super) const SERVER_KEY: PrivateKey = PrivateKey([2; 32]);
 
-/// An Initial datagram from [`CLIENT`] in QUIC draft 29, which no endpoint here
-/// speaks, and its meta.
-pub(super) fn draft_29() -> (Meta, Vec<u8>) {
+/// An Initial datagram in QUIC draft 29, which no endpoint here speaks.
+pub(super) fn draft_29() -> Vec<u8> {
     let len = u8::try_from(cid::LEN).expect("fits");
     let id = [[len].as_slice(), &[1; cid::LEN]].concat();
     let mut initial = [[0xc0].as_slice(), &[0xff, 0, 0, 0x1d], &id, &id].concat();
     initial.resize(usize::from(MTU_MIN), 0);
-    (meta(CLIENT, &initial), initial)
+    initial
 }
 
 /// The meta of `datagram` alone, from `source`.

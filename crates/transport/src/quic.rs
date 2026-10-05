@@ -798,7 +798,8 @@ mod tests {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let (meta, initial) = testing::draft_29();
+                let initial = testing::draft_29();
+                let meta = testing::meta(testing::CLIENT, &initial);
                 endpoint.receive(Monotonic(0), &meta, &initial);
                 let mut buffer = Vec::with_capacity(1 << 16);
                 let start = buffer.as_ptr();
@@ -967,8 +968,12 @@ mod tests {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let (mut meta, initial) = testing::draft_29();
-                (meta.len, meta.stride) = (10, 0);
+                let initial = testing::draft_29();
+                let meta = Meta {
+                    len: 10,
+                    stride: 0,
+                    ..testing::meta(testing::CLIENT, &initial)
+                };
                 endpoint.receive(Monotonic(0), &meta, &initial);
             });
         }

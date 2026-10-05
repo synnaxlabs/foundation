@@ -513,7 +513,7 @@ mod tests {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
-                let (_, initial) = testing::draft_29();
+                let initial = testing::draft_29();
                 let reply =
                     reply(&mut endpoint, Monotonic(0), testing::CLIENT, &initial);
                 let reply = reply.expect("a reply");
@@ -537,7 +537,7 @@ mod tests {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
                     Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
-                let (_, mut initial) = testing::draft_29();
+                let mut initial = testing::draft_29();
                 initial.pop();
                 let bare = [0xc0, 0xff, 0, 0, 0x1d, 0, 0];
                 [bare.as_slice(), &initial].map(|datagram| {
