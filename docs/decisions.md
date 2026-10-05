@@ -497,7 +497,8 @@ How to read this record:
   with drift, slew only. Sources are read directly: mesh peers, GPS, PPS with NMEA, the
   NIC hardware clock (kept by ptp4l), and the OS daemon. No PTP client in v1. Device
   clock fitting (DAQmx, LabJack) is a connector-library component that writes residual
-  error to the index's error channel.
+  error to the index's error channel. Amended by MESH SLEW: mesh time also steps
+  forward to an estimate whose whole interval is ahead of it.
 - **TIME ADAPTERS** Neutral model `Measurement { at: local monotonic, offset, error }`.
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
@@ -588,7 +589,8 @@ How to read this record:
   majority of falsetickers wholly ahead steps mesh time into the future, and it does
   not come back. That is outside the fault model. Lost: a frequency loop (a PLL, as
   in ntpd), because R6 bounds drift with an error that grows and a PLL can overshoot;
-  the slew private in `clock`, because it is decision logic in layer 2. The person
+  the slew private in `clock`, because it is decision logic in layer 2. Amends R6 TIME
+  LOCKED ("slew only") and r6 Q3 item 6 ("Step forward only at startup"). The person
   decided on 2026-10-05 ("Ok 225 mesh slew approved"), with the forward step.
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,

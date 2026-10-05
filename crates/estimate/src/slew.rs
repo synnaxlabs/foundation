@@ -6,7 +6,7 @@ use crate::{Drift, Measurement};
 const RATE_PPM: u64 = 500;
 
 /// Mesh time that moves toward a target estimate at no more than 500 ppm, or steps
-/// forward to it when mesh time is surely behind. It never goes back. Mesh time at a
+/// forward to it when its whole interval is ahead. It never goes back. Mesh time at a
 /// local reading is the reading plus the offset served there. The part of the target
 /// not yet applied goes into the error, so the estimate holds the true offset while
 /// the slew runs. Every value is valid.
@@ -50,13 +50,14 @@ impl Slew {
 
     /// Moves toward `target` from the offset served at `now`, for a local clock that
     /// drifts from mesh time by at most `drift`. When every offset `target` allows at
-    /// `now` is above every offset `self` allows there, mesh time is behind, and the
-    /// result steps to `target` at once. Mesh time from the result at or after `now`
-    /// is never earlier than mesh time from `self` at or before `now`.
+    /// `now` is above every offset `self` allows there, the result steps to `target`
+    /// at once. Each error counts with its full growth, past 36500 days. Mesh time
+    /// from the result at or after `now` is never earlier than mesh time from `self`
+    /// at or before `now`.
     #[must_use]
     pub fn toward(self, now: Monotonic, drift: Drift, target: Measurement) -> Self {
         let (earliest, _) = target.bounds_at(now, drift);
-        let (_, latest) = self.bounds(now, drift);
+        let (_, latest) = self.bounds_at(now, drift);
         let from = if earliest > latest {
             target.offset()
         } else {
@@ -75,13 +76,13 @@ impl Slew {
     /// `target` does.
     #[must_use]
     pub fn at(self, now: Monotonic, drift: Drift) -> Measurement {
-        let (low, high) = self.bounds(now, drift);
+        let (low, high) = self.bounds_at(now, drift);
         Measurement::between(now, low, high)
     }
 
     /// The lowest and highest offset of the estimate at `now`, in nanoseconds, with
     /// no stop at 36500 days.
-    fn bounds(self, now: Monotonic, drift: Drift) -> (i128, i128) {
+    fn bounds_at(self, now: Monotonic, drift: Drift) -> (i128, i128) {
         let served = i128::from(self.served(now));
         let (low, high) = self.target.bounds_at(now, drift);
         let half = (high - served).max(served - low);
@@ -246,6 +247,42 @@ mod tests {
         }
 
         #[test]
+        fn compares_both_estimates_at_now() {
+            let slew = Slew::new(estimate(0, 0, 100));
+            let next = |offset| {
+                let target = estimate(2 * SECOND_NS, offset, 10);
+                slew.toward(Monotonic(SECOND_NS), drift(10), target).from
+            };
+            assert_eq!(next(130), Span::ZERO);
+            assert_eq!(next(131), Span::from_nanos(131));
+        }
+
+        /// The slew back reaches its target at 3 s, after which a target at -600 us
+        /// is wholly ahead. At `now` it is not, so mesh time does not step back.
+        #[test]
+        fn compares_mid_slew_at_now() {
+            let now = Monotonic(2 * SECOND_NS);
+            let target = estimate(4 * SECOND_NS, -600_000, 10);
+            let slew = from_zero(-1_000_000).toward(now, drift(0), target);
+            assert_eq!(slew.from, Span::from_nanos(-500_000));
+        }
+
+        /// Readers see the served error stop at 36500 days, but its full growth still
+        /// reaches a target 500 ns past that, so mesh time slews.
+        #[test]
+        fn compares_full_growth_past_36500_days() {
+            let widest = MAX_ERROR.nanos();
+            let slew = Slew::new(estimate(0, 0, widest));
+            assert_eq!(check(slew, SECOND_NS, 1_000), (0, widest));
+            let next = |offset| {
+                let target = estimate(SECOND_NS, offset, 0);
+                slew.toward(Monotonic(SECOND_NS), drift(1_000), target).from
+            };
+            assert_eq!(next(widest + 500), Span::ZERO);
+            assert_eq!(next(widest + 1_001), Span::from_nanos(widest + 1_001));
+        }
+
+        #[test]
         fn serves_from_at_and_before_the_start() {
             let slew = Slew {
                 start: Monotonic(SECOND_NS),
@@ -320,15 +357,30 @@ mod tests {
             })
         }
 
+        /// A slew, three readings, a drift, and a new target at the middle reading.
+        /// Half the targets have an earliest offset there within 2 ns of the slew's
+        /// latest, where a step starts.
+        fn retarget() -> impl Strategy<Value = (Slew, [u64; 3], Drift, Measurement)> {
+            (slew(), readings(), 0..=100_000_000_u32).prop_flat_map(|(s, r, ppb)| {
+                let drift = Drift::from_ppb(ppb).expect("valid");
+                let now = Monotonic(r[1]);
+                let served = s.at(now, drift);
+                let latest = served.offset().nanos() + served.error().nanos();
+                let near = (0..TIME_NS, 0..ERROR_NS, -2..=2_i64).prop_map(
+                    move |(at, error, gap)| {
+                        let grown = estimate(at, 0, error).error_at(now, drift);
+                        estimate(at, latest + grown.nanos() + gap, error)
+                    },
+                );
+                (Just(s), Just(r), Just(drift), prop_oneof![target(), near])
+            })
+        }
+
         proptest! {
             #[test]
             fn mesh_time_never_goes_back(
-                s in slew(),
-                [early, switch, late] in readings(),
-                target in target(),
-                ppb in 0..=100_000_000_u32,
+                (s, [early, switch, late], drift, target) in retarget(),
             ) {
-                let drift = Drift::from_ppb(ppb).expect("valid");
                 let next = s.toward(Monotonic(switch), drift, target);
                 let before = mesh(s, early, drift);
                 prop_assert!(before <= mesh(s, late, drift));
@@ -337,15 +389,13 @@ mod tests {
                 prop_assert!(at_switch(s) <= at_switch(next));
             }
 
+            /// Errors stay far below 36500 days, where readers see the edges that
+            /// `toward` compares.
             #[test]
             fn steps_only_to_a_target_wholly_ahead(
-                s in slew(),
-                switch in 0..TIME_NS,
-                target in target(),
-                ppb in 0..=100_000_000_u32,
+                (s, [_, switch, _], drift, target) in retarget(),
             ) {
                 let now = Monotonic(switch);
-                let drift = Drift::from_ppb(ppb).expect("valid");
                 let edges = |m: Measurement| {
                     let offset = i128::from(m.offset().nanos());
                     let error = i128::from(m.error_at(now, drift).nanos());
