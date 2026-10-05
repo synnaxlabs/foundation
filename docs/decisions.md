@@ -1388,6 +1388,12 @@ How to read this record:
   (#37) gives files under one data directory, with owned blocks and a sync that
   poisons the file on failure (S4). `env::net` (#44) gives UDP sockets that move GSO
   and GRO batches with ECN and the local address, TCP streams, and listeners.
+  `env::serial` (#431) gives serial ports that move bytes at the line rate, with 8
+  data bits, a parity, and stop bits. Framing belongs to the protocol: a USB adapter
+  hides the gap between frames, so a seam that split frames would act differently
+  on `os` and `sim`. A socket, listener, or port may move to another thread before its
+  first poll. The first poll binds it to its thread, and a poll on another thread
+  panics.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -2153,10 +2159,11 @@ Rules:
 6. Upward flow goes only through values the upper crate pulls (watches, streams).
    Seams that lower crates define and upper crates implement (`env` traits) are
    injected downward.
-7. Only `os` touches the real clock, files, network, randomness, and threads, through
-   the `env` seams it implements. Only `clock` reads wall time through `env`; everyone
-   else asks `clock`. Only `node` builds real seams, and only `sim` builds simulated
-   ones. Below `hub`, only `home` writes channels, and only its companion samples.
+7. Only `os` touches the real clock, files, network, serial ports, randomness, and
+   threads, through the `env` seams it implements. Only `clock` reads wall time
+   through `env`; everyone else asks `clock`. Only `node` builds real seams, and only
+   `sim` builds simulated ones. Below `hub`, only `home` writes channels, and only its
+   companion samples.
 
 Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
 `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
@@ -2170,7 +2177,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, and holds the one `unsafe impl GlobalAlloc`. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
-| 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
+| 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
 | 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits, and slews mesh time. | `types` |
@@ -2180,7 +2187,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
