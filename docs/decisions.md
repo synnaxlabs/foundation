@@ -243,8 +243,9 @@ How to read this record:
   grant for a session it closed. The home sends a whole frame while the bytes it has
   spent are below the limit, so it passes the limit by less than one frame and never
   splits a frame. After a refusal, the session gets no later frame until it has the
-  refused one; frames from catch-up spend credit too. A byte is one byte of the frame's
-  encoded series (X35): the home, every connection, and a local reader see the same
+  refused one; frames from catch-up spend credit too. A frame costs one credit byte per
+  byte of its encoded series (X35), and at least one byte, so a frame with only empty
+  series still uses credit. The home, every connection, and a local reader see the same
   length, and per-connection framing does not count. Credits apply only to complete
   delivery, which is reliable: a lost frame would leak credit. The `hub` raises the
   limit only after it releases a frame, and it bounds its decoded copies itself, since a
