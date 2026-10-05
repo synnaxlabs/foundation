@@ -1,86 +1,201 @@
-//! Measures QUIC (noq) against TLS 1.3 over TCP (rustls), both on aws-lc-rs. The
-//! client prints one Markdown table line per run. `run.sh` drives the matrix.
+//! Measures QUIC (noq) against TLS 1.3 over TCP (tokio-rustls) between two hosts.
+//! The client prints one Markdown table line per run. `run.sh` drives the matrix.
 
 #![expect(
     clippy::disallowed_methods,
-    reason = "a benchmark reads the real clock and arguments"
+    reason = "a benchmark reads the real clock, its arguments, and /proc"
+)]
+#![expect(clippy::print_stdout, reason = "the client prints its table line")]
+#![expect(
+    clippy::print_stderr,
+    reason = "the server reports errors, and the client QUIC's counters"
 )]
 
 mod cpu;
-mod link;
+mod session;
 mod test;
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::Arc;
 
-use link::Carrier;
+use rustls::crypto::CryptoProvider;
+
+use session::{Config, Listener, Session};
 use test::Test;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 const USAGE: &str = "\
 usage:
-  carrier server <quic|tls> <listen> <cert.pem> <key.pem> [no-gso]
-  carrier client <quic|quic-dgram|tls> <server> <ca.pem> [no-gso] <test>
+  carrier server <quic|tls> <listen> <cert.pem> <key.pem> [options]
+  carrier client <quic|tls> <server> <ca.pem> <test> [options]
 tests:
-  bulk <secs>                        one stream, as fast as it goes
-  ping <size> <secs>                 one frame in flight, echoed
-  paced <size> <rate> <secs> [load]  frames at a fixed rate, echoed; `load` adds a
-                                     bulk stream on the same connection and thread
-                                     (QUIC) or thread (TLS)";
-
-/// The server name in the benchmark certificate.
-const SERVER_NAME: &str = "carrier.test";
+  bulk <secs>                       one stream, as fast as it goes
+  ping <frames> <size> <secs>       one frame in flight, echoed
+  paced <frames> <size> <rate> <secs> <none|shared>
+                                    frames at a fixed rate, echoed; `shared` adds a
+                                    bulk flow on the same connection and thread
+  <frames> is `stream` or `datagram` (QUIC only).
+options:
+  unsegmented      QUIC sends without GSO
+  mtu=<bytes>      the link MTU (1500)
+  cpus=<a,b,..>    count the busy time of these CPUs
+  samples=<path>   write each round trip there (client)";
 
 fn main() -> Result<(), Error> {
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .map_err(|_| "a crypto provider is already installed")?;
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let provider = Arc::new(Config::provider());
     match args.as_slice() {
         ["server", carrier, listen, cert, key, rest @ ..] => {
-            let gso = !rest.contains(&"no-gso");
-            let carrier = carrier.parse()?;
-            runtime.block_on(link::serve(carrier, listen.parse()?, cert, key, gso))
+            let options = Options::parse(rest, false)?;
+            let config = options.config(carrier.parse()?, provider)?;
+            let cpus = options.cpus.into();
+            runtime.block_on(serve(&config, listen.parse()?, cert, key, cpus))
         }
         ["client", carrier, server, ca, rest @ ..] => {
-            let (gso, rest) = match rest {
-                ["no-gso", rest @ ..] => (false, rest),
-                rest => (true, rest),
-            };
-            let carrier: Carrier = carrier.parse()?;
-            let test = parse_test(rest)?;
-            let server: SocketAddr = server.parse()?;
-            runtime.block_on(async {
-                let link = link::Link::connect(carrier, server, ca, gso).await?;
-                let row = test::run(&link, &test).await?;
-                println!("{row}");
-                Ok(())
-            })
+            let (test, rest) = Test::parse(rest)?;
+            let options = Options::parse(rest, true)?;
+            let config = options.config(carrier.parse()?, provider)?;
+            runtime.block_on(client(&config, server.parse()?, ca, &test, &options))
         }
         _ => Err(USAGE.into()),
     }
 }
 
-fn parse_test(args: &[&str]) -> Result<Test, Error> {
-    let secs =
-        |s: &str| -> Result<Duration, Error> { Ok(Duration::from_secs(s.parse()?)) };
-    match args {
-        ["bulk", s] => Ok(Test::Bulk { secs: secs(s)? }),
-        ["ping", size, s] => Ok(Test::Ping {
-            size: size.parse()?,
-            secs: secs(s)?,
-        }),
-        ["paced", size, rate, s, rest @ ..] => Ok(Test::Paced {
-            size: size.parse()?,
-            rate: rate.parse()?,
-            secs: secs(s)?,
-            load: rest == ["load"],
-        }),
-        _ => Err(format!("unknown test {args:?}").into()),
+/// The arguments after the positional ones.
+struct Options {
+    unsegmented: bool,
+    mtu: u16,
+    cpus: Vec<usize>,
+    samples: Option<String>,
+}
+
+impl Options {
+    fn parse(args: &[&str], client: bool) -> Result<Self, Error> {
+        let mut options = Self {
+            unsegmented: false,
+            mtu: 1500,
+            cpus: Vec::new(),
+            samples: None,
+        };
+        for arg in args {
+            match arg.split_once('=') {
+                None if *arg == "unsegmented" => options.unsegmented = true,
+                Some(("mtu", n)) => options.mtu = n.parse()?,
+                Some(("cpus", list)) => {
+                    options.cpus =
+                        list.split(',').map(str::parse).collect::<Result<_, _>>()?;
+                }
+                Some(("samples", path)) if client => {
+                    options.samples = Some(path.into())
+                }
+                _ => return Err(format!("unknown option {arg:?}\n{USAGE}").into()),
+            }
+        }
+        Ok(options)
+    }
+
+    fn config(
+        &self,
+        carrier: session::Carrier,
+        provider: Arc<CryptoProvider>,
+    ) -> Result<Config, Error> {
+        Config::new(carrier, provider, self.unsegmented, self.mtu)
+    }
+}
+
+async fn serve(
+    config: &Config,
+    listen: SocketAddr,
+    cert: &str,
+    key: &str,
+    cpus: Arc<[usize]>,
+) -> Result<(), Error> {
+    let listener = Listener::bind(config, listen, cert, key).await?;
+    eprintln!("server on {listen}: {config}");
+    loop {
+        let handshake = listener.accept().await?;
+        let cpus = Arc::clone(&cpus);
+        tokio::spawn(report("session", async move {
+            test::serve(handshake.finish().await?, cpus).await
+        }));
+    }
+}
+
+async fn client(
+    config: &Config,
+    server: SocketAddr,
+    ca: &str,
+    test: &Test,
+    options: &Options,
+) -> Result<(), Error> {
+    let mut session = Session::connect(config, server, ca).await?;
+    let outcome = test::run(&mut session, test, &options.cpus).await?;
+    if let Some(stats) = session.stats() {
+        eprintln!("noq: {stats}");
+    }
+    session.close().await;
+    println!("{}", outcome.line());
+    if let Some(path) = &options.samples {
+        std::fs::write(path, outcome.samples())?;
+    }
+    Ok(())
+}
+
+/// Runs a server task and prints its error, which `run.sh` counts as a failure.
+async fn report(what: &'static str, task: impl Future<Output = Result<(), Error>>) {
+    if let Err(e) = task.await {
+        eprintln!("error: {what}: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options_reject_an_unknown_option() {
+        let error = Options::parse(&["nogso"], false).err().unwrap().to_string();
+        assert!(
+            error.starts_with("unknown option \"nogso\"\nusage:"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn options_reject_samples_on_the_server() {
+        let error = Options::parse(&["samples=x"], false)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.starts_with("unknown option \"samples=x\""), "{error}");
+    }
+
+    #[test]
+    fn options_parse_each_option() {
+        let args = ["unsegmented", "mtu=9001", "cpus=2,6", "samples=out"];
+        let options = Options::parse(&args, true).unwrap();
+        assert!(options.unsegmented);
+        assert_eq!(options.mtu, 9001);
+        assert_eq!(options.cpus, [2, 6]);
+        assert_eq!(options.samples.as_deref(), Some("out"));
+    }
+
+    #[test]
+    fn config_rejects_an_mtu_below_the_quic_minimum() {
+        let options = Options::parse(&["mtu=1227"], false).unwrap();
+        let provider = Arc::new(Config::provider());
+        let error = options
+            .config(session::Carrier::Quic, provider)
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.to_string(),
+            "MTU 1227 is below the QUIC minimum of 1228"
+        );
     }
 }

@@ -1,17 +1,15 @@
 [package]
 name = "carrier"
-version = "0.0.0"
-edition = "2024"
-publish = false
-
-# Its own workspace: the benchmark's dependencies stay out of the product build.
-[workspace]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
-noq = { version = "1.3", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
-tokio = { version = "1.53", features = ["rt", "net", "time", "io-util", "macros"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+noq = { workspace = true, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+rustls = { workspace = true, features = ["aws_lc_rs", "std"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 
-[profile.release]
-debug = 1
+[lints]
+workspace = true

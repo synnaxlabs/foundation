@@ -33,5 +33,5 @@ These never ship in the binary.
 | `libfuzzer-sys` | Fuzz targets | Coverage-guided fuzzing with `cargo-fuzz` (testing layer 2) | (MIT or Apache-2.0) and NCSA | 0.4.13 | 2026-10-04 |
 | `hdrhistogram` | Benchmarks | Latency percentiles | MIT or Apache-2.0 | 7.6.0 | 2026-10-04 |
 | `core_affinity` | Benchmarks | Pin benchmark threads to cores on Linux | MIT or Apache-2.0 | 0.8.3 | 2026-10-04 |
-| `noq` | `bench/carrier` only | QUIC endpoint on Tokio for the carrier benchmark (#10). Its own workspace keeps it out of the product build | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
+| `noq` | `bench/carrier` only | QUIC endpoint on Tokio for the carrier benchmark (#10). No product crate depends on it. Its `noq-proto` brings `aes-gcm` for Retry tags only; packets use aws-lc-rs | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
 | `tokio-rustls` | `bench/carrier` only | TLS over TCP on Tokio for the carrier benchmark (#10) | MIT or Apache-2.0 | 0.26.6 | 2026-10-04 |

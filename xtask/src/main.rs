@@ -5,6 +5,7 @@
 mod map;
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use serde_json::Value;
@@ -37,7 +38,13 @@ fn layers() -> Result<(), Vec<String>> {
         let Some(name) = package["name"].as_str() else {
             continue;
         };
-        if name == "xtask" {
+        let bench = package["manifest_path"].as_str().is_some_and(|path| {
+            Path::new(path)
+                .components()
+                .any(|c| c.as_os_str() == "bench")
+        });
+        // Tools and benchmarks ship in no binary, so the crate map does not cover them.
+        if name == "xtask" || bench {
             continue;
         }
         let Some(entry) = map::find(name) else {
