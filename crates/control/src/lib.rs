@@ -59,11 +59,11 @@ impl Lease {
     }
 }
 
-/// A change of holder.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Handoff {
+/// A change of holder, borrowed from the [`Gate`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Handoff<'a> {
     /// The new holder, or `None` when the gate is now empty.
-    pub to: Option<Writer>,
+    pub to: Option<&'a Writer>,
 }
 
 /// Why the gate refused a control lease or a write.
