@@ -449,13 +449,12 @@ fn crosses(message: &Message) -> bool {
     side(message.from) != side(message.to)
 }
 
-// Node 4 is removed. It holds the leave and an entry after it that only leader 1
-// sent it, while nodes 2 and 3 hold the leave but not its commit. Node 2 then wins
-// term 2 with node 3's vote, so node 4's last position is not in the new leader's
-// log. After the network mends, node 4 campaigns. The leased voters refuse it once
-// at their term, then drop its campaigns, and node 2 keeps the lead.
+// Node 4 is removed. It holds the leave, as nodes 2 and 3 do, but no node holds its
+// commit. Leader 1 sends node 4 no entry past the leave. Node 2 then wins term 2
+// with node 3's vote. After the network mends, node 4 campaigns. The leased voters
+// refuse it once at their term, then drop its campaigns, and node 2 keeps the lead.
 #[test]
-fn leased_voters_refuse_a_removed_node_with_an_entry_the_leader_lacks() {
+fn leased_voters_refuse_a_removed_node_that_missed_a_new_term() {
     let mut nodes: BTreeMap<node::Key, Raft> = (1..=4)
         .map(|id| (key(id), node(id, &[1, 2, 3, 4])))
         .collect();
@@ -486,8 +485,8 @@ fn leased_voters_refuse_a_removed_node_with_an_entry_the_leader_lacks() {
     }
     lost.clear();
 
-    // The network splits: {1, 4} and {2, 3}. Leader 1 proposes an entry that only
-    // node 4 gets.
+    // The network splits: {1, 4} and {2, 3}. Leader 1 proposes an entry that no
+    // node gets: node 4 is on its side, but the entry is past the leave.
     nodes.get_mut(&key(1)).unwrap().propose(vec![7]).unwrap();
     run_holding(&mut nodes, &mut lost, crosses);
     assert_eq!(lost.len(), 2, "{lost:?}");
@@ -510,7 +509,7 @@ fn leased_voters_refuse_a_removed_node_with_an_entry_the_leader_lacks() {
     let with_4 = watch(&mut nodes, 8 * ELECTION, 4);
     let end = Position {
         term: Term(1),
-        index: 4,
+        index: 3,
     };
     let refuse = |id| sent(ELECTION, id, 4, 2, Body::PreVoteReply { granted: false });
     let mut expected = vec![
