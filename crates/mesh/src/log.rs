@@ -5,7 +5,7 @@
 //! the body. The header holds its own check, the format version, the record's number,
 //! the length of the body, and the check of the body. Record numbers count up from 0
 //! through all files. A record that does not fit in the rest of a file starts the
-//! next file.
+//! next file, or makes the file again, larger, when it holds no record.
 //!
 //! A header never crosses a 512-byte sector: a record whose header would cross one
 //! starts at the next sector. A power cut keeps all or none of a sector, so a header
@@ -76,6 +76,12 @@ pub(crate) enum Error {
         /// The file.
         path: PathBuf,
     },
+    /// A write failed or was dropped before it ended, so the end of the log is not
+    /// known.
+    Poisoned {
+        /// The file that holds the end of the log.
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for Error {
@@ -98,6 +104,11 @@ impl fmt::Display for Error {
             Self::Stray { path } => write!(
                 f,
                 "{} is in the directory of the log, but it is not the next log file",
+                path.display()
+            ),
+            Self::Poisoned { path } => write!(
+                f,
+                "a write of {} failed or was dropped; open the log again",
                 path.display()
             ),
         }
@@ -131,6 +142,10 @@ pub(crate) struct Log {
     offset: u64,
     // The number of the next record.
     next: u64,
+    // The index of the last entry.
+    last: u64,
+    // A write failed or was dropped, so the end of the log is not known.
+    poisoned: bool,
 }
 
 impl Log {
@@ -198,6 +213,8 @@ impl Log {
             number,
             offset: wide(scan.offset),
             next: scan.next,
+            last: wide(scan.stored.entries.len()),
+            poisoned: false,
         };
         Ok((log, scan.stored))
     }
@@ -207,17 +224,32 @@ impl Log {
     /// when the call returns: a crash before then keeps both or neither. A call with
     /// nothing to write does nothing.
     ///
-    /// After [`Error::Files`], open the log again: a failed sync poisons the file.
+    /// [`Error::Files`], or a drop of the future before it ends, poisons the log: open
+    /// it again.
     ///
     /// # Errors
     ///
-    /// [`Error::Files`] when a file call fails, and [`Error::Pool`] when the pool has
-    /// no blocks for the record.
+    /// - [`Error::Files`] when a file call fails.
+    /// - [`Error::Pool`] when the pool has no blocks for the record.
+    /// - [`Error::Poisoned`] after a failed or dropped write.
+    ///
+    /// # Panics
+    ///
+    /// When the first entry is not at an index from 1 to one past the last entry of
+    /// the log, or the indexes of `entries` do not count up by one.
     pub(crate) async fn write(
         &mut self,
         hard: Option<Hard>,
         entries: &[Entry],
     ) -> Result<(), Error> {
+        if self.poisoned {
+            let path = path(&self.dir, self.number);
+            return Err(Error::Poisoned { path });
+        }
+        assert!(
+            follows(self.last, entries),
+            "the entries of a write must follow the log"
+        );
         if hard.is_none() && entries.is_empty() {
             return Ok(());
         }
@@ -231,13 +263,21 @@ impl Log {
                 Ok(block.freeze())
             })
             .collect::<Result<Vec<Block>, Error>>()?;
+        self.poisoned = true;
         let mut start = wide(start(narrow(self.offset)));
         if start.saturating_add(len) > self.file.len() {
-            let number = self.number.saturating_add(1);
+            // A file with no record is made again, larger: a scan refuses a file
+            // with no record before another file.
+            let empty = self.offset == 0;
+            let number = self.number.saturating_add(u64::from(!empty));
+            let path = path(&self.dir, number);
+            if empty {
+                self.files.remove(&path).await?;
+            }
             let mode = Mode::Create {
                 len: len.max(SEGMENT),
             };
-            let file = self.files.open(&path(&self.dir, number), mode).await?;
+            let file = self.files.open(&path, mode).await?;
             self.files.sync_dir(&self.dir).await?;
             (self.file, self.number, start) = (file, number, 0);
         }
@@ -245,6 +285,10 @@ impl Log {
         self.file.sync().await?;
         self.offset = start.saturating_add(len);
         self.next = self.next.saturating_add(1);
+        if let Some(entry) = entries.last() {
+            self.last = entry.at.index;
+        }
+        self.poisoned = false;
         Ok(())
     }
 }
@@ -542,23 +586,39 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
         }
         _ => return None,
     }
-    let mut first = true;
+    let mut entries = Vec::new();
     while !body.is_empty() {
-        let entry = entry::decode(body)?;
-        if std::mem::take(&mut first) {
-            let keep = usize::try_from(entry.at.index.checked_sub(1)?).ok()?;
-            stored.entries.truncate(keep);
-        }
-        stored.entries.push(entry);
+        entries.push(entry::decode(body)?);
     }
+    if !follows(wide(stored.entries.len()), &entries) {
+        return None;
+    }
+    if let Some(first) = entries.first() {
+        let keep = usize::try_from(first.at.index.checked_sub(1)?).ok()?;
+        stored.entries.truncate(keep);
+    }
+    stored.entries.extend(entries);
     Some(())
+}
+
+// Whether `entries` can follow a log whose last entry has index `last`: the first at
+// an index from 1 to `last + 1`, and the others after it in order.
+fn follows(last: u64, entries: &[Entry]) -> bool {
+    entries.first().is_none_or(|first| {
+        let from = first.at.index;
+        (1..=last.saturating_add(1)).contains(&from)
+            && (entries.iter().zip(from..))
+                .all(|(entry, index)| entry.at.index == index)
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::future::pending;
+    use std::future::{pending, poll_fn};
+    use std::pin::pin;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::task::Poll;
 
     use env::files::Operation;
     use proptest::prelude::*;
@@ -1021,11 +1081,12 @@ mod tests {
 
     const LARGE: usize = 3 << 19;
 
-    /// Writes a small record, one larger than a file, and a small one: three files.
+    /// Writes a small record, one larger than a file, and two small ones: three files.
     fn three_files(sim: &mut Sim, node: &sim::node::Node) -> Stored {
         on(sim, node, |node| async move {
             let (mut log, _) = open(&node).await.unwrap();
-            let entries = vec![bytes(1, 10), bytes(2, LARGE), bytes(3, 10)];
+            let entries =
+                vec![bytes(1, 10), bytes(2, LARGE), bytes(3, 10), bytes(4, 10)];
             for entry in &entries {
                 log.write(None, std::slice::from_ref(entry)).await.unwrap();
             }
@@ -1156,34 +1217,175 @@ mod tests {
         assert_eq!(error, Error::Pool(expected));
     }
 
+    // Records 1 and 2 follow record 0 in `log-0`, and record 3 is durable in `log-1`.
+    // The damage is one bit of the body length of record 0, which is 126, or zeros
+    // over the header of record 2.
     #[test]
     fn refuses_a_bad_header_in_a_file_before_a_file_with_records() {
+        let damages: [(usize, u64, &[u8]); 2] =
+            [(0, wide(CHECK) + 10, &[127]), (2, 0, &[0; HEADER])];
+        for (record, at, damage) in damages {
+            let (mut sim, node) = sim(0);
+            let starts = three(&mut sim, &node);
+            on(&mut sim, &node, |node| async move {
+                let (mut log, stored) = open(&node).await.unwrap();
+                assert_eq!(stored.entries.len(), 3);
+                log.write(None, &[bytes(4, LARGE)]).await.unwrap();
+                let names = node.files().list(Path::new(DIR)).await.unwrap();
+                assert_eq!(names, ["log-0", "log-1"].map(PathBuf::from));
+            });
+            sim.crash(&node, Crash::Power);
+            let at = starts[record] + at;
+            on(&mut sim, &node, move |node| async move {
+                put(&node, "log-0", at, damage).await;
+            });
+            let result = stored(&mut sim, &node);
+            let names = on(&mut sim, &node, |node| async move {
+                node.files().list(Path::new(DIR)).await.unwrap()
+            });
+            let expected = Error::Corrupt {
+                path: file("log-0"),
+                offset: starts[record],
+            };
+            let kept = ["log-0", "log-1"].map(PathBuf::from).to_vec();
+            assert_eq!((result, names), (Err(expected), kept), "record {record}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_file_with_no_record_before_another_file() {
         let (mut sim, node) = sim(0);
-        let starts = three(&mut sim, &node);
+        three(&mut sim, &node);
         on(&mut sim, &node, |node| async move {
-            let (mut log, stored) = open(&node).await.unwrap();
-            assert_eq!(stored.entries.len(), 3);
-            log.write(None, &[bytes(4, LARGE)]).await.unwrap();
-            let names = node.files().list(Path::new(DIR)).await.unwrap();
-            assert_eq!(names, ["log-0", "log-1"].map(PathBuf::from));
-        });
-        sim.crash(&node, Crash::Power);
-        // One bit of the body length of record 0, which is 126. Records 1 and 2
-        // follow it in `log-0`, and record 3 is durable in `log-1`.
-        let at = starts[0] + wide(CHECK) + 10;
-        on(&mut sim, &node, move |node| async move {
-            put(&node, "log-0", at, &[127]).await;
-        });
-        let result = stored(&mut sim, &node);
-        let names = on(&mut sim, &node, |node| async move {
-            node.files().list(Path::new(DIR)).await.unwrap()
+            for name in ["log-1", "log-2"] {
+                let mode = Mode::Create { len: 512 };
+                drop(node.files().open(&file(name), mode).await.unwrap());
+            }
+            node.files().sync_dir(Path::new(DIR)).await.unwrap();
         });
         let expected = Error::Corrupt {
-            path: file("log-0"),
-            offset: starts[0],
+            path: file("log-1"),
+            offset: 0,
         };
-        let kept = ["log-0", "log-1"].map(PathBuf::from).to_vec();
-        assert_eq!((result, names), (Err(expected), kept));
+        assert_eq!(stored(&mut sim, &node), Err(expected));
+    }
+
+    // A cut can keep the header of the first record of a file and tear its body.
+    #[test]
+    fn a_record_that_does_not_fit_replaces_a_file_with_no_record() {
+        let (mut sim, node) = sim(0);
+        let len = usize::try_from(SEGMENT).unwrap() - 1000;
+        on(&mut sim, &node, move |node| async move {
+            let (mut log, _) = open(&node).await.unwrap();
+            log.write(None, &[bytes(1, 2000)]).await.unwrap();
+            log.write(None, &[bytes(2, len)]).await.unwrap();
+            drop(log);
+            put(&node, "log-1", 1024, &[0; 512]).await;
+        });
+        let expected = on(&mut sim, &node, |node| async move {
+            let (mut log, stored) = open(&node).await.unwrap();
+            assert_eq!(stored.entries, [bytes(1, 2000)]);
+            let large = bytes(2, LARGE);
+            log.write(None, std::slice::from_ref(&large)).await.unwrap();
+            let names = node.files().list(Path::new(DIR)).await.unwrap();
+            assert_eq!(names, ["log-0", "log-1"].map(PathBuf::from));
+            Stored {
+                hard: Hard::default(),
+                entries: vec![bytes(1, 2000), large],
+            }
+        });
+        sim.crash(&node, Crash::Power);
+        assert_eq!(stored(&mut sim, &node), Ok(expected));
+    }
+
+    #[test]
+    fn a_first_record_larger_than_a_file_is_in_log_0() {
+        let (mut sim, node) = sim(0);
+        let files = on(&mut sim, &node, |node| async move {
+            let (mut log, _) = open(&node).await.unwrap();
+            log.write(None, &[bytes(1, LARGE)]).await.unwrap();
+            drop(log);
+            let mut files = Vec::new();
+            for name in node.files().list(Path::new(DIR)).await.unwrap() {
+                let path = Path::new(DIR).join(&name);
+                let len = node.files().open(&path, Mode::Read).await.unwrap().len();
+                files.push((name, len));
+            }
+            files
+        });
+        let len = wide(encode(0, None, &[bytes(1, LARGE)]).len());
+        assert_eq!(files, [(PathBuf::from("log-0"), len)]);
+    }
+
+    #[test]
+    fn refuses_a_write_after_a_failed_or_dropped_one() {
+        let (mut sim, node) = sim(0);
+        let dropped = on(&mut sim, &node, |node| async move {
+            let (mut log, _) = open(&node).await.unwrap();
+            let entries = [bytes(1, 10)];
+            {
+                let mut write = pin!(log.write(None, &entries));
+                let poll = poll_fn(|cx| Poll::Ready(write.as_mut().poll(cx))).await;
+                assert!(poll.is_pending());
+            }
+            log.write(None, &entries).await.unwrap_err()
+        });
+        let failed = on(&mut sim, &node, |node| async move {
+            let (mut log, _) = open(&node).await.unwrap();
+            node.fail_file(&file("log-0"), Operation::WriteAt);
+            let error = log.write(None, &[bytes(1, 10)]).await.unwrap_err();
+            (error, log.write(None, &[bytes(1, 10)]).await.unwrap_err())
+        });
+        let poisoned = Error::Poisoned {
+            path: file("log-0"),
+        };
+        let io = Error::Files(files::Error::Io {
+            path: file("log-0"),
+            operation: Operation::WriteAt,
+            code: 5,
+        });
+        assert_eq!(
+            (dropped, failed),
+            (poisoned.clone(), (io, poisoned.clone()))
+        );
+        assert_eq!(
+            poisoned.to_string(),
+            "a write of mesh/log-0 failed or was dropped; open the log again"
+        );
+    }
+
+    #[test]
+    fn refuses_a_record_whose_entries_do_not_follow_the_log() {
+        let cases = [
+            vec![bytes(0, 1)],
+            vec![bytes(2, 1)],
+            vec![bytes(1, 1), bytes(3, 1)],
+        ];
+        for entries in cases {
+            let segments = [encode(0, None, &entries)];
+            let expected = Error::Corrupt {
+                path: file("log-0"),
+                offset: 0,
+            };
+            let indexes = entries.iter().map(|entry| entry.at.index);
+            let indexes = indexes.collect::<Vec<_>>();
+            assert_eq!(
+                scan(Path::new(DIR), &segments),
+                Err(expected),
+                "{indexes:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "the entries of a write must follow the log")]
+    fn panics_on_a_write_whose_entries_do_not_follow_the_log() {
+        let (mut sim, node) = sim(0);
+        on(&mut sim, &node, |node| async move {
+            let (mut log, _) = open(&node).await.unwrap();
+            log.write(None, &[bytes(1, 1)]).await.unwrap();
+            log.write(None, &[bytes(3, 1)]).await.unwrap();
+        });
     }
 
     fn data() -> impl Strategy<Value = Data> {

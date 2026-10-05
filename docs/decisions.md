@@ -973,7 +973,9 @@ How to read this record:
   changed, and the entries, so one sync makes both durable; two slots for the hard state
   lost, because they need a second sync and a second torn-write rule. A later record
   replaces the entries from its first index. A file is 1 MiB, or the length of its first
-  record when that is more, and a record that does not fit starts the next file. A
+  record when that is more, and a record that does not fit starts the next file. In a
+  file with no record, it makes that file again, larger, so each file but the last
+  holds a record. A failed or dropped write poisons the log (`Error::Poisoned`). A
   header never crosses a `SECTOR`: a record whose header would cross one starts at the
   next sector. A power cut keeps each sector whole or not at all (SIM CRASH), so a
   header is whole or absent. At a restart, zeros where a record should start, or a good
@@ -983,7 +985,10 @@ How to read this record:
   Then it syncs the end file, the directory, and its parent, because `raft` acts on
   what open gives and a crash can leave any of them with no sync. One check over the
   whole record lost: a damaged length then reads as a torn end, and the log drops the
-  good records after it. Nothing trims the log until snapshots (#253).
+  good records after it. Zeros over the header of a durable record, which only a disk
+  fault makes, read as the end, and open drops the records after it in that file. A
+  search past the end for a record lost: a body can hold the bytes of a record, so a
+  power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
