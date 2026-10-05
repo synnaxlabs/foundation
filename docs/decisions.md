@@ -804,10 +804,11 @@ How to read this record:
   decided on 2026-10-05 ("a is fine", #232). `Body::Heartbeat { commit }` carries
   the commit index, capped at what that follower is known to hold. A leader commits
   an index only when a quorum holds it and its entry is of the leader's own term. A
-  follower commits no further than the last entry the leader sent it. `Ready.committed` gives each entry
-  once, after it is written. Batch size (64 entries) and the number of appends in flight
-  per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
-  `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
+  follower commits no further than the last entry the leader sent it.
+  `Ready.committed` gives each entry once, after it is written. Batch size (64
+  entries) and the number of appends in flight per follower (8) are constants, not
+  `Config` fields: nothing measured asks for a knob. `Message` and `Body` are `Clone`,
+  not `Copy`, because an append carries entries.
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
