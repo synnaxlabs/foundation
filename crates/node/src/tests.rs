@@ -6,6 +6,7 @@ use sim::shard::Fault;
 use crate::{Config, Error, Node};
 
 struct Run {
+    seed: u64,
     sim: sim::Sim,
     host: sim::node::Node,
     node: Node,
@@ -27,7 +28,12 @@ fn start(seed: u64, cores: usize, faults: &[(usize, Fault)]) -> Run {
     let node = Node::start(Config {
         shards: host.shards(),
     });
-    Run { sim, host, node }
+    Run {
+        seed,
+        sim,
+        host,
+        node,
+    }
 }
 
 fn starts(run: &Run) -> Vec<(String, Option<usize>)> {
@@ -121,4 +127,57 @@ fn a_shard_that_cannot_pin_stops_the_node() {
         })
     );
     assert_eq!(e.to_string(), "cannot pin thread shard-0 to core 0");
+}
+
+/// Runs the sim until it ends, and returns the thread of each panic in order.
+fn panics(run: &mut Run) -> Vec<String> {
+    let mut threads = Vec::new();
+    loop {
+        match run.sim.run() {
+            Ok(()) => return threads,
+            Err(sim::Error::Panicked {
+                thread,
+                message,
+                seed,
+            }) => {
+                assert_eq!((message.as_str(), seed), ("injected", run.seed));
+                threads.push(thread);
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+}
+
+#[test]
+fn join_gives_the_first_shard_by_core_that_panicked() {
+    for seed in 0..32 {
+        let mut run = start(seed, 3, &[(0, Fault::Panic), (2, Fault::Panic)]);
+        let mut threads = panics(&mut run);
+        threads.sort();
+        assert_eq!(threads, ["shard-0", "shard-2"], "seed {seed}");
+        assert_eq!(
+            run.node.join(),
+            Err(Error::Thread(thread::Error::Panicked {
+                name: "shard-0".into()
+            })),
+            "seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn join_gives_a_shard_that_could_not_start_over_one_that_panicked() {
+    for seed in 0..32 {
+        let mut run = start(seed, 3, &[(0, Fault::Panic), (1, Fault::Start)]);
+        assert_eq!(starts(&run), named(&[0, 1]));
+        assert_eq!(panics(&mut run), ["shard-0"], "seed {seed}");
+        assert_eq!(
+            run.node.join(),
+            Err(Error::Thread(thread::Error::Start {
+                name: "shard-1".into(),
+                reason: "injected".into()
+            })),
+            "seed {seed}"
+        );
+    }
 }
