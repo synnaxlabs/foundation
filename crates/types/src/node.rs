@@ -75,8 +75,8 @@ impl fmt::Display for SmallOrder {
 
 impl std::error::Error for SmallOrder {}
 
-/// The y of each Ed25519 point of small order, and p and p + 1, which aws-lc's
-/// portable decoder reads as 0 and 1.
+/// The y of each Ed25519 point of small order, and p and p + 1, which a decoder that
+/// does not refuse y >= p reads as 0 and 1.
 const SMALL_ORDER: [[u8; 32]; 7] = [
     // 0 and p: order 4.
     [0; 32],

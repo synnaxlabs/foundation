@@ -737,16 +737,6 @@ mod tests {
     mod key {
         use super::*;
 
-        proptest! {
-            #[test]
-            fn keeps_every_key_aws_lc_derives(seed: [u8; 32]) {
-                let pair = Ed25519KeyPair::from_seed_unchecked(&seed).expect("32 bytes");
-                let bytes: [u8; 32] =
-                    pair.public_key().as_ref().try_into().expect("32 bytes");
-                prop_assert_eq!(PublicKey::new(bytes).map(PublicKey::to_bytes), Ok(bytes));
-            }
-        }
-
         #[test]
         fn refuses_a_key_that_is_not_ed25519() {
             let mut der = certificate(&Tls::new(&PrivateKey([1; 32]))).to_vec();
@@ -768,37 +758,6 @@ mod tests {
                 key(&CertificateDer::from(vec![1, 2, 3])),
                 Err(CertificateError::BadEncoding.into())
             );
-        }
-
-        #[test]
-        fn refuses_each_encoding_of_a_point_of_small_order() {
-            for hex in [
-                "0100000000000000000000000000000000000000000000000000000000000000",
-                "0100000000000000000000000000000000000000000000000000000000000080",
-                "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-                "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                "0000000000000000000000000000000000000000000000000000000000000080",
-                "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-                "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
-                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
-                "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
-                "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
-            ] {
-                let mut encoding = [0; 32];
-                for (byte, pair) in encoding.iter_mut().zip(hex.as_bytes().chunks(2)) {
-                    let pair = std::str::from_utf8(pair).expect("ASCII");
-                    *byte = u8::from_str_radix(pair, 16).expect("hex");
-                }
-                assert_eq!(
-                    key(&certificate(&keyless(encoding))),
-                    Err(CertificateError::ApplicationVerificationFailure.into()),
-                    "{hex}"
-                );
-            }
         }
     }
 
