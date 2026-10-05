@@ -1592,6 +1592,30 @@ mod tests {
     }
 
     #[test]
+    fn a_reset_sender_gives_back_its_blocks_when_the_peer_acknowledges() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            // noq-proto copies a write of 1452 bytes or less, and holds a larger one
+            // until the peer acknowledges it. A 2000-byte block takes 2112 bytes of
+            // the budget.
+            let config = block::Config { budget: 3000 };
+            let memory = Heap::new(config.reservation());
+            let pool = Pool::new(config, memory);
+            let mut sender = open_sender(&mut pair, Class::Complete);
+            let (now, message) = (pair.now(), pool.alloc(2000).expect("room").freeze());
+            write(&mut pair.client, now, &mut sender, &[message]);
+            pair.client.endpoint.reset(now, sender, Code(9));
+            let exhausted = block::Error::Exhausted {
+                requested: 2000,
+                available: 888,
+            };
+            assert_eq!(pool.alloc(2000).err(), Some(exhausted));
+            pair.run(RUN);
+            assert_eq!(pool.alloc(2000).err(), None);
+        });
+    }
+
+    #[test]
     fn a_reset_sender_that_waits_for_budget_stops_waiting() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);

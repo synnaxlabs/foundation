@@ -375,8 +375,11 @@ impl Endpoint {
 
     /// Resets `sender`'s stream with `code`. The peer's next read gives
     /// [`Error::Reset`], and the messages it has not read drop, unless it acknowledged
-    /// all of the stream. The message in hand drops, and its send budget comes back.
-    /// Does nothing when the connection ended.
+    /// all of the stream. The send budget of the message in hand comes back now, and
+    /// the stream's blocks go back to the pool at the latest when the peer
+    /// acknowledges the reset. A stream this side opened that resets before its first
+    /// message never reaches the peer, and the [`Receiver`] of a two-way one gets
+    /// [`Error::Reset`] with code 0. Does nothing when the connection ended.
     pub(crate) fn reset(&mut self, now: Monotonic, sender: Sender, code: Code) {
         let key = sender.key().connection;
         let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
