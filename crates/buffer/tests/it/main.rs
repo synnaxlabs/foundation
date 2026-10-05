@@ -381,6 +381,34 @@ fn a_busy_buffer_keeps_one_deadline_per_commit() {
     });
 }
 
+/// The task parks with a deadline it never polled. A push at that exact instant
+/// wakes it, and the deadline that just passed fires at once.
+#[test]
+fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
+    run(43, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.clock.sleep(COMMIT).await;
+        buffer
+            .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &[])])
+            .expect("queues");
+        shard
+            .clock
+            .sleep(Span::from_nanos(COMMIT.nanos() / 10))
+            .await;
+        assert_eq!(
+            shard.memory.syncs(),
+            2,
+            "the passed deadline fired at the wake"
+        );
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+    });
+}
+
 #[test]
 fn a_dropped_idle_buffer_ends_its_task_at_once() {
     let memory = Memory::default();
