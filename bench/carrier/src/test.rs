@@ -41,6 +41,9 @@ const GRACE: Duration = Duration::from_secs(5);
 /// The longest `secs` of a test. It keeps each deadline a flow adds to its start in
 /// range.
 const MAX_SECS: u64 = 24 * 60 * 60;
+/// The highest paced rate, in frames per second. It keeps the period between frames
+/// above zero.
+const MAX_RATE: u32 = 1_000_000_000;
 /// Marks a CPU time the server could not read.
 const NONE: u64 = u64::MAX;
 
@@ -95,7 +98,8 @@ impl FromStr for Load {
 
 /// A test measures for `secs` after the [`WARMUP`], and runs on until each of its flows
 /// has measured once, so a run starved for all of `secs` still has a result. A flow
-/// with no echo by the [`GRACE`] after that fails.
+/// with no echo by the [`GRACE`] after that fails. The flows rely on `secs` being at
+/// most [`MAX_SECS`] and `rate` at most [`MAX_RATE`], which [`Test::parse`] checks.
 #[derive(Debug)]
 pub(crate) enum Test {
     /// One stream, as fast as it goes.
@@ -149,8 +153,9 @@ impl Test {
             }
             ["paced", frames, n, rate, s, load, rest @ ..] => {
                 let rate = rate.parse()?;
-                if rate == 0 {
-                    return Err("a paced rate is above zero".into());
+                if !(1..=MAX_RATE).contains(&rate) {
+                    let error = format!("paced rate {rate} is not in 1..={MAX_RATE}");
+                    return Err(error.into());
                 }
                 let test = Self::Paced {
                     frames: frames.parse()?,
@@ -1353,9 +1358,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_a_zero_rate() {
+    fn parse_rejects_a_rate_outside_its_range() {
         let error = parse_error(&["paced", "stream", "256", "0", "1", "none"]);
-        assert_eq!(error, "a paced rate is above zero");
+        assert_eq!(error, "paced rate 0 is not in 1..=1000000000");
+        let error = parse_error(&["paced", "stream", "256", "1000000001", "1", "none"]);
+        assert_eq!(error, "paced rate 1000000001 is not in 1..=1000000000");
+        let args = ["paced", "stream", "256", "1000000000", "1", "none"];
+        let (test, _) = Test::parse(&args).expect("the highest rate parses");
+        let paced = matches!(test, Test::Paced { rate: MAX_RATE, .. });
+        assert!(paced, "{test:?}");
     }
 
     #[test]
