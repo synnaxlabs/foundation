@@ -207,6 +207,19 @@ How to read this record:
   per index (a durable reader after it stores the data). Flow is push with
   reader-granted credits. A slow reader catches up from disk and never slows writers or
   other readers. Delivery is at-least-once; seq makes repeats easy to drop.
+- **READER RULES (write-path and advisor, 2026-10-04)** A position is one cumulative
+  seq per path: the first sample the reader has not received. A reader that does not
+  record has no backfill position. An open session holds all data it has not received.
+  A closed named reader holds from its position until `hold` after the close, in mesh
+  time; an unnamed reader holds nothing after it closes. The floor per path is the
+  lowest held position, or none; `buffer` trims below it, past retention (by store
+  time), and under disk pressure. A resume takes, per path, the position the reader's
+  `hub` presents, then the position at this home, then the home's fallback. A position
+  below the floor or past the head is accepted as is; the `buffer` read reports any gap
+  (B2). Named readers write a position record at once when they open, close, or are
+  taken over, and on the home's interval when the position changed. A session open at a
+  crash restores as closed at the restore. Supersedes the B3 single position. Basis:
+  A6, A8, B2, B3, S10, X14, #41.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync.
@@ -840,7 +853,7 @@ Storage classes used in the table:
 | Control state | Memory in `control` at the home; handoff records in the index log (truth, copied by `replica`); control channel (published copy) | `control` decides, `home` records | New home at takeover (from the log, X18) | `control`, `home` |
 | Control lease | A writer session setting; state in `control` | The writer at open | `control` | `control` |
 | Reader positions | Truth: `delivery` state at the home, written as index log records and copied by `replica`. A connected reader's `hub` keeps its own position. Status channels publish copies | `delivery`; `replica` copies; `node` publishes | `home` after failover; `hub` on resume | `delivery`, `buffer`, `replica` |
-| Holds and floors | `delivery` (hold per reader and index); floor = f(holds, retention), handed to `buffer.set_floor` | `delivery` | `buffer` | `delivery`, `buffer` |
+| Holds and floors | `delivery` (hold per reader and index); floor = lowest held position per path, handed to `buffer.set_floor`, which also applies retention | `delivery` | `buffer` | `delivery`, `buffer` |
 | Backfill dedup marks | Index log records | `home` | `replica`, a new home | `home` |
 | Gaps | Index log records (explicit gap with a count) | `home`, `buffer` | Complete readers | `home`, `buffer` |
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
