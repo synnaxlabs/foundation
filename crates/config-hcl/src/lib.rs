@@ -154,8 +154,9 @@ pub enum Form {
     Namespace,
     /// An argument expanded with `...`, such as `f(xs...)`.
     Expansion,
-    /// An identifier with a character outside ASCII, such as `température`.
-    UnicodeIdentifier,
+    /// An object key that is a number HCL rounds: one with a fraction or an exponent,
+    /// or an integer of more than 154 digits, such as `{ 1.5 = 1 }`.
+    NumberKey,
 }
 
 impl fmt::Display for Form {
@@ -196,10 +197,9 @@ impl fmt::Display for Form {
                 "argument expansion does not exist in Foundation files. Write each \
                  argument"
             }
-            Self::UnicodeIdentifier => {
-                "identifiers with characters outside ASCII do not exist in Foundation \
-                 files. Write the key as a quoted string, or use only ASCII \
-                 characters"
+            Self::NumberKey => {
+                "number keys with a fraction, an exponent, or more than 154 digits do not \
+                 exist in Foundation files. Write the key as a quoted string"
             }
         })
     }
@@ -370,10 +370,9 @@ mod tests {
                  argument",
             ),
             (
-                Form::UnicodeIdentifier,
-                "identifiers with characters outside ASCII do not exist in Foundation \
-                 files. Write the key as a quoted string, or use only ASCII \
-                 characters",
+                Form::NumberKey,
+                "number keys with a fraction, an exponent, or more than 154 digits do not \
+                 exist in Foundation files. Write the key as a quoted string",
             ),
         ];
         for (form, message) in cases {

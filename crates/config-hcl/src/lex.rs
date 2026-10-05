@@ -150,9 +150,7 @@ impl<'a> Tokens<'a> {
                 self.number();
                 Kind::Number
             }
-            c if identifier_start(c) || c == '@' || c.is_alphabetic() => {
-                self.word(c, start)?
-            }
+            c if identifier_start(c) || c == '@' => self.word(c),
             _ => Kind::Other,
         };
         Ok(self.token(kind, rest, start))
@@ -297,9 +295,8 @@ impl<'a> Tokens<'a> {
         self.skip_bytes(len);
     }
 
-    /// Moves past the rest of a word after its first character, `first`, which
-    /// starts at `start`.
-    fn word(&mut self, first: char, start: Position) -> Result<Kind, Error> {
+    /// Moves past the rest of a word after its first character, `first`.
+    fn word(&mut self, first: char) -> Kind {
         let rest = self.rest;
         // A dot is part of the word unless it starts a splat or an expansion.
         let dot = |i: usize| {
@@ -308,28 +305,17 @@ impl<'a> Tokens<'a> {
         };
         let len = rest
             .char_indices()
-            .find(|&(i, c)| {
-                !(identifier_part(c)
-                    || !(c.is_ascii() || c.is_whitespace())
-                    || c == '@'
-                    || c == '.' && dot(i))
-            })
+            .find(|&(i, c)| !(identifier_part(c) || c == '@' || c == '.' && dot(i)))
             .map_or(rest.len(), |(i, _)| i);
         let word = rest
             .get(..len)
             .expect("invariant: a word ends on a character boundary");
         self.skip_bytes(len);
-        if !(first.is_ascii() && word.is_ascii()) {
-            return Err(Error::Form {
-                span: self.span(start),
-                form: Form::UnicodeIdentifier,
-            });
-        }
-        Ok(if first == '@' || word.contains(['.', '@']) {
+        if first == '@' || word.contains(['.', '@']) {
             Kind::Reference
         } else {
             Kind::Identifier
-        })
+        }
     }
 
     /// Reads a quoted string after its opening quote at `start`.

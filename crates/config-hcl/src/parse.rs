@@ -14,8 +14,8 @@ use crate::{Error, Expected, Form};
 /// # Errors
 ///
 /// Returns each problem found, in source order. A syntax error, a string escape that
-/// HCL does not have, a template, an identifier outside ASCII, or nesting past the
-/// limit stops reading, so it is the last one.
+/// HCL does not have, a template, or nesting past the limit stops reading, so it is
+/// the last one.
 pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut tokens = Tokens::new(source, text).map_err(|error| vec![error])?;
     let token = tokens.next();
@@ -396,22 +396,24 @@ impl<'a> Parser<'a> {
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::CloseBrace => return self.take(),
-                lex::Kind::OpenParenthesis => {
-                    self.refuse(Form::Parentheses, Ends::Line)?;
-                }
                 _ => {
-                    let (key, key_span) = self.key()?;
-                    if !matches!(self.token.kind, lex::Kind::Equals | lex::Kind::Colon)
-                    {
-                        return Err(self.syntax(Expected::ObjectEquals));
+                    if let Some(form) = self.leading_form() {
+                        self.refuse(form, Ends::Line)?;
+                    } else if let Some((key, key_span)) = self.key()? {
+                        if !matches!(
+                            self.token.kind,
+                            lex::Kind::Equals | lex::Kind::Colon
+                        ) {
+                            return Err(self.syntax(Expected::ObjectEquals));
+                        }
+                        self.take()?;
+                        let value = self.value(depth, Ends::Line)?;
+                        attributes.extend(value.map(|value| Attribute {
+                            key,
+                            key_span: Some(key_span),
+                            value,
+                        }));
                     }
-                    self.take()?;
-                    let value = self.value(depth, Ends::Line)?;
-                    attributes.extend(value.map(|value| Attribute {
-                        key,
-                        key_span: Some(key_span),
-                        value,
-                    }));
                 }
             }
             match self.token.kind {
@@ -424,37 +426,36 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Reads an object key: a string, an identifier, or an integer. An integer reads
-    /// as HCL reads it: its digits without leading zeros, after a `-` if it has one.
-    /// Any other token is `Expected::Key`.
-    fn key(&mut self) -> Result<(Box<str>, Span), Error> {
+    /// Reads an object key, where no HCL form starts: a string, an identifier, or an
+    /// integer, which reads as HCL reads it: its digits without leading zeros, after a
+    /// `-` if it has one. Returns `None` for a number that HCL rounds, after it keeps
+    /// the problem and moves past the entry. Any other token is `Expected::Key`.
+    fn key(&mut self) -> Result<Option<(Box<str>, Span)>, Error> {
         if matches!(
             self.token.kind,
             lex::Kind::String(_) | lex::Kind::Identifier
         ) {
             let key = self.take()?;
             let span = key.span;
-            return Ok((text(key), span));
+            return Ok(Some((text(key), span)));
         }
         let minus = if self.token.kind == lex::Kind::Minus {
             Some(self.take()?)
         } else {
             None
         };
-        let integer = self.token.kind == lex::Kind::Number
-            && self.token.text.bytes().all(|b| b.is_ascii_digit());
-        if !integer {
+        if self.token.kind != lex::Kind::Number {
             return Err(self.syntax(Expected::Key));
         }
-        let number = self.take()?;
-        let digits = match number.text.trim_start_matches('0') {
-            "" => "0",
-            digits => digits,
+        let Some(digits) = integer_key(self.token.text) else {
+            self.refuse(Form::NumberKey, Ends::Line)?;
+            return Ok(None);
         };
-        Ok(match minus {
+        let number = self.take()?;
+        Ok(Some(match minus {
             Some(minus) => (format!("-{digits}").into(), join(minus.span, number.span)),
             None => (digits.into(), number.span),
-        })
+        }))
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
@@ -550,6 +551,18 @@ impl<'a> Parser<'a> {
             },
         }
     }
+}
+
+/// The digits of an integer key without leading zeros, or `None` when HCL rounds the
+/// number. HCL reads a number key through a 512-bit float, which holds each integer of
+/// up to 154 digits.
+fn integer_key(number: &str) -> Option<&str> {
+    let digits = match number.trim_start_matches('0') {
+        "" => "0",
+        digits => digits,
+    };
+    (digits.len() <= 154 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(digits)
 }
 
 fn attribute(key: Token<'_>, value: Value) -> Attribute {
@@ -688,9 +701,6 @@ mod tests {
                             or `%%{` for the text `${` or `%{`";
     const NULL: &str = "`null` does not exist in Foundation files. Remove the \
                         attribute to use its default";
-    const UNICODE: &str = "identifiers with characters outside ASCII do not exist \
-                           in Foundation files. Write the key as a quoted string, or \
-                           use only ASCII characters";
 
     mod values {
         use super::*;
@@ -801,9 +811,10 @@ c = "°C # not a comment"
 
         #[test]
         fn reads_integer_keys_as_hcl_does() {
-            let digits = "123456789012345678901234567890123456789012345678901";
-            let text =
-                format!("a = {{ 40001 = 1, 007 = 2, -12 = 3, -0 = 4, {digits} = 5 }}");
+            let digits = "9".repeat(154);
+            let text = format!(
+                "a = {{ 40001 = 1, 007 = 2, -12 = 3, -0 = 4, 00{digits} = 5 }}"
+            );
             let document = ok(&text);
             let a = document.attributes.get("a").unwrap();
             let value::Kind::Map(object) = &a.value.kind else {
@@ -814,7 +825,7 @@ c = "°C # not a comment"
                 ("7", 17, 20, 2),
                 ("-12", 26, 29, 3),
                 ("-0", 35, 37, 4),
-                (digits, 43, 94, 5),
+                (digits.as_str(), 43, 199, 5),
             ];
             assert_eq!(object.iter().len(), keys.len());
             for (key, start, end, n) in keys {
@@ -1424,6 +1435,11 @@ c = "°C # not a comment"
                     Form::Operator,
                 ),
                 ("a = { (k) = 1 }\n", on(6, 7), Form::Parentheses),
+                ("a = { 1.5 = 1 }\n", on(6, 9), Form::NumberKey),
+                ("a = { 1e3 = 1 }\n", on(6, 9), Form::NumberKey),
+                ("a = { -1.5 = 1 }\n", on(7, 10), Form::NumberKey),
+                ("a = { - = 1 }\n", on(6, 7), Form::Operator),
+                ("a = { -x = 1 }\n", on(6, 7), Form::Operator),
             ];
             for (text, span, form) in cases {
                 let message = form.to_string();
@@ -1482,34 +1498,25 @@ c = "°C # not a comment"
         }
 
         #[test]
-        fn refuses_an_identifier_outside_ascii() {
-            let unicode = |span| {
-                let error = Error::Form {
-                    span,
-                    form: Form::UnicodeIdentifier,
-                };
-                (error, UNICODE)
+        fn refuses_a_number_key_that_hcl_rounds_and_reads_on() {
+            let message = Form::NumberKey.to_string();
+            let digits = "9".repeat(155);
+            let long = Error::Form {
+                span: on(6, 161),
+                form: Form::NumberKey,
             };
-            let cases = [
-                ("température = 1\n", at(0, 0, 0), at(12, 0, 11)),
-                ("a = { température = 1 }\n", at(6, 0, 6), at(18, 0, 17)),
-                ("a = température\n", at(4, 0, 4), at(16, 0, 15)),
-                ("a = x.température\n", at(4, 0, 4), at(18, 0, 17)),
-                ("b température {}\n", at(2, 0, 2), at(14, 0, 13)),
-                ("a = 1\nb = é\n", at(10, 1, 4), at(12, 1, 5)),
-                ("a = f(x, 温度)\n", at(9, 0, 9), at(15, 0, 11)),
-                ("e\u{301}t = 1\n", at(0, 0, 0), at(4, 0, 3)),
-                ("a\u{200b}= 1\n", at(0, 0, 0), at(4, 0, 2)),
-                ("a = x\u{2192}y\n", at(4, 0, 4), at(9, 0, 7)),
-            ];
-            for (text, start, end) in cases {
-                check(text, &[unicode(span(start, end))]);
-            }
-            let space = span(at(1, 0, 1), at(3, 0, 2));
-            let message = format!("the file needs {} here", Expected::AttributeOrBlock);
+            check(&format!("a = {{ {digits} = 1 }}\n"), &[(long, &message)]);
+            let key = Error::Form {
+                span: on(6, 9),
+                form: Form::NumberKey,
+            };
+            let null = Error::Form {
+                span: span(at(27, 1, 4), at(31, 1, 8)),
+                form: Form::Null,
+            };
             check(
-                "a\u{a0}= 1\n",
-                &[(syntax(space, Expected::AttributeOrBlock), &message)],
+                "a = { 1.5 = 1, b = 2 }\nc = null\n",
+                &[(key, &message), (null, NULL)],
             );
         }
 
@@ -1575,11 +1582,6 @@ c = "°C # not a comment"
                 ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
                 ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
                 ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
-                ("a = { 1.5 = 1 }\n", on(6, 9), Expected::Key),
-                ("a = { 1e3 = 1 }\n", on(6, 9), Expected::Key),
-                ("a = { -1.5 = 1 }\n", on(7, 10), Expected::Key),
-                ("a = { - = 1 }\n", on(8, 9), Expected::Key),
-                ("a = { -x = 1 }\n", on(7, 8), Expected::Key),
                 ("40001 = 1\n", on(0, 5), Expected::Item),
                 ("b 1 {}\n", on(2, 3), Expected::AttributeOrBlock),
             ];
