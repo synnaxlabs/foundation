@@ -1,7 +1,7 @@
 //! The file calls of a run: the disk of each node and the calls in flight on them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::{DefaultHasher, Hash};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::task::{Poll, Waker};
@@ -129,6 +129,8 @@ pub(crate) struct Files {
     /// The tick of the last process crash of each node, 0 before one. The calls of
     /// the node with a key up to it belong to a dead process.
     crashed: Vec<u64>,
+    /// A hash of every end of a call, in order.
+    digest: DefaultHasher,
 }
 
 impl Files {
@@ -142,6 +144,7 @@ impl Files {
             rng,
             tick: disk::ROOT,
             crashed: Vec::new(),
+            digest: DefaultHasher::new(),
         }
     }
 
@@ -205,14 +208,14 @@ impl Files {
         self.queue.first().map(|&(at, _)| at)
     }
 
-    /// Ends the calls due by true time `at`, in order, and hashes each end into
-    /// `digest`. Returns the wakers of their futures, and the blocks of the calls
-    /// whose futures dropped.
-    pub(crate) fn end(
-        &mut self,
-        at: Monotonic,
-        digest: &mut DefaultHasher,
-    ) -> (Vec<Waker>, Vec<Held>) {
+    /// A hash of every end of a call so far: its time, key, kind, and success.
+    pub(crate) fn digest(&self) -> u64 {
+        self.digest.finish()
+    }
+
+    /// Ends the calls due by true time `at`, in order. Returns the wakers of their
+    /// futures, and the blocks of the calls whose futures dropped.
+    pub(crate) fn end(&mut self, at: Monotonic) -> (Vec<Waker>, Vec<Held>) {
         let (mut wakers, mut orphans) = (Vec::new(), Vec::new());
         while let Some(&(due, key)) = self.queue.first() {
             if due > at {
@@ -225,7 +228,7 @@ impl Files {
                 (flight.node, flight.dropped, flight.waker.take());
             let kind = mem::discriminant(&flight.call);
             let ended = self.apply(key, flight);
-            (due, key, kind, ended.result.is_ok()).hash(digest);
+            (due, key, kind, ended.result.is_ok()).hash(&mut self.digest);
             if dropped {
                 if let Ok(Done::Open { inode, .. }) = ended.result {
                     self.disks[node].release(inode);
@@ -352,15 +355,9 @@ impl Files {
 
     /// Cuts the power of `node` at true time `at`, whose calls in flight have all
     /// dropped: each write ends now as a dropped write, the other calls have no
-    /// effect, and the disk keeps what is durable. Hashes each end into `digest`.
-    /// Returns the blocks of the calls, for the caller to drop after it releases the
-    /// lock.
-    pub(crate) fn cut_power(
-        &mut self,
-        node: usize,
-        at: Monotonic,
-        digest: &mut DefaultHasher,
-    ) -> Vec<Held> {
+    /// effect, and the disk keeps what is durable. Returns the blocks of the calls,
+    /// for the caller to drop after it releases the lock.
+    pub(crate) fn cut_power(&mut self, node: usize, at: Monotonic) -> Vec<Held> {
         let flights = &self.flights;
         self.queue.retain(|(_, key)| flights[key].node != node);
         let (cut, flights) = mem::take(&mut self.flights)
@@ -379,7 +376,7 @@ impl Files {
                 }
                 (false, flight.held)
             };
-            (at, key, kind, ok).hash(digest);
+            (at, key, kind, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
         self.disks[node].cut_power(&mut self.rng);

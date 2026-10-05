@@ -1,8 +1,16 @@
-//! Adapters that measure the node's monotonic clock against a time source.
+//! The sources of a [`Clock`](crate::Clock): the key of each, and the adapters that
+//! measure the node's monotonic clock against a time source.
 
+use estimate::Measurement;
 use estimate::exchange::{self, Exchange};
-use estimate::{Drift, Measurement};
 use types::time::{Interval, Monotonic, Span, Stamp};
+
+use crate::DRIFT;
+
+/// Identifies one source of a [`Clock`](crate::Clock). A removed key is never used
+/// again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Key(pub(crate) u64);
 
 /// Measures the node's monotonic clock against the OS wall clock.
 ///
@@ -58,7 +66,7 @@ impl Wall {
             answered: instant,
             returned,
         };
-        let read = match exchange.measure(Drift::UNDISCIPLINED) {
+        let read = match exchange.measure(DRIFT) {
             Ok(read) => read,
             Err(exchange::Error::Bound { .. }) => {
                 return Measurement::unknown(

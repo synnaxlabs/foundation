@@ -8,8 +8,9 @@ use crate::ALIGN;
 
 /// A reserved range of address space that one [`Pool`](crate::Pool) cuts blocks from.
 ///
-/// The pool calls [`commit`](Self::commit) before it first uses a range, and
-/// [`purge`](Self::purge) when a range is idle. Offsets are from
+/// The first [`ALIGN`] bytes are usable from the start. The pool calls
+/// [`commit`](Self::commit) before it uses any other range, first or after a purge,
+/// and [`purge`](Self::purge) when a range is idle. Offsets are from
 /// [`base`](Self::base). A range need not be page-aligned: `commit` rounds it out, and
 /// `purge` rounds it in.
 ///
@@ -17,7 +18,9 @@ use crate::ALIGN;
 ///
 /// - `base` and `len` give the same values on each call. The `len` bytes at `base`
 ///   belong to this value alone, at one address, until it drops.
-/// - When `commit` returns, each byte in its range is readable, writable, and
+/// - The first [`ALIGN`] bytes are as if a `commit` of them returned `Ok` before the
+///   first call.
+/// - When `commit` returns `Ok`, each byte in its range is readable, writable, and
 ///   initialized. It stays so until a `purge` of that byte or the drop.
 /// - A `purge` may change the bytes in its range. It changes no other byte.
 #[expect(
@@ -32,11 +35,21 @@ pub unsafe trait Memory: Send {
     fn len(&self) -> usize;
 
     /// Makes `len` bytes at `offset` usable.
-    fn commit(&self, offset: usize, len: usize);
+    ///
+    /// # Errors
+    ///
+    /// [`Refused`] when the system has no memory for the range now. The range stays
+    /// unusable, and a later call may succeed.
+    fn commit(&self, offset: usize, len: usize) -> Result<(), Refused>;
 
     /// Lets the system take back the pages that lie fully in `len` bytes at `offset`.
+    /// Those pages then stop counting against the memory the system can commit.
     fn purge(&self, offset: usize, len: usize);
 }
+
+/// The system has no memory to commit a range now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Refused;
 
 /// Memory from the heap, committed in full from the start. It never gives pages back.
 /// It serves tests and simulation, where no OS mapping exists.
@@ -80,7 +93,9 @@ unsafe impl Memory for Heap {
         self.layout.size()
     }
 
-    fn commit(&self, _offset: usize, _len: usize) {}
+    fn commit(&self, _offset: usize, _len: usize) -> Result<(), Refused> {
+        Ok(())
+    }
 
     fn purge(&self, _offset: usize, _len: usize) {}
 }
