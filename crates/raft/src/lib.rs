@@ -76,11 +76,13 @@ pub enum Error {
         /// The last log position.
         last: Position,
     },
-    /// A log entry is out of order: its index is not one more than the index before
-    /// it, or its term is lower than the term before it.
+    /// A log entry does not follow the one before it: its index is not the next
+    /// index, or its term is lower.
     EntryOutOfOrder {
-        /// The index that the entry should have.
-        index: u64,
+        /// The position of the entry.
+        at: Position,
+        /// The position of the entry before it, or zero for the first entry.
+        before: Position,
     },
     /// The applied index is past the end of the log.
     AppliedPastLog {
@@ -125,9 +127,10 @@ impl fmt::Display for Error {
                 "stored term {term} is lower than term {} of the last log entry",
                 last.term
             ),
-            Self::EntryOutOfOrder { index } => write!(
+            Self::EntryOutOfOrder { at, before } => write!(
                 f,
-                "the log entry at index {index} does not follow the one before"
+                "log entry at index {} in term {} does not follow index {} in term {}",
+                at.index, at.term, before.index, before.term
             ),
             Self::AppliedPastLog { applied, last } => write!(
                 f,

@@ -2,7 +2,7 @@ use crate::{Error, Position};
 
 /// One entry of the replicated log. A leader appends an entry with no data when its
 /// term starts; the caller applies nothing for it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// Where the entry is in the log.
     pub at: Position,
@@ -20,9 +20,11 @@ impl Log {
     pub(crate) fn new(entries: Vec<Entry>, applied: u64) -> Result<Self, Error> {
         let mut before = Position::default();
         for entry in &entries {
-            let index = before.index + 1;
-            if entry.at.index != index || entry.at.term < before.term {
-                return Err(Error::EntryOutOfOrder { index });
+            if entry.at.index != before.index + 1 || entry.at.term < before.term {
+                return Err(Error::EntryOutOfOrder {
+                    at: entry.at,
+                    before,
+                });
             }
             before = entry.at;
         }
@@ -76,22 +78,26 @@ mod tests {
         );
     }
 
+    fn out_of_order(at: &Entry, before: Position) -> Error {
+        Error::EntryOutOfOrder { at: at.at, before }
+    }
+
     #[test]
     fn rejects_entries_that_do_not_start_at_one() {
         let err = Log::new(vec![entry(1, 2)], 0).unwrap_err();
-        assert_eq!(err, Error::EntryOutOfOrder { index: 1 });
+        assert_eq!(err, out_of_order(&entry(1, 2), Position::default()));
         assert_eq!(
             err.to_string(),
-            "the log entry at index 1 does not follow the one before"
+            "log entry at index 2 in term 1 does not follow index 0 in term 0"
         );
     }
 
     #[test]
     fn rejects_a_gap_and_a_term_that_goes_back() {
         let err = Log::new(vec![entry(1, 1), entry(1, 3)], 0).unwrap_err();
-        assert_eq!(err, Error::EntryOutOfOrder { index: 2 });
+        assert_eq!(err, out_of_order(&entry(1, 3), entry(1, 1).at));
         let err = Log::new(vec![entry(2, 1), entry(1, 2)], 0).unwrap_err();
-        assert_eq!(err, Error::EntryOutOfOrder { index: 2 });
+        assert_eq!(err, out_of_order(&entry(1, 2), entry(2, 1).at));
     }
 
     #[test]

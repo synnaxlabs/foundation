@@ -18,6 +18,7 @@ pub enum Role {
 
 /// What the caller must do after an input, in this order: write `hard` and `entries`
 /// to disk, send `messages`, then apply `committed`.
+#[must_use = "a dropped Ready loses its messages and its hard state"]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ready {
     /// The hard state, if it changed since the last `Ready`.
@@ -66,8 +67,8 @@ impl Raft {
     /// - [`Error::Ticks`] when `heartbeat_ticks` is 0 or `election_ticks` is not
     ///   greater than `heartbeat_ticks`.
     /// - [`Error::DuplicateVoter`] when `voters` names a node twice.
-    /// - [`Error::EntryOutOfOrder`] when `entries` do not run from index 1 with terms that
-    ///   never decrease.
+    /// - [`Error::EntryOutOfOrder`] when `entries` do not run from index 1 with
+    ///   terms that never decrease.
     /// - [`Error::AppliedPastLog`] when `applied` is past the last entry.
     /// - [`Error::TermBehindLog`] when `hard.term` is lower than the last entry's term.
     pub fn new(config: Config, start: Start) -> Result<Self, Error> {
@@ -105,8 +106,7 @@ impl Raft {
             key,
             votes: vec![None; voters.len()],
             active: vec![false; voters.len()],
-            // One campaign sends one message to each other voter.
-            outbox: Vec::with_capacity(voters.len()),
+            outbox: Vec::new(),
             voters,
             election_ticks: u64::from(election_ticks),
             heartbeat_ticks: u64::from(heartbeat_ticks),

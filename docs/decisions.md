@@ -527,12 +527,12 @@ How to read this record:
   to send. The caller writes, then sends, then applies, as etcd does: to apply first
   only delays the next round trip. A candidate counts its own vote at once because
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
-  enters only through `tick`: a node draws its election timeout on the
-  first tick after a reset. PreVote and CheckQuorum have no off switch. Until
-  replication lands, a new leader announces itself with a heartbeat. A node that is
-  not in its own voter list votes and follows, but never campaigns. `step` does not
-  check that a sender is a voter (a voter can learn late that a peer joined), so the
-  caller authenticates the sender and decides which nodes may send.
+  enters only through `tick`: a node draws its election timeout on the first tick
+  after a reset. PreVote and CheckQuorum have no off switch. Until replication lands,
+  a new leader announces itself with a heartbeat. A node that is not in its own voter
+  list votes and follows, but never campaigns. `step` does not check that a sender is
+  a voter (a voter can learn late that a peer joined), so the caller authenticates
+  the sender and decides which nodes may send.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
