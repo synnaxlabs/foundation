@@ -52,8 +52,8 @@ pub struct Readers {
     /// The live frames not yet on disk, with their seq, oldest first. Empty when no
     /// complete session is open.
     queue: VecDeque<(Frame, Range<u64>)>,
-    /// The end of the newest live frame released, or dropped with no complete session
-    /// open. Memory holds no frame below it.
+    /// The end of the newest live frame with samples released, or dropped with no
+    /// complete session open. Memory holds no frame below it.
     released: u64,
     /// Named readers that still hold after their session closed.
     closed: Vec<Closed>,
@@ -250,7 +250,8 @@ impl Readers {
     /// # Panics
     ///
     /// If `seq` ends before it starts, or starts below the end of an earlier live
-    /// frame or below the `live` given to [`Readers::new`] or [`Readers::restore`].
+    /// frame with samples or below the `live` given to [`Readers::new`] or
+    /// [`Readers::restore`].
     pub fn queue(&mut self, frame: &Frame, seq: Range<u64>) {
         assert!(
             seq.start <= seq.end,
@@ -265,9 +266,12 @@ impl Readers {
             seq.start,
             seq.end
         );
+        if seq.is_empty() {
+            return;
+        }
         if self.complete.is_empty() {
             self.released = seq.end;
-        } else if !seq.is_empty() {
+        } else {
             self.queue.push_back((frame.clone(), seq));
         }
     }
@@ -1264,6 +1268,18 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn marks_no_session_behind_for_a_frame_with_no_samples_and_none_open() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            readers.queue(&frames.frame(1), 1..1);
+            let key = opened(&mut readers, 0, 10);
+            readers.queue(&frames.frame(2), 1..2);
+            readers.queue(&frames.frame(3), 2..4);
+            assert_eq!(released(&mut readers, 4), [key]);
+            assert_eq!(taken(&mut readers, key), [2, 3]);
+        }
+
+        #[test]
         fn gives_nothing_to_a_session_below_a_dropped_frame() {
             let frames = Frames::new(2);
             let mut readers = Readers::new(0);
@@ -1872,9 +1888,12 @@ pub(super) mod tests {
             }
 
             fn queue(&mut self, n: u64, seq: Range<u64>) {
+                if seq.is_empty() {
+                    return;
+                }
                 if self.open.is_empty() {
                     self.released = seq.end;
-                } else if !seq.is_empty() {
+                } else {
                     self.queued.push_back((n, seq));
                 }
             }
