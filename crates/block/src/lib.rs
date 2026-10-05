@@ -32,6 +32,9 @@ const HEADER: usize = 64;
 const NONE: usize = 0;
 /// In `Region::returned`: the pool is gone.
 const CLOSED: usize = usize::MAX;
+/// Size classes at most, so the largest payload (2 GiB) and any position in it fit in
+/// a `u32`, and a handle stays 16 bytes.
+const CLASSES: usize = 26;
 
 /// Settings for one [`Pool`].
 #[derive(Clone, Debug)]
@@ -58,10 +61,13 @@ impl Config {
     }
 }
 
-/// How many size classes fit in `budget`. Class `i` has a payload of `64 << i` bytes.
+/// How many size classes fit in `budget`, at most `CLASSES`. Class `i` has a payload
+/// of `64 << i` bytes.
 fn classes(budget: usize) -> usize {
     match budget.checked_sub(HEADER) {
-        Some(room) if room >= ALIGN => (room / ALIGN).ilog2() as usize + 1,
+        Some(room) if room >= ALIGN => {
+            ((room / ALIGN).ilog2() as usize + 1).min(CLASSES)
+        }
         _ => 0,
     }
 }
@@ -194,8 +200,10 @@ impl Pool {
     ///   succeeds later.
     /// - [`Error::Exhausted`] when the budget has no room for the block now.
     pub fn alloc(&self, len: usize) -> Result<Unique, Error> {
-        let index = class_of(len)
-            .filter(|&index| index < self.classes.len())
+        let (held, index) = u32::try_from(len)
+            .ok()
+            .zip(class_of(len))
+            .filter(|&(_, index)| index < self.classes.len())
             .ok_or(Error::TooLarge {
                 requested: len,
                 largest: self.largest(),
@@ -241,7 +249,7 @@ impl Pool {
             header
         };
         self.lent.set(self.lent.get() + 1);
-        Ok(Unique { header, len })
+        Ok(Unique { header, len: held })
     }
 
     /// Takes back the blocks that holders dropped, so that `alloc` can use them
@@ -382,7 +390,7 @@ unsafe fn payload(header: NonNull<Header>) -> NonNull<u8> {
 /// drop on any thread returns the block to its pool.
 pub struct Unique {
     header: NonNull<Header>,
-    len: usize,
+    len: u32,
 }
 
 // SAFETY: a `Unique` is the one holder of its block, and the return path is atomic.
@@ -397,6 +405,7 @@ impl Unique {
         let unique = ManuallyDrop::new(self);
         Block {
             header: unique.header,
+            start: 0,
             len: unique.len,
         }
     }
@@ -426,7 +435,7 @@ impl Deref for Unique {
         let start = unsafe { payload(self.header) };
         // SAFETY: the payload is committed, so it is initialized, and no one writes
         // to it while `self` is borrowed.
-        unsafe { slice::from_raw_parts(start.as_ptr(), self.len) }
+        unsafe { slice::from_raw_parts(start.as_ptr(), self.len as usize) }
     }
 }
 
@@ -436,7 +445,7 @@ impl DerefMut for Unique {
         // SAFETY: `self` holds the block.
         let start = unsafe { payload(self.header) };
         // SAFETY: the payload is committed, and `self` is its one holder.
-        unsafe { slice::from_raw_parts_mut(start.as_ptr(), self.len) }
+        unsafe { slice::from_raw_parts_mut(start.as_ptr(), self.len as usize) }
     }
 }
 
@@ -452,7 +461,9 @@ impl Drop for Unique {
 /// pool.
 pub struct Block {
     header: NonNull<Header>,
-    len: usize,
+    /// Bytes of the payload before this view.
+    start: u32,
+    len: u32,
 }
 
 // SAFETY: the bytes are immutable, and the count and the return path are atomic.
@@ -461,6 +472,24 @@ unsafe impl Send for Block {}
 unsafe impl Sync for Block {}
 
 impl Block {
+    /// Returns a block that shares this one's buffer and starts `len` bytes later.
+    ///
+    /// # Panics
+    ///
+    /// If `len` is more than the block's length.
+    #[must_use]
+    pub fn skip(mut self, len: usize) -> Block {
+        let skipped = u32::try_from(len)
+            .ok()
+            .filter(|&skipped| skipped <= self.len)
+            .unwrap_or_else(|| {
+                panic!("cannot skip {len} bytes of a block of {} bytes", self.len)
+            });
+        self.start += skipped;
+        self.len -= skipped;
+        self
+    }
+
     fn block(&self) -> &Header {
         // SAFETY: the header is valid while a holder has the block.
         unsafe { self.header.as_ref() }
@@ -472,6 +501,7 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Block")
             .field("offset", &self.block().offset)
+            .field("start", &self.start)
             .field("len", &self.len)
             .finish()
     }
@@ -483,6 +513,7 @@ impl Clone for Block {
         assert!(before < usize::MAX / 2, "a block has too many holders");
         Self {
             header: self.header,
+            start: self.start,
             len: self.len,
         }
     }
@@ -494,9 +525,11 @@ impl Deref for Block {
     fn deref(&self) -> &[u8] {
         self.block().payload.read();
         // SAFETY: `self` holds the block.
-        let start = unsafe { payload(self.header) };
+        let payload = unsafe { payload(self.header) };
+        // SAFETY: `start` is within the payload.
+        let start = unsafe { payload.add(self.start as usize) };
         // SAFETY: the payload is committed, and no one writes to a frozen block.
-        unsafe { slice::from_raw_parts(start.as_ptr(), self.len) }
+        unsafe { slice::from_raw_parts(start.as_ptr(), self.len as usize) }
     }
 }
 
@@ -658,6 +691,13 @@ mod tests {
         }
 
         #[test]
+        fn stops_at_the_largest_class() {
+            let reservation = |budget| Config { budget }.reservation();
+            assert_eq!(reservation((1 << 31) + 64), 64 + 26 * ((1 << 31) + 64));
+            assert_eq!(reservation(1 << 40), 64 + 26 * (1 << 40));
+        }
+
+        #[test]
         #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
         fn panics_when_it_does_not_fit_in_a_usize() {
             assert_eq!(Config { budget: usize::MAX }.reservation(), 0);
@@ -807,11 +847,69 @@ mod tests {
             let unique = pool.alloc(3).expect("the budget has room");
             assert_eq!(format!("{unique:?}"), "Unique { offset: 64, len: 3 }");
             let block = unique.freeze();
-            assert_eq!(format!("{block:?}"), "Block { offset: 64, len: 3 }");
+            assert_eq!(
+                format!("{block:?}"),
+                "Block { offset: 64, start: 0, len: 3 }"
+            );
+            let block = block.skip(1);
+            assert_eq!(
+                format!("{block:?}"),
+                "Block { offset: 64, start: 1, len: 2 }"
+            );
             assert_eq!(
                 format!("{pool:?}"),
                 "Pool { budget: 256, committed: 128, lent: 1 }"
             );
+        }
+    }
+
+    mod skip {
+        use super::*;
+
+        fn create_block(pool: &Pool) -> Block {
+            let mut unique = pool.alloc(5).expect("the budget has room");
+            unique.copy_from_slice(b"hello");
+            unique.freeze()
+        }
+
+        #[test]
+        fn starts_later_in_the_same_bytes() {
+            let pool = create_pool(256);
+            let block = create_block(&pool);
+            assert_eq!(&*block.clone().skip(0), b"hello");
+            assert_eq!(&*block.clone().skip(2), b"llo");
+            assert_eq!(&*block.skip(5), b"");
+        }
+
+        #[test]
+        fn shares_the_count_with_its_clones() {
+            let pool = create_pool(256);
+            let block = create_block(&pool);
+            let rest = block.clone().skip(3);
+            assert_eq!(&*rest, b"lo");
+            assert_eq!(&*rest.clone().skip(1), b"o");
+            drop(block);
+            assert_eq!(&*rest, b"lo");
+            drop(rest);
+            pool.reclaim();
+            assert_eq!(
+                format!("{pool:?}"),
+                "Pool { budget: 256, committed: 128, lent: 0 }"
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "cannot skip 6 bytes of a block of 5 bytes")]
+        fn panics_past_the_end() {
+            let pool = create_pool(256);
+            drop(create_block(&pool).skip(6));
+        }
+
+        #[test]
+        #[should_panic(expected = "cannot skip 4294967296 bytes of a block of 5 bytes")]
+        fn panics_past_a_u32() {
+            let pool = create_pool(256);
+            drop(create_block(&pool).skip(1 << 32));
         }
     }
 
