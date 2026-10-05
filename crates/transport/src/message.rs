@@ -192,7 +192,13 @@ fn alloc(pool: &Pool, value: u64, bytes_max: usize) -> Result<Unique, Error> {
     };
     match pool.alloc(len) {
         Ok(block) => Ok(block),
-        Err(error @ block::Error::Exhausted { .. }) => Err(Error::Pool(error)),
+        Err(block::Error::Exhausted {
+            requested,
+            available,
+        }) => Err(Error::Pool {
+            bytes: requested,
+            available,
+        }),
         Err(error @ block::Error::TooLarge { .. }) => {
             panic!("the pool cannot hold a message of `bytes_max`: {error}")
         }
@@ -469,10 +475,10 @@ mod tests {
             let mut reader = Reader::new(1_000);
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),
-                Err(Error::Pool(block::Error::Exhausted {
-                    requested: 100,
+                Err(Error::Pool {
+                    bytes: 100,
                     available: 108
-                }))
+                })
             );
             assert_eq!(source.given, 2);
             drop(held);

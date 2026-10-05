@@ -48,7 +48,7 @@ pub mod stream;
 mod tls;
 
 use std::marker::PhantomData;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
 use types::node::{PrivateKey, PublicKey};
@@ -73,8 +73,9 @@ impl Transport {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when `config.idle` is not positive, or `config.window_bytes`
-    /// is below `config.message_bytes_max`.
+    /// [`Error::Config`] when `config.idle` is not positive, `config.window_bytes` is
+    /// below `config.message_bytes_max`, or `config.message_bytes_max` is over
+    /// `config.pool.largest()`.
     ///
     /// ```
     /// use transport::{Config, Error, Transport};
@@ -146,7 +147,7 @@ impl Transport {
 /// The inputs of a [`Transport`].
 ///
 /// ```
-/// use std::num::NonZeroU32;
+/// use std::num::{NonZeroU32, NonZeroUsize};
 /// use std::rc::Rc;
 ///
 /// use transport::Config;
@@ -161,7 +162,7 @@ impl Transport {
 /// ) -> Config {
 ///     Config {
 ///         private_key: PrivateKey([7; 32]),
-///         message_bytes_max: 16 << 20,
+///         message_bytes_max: NonZeroUsize::new(16 << 20).expect("not zero"),
 ///         window_bytes: 32 << 20,
 ///         streams_max: NonZeroU32::new(1_024).expect("not zero"),
 ///         idle: Span::MINUTE,
@@ -176,9 +177,10 @@ impl Transport {
 pub struct Config {
     /// The node's key. Peers authenticate the node by its public key.
     pub private_key: PrivateKey,
-    /// The largest message this node accepts on a stream. Peers exchange their limits
-    /// in the handshake, and each sender checks the peer's.
-    pub message_bytes_max: usize,
+    /// The largest message this node accepts on a stream, and the largest datagram.
+    /// Peers exchange their limits in the handshake, and each sender checks the
+    /// peer's. Must be at most `pool.largest()`.
+    pub message_bytes_max: NonZeroUsize,
     /// The most bytes in flight per session in each direction: sent and not yet
     /// acknowledged, or received and not yet taken. It bounds the memory of a session.
     /// Size it near bandwidth times round trip. Must be at least `message_bytes_max`.
