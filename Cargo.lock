@@ -1275,6 +1275,7 @@ name = "secret"
 version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
+ "counting",
  "env",
  "proptest",
  "sim",
