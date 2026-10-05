@@ -290,12 +290,12 @@ fn header(bytes: &[u8], layout: Layout, index: usize) -> Result<Plan, Error> {
 /// Reads header field `index`: `width` little-endian bytes after the tag and the bit
 /// width. Bytes past the end read as zeros.
 fn field(header: &[u8], index: usize, width: usize) -> u64 {
-    header
-        .iter()
-        .skip(index.strict_mul(width).strict_add(2))
-        .take(width)
-        .rev()
-        .fold(0, |value, byte| value.wrapping_shl(8) | u64::from(*byte))
+    let mut word = [0; 8];
+    let bytes = header.iter().skip(index.strict_mul(width).strict_add(2));
+    for (byte, value) in word.iter_mut().zip(bytes.take(width)) {
+        *byte = *value;
+    }
+    u64::from_le_bytes(word)
 }
 
 impl Vector<'_> {

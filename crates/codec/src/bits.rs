@@ -1,7 +1,5 @@
 //! Bit packing in natural order, least significant bit first.
 
-use std::{mem, slice};
-
 /// The bytes that `count` values of `bits` bits fill.
 pub(crate) fn len(count: usize, bits: u8) -> usize {
     count.strict_mul(usize::from(bits)).div_ceil(8)
@@ -32,48 +30,22 @@ pub(crate) fn pack(values: impl Iterator<Item = u64>, bits: u8, out: &mut [u8]) 
 
 /// The values of `bits` bits packed in `bytes`, in order. It never ends: past the
 /// bytes, it yields zeros.
-pub(crate) fn unpack(bytes: &[u8], bits: u8) -> Unpack<'_> {
-    let (words, tail) = bytes.as_chunks::<8>();
-    Unpack {
-        words: words.iter(),
-        tail,
-        acc: 0,
-        filled: 0,
-        bits: u32::from(bits),
-        mask: u64::MAX.unbounded_shr(u32::from(64_u8.strict_sub(bits))),
-    }
-}
-
-/// The iterator [`unpack`] returns.
-pub(crate) struct Unpack<'a> {
-    words: slice::Iter<'a, [u8; 8]>,
-    tail: &'a [u8],
-    acc: u128,
-    filled: u32,
-    bits: u32,
-    mask: u64,
-}
-
-impl Iterator for Unpack<'_> {
-    type Item = u64;
-
-    fn next(&mut self) -> Option<u64> {
-        if self.filled < self.bits {
-            let word = self.words.next().copied().unwrap_or_else(|| {
-                let mut word = [0; 8];
-                for (byte, value) in word.iter_mut().zip(mem::take(&mut self.tail)) {
-                    *byte = *value;
-                }
-                word
-            });
-            self.acc |= u128::from(u64::from_le_bytes(word)).wrapping_shl(self.filled);
-            self.filled = self.filled.strict_add(64);
-        }
-        let value = low(self.acc) & self.mask;
-        self.acc = self.acc.wrapping_shr(self.bits);
-        self.filled = self.filled.strict_sub(self.bits);
-        Some(value)
-    }
+pub(crate) fn unpack(bytes: &[u8], bits: u8) -> impl Iterator<Item = u64> + '_ {
+    let mask = u64::MAX.unbounded_shr(u32::from(64_u8.strict_sub(bits)));
+    let bits = usize::from(bits);
+    (0_usize..).map(move |index| {
+        let start = index.strict_mul(bits);
+        let rest = bytes.get(start.div_euclid(8)..).unwrap_or_default();
+        let window = rest.first_chunk().copied().unwrap_or_else(|| {
+            let mut window = [0; 16];
+            for (byte, value) in window.iter_mut().zip(rest) {
+                *byte = *value;
+            }
+            window
+        });
+        let shift = u32::try_from(start.rem_euclid(8)).expect("invariant: under 8");
+        low(u128::from_le_bytes(window).wrapping_shr(shift)) & mask
+    })
 }
 
 #[expect(
