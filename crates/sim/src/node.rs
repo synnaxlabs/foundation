@@ -1,12 +1,13 @@
 //! One simulated node and its settings.
 
 use std::fmt;
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 
 use types::time::{Monotonic, Span, Stamp};
 
-use crate::drivers;
 use crate::state::lock;
+use crate::{drivers, net};
 
 /// One simulated node: the `env` handles that its code gets. Clones refer to the same
 /// node.
@@ -48,6 +49,36 @@ impl Node {
     #[must_use]
     pub fn threads(&self) -> env::threads::Threads {
         env::threads::Threads::new(self.0.clone())
+    }
+
+    /// The node's network, on its [`Node::addresses`]. UDP only: `connect` and
+    /// `listen` panic.
+    ///
+    /// - A bind or a send from an address that is not the node's gives `Error::Io`
+    ///   with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free port from
+    ///   49152.
+    /// - A send to the other family than the socket's gives `Error::Unreachable`.
+    /// - Each socket draws its send and receive batch maxes from 1, 8, and 64.
+    /// - A datagram is lost when it is over the link's
+    ///   [`mtu`](crate::link::Config::mtu), when nothing is bound at its
+    ///   destination, or when it would fill the receive queue past
+    ///   `recv_buffer_bytes`. The send buffer never fills.
+    /// - A socket half panics when it polls outside the node's threads.
+    #[must_use]
+    pub fn net(&self) -> env::net::Net {
+        env::net::Net::new(self.0.clone())
+    }
+
+    /// The node's IPv4 and IPv6 addresses, in that order: node `k`, from 0 in the
+    /// order of [`Sim::node`](crate::Sim::node), has `10.0.0.0` and `fd00::`, each
+    /// plus `k + 1`.
+    ///
+    /// # Panics
+    ///
+    /// For the 16,777,215th node and after: `10.0.0.0/8` has no host for them.
+    #[must_use]
+    pub fn addresses(&self) -> [IpAddr; 2] {
+        net::addresses(self.0.node)
     }
 
     /// Steps the wall clock by `span`, forward or back, as when NTP or an operator

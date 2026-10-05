@@ -9,7 +9,7 @@ use std::sync::Arc;
 use divan::Bencher;
 use types::channel::Slot;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{Draft, Form, Frame, Path, Range};
+use types::frame::{Draft, Form, Frame, Label, Range};
 use types::sample::{Scalar, Type};
 
 const F64: Type = Type::Scalar(Scalar::F64);
@@ -103,7 +103,7 @@ fn draft(pool: &block::Pool, case: &Case) -> Draft {
     Draft::new(
         pool,
         black_box(&case.set),
-        Path::Live,
+        Label::Live,
         Form::Encoded,
         black_box(&case.series),
     )

@@ -21,30 +21,44 @@ const DESCRIPTOR: usize = 8;
 const SERIES_ALIGN: usize = 8;
 
 /// Offsets of the header's fields: the key set key and the counts of ranges and
-/// descriptors (each `u32`), then form and path (each `u8`), then zeros.
+/// descriptors (each `u32`), then form and label (each `u8`), then zeros.
 mod at {
     pub(super) const KEY_SET: usize = 0;
     pub(super) const RANGES: usize = 4;
     pub(super) const SERIES: usize = 8;
     pub(super) const FORM: usize = 12;
-    pub(super) const PATH: usize = 13;
+    pub(super) const LABEL: usize = 13;
 }
 
-/// One of an index's two write paths, each with its own seq. Backfill is late data,
-/// labeled by the writer, that live readers never see.
+/// One of an index's two write paths, each with its own seq. Backfill is late data
+/// that live readers never see.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Path {
     /// The newest data.
     Live,
-    /// Late data, labeled by the writer. It ends before the newest live sample.
+    /// Late data. It ends before the newest live sample.
     Backfill,
 }
 
-impl Path {
+/// What a writer says a frame holds. The home applies a live or backfill frame to that
+/// path, and checks a resend frame against both paths first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Label {
+    /// New data for the live path.
+    Live,
+    /// Late data for the backfill path.
+    Backfill,
+    /// A live frame that the writer sends again after a reconnect, with its original
+    /// boundaries. It lands on one path or on none.
+    Resend,
+}
+
+impl Label {
     const fn byte(self) -> u8 {
         match self {
             Self::Live => 0,
             Self::Backfill => 1,
+            Self::Resend => 2,
         }
     }
 
@@ -52,7 +66,10 @@ impl Path {
         match byte {
             0 => Self::Live,
             1 => Self::Backfill,
-            other => unreachable!("invariant: only a draft writes a path, not {other}"),
+            2 => Self::Resend,
+            other => {
+                unreachable!("invariant: only a draft writes a label, not {other}")
+            }
         }
     }
 }
@@ -163,10 +180,10 @@ impl From<block::Error> for Error {
 pub struct Draft(block::Unique);
 
 impl Draft {
-    /// Takes a block from `pool` for a frame of `set` on `path`, and writes its header,
-    /// ranges, and descriptors. `series` holds each present entry and the byte length
-    /// of its series, in increasing entry order. A group is present when its index is.
-    /// Each range starts at zero, and series bytes are not cleared.
+    /// Takes a block from `pool` for a frame of `set` labeled `label`, and writes its
+    /// header, ranges, and descriptors. `series` holds each present entry and the byte
+    /// length of its series, in increasing entry order. A group is present when its
+    /// index is. Each range starts at zero, and series bytes are not cleared.
     ///
     /// # Errors
     ///
@@ -175,7 +192,7 @@ impl Draft {
     pub fn new(
         pool: &block::Pool,
         set: &KeySet,
-        path: Path,
+        label: Label,
         form: Form,
         series: &[(usize, usize)],
     ) -> Result<Self, Error> {
@@ -188,7 +205,7 @@ impl Draft {
         put(head, at::RANGES, &to_u32(groups).to_le_bytes());
         put(head, at::SERIES, &to_u32(series.len()).to_le_bytes());
         head[at::FORM] = form.byte();
-        head[at::PATH] = path.byte();
+        head[at::LABEL] = label.byte();
         let (ranges, descriptors, body) = split_mut(&mut block);
         let indexes = series
             .iter()
@@ -270,10 +287,10 @@ impl Frame {
         key_set::Key::new(u32::from_le_bytes(get(&self.0, at::KEY_SET)))
     }
 
-    /// The frame's write path.
+    /// What the writer says the frame holds.
     #[must_use]
-    pub fn path(&self) -> Path {
-        Path::from_byte(self.0[at::PATH])
+    pub fn label(&self) -> Label {
+        Label::from_byte(self.0[at::LABEL])
     }
 
     /// How the frame's series hold their samples.
@@ -460,7 +477,7 @@ mod tests {
     /// The error of a draft of `series` over [`one_group`].
     fn refusal(series: &[(usize, usize)]) -> Error {
         let set = one_group(&mut Interner::new());
-        let result = Draft::new(&pool(1 << 16), &set, Path::Live, Form::Raw, series);
+        let result = Draft::new(&pool(1 << 16), &set, Label::Live, Form::Raw, series);
         result.unwrap_err()
     }
 
@@ -480,7 +497,7 @@ mod tests {
         drop(dirty);
         let series = [(0, 3), (2, 2)];
         let mut draft =
-            Draft::new(&pool, &set, Path::Live, Form::Encoded, &series).unwrap();
+            Draft::new(&pool, &set, Label::Resend, Form::Encoded, &series).unwrap();
         draft.series(0).unwrap().copy_from_slice(&[0xaa; 3]);
         draft.series(2).unwrap().copy_from_slice(&[1, 2]);
         draft.set_range(0, Range { seq: 7, count: 2 });
@@ -489,7 +506,7 @@ mod tests {
         for n in [3_u32, 1, 2] {
             expected.extend(n.to_le_bytes());
         }
-        expected.extend([1, 0, 0, 0]);
+        expected.extend([1, 2, 0, 0]);
         for n in [0_u32, 2] {
             expected.extend(n.to_le_bytes());
         }
@@ -502,14 +519,29 @@ mod tests {
     }
 
     #[test]
+    fn writes_each_label_byte() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        for (label, byte) in
+            [(Label::Live, 0), (Label::Backfill, 1), (Label::Resend, 2)]
+        {
+            let frame = Draft::new(&pool, &set, label, Form::Raw, &[])
+                .unwrap()
+                .freeze();
+            assert_eq!(frame.0[13], byte, "{label:?}");
+            assert_eq!(frame.label(), label);
+        }
+    }
+
+    #[test]
     fn reads_the_header_and_absent_parts() {
         let set = two_groups();
         let pool = pool(1 << 16);
         let draft =
-            Draft::new(&pool, &set, Path::Backfill, Form::Raw, &[(0, 8)]).unwrap();
+            Draft::new(&pool, &set, Label::Backfill, Form::Raw, &[(0, 8)]).unwrap();
         let frame = draft.freeze();
         assert_eq!(frame.key_set(), set.key());
-        assert_eq!(frame.path(), Path::Backfill);
+        assert_eq!(frame.label(), Label::Backfill);
         assert_eq!(frame.form(), Form::Raw);
         assert_eq!(frame.range(0), Some(Range::default()));
         assert_eq!(frame.series(0).map(<[u8]>::len), Some(8));
@@ -536,7 +568,7 @@ mod tests {
         let pool = pool(1 << 16);
         let series = [(0, 8), (64, 8), (129, 8)];
         let mut draft =
-            Draft::new(&pool, &set, Path::Live, Form::Raw, &series).unwrap();
+            Draft::new(&pool, &set, Label::Live, Form::Raw, &series).unwrap();
         for (seq, &(entry, _)) in (1..).zip(&series) {
             draft
                 .series(entry)
@@ -557,7 +589,7 @@ mod tests {
     fn returns_the_pool_error() {
         let pool = pool(512);
         let set = one_group(&mut Interner::new());
-        let result = Draft::new(&pool, &set, Path::Live, Form::Raw, &[(0, 1000)]);
+        let result = Draft::new(&pool, &set, Label::Live, Form::Raw, &[(0, 1000)]);
         let error = result.unwrap_err();
         let cause = block::Error::TooLarge {
             requested: 1040,
@@ -582,7 +614,7 @@ mod tests {
         }]);
         let pool = pool(1 << 16);
         let len = usize::try_from(u32::MAX).unwrap() + 1;
-        let result = Draft::new(&pool, &set, Path::Live, Form::Raw, &[(0, len - 40)]);
+        let result = Draft::new(&pool, &set, Label::Live, Form::Raw, &[(0, len - 40)]);
         let expected = block::Error::TooLarge {
             requested: len,
             largest: pool.largest(),
@@ -648,7 +680,7 @@ mod tests {
         let error = Draft::new(
             &pool(1 << 16),
             &two_groups(),
-            Path::Live,
+            Label::Live,
             Form::Raw,
             &[(0, 1), (3, 1)],
         )
@@ -662,7 +694,7 @@ mod tests {
         let pool = pool(1 << 16);
         let series = [(0, 1)];
         let mut draft =
-            Draft::new(&pool, &two_groups(), Path::Live, Form::Raw, &series).unwrap();
+            Draft::new(&pool, &two_groups(), Label::Live, Form::Raw, &series).unwrap();
         draft.set_range(1, Range::default());
     }
 
@@ -677,7 +709,7 @@ mod tests {
         /// Each entry's series length, by entry position.
         lens: Vec<usize>,
         ranges: Vec<(u64, u32)>,
-        path: Path,
+        label: Label,
         form: Form,
         /// Whether the draft is filled through `iter_mut` or by entry.
         in_order: bool,
@@ -694,19 +726,23 @@ mod tests {
                     vec(any::<bool>(), n * 41),
                     vec(0_usize..40, n * 41),
                     vec(any::<(u64, u32)>(), n),
-                    prop_oneof![Just(Path::Live), Just(Path::Backfill)],
+                    prop_oneof![
+                        Just(Label::Live),
+                        Just(Label::Backfill),
+                        Just(Label::Resend)
+                    ],
                     prop_oneof![Just(Form::Raw), Just(Form::Encoded)],
                     any::<bool>(),
                 )
             })
             .prop_map(
-                |(data, groups, present, lens, ranges, path, form, in_order)| Case {
+                |(data, groups, present, lens, ranges, label, form, in_order)| Case {
                     data,
                     groups,
                     present,
                     lens,
                     ranges,
-                    path,
+                    label,
                     form,
                     in_order,
                 },
@@ -785,7 +821,7 @@ mod tests {
         let (set, series) = shape(case);
         let entries = set.entries().len();
         let pool = pool(1 << 20);
-        let mut draft = Draft::new(&pool, &set, case.path, case.form, &series)
+        let mut draft = Draft::new(&pool, &set, case.label, case.form, &series)
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
         fill(&mut draft, &series, entries, case.in_order)?;
         let mut ranges = Vec::new();
@@ -802,7 +838,7 @@ mod tests {
         let frame = draft.freeze();
 
         prop_assert_eq!(frame.key_set(), set.key());
-        prop_assert_eq!(frame.path(), case.path);
+        prop_assert_eq!(frame.label(), case.label);
         prop_assert_eq!(frame.form(), case.form);
         for (group, range) in (0_u32..).zip(ranges) {
             prop_assert_eq!(frame.range(group), range);
