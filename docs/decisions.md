@@ -284,15 +284,40 @@ How to read this record:
   (natural order), RLE; timestamps add stride; floats raw, ALP, fdelta, RLE; `max` mode
   adds pco. No zstd and no ALP_rd. Policy: `compression { select, mode = auto, raw, or
   max }`, default `auto`. The validator is the top fuzz target.
+- **CODEC FORMAT V1 (#4)** A vector is a tag byte, a bit width byte, header fields,
+  zeros to a multiple of the sample width, then a body padded the same way. Tags: 0
+  raw; 1 FFOR (reference; body `sample - reference`); 2 delta (first, base; body
+  `sample - previous - base` for each sample after the first); 3 RLE (`u16` run count;
+  body the values, then `u16` lengths). Sample arithmetic is modulo 2^b, where b is
+  the bit count of a sample. Packing is in natural order in every vector, least
+  significant bit first. The person chose it ("Natural order") over FastLanes order
+  for full vectors: a natural-order FFOR decode prototype took 197 ns per vector on an
+  M3 Max, about 1.9% of a core at 100M samples/s. FastLanes order can come later as a
+  new tag. Raw and RLE have bit width 0. Integers, `Stamp`, and `Span` use all four
+  tags; other scalars use raw. Timestamp stride (BQ4) comes later as a new tag. The
+  validator checks tags, bit widths, lengths, and run sums, not padding. `max_len`
+  (raw plus one raw header per vector) sizes the output, and the encoder makes one
+  pass. `codec/src/vector.rs` is the full spec.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
   fsync is fatal and never retried.
-  Ring record (starting point): `[len: u32][crc32c: u32][payload]`, one per group
-  commit, starting on a 4096-byte boundary so a commit never rewrites a synced block.
-  The CRC continues from the record before (a chain), and each open of the ring starts
-  a chain from a random value, so bytes of an earlier chain never read as the next
-  record.
+  Ring record (starting point): `[len: u32][crc32c: u32][kind: u8][body]`, starting
+  on a 4096-byte boundary so a commit never rewrites a synced block. The CRC covers
+  `len`, `kind`, and the body. It continues from the record before (a chain), so
+  bytes of an earlier chain never read as the next record.
+  Kinds: data (1), one per group commit; wrap (2), no body, the rest of the area is
+  not used and the next record is at its start; restart (3), written at each open,
+  its body is a random `u32` and the chain continues from that value. A record never
+  crosses the end of the area. Kind 0 is never valid.
+  Offsets count bytes since the ring was made and never wrap; the place in the area
+  is the offset modulo the area length. The area is at least twice the largest record
+  less one block, so an empty ring takes any record. A body is at most `u32::MAX`
+  bytes.
+  Recovery walks from the tail to the first record that does not follow the chain.
+  A record that follows the chain but has an unknown kind or a wrong shape fails the
+  open. The restart record needs one free block: an open of a full ring first moves
+  records at the tail to a segment.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -447,6 +472,15 @@ How to read this record:
   Callers admit peers, dispatch streams (STREAM DISPATCH), and cancel stale latest
   frames. Builds on SIM NETWORK. Proposed by `network` in #45; approved by the
   coordinator on PR #53.
+- **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
+  is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
+  from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
+  the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
+  issuer are not checked. A node sends its certificate when it dials; an SDK client
+  sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
+  session protocol gets a new name. Resumption and 0-RTT are off, so rustls gets a
+  fixed time and never reads the OS clock. Randomness inside TLS comes from aws-lc
+  (TLS RANDOMNESS). Decided by `network` in #54.
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -598,6 +632,22 @@ How to read this record:
   editor exists. `node` builds the front-end table keyed by file extension. Files hold
   data only (no loops, variables, or modules). SDK code may produce a Document directly.
   Never shrink the model to the weakest syntax. Supersedes: r3 plain HCL.
+- **DOCUMENT MODEL (2026-10-04)** A Document is attributes in a map sorted by key
+  (keys unique) plus blocks in order. Values: bool, integer (`i128`), finite float,
+  string, reference (`types::name::Name`), list, map, and call. No null and no
+  expressions. Refines K1: a front end gives every key, keyword, label, function
+  name, and value a span (byte offset, then line and column in Unicode scalar values,
+  from 0); SDK and spec documents have none (section 2.1, kind config). `==` never
+  reads spans, so a Document from a file equals the same Document from the spec.
+  Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
+- **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
+  recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
+  `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
+  ended the process, `hcl-primitives` read `-18446744073709551615` as 1, and its errors
+  had no fix-it hints. The reader refuses nesting past the Document limit, reads
+  integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
+  section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
+  in `docs/dependencies.md`.
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -1518,7 +1568,7 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
-| 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, and shared value readers. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
