@@ -1013,6 +1013,22 @@ mod tests {
         }
 
         #[test]
+        fn keeps_its_vote_when_it_steps_down() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            tick_times(&mut raft, 10);
+            assert_eq!(raft.role(), Role::Follower);
+            sent(&mut raft);
+            let vote = Body::Vote {
+                last: Position::default(),
+            };
+            raft.step(message(3, 1, vote)).unwrap();
+            let rejected = Body::VoteReply { granted: false };
+            assert_eq!(sent(&mut raft)[0].body, rejected);
+            assert_eq!(raft.hard().vote, Some(key(1)));
+        }
+
+        #[test]
         fn does_not_count_contact_from_a_lower_term() {
             let mut raft = raft(&[1, 2, 3], at_term(1));
             elect(&mut raft, &[2]);
