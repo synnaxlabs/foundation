@@ -25,7 +25,7 @@ const QUIC_V1: u32 = 1;
 
 /// The smallest datagram QUIC allows. Every datagram is this size until MTU
 /// discovery finds a larger one.
-const MTU_MIN: u16 = 1200;
+pub(super) const MTU_MIN: u16 = 1200;
 
 /// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
 /// node takes.
@@ -116,8 +116,8 @@ fn server(tls: &Tls, transport: Arc<TransportConfig>) -> ServerConfig {
     tokens.sent(0).log(Arc::new(NoneTokenLog));
     #[expect(clippy::disallowed_methods, reason = "the config sets the time source")]
     let mut server = ServerConfig::new(Arc::new(crypto), Arc::new(NoTokens));
-    // Each `Incoming` is accepted when it arrives, so none waits for a slot and
-    // none buffers a datagram.
+    // Each `Incoming` is accepted when it arrives, so none waits and none buffers a
+    // datagram.
     server
         .transport_config(transport)
         .validation_token_config(tokens)
@@ -223,7 +223,6 @@ mod tests {
 
     use std::num::NonZeroUsize;
 
-    use env::net::udp::Meta;
     use noq_proto::Dir;
     use noq_proto::crypto::HmacKey;
     use types::time::Monotonic;
@@ -482,23 +481,12 @@ mod tests {
         fn offers_only_quic_v1_to_a_peer_of_another_version() {
             let versions = testing::run(1, |shard| {
                 let config = shard.config(testing::SERVER_KEY, Span::SECOND);
-                let mut endpoint = Endpoint::new(&config, SERVER_SHARD);
-                let draft_29 = [0xff, 0, 0, 0x1d];
-                let len = u8::try_from(cid::LEN).expect("fits");
-                let id = [[len].as_slice(), &[1; cid::LEN]].concat();
-                let mut initial = [[0xc0].as_slice(), &draft_29, &id, &id].concat();
-                initial.resize(usize::from(MTU_MIN), 0);
-                let meta = Meta {
-                    source: testing::CLIENT,
-                    destination: None,
-                    ecn: None,
-                    len: initial.len(),
-                    stride: initial.len(),
-                };
+                let mut endpoint =
+                    Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+                let (meta, initial) = testing::draft_29();
                 endpoint.receive(Monotonic(0), &meta, &initial);
                 let mut buffer = Vec::new();
-                let transmit =
-                    endpoint.transmit(Monotonic(0), NonZeroUsize::MIN, &mut buffer);
+                let transmit = endpoint.transmit(Monotonic(0), &mut buffer);
                 let reply = transmit.expect("a reply").contents;
                 let (_, Some(_)) = ids(reply) else {
                     panic!("not a long header: {reply:02x?}");

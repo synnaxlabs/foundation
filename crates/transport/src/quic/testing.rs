@@ -15,7 +15,8 @@ use env::tasks::Tasks;
 use types::node::{PrivateKey, PublicKey};
 use types::time::{Monotonic, Span};
 
-use super::{Endpoint, Event, connection};
+use super::settings::MTU_MIN;
+use super::{Endpoint, Event, cid, connection};
 use crate::Config;
 
 /// The client's address. The server's is [`SERVER`].
@@ -34,6 +35,23 @@ pub(super) const STREAMS_MAX: u32 = 16;
 pub(super) const CLIENT_KEY: PrivateKey = PrivateKey([1; 32]);
 /// The server's node key.
 pub(super) const SERVER_KEY: PrivateKey = PrivateKey([2; 32]);
+
+/// An Initial datagram from [`CLIENT`] in QUIC draft 29, which no endpoint here
+/// speaks, and its meta.
+pub(super) fn draft_29() -> (Meta, Vec<u8>) {
+    let len = u8::try_from(cid::LEN).expect("fits");
+    let id = [[len].as_slice(), &[1; cid::LEN]].concat();
+    let mut initial = [[0xc0].as_slice(), &[0xff, 0, 0, 0x1d], &id, &id].concat();
+    initial.resize(usize::from(MTU_MIN), 0);
+    let meta = Meta {
+        source: CLIENT,
+        destination: None,
+        ecn: None,
+        len: initial.len(),
+        stride: initial.len(),
+    };
+    (meta, initial)
+}
 
 /// The time `elapsed` after the start of a run.
 pub(super) fn at(elapsed: Duration) -> Monotonic {
@@ -125,8 +143,6 @@ pub(super) struct Side {
     pub(super) key: Option<connection::Key>,
     /// Where this side sends from and takes datagrams.
     pub(super) address: SocketAddr,
-    /// The most datagrams this side sends in one batch.
-    pub(super) datagrams_max: NonZeroUsize,
     /// When (from the start), where to, and the bytes of each datagram this side
     /// sent, the dropped ones too.
     pub(super) sent: Vec<(Duration, SocketAddr, Vec<u8>)>,
@@ -143,8 +159,10 @@ pub(super) struct Side {
 impl Pair {
     /// Two endpoints with `idle`, and no connection.
     pub(super) fn new(shard: &Shard, idle: Span, delay: Duration) -> Self {
-        let client = Endpoint::new(&shard.config(CLIENT_KEY, idle), CLIENT_SHARD);
-        let server = Endpoint::new(&shard.config(SERVER_KEY, idle), SERVER_SHARD);
+        let config = shard.config(CLIENT_KEY, idle);
+        let client = Endpoint::new(&config, CLIENT_SHARD, NonZeroUsize::MIN);
+        let config = shard.config(SERVER_KEY, idle);
+        let server = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
         Self {
             now: Duration::ZERO,
             delay,
@@ -164,7 +182,7 @@ impl Pair {
     /// Nothing is sent yet.
     pub(super) fn dial(&mut self, peer: PublicKey) {
         let key = self.client.endpoint.connect(self.now(), peer, SERVER);
-        self.client.key = Some(key.expect("the dial starts"));
+        self.client.key = Some(key);
     }
 
     /// Moves datagrams and runs timers for `span`.
@@ -200,7 +218,7 @@ impl Pair {
     /// shard, as a restart does. The old connection is gone.
     pub(super) fn restart(&mut self, shard: &Shard) {
         let config = shard.config(SERVER_KEY, self.idle);
-        self.server.endpoint = Endpoint::new(&config, SERVER_SHARD);
+        self.server.endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
         self.server.key = None;
     }
 
@@ -230,7 +248,6 @@ impl Side {
             endpoint,
             key: None,
             address,
-            datagrams_max: NonZeroUsize::MIN,
             sent: Vec::new(),
             batch_max: 0,
             events: Vec::new(),
@@ -262,10 +279,7 @@ impl Side {
             return out;
         }
         let mut buffer = Vec::new();
-        while let Some(transmit) =
-            self.endpoint
-                .transmit(at(now), self.datagrams_max, &mut buffer)
-        {
+        while let Some(transmit) = self.endpoint.transmit(at(now), &mut buffer) {
             let len = transmit.contents.len();
             let stride = transmit.segment.map_or(len, NonZeroUsize::get);
             for datagram in transmit.contents.chunks(stride) {

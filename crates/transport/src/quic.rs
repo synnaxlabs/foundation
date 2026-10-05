@@ -7,7 +7,6 @@ mod settings;
 mod testing;
 
 use std::collections::VecDeque;
-use std::mem;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
@@ -15,9 +14,7 @@ use std::time::{Duration, Instant};
 use bytes::BytesMut;
 use env::net::Ecn;
 use env::net::udp::{Meta, Transmit};
-use noq_proto::{
-    ConnectError, ConnectionHandle, DatagramEvent, EcnCodepoint, FourTuple,
-};
+use noq_proto::{ConnectionHandle, DatagramEvent, EcnCodepoint, FourTuple};
 use types::node::PublicKey;
 use types::time::Monotonic;
 
@@ -37,6 +34,8 @@ pub(crate) struct Endpoint {
     epoch: Instant,
     settings: Settings,
     inner: noq_proto::Endpoint,
+    /// The most datagrams in one [`Transmit`].
+    datagrams_max: NonZeroUsize,
     /// Indexed by noq-proto's handle.
     connections: Vec<Option<Connection>>,
     /// The connections made so far.
@@ -46,13 +45,12 @@ pub(crate) struct Endpoint {
     ready: VecDeque<connection::Key>,
     events: VecDeque<Event>,
     /// Datagrams that no connection sends, such as a version negotiation or a
-    /// stateless reset.
+    /// stateless reset. At most one for each datagram of a batch, because the caller
+    /// takes them all with [`Endpoint::transmit`] after each [`Endpoint::receive`].
     responses: VecDeque<(noq_proto::Transmit, Vec<u8>)>,
     /// The buffer that each received batch is copied into and split from. noq-proto
     /// decrypts in place and keeps parts of it.
     received: BytesMut,
-    /// Where noq-proto writes a response.
-    reply: Vec<u8>,
 }
 
 /// A change to a connection that the caller must know about.
@@ -68,56 +66,51 @@ pub(crate) enum Event {
 
 impl Endpoint {
     /// An endpoint for this node's key whose connection IDs all start with
-    /// `shard`.
+    /// `shard`. Each [`Transmit`] holds at most `datagrams_max` datagrams: the
+    /// socket's batch max.
     ///
     /// # Panics
     ///
     /// When `config.idle` is not positive. `Transport::new` refuses it first.
-    pub(crate) fn new(config: &Config, shard: u8) -> Self {
+    pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
         let (settings, endpoint) = Settings::new(config, shard);
         Self {
             epoch: config.clock.epoch(),
             settings,
             inner: endpoint,
+            datagrams_max,
             connections: Vec::new(),
             serial: 0,
             ready: VecDeque::new(),
             events: VecDeque::new(),
             responses: VecDeque::new(),
             received: BytesMut::new(),
-            reply: Vec::new(),
         }
     }
 
     /// Dials `remote` and expects it to prove `peer`. The dial ends in
     /// [`Event::Connected`] or [`Event::Closed`] for the key.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`Error::Broken`] when no datagram can go to `remote` (port 0, or an
-    /// unspecified IP).
+    /// When no datagram can go to `remote`: its port is 0 or its IP is unspecified.
     pub(crate) fn connect(
         &mut self,
         now: Monotonic,
         peer: PublicKey,
         remote: SocketAddr,
-    ) -> Result<connection::Key, Error> {
+    ) -> connection::Key {
         let now = self.instant(now);
         let dial = self.settings.client(peer);
-        let (handle, inner) = match self.inner.connect(now, dial, remote, SERVER_NAME) {
-            Ok(connection) => connection,
-            Err(error @ ConnectError::InvalidRemoteAddress(_)) => {
-                return Err(Error::Broken {
-                    reason: error.to_string(),
-                });
-            }
-            Err(error) => {
-                panic!("invariant: a dial fails only on its address: {error}")
-            }
-        };
+        let (handle, inner) = self
+            .inner
+            .connect(now, dial, remote, SERVER_NAME)
+            .unwrap_or_else(|error| {
+                panic!("a dial fails only on its address: {error}")
+            });
         let key = self.insert(handle, |key| Connection::dialed(key, inner, peer));
         self.drive(handle);
-        Ok(key)
+        key
     }
 
     /// Takes one received batch: `meta.len` bytes of `batch`, in datagrams of
@@ -126,31 +119,33 @@ impl Endpoint {
         let now = self.instant(now);
         let path = FourTuple::new(meta.source, meta.destination);
         let ecn = meta.ecn.map(codepoint);
-        // The stride is 0 only for an empty batch.
-        let stride = meta.stride.max(1);
+        assert!(
+            meta.stride > 0 || meta.len == 0,
+            "invariant: a batch of {} bytes has a stride",
+            meta.len
+        );
         self.received.extend_from_slice(&batch[..meta.len]);
         let mut datagrams = self.received.split();
         while !datagrams.is_empty() {
-            let datagram = datagrams.split_to(stride.min(datagrams.len()));
+            let datagram = datagrams.split_to(meta.stride.min(datagrams.len()));
             self.handle(now, path, ecn, datagram);
         }
     }
 
-    /// The next datagrams to send, at most `datagrams_max` of them to one
-    /// destination, written into `buffer`. `None` when nothing is due. Call it until
-    /// `None` after each other call but [`Endpoint::deadline`] and
-    /// [`Endpoint::poll`].
+    /// The next datagrams to send, all to one destination, written into `buffer`.
+    /// `None` when nothing is due. Call it until `None` after each other call but
+    /// [`Endpoint::deadline`] and [`Endpoint::poll`].
     pub(crate) fn transmit<'a>(
         &mut self,
         now: Monotonic,
-        datagrams_max: NonZeroUsize,
         buffer: &'a mut Vec<u8>,
     ) -> Option<Transmit<'a>> {
         if let Some((transmit, bytes)) = self.responses.pop_front() {
-            *buffer = bytes;
+            buffer.clear();
+            buffer.extend_from_slice(&bytes);
             return Some(outgoing(&transmit, buffer));
         }
-        let now = self.instant(now);
+        let (now, datagrams_max) = (self.instant(now), self.datagrams_max);
         while let Some(key) = self.ready.pop_front() {
             let Some(connection) = self.get(key) else {
                 continue;
@@ -263,8 +258,8 @@ impl Endpoint {
         ecn: Option<EcnCodepoint>,
         datagram: BytesMut,
     ) {
-        self.reply.clear();
-        let event = self.inner.handle(now, path, ecn, datagram, &mut self.reply);
+        let mut reply = Vec::new();
+        let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
             None => None,
             Some(DatagramEvent::ConnectionEvent(handle, event)) => {
@@ -276,7 +271,7 @@ impl Endpoint {
                 None
             }
             Some(DatagramEvent::NewConnection(incoming)) => {
-                match self.inner.accept(incoming, now, &mut self.reply, None) {
+                match self.inner.accept(incoming, now, &mut reply, None) {
                     Ok((handle, inner)) => {
                         self.insert(handle, |key| Connection::accepted(key, inner));
                         self.drive(handle);
@@ -288,8 +283,7 @@ impl Endpoint {
             Some(DatagramEvent::Response(response)) => Some(response),
         };
         if let Some(response) = response {
-            self.responses
-                .push_back((response, mem::take(&mut self.reply)));
+            self.responses.push_back((response, reply));
         }
     }
 
@@ -405,15 +399,18 @@ mod tests {
         }
 
         #[test]
-        fn to_port_zero_is_broken() {
-            let dialed = testing::run(1, |shard| {
+        #[should_panic(
+            expected = "a dial fails only on its address: invalid remote address: \
+                        127.0.0.1:0"
+        )]
+        fn to_port_zero_panics() {
+            testing::run(1, |shard| {
                 let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
-                let mut endpoint = Endpoint::new(&config, testing::CLIENT_SHARD);
+                let mut endpoint =
+                    Endpoint::new(&config, testing::CLIENT_SHARD, NonZeroUsize::MIN);
                 let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-                endpoint.connect(Monotonic(0), server(), remote)
+                endpoint.connect(Monotonic(0), server(), remote);
             });
-            let reason = "invalid remote address: 127.0.0.1:0".into();
-            assert_eq!(dialed, Err(Error::Broken { reason }));
         }
     }
 
@@ -516,6 +513,22 @@ mod tests {
         }
 
         #[test]
+        fn writes_a_response_into_the_callers_buffer() {
+            testing::run(1, |shard| {
+                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let mut endpoint =
+                    Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
+                let (meta, initial) = testing::draft_29();
+                endpoint.receive(Monotonic(0), &meta, &initial);
+                let mut buffer = Vec::with_capacity(1 << 16);
+                let start = buffer.as_ptr();
+                let transmit = endpoint.transmit(Monotonic(0), &mut buffer);
+                let contents = transmit.expect("a version negotiation").contents;
+                assert_eq!(contents.as_ptr(), start);
+            });
+        }
+
+        #[test]
         fn gives_each_connection_a_turn() {
             testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
@@ -533,11 +546,7 @@ mod tests {
                 let (now, mut buffer) = (pair.now(), Vec::new());
                 let ids: Vec<Vec<u8>> = (0..4)
                     .map(|_| {
-                        let transmit = pair.client.endpoint.transmit(
-                            now,
-                            NonZeroUsize::MIN,
-                            &mut buffer,
-                        );
+                        let transmit = pair.client.endpoint.transmit(now, &mut buffer);
                         destination(transmit.expect("a datagram").contents).to_vec()
                     })
                     .collect();
@@ -551,10 +560,26 @@ mod tests {
         use super::*;
 
         #[test]
+        #[should_panic(expected = "invariant: a batch of 10 bytes has a stride")]
+        fn with_no_stride_panics() {
+            testing::run(1, |shard| {
+                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let mut endpoint =
+                    Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
+                let (mut meta, initial) = testing::draft_29();
+                (meta.len, meta.stride) = (10, 0);
+                endpoint.receive(Monotonic(0), &meta, &initial);
+            });
+        }
+
+        #[test]
         fn splits_a_batch_into_its_datagrams() {
             testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-                pair.client.datagrams_max = NonZeroUsize::new(10).expect("not zero");
+                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let batch = NonZeroUsize::new(10).expect("not zero");
+                pair.client.endpoint =
+                    Endpoint::new(&config, testing::CLIENT_SHARD, batch);
                 pair.dial(server());
                 pair.run(Duration::from_millis(100));
                 let sent: Vec<u8> = (0..=u8::MAX).cycle().take(20_000).collect();
