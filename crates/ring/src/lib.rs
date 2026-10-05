@@ -130,7 +130,9 @@ impl<T: Send> Producer<T> {
     ///
     /// # Errors
     ///
-    /// [`Full`] holds the value when the ring has no room. Staged values take room.
+    /// [`Full`] holds the value when the ring has no room. Staged values take room,
+    /// and room comes back only after [`publish`](Self::publish): the consumer cannot
+    /// take staged values.
     pub fn stage(&mut self, value: T) -> Result<(), Full<T>> {
         let shared = &*self.shared;
         if self.tail.wrapping_sub(self.head) == shared.capacity {
@@ -469,6 +471,19 @@ mod tests {
         }
 
         #[test]
+        fn does_nothing_a_second_time_with_nothing_new_staged() {
+            let (mut producer, mut consumer) = new(config(2));
+            let (tally, waker) = create_waker();
+            assert_eq!(producer.stage(1), Ok(()));
+            producer.publish();
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Ready(Some(1)));
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
+            producer.publish();
+            assert_eq!(tally.count(), 0);
+            assert_eq!(poll_pop(&mut consumer, &waker), Poll::Pending);
+        }
+
+        #[test]
         fn does_nothing_with_nothing_staged() {
             let (mut producer, mut consumer) = new::<u8>(config(2));
             let (tally, waker) = create_waker();
@@ -747,18 +762,19 @@ mod tests {
             panic!("no result after {POLLS} polls");
         }
 
-        /// Pushes `value`, and yields while the ring is full. It panics when the ring
-        /// stays full for seconds, so a stuck consumer fails the test in place of a
-        /// hang.
+        /// Pushes `value`, and yields while the ring is full. It panics after `YIELDS`
+        /// yields (about 10 seconds on an M3 Max), so a stuck consumer fails the test
+        /// in place of a hang.
         fn push_yielding(producer: &mut Producer<usize>, mut value: usize) {
-            for _ in 0..1_000_000 {
+            const YIELDS: u32 = 50_000_000;
+            for _ in 0..YIELDS {
                 match producer.push(value) {
                     Ok(()) => return,
                     Err(Full(back)) => value = back,
                 }
                 thread::yield_now();
             }
-            panic!("the ring stayed full");
+            panic!("the ring stayed full for {YIELDS} yields");
         }
 
         fn carries_every_value_in_order(spins: u32) {
