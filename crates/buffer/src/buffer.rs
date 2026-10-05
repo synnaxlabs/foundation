@@ -84,7 +84,8 @@ pub enum Error {
     },
     /// No header block has the magic: the file is not a ring.
     Missing,
-    /// Both header blocks have the magic and a wrong CRC: the ring is lost.
+    /// Both header blocks have the magic and a wrong CRC, which no crash leaves:
+    /// the ring is lost.
     Damaged,
     /// The ring has a format version this build does not read.
     Version(u16),
