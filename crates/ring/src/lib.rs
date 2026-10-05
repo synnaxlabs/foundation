@@ -97,28 +97,3 @@ impl<T> fmt::Debug for Consumer<T> {
 /// A value that did not fit because the ring was full.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Full<T>(pub T);
-
-// Deliberate break: this crate names unsafe_code but runs no tests under Miri.
-
-#[cfg(all(
-    test,
-    loom,
-    not(miri),
-    not(shuttle),
-    not(fuzzing),
-    target_pointer_width = "64"
-))]
-mod loom_break {
-    #[test]
-    fn fails_under_loom() {
-        panic!("deliberate break: a loom test whose cfg rustfmt splits");
-    }
-}
-
-#[cfg(all(test, shuttle))]
-mod shuttle_break {
-    #[test]
-    fn fails_under_shuttle() {
-        panic!("deliberate break: a shuttle test");
-    }
-}
