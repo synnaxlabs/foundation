@@ -94,11 +94,10 @@ impl<const N: usize> Reader<N> {
     /// value. So `f` must have no effect other than its result. Only the last result
     /// comes out.
     ///
-    /// A read that returns a value saw no update after `f`, and an update makes its
-    /// number visible before its own `f` runs. So a clock reading in a read's `f` is no
-    /// later than one in the `f` of the update that replaced the value, when the
-    /// caller orders each reading with the loads around it: a counter read is not a
-    /// memory operation.
+    /// A read that returns the old value took a clock reading in `f` no later than
+    /// the update that replaced it took one in its `f`, when `f` orders its clock read
+    /// against the loads around it. A counter read is not a memory operation, so only
+    /// the clock adapter can order it.
     pub fn read<R>(&self, mut f: impl FnMut([u64; N]) -> R) -> R {
         loop {
             let mut before = self.shared.seq.load(Acquire);
@@ -108,9 +107,7 @@ impl<const N: usize> Reader<N> {
             }
             let value = array::from_fn(|index| self.shared.words[index].load(Relaxed));
             let result = f(value);
-            // SeqCst, not Acquire: a clock reading in `f` is not a memory operation,
-            // and the load must see an update whose clock reading came before it.
-            fence(SeqCst);
+            fence(Acquire);
             if self.shared.seq.load(Relaxed) == before {
                 return result;
             }
@@ -228,7 +225,7 @@ mod model {
 
     use loom::model::Builder;
     use loom::sync::Arc;
-    use loom::sync::atomic::AtomicU64;
+    use loom::sync::atomic::{AtomicU64, fence};
     use loom::thread;
 
     use super::new;
@@ -257,8 +254,9 @@ mod model {
     }
 
     /// A clock is a third thread that ticks. A clock reading is a `SeqCst` load of
-    /// the tick: it synchronizes with nothing, as a real clock does not. The model
-    /// fails when either fence is weaker than `SeqCst`.
+    /// the tick: it synchronizes with nothing, as a real clock does not. The fences
+    /// around the reader's tick load stand for the adapter's ordered counter read.
+    /// The model fails when the writer's fence is weaker than `SeqCst`.
     #[test]
     fn orders_an_old_read_before_the_update() {
         bounded(|| {
@@ -274,7 +272,12 @@ mod model {
             let reads = {
                 let clock = clock.clone();
                 thread::spawn(move || {
-                    reader.read(|[value]| (value, clock.load(SeqCst)))
+                    reader.read(|[value]| {
+                        fence(SeqCst);
+                        let tick = clock.load(SeqCst);
+                        fence(SeqCst);
+                        (value, tick)
+                    })
                 })
             };
             let mut updated = 0;
