@@ -8,6 +8,9 @@ publish.workspace = true
 [dependencies]
 types = { path = "../types" }
 
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+
 [[test]]
 name = "conformance"
 path = "../../oracles/conformance/raft/election.rs"
