@@ -5,7 +5,7 @@ use std::collections::btree_map::Entry;
 use std::fmt;
 use std::future;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Poll, Waker};
 
 use document::diagnostic::{Code, Diagnostic};
@@ -37,7 +37,7 @@ enum Claim<T> {
     Mine,
 }
 
-impl<K: Ord + Clone + fmt::Debug, S: PartialEq + fmt::Debug, T> Registry<K, S, T> {
+impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Registry<K, S, T> {
     /// Makes an empty registry.
     #[must_use]
     pub fn new() -> Self {
@@ -58,7 +58,7 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq + fmt::Debug, T> Registry<K, S, T
     ///
     /// # Panics
     ///
-    /// When a thread panicked while it held the registry's lock.
+    /// Only on a bug in this module: an open slot whose endpoint is gone.
     pub async fn acquire<F>(
         &self,
         key: K,
@@ -94,7 +94,7 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq + fmt::Debug, T> Registry<K, S, T
                     if *open == settings {
                         Poll::Ready(Ok(Claim::Shared(endpoint)))
                     } else {
-                        Poll::Ready(Err(unequal(&key, open)))
+                        Poll::Ready(Err(unequal(&key)))
                     }
                 }
             }
@@ -128,9 +128,7 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq + fmt::Debug, T> Registry<K, S, T
     }
 }
 
-impl<K: Ord + Clone + fmt::Debug, S: PartialEq + fmt::Debug, T> Default
-    for Registry<K, S, T>
-{
+impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Default for Registry<K, S, T> {
     fn default() -> Self {
         Self::new()
     }
@@ -143,9 +141,10 @@ impl<K: fmt::Debug, S, T> fmt::Debug for Registry<K, S, T> {
 }
 
 /// A share of one open endpoint. Derefs to the endpoint. When the last lease on it
-/// drops, the endpoint drops (closes) on that thread, and the next
-/// [`Registry::acquire`] of its key opens it again after the close. The close runs
-/// after the registry's lock is released, so it may be slow or use the registry.
+/// drops, the endpoint drops (closes) on that thread, after the registry's lock is
+/// released, and the next [`Registry::acquire`] of its key waits for the close. The
+/// last lease often drops on a shard, so the endpoint's drop must not block: an
+/// endpoint with a slow close hands the close to its own thread.
 ///
 /// A lease is not `Clone`: acquire again to share the endpoint.
 ///
@@ -223,11 +222,12 @@ impl<K: Ord, S, T> Drop for Free<'_, K, S, T> {
     }
 }
 
-fn unequal(key: &impl fmt::Debug, open: &impl fmt::Debug) -> Error {
+/// Settings can hold secrets, so the message never shows them.
+fn unequal(key: &impl fmt::Debug) -> Error {
     Error::Config(vec![Diagnostic::new(
         SETTINGS,
         None,
-        format!("the endpoint {key:?} is open with other settings: {open:?}"),
+        format!("the endpoint {key:?} is open with other settings"),
         "Give every connector on this endpoint the same settings".into(),
     )])
 }
@@ -238,8 +238,10 @@ fn wake<S, T>(slot: Option<Slot<S, T>>) {
     }
 }
 
+/// Recovers a poisoned lock, so that a drop never panics. No code under the lock
+/// leaves the map half changed when it panics.
 fn lock<K, S, T>(slots: &Slots<K, S, T>) -> MutexGuard<'_, BTreeMap<K, Slot<S, T>>> {
-    slots.lock().expect("no panic under the registry lock")
+    slots.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -438,7 +440,7 @@ mod tests {
             [Diagnostic::new(
                 SETTINGS,
                 None,
-                "the endpoint \"tty0\" is open with other settings: 9600".into(),
+                "the endpoint \"tty0\" is open with other settings".into(),
                 "Give every connector on this endpoint the same settings".into(),
             )]
         );
@@ -569,6 +571,35 @@ mod tests {
         let open = |(): &()| future::ready(Ok(probe));
         drop(block_on(ports.acquire(0, (), open)).expect("opens"));
         assert_eq!(free.load(Relaxed), 1, "the lock was free at the close");
+    }
+
+    /// Settings whose compare panics while the registry holds its lock.
+    #[derive(Debug)]
+    struct Touchy;
+
+    impl PartialEq for Touchy {
+        fn eq(&self, _: &Self) -> bool {
+            panic!("a panic under the registry lock");
+        }
+    }
+
+    #[test]
+    fn releases_after_a_panic_under_its_lock() {
+        let ports = Registry::<&str, Touchy, Port>::new();
+        let closes = Arc::new(AtomicUsize::new(0));
+        let port = Port {
+            n: 0,
+            closes: Arc::clone(&closes),
+        };
+        let lease = block_on(ports.acquire("tty0", Touchy, |_| async { Ok(port) }))
+            .expect("opens");
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(ports.acquire("tty0", Touchy, |_| async { unreachable!() }))
+        }));
+        assert!(unwound.is_err(), "the compare panics");
+        drop(lease);
+        assert_eq!(closes.load(Relaxed), 1);
+        assert_eq!(format!("{ports:?}"), "{}");
     }
 
     #[test]
