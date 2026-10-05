@@ -83,7 +83,7 @@ fn a_panic_fault_panics_a_task_of_the_shard() {
     );
     assert_eq!(
         handle.unwrap().join(),
-        Err(thread::Error::Panicked {
+        Err(thread::Panicked {
             name: "shard-0".into()
         })
     );
@@ -137,7 +137,7 @@ fn a_panic_fault_fires_when_the_main_future_completes_first() {
             assert_eq!(sim.run(), Err(panicked(seed)));
             assert_eq!(
                 handle.unwrap().join(),
-                Err(thread::Error::Panicked {
+                Err(thread::Panicked {
                     name: "shard-0".into()
                 })
             );

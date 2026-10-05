@@ -2,9 +2,14 @@
 //! etcd Authors, Apache License 2.0, see `LICENSE`). This file is modified from the
 //! etcd source: `README.md` lists each source and the changes.
 
-use raft::{Body, Data, Entry, Hard, Message, Position, Raft, Role, Term};
+use raft::{
+    Body, Data, Entry, Error, Hard, Message, Position, Raft, Ready, Role, Term,
+};
 
-use crate::common::{Disk, ELECTION, Network, at_term, count, key, start};
+use crate::common::{
+    Disk, ELECTION, Network, accept, accept_all, at_term, count, elect, key, leader,
+    noop, position, reply, start,
+};
 
 /// A log with one entry per term in `terms`, from index 1, with no data.
 fn log(terms: &[u64]) -> Vec<Entry> {
@@ -17,90 +22,8 @@ fn log(terms: &[u64]) -> Vec<Entry> {
 
 fn entry(term: u64, index: u64, data: &[u8]) -> Entry {
     Entry {
-        at: Position {
-            term: Term(term),
-            index,
-        },
+        at: position(term, index),
         data: Data::Bytes(data.to_vec()),
-    }
-}
-
-/// A leader's first entry of its term; etcd's noop entry.
-fn noop(term: u64, index: u64) -> Entry {
-    Entry {
-        at: Position {
-            term: Term(term),
-            index,
-        },
-        data: Data::Empty,
-    }
-}
-
-/// Elects node 1 with the votes of `others`. The leader's first `Ready` is left for
-/// the caller. etcd's tests call `becomeLeader` and send nothing.
-fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
-    let term = Term(raft.term().0 + 1);
-    raft.campaign();
-    disk.store(raft.ready());
-    for granted in [
-        Body::PreVoteReply { granted: true },
-        Body::VoteReply { granted: true },
-    ] {
-        let vote = granted == Body::VoteReply { granted: true };
-        for &from in others {
-            raft.step(Message {
-                from: key(from),
-                to: key(1),
-                term,
-                body: granted.clone(),
-            })
-            .unwrap();
-        }
-        if !vote {
-            disk.store(raft.ready());
-        }
-    }
-    assert_eq!(raft.role(), Role::Leader);
-}
-
-/// Node 1 at term 1 as the leader of `size` voters, with its first `Ready` left.
-fn leader(size: u8) -> (Raft, Disk) {
-    let voters: Vec<u8> = (1..=size).collect();
-    let others: Vec<u8> = (2..=size / 2 + 1).collect();
-    let (mut raft, mut disk) = start(1, &voters, ELECTION, Hard::default(), vec![], 0);
-    elect(&mut raft, &mut disk, &others);
-    (raft, disk)
-}
-
-/// etcd's `acceptAndReply`: the reply of a follower that took an `Append`.
-fn accept(message: &Message) -> Message {
-    let Body::Append { prev, entries, .. } = &message.body else {
-        panic!("type should be Append");
-    };
-    Message {
-        from: message.to,
-        to: message.from,
-        term: message.term,
-        body: Body::AppendReply {
-            last: prev.index + count(entries.len()),
-        },
-    }
-}
-
-/// Every follower accepts each `Append` until the leader sends none.
-fn accept_all(raft: &mut Raft, disk: &mut Disk) {
-    loop {
-        let messages = disk.store(raft.ready());
-        let appends: Vec<&Message> = messages
-            .iter()
-            .filter(|message| matches!(message.body, Body::Append { .. }))
-            .collect();
-        if appends.is_empty() {
-            return;
-        }
-        for message in appends {
-            raft.step(accept(message)).unwrap();
-        }
     }
 }
 
@@ -116,15 +39,6 @@ fn commit_noop(raft: &mut Raft, disk: &mut Disk) {
     disk.store(raft.ready());
 }
 
-fn reply(from: u8, term: u64, body: Body) -> Message {
-    Message {
-        from: key(from),
-        to: key(1),
-        term: Term(term),
-        body,
-    }
-}
-
 fn append(term: u64, prev: Position, entries: Vec<Entry>, commit: u64) -> Message {
     reply(
         2,
@@ -135,13 +49,6 @@ fn append(term: u64, prev: Position, entries: Vec<Entry>, commit: u64) -> Messag
             commit,
         },
     )
-}
-
-fn position(term: u64, index: u64) -> Position {
-    Position {
-        term: Term(term),
-        index,
-    }
 }
 
 #[test]
@@ -296,22 +203,45 @@ fn follower_check_msg_app() {
     }
 }
 
+/// etcd sends each append at term 2. Ours refuses an entry above the message's
+/// term with `Error::TermBehindLog`, then takes the same append at the term of its
+/// last entry.
 #[test]
 fn follower_append_entries() {
-    let cases: [(Position, Vec<Entry>, &[u64], bool); 4] = [
-        (position(2, 2), log3(&[3]), &[1, 2, 3], true),
-        (position(1, 1), log2(&[3, 4]), &[1, 3, 4], true),
-        (position(0, 0), log(&[1]), &[1, 2], false),
-        (position(0, 0), log(&[3]), &[3], true),
+    // The term of the last entry, `prev`, the entries, the terms on disk, whether
+    // the entries are unstable, and the `last` of the answer.
+    type Case = (u64, Position, Vec<Entry>, &'static [u64], bool, u64);
+    let cases: [Case; 4] = [
+        (3, position(2, 2), log3(&[3]), &[1, 2, 3], true, 3),
+        (4, position(1, 1), log2(&[3, 4]), &[1, 3, 4], true, 3),
+        (2, position(0, 0), log(&[1]), &[1, 2], false, 1),
+        (3, position(0, 0), log(&[3]), &[3], true, 1),
     ];
-    for (i, (prev, entries, terms, unstable)) in cases.into_iter().enumerate() {
+    for (i, case) in cases.into_iter().enumerate() {
+        let (term, prev, entries, terms, unstable, last) = case;
         let unstable = if unstable { entries.clone() } else { vec![] };
         let (mut raft, mut disk) =
             start(1, &[1, 2, 3], ELECTION, at_term(2), log(&[1, 2]), 0);
-        raft.step(append(2, prev, entries, 0)).unwrap();
+        if term > 2 {
+            let refused = Error::TermBehindLog {
+                term: Term(2),
+                last: entries.last().unwrap().at,
+            };
+            let etcd = append(2, prev, entries.clone(), 0);
+            assert_eq!(raft.step(etcd), Err(refused), "#{i}");
+            assert_eq!(raft.ready(), Ready::default(), "#{i}");
+        }
+        raft.step(append(term, prev, entries, 0)).unwrap();
         let ready = raft.ready();
         assert_eq!(ready.entries, unstable, "#{i}");
-        disk.store(ready);
+        let answer = Message {
+            from: key(1),
+            to: key(2),
+            term: Term(term),
+            body: Body::AppendReply { last },
+        };
+        assert_eq!(disk.store(ready), [answer], "#{i}");
+        assert_eq!(disk.hard.term, Term(term), "#{i}");
         assert_eq!(disk.entries, log(terms), "#{i}");
     }
 }

@@ -97,7 +97,9 @@ unsafe impl block::Memory for Memory {
         self.len
     }
 
-    fn commit(&self, _offset: usize, _len: usize) {}
+    fn commit(&self, _offset: usize, _len: usize) -> Result<(), block::Refused> {
+        Ok(())
+    }
 
     /// # Panics
     ///

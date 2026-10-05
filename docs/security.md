@@ -73,11 +73,13 @@ state on `main`.
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
   byte arrives), #298 (datagrams that are not valid, from one address, stop every
-  stateless reset; a small datagram of an unknown version gets a reply), #299 (a
-  peer makes the node hold certificates that are not valid for a session).
+  stateless reset; a small datagram of an unknown version gets a reply).
+- Fixed: #299 (a peer made the node hold certificates that are not valid for a
+  session). A chain is one certificate of at most 1 KiB.
 - Not decided: a limit on handshakes before admission. Each one costs the node a key
   exchange and one signature, and one signature check more when the peer sends a
-  certificate.
+  certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
+  timeout (#563).
 
 ### `transport` to protocols
 
@@ -118,7 +120,11 @@ state on `main`.
   placement. Not built (`spec`).
 - `raft` does not check the sender of a request, by decision: the caller
   authenticates the sender and decides which nodes may send (RAFT SURFACE). Not
-  built (`mesh`). `raft` trusts each field of a message. Open: #232.
+  built (`mesh`). Before it acts, `raft` checks the index a heartbeat or an append
+  answer names, the order of an append's entries, and that no entry is above the
+  append's term. A node that a change removed and that missed its release can win
+  an election once no voter has a lease, and lead until it commits the leave
+  (#483).
 - `raft` counts a reply only from a voter. But it takes a higher term from any
   sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
   #352 (a reply from a node that is not a voter makes the leader step down; one
@@ -146,9 +152,8 @@ state on `main`.
   encoding (`document`). Both readers bound nesting at 64 levels.
   `config_hcl::write` gives text that reads back as an equal `Document`. Fuzzed:
   `config_hcl_read`, `config_hcl_update`, `config_hcl_write`,
-  `document_encoding`. Open: #446 (`update` puts a new block after a kept block
-  it must come before; the `config_hcl_update` target finds it, so its long runs
-  wait on the fix).
+  `document_encoding`. Fixed: #446 (`update` put a new block after a kept block
+  it must come before); the `block_before_kept` inputs hold it.
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -175,8 +180,12 @@ state on `main`.
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
 - Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
-  reported durable or cannot open). Fixed: #393 (two CRC-valid fields stopped the
-  node at open); the `area` and `below_tail` inputs hold both.
+  reported durable or cannot open), #553 (a power cut after the first open loses
+  the new ring: its directory is not synced in its parent), #566 (a write of a dead
+  process can land on a ring that a new process opened), #572 (`append` takes a
+  record over the pool's largest block, and then each open fails). Fixed: #393 (two
+  CRC-valid fields stopped the node at open); the `area` and `below_tail` inputs
+  hold both.
 
 ### Device to connector
 
@@ -247,6 +256,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
+| `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
@@ -255,6 +265,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 | `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
+| `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks

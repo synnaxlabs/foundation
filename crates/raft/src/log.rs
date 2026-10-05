@@ -71,6 +71,13 @@ impl Log {
         voters_in(entry).map(|voters| (entry.at, voters))
     }
 
+    // The last configuration before `index`, or `None` with none.
+    pub(crate) fn voters_before(&self, index: u64) -> Option<&Voters> {
+        let end = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
+        let end = end.min(self.entries.len());
+        self.entries[..end].iter().rev().find_map(voters_in)
+    }
+
     // The position at `index`: the zero position for 0, `None` past the end.
     pub(crate) fn at(&self, index: u64) -> Option<Position> {
         if index == 0 {
@@ -80,11 +87,20 @@ impl Log {
         self.entries.get(at).map(|entry| entry.at)
     }
 
-    // Up to `max` entries from `index`, cloned for a message.
-    pub(crate) fn slice(&self, index: u64, max: usize) -> Vec<Entry> {
-        let from = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
+    // The index of the first entry of `term` or of a later term: one past the end
+    // with none.
+    pub(crate) fn first_of(&self, term: Term) -> u64 {
+        let before = self.entries.partition_point(|entry| entry.at.term < term);
+        u64::try_from(before).map_or(u64::MAX, |before| before.saturating_add(1))
+    }
+
+    // Up to `max` entries from index `from` through index `end`, cloned for a
+    // message. Empty when `from` is past `end` or past the log.
+    pub(crate) fn slice(&self, from: u64, end: u64, max: usize) -> Vec<Entry> {
+        let offset = |index: u64| usize::try_from(index).unwrap_or(usize::MAX);
+        let end = offset(end).min(self.entries.len());
         self.entries
-            .get(from..)
+            .get(offset(from.saturating_sub(1))..end)
             .unwrap_or_default()
             .iter()
             .take(max)
@@ -156,16 +172,14 @@ impl Log {
 
     // The entries no `Ready` has given to write yet.
     pub(crate) fn take_unstable(&mut self) -> Vec<Entry> {
-        let entries = self.slice(self.stable + 1, usize::MAX);
+        let entries = self.slice(self.stable + 1, u64::MAX, usize::MAX);
         self.stable = self.last().index;
         entries
     }
 
     // The committed entries no `Ready` has given to apply yet.
     pub(crate) fn take_committed(&mut self) -> Vec<Entry> {
-        let count =
-            usize::try_from(self.committed - self.applied).unwrap_or(usize::MAX);
-        let entries = self.slice(self.applied + 1, count);
+        let entries = self.slice(self.applied + 1, self.committed, usize::MAX);
         self.applied = self.committed;
         entries
     }
@@ -196,7 +210,10 @@ pub(crate) fn check(
 ) -> Result<Position, Error> {
     for entry in entries {
         let term = entry.at.term;
-        if entry.at.index != before.index + 1 || term < before.term || term == Term(0) {
+        if Some(entry.at.index) != before.index.checked_add(1)
+            || term < before.term
+            || term == Term(0)
+        {
             return Err(Error::EntryOutOfOrder {
                 at: entry.at,
                 before,
@@ -345,6 +362,16 @@ mod tests {
     }
 
     #[test]
+    fn gives_the_last_configuration_before_an_index() {
+        let entries = vec![config(1, 1, 1), entry(1, 2), config(1, 3, 2), entry(1, 4)];
+        let log = Log::new(entries, 0).unwrap();
+        let before: Vec<Option<&Voters>> =
+            (0..=6).map(|i| log.voters_before(i)).collect();
+        let (one, two) = (Some(&voters(1)), Some(&voters(2)));
+        assert_eq!(before, [None, None, one, one, two, two, two]);
+    }
+
+    #[test]
     fn an_append_puts_in_force_the_last_configuration_it_leaves_in_the_log() {
         let mut log =
             Log::new(vec![entry(1, 1), config(1, 2, 1), config(1, 3, 2)], 0).unwrap();
@@ -450,10 +477,20 @@ mod tests {
     }
 
     #[test]
-    fn gives_entries_from_an_index_up_to_a_limit() {
+    fn gives_the_first_index_of_a_term_or_of_a_later_one() {
+        let log = log(&[1, 1, 3, 3]);
+        let first: Vec<u64> = (0..=4).map(|term| log.first_of(Term(term))).collect();
+        assert_eq!(first, vec![1, 1, 3, 3, 5]);
+    }
+
+    #[test]
+    fn gives_entries_from_an_index_through_an_end_up_to_a_limit() {
         let log = log(&[1, 1, 2, 2]);
-        assert_eq!(log.slice(2, 2), vec![entry(1, 2), entry(2, 3)]);
-        assert_eq!(log.slice(4, 10), vec![entry(2, 4)]);
-        assert_eq!(log.slice(5, 10), vec![]);
+        assert_eq!(log.slice(2, 4, 2), vec![entry(1, 2), entry(2, 3)]);
+        assert_eq!(log.slice(4, u64::MAX, 10), vec![entry(2, 4)]);
+        assert_eq!(log.slice(5, u64::MAX, 10), vec![]);
+        assert_eq!(log.slice(2, 3, 10), vec![entry(1, 2), entry(2, 3)]);
+        assert_eq!(log.slice(3, 2, 10), vec![]);
+        assert_eq!(log.slice(4, 2, 10), vec![]);
     }
 }

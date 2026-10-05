@@ -72,11 +72,11 @@ impl Readers {
     /// # Panics
     ///
     /// If the latest session is not open.
-    pub fn take(&mut self, key: Key) -> Option<Frame> {
+    pub(super) fn take_latest(&mut self, key: Key) -> Option<Frame> {
         let i = self
             .latest
             .binary_search_by_key(&key, |session| session.key)
-            .unwrap_or_else(|_| panic!("latest session {key} is not open"));
+            .unwrap_or_else(|_| panic!("session {key} is not open"));
         if mem::replace(&mut self.latest[i].waiting, false) {
             self.newest.clone()
         } else {
@@ -97,54 +97,13 @@ impl Readers {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
 
     use proptest::prelude::*;
-    use types::channel::Slot;
-    use types::frame::key_set::{Group, Interner, KeySet};
-    use types::frame::{Draft, Form, Path};
     use types::time::Span;
 
     use super::*;
+    use crate::readers::tests::{Frames, number};
     use crate::{Position, Reader, Record, Start};
-
-    /// Frames of one index with no data channels. Frame `n` holds `n` in its index
-    /// series.
-    struct Frames {
-        pool: block::Pool,
-        set: Arc<KeySet>,
-    }
-
-    impl Frames {
-        /// Room for `count` frames at once. Each takes a 64-byte block and the block's
-        /// 64-byte header.
-        fn new(count: usize) -> Self {
-            let config = block::Config {
-                budget: count * 128,
-            };
-            let memory = block::Heap::new(config.reservation());
-            let index = Group {
-                index: Slot::new(1),
-                data: &[],
-            };
-            Self {
-                pool: block::Pool::new(config, memory),
-                set: Interner::new().intern(&[index]),
-            }
-        }
-
-        fn make(&self, n: u64) -> Result<Frame, types::frame::Error> {
-            let series = [(0, 8)];
-            let mut draft = Draft::new(&self.pool, &self.set, Form::Raw, &series)?;
-            let bytes = draft.series(0).expect("the index is present");
-            bytes.copy_from_slice(&n.to_le_bytes());
-            Ok(draft.freeze(Path::Live))
-        }
-
-        fn frame(&self, n: u64) -> Frame {
-            self.make(n).expect("the pool has room")
-        }
-    }
 
     fn at(nanos: i64) -> Stamp {
         Stamp::from_nanos(nanos)
@@ -173,11 +132,6 @@ mod tests {
         readers.open_latest(None, at(0)).key
     }
 
-    fn number(frame: &Frame) -> u64 {
-        let bytes = frame.series(0).expect("the index is present");
-        u64::from_le_bytes(bytes.try_into().expect("8 bytes"))
-    }
-
     fn taken(readers: &mut Readers, key: Key) -> Option<u64> {
         readers.take(key).as_ref().map(number)
     }
@@ -192,7 +146,7 @@ mod tests {
         #[test]
         fn gets_the_newest_frame_at_once() {
             let frames = Frames::new(4);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             assert_eq!(put(&mut readers, frames.frame(1)), []);
             assert_eq!(put(&mut readers, frames.frame(2)), []);
             let latest = readers.open_latest(None, at(0));
@@ -203,7 +157,7 @@ mod tests {
 
         #[test]
         fn gets_nothing_before_the_first_frame() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let latest = readers.open_latest(None, at(0));
             assert!(!latest.woken);
             assert_eq!(taken(&mut readers, latest.key), None);
@@ -211,7 +165,7 @@ mod tests {
 
         #[test]
         fn shares_the_key_space_with_complete_sessions() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let a = complete(&mut readers, "a", live(0));
             let b = unnamed(&mut readers);
             readers.close(b, at(0));
@@ -221,7 +175,7 @@ mod tests {
 
         #[test]
         fn takes_over_a_latest_session() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let old = readers.open_latest(Some(name("a")), at(0)).key;
             let new = readers.open_latest(Some(name("a")), at(1));
             assert_eq!(new.replaced, Some(old));
@@ -230,9 +184,9 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "latest session 0 is not open")]
+        #[should_panic(expected = "session 0 is not open")]
         fn closes_the_latest_session_it_takes_over() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let old = readers.open_latest(Some(name("a")), at(0)).key;
             let new = readers.open_latest(Some(name("a")), at(1));
             assert_eq!(new.replaced, Some(old));
@@ -241,7 +195,7 @@ mod tests {
 
         #[test]
         fn closes_the_complete_session_it_takes_over() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let old = complete(&mut readers, "a", live(5));
             assert_eq!(readers.records().count(), 1, "the open record");
             let new = readers.open_latest(Some(name("a")), at(3));
@@ -259,7 +213,7 @@ mod tests {
 
         #[test]
         fn leaves_a_hold_to_the_next_complete_session() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let old = complete(&mut readers, "a", live(5));
             readers.close(old, at(1));
             let latest = readers.open_latest(Some(name("a")), at(2)).key;
@@ -280,7 +234,7 @@ mod tests {
         #[test]
         fn holds_nothing_and_writes_no_record() {
             let frames = Frames::new(4);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let key = readers.open_latest(Some(name("a")), at(0)).key;
             assert_eq!(put(&mut readers, frames.frame(1)), [key]);
             readers.close(key, at(1));
@@ -295,9 +249,9 @@ mod tests {
         use super::*;
 
         #[test]
-        #[should_panic(expected = "latest session 0 is not open")]
+        #[should_panic(expected = "session 0 is not open")]
         fn closes_the_latest_session_it_takes_over() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let old = readers.open_latest(Some(name("a")), at(0)).key;
             assert_eq!(complete(&mut readers, "a", live(0)), Key(1));
             readers.take(old);
@@ -310,7 +264,7 @@ mod tests {
         #[test]
         fn makes_the_frame_wait_for_each_session() {
             let frames = Frames::new(4);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let (a, b) = (unnamed(&mut readers), unnamed(&mut readers));
             assert_eq!(put(&mut readers, frames.frame(1)), [a, b]);
             assert_eq!(taken(&mut readers, a), Some(1));
@@ -320,7 +274,7 @@ mod tests {
         #[test]
         fn replaces_the_waiting_frame() {
             let frames = Frames::new(4);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let key = unnamed(&mut readers);
             assert_eq!(put(&mut readers, frames.frame(1)), [key]);
             assert_eq!(put(&mut readers, frames.frame(2)), []);
@@ -331,7 +285,7 @@ mod tests {
         #[test]
         fn wakes_only_sessions_with_no_waiting_frame() {
             let frames = Frames::new(4);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let (a, b, c) = (
                 unnamed(&mut readers),
                 unnamed(&mut readers),
@@ -346,7 +300,7 @@ mod tests {
         #[test]
         fn wakes_no_closed_session() {
             let frames = Frames::new(4);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let (a, b) = (unnamed(&mut readers), unnamed(&mut readers));
             readers.close(a, at(0));
             assert_eq!(put(&mut readers, frames.frame(1)), [b]);
@@ -355,7 +309,7 @@ mod tests {
         #[test]
         fn wakes_no_complete_session() {
             let frames = Frames::new(4);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             complete(&mut readers, "a", live(0));
             let key = unnamed(&mut readers);
             assert_eq!(put(&mut readers, frames.frame(1)), [key]);
@@ -364,7 +318,7 @@ mod tests {
         #[test]
         fn releases_the_frame_it_replaces() {
             let frames = Frames::new(2);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let key = unnamed(&mut readers);
             assert_eq!(put(&mut readers, frames.frame(1)), [key]);
             let second = frames.frame(2);
@@ -380,7 +334,7 @@ mod tests {
         #[test]
         fn keeps_a_taken_frame_alive() {
             let frames = Frames::new(2);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let key = unnamed(&mut readers);
             assert_eq!(put(&mut readers, frames.frame(1)), [key]);
             let sending = readers.take(key).expect("frame 1 waits");
@@ -397,19 +351,11 @@ mod tests {
         use super::*;
 
         #[test]
-        #[should_panic(expected = "latest session 0 is not open")]
+        #[should_panic(expected = "session 0 is not open")]
         fn panics_on_a_closed_session() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let key = unnamed(&mut readers);
             readers.close(key, at(0));
-            readers.take(key);
-        }
-
-        #[test]
-        #[should_panic(expected = "latest session 0 is not open")]
-        fn panics_on_a_complete_session() {
-            let mut readers = Readers::new();
-            let key = complete(&mut readers, "a", live(0));
             readers.take(key);
         }
     }
@@ -420,7 +366,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "complete session 0 is not open")]
         fn panics_on_a_latest_session() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let key = unnamed(&mut readers);
             readers.ack(key, live(1)).expect("panics before");
         }
@@ -432,7 +378,7 @@ mod tests {
         #[test]
         fn gives_a_new_session_only_the_newest_frame() {
             let frames = Frames::new(4);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let old = unnamed(&mut readers);
             assert_eq!(put(&mut readers, frames.frame(1)), [old]);
             assert_eq!(put(&mut readers, frames.frame(2)), []);
@@ -445,7 +391,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "session 0 is not open")]
         fn panics_on_a_closed_session() {
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let key = unnamed(&mut readers);
             readers.close(key, at(0));
             readers.close(key, at(1));
@@ -497,7 +443,7 @@ mod tests {
 
         fn check(inputs: Vec<Input>) {
             let frames = Frames::new(4);
-            let mut readers = Readers::new();
+            let mut readers = Readers::new(0);
             let mut model = Model::default();
             let mut n = 0;
             for input in inputs {

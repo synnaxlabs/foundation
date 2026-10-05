@@ -2,7 +2,7 @@
 //! frame by its channel and type, then the frame's series bytes.
 
 use block::Block;
-use types::channel::{self, Slot};
+use types::channel;
 use types::frame::key_set::KeySet;
 use types::frame::{self, Form, Frame};
 use types::sample::{Scalar, Type};
@@ -21,8 +21,8 @@ mod at {
 }
 
 /// The stored body of `frame`, an encoded index frame of `set`, as the two parts of
-/// one buffer entry: a header block from `pool`, then [`Frame::body`]. `key` gives the
-/// channel key of a slot. Copies no series byte.
+/// one buffer entry: a header block from `pool`, then [`Frame::body`]. Copies no
+/// series byte.
 ///
 /// # Errors
 ///
@@ -35,7 +35,6 @@ pub(crate) fn body(
     pool: &block::Pool,
     frame: &Frame,
     set: &KeySet,
-    key: impl Fn(Slot) -> channel::Key,
 ) -> Result<[Block; 2], block::Error> {
     assert_eq!(frame.form(), Form::Encoded, "the frame is not encoded");
     assert_eq!(
@@ -58,7 +57,7 @@ pub(crate) fn body(
             "the frame has more than one group"
         );
         let (kind, element, n) = codes(entry.data_type);
-        let channel = key(entry.slot).as_u128().to_le_bytes();
+        let channel = entry.key.as_u128().to_le_bytes();
         descriptor[..at::KIND].copy_from_slice(&channel);
         descriptor[at::KIND] = kind;
         descriptor[at::ELEMENT] = element;
@@ -200,15 +199,15 @@ mod tests {
     use std::iter;
     use std::sync::Arc;
 
-    use proptest::collection::vec;
+    use proptest::collection::{btree_set, vec};
     use proptest::prelude::*;
-    use std::collections::BTreeMap;
 
+    use types::channel::Slot;
     use types::frame::key_set::{Group, Interner};
     use types::frame::{Draft, Path};
 
     use super::*;
-    use crate::common::pool;
+    use crate::common::{interner, key, pool};
 
     const SCALARS: [Scalar; 14] = [
         Scalar::Bool,
@@ -226,12 +225,6 @@ mod tests {
         Scalar::Span,
         Scalar::Uuid,
     ];
-
-    /// A key with the slot number in its first and last byte.
-    fn key(slot: Slot) -> channel::Key {
-        let bits = u128::from(slot.get());
-        channel::Key::from_u128(bits << 120 | bits)
-    }
 
     /// A live frame of `set` in `form` with each present entry and its bytes, in
     /// entry order.
@@ -261,13 +254,13 @@ mod tests {
 
     /// The stored body of one index series of 8 bytes: 38 bytes.
     fn stored() -> Vec<u8> {
-        let set = Interner::new().intern(&[Group {
-            index: Slot::new(1),
+        let set = interner().intern(&[Group {
+            index: key(Slot::new(1)),
             data: &[],
         }]);
         let pool = pool(4096);
         let frame = frame(&pool, &set, &[(0, &[9; 8])]);
-        joined(&body(&pool, &frame, &set, key).expect("room"))
+        joined(&body(&pool, &frame, &set).expect("room"))
     }
 
     mod body {
@@ -275,21 +268,28 @@ mod tests {
 
         #[test]
         fn lays_out_the_header_then_the_series() {
-            let data = [(Slot::new(2), Type::Scalar(Scalar::U8))];
+            let index = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+            let channel = [
+                16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+            ];
+            let data = [(
+                channel::Key::from_u128(u128::from_le_bytes(channel)),
+                Type::Scalar(Scalar::U8),
+            )];
             let set = Interner::new().intern(&[Group {
-                index: Slot::new(1),
+                index: channel::Key::from_u128(u128::from_le_bytes(index)),
                 data: &data,
             }]);
             let pool = pool(4096);
             let stamps = [7; 16];
             let frame = frame(&pool, &set, &[(0, &stamps), (1, &[1, 2, 3])]);
-            let parts = body(&pool, &frame, &set, key).expect("room");
+            let parts = body(&pool, &frame, &set).expect("room");
             let header = [
                 &[2, 0, 0, 0][..],
-                &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                &index,
                 &[0, 11, 0, 0, 0, 0],
                 &[16, 0, 0, 0],
-                &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+                &channel,
                 &[0, 5, 0, 0, 0, 0],
                 &[19, 0, 0, 0],
             ]
@@ -334,10 +334,10 @@ mod tests {
             ];
             let data: Vec<_> = (2..)
                 .zip(cases)
-                .map(|(slot, (data_type, _))| (Slot::new(slot), data_type))
+                .map(|(slot, (data_type, _))| (key(Slot::new(slot)), data_type))
                 .collect();
-            let set = Interner::new().intern(&[Group {
-                index: Slot::new(1),
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(1)),
                 data: &data,
             }]);
             let pool = pool(4096);
@@ -345,7 +345,7 @@ mod tests {
                 .map(|entry| (entry, &[][..]))
                 .collect();
             let frame = frame(&pool, &set, &series);
-            let parts = body(&pool, &frame, &set, key).expect("room");
+            let parts = body(&pool, &frame, &set).expect("room");
 
             let (descriptors, rest) = parts[0][COUNT..].as_chunks::<DESCRIPTOR>();
             assert!(rest.is_empty(), "the header is whole descriptors");
@@ -365,8 +365,8 @@ mod tests {
 
         #[test]
         fn returns_the_pool_error_when_the_pool_is_full() {
-            let set = Interner::new().intern(&[Group {
-                index: Slot::new(1),
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(1)),
                 data: &[],
             }]);
             let frames = pool(4096);
@@ -378,7 +378,7 @@ mod tests {
             }
             let available = 4096 - heads.committed();
 
-            let error = body(&heads, &frame, &set, key).expect_err("full");
+            let error = body(&heads, &frame, &set).expect_err("full");
 
             assert_eq!(
                 error,
@@ -399,40 +399,40 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is not encoded")]
             fn panics_on_a_raw_frame() {
-                let set = Interner::new().intern(&[Group {
-                    index: Slot::new(1),
+                let set = interner().intern(&[Group {
+                    index: key(Slot::new(1)),
                     data: &[],
                 }]);
                 let pool = pool(4096);
                 let frame = draft(&pool, &set, Form::Raw, &[(0, &[0; 8])]);
-                drop(body(&pool, &frame, &set, key));
+                drop(body(&pool, &frame, &set));
             }
 
             #[test]
             #[should_panic(expected = "the frame is not of the key set")]
             fn panics_on_a_frame_of_another_key_set() {
-                let mut interner = Interner::new();
+                let mut interner = interner();
                 let [of, other] = [1, 2].map(|slot| {
                     interner.intern(&[Group {
-                        index: Slot::new(slot),
+                        index: key(Slot::new(slot)),
                         data: &[],
                     }])
                 });
                 let pool = pool(4096);
                 let frame = frame(&pool, &of, &[(0, &[0; 8])]);
-                drop(body(&pool, &frame, &other, key));
+                drop(body(&pool, &frame, &other));
             }
 
             #[test]
             #[should_panic(expected = "the frame has more than one group")]
             fn panics_on_a_frame_of_two_groups() {
-                let set = Interner::new().intern(&[1, 2].map(|slot| Group {
-                    index: Slot::new(slot),
+                let set = interner().intern(&[1, 2].map(|slot| Group {
+                    index: key(Slot::new(slot)),
                     data: &[],
                 }));
                 let pool = pool(4096);
                 let frame = frame(&pool, &set, &[(0, &[0; 8]), (1, &[0; 8])]);
-                drop(body(&pool, &frame, &set, key));
+                drop(body(&pool, &frame, &set));
             }
         }
     }
@@ -525,31 +525,35 @@ mod tests {
         #[derive(Debug, Clone)]
         struct Entry {
             present: bool,
-            channel: channel::Key,
             bytes: Vec<u8>,
         }
 
-        /// The data types of each group, the present group, then each entry of
-        /// their key set.
-        fn write() -> impl Strategy<Value = (Vec<Vec<Type>>, usize, Vec<Entry>)> {
+        /// A write: the data types of each group, the distinct keys of its index and
+        /// then its data channels, the present group, then each entry of their key
+        /// set.
+        fn write() -> impl Strategy<Value = Write> {
             vec(vec(data_type(), 0..4), 1..4).prop_flat_map(|groups| {
                 let entries: usize = groups.iter().map(|data| data.len() + 1).sum();
-                let entry = (any::<bool>(), any::<u128>(), vec(any::<u8>(), 0..24))
-                    .prop_map(|(present, bits, bytes)| Entry {
-                        present,
-                        channel: channel::Key::from_u128(bits),
-                        bytes,
-                    });
-                (0..groups.len(), vec(entry, entries), Just(groups))
-                    .prop_map(|(group, entries, groups)| (groups, group, entries))
+                let keys = btree_set(any::<u128>(), entries)
+                    .prop_map(|bits| {
+                        bits.into_iter().map(channel::Key::from_u128).collect()
+                    })
+                    .prop_shuffle();
+                let entry = (any::<bool>(), vec(any::<u8>(), 0..24))
+                    .prop_map(|(present, bytes)| Entry { present, bytes });
+                let group = 0..groups.len();
+                (Just(groups), keys, group, vec(entry, entries))
             })
         }
 
-        /// A key set of `groups`, each the data types on one index.
-        fn key_set(groups: &[Vec<Type>]) -> Arc<KeySet> {
-            let mut slots = (1..).map(Slot::new);
-            let mut next = || slots.next().expect("slots never end");
-            let data: Vec<(Slot, Vec<(Slot, Type)>)> = groups
+        type Write = (Vec<Vec<Type>>, Vec<channel::Key>, usize, Vec<Entry>);
+
+        /// A key set of `groups`, each the data types on one index, with `keys` in
+        /// order.
+        fn key_set(groups: &[Vec<Type>], keys: &[channel::Key]) -> Arc<KeySet> {
+            let mut keys = keys.iter().copied();
+            let mut next = || keys.next().expect("a key for each channel");
+            let data: Vec<(channel::Key, Vec<(channel::Key, Type)>)> = groups
                 .iter()
                 .map(|types| (next(), types.iter().map(|&t| (next(), t)).collect()))
                 .collect();
@@ -565,21 +569,17 @@ mod tests {
 
         proptest! {
             #[test]
-            fn reads_back_each_present_series((groups, group, entries) in write()) {
-                let set = key_set(&groups);
+            fn reads_back_each_present_series((groups, keys, group, entries) in write()) {
+                let set = key_set(&groups, &keys);
                 let series: Vec<(usize, &[u8])> = (0..entries.len())
                     .filter(|&e| to_usize(set.entries()[e].group) == group)
                     .filter(|&e| entries[e].present && entries[set.index(e)].present)
                     .map(|entry| (entry, &entries[entry].bytes[..]))
                     .collect();
-                let channels: BTreeMap<_, _> = iter::zip(set.entries(), &entries)
-                    .map(|(entry, write)| (entry.slot, write.channel))
-                    .collect();
                 let pool = pool(1 << 16);
                 let frame = frame(&pool, &set, &series);
 
-                let key = |slot| channels[&slot];
-                let parts = body(&pool, &frame, &set, key).expect("room");
+                let parts = body(&pool, &frame, &set).expect("room");
 
                 prop_assert_eq!(parts[0].len(), COUNT + DESCRIPTOR * series.len());
                 let body = joined(&parts);
@@ -587,7 +587,7 @@ mod tests {
                 let expected: Vec<_> = series
                     .iter()
                     .map(|&(entry, bytes)| Series {
-                        channel: channels[&set.entries()[entry].slot],
+                        channel: set.entries()[entry].key,
                         data_type: set.entries()[entry].data_type,
                         bytes,
                     })

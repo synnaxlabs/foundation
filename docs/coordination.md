@@ -72,15 +72,14 @@ Most of the cost is context size per turn, so keep each context small:
 | `memory` | Fable | `block`, `ring` |
 | `data-path` | Opus | `types`, `codec`, `wire` |
 | `consensus` | Fable | `raft`, `spec`, then `mesh`, `blob` |
-| `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark |
-| `write-path` | Opus | `control`, `delivery`, then `home` |
+| `simulation` | Opus | `env`, `os`, `sim`, the QUIC against TLS over TCP benchmark, then two nodes in `sim` (`node`, #462) |
+| `write-path` | Opus | `control`, `delivery`, `home`, then `hub` (#462) |
 | `storage` | Fable | `buffer`, then `replica` |
 | `time` | Opus | `estimate`, then `clock` |
 | `config` | Opus | `document`, `config-hcl`, then `config` |
 | `network` | Opus | `transport` |
 | `advisor` | Opus | Answers design questions; writes no code here |
 | **Factory host** | | |
-| `hub` | Fable | `hub`; starts after `home`'s write path and `mesh`'s snapshot and watch |
 | `connector` | Opus | `connector` (the kind contract, supervisor, `ctx`, components) |
 | `access` | Opus | `secret`, then `access` after `spec` (#43) |
 | `ops` | Opus | `node` first as a walking skeleton for `verify`, then `ops` |
@@ -276,6 +275,11 @@ Sessions message each other with `SendMessage`, by name. Find names with
   docs first, then send the link.
 - An idle session wakes when a message arrives. Do not send a message to check if a
   session is alive.
+- **A question for the person** states the problem, the fix, its cost, and a
+  recommendation. For each option, it says whether it is a patch or the long-term
+  path; for a patch, it names the long-term fix. The person decided on 2026-10-05:
+  "whenever you present thes, you need to tell me hwether its a patch and not a long
+  term fix or the long term path".
 
 ## Before a session stops
 
