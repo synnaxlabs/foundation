@@ -797,14 +797,16 @@ How to read this record:
   and the caller gets `Error::Broken`. Each connection keeps two budgets, which count
   the length of each message. A sender starts a message only when the messages it
   started and the streams have not taken in full stay within the peer's
-  `window_bytes`; else the write waits for `Writable`. A receiver takes a block only
-  when the messages that hold one stay within `window_bytes` plus
-  `message_bytes_max`; else the read waits for `Readable`. So bytes that wait for a
-  block never use up the credit that a started message needs, and a peer that breaks
-  the send rule holds at most the receive budget and stops only its own connection.
-  Until the hello carries the peer's window, a sender uses its own. Proposed by
-  `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
-  `network` in #228.
+  `window_bytes`; else the write waits for `Writable`. A send that does not wait
+  (`try_send`) starts a message only by the same rule and when the stream holds no part
+  of an earlier one; else it gives the message back with no byte sent, and the stream
+  does not wait for room (#597). A receiver takes a block only when the messages that
+  hold one stay within `window_bytes` plus `message_bytes_max`; else the read waits for
+  `Readable`. So bytes that wait for a block never use up the credit that a started
+  message needs, and a peer that breaks the send rule holds at most the receive budget
+  and stops only its own connection. Until the hello carries the peer's window, a sender
+  uses its own. Proposed by `network` in #55; approved by the coordinator on PR #407.
+  The budgets: proposed by `network` in #228.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is

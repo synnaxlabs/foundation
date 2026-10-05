@@ -296,14 +296,40 @@ impl Endpoint {
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
-        assert!(
-            message.len() <= self.message_bytes_max,
-            "a message of {} bytes is over the largest message, {} bytes",
-            message.len(),
-            self.message_bytes_max
-        );
+        self.check_size(&message);
         sender.load(message);
         self.flush(now, sender)
+    }
+
+    /// Puts `message` on the stream after the messages before it when the stream
+    /// can take it now. Else gives it back with nothing of it sent: when `sender`
+    /// still holds part of an earlier message after a flush, when the send budget
+    /// has no room for it, or when the connection ended. The stream does not wait
+    /// for room for a message it gives back. Once taken, `sender` may hold the rest
+    /// of it: call [`Endpoint::flush`] after [`Event::Writable`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Stopped`] when the peer stopped the stream.
+    ///
+    /// # Panics
+    ///
+    /// After [`Endpoint::finish`], or when `message` is over the largest message
+    /// (this side's own until the hello).
+    pub(crate) fn try_write(
+        &mut self,
+        now: Monotonic,
+        sender: &mut Sender,
+        message: Block,
+    ) -> Result<Option<Block>, Error> {
+        self.check_size(&message);
+        sender.check_unfinished();
+        let key = sender.key().connection;
+        let mut message = Some(message);
+        self.streams(now, key, (), |streams, inner, _, events| {
+            streams.try_write(inner, sender, &mut message, events)
+        })?;
+        Ok(message)
     }
 
     /// Writes the rest of the message that `sender` holds. `Ready` when it holds
@@ -376,6 +402,18 @@ impl Endpoint {
     /// The next event, in the order they happened.
     pub(crate) fn poll(&mut self) -> Option<Event> {
         self.events.pop_front()
+    }
+
+    /// # Panics
+    ///
+    /// When `message` is over the largest message.
+    fn check_size(&self, message: &Block) {
+        assert!(
+            message.len() <= self.message_bytes_max,
+            "a message of {} bytes is over the largest message, {} bytes",
+            message.len(),
+            self.message_bytes_max
+        );
     }
 
     fn instant(&self, now: Monotonic) -> Instant {
