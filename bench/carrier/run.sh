@@ -139,6 +139,7 @@ done
 grep . /sys/class/net/$iface/queues/rx-*/rps_cpus
 grep -E "$iface|CPU0" /proc/interrupts
 cat /proc/cmdline
+grep -E 'CONFIG_(IRQ_TIME_ACCOUNTING|HZ)[ =]' "/boot/config-$(uname -r)"
 cd foundation && ~/.cargo/bin/rustc -V
 EOF
 }
