@@ -14,9 +14,6 @@ pub(crate) struct Token<'a> {
 pub(crate) enum Kind {
     /// An [`identifier_start`], then [`identifier_part`]s.
     Identifier,
-    /// A word with `.` or `@`, which only a reference can be: identifier parts, `@`,
-    /// and dots, which `types::name` checks.
-    Reference,
     /// Digits, then an optional fraction and an optional exponent.
     Number,
     /// A quoted string, with its escapes read.
@@ -151,7 +148,10 @@ impl<'a> Tokens<'a> {
                 self.number();
                 Kind::Number
             }
-            c if identifier_start(c) || c == '@' => self.word(c),
+            c if identifier_start(c) => {
+                self.identifier();
+                Kind::Identifier
+            }
             _ => Kind::Other,
         };
         Ok(self.token(kind, rest, start))
@@ -313,27 +313,14 @@ impl<'a> Tokens<'a> {
         self.skip_bytes(len);
     }
 
-    /// Moves past the rest of a word after its first character, `first`.
-    fn word(&mut self, first: char) -> Kind {
-        let rest = self.rest;
-        // A dot is part of the word unless it starts a splat or an expansion.
-        let dot = |i: usize| {
-            let after = rest.get(i..).unwrap_or_default();
-            !after.starts_with(".*") && !after.starts_with("...")
-        };
-        let len = rest
+    /// Moves past the rest of an identifier after its first character.
+    fn identifier(&mut self) {
+        let len = self
+            .rest
             .char_indices()
-            .find(|&(i, c)| !(identifier_part(c) || c == '@' || c == '.' && dot(i)))
-            .map_or(rest.len(), |(i, _)| i);
-        let word = rest
-            .get(..len)
-            .expect("invariant: a word ends on a character boundary");
+            .find(|&(_, c)| !identifier_part(c))
+            .map_or(self.rest.len(), |(i, _)| i);
         self.skip_bytes(len);
-        if first == '@' || word.contains(['.', '@']) {
-            Kind::Reference
-        } else {
-            Kind::Identifier
-        }
     }
 
     /// Reads a quoted string after its opening quote at `start`.
@@ -521,13 +508,10 @@ impl<'a> Tokens<'a> {
     }
 }
 
-/// The kind of the word that all of `text` reads as: [`Kind::Identifier`] or
-/// [`Kind::Reference`]. `None` when `text` reads as any other token, or as more than
-/// one.
-pub(crate) fn word(text: &str) -> Option<Kind> {
-    let token = Tokens::new(Source(0), text).ok()?.next();
-    (matches!(token.kind, Kind::Identifier | Kind::Reference) && token.text == text)
-        .then_some(token.kind)
+/// Reports whether all of `text` reads as one [`Kind::Identifier`].
+pub(crate) fn identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(identifier_start) && chars.all(identifier_part)
 }
 
 /// Reports whether `c` can start an identifier. HCL uses `ID_Start`, and the

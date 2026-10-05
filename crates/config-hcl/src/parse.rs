@@ -203,9 +203,7 @@ impl<'a> Parser<'a> {
         }
         let token = self.take()?;
         let kind = match token.kind {
-            lex::Kind::Identifier | lex::Kind::Reference => {
-                return self.word(&token, depth);
-            }
+            lex::Kind::Identifier => return self.word(&token, depth),
             lex::Kind::Number => return Ok(self.number(&token, None)),
             lex::Kind::Minus if self.token.kind == lex::Kind::Number => {
                 let digits = self.take()?;
@@ -260,11 +258,7 @@ impl<'a> Parser<'a> {
 
     /// Refuses a `for` expression at the start of a list or an object.
     fn refuse_for(&mut self) -> Result<(), Error> {
-        if matches!(
-            self.token.kind,
-            lex::Kind::Identifier | lex::Kind::Reference
-        ) && opens_for(self.token.text)
-        {
+        if self.token.kind == lex::Kind::Identifier && opens_for(self.token.text) {
             self.refuse(Form::For, Ends::Close)?;
         }
         Ok(())
@@ -304,9 +298,7 @@ impl<'a> Parser<'a> {
     }
 
     fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
-        if self.token.kind == lex::Kind::OpenParenthesis
-            && word.kind == lex::Kind::Identifier
-        {
+        if self.token.kind == lex::Kind::OpenParenthesis {
             return self.call(word, depth).map(Some);
         }
         if self.token.kind == lex::Kind::DoubleColon {
@@ -322,21 +314,41 @@ impl<'a> Parser<'a> {
                 });
                 return Ok(None);
             }
-            None => match word.text.parse::<Name>() {
-                Ok(name) => value::Kind::Reference(name),
-                Err(error) => {
-                    self.errors.push(Error::Name {
-                        span: word.span,
-                        error,
-                    });
-                    return Ok(None);
-                }
-            },
+            None => return self.reference(word),
         };
         Ok(Some(Value {
             kind,
             span: Some(word.span),
         }))
+    }
+
+    /// Reads a reference from its first part: each `.` and identifier after it.
+    fn reference(&mut self, first: &Token<'a>) -> Result<Option<Value>, Error> {
+        let mut text = String::from(first.text);
+        let mut span = first.span;
+        // Each pass takes two tokens or returns.
+        for _ in 0..=self.len {
+            if self.token.kind != lex::Kind::Dot
+                || self.second().kind != lex::Kind::Identifier
+            {
+                return match text.parse::<Name>() {
+                    Ok(name) => Ok(Some(Value {
+                        kind: value::Kind::Reference(name),
+                        span: Some(span),
+                    })),
+                    Err(error) => {
+                        self.errors.push(Error::Name { span, error });
+                        Ok(None)
+                    }
+                };
+            }
+            self.take()?;
+            let part = self.take()?;
+            text.push('.');
+            text.push_str(part.text);
+            span = join(span, part.span);
+        }
+        unreachable!("invariant: each pass takes two tokens")
     }
 
     /// Reads a number, after its minus sign if `minus` holds the sign's span. Returns
@@ -582,12 +594,13 @@ impl<'a> Parser<'a> {
             "invariant: no rule takes the end, at {:?}",
             self.token.span
         );
-        let next = if self.newlines_skipped {
-            self.tokens.next_past_lines()
-        } else {
-            self.tokens.next()
-        };
-        Ok(std::mem::replace(&mut self.token, next))
+        let token = next(&mut self.tokens, self.newlines_skipped);
+        Ok(std::mem::replace(&mut self.token, token))
+    }
+
+    /// The token after the next one, as [`Parser::take`] reads it.
+    fn second(&self) -> Token<'a> {
+        next(&mut self.tokens.clone(), self.newlines_skipped)
     }
 
     /// The first token after the next one that is not a new line.
@@ -607,6 +620,15 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The next token of `tokens`, past new lines when `newlines_skipped` holds.
+fn next<'a>(tokens: &mut Tokens<'a>, newlines_skipped: bool) -> Token<'a> {
+    if newlines_skipped {
+        tokens.next_past_lines()
+    } else {
+        tokens.next()
+    }
+}
+
 /// A word that reads as a value, not as a reference.
 pub(crate) enum Literal {
     Bool(bool),
@@ -614,8 +636,7 @@ pub(crate) enum Literal {
 }
 
 /// Reports whether HCL reads `word` after `[` or `{` as the start of a `for`
-/// expression. The lexer reads `for.x` as one word, and HCL decides on its first
-/// part.
+/// expression: whether its first part is `for`.
 pub(crate) fn opens_for(word: &str) -> bool {
     word.split('.').next() == Some("for")
 }
@@ -856,14 +877,35 @@ c = "°C # not a comment"
 
         #[test]
         fn reads_references() {
-            let text = "a = site_a.pt_1\nb = site_a.1\nc = @system.x\nd = a-b.c-d\n";
+            let text = "a = site_a.pt_1\nb = a-b.c-d\nc = x.true.for\n";
             let expected = attributes(vec![
                 ("a", reference("site_a.pt_1")),
-                ("b", reference("site_a.1")),
-                ("c", reference("@system.x")),
-                ("d", reference("a-b.c-d")),
+                ("b", reference("a-b.c-d")),
+                ("c", reference("x.true.for")),
             ]);
             assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_a_reference_past_spaces_and_bracketed_new_lines_as_hcl_does() {
+            let first = |document: Document| {
+                let value = document.attributes.iter().next().unwrap().value.clone();
+                match value.kind {
+                    value::Kind::List(items) => items.into_iter().next().unwrap(),
+                    _ => value,
+                }
+            };
+            let cases = [
+                ("a = x . b\n", on(4, 9)),
+                ("a = [x\n.b]\n", span(at(5, 0, 5), at(9, 1, 2))),
+                ("a = [x.\nb]\n", span(at(5, 0, 5), at(9, 1, 1))),
+                ("a = [x\n# c\n.\n\nb]\n", span(at(5, 0, 5), at(15, 4, 1))),
+            ];
+            for (text, span) in cases {
+                let value = first(ok(text));
+                assert_eq!(value.kind, reference("x.b"), "{text:?}");
+                assert_eq!(value.span, Some(span), "{text:?}");
+            }
         }
 
         #[test]
@@ -1620,10 +1662,10 @@ c = "°C # not a comment"
                 ("a = [for]\n", on(5, 8), Form::For),
                 ("a = [for, 1]\n", on(5, 8), Form::For),
                 ("a = [for(1)]\n", on(5, 8), Form::For),
-                ("a = [for.x]\n", on(5, 10), Form::For),
+                ("a = [for.x]\n", on(5, 8), Form::For),
                 ("a = { for = 1 }\n", on(6, 9), Form::For),
                 ("a = { for : 1 }\n", on(6, 9), Form::For),
-                ("a = { for.x = 1 }\n", on(6, 11), Form::For),
+                ("a = { for.x = 1 }\n", on(6, 9), Form::For),
                 (
                     "a = [\n  for x in y : x\n]\n",
                     span(at(8, 1, 2), at(11, 1, 5)),
@@ -1632,6 +1674,19 @@ c = "°C # not a comment"
                 ("a = b[0]\n", on(5, 6), Form::Index),
                 ("a = f(1).b\n", on(8, 9), Form::Index),
                 ("a = 1.x\n", on(5, 6), Form::Index),
+                ("a = true.f\n", on(8, 9), Form::Index),
+                ("a = false.x\n", on(9, 10), Form::Index),
+                ("a = b.0\n", on(5, 6), Form::Index),
+                ("a = site_a.1\n", on(10, 11), Form::Index),
+                ("a = b.1-2\n", on(5, 6), Form::Index),
+                ("a = b.0c\n", on(5, 6), Form::Index),
+                ("a = b.-c\n", on(5, 6), Form::Index),
+                ("a = [kf1.5true]\n", on(8, 9), Form::Index),
+                ("a = b.c.@d\n", on(7, 8), Form::Index),
+                ("a = b.\n", on(5, 6), Form::Index),
+                ("a = b..c\n", on(5, 6), Form::Index),
+                ("a = b.c[0]\n", on(7, 8), Form::Index),
+                ("a = b.c.*\n", on(7, 8), Form::Splat),
                 ("a = [1][0]\n", on(7, 8), Form::Index),
                 ("a = b[*].c\n", on(5, 6), Form::Splat),
                 ("a = b[ * ]\n", on(5, 6), Form::Splat),
@@ -1723,6 +1778,19 @@ c = "°C # not a comment"
         }
 
         #[test]
+        fn refuses_null_and_the_index_after_it_as_hcl_does() {
+            let null = Error::Form {
+                span: on(4, 8),
+                form: Form::Null,
+            };
+            let index = Error::Form {
+                span: on(8, 9),
+                form: Form::Index,
+            };
+            check("a = null.x\n", &[(null, NULL), (index, &refused(Form::Index))]);
+        }
+
+        #[test]
         fn refuses_a_number_key_that_hcl_rounds_and_reads_on() {
             let message = refused(Form::NumberKey);
             let digits = "9".repeat(155);
@@ -1790,8 +1858,8 @@ c = "°C # not a comment"
                 ("b { = }\n", on(4, 5), Expected::Key),
                 ("b { a 1 }\n", on(6, 7), Expected::Equals),
                 ("b { a {} }\n", on(6, 7), Expected::Equals),
-                ("b { a.b = 1 }\n", on(4, 7), Expected::Key),
-                ("b a.b {}\n", on(2, 5), Expected::AttributeOrBlock),
+                ("b { a.b = 1 }\n", on(5, 6), Expected::Equals),
+                ("b a.b {}\n", on(3, 4), Expected::BlockStart),
                 ("b {}  x\n", on(6, 7), Expected::Newline),
                 (
                     "b {\n  a = 1 }\n",
@@ -1800,7 +1868,10 @@ c = "°C # not a comment"
                 ),
                 ("b {\n", span(at(4, 1, 0), at(4, 1, 0)), Expected::Item),
                 ("}\n", on(0, 1), Expected::Item),
-                ("a.b = 1\n", on(0, 3), Expected::Item),
+                ("a.b = 1\n", on(1, 2), Expected::AttributeOrBlock),
+                ("@a = 1\n", on(0, 1), Expected::Item),
+                ("a = @system.x\n", on(4, 5), Expected::Value),
+                ("a = x\n.b\n", span(at(6, 1, 0), at(7, 1, 1)), Expected::Item),
                 ("a = [1 2]\n", on(7, 8), Expected::ListEnd),
                 (
                     "a = [1, 2\n",
@@ -1808,7 +1879,7 @@ c = "°C # not a comment"
                     Expected::ListEnd,
                 ),
                 ("a = { = 1 }\n", on(6, 7), Expected::Key),
-                ("a = { k.j = 1 }\n", on(6, 9), Expected::Key),
+                ("a = { k.j = 1 }\n", on(7, 8), Expected::ObjectEquals),
                 ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
                 ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
                 ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
@@ -1884,23 +1955,6 @@ c = "°C # not a comment"
 
         #[test]
         fn refuses_a_reference_that_is_not_a_name() {
-            let error = "a.@".parse::<Name>().unwrap_err();
-            let name = Error::Name {
-                span: on(4, 7),
-                error,
-            };
-            check("r = a.@\n", &[(name, NAME)]);
-
-            for (text, name) in [("r = a.\n", "a."), ("r = a..b\n", "a..b")] {
-                let error = name.parse::<Name>().unwrap_err();
-                let end = u32::try_from(name.len()).unwrap() + 4;
-                let name = Error::Name {
-                    span: on(4, end),
-                    error,
-                };
-                check(text, &[(name, NAME)]);
-            }
-
             let long = "a".repeat(256);
             let error = long.parse::<Name>().unwrap_err();
             let name = Error::Name {
@@ -2058,7 +2112,7 @@ c = "°C # not a comment"
 
         #[test]
         fn returns_every_problem_in_source_order() {
-            let text = "m = { a = 1, a = 2, b = null }\nr = a.@\nc = \n";
+            let text = "m = { a = 1, a = 2, b = null }\nr = é\nc = \n";
             let repeat = document::Error::DuplicateKey {
                 key: "a".into(),
                 first: Some(on(6, 7)),
@@ -2069,10 +2123,10 @@ c = "°C # not a comment"
                 form: Form::Null,
             };
             let name = Error::Name {
-                span: span(at(35, 1, 4), at(38, 1, 7)),
-                error: "a.@".parse::<Name>().unwrap_err(),
+                span: span(at(35, 1, 4), at(37, 1, 5)),
+                error: "é".parse::<Name>().unwrap_err(),
             };
-            let value = syntax(span(at(43, 2, 4), at(44, 3, 0)), Expected::Value);
+            let value = syntax(span(at(42, 2, 4), at(43, 3, 0)), Expected::Value);
             check(
                 text,
                 &[

@@ -21,9 +21,9 @@ fn text() -> impl Strategy<Value = String> {
 }
 
 fn name() -> impl Strategy<Value = Kind> {
-    let name = "[a-z_][a-z0-9_]{0,4}(\\.@?[a-z0-9_]{1,5}){0,2}"
-        .prop_filter("a keyword is not a reference", |name| {
-            !matches!(name.as_str(), "true" | "false" | "null")
+    let name = "[a-z_][a-z0-9_-]{0,4}(\\.[a-z_][a-z0-9_-]{0,4}){0,2}"
+        .prop_filter("HCL reads a keyword as a value", |name| {
+            !matches!(name.split('.').next(), Some("true" | "false" | "null"))
         });
     prop_oneof![
         4 => name,
