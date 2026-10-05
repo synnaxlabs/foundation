@@ -87,6 +87,11 @@ How to read this record:
   Case-sensitive; case-only collisions are rejected. `*` matches one segment, `**` any
   depth. The `@` prefix is reserved for Foundation. Hierarchy and struct fields share
   the dot. MQTT maps `.` to `/`.
+- **NAME DETAILS (#3)** Letters and digits in names are ASCII, so a case-only
+  collision is an ASCII case-insensitive match. Pattern specificity orders by more
+  literal segments, then fewer `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` >
+  `**`. Two different patterns may tie (`a.*` and `*.a`); a tie on one name is the S12
+  plan error.
 - **A4 + M1/M2 answer** `channel::Key` is a UUIDv7 made with the channel. It is never
   reused and never changes. Files carry names only. The stored spec maps name to key,
   and `apply` assigns a key the first time a name appears. Renames are explicit
