@@ -53,6 +53,16 @@ impl KeySet {
         &self.groups
     }
 
+    /// The position in [`Self::entries`] of the index of `entry`'s group.
+    ///
+    /// # Panics
+    ///
+    /// If `entry` is out of range.
+    #[must_use]
+    pub fn index(&self, entry: usize) -> usize {
+        self.groups[super::to_usize(self.entries[entry].group)]
+    }
+
     /// The position of `slot` in [`Self::entries`], or `None` when the key set does not
     /// hold it.
     #[must_use]
@@ -232,6 +242,10 @@ mod tests {
             ]
         );
         assert_eq!(set.groups(), [2, 4]);
+        assert_eq!(
+            (0..5).map(|e| set.index(e)).collect::<Vec<_>>(),
+            [2, 4, 2, 2, 4]
+        );
         assert_eq!(set.key().get(), 0);
     }
 
@@ -449,11 +463,13 @@ mod tests {
             let group = entries[at].group;
             let numbered = set.groups().iter().position(|&position| position == at);
             prop_assert_eq!(entries[at].data_type, STAMP);
+            prop_assert_eq!(set.index(at), at);
             prop_assert_eq!(numbered.and_then(|g| u32::try_from(g).ok()), Some(group));
             for (slot, kind) in data {
                 let entry = entries[set.find(*slot).unwrap()];
                 prop_assert_eq!(entry.data_type, *kind);
                 prop_assert_eq!(entry.group, group);
+                prop_assert_eq!(set.index(set.find(*slot).unwrap()), at);
             }
         }
         Ok(())
