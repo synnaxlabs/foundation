@@ -5,8 +5,9 @@ on:
   push:
     branches: [main]
 
+# Each commit on main gets its own group, so a later merge never cancels its run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -48,6 +49,7 @@ jobs:
               - 'crates/ring/**'
               - 'crates/block/**'
               - 'crates/counting/**'
+              - 'crates/node/**'
               - 'xtask/**'
               - 'Cargo.lock'
               - '.cargo/**'

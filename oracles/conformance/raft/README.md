@@ -6,11 +6,14 @@ Authors, Apache License 2.0). `crates/raft` runs them as its `conformance` test.
 `[[test]]` entry in `crates/raft/Cargo.toml` is part of this oracle: to remove it is
 to weaken the oracle.
 
-`LICENSE` is the license of the etcd source. `election.rs` and `replication.rs` are
-modified works: ports from Go to Rust, and the port rules below list the changes.
-`quorum/` holds etcd's `quorum/testdata` tables unchanged; the unit tests of
-`crates/raft/src/voters.rs` read them with `include_str!`. Each case is a `committed`
-or `vote` line with `cfg` (the incoming voters), `cfgj` (the outgoing voters in a joint
+`LICENSE` is the license of the etcd source. `election.rs`, `replication.rs`, and
+`common.rs` (the test network and the node disks the scenarios share) are modified
+works: ports from Go to Rust, and the port rules below list the changes. `main.rs` is
+the root of the test binary.
+
+`quorum/` holds etcd's `quorum/testdata` tables unchanged. `quorum.rs` reads them and
+is a unit test module of `crates/raft/src/voters.rs`. Each case is a `committed` or
+`vote` line with `cfg` (the incoming voters), `cfgj` (the outgoing voters in a joint
 phase, or `zero`), and `idx` or `votes` (one value per distinct id, in order of first
 appearance; `_` is absent), then `----` and a result block whose last line is the
 committed index (`∞` for no voters) or `VoteWon`, `VoteLost`, or `VotePending`.

@@ -91,7 +91,8 @@ impl Raft {
     ///
     /// - [`Error::Ticks`] when `heartbeat_ticks` is 0 or `election_ticks` is not
     ///   greater than `heartbeat_ticks`.
-    /// - [`Error::DuplicateVoter`] when a list in `voters` names a node twice.
+    /// - [`Error::EmptyIncoming`] when `voters.incoming` is empty but `outgoing` is
+    ///   not.
     /// - [`Error::EntryOutOfOrder`] when `entries` do not run from index 1 with
     ///   terms that never decrease.
     /// - [`Error::AppliedPastLog`] when `applied` is past the last entry.
@@ -104,7 +105,7 @@ impl Raft {
         } = config;
         let Start {
             hard,
-            mut voters,
+            voters,
             entries,
             applied,
         } = start;
@@ -114,7 +115,7 @@ impl Raft {
                 heartbeat: heartbeat_ticks,
             });
         }
-        voters.normalize()?;
+        voters.check()?;
         let peers = voters.peers().map(|key| (key, Peer::new())).collect();
         let log = Log::new(entries, applied)?;
         let last = log.last();
@@ -168,7 +169,7 @@ impl Raft {
         self.leader
     }
 
-    /// The nodes whose votes count, each list sorted.
+    /// The nodes whose votes count.
     #[must_use]
     pub fn voters(&self) -> &Voters {
         &self.voters
@@ -494,7 +495,7 @@ impl Raft {
             self.election_elapsed = 0;
             let heard = self
                 .voters
-                .reached(|key| key == self.key || self.peer(key).active);
+                .quorum(|key| key == self.key || self.peer(key).active);
             for peer in self.peers.values_mut() {
                 peer.active = false;
             }
@@ -694,7 +695,7 @@ mod tests {
             hard,
             voters: Voters {
                 incoming: voters.iter().copied().map(key).collect(),
-                outgoing: Vec::new(),
+                ..Voters::default()
             },
             entries: Vec::new(),
             applied: 0,
@@ -837,17 +838,6 @@ mod tests {
                     election: 3,
                     heartbeat: 3
                 }
-            );
-        }
-
-        #[test]
-        fn rejects_a_duplicate_voter() {
-            let start = start(&[2, 1, 2], Hard::default());
-            let err = Raft::new(CONFIG, start).unwrap_err();
-            assert_eq!(err, Error::DuplicateVoter(key(2)));
-            assert_eq!(
-                err.to_string(),
-                "node 00000000000000000000000000000002 is in the voter list twice"
             );
         }
 
@@ -1709,14 +1699,6 @@ mod tests {
         }
 
         #[test]
-        fn rejects_a_duplicate_in_an_unsorted_list() {
-            let error = Raft::new(CONFIG, start(&[3, 1, 3], Hard::default()))
-                .err()
-                .unwrap();
-            assert_eq!(error, Error::DuplicateVoter(key(3)));
-        }
-
-        #[test]
         fn a_non_voter_does_not_count_for_a_commit_or_the_quorum_check() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             elect(&mut raft, &[2]);
@@ -1792,24 +1774,28 @@ mod tests {
         }
 
         #[test]
-        fn rejects_a_duplicate_in_the_outgoing_list() {
+        fn rejects_an_empty_incoming_set_with_an_outgoing_set() {
             let start = Start {
                 voters: Voters {
-                    incoming: vec![key(1), key(2)],
-                    outgoing: vec![key(2), key(3), key(2)],
+                    outgoing: [key(1), key(2)].into_iter().collect(),
+                    ..Voters::default()
                 },
                 ..start(&[], Hard::default())
             };
             let error = Raft::new(CONFIG, start).unwrap_err();
-            assert_eq!(error, Error::DuplicateVoter(key(2)));
+            assert_eq!(error, Error::EmptyIncoming);
+            assert_eq!(
+                error.to_string(),
+                "the incoming voter set is empty while the outgoing set is not"
+            );
         }
 
         #[test]
-        fn reports_each_list_sorted() {
+        fn reports_the_voters_it_started_with() {
             let raft = joint(&[3, 1], &[2, 1]);
             let voters = Voters {
-                incoming: vec![key(1), key(3)],
-                outgoing: vec![key(1), key(2)],
+                incoming: [key(1), key(3)].into_iter().collect(),
+                outgoing: [key(1), key(2)].into_iter().collect(),
             };
             assert_eq!(raft.voters(), &voters);
         }

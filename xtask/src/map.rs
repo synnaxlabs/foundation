@@ -13,7 +13,7 @@ pub(crate) enum Deps {
     Only(&'static [&'static str]),
     /// Any layer 1 crate not in [`TEST_ONLY`], plus these.
     Layer1And(&'static [&'static str]),
-    /// Any crate not in [`TEST_ONLY`].
+    /// Any crate not in [`TEST_ONLY`] in a lower layer or earlier in [`CRATES`].
     Any,
 }
 
@@ -218,6 +218,11 @@ pub(crate) const CRATES: &[Crate] = &[
         layer: 4,
         deps: Deps::Any,
     },
+    Crate {
+        name: "acceptance",
+        layer: 4,
+        deps: Deps::Any,
+    },
 ];
 
 /// Every connector kind crate, named `connector-<kind>`.
@@ -243,8 +248,16 @@ impl Crate {
             Deps::Only(_) => false,
             _ if TEST_ONLY.contains(&dep) => false,
             Deps::Layer1And(_) => find(dep).is_some_and(|d| d.layer == 1),
-            Deps::Any => true,
+            Deps::Any => {
+                find(dep).is_some_and(|d| d.layer < self.layer || d.earlier(self))
+            }
         }
+    }
+
+    /// Reports whether this crate comes before `other` in [`CRATES`].
+    fn earlier(&self, other: &Crate) -> bool {
+        let index = |c: &Crate| CRATES.iter().position(|e| e.name == c.name);
+        matches!((index(self), index(other)), (Some(a), Some(b)) if a < b)
     }
 
     /// Describes the allowed dependencies for an error message.
@@ -259,7 +272,7 @@ impl Crate {
                 "any layer 1 crate that is not test-only, {}",
                 list.join(", ")
             ),
-            Deps::Any => "any crate that is not test-only".to_string(),
+            Deps::Any => "any earlier crate that is not test-only".to_string(),
         }
     }
 }
@@ -284,6 +297,20 @@ mod tests {
     }
 
     #[test]
+    fn allows_any_only_on_crates_earlier_in_the_map() {
+        for (name, dep, allowed) in [
+            ("node", "acceptance", false),
+            ("node", "ops", true),
+            ("node", "connector-modbus", true),
+            ("acceptance", "node", true),
+            ("acceptance", "acceptance", false),
+        ] {
+            let entry = find(name).expect("in the map");
+            assert_eq!(entry.allows(dep), allowed, "`{name}` on `{dep}`");
+        }
+    }
+
+    #[test]
     fn describes_the_allowed_dependencies() {
         for (name, text) in [
             ("counting", "no workspace crates"),
@@ -293,7 +320,7 @@ mod tests {
                 "connector",
                 "any layer 1 crate that is not test-only, hub, secret",
             ),
-            ("node", "any crate that is not test-only"),
+            ("node", "any earlier crate that is not test-only"),
         ] {
             let entry = find(name).expect("in the map");
             assert_eq!(entry.describe(), text, "`{name}`");

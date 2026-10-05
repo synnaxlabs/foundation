@@ -70,8 +70,8 @@ pub enum Error {
         /// The configured heartbeat ticks.
         heartbeat: u32,
     },
-    /// One voter list names a node twice.
-    DuplicateVoter(node::Key),
+    /// The incoming voter set is empty while the outgoing set is not.
+    EmptyIncoming,
     /// The stored term is lower than the term of the last log entry.
     TermBehindLog {
         /// The stored term.
@@ -127,8 +127,11 @@ impl fmt::Display for Error {
                 "election_ticks ({election}) must be greater than heartbeat_ticks \
                  ({heartbeat}), and heartbeat_ticks must be at least 1"
             ),
-            Self::DuplicateVoter(key) => {
-                write!(f, "node {:032x} is in the voter list twice", key.as_u128())
+            Self::EmptyIncoming => {
+                write!(
+                    f,
+                    "the incoming voter set is empty while the outgoing set is not"
+                )
             }
             Self::TermBehindLog { term, last } => write!(
                 f,

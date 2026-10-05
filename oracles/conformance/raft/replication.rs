@@ -2,58 +2,9 @@
 //! etcd Authors, Apache License 2.0, see `LICENSE`). This file is modified from the
 //! etcd source: `README.md` lists each source and the changes.
 
-use raft::{
-    Body, Config, Entry, Hard, Message, Position, Raft, Ready, Role, Start, Term,
-    Voters,
-};
+use raft::{Body, Entry, Hard, Message, Position, Raft, Role, Term};
 
-use super::{ELECTION, Network, at_term, key};
-
-/// What one node has stored: its log and the entries it applied, in order.
-#[derive(Debug, Default)]
-pub(super) struct Disk {
-    pub(super) hard: Hard,
-    pub(super) entries: Vec<Entry>,
-    pub(super) committed: Vec<Entry>,
-}
-
-impl Disk {
-    /// Does what a `Ready` asks for and returns its messages.
-    pub(super) fn store(&mut self, ready: Ready) -> Vec<Message> {
-        let Ready {
-            hard,
-            entries,
-            committed,
-            messages,
-        } = ready;
-        if let Some(hard) = hard {
-            self.hard = hard;
-        }
-        if let Some(first) = entries.first() {
-            let keep = usize::try_from(first.at.index - 1).unwrap();
-            assert!(
-                keep <= self.entries.len(),
-                "a write past the end of the log"
-            );
-            self.entries.truncate(keep);
-            self.entries.extend(entries);
-        }
-        self.committed.extend(committed);
-        messages
-    }
-
-    pub(super) fn last(&self) -> u64 {
-        count(self.entries.len())
-    }
-
-    fn committed(&self) -> u64 {
-        count(self.committed.len())
-    }
-}
-
-fn count(n: usize) -> u64 {
-    u64::try_from(n).unwrap()
-}
+use crate::common::{Disk, ELECTION, Network, at_term, count, key, start};
 
 /// A log with one entry per term in `terms`, from index 1, with no data.
 fn log(terms: &[u64]) -> Vec<Entry> {
@@ -72,38 +23,6 @@ fn entry(term: u64, index: u64, data: &[u8]) -> Entry {
         },
         data: data.to_vec(),
     }
-}
-
-/// Node `id` with the stored state `hard`, the log `entries`, and `applied` of them
-/// applied, with the disk that holds the same.
-pub(super) fn start(
-    id: u8,
-    voters: &[u8],
-    election: u32,
-    hard: Hard,
-    entries: Vec<Entry>,
-    applied: u64,
-) -> (Raft, Disk) {
-    let config = Config {
-        key: key(id),
-        election_ticks: election,
-        heartbeat_ticks: 1,
-    };
-    let start = Start {
-        hard,
-        voters: Voters {
-            incoming: voters.iter().copied().map(key).collect(),
-            outgoing: Vec::new(),
-        },
-        entries: entries.clone(),
-        applied,
-    };
-    let disk = Disk {
-        hard,
-        committed: entries[..usize::try_from(applied).unwrap()].to_vec(),
-        entries,
-    };
-    (Raft::new(config, start).unwrap(), disk)
 }
 
 /// Elects node 1 with the votes of `others`. The leader's first `Ready` is left for
@@ -211,19 +130,6 @@ fn position(term: u64, index: u64) -> Position {
     Position {
         term: Term(term),
         index,
-    }
-}
-
-impl Network {
-    /// Proposes `data` to a node, then delivers until quiet.
-    pub(super) fn propose(&mut self, id: u8, data: &[u8]) {
-        let peer = self.peers.get_mut(&key(id)).unwrap();
-        peer.propose(data.to_vec()).unwrap();
-        self.flush(id);
-    }
-
-    pub(super) fn disk(&self, id: u8) -> &Disk {
-        &self.disks[&key(id)]
     }
 }
 

@@ -172,7 +172,7 @@ impl Network {
             hard: disk.hard,
             voters: Voters {
                 incoming: (0..self.disks.len()).map(Self::key).collect(),
-                outgoing: Vec::new(),
+                ..Voters::default()
             },
             entries: disk.entries.clone(),
             applied: disk.applied,
