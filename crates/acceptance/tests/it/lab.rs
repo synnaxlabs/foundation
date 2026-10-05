@@ -33,6 +33,10 @@ struct Member {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Node(usize);
 
+/// A live reader on one channel, opened with [`Lab::reader`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Reader;
+
 /// A join ticket. It is a secret, never written to a file.
 #[derive(Debug)]
 pub(crate) struct Ticket;
@@ -120,6 +124,33 @@ impl Lab {
     /// second, as `buffer` stores it.
     pub(crate) fn budget(&self, _rate: u64, _span: Duration) -> u64 {
         todo!("waits on #342")
+    }
+
+    /// Makes `nodes` the members of one mesh, without a ticket.
+    pub(crate) fn mesh(&mut self, _nodes: &[Node]) {
+        todo!("waits on #462")
+    }
+
+    /// Creates the `f64` channel `channel`, whose home is `home`.
+    pub(crate) fn channel(&mut self, _home: Node, _channel: &str) {
+        todo!("waits on #462")
+    }
+
+    /// Opens a live reader on `channel` at `node`. It gets the samples written from
+    /// now on.
+    pub(crate) fn reader(&mut self, _node: Node, _channel: &str) -> Reader {
+        todo!("waits on #462")
+    }
+
+    /// Writes `values` to `channel` on `node`, one each millisecond, as the
+    /// simulation runs.
+    pub(crate) fn send(&mut self, _node: Node, _channel: &str, _values: &[f64]) {
+        todo!("waits on #462")
+    }
+
+    /// Every sample that `reader` got, in the order it got them.
+    pub(crate) fn received(&self, _reader: Reader) -> Vec<Sample> {
+        todo!("waits on #462")
     }
 
     /// Creates a single-use join ticket on `admin`.
