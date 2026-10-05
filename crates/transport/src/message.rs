@@ -10,6 +10,7 @@
 
 use std::mem;
 use std::ops::Deref;
+use std::task::Poll;
 
 use block::{Block, Pool, Unique};
 
@@ -19,7 +20,7 @@ use crate::Error;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Prefix {
     bytes: [u8; 8],
-    len: usize,
+    size: usize,
 }
 
 impl Prefix {
@@ -45,7 +46,7 @@ impl Prefix {
         bytes.rotate_left(rotate);
         let [first, ..] = &mut bytes;
         *first |= tag;
-        Self { bytes, len: size }
+        Self { bytes, size }
     }
 }
 
@@ -54,7 +55,7 @@ impl Deref for Prefix {
 
     fn deref(&self) -> &[u8] {
         self.bytes
-            .get(..self.len)
+            .get(..self.size)
             .expect("invariant: a prefix is at most 8 bytes")
     }
 }
@@ -68,15 +69,15 @@ pub(crate) struct Reader {
 
 #[derive(Debug)]
 enum State {
-    /// A length prefix, with `have` of its `len` bytes. `len` is 1 until the first
+    /// A length prefix, with `have` of its `size` bytes. `size` is 1 until the first
     /// byte gives it. The bytes after `have` are zero.
     Prefix {
         bytes: [u8; 8],
         have: usize,
-        len: usize,
+        size: usize,
     },
     /// A message of this many bytes, with no block yet.
-    Sized(usize),
+    Sized(u64),
     /// A message's block, with `have` of its bytes.
     Body { block: Unique, have: usize },
 }
@@ -84,7 +85,7 @@ enum State {
 const START: State = State::Prefix {
     bytes: [0; 8],
     have: 0,
-    len: 1,
+    size: 1,
 };
 
 impl Reader {
@@ -97,67 +98,68 @@ impl Reader {
     }
 
     /// Reads the next whole message into a block from `pool`. `source(max)` gives
-    /// the stream's next bytes, at most `max` of them, or `None` or no bytes when it
-    /// has none now. The reader never asks for a byte past the current message, so
-    /// the bytes of later messages stay with the source.
+    /// the stream's next 1 to `max` bytes, `Pending` when it has none now, or `None`
+    /// when the stream has ended. The reader never asks for a byte past the current
+    /// message, so later messages stay with the source.
     ///
-    /// Returns `None` when the source runs out before the message is whole; the next
+    /// Returns the message, `Pending` when the source has no more bytes now, or
+    /// `None` when the stream ended between two messages. After `Pending`, the next
     /// call goes on where this one stopped.
     ///
     /// # Errors
     ///
-    /// - [`Error::TooLarge`] when the message is longer than `bytes_max`. The stream
-    ///   cannot go on.
-    /// - [`Error::Pool`] when `pool` has no room for the message. Its bytes stay with
-    ///   the source; call again after a block frees.
+    /// - [`Error::Broken`] when the peer breaks the framing: a message over
+    ///   `bytes_max`, or a stream that ends inside a message. The stream cannot go on.
+    /// - [`Error::Pool`] when `pool` has no room for the message now. Its bytes stay
+    ///   with the source; call again after a block frees.
     /// - The source's error.
     ///
     /// # Panics
     ///
-    /// When the source gives more bytes than the reader asked for.
+    /// When the source gives no bytes or more than `max`, or when `pool` cannot hold
+    /// a message of `bytes_max` bytes.
     pub(crate) fn read<B: AsRef<[u8]>>(
         &mut self,
         pool: &Pool,
-        mut source: impl FnMut(usize) -> Result<Option<B>, Error>,
-    ) -> Result<Option<Block>, Error> {
+        mut source: impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
+    ) -> Result<Poll<Option<Block>>, Error> {
         loop {
             match &mut self.state {
-                State::Prefix { bytes, have, len } => {
-                    let prefix = bytes.get_mut(..*len).expect("invariant: len <= 8");
-                    if !pull(&mut source, prefix, have)? {
-                        return Ok(None);
+                State::Prefix { bytes, have, size } => {
+                    let prefix = bytes.get_mut(..*size).expect("invariant: size <= 8");
+                    match pull(&mut source, prefix, have)? {
+                        Poll::Pending => return Ok(Poll::Pending),
+                        Poll::Ready(false) if *have == 0 => {
+                            return Ok(Poll::Ready(None));
+                        }
+                        Poll::Ready(false) => return Err(ended()),
+                        Poll::Ready(true) => {}
                     }
                     let [first, ..] = *bytes;
-                    let (size, shift, mask) = match first >> 6 {
+                    let (full, shift, mask) = match first >> 6 {
                         0 => (1, 56, 0x3f),
                         1 => (2, 48, 0x3fff),
                         2 => (4, 32, 0x3fff_ffff),
                         _ => (8, 0, 0x3fff_ffff_ffff_ffff),
                     };
-                    *len = size;
-                    if *have == size {
+                    *size = full;
+                    if *have == full {
                         let value =
                             u64::from_be_bytes(*bytes).wrapping_shr(shift) & mask;
-                        // On a 32-bit target this saturates, and is still over
-                        // `bytes_max`.
-                        self.state =
-                            State::Sized(usize::try_from(value).unwrap_or(usize::MAX));
+                        self.state = State::Sized(value);
                     }
                 }
-                State::Sized(bytes) => {
-                    let bytes = *bytes;
-                    if bytes > self.bytes_max {
-                        return Err(Error::TooLarge {
-                            bytes,
-                            bytes_max: self.bytes_max,
-                        });
-                    }
-                    let block = pool.alloc(bytes).map_err(Error::Pool)?;
+                State::Sized(value) => {
+                    let block = alloc(pool, *value, self.bytes_max)?;
                     self.state = State::Body { block, have: 0 };
                 }
                 State::Body { block, have } => {
-                    if *have < block.len() && !pull(&mut source, block, have)? {
-                        return Ok(None);
+                    if *have < block.len() {
+                        match pull(&mut source, block, have)? {
+                            Poll::Pending => return Ok(Poll::Pending),
+                            Poll::Ready(false) => return Err(ended()),
+                            Poll::Ready(true) => {}
+                        }
                     }
                     if *have == block.len() {
                         let State::Body { block, .. } =
@@ -165,45 +167,68 @@ impl Reader {
                         else {
                             unreachable!("this arm matched a body");
                         };
-                        return Ok(Some(block.freeze()));
+                        return Ok(Poll::Ready(Some(block.freeze())));
                     }
                 }
             }
         }
     }
+}
 
-    /// Checks that the stream ended between two messages.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Broken`] when it ended inside a message.
-    pub(crate) fn finish(&self) -> Result<(), Error> {
-        match self.state {
-            State::Prefix { have: 0, .. } => Ok(()),
-            _ => Err(Error::Broken {
-                reason: "the stream ended inside a message".to_owned(),
-            }),
+/// A block for a message of `value` bytes.
+///
+/// # Errors
+///
+/// [`Error::Broken`] when `value` is over `bytes_max`, and [`Error::Pool`] when the
+/// pool has no room now.
+///
+/// # Panics
+///
+/// When the pool cannot hold a message of `bytes_max` bytes.
+fn alloc(pool: &Pool, value: u64, bytes_max: usize) -> Result<Unique, Error> {
+    let Some(len) = usize::try_from(value).ok().filter(|&len| len <= bytes_max) else {
+        return Err(Error::Broken {
+            reason: format!(
+                "a message of {value} bytes is over the limit of {bytes_max}"
+            ),
+        });
+    };
+    match pool.alloc(len) {
+        Ok(block) => Ok(block),
+        Err(error @ block::Error::Exhausted { .. }) => Err(Error::Pool(error)),
+        Err(error @ block::Error::TooLarge { .. }) => {
+            panic!("the pool cannot hold a message of `bytes_max`: {error}")
         }
     }
 }
 
+fn ended() -> Error {
+    Error::Broken {
+        reason: "the stream ended inside a message".to_owned(),
+    }
+}
+
 /// Copies the source's next bytes into `buffer` after its first `have`. Returns
-/// `false` when the source has none now.
+/// `false` when the stream has ended.
 fn pull<B: AsRef<[u8]>>(
-    source: &mut impl FnMut(usize) -> Result<Option<B>, Error>,
+    source: &mut impl FnMut(usize) -> Result<Poll<Option<B>>, Error>,
     buffer: &mut [u8],
     have: &mut usize,
-) -> Result<bool, Error> {
+) -> Result<Poll<bool>, Error> {
     let rest = buffer.get_mut(*have..).expect("invariant: have <= len");
-    let Some(chunk) = source(rest.len())? else {
-        return Ok(false);
+    let Poll::Ready(chunk) = source(rest.len())? else {
+        return Ok(Poll::Pending);
+    };
+    let Some(chunk) = chunk else {
+        return Ok(Poll::Ready(false));
     };
     let chunk = chunk.as_ref();
+    assert!(!chunk.is_empty(), "the source gives at least one byte");
     rest.get_mut(..chunk.len())
         .expect("the source gives at most the bytes asked for")
         .copy_from_slice(chunk);
     *have = have.saturating_add(chunk.len());
-    Ok(!chunk.is_empty())
+    Ok(Poll::Ready(true))
 }
 
 #[cfg(test)]
@@ -232,11 +257,13 @@ mod tests {
     }
 
     /// A source over `bytes` that gives at most `split` bytes per call, and records
-    /// the most bytes it gave.
+    /// the bytes it gave. When it has no bytes, the stream has ended, or it is
+    /// pending when `open`.
     struct Source {
         bytes: VecDeque<u8>,
         split: usize,
         given: usize,
+        open: bool,
     }
 
     impl Source {
@@ -245,30 +272,48 @@ mod tests {
                 bytes: bytes.into(),
                 split,
                 given: 0,
+                open: false,
             }
         }
 
-        fn take(&mut self, max: usize) -> Option<Vec<u8>> {
+        fn take(&mut self, max: usize) -> Poll<Option<Vec<u8>>> {
             let n = max.min(self.split).min(self.bytes.len());
             if n == 0 {
-                return None;
+                return if self.open {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(None)
+                };
             }
             self.given = self.given.saturating_add(n);
-            Some(self.bytes.drain(..n).collect())
+            Poll::Ready(Some(self.bytes.drain(..n).collect()))
         }
     }
 
-    /// Every message `reader` reads from `source` until it has none.
+    /// One read of `reader` from `source`, with the message as bytes.
+    fn read(
+        reader: &mut Reader,
+        pool: &Pool,
+        source: &mut Source,
+    ) -> Result<Poll<Option<Vec<u8>>>, Error> {
+        let read = reader.read(pool, |max| Ok(source.take(max)))?;
+        Ok(read.map(|block| block.map(|block| block.to_vec())))
+    }
+
+    /// Every message `reader` reads from `source`, until the stream ends.
     fn read_all(
         reader: &mut Reader,
         pool: &Pool,
         source: &mut Source,
     ) -> Result<Vec<Vec<u8>>, Error> {
         let mut messages = Vec::new();
-        while let Some(block) = reader.read(pool, |max| Ok(source.take(max)))? {
-            messages.push(block.to_vec());
+        loop {
+            match read(reader, pool, source)? {
+                Poll::Ready(Some(message)) => messages.push(message),
+                Poll::Ready(None) => return Ok(messages),
+                Poll::Pending => panic!("a source that is not open is never pending"),
+            }
         }
-        Ok(messages)
     }
 
     mod prefix {
@@ -327,7 +372,6 @@ mod tests {
                 let mut reader = Reader::new(300);
                 let read = read_all(&mut reader, &pool, &mut source);
                 prop_assert_eq!(read, Ok(messages));
-                prop_assert_eq!(reader.finish(), Ok(()));
             }
         }
 
@@ -359,12 +403,28 @@ mod tests {
             let pool = pool(1 << 16);
             let mut source = Source::new(encode(&[vec![7; 10], vec![8; 10]]), 64);
             let mut reader = Reader::new(16);
-            let first = reader.read(&pool, |max| Ok(source.take(max)));
             assert_eq!(
-                first.map(|block| block.map(|b| b.to_vec())),
-                Ok(Some(vec![7; 10]))
+                read(&mut reader, &pool, &mut source),
+                Ok(Poll::Ready(Some(vec![7; 10])))
             );
             assert_eq!(source.given, 11);
+        }
+
+        #[test]
+        fn when_source_has_no_bytes_now_it_is_pending_then_goes_on() {
+            let pool = pool(1 << 16);
+            let stream = encode(&[vec![5; 10]]);
+            let (now, later) = stream.split_at(4);
+            let mut source = Source::new(now.to_vec(), 64);
+            source.open = true;
+            let mut reader = Reader::new(16);
+            assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
+            source.bytes.extend(later);
+            source.open = false;
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
+                Ok(vec![vec![5; 10]])
+            );
         }
 
         #[test]
@@ -374,9 +434,15 @@ mod tests {
             let mut reader = Reader::new(16);
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),
-                Err(Error::TooLarge {
-                    bytes: 17,
-                    bytes_max: 16
+                Err(Error::Broken {
+                    reason: "a message of 17 bytes is over the limit of 16".to_owned()
+                })
+            );
+            assert_eq!(source.given, 1);
+            assert_eq!(
+                read(&mut reader, &pool, &mut source),
+                Err(Error::Broken {
+                    reason: "a message of 17 bytes is over the limit of 16".to_owned()
                 })
             );
             assert_eq!(source.given, 1);
@@ -389,9 +455,10 @@ mod tests {
             let mut reader = Reader::new(16);
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),
-                Err(Error::TooLarge {
-                    bytes: (1 << 62) - 1,
-                    bytes_max: 16
+                Err(Error::Broken {
+                    reason: "a message of 4611686018427387903 bytes is over the limit \
+                        of 16"
+                        .to_owned()
                 })
             );
         }
@@ -419,6 +486,15 @@ mod tests {
         }
 
         #[test]
+        #[should_panic(expected = "the pool cannot hold a message of `bytes_max`")]
+        fn when_pool_cannot_hold_bytes_max_it_panics() {
+            let pool = pool(300);
+            let mut source = Source::new(encode(&[vec![9; 200]]), 64);
+            let mut reader = Reader::new(1_000);
+            drop(read_all(&mut reader, &pool, &mut source));
+        }
+
+        #[test]
         fn when_source_fails_it_gives_the_error() {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(16);
@@ -428,7 +504,7 @@ mod tests {
                         code: crate::Code(16),
                     })
                 })
-                .map(|block| block.map(|block| block.to_vec()));
+                .map(|read| read.map(|block| block.map(|block| block.to_vec())));
             assert_eq!(
                 read,
                 Err(Error::Reset {
@@ -438,13 +514,43 @@ mod tests {
         }
 
         #[test]
-        fn when_stream_ends_inside_a_message_finish_fails() {
+        fn when_source_fails_inside_a_message_it_gives_the_error() {
             let pool = pool(1 << 16);
-            let mut source = Source::new(vec![0x05, 1, 2], 64);
             let mut reader = Reader::new(16);
-            assert_eq!(read_all(&mut reader, &pool, &mut source), Ok(vec![]));
+            let mut given = false;
+            let read = reader
+                .read(&pool, |_| {
+                    if mem::replace(&mut given, true) {
+                        return Err(Error::Reset {
+                            code: crate::Code(16),
+                        });
+                    }
+                    Ok(Poll::Ready(Some([0x05])))
+                })
+                .map(|read| read.map(|block| block.map(|block| block.to_vec())));
             assert_eq!(
-                reader.finish(),
+                read,
+                Err(Error::Reset {
+                    code: crate::Code(16)
+                })
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "the source gives at least one byte")]
+        fn when_source_gives_no_bytes_it_panics() {
+            let pool = pool(1 << 16);
+            let mut reader = Reader::new(16);
+            drop(reader.read(&pool, |_| Ok(Poll::Ready(Some([0_u8; 0])))));
+        }
+
+        #[test]
+        fn when_stream_ends_after_a_prefix_it_fails() {
+            let pool = pool(1 << 16);
+            let mut source = Source::new(vec![0x05], 64);
+            let mut reader = Reader::new(16);
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
                 Err(Error::Broken {
                     reason: "the stream ended inside a message".to_owned()
                 })
@@ -452,13 +558,25 @@ mod tests {
         }
 
         #[test]
-        fn when_stream_ends_inside_a_prefix_finish_fails() {
+        fn when_stream_ends_inside_a_message_it_fails() {
+            let pool = pool(1 << 16);
+            let mut source = Source::new(vec![0x05, 1, 2], 64);
+            let mut reader = Reader::new(16);
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
+                Err(Error::Broken {
+                    reason: "the stream ended inside a message".to_owned()
+                })
+            );
+        }
+
+        #[test]
+        fn when_stream_ends_inside_a_prefix_it_fails() {
             let pool = pool(1 << 16);
             let mut source = Source::new(vec![0x40], 64);
             let mut reader = Reader::new(16);
-            assert_eq!(read_all(&mut reader, &pool, &mut source), Ok(vec![]));
             assert_eq!(
-                reader.finish(),
+                read_all(&mut reader, &pool, &mut source),
                 Err(Error::Broken {
                     reason: "the stream ended inside a message".to_owned()
                 })
