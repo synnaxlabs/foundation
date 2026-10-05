@@ -1448,6 +1448,12 @@ How to read this record:
   removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
   thread that a crash ended panics, because no process joins its own threads after it
   dies. Built by `simulation` in #114.
+- **SIM PANICS (2026-10-05)** A panic in a poll or in the drop of a future ends the
+  thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
+  future drops in its own `catch_unwind`, so a second panic never aborts the process.
+  The error gives every panic, the first one first: a drop that panics is a defect of
+  its own, even when an earlier panic caused the drop. `Sim::crash` panics with the
+  same messages after the crash ends. Built by `simulation` in #548.
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
