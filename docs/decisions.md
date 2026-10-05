@@ -542,8 +542,13 @@ How to read this record:
   half of the bounds that vote. This reads C6's "follows the smallest measured bound":
   when sources agree, the result is never wider than the narrowest. The result holds the
   true offset when the bounds that hold it are a majority of the bounds that vote, and
-  every other bound that votes misses them. Decided by the `time` builder (#49). A
-  device's readings go to the oscillator fit (`Overlap`), never to `combine`. Node
+  every other bound that votes misses them. Decided by the `time` builder (#49). Each
+  source votes: a source with no measurement agrees with no offset, and it votes beside
+  the known bounds, or beside the unknown bounds when no bound is known. So before its
+  first estimate a clock waits until more than half of its sources agree, and one
+  source that answers first cannot set mesh time. The person decided on 2026-10-05
+  ("clock question si approved at whatever path you think"), #488. A device's readings
+  go to the oscillator fit (`Overlap`), never to `combine`. Node
   sources keep `Filter`, not `Overlap`: a network exchange puts the true offset at about
   the same place in each bracket, so an overlap gains little, and a broken drift bound
   would stay wrong for the life of an overlap, not for 8 exchanges. Decided by the
@@ -585,7 +590,11 @@ How to read this record:
   with nine fraction digits; input needs an offset, takes up to nine fraction digits,
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
-  trips; input rejects an end before the start.
+  trips; input rejects an end before the start. A byte size follows the span rules: one
+  number and one unit with no space (`200GiB`), and a decimal fraction only when it
+  gives whole bytes (`1.5GiB`). Its type lives in `types` beside `time::Span`, and the
+  `document` reader is an adapter over it. The person decided on 2026-10-05 ("A yes I
+  approve", #479).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -801,18 +810,20 @@ How to read this record:
   empty entry of its term first, so it can commit what came before. It replicates with
   `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
   (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
-  (its hint for the next `prev`). A malformed `Append` (entries that do not follow
-  `prev`) is `Error::EntryOutOfOrder`. An `Append` with an entry whose term is above
-  the message's term is `Error::TermBehindLog`: no leader sends one, and a follower
-  that wrote it could not restart. The conformance oracle changed to match; the person
-  decided on 2026-10-05 ("a is fine", #232). `Body::Heartbeat { commit }` carries
-  the commit index, capped at what that follower is known to hold. A leader commits
-  an index only when a quorum holds it and its entry is of the leader's own term. A
-  follower commits no further than the last entry the leader sent it.
-  `Ready.committed` gives each entry once, after it is written. Batch size (64
-  entries) and the number of appends in flight per follower (8) are constants, not
-  `Config` fields: nothing measured asks for a knob. `Message` and `Body` are `Clone`,
-  not `Copy`, because an append carries entries.
+  (its hint for the next `prev`). `step` checks every index a message names, and the
+  order of an append's entries, against the log before it changes state: entries that
+  do not follow `prev` are `Error::EntryOutOfOrder`, and an index past the log is
+  `Error::IndexPastLog`. An `Append` with an entry whose term is above the message's
+  term is `Error::TermBehindLog`: no leader sends one, and a follower that wrote it
+  could not restart. The conformance oracle changed to match; the person decided on
+  2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
+  is known to hold. A leader commits an index only when a quorum holds it and its
+  entry is of the leader's own term. A follower commits no further than the last
+  entry the leader sent it. `Ready.committed` gives each entry once, after it is
+  written. Batch size (64 entries) and the number of appends in flight per follower
+  (8) are constants, not `Config` fields: nothing measured asks for a knob. `Message`
+  and `Body` are `Clone`, not `Copy`, because an append carries entries.
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
@@ -1138,7 +1149,7 @@ How to read this record:
   settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
   SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
-  that selects node names: `node_settings { select = "site-a/*" disk = "200 GiB" }`.
+  that selects node names: `node_settings { select = "site-a/*" disk = "200GiB" }`.
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the

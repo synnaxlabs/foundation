@@ -196,7 +196,10 @@ pub(crate) fn check(
 ) -> Result<Position, Error> {
     for entry in entries {
         let term = entry.at.term;
-        if entry.at.index != before.index + 1 || term < before.term || term == Term(0) {
+        if Some(entry.at.index) != before.index.checked_add(1)
+            || term < before.term
+            || term == Term(0)
+        {
             return Err(Error::EntryOutOfOrder {
                 at: entry.at,
                 before,
