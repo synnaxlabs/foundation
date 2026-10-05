@@ -1042,6 +1042,23 @@ mod tests {
             prop_assert_eq!(group.push(&area.pool, &area.writer, &mut batch), expected.clone());
             prop_assert_eq!(group.is_empty(), expected.is_err());
         }
+
+        /// One entry alone takes `entry_max` bytes of parts, and is large with one
+        /// byte more.
+        #[test]
+        fn one_entry_alone_takes_the_entry_max(body_max in table_len(1)..=60_000usize) {
+            let area = Area::with_body_max(body_max);
+            let max = area.layout.entry_max();
+            let push = |len: usize| {
+                let bytes = vec![7; len];
+                let parts = parts(&area.pool, &[&bytes]);
+                let mut batch = vec![entry(header(1, Path::Live, 0), parts)];
+                Group::default().push(&area.pool, &area.writer, &mut batch)
+            };
+            prop_assert_eq!(push(max), Ok(0..1));
+            let limit = Limit::Body { len: body_max + 1, max: body_max };
+            prop_assert_eq!(push(max + 1), Err(Rejected::Large(limit)));
+        }
     }
 
     #[test]

@@ -131,6 +131,13 @@ impl Layout {
         self.body_max
     }
 
+    /// The most bytes of parts that one entry alone holds in a record: `body_max`
+    /// less the table of one entry.
+    #[must_use]
+    pub fn entry_max(self) -> usize {
+        self.body_max - entry::table_len(1)
+    }
+
     /// The length of the ring file: the two header blocks and the area.
     pub(crate) fn file_len(self) -> u64 {
         AREA_START + self.area
