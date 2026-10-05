@@ -55,29 +55,37 @@ impl Token {
     }
 
     /// Cancels this token and its children: wakes every [`Wait`], then runs each hook
-    /// on the calling thread. Later calls do nothing.
+    /// on the calling thread. On return, every token below this one is cancelled.
+    /// When another call cancels some of them at the same time, that call runs
+    /// their hooks, and they may not have run yet.
     ///
     /// # Panics
     ///
-    /// When a hook panics. The tokens are cancelled, and hooks after it do not run.
+    /// When a hook panics. The tokens are cancelled, but the hooks after it do not
+    /// run, so the parts they unblock can stay blocked. A hook must not panic.
     pub fn cancel(&self) {
         let mut hooks = Vec::new();
         let mut nodes = vec![Arc::clone(&self.0)];
         while let Some(node) = nodes.pop() {
-            let state = {
+            // A node another call flagged is still walked, since that call may not
+            // have reached its children yet. Children stay listed for this walk.
+            let (wakers, taken, children) = {
                 let mut state = node.lock();
+                let children: Vec<_> = state.children.values().cloned().collect();
                 if node.cancelled.load(Relaxed) {
-                    continue;
+                    (Slab::default(), Slab::default(), children)
+                } else {
+                    node.cancelled.store(true, Release);
+                    (
+                        mem::take(&mut state.wakers),
+                        mem::take(&mut state.hooks),
+                        children,
+                    )
                 }
-                node.cancelled.store(true, Release);
-                mem::take(&mut *state)
             };
-            state.wakers.into_values().for_each(Waker::wake);
-            hooks.extend(state.hooks.into_values());
-            nodes.extend(state.children.into_values().filter_map(|c| c.upgrade()));
-            if let Some((parent, key)) = &node.parent {
-                drop(parent.remove(*key, |state| &mut state.children));
-            }
+            wakers.into_values().for_each(Waker::wake);
+            hooks.extend(taken.into_values());
+            nodes.extend(children.iter().filter_map(Weak::upgrade));
         }
         for hook in hooks {
             hook();
@@ -108,8 +116,9 @@ impl Token {
     /// Runs `f` once, on the thread that cancels, to unblock a blocking vendor call.
     /// That thread may be a shard, so `f` must not block. When the token is already
     /// cancelled, runs `f` now. Dropping the returned [`Hook`] before cancel removes
-    /// `f`; it does not wait for an `f` that already runs, so `f` must own what it
-    /// touches.
+    /// `f`, but does not wait for an `f` that already runs. So `f` must hold an `Arc`
+    /// to any vendor handle it uses, and the handle must close only when the last
+    /// `Arc` drops, never right after the `Hook` drops.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -168,15 +177,22 @@ impl Future for Wait {
             this.key = None;
             return Poll::Ready(());
         }
+        // Waker clones and drops run executor code, so they happen outside the lock.
+        let waker = cx.waker().clone();
         let mut state = this.node.lock();
         if this.node.cancelled.load(Relaxed) {
+            drop(state);
             this.key = None;
             return Poll::Ready(());
         }
-        match this.key {
-            Some(key) => state.wakers.get_mut(key).clone_from(cx.waker()),
-            None => this.key = Some(state.wakers.insert(cx.waker().clone())),
+        let mut old = None;
+        if let Some(key) = this.key {
+            old = Some(mem::replace(state.wakers.get_mut(key), waker));
+        } else {
+            this.key = Some(state.wakers.insert(waker));
         }
+        drop(state);
+        drop(old);
         Poll::Pending
     }
 }
@@ -252,12 +268,16 @@ impl Node {
 }
 
 impl Drop for Node {
+    /// Walks up in a loop, not by recursion, so a long chain of children does not
+    /// overflow the stack when its last token drops.
     fn drop(&mut self) {
-        if self.cancelled.load(Relaxed) {
-            return;
-        }
-        if let Some((parent, key)) = &self.parent {
-            drop(parent.remove(*key, |state| &mut state.children));
+        let mut link = self.parent.take();
+        while let Some((parent, key)) = link {
+            drop(parent.remove(key, |state| &mut state.children));
+            let Some(mut parent) = Arc::into_inner(parent) else {
+                return;
+            };
+            link = parent.parent.take();
         }
     }
 }
@@ -308,6 +328,10 @@ impl<T> Slab<T> {
             .expect("invariant: a live key names a full slot");
         self.free.push(key);
         value
+    }
+
+    fn values(&self) -> impl Iterator<Item = &T> {
+        self.slots.iter().flatten()
     }
 
     fn into_values(self) -> impl Iterator<Item = T> {
@@ -362,12 +386,14 @@ mod tests {
     }
 
     fn entries(token: &Token) -> (usize, usize, usize) {
+        fn live<T>(slab: &Slab<T>) -> usize {
+            slab.values().count()
+        }
         let state = token.0.lock();
-        let live = |slots: &[Option<_>]| slots.iter().flatten().count();
         (
-            state.wakers.slots.iter().flatten().count(),
-            state.hooks.slots.iter().flatten().count(),
-            live(&state.children.slots),
+            live(&state.wakers),
+            live(&state.hooks),
+            live(&state.children),
         )
     }
 
@@ -387,6 +413,54 @@ mod tests {
             for (wait, (tally, waker)) in waits.iter_mut().zip(&tallies) {
                 assert_eq!(tally.wakes(), 1, "cancel wakes each waiter once");
                 assert_eq!(poll(wait.as_mut(), waker), Poll::Ready(()), "cancelled");
+            }
+        }
+
+        /// A waker that cancels its token and records whether the grandchild was
+        /// cancelled when that call returned.
+        struct Recancel(Token, Token, AtomicBool);
+
+        impl Wake for Recancel {
+            fn wake(self: Arc<Self>) {
+                self.0.cancel();
+                self.2.store(self.1.cancelled(), SeqCst);
+            }
+        }
+
+        #[test]
+        fn returns_after_its_children_are_cancelled_during_another_cancel() {
+            let root = Token::new();
+            let child = root.child();
+            let grandchild = child.child();
+            let check =
+                Arc::new(Recancel(child.clone(), grandchild, AtomicBool::new(false)));
+            let mut wait = pin!(child.wait());
+            let waker = Waker::from(Arc::clone(&check));
+            assert_eq!(poll(wait.as_mut(), &waker), Poll::Pending, "live token");
+            root.cancel();
+            assert!(check.2.load(SeqCst), "the grandchild was cancelled");
+        }
+
+        #[test]
+        fn never_loses_the_wake_of_a_concurrent_poll() {
+            for round in 0..20_000 {
+                let token = Token::new();
+                let (tally, waker) = Tally::waker();
+                let mut wait = Box::pin(token.wait());
+                let started = AtomicBool::new(false);
+                let first = std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        started.store(true, SeqCst);
+                        token.cancel();
+                    });
+                    while !started.load(SeqCst) {
+                        std::hint::spin_loop();
+                    }
+                    poll(wait.as_mut(), &waker)
+                });
+                if first.is_pending() {
+                    assert_eq!(tally.wakes(), 1, "round {round} lost its wake");
+                }
             }
         }
 
@@ -416,6 +490,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn debug_shows_whether_cancelled() {
+        let token = Token::new();
+        let wait = token.wait();
+        let hook = token.on_cancel(|| {});
+        assert_eq!(
+            format!("{token:?}"),
+            "Token { cancelled: false, .. }",
+            "live"
+        );
+        assert_eq!(format!("{wait:?}"), "Wait { cancelled: false, .. }", "live");
+        assert_eq!(format!("{hook:?}"), "Hook { .. }", "a hook");
+        token.cancel();
+        assert_eq!(
+            format!("{token:?}"),
+            "Token { cancelled: true, .. }",
+            "done"
+        );
+        assert_eq!(format!("{wait:?}"), "Wait { cancelled: true, .. }", "done");
+    }
+
     mod child {
         use super::*;
 
@@ -434,6 +529,8 @@ mod tests {
             child.cancel();
             assert!(child.cancelled(), "the child is cancelled");
             assert!(!parent.cancelled(), "the parent stays live");
+            assert_eq!(entries(&parent), (0, 0, 1), "a held child stays listed");
+            drop(child);
             assert_eq!(entries(&parent), (0, 0, 0), "the parent forgot the child");
         }
 
@@ -455,6 +552,18 @@ mod tests {
                 parent.0.lock().children.slots.len() <= 1,
                 "slots are reused"
             );
+        }
+
+        #[test]
+        fn a_deep_chain_drops_without_overflowing_the_stack() {
+            let root = Token::new();
+            let mut leaf = root.child();
+            for _ in 0..200_000 {
+                leaf = leaf.child();
+            }
+            drop(leaf);
+            assert!(!root.cancelled(), "the root stays live");
+            assert_eq!(entries(&root), (0, 0, 0), "the chain left the root");
         }
 
         #[test]
@@ -492,6 +601,31 @@ mod tests {
             }
             assert_eq!(entries(&token), (0, 0, 0), "no waker is left");
             assert!(token.0.lock().wakers.slots.len() <= 1, "slots are reused");
+        }
+
+        /// A waker whose last drop drops a wait on the same token, as a task's
+        /// future does when an executor frees the task with its last waker.
+        struct Owner(Mutex<Option<Pin<Box<Wait>>>>);
+
+        impl Wake for Owner {
+            fn wake(self: Arc<Self>) {
+                let wait = self.0.lock().expect("no panic under this lock").take();
+                drop(wait);
+            }
+        }
+
+        #[test]
+        fn drops_a_replaced_waker_outside_the_lock() {
+            let token = Token::new();
+            let (_, plain) = Tally::waker();
+            let mut inner = Box::pin(token.wait());
+            assert_eq!(poll(inner.as_mut(), &plain), Poll::Pending, "live token");
+            let owner = Waker::from(Arc::new(Owner(Mutex::new(Some(inner)))));
+            let mut outer = pin!(token.wait());
+            assert_eq!(poll(outer.as_mut(), &owner), Poll::Pending, "live token");
+            drop(owner);
+            assert_eq!(poll(outer.as_mut(), &plain), Poll::Pending, "no deadlock");
+            assert_eq!(entries(&token), (1, 0, 0), "the inner wait left");
         }
 
         #[test]
