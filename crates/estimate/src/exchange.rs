@@ -38,9 +38,9 @@ pub struct Exchange {
 
 impl Exchange {
     /// The offset of the asking node's monotonic clock at `returned`, for a clock that
-    /// drifts from mesh time by at most `drift`. The true offset is at least
-    /// `answered.earliest - returned`, and at most `received.latest - sent` plus what
-    /// drift adds over the round trip, whatever the delay in each direction.
+    /// drifts from mesh time by at most `drift`. Mesh time only goes forward, so at
+    /// `returned` it is at least both `earliest` edges, and at `sent` it is at most both
+    /// `latest` edges. The offset holds whatever the delay in each direction.
     ///
     /// # Errors
     ///
@@ -48,12 +48,18 @@ impl Exchange {
     ///   false, the clock drifts more than `drift`, or `sent` is after `returned`.
     /// - [`Error::Bound`] when the error is more than 36500 days.
     pub fn measure(self, drift: Drift) -> Result<Measurement, Error> {
+        let (received, answered) = (self.received, self.answered);
+        let earliest = received.earliest.max(answered.earliest);
+        let latest = received.latest.min(answered.latest);
+        if received.earliest > latest || earliest > answered.latest {
+            return Err(Error::Crossed);
+        }
         let round_trip = self.returned.0.checked_sub(self.sent.0);
         let round_trip = round_trip.ok_or(Error::Crossed)?;
         let offset = |mesh: i64, local: u64| i128::from(mesh) - i128::from(local);
-        let low = offset(self.answered.earliest.nanos(), self.returned.0);
-        let high = offset(self.received.latest.nanos(), self.sent.0)
-            + i128::from(drift.over(round_trip));
+        let low = offset(earliest.nanos(), self.returned.0);
+        let high =
+            offset(latest.nanos(), self.sent.0) + i128::from(drift.over(round_trip));
         if low > high {
             return Err(Error::Crossed);
         }
@@ -118,6 +124,14 @@ mod tests {
         }
 
         #[test]
+        fn bounds_each_edge_by_both_intervals() {
+            let (wide, narrow) = (peer(5_000, 7_000), peer(6_150, 6_150));
+            assert_eq!(check(0, 1_000, wide, narrow, 1_250), Ok((5_025, 125)));
+            let narrow = peer(6_100, 6_100);
+            assert_eq!(check(0, 1_000, narrow, wide, 1_250), Ok((4_975, 125)));
+        }
+
+        #[test]
         fn gives_the_peer_interval_for_a_zero_round_trip() {
             let interval = peer(5_990, 6_010);
             assert_eq!(check(0, 1_000, interval, interval, 1_000), Ok((5_000, 10)));
@@ -125,11 +139,11 @@ mod tests {
 
         #[test]
         fn widens_only_the_high_edge_by_drift() {
-            let instant = peer(0, 0);
-            let exact = check(0, 0, instant, instant, SECOND_NS);
-            assert_eq!(exact, Ok((-500_000_000, 500_000_000)));
-            let drifted = check(1_000, 0, instant, instant, SECOND_NS);
-            assert_eq!(drifted, Ok((-499_999_500, 500_000_500)));
+            let (instant, returned) = (peer(0, 0), 2 * SECOND_NS);
+            let exact = check(0, SECOND_NS, instant, instant, returned);
+            assert_eq!(exact, Ok((-1_500_000_000, 500_000_000)));
+            let drifted = check(1_000, SECOND_NS, instant, instant, returned);
+            assert_eq!(drifted, Ok((-1_499_999_500, 500_000_500)));
         }
 
         #[test]
@@ -169,8 +183,27 @@ mod tests {
         }
 
         #[test]
+        fn fails_when_a_peer_interval_is_inverted() {
+            let (honest, inverted) = (peer(6_150, 6_150), peer(6_100, 5_900));
+            let err = check(0, 1_000, inverted, honest, 1_250);
+            assert_eq!(err, Err(Error::Crossed));
+            let (honest, inverted) = (peer(6_100, 6_100), peer(6_150, 5_950));
+            let err = check(0, 1_000, honest, inverted, 1_250);
+            assert_eq!(err, Err(Error::Crossed));
+        }
+
+        #[test]
+        fn fails_when_peer_time_goes_back() {
+            let received = peer(6_100, 6_100);
+            let err = check(0, 1_000, received, peer(6_099, 6_099), 1_250);
+            assert_eq!(err, Err(Error::Crossed));
+            let ok = check(0, 1_000, received, peer(6_100, 6_100), 1_250);
+            assert_eq!(ok, Ok((4_975, 125)));
+        }
+
+        #[test]
         fn fails_when_sent_is_after_returned() {
-            let interval = peer(0, 0);
+            let interval = peer(-100, 100);
             let err = check(0, 1_001, interval, interval, 1_000);
             assert_eq!(err, Err(Error::Crossed));
         }
