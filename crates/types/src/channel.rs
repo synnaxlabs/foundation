@@ -45,16 +45,7 @@ impl Key {
 impl fmt::Display for Key {
     /// Writes the key as a lowercase hyphenated UUID string.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let bits = self.0;
-        write!(
-            f,
-            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-            bits >> 96,
-            bits >> 80 & 0xffff,
-            bits >> 64 & 0xffff,
-            bits >> 48 & 0xffff,
-            bits & 0xffff_ffff_ffff
-        )
+        crate::uuid::write(self.0, f)
     }
 }
 
@@ -63,25 +54,7 @@ impl FromStr for Key {
 
     /// Reads a hyphenated UUID string, in either case.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let error = || crate::ParseError {
-            input: s.into(),
-            expected: "a hyphenated UUID such as 0192540a-6f00-7000-8000-000000000000",
-        };
-        if s.len() != 36 {
-            return Err(error());
-        }
-        let mut bits = 0_u128;
-        for (i, b) in s.bytes().enumerate() {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                if b != b'-' {
-                    return Err(error());
-                }
-                continue;
-            }
-            let digit = char::from(b).to_digit(16).ok_or_else(error)?;
-            bits = bits << 4 | u128::from(digit);
-        }
-        Ok(Self(bits))
+        crate::uuid::read(s).map(Self)
     }
 }
 

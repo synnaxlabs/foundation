@@ -11,6 +11,7 @@ pub mod node;
 pub mod quality;
 pub mod sample;
 pub mod time;
+mod uuid;
 
 use std::fmt;
 
