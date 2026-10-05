@@ -30,14 +30,14 @@ pub const VERSION: u16 = 1;
 /// Samples in a full vector. The last vector of a series may hold fewer.
 pub const VECTOR_LEN: usize = 1024;
 
-/// The most bytes [`Encoder::encode`] writes for `count` samples of `scalar`.
+/// The most bytes [`Encoder::encode`] writes for `len` bytes of values of `scalar`.
 ///
 /// # Panics
 ///
-/// Panics when the bound is more than `usize::MAX`.
+/// Panics when the bound is more than `usize::MAX`. No slice is that long.
 #[must_use]
-pub fn max_len(scalar: Scalar, count: usize) -> usize {
-    Layout::of(scalar).max_len(count)
+pub fn max_len(scalar: Scalar, len: usize) -> usize {
+    Layout::of(scalar).max_len(len)
 }
 
 /// Encodes the series of one channel.
@@ -56,7 +56,7 @@ impl Encoder {
     }
 
     /// Encodes `values`, the little-endian bytes of `count` samples, into the front of
-    /// `out` and returns the bytes written.
+    /// `out` and returns the bytes written. It checks `values` before `out`.
     ///
     /// # Errors
     ///
@@ -66,7 +66,7 @@ impl Encoder {
     ///
     /// # Panics
     ///
-    /// Panics when `out` is shorter than [`max_len`].
+    /// Panics when `out` is shorter than [`max_len`] of `values.len()`.
     pub fn encode(
         &mut self,
         count: usize,
@@ -81,7 +81,7 @@ impl Encoder {
             });
         }
         let width = self.layout.width();
-        let max = self.layout.max_len(count);
+        let max = self.layout.max_len(values.len());
         assert!(
             out.len() >= max,
             "out holds {} bytes, fewer than the {max} that {count} samples may need",
@@ -100,6 +100,10 @@ impl Encoder {
 
 /// Checks the headers of `bytes`, an encoded series of `count` samples of `scalar`,
 /// without decoding the samples, and returns the length of the decoded samples.
+///
+/// The bytes do not carry `count`. A wrong count passes when the vectors also parse
+/// at it: an FFOR or delta vector with bit width 0 holds any count up to
+/// [`VECTOR_LEN`], and padding can hide a few samples.
 ///
 /// # Errors
 ///
@@ -126,7 +130,8 @@ pub fn validate(scalar: Scalar, count: usize, bytes: &[u8]) -> Result<usize, Err
 ///
 /// # Panics
 ///
-/// Panics when `out` does not hold exactly `count` samples.
+/// Panics when `out` does not hold exactly `count` samples. When no slice can hold
+/// them, it returns [`Error::Overflow`] and does not panic.
 pub fn decode(
     scalar: Scalar,
     count: usize,
@@ -135,9 +140,10 @@ pub fn decode(
 ) -> Result<(), Error> {
     let layout = Layout::of(scalar);
     let width = layout.width();
+    let len = layout.raw_len(count)?;
     assert_eq!(
         out.len(),
-        layout.raw_len(count)?,
+        len,
         "out holds {} bytes, not {count} samples of {width} bytes",
         out.len()
     );
@@ -221,21 +227,15 @@ impl Layout {
         count.checked_mul(self.width()).ok_or(Error::Overflow)
     }
 
-    /// The raw size of `count` samples plus one raw header per vector. Selection never
-    /// picks a codec larger than raw, so it bounds every encoding.
-    fn max_len(self, count: usize) -> usize {
+    /// `len` bytes of values plus one raw header per vector. Selection never picks a
+    /// codec larger than raw, so it bounds every encoding.
+    fn max_len(self, len: usize) -> usize {
         let width = self.width();
-        let header = vector::header_len(0, width);
-        count
-            .checked_mul(width)
-            .and_then(|samples| {
-                let headers = count.div_ceil(VECTOR_LEN).checked_mul(header)?;
-                samples.checked_add(headers)
-            })
+        let vectors = len.div_ceil(width).div_ceil(VECTOR_LEN);
+        len.checked_add(vectors.strict_mul(vector::header_len(0, width)))
             .unwrap_or_else(|| {
                 panic!(
-                    "the encoded size of {count} {width}-byte samples is more than \
-                     usize::MAX"
+                    "the encoded size of {len} bytes of values is more than usize::MAX"
                 )
             })
     }
@@ -399,7 +399,7 @@ mod tests {
     fn encode(scalar: Scalar, values: &[u8]) -> Vec<u8> {
         let count = values.len() / scalar.width();
         let [zeros, ones] = [0x00, 0xff].map(|fill| {
-            let mut out = vec![fill; max_len(scalar, count)];
+            let mut out = vec![fill; max_len(scalar, values.len())];
             let len = Encoder::new(scalar)
                 .encode(count, values, &mut out)
                 .expect("the values hold whole samples");
@@ -416,6 +416,53 @@ mod tests {
             .into_iter()
             .flat_map(|value| value.to_le_bytes().into_iter().take(width))
             .collect()
+    }
+
+    /// The count and series of a frame in `form` that holds `bytes` as the series of
+    /// its one group, when the writer did not call `set_count`.
+    fn uncounted(form: Form, bytes: &[u8]) -> (usize, Vec<u8>) {
+        let set = Interner::new().intern(&[Group {
+            index: Slot::new(1),
+            data: &[],
+        }]);
+        let config = block::Config { budget: 1 << 16 };
+        let memory = block::Heap::new(config.reservation());
+        let pool = block::Pool::new(config, memory);
+        let mut draft = Draft::new(&pool, &set, form, &[(0, bytes.len())])
+            .expect("the pool holds the frame");
+        draft
+            .series(0)
+            .expect("entry 0 is present")
+            .copy_from_slice(bytes);
+        let frame = draft.freeze(Path::Live);
+        let range = frame.range(0).expect("group 0 is present");
+        let count = usize::try_from(range.count).expect("the count fits");
+        (count, frame.series(0).expect("entry 0 is present").to_vec())
+    }
+
+    #[test]
+    fn refuses_a_series_whose_count_was_not_set() {
+        let (count, series) = uncounted(Form::Raw, &[1; 16]);
+        assert_eq!(
+            Encoder::new(Scalar::Stamp).encode(count, &series, &mut [0; 32]),
+            Err(Error::Length {
+                expected: 0,
+                actual: 16,
+            })
+        );
+        let encoded = encode(Scalar::Stamp, &[1; 16]);
+        let (count, series) = uncounted(Form::Encoded, &encoded);
+        let trailing = Error::Trailing {
+            extra: encoded.len(),
+        };
+        assert_eq!(
+            validate(Scalar::Stamp, count, &series),
+            Err(trailing.clone())
+        );
+        assert_eq!(
+            decode(Scalar::Stamp, count, &series, &mut []),
+            Err(trailing)
+        );
     }
 
     mod encode {
@@ -513,23 +560,45 @@ mod tests {
 
         #[test]
         fn refuses_values_that_do_not_fit_the_count() {
-            let mut out = [7; 16];
-            for (count, values, expected) in [
-                (2, &[1, 2, 3][..], 4),
-                (1, &[1, 2, 3, 4], 2),
-                (3, &[1, 2], 6),
-                (0, &[1, 2], 0),
-            ] {
-                assert_eq!(
-                    Encoder::new(Scalar::U16).encode(count, values, &mut out),
-                    Err(Error::Length {
-                        expected,
-                        actual: values.len(),
-                    }),
-                    "{count} {values:?}"
-                );
+            for scalar in INTS.into_iter().chain(OTHERS) {
+                let width = scalar.width();
+                let mut out = [7; 64];
+                for (count, len) in
+                    [(2, 2 * width - 1), (1, 2 * width), (3, width), (0, width)]
+                {
+                    assert_eq!(
+                        Encoder::new(scalar).encode(count, &vec![1; len], &mut out),
+                        Err(Error::Length {
+                            expected: count * width,
+                            actual: len,
+                        }),
+                        "{scalar:?} {count} {len}"
+                    );
+                }
+                assert_eq!(out, [7; 64], "a refused {scalar:?} series wrote to out");
             }
-            assert_eq!(out, [7; 16], "a refused series wrote to out");
+        }
+
+        #[test]
+        fn sizes_out_from_the_values_not_the_count() {
+            let values = [0; 16];
+            let mut out = vec![0; max_len(Scalar::Uuid, values.len())];
+            let count = usize::try_from(u32::MAX).expect("a u32 fits");
+            assert_eq!(
+                Encoder::new(Scalar::Uuid).encode(count, &values, &mut out),
+                Err(Error::Length {
+                    expected: 68_719_476_720,
+                    actual: 16,
+                })
+            );
+        }
+
+        #[test]
+        fn refuses_counts_past_usize() {
+            assert_eq!(
+                Encoder::new(Scalar::U16).encode(usize::MAX, &[], &mut []),
+                Err(Error::Overflow)
+            );
         }
 
         #[test]
@@ -539,31 +608,6 @@ mod tests {
                 Err(Error::Length {
                     expected: 1,
                     actual: 0,
-                })
-            );
-        }
-
-        #[test]
-        fn refuses_a_series_whose_count_was_not_set() {
-            let set = Interner::new().intern(&[Group {
-                index: Slot::new(1),
-                data: &[],
-            }]);
-            let config = block::Config { budget: 1 << 16 };
-            let memory = block::Heap::new(config.reservation());
-            let pool = block::Pool::new(config, memory);
-            let mut draft = Draft::new(&pool, &set, Form::Raw, &[(0, 16)])
-                .expect("the pool holds the frame");
-            draft.series(0).expect("entry 0 is present").fill(1);
-            let frame = draft.freeze(Path::Live);
-            let range = frame.range(0).expect("group 0 is present");
-            let count = usize::try_from(range.count).expect("the count fits");
-            let series = frame.series(0).expect("entry 0 is present");
-            assert_eq!(
-                Encoder::new(Scalar::Stamp).encode(count, series, &mut [0; 32]),
-                Err(Error::Length {
-                    expected: 0,
-                    actual: 16,
                 })
             );
         }
@@ -582,22 +626,23 @@ mod tests {
 
         #[test]
         fn is_raw_plus_one_raw_header_per_vector() {
-            for (scalar, count, len) in [
+            for (scalar, len, max) in [
                 (Scalar::U8, 0, 0),
                 (Scalar::U8, 1, 3),
                 (Scalar::U8, 1_024, 1_026),
                 (Scalar::U8, 1_025, 1_029),
-                (Scalar::U32, 3, 16),
-                (Scalar::I64, 2_048, 16_400),
-                (Scalar::Uuid, 1, 32),
+                (Scalar::U16, 3, 5),
+                (Scalar::U32, 12, 16),
+                (Scalar::I64, 16_384, 16_400),
+                (Scalar::Uuid, 16, 32),
             ] {
-                assert_eq!(max_len(scalar, count), len, "{scalar:?} {count}");
+                assert_eq!(max_len(scalar, len), max, "{scalar:?} {len}");
             }
         }
 
         #[test]
         #[should_panic(
-            expected = "the encoded size of 18446744073709551615 2-byte samples"
+            expected = "the encoded size of 18446744073709551615 bytes of values"
         )]
         fn panics_past_usize() {
             std::hint::black_box(max_len(Scalar::U16, usize::MAX));
@@ -824,16 +869,23 @@ mod tests {
 
         #[test]
         fn refuses_counts_past_usize() {
-            let overflow = Err(Error::Overflow);
-            assert_eq!(validate(Scalar::U16, usize::MAX, &[]), overflow);
-            assert_eq!(
-                decode(Scalar::U16, usize::MAX, &[], &mut []),
-                Err(Error::Overflow)
-            );
-            assert_eq!(
-                Encoder::new(Scalar::U16).encode(usize::MAX, &[], &mut []),
-                overflow
-            );
+            assert_eq!(validate(Scalar::U16, usize::MAX, &[]), Err(Error::Overflow));
+        }
+
+        #[test]
+        fn passes_any_count_a_vector_of_width_0_holds() {
+            let second = 1_000_000_000;
+            let encoded = encode(Scalar::Stamp, &bytes(8, (0..5).map(|n| n * second)));
+            assert_eq!(encoded[..2], [2, 0], "five stamps make one delta vector");
+            for count in [1, 5, 1_000, 1_024] {
+                accepts(
+                    Scalar::Stamp,
+                    count,
+                    &encoded,
+                    &bytes(8, (0..count).map(|n| i128::try_from(n).unwrap() * second)),
+                );
+            }
+            check(Scalar::Stamp, 1_025, &encoded, &truncated(1, 2, 0));
         }
 
         #[test]
@@ -940,6 +992,14 @@ mod tests {
         #[should_panic(expected = "out holds 3 bytes, not 2 samples of 2 bytes")]
         fn panics_when_out_does_not_hold_count_samples() {
             let _result = decode(Scalar::U16, 2, &[], &mut [0; 3]);
+        }
+
+        #[test]
+        fn refuses_counts_past_usize_before_it_checks_out() {
+            assert_eq!(
+                decode(Scalar::U16, usize::MAX, &[], &mut []),
+                Err(Error::Overflow)
+            );
         }
     }
 }

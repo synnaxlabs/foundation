@@ -90,7 +90,7 @@ fn round_trip(scalar: Scalar) -> [bool; 4] {
     let width = scalar.width();
     let most = COUNTS[COUNTS.len() - 1];
     let mut encoder = Encoder::new(scalar);
-    let mut series = vec![0; max_len(scalar, most)];
+    let mut series = vec![0; max_len(scalar, most * width)];
     let mut decoded = vec![0; most * width];
     let mut tags = [false; 4];
     let bits = u32::try_from(8 * width).expect("widths are small").min(64);
@@ -110,7 +110,7 @@ fn round_trip(scalar: Scalar) -> [bool; 4] {
                 .collect();
             let case = format!("{scalar:?}, {shape:?}, {count} samples");
             let (written, allocations) = ALLOCATOR.count(|| {
-                let bound = max_len(scalar, count);
+                let bound = max_len(scalar, values.len());
                 encoder.encode(count, &values, &mut series[..bound])
             });
             assert_eq!(allocations, 0, "encoding {case} allocated");
