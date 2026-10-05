@@ -351,7 +351,11 @@ How to read this record:
   that do not hold `count` samples, and `validate` refuses encoded bytes that do not
   parse as `count` samples. The bytes do not carry the count, so a wrong count passes
   when the vectors also parse at it: a vector with bit width 0 holds any count up to
-  1024.
+  1024. A fixed array is the series of its `count * len` elements. A `String`,
+  `Bytes`, or `List` series is the `u32` series of its ends, then the series of its
+  elements (`u8` for `String` and `Bytes`). An end counts elements from the first, so
+  ends never decrease, and a `List` sample holds at most `max` elements. `codec` does
+  not check UTF-8. Vector numbers in errors count across the ends and the elements.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
