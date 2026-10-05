@@ -1,7 +1,6 @@
 //! One index of a shard: who may write it, the order of its samples, and its newest
 //! frame.
 
-use std::fmt;
 use std::ops::Range;
 
 use control::{Gate, Permit};
@@ -9,6 +8,7 @@ use delivery::Readers;
 use types::frame::{Draft, Frame, Path};
 use types::time::{Interval, Monotonic};
 
+use crate::Refusal;
 use crate::order::{self, Order, Tail};
 
 /// One index of a shard. It reads no clock: each input takes the time.
@@ -114,26 +114,6 @@ impl Index {
         }
     }
 }
-
-/// Why an index refused a frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
-    /// The gate refused the write.
-    Control(control::Error),
-    /// A stamp broke a rule.
-    Order(order::Error),
-}
-
-impl fmt::Display for Refusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Control(error) => error.fmt(f),
-            Self::Order(error) => error.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for Refusal {}
 
 #[cfg(test)]
 mod tests {
