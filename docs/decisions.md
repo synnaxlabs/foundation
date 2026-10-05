@@ -884,7 +884,9 @@ How to read this record:
   term. Until `mesh` sends the answer, the node campaigns. While a voter has a lease,
   this has no effect. Once no voter has a lease, as after the leader fails, the voters
   can elect the node: it commits an entry of its term, which commits the leave, and
-  steps down, and the voters follow it until their election timeout (#483). Readmit in
+  steps down, and the voters follow it until their election timeout (#483). This gap
+  stays, pinned by a test, until #483; keeping readmit until then lost. The person
+  decided on 2026-10-05 ("(a)"), #482. Readmit in
   `raft` (#414) lost: it sent the log to a sender that `raft` cannot check. The person
   decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set
   sends the commit and steps down. A node outside an uncommitted configuration still
