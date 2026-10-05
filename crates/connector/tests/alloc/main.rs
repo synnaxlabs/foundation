@@ -4,12 +4,12 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use std::future::{self, Future};
+use std::future;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Wake, Waker};
 
 use connector::cancel::Token;
 
