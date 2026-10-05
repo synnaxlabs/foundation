@@ -8,12 +8,15 @@ publish.workspace = true
 [dependencies]
 aws-lc-rs = { workspace = true }
 block = { path = "../block" }
+bytes = { workspace = true }
 env = { path = "../env" }
+noq-proto = { workspace = true }
 rustls = { workspace = true }
 types = { path = "../types" }
 
 [dev-dependencies]
 proptest = { workspace = true }
+sim = { path = "../sim" }
 
 [lints]
 workspace = true

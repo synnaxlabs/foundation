@@ -39,6 +39,11 @@ mod error;
     expect(dead_code, reason = "the QUIC carrier is the first user")
 )]
 mod message;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the QUIC carrier is the first user")
+)]
+mod quic;
 mod session;
 pub mod stream;
 #[cfg_attr(

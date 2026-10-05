@@ -1377,9 +1377,12 @@ version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
  "block",
+ "bytes",
  "env",
+ "noq-proto",
  "proptest",
  "rustls",
+ "sim",
  "types",
 ]
 
