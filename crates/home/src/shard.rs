@@ -33,7 +33,7 @@ pub(crate) struct Shard {
     scratch: Scratch,
 }
 
-/// An open writer.
+/// The shard's state for an open writer.
 #[derive(Debug)]
 struct Session {
     set: Arc<KeySet>,
@@ -46,7 +46,7 @@ struct Session {
 struct Claim {
     /// The index's place in [`Shard::indexes`].
     place: usize,
-    gate: control::Key,
+    key: control::Key,
 }
 
 /// The buffers of a write, kept from one write to the next.
@@ -55,13 +55,19 @@ struct Scratch {
     split: split::Scratch,
     /// The check of each present group, in group order.
     checks: Vec<(u32, Result<Accepted, Refusal>)>,
+    batch: Batch,
+    outcomes: Vec<Outcome>,
+}
+
+/// The entries of one append. Empty between appends.
+#[derive(Debug, Default)]
+struct Batch {
+    /// Each handoff to record: its group, the seq it goes in at, and its body.
+    handoffs: Vec<(u32, u64, Option<Block>)>,
     /// The stored body of each accepted group, in group order.
     bodies: Vec<Body>,
-    /// The handoff body of each group whose index has a handoff to record.
-    handoffs: Vec<(u32, Option<Block>)>,
-    /// Empty between appends. See [`reuse`].
+    /// See [`reuse`].
     entries: Vec<Entry<'static>>,
-    outcomes: Vec<Outcome>,
 }
 
 /// The stored body of one accepted group.
@@ -108,7 +114,7 @@ pub(crate) enum Error {
     /// A backfill frame found no room in the ring or the pool. Nothing is spent, and
     /// the writer writes the frame again later.
     Full,
-    /// A sync failed. The shard takes no more frames.
+    /// A commit failed. The shard takes no more frames.
     Disk(env::files::Error),
 }
 
@@ -117,7 +123,7 @@ impl fmt::Display for Error {
         match self {
             Self::Resend => write!(f, "the home does not take a resend frame yet"),
             Self::Full => write!(f, "the ring or the pool has no room for the frame"),
-            Self::Disk(error) => write!(f, "a sync failed: {error}"),
+            Self::Disk(error) => write!(f, "a commit failed: {error}"),
         }
     }
 }
@@ -166,7 +172,7 @@ impl Shard {
 
     /// Opens `writer` on each index of its key set at monotonic time `now`, and
     /// appends a handoff for each index where it takes control. A handoff that finds
-    /// no room waits for the next append on its index. A failed sync fails the next
+    /// no room waits for the next append on its index. A failed commit fails the next
     /// write.
     ///
     /// # Panics
@@ -192,8 +198,8 @@ impl Shard {
                 let Some(&place) = self.places.get(&entry.slot) else {
                     panic!("the shard does not carry index {}", entry.key);
                 };
-                let gate = self.indexes[place].gate.open(control.clone(), lease, now);
-                Claim { place, gate }
+                let key = self.indexes[place].gate.open(control.clone(), lease, now);
+                Claim { place, key }
             })
             .collect();
         let session = Session { set, claims };
@@ -220,7 +226,7 @@ impl Shard {
             panic!("writer {} is not open", key.0);
         };
         for claim in &session.claims {
-            self.indexes[claim.place].gate.close(claim.gate, now);
+            self.indexes[claim.place].gate.close(claim.key, now);
         }
         self.record(&session, mesh);
     }
@@ -234,7 +240,7 @@ impl Shard {
     ///
     /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
     /// frame when the ring or the pool has no room; no seq moves. [`Error::Disk`]
-    /// after a failed sync.
+    /// after a failed commit.
     ///
     /// # Panics
     ///
@@ -258,50 +264,36 @@ impl Shard {
         for (group, stamps) in split.groups() {
             let (claim, _) = session.claim(group);
             let index = &mut self.indexes[claim.place];
-            let checked = match stamps {
-                Ok(stamps) => index.check(claim.gate, path, stamps, now, mesh),
-                Err(error) => Err(match index.gate.check(claim.gate, now) {
-                    Ok(_) => Refusal::Codec(error),
-                    Err(control) => Refusal::Control(control),
-                }),
-            };
+            let checked = index.check(claim.key, path, stamps, now, mesh);
             scratch.checks.push((group, checked));
         }
-        let ready = frames(
-            &self.pool,
-            &mut split,
-            &session.set,
-            &mut scratch.checks,
-            &mut scratch.bodies,
-        )
-        .and_then(|()| {
-            let groups = scratch.checks.iter().map(|&(group, _)| group);
-            handoffs(
-                &self.pool,
-                &self.indexes,
-                session,
-                groups,
-                &mut scratch.handoffs,
-            )
-        });
+        let batch = &mut scratch.batch;
+        let made = batch
+            .bodies(&self.pool, &mut split, &session.set, &mut scratch.checks)
+            .and_then(|()| {
+                let groups = scratch.checks.iter().map(|&(group, _)| group);
+                batch.handoffs(&self.pool, &self.indexes, session, groups)
+            });
         drop(split);
-        let room = match ready {
-            Ok(()) => append(&self.buffer, &mut scratch.entries, |batch| {
-                let (handoffs, bodies) = (&scratch.handoffs, &scratch.bodies);
-                entries(&self.indexes, session, path, mesh, handoffs, bodies, batch);
-            }),
-            Err(_) => Ok(false),
-        };
-        scratch.bodies.clear();
-        let room = room.and_then(|room| match (room, path) {
+        if made.is_err() {
+            batch.clear();
+        }
+        let appended =
+            batch.append(&self.buffer, &mut self.indexes, session, path, mesh);
+        let room = appended.and_then(|room| match (room && made.is_ok(), path) {
             (false, Path::Backfill) => Err(Error::Full),
-            _ => Ok(room),
+            (room, _) => Ok(room),
         });
         match room {
-            Ok(room) => Ok(scratch.finish(&mut self.indexes, session, room)),
+            Ok(room) => Ok(spend(
+                &mut scratch.checks,
+                &mut self.indexes,
+                session,
+                room,
+                &mut scratch.outcomes,
+            )),
             Err(error) => {
                 scratch.checks.clear();
-                scratch.handoffs.clear();
                 Err(error)
             }
         }
@@ -317,33 +309,20 @@ impl Shard {
         self.buffer.durable(slot, path).seq
     }
 
-    /// Appends the unrecorded handoff of each index of `session`, and marks each
-    /// recorded when it went in.
+    /// Appends the unrecorded handoff of each index of `session`.
     fn record(&mut self, session: &Session, mesh: Interval) {
         let groups = (0..session.claims.len()).map(|group| {
             u32::try_from(group).expect("invariant: a key set has u32 groups")
         });
-        let pending = &mut self.scratch.handoffs;
-        let made = handoffs(&self.pool, &self.indexes, session, groups, pending);
-        if made.is_ok() && !pending.is_empty() {
-            let room = append(&self.buffer, &mut self.scratch.entries, |batch| {
-                entries(
-                    &self.indexes,
-                    session,
-                    Path::Live,
-                    mesh,
-                    pending,
-                    &[],
-                    batch,
-                );
-            });
-            if room == Ok(true) {
-                for &(group, _) in pending.iter() {
-                    self.indexes[session.claim(group).0.place].gate.recorded();
-                }
-            }
+        let batch = &mut self.scratch.batch;
+        if batch
+            .handoffs(&self.pool, &self.indexes, session, groups)
+            .is_err()
+        {
+            batch.clear();
         }
-        pending.clear();
+        // A handoff with no room waits, and a failed commit fails the next write.
+        drop(batch.append(&self.buffer, &mut self.indexes, session, Path::Live, mesh));
     }
 }
 
@@ -357,145 +336,140 @@ impl Session {
     }
 }
 
-impl Scratch {
-    /// Spends the seq of each accepted group, marks each handoff recorded when the
-    /// append found `room`, and returns the outcome of each present group.
-    fn finish(
+impl Batch {
+    /// Adds the stored body of each accepted group of `checks`, in group order, with
+    /// its index frame from `split`.
+    fn bodies(
         &mut self,
+        pool: &block::Pool,
+        split: &mut Split<'_>,
+        set: &KeySet,
+        checks: &mut [(u32, Result<Accepted, Refusal>)],
+    ) -> Result<(), block::Error> {
+        for (group, checked) in checks {
+            if let Ok(accepted) = checked {
+                let draft = split.frame(pool, *group)?;
+                let parts = stored::body(pool, accepted.freeze(draft, *group), set)?;
+                self.bodies.push(Body {
+                    group: *group,
+                    range: range(accepted),
+                    last: accepted.last(),
+                    parts,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds the handoff of the index of each of `groups` that has one to record.
+    fn handoffs(
+        &mut self,
+        pool: &block::Pool,
+        indexes: &[Index],
+        session: &Session,
+        groups: impl Iterator<Item = u32>,
+    ) -> Result<(), block::Error> {
+        for group in groups {
+            let (claim, _) = session.claim(group);
+            if let Some((handoff, first)) = indexes[claim.place].handoff() {
+                self.handoffs
+                    .push((group, first, handoff::body(pool, handoff)?));
+            }
+        }
+        Ok(())
+    }
+
+    /// Appends the batch as one record at mesh time `mesh`: each handoff on the live
+    /// path, then each body on `path`. Marks each handoff recorded when the batch
+    /// found room, and empties the batch. Returns whether it found room. An empty
+    /// batch appends nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Disk`] after a failed commit, also for an empty batch.
+    fn append(
+        &mut self,
+        buffer: &Buffer,
         indexes: &mut [Index],
         session: &Session,
-        room: bool,
-    ) -> &[Outcome] {
-        for (group, _) in self.handoffs.drain(..) {
-            if room {
+        path: Path,
+        mesh: Interval,
+    ) -> Result<bool, Error> {
+        let mut entries = reuse(mem::take(&mut self.entries));
+        let handoffs = self.handoffs.iter().map(|(group, first, parts)| {
+            let (_, entry) = session.claim(*group);
+            Entry {
+                index: entry.key,
+                slot: entry.slot,
+                path: Path::Live,
+                first: *first,
+                len: 0,
+                stored_at: mesh.latest,
+                last: None,
+                tag: handoff::TAG,
+                parts: parts.as_slice(),
+            }
+        });
+        let bodies = self.bodies.iter().map(|body| {
+            let (_, entry) = session.claim(body.group);
+            Entry {
+                index: entry.key,
+                slot: entry.slot,
+                path,
+                first: body.range.seq,
+                len: body.range.count,
+                stored_at: mesh.latest,
+                last: body.last,
+                tag: stored::TAG,
+                parts: &body.parts,
+            }
+        });
+        entries.extend(handoffs.chain(bodies));
+        let room = room(buffer.append(&entries));
+        self.entries = reuse(entries);
+        for (group, _, _) in self.handoffs.drain(..) {
+            if room == Ok(true) {
                 indexes[session.claim(group).0.place].gate.recorded();
             }
         }
-        self.outcomes.clear();
-        for (group, checked) in self.checks.drain(..) {
-            let (claim, entry) = session.claim(group);
-            let slot = entry.slot;
-            self.outcomes.push(match checked {
-                Ok(accepted) => {
-                    let range = range(&accepted);
-                    indexes[claim.place].advance(accepted);
-                    if room {
-                        Outcome::Applied { slot, range }
-                    } else {
-                        Outcome::Lost { slot, range }
-                    }
+        self.bodies.clear();
+        room
+    }
+
+    /// Empties the batch. Each handoff waits for the next append on its index.
+    fn clear(&mut self) {
+        self.handoffs.clear();
+        self.bodies.clear();
+    }
+}
+
+/// Spends the seq of each accepted group of `checks`, and makes the outcome of each
+/// present group into `out`: applied when the append found `room`, else lost.
+fn spend<'a>(
+    checks: &mut Vec<(u32, Result<Accepted, Refusal>)>,
+    indexes: &mut [Index],
+    session: &Session,
+    room: bool,
+    out: &'a mut Vec<Outcome>,
+) -> &'a [Outcome] {
+    out.clear();
+    for (group, checked) in checks.drain(..) {
+        let (claim, entry) = session.claim(group);
+        let slot = entry.slot;
+        out.push(match checked {
+            Ok(accepted) => {
+                let range = range(&accepted);
+                indexes[claim.place].advance(accepted);
+                if room {
+                    Outcome::Applied { slot, range }
+                } else {
+                    Outcome::Lost { slot, range }
                 }
-                Err(refusal) => Outcome::Refused { slot, refusal },
-            });
-        }
-        &self.outcomes
+            }
+            Err(refusal) => Outcome::Refused { slot, refusal },
+        });
     }
-}
-
-/// Makes the index frame and the stored body of each accepted group of `checks`, in
-/// group order, into `out`.
-fn frames(
-    pool: &block::Pool,
-    split: &mut Split<'_>,
-    set: &KeySet,
-    checks: &mut [(u32, Result<Accepted, Refusal>)],
-    out: &mut Vec<Body>,
-) -> Result<(), block::Error> {
-    for (group, checked) in checks {
-        if let Ok(accepted) = checked {
-            let draft = split.frame(pool, *group)?;
-            let parts = stored::body(pool, accepted.freeze(draft, *group), set)?;
-            out.push(Body {
-                group: *group,
-                range: range(accepted),
-                last: accepted.last(),
-                parts,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Makes the handoff body of the index of each of `groups` whose gate has a handoff to
-/// record, into `out`.
-fn handoffs(
-    pool: &block::Pool,
-    indexes: &[Index],
-    session: &Session,
-    groups: impl Iterator<Item = u32>,
-    out: &mut Vec<(u32, Option<Block>)>,
-) -> Result<(), block::Error> {
-    for group in groups {
-        let (claim, _) = session.claim(group);
-        if let Some(handoff) = indexes[claim.place].gate.handoff() {
-            out.push((group, handoff::body(pool, handoff)?));
-        }
-    }
-    Ok(())
-}
-
-/// Makes the entries of one append on `path` into `out`: each handoff, on the live
-/// path at its tail, then each body.
-fn entries<'a>(
-    indexes: &[Index],
-    session: &Session,
-    path: Path,
-    mesh: Interval,
-    handoffs: &'a [(u32, Option<Block>)],
-    bodies: &'a [Body],
-    out: &mut Vec<Entry<'a>>,
-) {
-    let handoffs = handoffs.iter().map(|(group, parts)| {
-        let (claim, entry) = session.claim(*group);
-        Entry {
-            index: entry.key,
-            slot: entry.slot,
-            path: Path::Live,
-            first: indexes[claim.place].order.tail(Path::Live).seq,
-            len: 0,
-            stored_at: mesh.latest,
-            last: None,
-            tag: handoff::TAG,
-            parts: parts.as_slice(),
-        }
-    });
-    let bodies = bodies.iter().map(|body| {
-        let (_, entry) = session.claim(body.group);
-        Entry {
-            index: entry.key,
-            slot: entry.slot,
-            path,
-            first: body.range.seq,
-            len: body.range.count,
-            stored_at: mesh.latest,
-            last: body.last,
-            tag: stored::TAG,
-            parts: &body.parts,
-        }
-    });
-    out.extend(handoffs.chain(bodies));
-}
-
-/// Appends the entries `fill` makes as one batch, in the vector kept in `spare`.
-/// Returns whether the batch found room. An empty batch appends nothing.
-///
-/// # Errors
-///
-/// [`Error::Disk`] after a failed sync.
-fn append<'a>(
-    buffer: &Buffer,
-    spare: &mut Vec<Entry<'static>>,
-    fill: impl FnOnce(&mut Vec<Entry<'a>>),
-) -> Result<bool, Error> {
-    let mut batch = reuse(mem::take(spare));
-    fill(&mut batch);
-    let room = if batch.is_empty() {
-        Ok(true)
-    } else {
-        room(buffer.append(&batch))
-    };
-    *spare = reuse(batch);
-    room
+    out
 }
 
 /// Empties `entries` and gives back its allocation for entries of another lifetime,
@@ -524,19 +498,18 @@ fn range(accepted: &Accepted) -> frame::Range {
 ///
 /// # Errors
 ///
-/// [`Error::Disk`] after a failed sync.
+/// [`Error::Disk`] after a failed commit.
 ///
 /// # Panics
 ///
-/// If the append failed for another reason, which no append can.
+/// If the append failed for another reason: a batch that no record holds, or a
+/// failure that only an open has.
 fn room(appended: Result<(), buffer::Error>) -> Result<bool, Error> {
     match appended {
         Ok(()) => Ok(true),
         Err(buffer::Error::Full { .. } | buffer::Error::Pool(_)) => Ok(false),
         Err(buffer::Error::Files(error)) => Err(Error::Disk(error)),
-        Err(error) => {
-            panic!("invariant: an append fails only for room or a sync: {error}")
-        }
+        Err(error) => panic!("an append failed for neither room nor a commit: {error}"),
     }
 }
 
@@ -632,13 +605,15 @@ mod tests {
             bytes
         }
 
-        /// Takes every block of the pool.
+        /// Takes every block of the pool, of each size class.
         fn fill(&self) -> Vec<Unique> {
             let mut blocks = Vec::new();
-            for len in [1 << 16, BLOCK, 64, 1] {
+            let mut len = self.pool.largest();
+            while len > 0 {
                 while let Ok(block) = self.pool.alloc(len) {
                     blocks.push(block);
                 }
+                len -= len.div_ceil(16);
             }
             blocks
         }
@@ -982,6 +957,31 @@ mod tests {
     }
 
     #[test]
+    fn loses_a_live_frame_when_the_pool_has_no_block_for_its_record() {
+        run(15, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let live = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            let backfill = frame(&test.pool, &set, &[(0, &[1]), (1, &[1])]);
+            let room: Vec<_> = (0..4)
+                .map(|_| test.pool.alloc(BLOCK).expect("a block"))
+                .collect();
+            let blocks = test.fill();
+            drop(room);
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            assert_eq!(
+                shard.write(a, LIVE, live, NOW, MESH),
+                Ok(&[lost(0, 0, 1)][..])
+            );
+            assert_eq!(
+                shard.write(a, BACKFILL, backfill, NOW, MESH),
+                Err(Error::Full)
+            );
+            drop(blocks);
+        });
+    }
+
+    #[test]
     fn records_a_handoff_at_open_and_close() {
         run(8, |test| async move {
             let set = two_indexes();
@@ -1076,6 +1076,11 @@ mod tests {
                 handoffs[0] < series[0],
                 "the handoff goes in before the frame"
             );
+            let again = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            assert_eq!(
+                shard.write(a, LIVE, again, NOW, MESH),
+                Ok(&[applied(0, 1, 1)][..])
+            );
             let second = frame(&test.pool, &set, &[(2, &[10])]);
             assert_eq!(
                 shard.write(a, LIVE, second, NOW, MESH),
@@ -1092,7 +1097,8 @@ mod tests {
         run(10, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 2, &set), NOW, MESH);
+            let b = shard.open_writer(writer("b", 1, &set), NOW, MESH);
             test.node.fail_file(FilePath::new(RING), Operation::Sync);
             let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
             assert_eq!(
@@ -1108,13 +1114,21 @@ mod tests {
                 shard.committed().await,
                 Err(buffer::Error::Files(failed.clone()))
             );
-            let write = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
             let disk = Error::Disk(failed);
             assert_eq!(
                 disk.to_string(),
-                "a sync failed: sync of shard-0/ring failed with OS error 5"
+                "a commit failed: sync of shard-0/ring failed with OS error 5"
             );
-            assert_eq!(shard.write(a, LIVE, write, NOW, MESH), Err(disk));
+            let write = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            assert_eq!(shard.write(a, LIVE, write, NOW, MESH), Err(disk.clone()));
+            let refused = frame(&test.pool, &set, &[(2, &[20])]);
+            assert_eq!(shard.write(b, LIVE, refused, NOW, MESH), Err(disk.clone()));
+            let live = frame(&test.pool, &set, &[(0, &[30]), (1, &[3])]);
+            let backfill = frame(&test.pool, &set, &[(0, &[1]), (1, &[1])]);
+            let blocks = test.fill();
+            assert_eq!(shard.write(a, LIVE, live, NOW, MESH), Err(disk.clone()));
+            assert_eq!(shard.write(a, BACKFILL, backfill, NOW, MESH), Err(disk));
+            drop(blocks);
         });
     }
 

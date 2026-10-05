@@ -3,22 +3,20 @@
 
 use std::ops::Range;
 
-use control::{Gate, Permit};
+use control::{Gate, Handoff, Permit};
 use delivery::Readers;
 use types::frame::{Draft, Frame, Path};
 use types::time::{Interval, Monotonic, Stamp};
 
-use crate::Refusal;
 use crate::order::{self, Order, Tail};
+use crate::{Refusal, split};
 
 /// One index of a shard. It reads no clock: each input takes the time.
 #[derive(Debug)]
 pub(crate) struct Index {
-    /// Who may write the index. The shard opens and closes writers on it, and records
-    /// each [`Gate::handoff`] before the index's next frame.
+    /// Who may write the index.
     pub(crate) gate: Gate,
-    /// Where each path stands. The shard reads it to place a handoff.
-    pub(crate) order: Order,
+    order: Order,
     readers: Readers,
 }
 
@@ -64,14 +62,16 @@ impl Index {
         }
     }
 
-    /// Checks a frame from `key` whose index series on `path` is `stamps`, at
-    /// monotonic time `now` and mesh time `mesh`. Only the gate changes: a lease that
-    /// ran out by `now` hands control on.
+    /// Checks a frame from `key` whose index series on `path` is `stamps`, or the
+    /// error of its first series that does not fit, at monotonic time `now` and mesh
+    /// time `mesh`. Only the gate changes: a lease that ran out by `now` hands
+    /// control on.
     ///
     /// # Errors
     ///
-    /// [`Refusal::Control`] when `key` does not hold control, else
-    /// [`Refusal::Order`] when a stamp breaks a rule.
+    /// In this order: [`Refusal::Control`] when `key` does not hold control,
+    /// [`Refusal::Codec`] with the error of `stamps`, and [`Refusal::Order`] when a
+    /// stamp breaks a rule.
     ///
     /// # Panics
     ///
@@ -80,11 +80,12 @@ impl Index {
         &mut self,
         key: control::Key,
         path: Path,
-        stamps: &[[u8; 8]],
+        stamps: Result<&[[u8; 8]], split::Error>,
         now: Monotonic,
         mesh: Interval,
     ) -> Result<Accepted, Refusal> {
         let permit = self.gate.check(key, now).map_err(Refusal::Control)?;
+        let stamps = stamps.map_err(Refusal::Codec)?;
         let order = self
             .order
             .check(path, mesh)
@@ -96,6 +97,12 @@ impl Index {
             permit,
             frame: None,
         })
+    }
+
+    /// The gate's handoff to record, and the seq it goes in at: the live tail.
+    pub(crate) fn handoff(&self) -> Option<(Handoff<'_>, u64)> {
+        let first = self.order.tail(Path::Live).seq;
+        self.gate.handoff().map(|handoff| (handoff, first))
     }
 
     /// Spends the seq of `accepted` and renews the writer's control lease. A live
@@ -125,7 +132,7 @@ impl Index {
 mod tests {
     use std::sync::Arc;
 
-    use control::{Handoff, Lease, Writer};
+    use control::{Lease, Writer};
     use types::authority::Authority;
     use types::channel;
     use types::frame::key_set::{Group, Interner, KeySet};
@@ -216,7 +223,8 @@ mod tests {
         seconds: &[i64],
         now: Monotonic,
     ) -> Result<Range<u64>, Refusal> {
-        let accepted = index.check(key, Path::Live, &stamps(seconds), now, mesh())?;
+        let accepted =
+            index.check(key, Path::Live, Ok(&stamps(seconds)), now, mesh())?;
         let seq = accepted.seq();
         let _ = index.advance(accepted);
         Ok(seq)
@@ -284,8 +292,8 @@ mod tests {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
             let series = stamps(&[1, 2]);
-            let first = index.check(key, Path::Live, &series, at(1), mesh());
-            let again = index.check(key, Path::Live, &series, at(2), mesh());
+            let first = index.check(key, Path::Live, Ok(&series), at(1), mesh());
+            let again = index.check(key, Path::Live, Ok(&series), at(2), mesh());
             assert_eq!(first.map(|accepted| accepted.seq()), Ok(0..2));
             assert_eq!(again.map(|accepted| accepted.seq()), Ok(0..2));
         }
@@ -320,7 +328,7 @@ mod tests {
             let mut index = index();
             let holder = index.gate.open(writer("a", 10), Some(lease(10)), at(0));
             let accepted =
-                index.check(holder, Path::Live, &stamps(&[1]), at(8), mesh());
+                index.check(holder, Path::Live, Ok(&stamps(&[1])), at(8), mesh());
             assert_eq!(index.gate.deadline(), Some(at(10)));
             let _ = index.advance(accepted.expect("a holder's frame in order"));
             assert_eq!(index.gate.deadline(), Some(at(18)));
@@ -350,7 +358,7 @@ mod tests {
             let series = stamps(&[2, 3]);
             assert_eq!(write(&mut index, key, &[1], at(1)), Ok(0..1));
             let mut accepted = index
-                .check(key, Path::Live, &series, at(2), mesh())
+                .check(key, Path::Live, Ok(&series), at(2), mesh())
                 .expect("a holder's frame in order");
             let frame = accepted.freeze(frames.draft(&series), 0).clone();
             assert_eq!(index.advance(accepted), &[session]);
@@ -368,7 +376,7 @@ mod tests {
             let session = index.readers.open_latest(None, s(0)).key;
             let series = stamps(&[1, 2]);
             let mut accepted = index
-                .check(key, Path::Backfill, &series, at(1), mesh())
+                .check(key, Path::Backfill, Ok(&series), at(1), mesh())
                 .expect("a holder's frame in order");
             let frame = accepted.freeze(frames.draft(&series), 0);
             assert_eq!(frame.path(), Path::Backfill);
@@ -393,7 +401,7 @@ mod tests {
         fn panics_when_the_path_moved_after_the_check() {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
-            let first = index.check(key, Path::Live, &stamps(&[1]), at(1), mesh());
+            let first = index.check(key, Path::Live, Ok(&stamps(&[1])), at(1), mesh());
             let first = first.expect("a holder's frame in order");
             // At the same time, so the gate still takes the first permit.
             assert_eq!(write(&mut index, key, &[1], at(1)), Ok(0..1));
@@ -407,7 +415,7 @@ mod tests {
         fn panics_when_the_holder_changed_after_the_check() {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
-            let first = index.check(key, Path::Live, &stamps(&[1]), at(1), mesh());
+            let first = index.check(key, Path::Live, Ok(&stamps(&[1])), at(1), mesh());
             let first = first.expect("a holder's frame in order");
             let _ = index.gate.open(writer("b", 20), None, at(1));
             let _ = index.advance(first);
@@ -421,7 +429,7 @@ mod tests {
             let key = index.gate.open(writer("a", 10), None, at(0));
             let series = stamps(&[1]);
             let mut accepted = index
-                .check(key, Path::Live, &series, at(1), mesh())
+                .check(key, Path::Live, Ok(&series), at(1), mesh())
                 .expect("a holder's frame in order");
             let _ = accepted.freeze(frames.draft(&series), 0);
             let _ = accepted.freeze(frames.draft(&series), 0);

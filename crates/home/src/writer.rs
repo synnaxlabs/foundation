@@ -1,10 +1,11 @@
-//! A writer session on the indexes of one shard.
+//! What a writer opens with on the indexes of one shard, and the key of an open
+//! writer.
 
 use std::sync::Arc;
 
 use types::frame::key_set::KeySet;
 
-/// A writer session on the indexes of one shard.
+/// What a writer opens with: its control, its lease, and the key set of its frames.
 #[derive(Clone, Debug)]
 pub(crate) struct Writer {
     /// The subject and its authority, already capped by access.
