@@ -1,13 +1,19 @@
 //! Election scenarios ported from the tests of etcd/raft (Copyright 2015 The etcd
 //! Authors, Apache License 2.0, see `LICENSE`). This file is modified from the etcd
-//! source: `README.md` lists each source and the changes.
+//! source: `README.md` lists each source and the changes. `replication.rs` holds
+//! the replication scenarios on the same network.
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
+#[path = "replication.rs"]
+mod replication;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use raft::{Body, Config, Entry, Hard, Message, Position, Raft, Role, Start, Term};
+use raft::{Body, Entry, Hard, Message, Position, Raft, Role, Term};
+
+use replication::{Disk, start};
 use types::node;
 
 const ELECTION: u32 = 10;
@@ -23,13 +29,14 @@ fn at_term(term: u64) -> Hard {
     }
 }
 
-fn build(id: u8, voters: &[u8], election: u32, hard: Hard, last: Position) -> Raft {
-    let config = Config {
-        key: key(id),
-        election_ticks: election,
-        heartbeat_ticks: 1,
-    };
-    // A log of `last.index` entries, all in `last.term`, ends at `last`.
+/// Node `id` with a log of `last.index` entries, all in `last.term`, and its disk.
+fn build(
+    id: u8,
+    voters: &[u8],
+    election: u32,
+    hard: Hard,
+    last: Position,
+) -> (Raft, Disk) {
     let entries = (1..=last.index)
         .map(|index| Entry {
             at: Position {
@@ -39,13 +46,7 @@ fn build(id: u8, voters: &[u8], election: u32, hard: Hard, last: Position) -> Ra
             data: Vec::new(),
         })
         .collect();
-    let start = Start {
-        hard,
-        voters: voters.iter().copied().map(key).collect(),
-        entries,
-        applied: 0,
-    };
-    Raft::new(config, start).unwrap()
+    start(id, voters, election, hard, entries, 0)
 }
 
 fn drain(raft: &mut Raft) -> Vec<Message> {
@@ -56,13 +57,22 @@ fn drain(raft: &mut Raft) -> Vec<Message> {
 /// with no peer never answers.
 struct Network {
     peers: BTreeMap<node::Key, Raft>,
+    disks: BTreeMap<node::Key, Disk>,
     cuts: BTreeSet<(node::Key, node::Key)>,
 }
 
 impl Network {
-    fn new(peers: impl IntoIterator<Item = Raft>) -> Self {
+    fn new(peers: impl IntoIterator<Item = (Raft, Disk)>) -> Self {
+        let (peers, disks) = peers
+            .into_iter()
+            .map(|(peer, disk)| {
+                let key = peer.key();
+                ((key, peer), (key, disk))
+            })
+            .unzip();
         Self {
-            peers: peers.into_iter().map(|peer| (peer.key(), peer)).collect(),
+            peers,
+            disks,
             cuts: BTreeSet::new(),
         }
     }
@@ -128,7 +138,8 @@ impl Network {
     }
 
     fn take(&mut self, id: node::Key) -> Vec<Message> {
-        let mut messages = drain(self.peers.get_mut(&id).unwrap());
+        let ready = self.peers.get_mut(&id).unwrap().ready();
+        let mut messages = self.disks.get_mut(&id).unwrap().store(ready);
         messages.retain(|message| !self.cuts.contains(&(message.from, message.to)));
         messages
     }
@@ -138,8 +149,9 @@ impl Network {
             let Some(peer) = self.peers.get_mut(&message.to) else {
                 continue;
             };
+            let to = message.to;
             peer.step(message).unwrap();
-            queue.extend(self.take(message.to));
+            queue.extend(self.take(to));
         }
     }
 
@@ -155,7 +167,7 @@ fn heartbeat(from: u8, to: u8, term: Term) -> Message {
         from: key(from),
         to: key(to),
         term,
-        body: Body::Heartbeat,
+        body: Body::Heartbeat { commit: 0 },
     }
 }
 
@@ -208,7 +220,7 @@ fn single_node() {
 /// Node 1 at term 1 in `role`, with voters 1, 2, and 3, and an empty outbox. A
 /// candidate and a leader are at term 2, because a campaign advances the term.
 fn in_role(role: Role) -> Raft {
-    let mut raft = build(1, &[1, 2, 3], ELECTION, at_term(1), Position::default());
+    let (mut raft, _) = build(1, &[1, 2, 3], ELECTION, at_term(1), Position::default());
     let reply = |body| Message {
         from: key(3),
         to: key(1),
@@ -350,7 +362,7 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
                 term,
                 vote: vote.map(key),
             };
-            let mut raft = build(1, &[1], ELECTION, hard, own);
+            let (mut raft, _) = build(1, &[1], ELECTION, hard, own);
             let last = Position {
                 term: Term(log_term),
                 index,
@@ -362,15 +374,22 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
                 body: request(last),
             })
             .unwrap();
-            let [reply] = drain(&mut raft)[..] else {
+            let [reply] = &drain(&mut raft)[..] else {
                 panic!("expected one reply");
             };
-            match reply.body {
-                Body::VoteReply { granted } | Body::PreVoteReply { granted } => granted,
+            match &reply.body {
+                Body::VoteReply { granted } | Body::PreVoteReply { granted } => {
+                    *granted
+                }
                 Body::Vote { .. }
                 | Body::PreVote { .. }
-                | Body::Heartbeat
-                | Body::HeartbeatReply => panic!("expected a reply, got {reply:?}"),
+                | Body::Heartbeat { .. }
+                | Body::HeartbeatReply
+                | Body::Append { .. }
+                | Body::AppendReply { .. }
+                | Body::AppendReject { .. } => {
+                    panic!("expected a reply, got {reply:?}")
+                }
             }
         })
         .collect()
@@ -530,7 +549,7 @@ fn prevote_checkquorum() {
 /// Node 1 at term 1 as the leader of voters 1, 2, and 3, with an election timeout
 /// of 5 ticks.
 fn leader_of_three() -> Raft {
-    let mut raft = build(1, &[1, 2, 3], 5, Hard::default(), Position::default());
+    let (mut raft, _) = build(1, &[1, 2, 3], 5, Hard::default(), Position::default());
     raft.campaign();
     for body in [
         Body::PreVoteReply { granted: true },
@@ -600,8 +619,8 @@ fn leader_superseding_with_check_quorum() {
 /// heartbeat makes the leader step down and take the higher term.
 ///
 /// etcd runs this without PreVote, where node 3 raises its term with failed
-/// campaigns. With PreVote, a failed campaign raises no term, so node 3 starts with
-/// the higher term on disk.
+/// campaigns after it holds the leader's first entry. With PreVote, a failed campaign
+/// raises no term, so node 3 starts with the higher term and that entry on disk.
 #[test]
 fn free_stuck_candidate_with_check_quorum() {
     let voters = [1, 2, 3];
@@ -609,10 +628,14 @@ fn free_stuck_candidate_with_check_quorum() {
         term: Term(3),
         vote: Some(key(3)),
     };
+    let first = Position {
+        term: Term(1),
+        index: 1,
+    };
     let mut network = Network::new([
         build(1, &voters, ELECTION, Hard::default(), Position::default()),
         build(2, &voters, ELECTION, Hard::default(), Position::default()),
-        build(3, &voters, ELECTION, stuck, Position::default()),
+        build(3, &voters, ELECTION, stuck, first),
     ]);
     network.isolate(3);
     network.campaign(&[1]);
@@ -647,8 +670,8 @@ fn non_promotable_voter_with_check_quorum() {
 /// A follower whose election times out just before a late heartbeat arrives does
 /// not make the leader step down.
 ///
-/// In etcd, node 3 is also behind in the log. This phase has no log replication, so
-/// all logs are equal, and the leases alone protect the leader.
+/// In etcd, node 3 is also behind in the log. Here all logs are equal, so the leases
+/// alone protect the leader.
 #[test]
 fn disruptive_follower_prevote() {
     let mut network = Network::of(3, &[1, 2, 3], at_term(1));

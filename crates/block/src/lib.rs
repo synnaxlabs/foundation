@@ -32,6 +32,9 @@ const HEADER: usize = 64;
 const NONE: usize = 0;
 /// In `Region::returned`: the pool is gone.
 const CLOSED: usize = usize::MAX;
+/// The most size classes a pool has. The largest payload is then 2 GiB, so a length
+/// or a position fits in a `u32` and a handle stays 16 bytes.
+const CLASSES_MAX: usize = 26;
 
 /// Settings for one [`Pool`].
 #[derive(Clone, Debug)]
@@ -42,8 +45,8 @@ pub struct Config {
 
 impl Config {
     /// Bytes of address space that a pool with these settings needs from its
-    /// [`Memory`]. Each size class can grow to the full budget, so this is many times
-    /// the budget.
+    /// [`Memory`]. Each size class can grow to the full budget, so this is up to 26
+    /// times the budget.
     ///
     /// # Panics
     ///
@@ -58,23 +61,45 @@ impl Config {
     }
 }
 
-/// How many size classes fit in `budget`. Class `i` has a payload of `64 << i` bytes.
+/// How many size classes fit in `budget`, at most `CLASSES_MAX`. Class `i` has a
+/// payload of `64 << i` bytes.
 fn classes(budget: usize) -> usize {
     match budget.checked_sub(HEADER) {
-        Some(room) if room >= ALIGN => (room / ALIGN).ilog2() as usize + 1,
+        Some(room) if room >= ALIGN => {
+            ((room / ALIGN).ilog2() as usize + 1).min(CLASSES_MAX)
+        }
         _ => 0,
     }
 }
 
 /// The smallest class with a payload of at least `len` bytes.
-fn class_of(len: usize) -> Option<usize> {
-    let payload = len.max(ALIGN).checked_next_power_of_two()?;
-    Some((payload.trailing_zeros() - ALIGN.trailing_zeros()) as usize)
+const fn class_of(len: usize) -> Option<usize> {
+    let least = if len < ALIGN { ALIGN } else { len };
+    match least.checked_next_power_of_two() {
+        Some(payload) => {
+            Some((payload.trailing_zeros() - ALIGN.trailing_zeros()) as usize)
+        }
+        None => None,
+    }
 }
 
 /// Bytes that one block of class `index` takes.
-const fn footprint(index: usize) -> usize {
+const fn class_footprint(index: usize) -> usize {
     HEADER + (ALIGN << index)
+}
+
+/// Bytes that a block with a payload of `len` bytes takes from its pool: the header
+/// plus the payload of the smallest size class that holds `len`.
+///
+/// # Panics
+///
+/// If no size class holds `len` (the next power of two overflows a `usize`).
+#[must_use]
+pub const fn footprint(len: usize) -> usize {
+    match class_of(len) {
+        Some(index) => class_footprint(index),
+        None => panic!("no size class holds that many bytes"),
+    }
 }
 
 /// The start of a pool's memory. Any thread that drops a block reaches it.
@@ -105,6 +130,14 @@ const _: () = assert!(
     size_of::<Region>() <= HEADER && size_of::<Header>() <= HEADER,
     "the headers fit in the bytes before a payload"
 );
+const _: () = assert!(
+    ALIGN << (CLASSES_MAX - 1) <= u32::MAX as usize,
+    "the largest payload fits in a u32"
+);
+const _: () = assert!(
+    size_of::<Unique>() == 16 && size_of::<Block>() == 16,
+    "a handle is 16 bytes"
+);
 
 #[derive(Default)]
 struct Class {
@@ -118,8 +151,8 @@ struct Class {
 /// A pool is not `Sync`: only its owner shard allocates from it. Blocks it hands out
 /// may move to and drop on any thread, and stay valid after the pool drops.
 ///
-/// Blocks come in sizes: 64 bytes and each power of two above it, each with 64 bytes
-/// in front. Budget that blocks of one size took stays with that size.
+/// Blocks come in sizes: 64 bytes and each power of two above it up to 2 GiB, each
+/// with 64 bytes in front. Budget that blocks of one size took stays with that size.
 pub struct Pool {
     region: NonNull<Region>,
     budget: usize,
@@ -205,7 +238,7 @@ impl Pool {
             self.reclaim();
         }
         let header = if class.free.get() == NONE {
-            let size = footprint(index);
+            let size = class_footprint(index);
             let available = self.budget - self.committed.get();
             if size > available {
                 return Err(Error::Exhausted {
@@ -241,7 +274,14 @@ impl Pool {
             header
         };
         self.lent.set(self.lent.get() + 1);
-        Ok(Unique { header, len })
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the class check above keeps `len` at or below 2 GiB"
+        )]
+        Ok(Unique {
+            header,
+            len: len as u32,
+        })
     }
 
     /// Takes back the blocks that holders dropped, so that `alloc` can use them
@@ -382,7 +422,7 @@ unsafe fn payload(header: NonNull<Header>) -> NonNull<u8> {
 /// drop on any thread returns the block to its pool.
 pub struct Unique {
     header: NonNull<Header>,
-    len: usize,
+    len: u32,
 }
 
 // SAFETY: a `Unique` is the one holder of its block, and the return path is atomic.
@@ -397,6 +437,7 @@ impl Unique {
         let unique = ManuallyDrop::new(self);
         Block {
             header: unique.header,
+            start: 0,
             len: unique.len,
         }
     }
@@ -426,7 +467,7 @@ impl Deref for Unique {
         let start = unsafe { payload(self.header) };
         // SAFETY: the payload is committed, so it is initialized, and no one writes
         // to it while `self` is borrowed.
-        unsafe { slice::from_raw_parts(start.as_ptr(), self.len) }
+        unsafe { slice::from_raw_parts(start.as_ptr(), self.len as usize) }
     }
 }
 
@@ -436,7 +477,7 @@ impl DerefMut for Unique {
         // SAFETY: `self` holds the block.
         let start = unsafe { payload(self.header) };
         // SAFETY: the payload is committed, and `self` is its one holder.
-        unsafe { slice::from_raw_parts_mut(start.as_ptr(), self.len) }
+        unsafe { slice::from_raw_parts_mut(start.as_ptr(), self.len as usize) }
     }
 }
 
@@ -452,7 +493,10 @@ impl Drop for Unique {
 /// pool.
 pub struct Block {
     header: NonNull<Header>,
-    len: usize,
+    /// Bytes of the payload before this view. `start + len` never exceeds the length
+    /// that `alloc` gave.
+    start: u32,
+    len: u32,
 }
 
 // SAFETY: the bytes are immutable, and the count and the return path are atomic.
@@ -461,6 +505,25 @@ unsafe impl Send for Block {}
 unsafe impl Sync for Block {}
 
 impl Block {
+    /// Returns a block that shares this one's buffer and starts `count` bytes later.
+    /// Check the length first when the bytes came from outside.
+    ///
+    /// # Panics
+    ///
+    /// If `count` is more than the block's length.
+    #[must_use]
+    pub fn skip(mut self, count: usize) -> Block {
+        let skipped = u32::try_from(count)
+            .ok()
+            .filter(|&skipped| skipped <= self.len)
+            .unwrap_or_else(|| {
+                panic!("cannot skip {count} bytes of a block of {} bytes", self.len)
+            });
+        self.start += skipped;
+        self.len -= skipped;
+        self
+    }
+
     fn block(&self) -> &Header {
         // SAFETY: the header is valid while a holder has the block.
         unsafe { self.header.as_ref() }
@@ -472,6 +535,7 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Block")
             .field("offset", &self.block().offset)
+            .field("start", &self.start)
             .field("len", &self.len)
             .finish()
     }
@@ -483,6 +547,7 @@ impl Clone for Block {
         assert!(before < usize::MAX / 2, "a block has too many holders");
         Self {
             header: self.header,
+            start: self.start,
             len: self.len,
         }
     }
@@ -494,9 +559,12 @@ impl Deref for Block {
     fn deref(&self) -> &[u8] {
         self.block().payload.read();
         // SAFETY: `self` holds the block.
-        let start = unsafe { payload(self.header) };
+        let first = unsafe { payload(self.header) };
+        // SAFETY: `start + len` is at most the length `alloc` gave (field invariant),
+        // so the add stays in the block.
+        let start = unsafe { first.add(self.start as usize) };
         // SAFETY: the payload is committed, and no one writes to a frozen block.
-        unsafe { slice::from_raw_parts(start.as_ptr(), self.len) }
+        unsafe { slice::from_raw_parts(start.as_ptr(), self.len as usize) }
     }
 }
 
@@ -658,9 +726,44 @@ mod tests {
         }
 
         #[test]
+        #[cfg(target_pointer_width = "64")]
+        fn stops_at_a_payload_of_two_gibibytes() {
+            assert_eq!(ALIGN << (CLASSES_MAX - 1), 1 << 31);
+            assert_eq!(class_of(1 << 31), Some(CLASSES_MAX - 1));
+            assert_eq!(class_of((1 << 31) + 1), Some(CLASSES_MAX));
+            assert_eq!(classes((1 << 31) + 63), CLASSES_MAX - 1);
+            assert_eq!(classes((1 << 31) + 64), CLASSES_MAX);
+            assert_eq!(classes(1 << 40), CLASSES_MAX);
+            assert_eq!(classes(usize::MAX), CLASSES_MAX);
+        }
+
+        #[test]
         #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
         fn panics_when_it_does_not_fit_in_a_usize() {
             assert_eq!(Config { budget: usize::MAX }.reservation(), 0);
+        }
+    }
+
+    mod footprint {
+        use super::*;
+
+        const FRAME: usize = footprint(1000);
+
+        #[test]
+        fn is_the_header_and_the_class_payload() {
+            assert_eq!(FRAME, 64 + 1024);
+            assert_eq!(footprint(0), 128);
+            assert_eq!(footprint(1), 128);
+            assert_eq!(footprint(64), 128);
+            assert_eq!(footprint(65), 192);
+            assert_eq!(footprint(128), 192);
+            assert_eq!(footprint(129), 320);
+        }
+
+        #[test]
+        #[should_panic(expected = "no size class holds that many bytes")]
+        fn panics_above_the_largest_power_of_two() {
+            assert_eq!(footprint(usize::MAX), 0);
         }
     }
 
@@ -726,7 +829,9 @@ mod tests {
                 let pool = create_pool(1 << 16);
                 let mut blocks = Vec::new();
                 for (len, fill) in lens.iter().copied().zip(1_u8..) {
+                    let before = pool.committed();
                     let mut block = pool.alloc(len).expect("the budget has room");
+                    prop_assert_eq!(pool.committed() - before, footprint(len));
                     prop_assert_eq!(block.len(), len);
                     prop_assert_eq!(block.as_ptr().addr() % ALIGN, 0);
                     block.fill(fill);
@@ -807,11 +912,70 @@ mod tests {
             let unique = pool.alloc(3).expect("the budget has room");
             assert_eq!(format!("{unique:?}"), "Unique { offset: 64, len: 3 }");
             let block = unique.freeze();
-            assert_eq!(format!("{block:?}"), "Block { offset: 64, len: 3 }");
+            assert_eq!(
+                format!("{block:?}"),
+                "Block { offset: 64, start: 0, len: 3 }"
+            );
+            let block = block.skip(1);
+            assert_eq!(
+                format!("{block:?}"),
+                "Block { offset: 64, start: 1, len: 2 }"
+            );
             assert_eq!(
                 format!("{pool:?}"),
                 "Pool { budget: 256, committed: 128, lent: 1 }"
             );
+        }
+    }
+
+    mod skip {
+        use super::*;
+
+        fn create_block(pool: &Pool) -> Block {
+            let mut unique = pool.alloc(5).expect("the budget has room");
+            unique.copy_from_slice(b"hello");
+            unique.freeze()
+        }
+
+        #[test]
+        fn starts_later_in_the_same_bytes() {
+            let pool = create_pool(256);
+            let block = create_block(&pool);
+            assert_eq!(&*block.clone().skip(0), b"hello");
+            assert_eq!(&*block.clone().skip(2), b"llo");
+            assert_eq!(&*block.skip(5), b"");
+        }
+
+        #[test]
+        fn shares_the_count_with_its_clones() {
+            let pool = create_pool(256);
+            let block = create_block(&pool);
+            let rest = block.clone().skip(3);
+            assert_eq!(&*rest, b"lo");
+            assert_eq!(&*rest.clone().skip(1), b"o");
+            drop(block);
+            assert_eq!(&*rest, b"lo");
+            drop(rest);
+            pool.reclaim();
+            assert_eq!(
+                format!("{pool:?}"),
+                "Pool { budget: 256, committed: 128, lent: 0 }"
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "cannot skip 6 bytes of a block of 5 bytes")]
+        fn panics_past_the_end() {
+            let pool = create_pool(256);
+            drop(create_block(&pool).skip(6));
+        }
+
+        #[test]
+        #[cfg(target_pointer_width = "64")]
+        #[should_panic(expected = "cannot skip 4294967296 bytes of a block of 5 bytes")]
+        fn panics_past_a_u32() {
+            let pool = create_pool(256);
+            drop(create_block(&pool).skip(1 << 32));
         }
     }
 

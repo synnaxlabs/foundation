@@ -267,15 +267,20 @@ How to read this record:
 - **B6** One write call is one frame. Smart batching is the default. Catch-up may merge
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
-- **B7** A frame applies whole or not at all, per index. Live writes are never retried.
-  A writer may resend unconfirmed live data as backfill. The home finds a repeat by
-  timestamp: it checks a backfill frame that starts at or before the last backfill
-  stamp against the index on both paths. When every sample exists with the same
-  values, the frame is a repeat, and the home drops and confirms it. When no sample
-  exists, the frame is out of order. Some samples stored and some not, a stored
-  timestamp with other values, or a range below the buffer's floor is an error. Writers
-  assign no numbers: a resend comes in a new session, and the writer never learned
-  them. The person decided on 2026-10-05 ("By timestamp + same values"), #148.
+- **B7** A frame applies whole or not at all, per index. A writer never resends on the
+  live path. After a reconnect, it resends each unconfirmed live frame, with its
+  original boundaries, labeled `resend`. `resend` is a frame label, not a third path:
+  the home checks a resend frame by timestamp against both paths of the index, and it
+  lands on one of them or on none. When every sample exists with the same values, the
+  frame is a repeat, and the home drops and confirms it. When no sample exists and the
+  frame starts after the newest live stamp, it never landed, and the home applies it
+  to the live path. When no sample exists and the frame fits A6, it applies as
+  backfill. Anything else is an error: some samples stored and some not, a stored
+  timestamp with other values, a frame that fits neither path, or a range below the
+  buffer's floor. Live and backfill frames pay no check. Values are compared decoded,
+  not as bytes. Writers assign no numbers: a resend comes in a new session, and the
+  writer never learned them. The person decided on 2026-10-05: "By timestamp + same
+  values" (#148), then "A `resend` label" (#168).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -332,6 +337,14 @@ How to read this record:
   is the offset modulo the area length. The area is at least twice the largest record
   less one block, so an empty ring takes any record. A body is at most `u32::MAX`
   bytes.
+  Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
+  2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
+  u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
+  little-endian, fixed width; `last` is a presence byte (0 or 1) then the stamp,
+  which is 0 and not read under presence 0. The entries' bytes follow the table in
+  order, each `bytes` long, so one table block and the callers' blocks make one
+  vectored write with no copy and no block per entry. A body that ends early, an
+  unknown path or presence byte, or bytes after the last entry is a wrong shape.
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open. The restart record needs one free block: an open of a full ring first moves
@@ -409,7 +422,9 @@ How to read this record:
 - **TIME ADAPTERS** Neutral model `Measurement { at: local monotonic, offset, error }`.
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
-  same estimator serves device clocks in the connector library.
+  same estimator serves device clocks in the connector library. Amended by ESTIMATE FIT:
+  a device clock gives `Overlap` readings with a low edge, a high edge, or both, not
+  `Measurement`s.
 - **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about one local clock (the node's
   monotonic clock, or a device's sample clock in nanoseconds, #84): its offset is mesh
   time minus the local reading at `at`, and its error is a half-width from 0 to 36500
@@ -422,7 +437,7 @@ How to read this record:
   half of them. This reads C6's "follows the smallest measured bound": when sources
   agree, the result is never wider than the narrowest. The result holds the true offset
   when the bounds that hold it are a majority and every other bound misses them. Decided
-  by the `time` builder (#49). A device's measurements go to the oscillator fit
+  by the `time` builder (#49). A device's readings go to the oscillator fit
   (`Overlap`), never to `combine`. Node sources keep `Filter`, not `Overlap`: a network
   exchange puts the true offset at about the same place in each bracket, so an overlap
   gains little, and a broken drift bound would stay wrong for the life of an overlap,
@@ -442,25 +457,27 @@ How to read this record:
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
   trips; input rejects an end before the start.
-- **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock.
-  It keeps the offsets that every measurement of that clock allows, each widened by
-  drift, so it holds only the measurement with the highest low edge and the one with
-  the lowest high edge. Measurements come in local time order. An older one returns
-  `Backwards` (the device restarted), and one that shares no offset returns `Disjoint`
-  (the clock jumped, or it drifts faster than its bound). Neither changes the overlap,
-  and the caller starts a new one with a gap. Each measurement holds true mesh time,
-  with the node's own error in its bound, so the drift covers only the device
-  oscillator. The drift is fixed for the life of an overlap, because a smaller drift
-  would need measurements that it dropped. This reads r6 Q5's lower-envelope fit with
-  the rate bounded by `Drift`, not fitted. A line fit of offset and rate lost: it is
-  honest only if the rate stays constant, and no datasheet bounds oscillator wander. A
-  measured rate needs a signed rate in the model, not a smaller `Drift`. A device
-  adapter must give each measurement a two-sided bound. The return time of a read
-  bounds its last sample only from above. The lower bound comes from a device counter
-  read between two mesh stamps, or from a latency that the hardware guarantees: one
-  read over a stated latency gives a low edge above the truth, and the overlap keeps it.
-  Decided by the `time` builder; the person accepted it on 2026-10-05 ('#1 is fine').
-  Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper bounds).
+- **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
+  keeps the offsets that every reading of that clock allows, each widened by drift, so
+  it holds only the reading with the highest low edge and the one with the lowest high
+  edge. Readings come in local time order. An older one returns `Backwards` (the device
+  restarted), and one that shares no offset returns `Disjoint` (the clock jumped, or it
+  drifts faster than its bound). Neither changes the overlap, and the caller starts a
+  new one with a gap. Each reading holds true mesh time, with the node's own error in
+  its bound, so the drift covers only the device oscillator. The drift is fixed for the
+  life of an overlap, because a smaller drift would need readings that it dropped. This
+  reads r6 Q5's lower-envelope fit with the rate bounded by `Drift`, not fitted. A line
+  fit of offset and rate lost: it is honest only if the rate stays constant, and no
+  datasheet bounds oscillator wander. A measured rate needs a signed rate in the model,
+  not a smaller `Drift`. A reading gives a low edge, a high edge, or both, at one device
+  time. A read return bounds the newest sample the host knows only from above. A low
+  edge comes from a mesh stamp before the device acts (a start command or a request),
+  from a device counter read between two mesh stamps, or from a latency that the
+  hardware guarantees. The overlap gives a bound only when it has both a low edge and a
+  high edge (`Open` before that). Decided by the `time` builder; the person accepted it
+  on 2026-10-05 ('#1 is fine'). The person accepted one-sided readings on 2026-10-05
+  ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper
+  bounds).
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
   a reader gets no mesh time. After it, when `combine` fails (no majority, a bound too
   wide, or no sources after a remove), the clock holds over: it keeps its last estimate
@@ -507,8 +524,8 @@ How to read this record:
 - **PROTOCOL HEADER (#75)** The header of STREAM DISPATCH is 3 bytes: the wire
   version (`u16`, little-endian), then the protocol number (`u8`): clock 1, mesh 2,
   replica 3, blob 4, hub 5. On a stream, the header is the whole first message, so
-  later messages carry no prefix. A datagram starts with it; its handler reads from
-  `wire::header::LEN` until `block` has a view that skips a prefix (#110). The
+  later messages carry no prefix. A datagram starts with it; its handler calls
+  `Block::skip(wire::header::LEN)` on the rest (BLOCK VIEW). The
   version covers every message on that stream, encoded series included: each wire
   version fixes one codec version (wire 1 carries codec 1). The version comes first
   and is checked first, so a later version can change what follows it. A node reads
@@ -567,9 +584,15 @@ How to read this record:
   the Ed25519 key in the leaf certificate's `SubjectPublicKeyInfo`; names, dates, and
   issuer are not checked. A node sends its certificate when it dials; an SDK client
   sends none and pins the node key the same way. ALPN is `foundation/1`, and a new
-  session protocol gets a new name. Resumption and 0-RTT are off, so rustls gets a
-  fixed time and never reads the OS clock. Randomness inside TLS comes from aws-lc
-  (TLS RANDOMNESS). Decided by `network` in #54.
+  session protocol gets a new name. A session that agrees no ALPN, or another name,
+  ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
+  ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
+  dialing node offers them in that order, and the client's order decides, so nodes
+  agree AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between
+  nodes and "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so
+  an SDK may offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
+  reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS).
+  Decided by `network` in #54; the ALPN check, suites, and groups in #108.
 
 ### 1.8 Consensus, regions, and the spec
 
@@ -593,11 +616,23 @@ How to read this record:
   only delays the next round trip. A candidate counts its own vote at once because
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
   enters only through `tick`: a node draws its election timeout on the first tick
-  after a reset. PreVote and CheckQuorum have no off switch. Until replication lands,
-  a new leader announces itself with a heartbeat. A node that is not in its own voter
-  list votes and follows, but never campaigns. `step` does not check that a sender is
-  a voter (a voter can learn late that a peer joined), so the caller authenticates
-  the sender and decides which nodes may send.
+  after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
+  its own voter list votes and follows, but never campaigns. `step` does not check
+  that a sender is a voter (a voter can learn late that a peer joined), so the caller
+  authenticates the sender and decides which nodes may send.
+- **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
+  or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
+  empty entry of its term first, so it can commit what came before. It replicates with
+  `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
+  (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
+  (its hint for the next `prev`). A malformed `Append` (entries that do not follow
+  `prev`) is `Error::EntryOutOfOrder`. `Body::Heartbeat { commit }` carries the commit
+  index, capped at what that follower is known to hold. A leader commits an index only
+  when a quorum holds it and its entry is of the leader's own term. A follower commits
+  no further than the last entry the leader sent it. `Ready.committed` gives each entry
+  once, after it is written. Batch size (64 entries) and the number of appends in flight
+  per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
+  `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -750,6 +785,27 @@ How to read this record:
   integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
+- **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
+  Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
+  span, a message, a fix, and notes (other places that explain it). The span is `None`
+  only for a Document with no spans; a problem with a whole file has an empty span at
+  the start of the file. The message and the fix have no final period, and each
+  producer's tests pin both. A code is `<producer>.<problem>`: each part is lower-case
+  ASCII letters and digits, starts with a letter, and may join words with single `-`
+  (`hcl.syntax`, `document.duplicate-key`). The producer is a name it owns: the syntax
+  of a front end, a core crate, or a kind. No two producers share a name. A producer
+  declares each code as a `const` item, so a bad code fails the build. A code never
+  changes between releases. Each producer maps its own errors with `From<&Error>`
+  beside them, so `config`, `ops`, and `node` never match a producer's variants.
+  `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new` breaks
+  no producer. No severity field: the warnings in K2 and R13-10 belong to plan output.
+  `ops` operation error codes use `Code` too, so the grammar has one home. A code
+  crosses the wire as text, and no reader makes a `Code` from it. Lost: a `Diagnose`
+  trait behind `Box<dyn>` (not `Clone`, and a fix is optional); number codes (a
+  central registry, and unreadable); one span only (the first producer has two
+  places). Codes go into `oracles/conformance/document/` at the first stable release;
+  the person decided on 2026-10-05 ("At the first release"). Decided by the `config`
+  builder; approved by the coordinator (#137).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -805,11 +861,11 @@ How to read this record:
 
 - **Factory constraint** Two people, each on an individual Max plan. The factory runs in
   attended, locally started sessions, not as an unattended daemon.
-- **BENCH SPEND (2026-10-04)** Linux benchmarks that need real machines run on rented
-  AWS machines. The person: "you're welcome to provision AWS machines. SET STRICT COST
-  LIMITS. I don't want more than $100 spent". The limit is 100 USD in total, across
-  all benchmarks, until the person raises it. Only the coordinator provisions, by the
-  procedure in `docs/coordination.md`.
+- **BENCH SPEND (2026-10-04, replaced by the test budget in 5.5 on 2026-10-05)** Linux
+  benchmarks that need real machines run on rented AWS machines. The person: "you're
+  welcome to provision AWS machines. SET STRICT COST LIMITS. I don't want more than $100
+  spent". The limit is 100 USD in total, across all benchmarks, until the person raises
+  it. Only the coordinator provisions, by the procedure in `docs/coordination.md`.
 - **C7** One operation table (typed input and output, error codes, read-only and
   destructive flags) generates the CLI (`--json`), annotated MCP tools, and docs
   embedded in the binary. Every error has a stable code and a fix-it hint. Status is
@@ -857,7 +913,12 @@ How to read this record:
   starts the daily run.
 - **C9c** Oracles are enforced by visibility. A script writes an oracle section at the
   top of each PR summary and flags weakening. Each flagged change gets its own
-  adversarial reviewer. A person merges every PR. Supersedes: T2 enforcement level.
+  adversarial reviewer. A person merges every PR, except routine PRs (MERGE RULE).
+  Supersedes: T2 enforcement level.
+- **MERGE RULE (2026-10-05)** The coordinator merges a routine PR that the person has
+  not merged 30 minutes after `ready`, and then tells the person; `docs/coordination.md`
+  defines routine. It lets builders go on while the person is away. The person decided
+  on 2026-10-05 ("Yes, that narrow set").
 - **AGENT REQUIREMENT** Every task must be easy to do with agents. C7 carries it.
 - **R16-1 (2026-10-04)** Release builds keep integer overflow checks
   (`overflow-checks = true`), so R9-D10 holds in release too. An intended wrap uses
@@ -886,6 +947,42 @@ How to read this record:
   `clippy::error_impl_error` are rejected: an enum lets a test pin the variant, and
   backtrace capture costs time on hot paths. Decided by the advisor under the quality
   delegation.
+- **FACTORY HOST (2026-10-05)** The person approved one AWS c7i.16xlarge (64 vCPU, 128
+  GiB, about 69 USD a day) for builder sessions: "that 480 a week is fine. let's only
+  allocate a day at a time in budget". It is outside the test budget. The advisor
+  launched it; the coordinator owns it from then on. Each boot stops it after 24 hours.
+  Each day, at least two hours before the stop, the coordinator asks the person to renew
+  one more day. On a yes it runs `sudo shutdown -c; sudo shutdown -h +1440` on the host
+  and posts the day on the ledger (#163). Without a yes, the host stops. The person's
+  laptop keeps the first nine builders, the coordinator, and the advisor. On the host,
+  sessions use a fine-grained GitHub token for `synnaxlabs/foundation` only (contents,
+  issues, and pull requests), not the person's login, and an instance role that can
+  start and stop only instances tagged `project=foundation-test`.
+- **REMOTE CONTROL (2026-10-05)** Sessions on the laptop and on the factory host
+  message each other through Remote Control ("remote control is fine"). Every session
+  name is unique across both machines. There is one coordinator. If Remote Control
+  fails, the fallback is one `inbox:<name>` GitHub issue per session, not a new
+  socket.
+- **QUALITY SESSIONS (2026-10-05)** The person approved `verify` and `red-team` and
+  asked for `audit` and `ux`. `verify` owns the MVP acceptance tests (in `acceptance`,
+  written before the pieces land) and the chaos lab. `red-team` attacks merged code,
+  security and vulnerabilities included, and owns `fuzz/` and additions under
+  `oracles/`. `audit` checks architecture boundaries, software practices, and
+  performance across merged code. `ux` checks the end user's experience: CLI, files,
+  errors, plan output, MCP, and docs. Each finding is an issue; `verify` and `red-team`
+  findings come with a failing test.
+- **BREAKER REVIEW (2026-10-05)** Every PR gets a third reviewer, the `breaker`, whose
+  only output is a test that fails against the PR, or nothing. It runs on Fable for
+  layer 1 and layer 2 crates, in its own worktree.
+- **CLOUD ROUTINES (2026-10-05)** The person has 250 USD of cloud session credits: "we
+  should use up the usage credits quickly", and the quality passes "should be running
+  more often than nightly". `audit`, `ux`, and the `red-team` attack pass on layer 1
+  and layer 2 code run as Claude Code routines in the cloud, one run per merged PR,
+  plus an hourly sweep for merges whose event was dropped. Each run files issues and
+  needs no reply, so the one-way messaging of cloud sessions does not matter. A pilot
+  checks first that a run can use `gh`. After the pilot, the `breaker` moves to a
+  routine on each opened PR. `red-team` keeps a host session for fuzzing, simulation
+  swarms, and the threat model.
 
 ### 1.14 Testing
 
@@ -951,6 +1048,12 @@ How to read this record:
   implements it over `std::alloc` for tests, Miri, and `sim`. `block` makes no OS
   call. `reclaim` takes back returned blocks on each loop turn; `purge` gives idle
   pages back on a timer that the shard owns (#2).
+- **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
+  starts `count` bytes later, with no copy and no count change. `Block` is
+  `{ header, start: u32, len: u32 }`, 16 bytes, so a pool has at most 26 size classes
+  and the largest block holds 2 GiB; a budget above that gives more blocks, not larger
+  ones. `slice(&self, range)` lost: it clones the count for every view, and nothing
+  needs a range yet. Decided by `memory`.
 - **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
@@ -976,6 +1079,12 @@ How to read this record:
 - **BQ18** The desired version is in the spec. Nodes report versions with lease
   renewals. A rollout lock upgrades one node at a time. Finalize when all report.
   Multi-region scope: 5.1.
+- **CPU BASELINE (2026-10-05)** Builds assume x86-64-v2 on x86-64 (every CPU since
+  2009) and the CRC instruction on aarch64 Linux (Raspberry Pi 3 and later, Graviton;
+  Apple chips have it already). `.cargo/config.toml` sets both, so tests, benchmarks,
+  and releases build the same code. A binary fails on an older CPU. Without the flags,
+  the `crc32c` kernels ran 2x slower (#140). The person decided on 2026-10-05 ("Raise
+  the minimum").
 
 ### 1.16 Retired entries
 
@@ -1042,8 +1151,9 @@ Storage classes used in the table:
 | Data channel | Spec: `Kind::Data { index, quality, data_type, unit }`. The `index` edge is defined here only (X23) | As channel | As index | `spec` |
 | `channel::Key` | Spec (name to key map), wire setup, disk footers. Never in files | `apply`, the first time a name appears | Everyone | `types` (value), `mesh` (assignment) |
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
-| `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's interner when the node learns a channel (owner: X42) | `hub`, `home`, `delivery` | `types` (value) |
+| `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery` | `types` (value) |
 | Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
+| Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one | The writer; backfill is its label for late data | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
 | Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (meaning) |
 | Enum and flags definitions | Files, then Spec as named types with fingerprints | People, `discover` | Sinks, SDK code generation, `plan` | `spec` |
@@ -1118,6 +1228,7 @@ Storage classes used in the table:
 | Subscription | The selector of a reader session, kept live in `hub` against `mesh` watches | The reader | `hub` | `hub` |
 | Effective settings | Memory: a per-node cache of `spec::resolve` results | `mesh` | `home`, `transport`, `clock`, supervisor | `mesh` |
 | Document | Memory: made by a front end from files, or by SDK code | Front ends | `config`, kinds | `document` (X21) |
+| Diagnostic | Memory: made from a producer's error | Front ends, kinds, `document` | `config`, `ops` (text, `--json`, MCP) | `document` (DIAGNOSTICS) |
 | Selector | A value inside policies, readers, connectors, and access | Files, sessions | Every matcher | `types` (one matcher) |
 | Plan | A JSON artifact with stable change kinds | `ops plan` | `ops apply` (commits exactly it) | `config`, `ops` |
 
@@ -1266,6 +1377,12 @@ the oscillator fit move to a layer-1 crate (`estimate`), used by both
 `clock` and the connector library. Rename the connector module to `stamp`
 (`stamp::Midpoint`, `stamp::Window`, `stamp::Fit`). Basis: R9-D13, TIME ADAPTERS, the
 SRP PASS layer-1 rule, BQ21 (names).
+Amended (2026-10-05, #143): there is no exchange state machine. The request carries
+`sent` and the peer echoes it, so `estimate::Exchange` is plain data, and
+`Exchange::measure` turns one round trip into a `Measurement`. `clock` sends requests
+on a fixed timer and keeps no state for each one: a late answer is still an exchange,
+and a lost one needs no timeout. The person approved it on 2026-10-05 ("Yeah I
+approve").
 
 **X12. The old term vs "region".**
 Conflict: S9, K5, the MODEL MAP, C3, C6, C8, BQ8, R4 RESULTS, r4, r8 (including its
@@ -1557,16 +1674,17 @@ SIMPLICITY DIRECTIVE.
 Conflict: A1 and A20 say "writes to the home are never buffered". BQ7 and r13 let a
 writer keep unconfirmed frames and resend them after failover.
 Resolution: live delivery is never queued for retry. A writer may keep unconfirmed
-frames in a bounded memory window only to resend them as backfill after failover (B7).
-Basis: BQ7, B7.
+frames in a bounded memory window only to resend them, labeled `resend`, after
+failover (B7). Basis: BQ7, B7.
 
 **X42. The owner of the slot and key set tables.**
 Conflict: M1 needs one node-wide slot table and key set interner. `hub` opens sessions,
 but `home` (below `hub`) routes by key set and writes companion samples, so a
 `hub`-owned table would point upward.
-Resolution (memory delegation): the interner is a layer-1 data structure
-(`types::frame::Interner`). `node` constructs one instance per node and injects it into
-`hub` and `home`. Interning happens at session open; each shard reads a snapshot.
+Resolution (memory delegation): both tables are layer-1 data structures, the slot table
+(`types::channel::Slots`) and the interner (`types::frame::key_set::Interner`). `node`
+constructs one of each per node and injects them into `hub` and `home`. Interning
+happens at session open; each shard reads a snapshot.
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**
@@ -1698,6 +1816,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
 | 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
+| 4 | `acceptance` | Runs the MVP acceptance scenarios against whole meshes built from `node`. Test-only. | all crates |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
 
 Outside the binary: the Rust SDK reuses `block`, `types`, `codec`, and `wire`; other
@@ -1799,7 +1918,40 @@ Parameters and later choices, recorded and not asked:
 - A plugin system (D5).
 - Copy-on-write mesh branching, the reason the word "branch" is reserved (VOCABULARY).
 
-### 5.5 First phase
+### 5.5 MVP
+
+Decided with the person on 2026-10-05. The MVP is an edge-to-cloud mesh that survives
+a bad link:
+
+- Two or more nodes (an edge node and a cloud node), joined by ticket, in one region,
+  with Raft for the spec and membership.
+- Inbound connectors, each with commands back to the device: OPC UA client, Modbus
+  TCP and RTU, and NI DAQmx. Outbound: InfluxDB. The person cut LabJack, MQTT with
+  Sparkplug B, and Kafka from the MVP ("eliminate 3 of those"). CI tests the NI
+  connector against a stub `libnidaqmx.so` (R7 loads the library at run time). NI's
+  simulated devices run only on the factory host, if NI's driver builds for its kernel.
+- Store-and-forward: an edge node writes 1M samples/s (1% of P1) while its link to the
+  cloud is cut for one hour. With a disk budget that covers the hour, the InfluxDB out
+  connector (a named reader whose hold covers the cut) receives every sample, in seq
+  order. With a budget that covers 30 minutes, it receives exactly one gap, whose count
+  equals the trimmed samples. `verify` runs both.
+- A time error bound on every sample.
+- Command authority and audit (D2).
+- The mesh as code: `plan` and `apply` from HCL, operated through the JSON CLI and MCP.
+- Robust means: simulation-tested, fuzzed, and chaos-tested on real AWS links.
+
+Out of the MVP: standby failover (`replica`), more than one region, the calculation
+engine, and performance work past the P1 targets.
+
+**Test budget (2026-10-05).** The person approved 1000 USD for AWS testing, and it
+replaces BENCH SPEND: a nightly chaos lab (about 2 USD a day), a spot simulation swarm
+of four c7i.8xlarge for four hours (ledger cap 22.85 USD at the on-demand price, about
+9 USD at spot), a nightly P1 benchmark on a c7i.metal-24xl (about 4 USD), and
+benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day ("test budget
+should be capped at $100 a day"). Every launch goes in the ledger (#15) with its cap
+and an automatic shutdown first.
+
+### 5.6 First phase
 
 The first wave builds the riskiest pieces in parallel: `block` and `ring` (`memory`),
 `types`, `codec`, and `wire` (`data-path`), `raft` and `spec` (`consensus`), and
