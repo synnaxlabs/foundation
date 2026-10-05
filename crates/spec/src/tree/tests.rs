@@ -1,6 +1,5 @@
-use std::collections::BTreeSet;
-
 use proptest::prelude::*;
+use proptest::sample::Index;
 
 use super::*;
 
@@ -10,8 +9,11 @@ const SMALL: u32 = 256;
 type Model = BTreeMap<u16, Vec<u8>>;
 type Change = (u16, Option<Vec<u8>>);
 
+// Some names are longer than a chunk at the small scale.
 fn name(id: u16) -> Name {
-    format!("site_{}.pt_{id}", id % 7).parse().unwrap()
+    let long = if id.is_multiple_of(41) { 300 } else { 0 };
+    let name = format!("site_{}.pt_{id}{}", id % 7, "x".repeat(long));
+    name.parse().unwrap()
 }
 
 fn step(chunks: &mut Chunks, scale: u32, root: Hash, changes: &[Change]) -> Update {
@@ -59,8 +61,10 @@ fn changed(old: &Model, new: &Model) -> Vec<Name> {
     names(ids)
 }
 
+// Some values are longer than a chunk at the small scale.
 fn value() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(any::<u8>(), 0..48)
+    let size = prop_oneof![9 => 0..48_usize, 1 => 200..1200_usize];
+    size.prop_flat_map(|size| prop::collection::vec(any::<u8>(), size))
 }
 
 fn change() -> impl Strategy<Value = Change> {
@@ -100,9 +104,9 @@ fn a_tree_that_shrinks_to_one_leaf_has_that_leaf_as_its_root() {
     let mut chunks = Chunks::default();
     let model: Model = (0..500).map(|id| (id, vec![1; 20])).collect();
     let root = build(&mut chunks, SMALL, &model);
-    let deletes: Vec<_> = (1..500).map(|id| (id, None)).collect();
+    let deletes: Vec<_> = (2..500).chain([0]).map(|id| (id, None)).collect();
     let update = step(&mut chunks, SMALL, root, &deletes);
-    let one = build(&mut chunks, SMALL, &Model::from([(0, vec![1; 20])]));
+    let one = build(&mut chunks, SMALL, &Model::from([(1, vec![1; 20])]));
     assert_eq!(update.root, one);
     assert_eq!(hashes(&update), BTreeSet::from([one]));
 }
@@ -207,6 +211,81 @@ fn a_change_reads_only_the_chunks_near_it() {
     let update = apply(&mut near, root, change.clone()).unwrap();
     assert_eq!(update, apply(&mut all, root, change).unwrap());
     assert_eq!(get(&near, root, &first), Ok(value.as_deref()));
+}
+
+#[test]
+fn a_missing_chunk_after_the_change_is_named() {
+    let mut all = Chunks::default();
+    let root = plant(&mut all).root;
+    let (first, _) = definition(0);
+    let key = first.as_str().as_bytes();
+    for level in 0..2 {
+        let mut cursor = Cursor::seek(&all, root, level, key).unwrap();
+        cursor.advance().unwrap();
+        let next = cursor.node.hash;
+        let mut chunks = all.clone();
+        chunks.0.remove(&next);
+        let change = [(first.clone(), Some(vec![1]))];
+        assert_eq!(apply(&mut chunks, root, change), Err(Error::Missing(next)));
+        assert_eq!(diff(&chunks, empty(), root), Err(Error::Missing(next)));
+    }
+}
+
+// Builds a chunk from parts, as a peer with a fault can.
+fn raw(chunks: &mut Chunks, level: u8, entries: &[(&str, &[u8])]) -> Hash {
+    let mut bytes = vec![level];
+    for (key, payload) in entries {
+        chunk::write(&mut bytes, level, key.as_bytes(), payload);
+    }
+    chunks.insert(bytes)
+}
+
+#[test]
+fn a_child_at_the_wrong_level_is_named() {
+    let mut chunks = Chunks::default();
+    let leaf = raw(&mut chunks, 0, &[("a", b"v")]);
+    let inner = raw(&mut chunks, 1, &[("a", &leaf.0)]);
+    let root = raw(&mut chunks, 2, &[("a", &inner.0), ("b", &leaf.0)]);
+    assert_eq!(diff(&chunks, empty(), root), Err(Error::Corrupt(leaf)));
+    let b = "b".parse().unwrap();
+    assert_eq!(get(&chunks, root, &b), Err(Error::Corrupt(leaf)));
+
+    let top = raw(&mut chunks, 255, &[("a", &leaf.0)]);
+    let change = [("zz".parse().unwrap(), Some(vec![1]))];
+    assert_eq!(apply(&mut chunks, top, change), Err(Error::Corrupt(leaf)));
+}
+
+#[test]
+fn a_child_with_another_last_key_is_named() {
+    let mut chunks = Chunks::default();
+    let mut child = raw(&mut chunks, 0, &[("b", b"v")]);
+    // Without the check, two entries share each child, and a diff reads 2^20 leaves.
+    for level in 1..=20 {
+        child = raw(&mut chunks, level, &[("a", &child.0), ("b", &child.0)]);
+    }
+    let found = diff(&chunks, empty(), child);
+    assert!(matches!(found, Err(Error::Corrupt(_))), "{found:?}");
+    let shared = raw(&mut chunks, 0, &[("b", b"v")]);
+    let root = raw(&mut chunks, 1, &[("a", &shared.0), ("b", &shared.0)]);
+    assert_eq!(diff(&chunks, empty(), root), Err(Error::Corrupt(shared)));
+}
+
+#[test]
+fn a_name_longer_than_a_chunk_fits_in_the_tree() {
+    let long: Name = "a".repeat(3 * 4096).parse().unwrap();
+    let changes = [(long.clone(), Some(vec![1])), (name(1), Some(vec![2]))];
+    let mut chunks = Chunks::default();
+    let root = apply(&mut chunks, empty(), changes).unwrap().root;
+    assert_eq!(get(&chunks, root, &long), Ok(Some(&[1][..])));
+    assert_eq!(get(&chunks, root, &name(1)), Ok(Some(&[2][..])));
+
+    let mut chunks = Chunks::default();
+    let update = plant(&mut chunks);
+    let root = apply(&mut chunks, update.root, [(long.clone(), Some(vec![1]))]);
+    let root = root.unwrap().root;
+    let all = (0..50_000).map(definition).chain([(long, Some(vec![1]))]);
+    let whole = apply(&mut Chunks::default(), empty(), all).unwrap().root;
+    assert_eq!(root, whole);
 }
 
 #[test]
@@ -352,4 +431,55 @@ fn the_roots_of_known_trees_do_not_change() {
         "32c5b07b5b6059284caec8ed6b05c67c3b4a590d6600b055dd347debac1f31d6",
     ];
     assert_eq!(roots, known);
+}
+
+// A chunk of any level whose entries name earlier chunks, or hold loose bytes.
+type Loose = (u8, Vec<(u8, Result<Index, Vec<u8>>)>);
+
+fn loose() -> impl Strategy<Value = Vec<Loose>> {
+    let payload = prop_oneof![
+        3 => any::<Index>().prop_map(Ok),
+        1 => prop::collection::vec(any::<u8>(), 0..40).prop_map(Err),
+    ];
+    let entries = prop::collection::vec((b'a'..b'f', payload), 0..4);
+    prop::collection::vec((0..4_u8, entries), 1..12)
+}
+
+proptest! {
+    #[test]
+    fn chunks_from_a_peer_with_a_fault_give_a_result(
+        loose in loose(),
+        bytes in prop::collection::vec(any::<u8>(), 0..64),
+    ) {
+        let mut chunks = Chunks::default();
+        let mut made = vec![chunks.insert(bytes)];
+        for (level, entries) in &loose {
+            let mut bytes = vec![*level];
+            for (key, payload) in entries {
+                let payload = match payload {
+                    Ok(index) => made[index.index(made.len())].0.to_vec(),
+                    Err(bytes) => bytes.clone(),
+                };
+                bytes.push(1);
+                bytes.push(*key);
+                if *level == 0 {
+                    bytes.push(u8::try_from(payload.len()).unwrap());
+                }
+                bytes.extend(payload);
+            }
+            made.push(chunks.insert(bytes));
+        }
+        let name: Name = "c".parse().unwrap();
+        for &root in &made {
+            let change = [(name.clone(), Some(vec![1; 300]))];
+            let results = (
+                get(&chunks, root, &name).is_ok(),
+                diff(&chunks, empty(), root).is_ok(),
+                diff(&chunks, root, made[0]).is_ok(),
+                apply_at(&mut chunks.clone(), SMALL, root, change).is_ok(),
+            );
+            // A tree that a diff can read whole is a tree that a change can read.
+            prop_assert!(!results.1 || results.3, "{results:?}");
+        }
+    }
 }

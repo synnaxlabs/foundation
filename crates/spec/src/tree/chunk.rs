@@ -64,6 +64,10 @@ impl<'a> Node<'a> {
             } else {
                 rest.split_off(..32)
             };
+            let sorted = entries.last().is_none_or(|last: &Entry<'_>| last.key < key);
+            if !sorted {
+                return Err(corrupt);
+            }
             entries.push(Entry {
                 key,
                 payload: payload.ok_or(corrupt)?,
@@ -109,12 +113,17 @@ fn write_bytes(chunk: &mut Vec<u8>, bytes: &[u8]) {
     chunk.extend_from_slice(bytes);
 }
 
+// Refuses a length that `write_bytes` does not make, so one entry has one encoding.
 fn take_bytes<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
     let mut length = 0_u32;
     for shift in (0..32).step_by(7) {
         let (&byte, tail) = rest.split_first()?;
         *rest = tail;
-        length |= u32::from(byte & 0x7F).checked_shl(shift)?;
+        let bits = u32::from(byte & 0x7F);
+        if bits << shift >> shift != bits || (byte == 0 && shift > 0) {
+            return None;
+        }
+        length |= bits << shift;
         if byte & 0x80 == 0 {
             return rest.split_off(..usize::try_from(length).ok()?);
         }
@@ -137,15 +146,15 @@ mod tests {
     #[test]
     fn reads_the_leaf_entries_it_wrote() {
         let long = vec![7_u8; 300];
-        let bytes = chunk(0, &[(b"a", b""), (b"b.c", &long), (b"", b"x")]);
+        let bytes = chunk(0, &[(b"", b"x"), (b"a", b""), (b"b.c", &long)]);
         let node = Node::read(Hash::of(&bytes), &bytes).unwrap();
         assert_eq!(node.level, 0);
         let entries: Vec<_> = node.entries.iter().map(|e| (e.key, e.payload)).collect();
         assert_eq!(
             entries,
-            [(&b"a"[..], &b""[..]), (b"b.c", &long), (b"", b"x")]
+            [(&b""[..], &b"x"[..]), (b"a", b""), (b"b.c", &long)]
         );
-        assert_eq!(node.last_key(), Some(&b""[..]));
+        assert_eq!(node.last_key(), Some(&b"b.c"[..]));
     }
 
     #[test]
@@ -161,9 +170,16 @@ mod tests {
     fn rejects_bytes_that_are_not_a_chunk() {
         let whole = chunk(0, &[(b"key", b"value")]);
         let short_hash = chunk(1, &[(b"key", &[0; 31])]);
-        let cases: [&[u8]; 6] = [
+        let cases: [&[u8]; 11] = [
             b"",
             &[1],
+            // Keys out of order, and a key twice.
+            &[0, 1, b'b', 0, 1, b'a', 0],
+            &[0, 1, b'a', 0, 1, b'a', 0],
+            // Lengths in a longer form than needed, or over 32 bits.
+            &[0, 0x81, 0, b'a', 0],
+            &[0, 0x80, 0x80, 0x80, 0x80, 0, 0],
+            &[0, 0x80, 0x80, 0x80, 0x80, 0x10, 0],
             &whole[..whole.len() - 1],
             &whole[..2],
             &short_hash,

@@ -11,7 +11,13 @@ pub(super) const SCALE: u32 = 4096;
 /// The chance grows with the chunk's size (a Weibull hazard of shape 4), so sizes stay
 /// near `scale`. Only the key is hashed, so a new value of the same size moves no
 /// boundary. The rule uses integers only, so every platform cuts at the same place.
+///
+/// A chunk above the leaves never ends after its first entry. Each level then has at
+/// most half the chunks of the level below, for keys of any size.
 fn boundary(scale: u32, level: u8, key: &[u8], start: usize, end: usize) -> bool {
+    if level > 0 && start == 0 {
+        return false;
+    }
     let scale = u128::from(scale);
     let (start, end) = (start as u128, end as u128);
     // Keeps the powers below in range for an entry of any size.

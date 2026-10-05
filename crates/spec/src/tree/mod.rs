@@ -11,10 +11,9 @@
 mod chunk;
 mod chunker;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use types::hash::{Map, Set};
 use types::name::Name;
 
 use chunk::{Entry, Node};
@@ -55,7 +54,7 @@ impl std::error::Error for Error {}
 
 /// The chunks that tree operations can read, by hash.
 #[derive(Clone, Debug, Default)]
-pub struct Chunks(Map<Hash, Vec<u8>>);
+pub struct Chunks(BTreeMap<Hash, Vec<u8>>);
 
 impl Chunks {
     /// Adds a chunk and returns its hash.
@@ -79,6 +78,18 @@ impl Chunks {
         };
         Node::read(hash, bytes)
     }
+
+    // Reads the child of `parent` that `entry` names, and checks that it fits there.
+    fn child(&self, parent: &Node<'_>, entry: &Entry<'_>) -> Result<Node<'_>, Error> {
+        let child = self.node(entry.child())?;
+        let fits = parent.level.checked_sub(1) == Some(child.level)
+            && child.last_key() == Some(entry.key);
+        if fits {
+            Ok(child)
+        } else {
+            Err(Error::Corrupt(child.hash))
+        }
+    }
 }
 
 /// Returns the value of `name` in the tree at `root`.
@@ -101,7 +112,7 @@ pub fn get<'a>(
         if node.level == 0 {
             return Ok((entry.key == key).then_some(entry.payload));
         }
-        node = chunks.node(entry.child())?;
+        node = chunks.child(&node, entry)?;
     }
 }
 
@@ -123,6 +134,10 @@ pub struct Update {
 ///
 /// [`Error::Missing`] if a chunk near a change is not in `chunks`. `chunks` is then
 /// not changed.
+///
+/// # Panics
+///
+/// If a value is 4 GiB or larger.
 pub fn apply(
     chunks: &mut Chunks,
     root: Hash,
@@ -167,7 +182,7 @@ fn apply_at(
         };
     }
     while tops.len() > 1 {
-        level += 1;
+        level = level.checked_add(1).ok_or(Error::Corrupt(root))?;
         let mut writer = Writer::new(scale, level);
         for (key, hash) in &tops {
             writer.push(key, &hash.0);
@@ -181,6 +196,7 @@ fn apply_at(
     }
     let mut root = tops.into_values().next().unwrap_or_else(empty);
     // A chunk with one child is not a root: its child is.
+    let mut passed = Vec::new();
     loop {
         let node = match fresh.get(&root) {
             Some(bytes) => Node::read(root, bytes)?,
@@ -190,9 +206,14 @@ fn apply_at(
         if node.level == 0 {
             break;
         }
-        let child = only.child();
-        fresh.remove(&root);
-        root = child;
+        if !fresh.contains_key(&only.child()) {
+            chunks.child(&node, &only)?;
+        }
+        passed.push(root);
+        root = only.child();
+    }
+    for hash in passed {
+        fresh.remove(&hash);
     }
     let made = fresh.keys().copied().collect();
     chunks.0.extend(fresh);
@@ -218,7 +239,7 @@ fn rewrite(
     while let Some((first, _)) = edits.first() {
         let mut cursor = Cursor::seek(chunks, root, level, first)?;
         let mut writer = Writer::new(scale, level);
-        let mut old: Map<&[u8], Hash> = Map::default();
+        let mut old: BTreeMap<&[u8], Hash> = BTreeMap::new();
         loop {
             for entry in &cursor.node.entries {
                 let mut replaced = false;
@@ -287,7 +308,7 @@ impl<'a> Cursor<'a> {
         while node.level > level {
             let index = node.entries.partition_point(|entry| entry.key < key);
             let index = index.min(node.entries.len() - 1);
-            let child = chunks.node(node.entries[index].child())?;
+            let child = chunks.child(&node, &node.entries[index])?;
             path.push((node, index));
             node = child;
         }
@@ -306,9 +327,9 @@ impl<'a> Cursor<'a> {
         let Some((node, index)) = self.path.last() else {
             return Ok(false);
         };
-        let mut child = self.chunks.node(node.entries[*index].child())?;
+        let mut child = self.chunks.child(node, &node.entries[*index])?;
         while child.level > self.node.level {
-            let first = self.chunks.node(child.entries[0].child())?;
+            let first = self.chunks.child(&child, &child.entries[0])?;
             self.path.push((child, 0));
             child = first;
         }
@@ -344,8 +365,8 @@ pub fn diff(chunks: &Chunks, old: Hash, new: Hash) -> Result<Diff, Error> {
         let old_level = olds.first().map_or(0, |node| node.level);
         let new_level = news.first().map_or(0, |node| node.level);
         if old_level == new_level {
-            let same: Set<Hash> = olds.iter().map(|node| node.hash).collect();
-            let same: Set<Hash> = news
+            let same: BTreeSet<Hash> = olds.iter().map(|node| node.hash).collect();
+            let same: BTreeSet<Hash> = news
                 .iter()
                 .map(|node| node.hash)
                 .filter(|hash| same.contains(hash))
@@ -403,8 +424,13 @@ fn children<'a>(
     chunks: &'a Chunks,
     nodes: &[Node<'a>],
 ) -> Result<Vec<Node<'a>>, Error> {
-    let entries = nodes.iter().flat_map(|node| &node.entries);
-    entries.map(|entry| chunks.node(entry.child())).collect()
+    let mut children = Vec::new();
+    for node in nodes {
+        for entry in &node.entries {
+            children.push(chunks.child(node, entry)?);
+        }
+    }
+    Ok(children)
 }
 
 fn entries<'a, 'b>(
