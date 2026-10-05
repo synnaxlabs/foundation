@@ -1,10 +1,11 @@
 use std::fmt::Write as _;
 
+use document::encoding::{self, TooDeep};
 use document::value::{Call, Kind, Value};
 use document::{Block, Document, Map, Span};
 
 use crate::lex;
-use crate::parse::{Ends, enter, literal};
+use crate::parse::{Ends, literal};
 use crate::{Error, Unwritable};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
@@ -25,10 +26,17 @@ const WIDTH: usize = 88;
 /// # Errors
 ///
 /// Returns [`Error::Unwritable`] for each part that HCL text cannot hold, in
-/// Document order.
+/// Document order. A Document nested deeper than [`encoding::DEPTH_MAX`] gives only
+/// [`Unwritable::Depth`], at the first level past the limit.
 pub fn write(document: &Document) -> Result<String, Vec<Error>> {
+    if let Err(TooDeep { span }) = encoding::check(document) {
+        return Err(vec![Error::Unwritable {
+            span,
+            part: Unwritable::Depth,
+        }]);
+    }
     let mut writer = Writer::default();
-    writer.body(document, 0, 0);
+    writer.body(document, 0);
     if writer.errors.is_empty() {
         Ok(writer.out)
     } else {
@@ -75,6 +83,8 @@ impl<'a> Items<'a> {
     }
 }
 
+/// Recurses once per level, so it runs only on a Document that [`encoding::check`]
+/// accepts.
 #[derive(Default)]
 struct Writer {
     out: String,
@@ -83,7 +93,7 @@ struct Writer {
 
 impl Writer {
     /// Writes the attributes and blocks of a body, `indent` levels in.
-    fn body(&mut self, document: &Document, depth: usize, indent: usize) {
+    fn body(&mut self, document: &Document, indent: usize) {
         for attribute in document.attributes.iter() {
             self.pad(indent);
             if lex::word(&attribute.key) != Some(lex::Kind::Identifier) {
@@ -91,18 +101,18 @@ impl Writer {
             }
             self.out.push_str(&attribute.key);
             self.out.push_str(" = ");
-            self.value(&attribute.value, depth, indent, Ends::Line);
+            self.value(&attribute.value, indent, Ends::Line);
             self.out.push('\n');
         }
         for (i, block) in document.blocks.iter().enumerate() {
             if i > 0 || document.attributes.iter().len() > 0 {
                 self.out.push('\n');
             }
-            self.block(block, depth, indent);
+            self.block(block, indent);
         }
     }
 
-    fn block(&mut self, block: &Block, depth: usize, indent: usize) {
+    fn block(&mut self, block: &Block, indent: usize) {
         self.pad(indent);
         if lex::word(&block.keyword) != Some(lex::Kind::Identifier) {
             self.refuse(block.keyword_span, Unwritable::Keyword);
@@ -112,15 +122,12 @@ impl Writer {
             self.out.push(' ');
             quoted(&mut self.out, &label.text);
         }
-        let Some(depth) = enter(depth) else {
-            return self.refuse(block.span, Unwritable::Depth);
-        };
         if block.body == Document::default() {
             self.out.push_str(" {}\n");
             return;
         }
         self.out.push_str(" {\n");
-        self.body(&block.body, depth, indent.saturating_add(1));
+        self.body(&block.body, indent.saturating_add(1));
         self.pad(indent);
         self.out.push_str("}\n");
     }
@@ -128,12 +135,12 @@ impl Writer {
     /// Writes a value on one line when the line fits, and otherwise with each item on
     /// its own line. A line with a heredoc in it is more than one line, so it does not
     /// fit.
-    fn value(&mut self, value: &Value, depth: usize, indent: usize, ends: Ends) {
+    fn value(&mut self, value: &Value, indent: usize, ends: Ends) {
         let Some(items) = Items::of(&value.kind) else {
-            return self.line(value, depth, ends);
+            return self.line(value, ends);
         };
         let mut line = Self::default();
-        line.line(value, depth, ends);
+        line.line(value, ends);
         let comma = usize::from(ends == Ends::Comma);
         let width = self
             .column()
@@ -144,21 +151,18 @@ impl Writer {
             self.errors.append(&mut line.errors);
             return;
         }
-        let Some(depth) = enter(depth) else {
-            return self.refuse(value.span, Unwritable::Depth);
-        };
         let inner = indent.saturating_add(1);
         self.open(items);
         match items {
-            Items::List(values) => self.items(values, depth, inner),
-            Items::Call(call) => self.items(&call.arguments, depth, inner),
+            Items::List(values) => self.items(values, inner),
+            Items::Call(call) => self.items(&call.arguments, inner),
             Items::Map(map) => {
                 for attribute in map.iter() {
                     self.out.push('\n');
                     self.pad(inner);
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.value(&attribute.value, depth, inner, Ends::Line);
+                    self.value(&attribute.value, inner, Ends::Line);
                 }
             }
         }
@@ -170,17 +174,17 @@ impl Writer {
     }
 
     /// Writes each item on its own line, `indent` levels in, with a `,` after it.
-    fn items(&mut self, values: &[Value], depth: usize, indent: usize) {
+    fn items(&mut self, values: &[Value], indent: usize) {
         for item in values {
             self.out.push('\n');
             self.pad(indent);
-            self.value(item, depth, indent, Ends::Comma);
+            self.value(item, indent, Ends::Comma);
             self.out.push(',');
         }
     }
 
     /// Writes a value on one line, except a heredoc.
-    fn line(&mut self, value: &Value, depth: usize, ends: Ends) {
+    fn line(&mut self, value: &Value, ends: Ends) {
         let items = match &value.kind {
             Kind::Bool(b) => {
                 return self.out.push_str(if *b { "true" } else { "false" });
@@ -210,19 +214,16 @@ impl Writer {
             Kind::Call(call) => Items::Call(call),
             Kind::Map(map) => Items::Map(map),
         };
-        let Some(depth) = enter(depth) else {
-            return self.refuse(value.span, Unwritable::Depth);
-        };
         self.open(items);
         match items {
-            Items::List(values) => self.line_items(values, depth),
-            Items::Call(call) => self.line_items(&call.arguments, depth),
+            Items::List(values) => self.line_items(values),
+            Items::Call(call) => self.line_items(&call.arguments),
             Items::Map(map) => {
                 for (i, attribute) in map.iter().enumerate() {
                     self.out.push_str(if i == 0 { " " } else { ", " });
                     key(&mut self.out, &attribute.key);
                     self.out.push_str(" = ");
-                    self.line(&attribute.value, depth, Ends::Line);
+                    self.line(&attribute.value, Ends::Line);
                 }
                 if items.len() > 0 {
                     self.out.push(' ');
@@ -232,12 +233,12 @@ impl Writer {
         self.out.push(items.close());
     }
 
-    fn line_items(&mut self, values: &[Value], depth: usize) {
+    fn line_items(&mut self, values: &[Value]) {
         for (i, item) in values.iter().enumerate() {
             if i > 0 {
                 self.out.push_str(", ");
             }
-            self.line(item, depth, Ends::Comma);
+            self.line(item, Ends::Comma);
         }
     }
 
@@ -797,5 +798,39 @@ mod tests {
             blocks: vec![blocks],
         };
         assert_eq!(write(&document), refused(on(3, 4)));
+    }
+
+    #[test]
+    fn gives_only_the_depth_error_past_the_limit() {
+        let mut lists = Value {
+            kind: list(Vec::new()),
+            span: Some(on(1, 2)),
+        };
+        for _ in 0..64 {
+            lists = value(Kind::List(vec![lists]));
+        }
+        let document = Document {
+            attributes: Map::new(vec![
+                Attribute {
+                    key: "a".into(),
+                    key_span: None,
+                    value: lists,
+                },
+                Attribute {
+                    key: "my key".into(),
+                    key_span: Some(on(3, 4)),
+                    value: value(Kind::Integer(1)),
+                },
+            ])
+            .unwrap(),
+            blocks: Vec::new(),
+        };
+        assert_eq!(
+            write(&document),
+            Err(vec![Error::Unwritable {
+                span: Some(on(1, 2)),
+                part: Unwritable::Depth,
+            }])
+        );
     }
 }
