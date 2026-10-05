@@ -1,5 +1,5 @@
-//! Defines the syntax-neutral Document with source positions, diagnostics, and shared
-//! value readers.
+//! Defines the syntax-neutral Document with source positions, diagnostics, shared
+//! value readers, and its canonical encoding.
 //!
 //! Each syntax is a front end that reads files into a [`Document`] and writes one back.
 //! SDK code may build a document directly. Files hold data only, so a document has no
@@ -15,6 +15,7 @@
 #[cfg(test)]
 mod arbitrary;
 mod block;
+pub mod encoding;
 mod map;
 mod span;
 pub mod value;

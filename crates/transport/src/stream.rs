@@ -66,7 +66,7 @@ impl Sender {
     /// }
     /// ```
     pub async fn send(&mut self, message: Block) -> Result<(), Error> {
-        let _ = message;
+        drop(message);
         todo!("#68")
     }
 

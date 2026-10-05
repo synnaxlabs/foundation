@@ -304,6 +304,21 @@ How to read this record:
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open. The restart record needs one free block: an open of a full ring first moves
   records at the tail to a segment.
+  Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
+  u64][tail chain: u32][seq: u64][zero padding][crc32c: u32]`, one 4096-byte block,
+  magic `FNDNRING`, version 1. The CRC is the last four bytes and covers the rest.
+  The magic, the version, and the place of the CRC are the same in every version, so
+  an older build reads a newer block and reports its version. Two blocks at the
+  start of the ring hold the last two checkpoints: checkpoint `n` goes to block `n
+  mod 2`. Open takes the whole block with the higher `seq` (on a tie, the first);
+  one torn block leaves the other. No block with the magic: not a ring. Both with
+  the magic and a wrong CRC: the ring is lost. The header with a new tail is durable
+  before the writer releases the space, so the header's tail is at or before the
+  writer's tail and the records between are whole. The layout comes from the header
+  at open; configuration sets it at create, and a changed `body_max` takes effect at
+  the next create. The open reports the effective layout, callers bound a commit by
+  it, and the node shows it in status. A new ring has the same block at `seq` 0 in
+  both places, with the tail at offset 0 and a random chain value.
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -367,20 +382,19 @@ How to read this record:
   monotonic clock, or a device's sample clock in nanoseconds, #84): its offset is mesh
   time minus the local reading at `at`, and its error is a half-width from 0 to 36500
   days. A bound grows by the drift bound times the time from `at`, in both directions.
-  The drift bound is at most 10%; `Drift::UNDISCIPLINED` is 200 ppm. A measured
-  oscillator rate goes into `Drift` later, as an additive change. Each source keeps its
-  last 8 measurements and offers the one with the smallest bound now. This reads R6 TIME
-  LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a fresh
-  slower one. `combine` takes one `Filter` per source and returns the hull of the
+  The drift bound is at most 10%; `Drift::UNDISCIPLINED` is 200 ppm. Each source keeps
+  its last 8 measurements and offers the one with the smallest bound now. This reads R6
+  TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
+  fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
   offsets inside the most bounds (Marzullo). It fails when no offset is inside more than
   half of them. This reads C6's "follows the smallest measured bound": when sources
   agree, the result is never wider than the narrowest. The result holds the true offset
   when the bounds that hold it are a majority and every other bound misses them. Decided
-  by the `time` builder (#49). A device's measurements go to the oscillator fit (`Fit`),
-  never to `combine`. Node sources keep `Filter`, not `Fit`: a network exchange puts the
-  true offset at about the same place in each bracket, so an overlap gains little, and a
-  broken drift bound would stay wrong for the life of a fit, not for 8 exchanges.
-  Decided by the coordinator (#84).
+  by the `time` builder (#49). A device's measurements go to the oscillator fit
+  (`Overlap`), never to `combine`. Node sources keep `Filter`, not `Overlap`: a network
+  exchange puts the true offset at about the same place in each bracket, so an overlap
+  gains little, and a broken drift bound would stay wrong for the life of an overlap,
+  not for 8 exchanges. Decided by the coordinator (#84).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -396,6 +410,25 @@ How to read this record:
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
   trips; input rejects an end before the start.
+- **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock.
+  It keeps the offsets that every measurement of that clock allows, each widened by
+  drift, so it holds only the measurement with the highest low edge and the one with
+  the lowest high edge. Measurements come in local time order. An older one returns
+  `Backwards` (the device restarted), and one that shares no offset returns `Disjoint`
+  (the clock jumped, or it drifts faster than its bound). Neither changes the overlap,
+  and the caller starts a new one with a gap. Each measurement holds true mesh time,
+  with the node's own error in its bound, so the drift covers only the device
+  oscillator. The drift is fixed for the life of an overlap, because a smaller drift
+  would need measurements that it dropped. This reads r6 Q5's lower-envelope fit with
+  the rate bounded by `Drift`, not fitted. A line fit of offset and rate lost: it is
+  honest only if the rate stays constant, and no datasheet bounds oscillator wander. A
+  measured rate needs a signed rate in the model, not a smaller `Drift`. A device
+  adapter must give each measurement a two-sided bound. The return time of a read
+  bounds its last sample only from above. The lower bound comes from a device counter
+  read between two mesh stamps, or from a latency that the hardware guarantees: one
+  read over a stated latency gives a low edge above the truth, and the overlap keeps it.
+  Decided by the `time` builder; the person accepted it on 2026-10-05 ('#1 is fine').
+  Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper bounds).
 
 ### 1.7 Transport
 
@@ -421,6 +454,26 @@ How to read this record:
   table from protocol to handler and runs one accept loop per session. A protocol
   that the table does not know comes from a peer, so the loop resets that stream with
   a code and goes on. Decided by the coordinator (network's review of #53).
+- **PROTOCOL HEADER (#75)** The header of STREAM DISPATCH is 3 bytes: the wire
+  version (`u16`, little-endian), then the protocol number (`u8`): clock 1, mesh 2,
+  replica 3, blob 4, hub 5. On a stream, the header is the whole first message, so
+  later messages carry no prefix. A datagram starts with it; its handler reads from
+  `wire::header::LEN` until `block` has a view that skips a prefix (#110). The
+  version covers every message on that stream, encoded series included: each wire
+  version fixes one codec version (wire 1 carries codec 1). The version comes first
+  and is checked first, so a later version can change what follows it. A node reads
+  only `wire::VERSION` until version 2 exists; then it also reads the version before
+  it (C9d), and writers take the version from the format flag. `node` stops a stream
+  whose header is not valid with code 1 (`wire::header::REJECTED`) and resets its
+  reply half, if it has one, with the same code; a datagram whose header is not valid
+  drops and counts in a status channel. Stop and reset codes 1 to 15 belong to the
+  header; each protocol numbers its own from 16. A client session (`Peer::Client`)
+  opens only hub streams, its signed hello is the first hub message, and `node`
+  refuses the other four protocols from a client. The stream and client rules are
+  approved by the coordinator on #90. Rejected: a version agreed once per session
+  (the format flag's flip reaches nodes at different times, so one session can carry
+  streams of two versions) and a session per protocol (`transport` stays blind to
+  protocols, and it costs five handshakes per peer pair).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
   however many shards it runs, so each site's firewall needs one known port per
   conduit. Each QUIC connection belongs to one shard, and every connection ID a node
@@ -626,6 +679,16 @@ How to read this record:
   from 0); SDK and spec documents have none (section 2.1, kind config). `==` never
   reads spans, so a Document from a file equals the same Document from the spec.
   Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
+- **DOCUMENT ENCODING (2026-10-04)** `document::encoding` gives each Document exactly
+  one byte string, with no spans: a version byte, then tagged values, blocks in the
+  producer's order, keys in byte order, and fixed-width little-endian integers (`u64`
+  counts and lengths, `i128` integers, and `f64` floats as their bits). `decode`
+  refuses every byte string that `encode` cannot write. Both refuse nesting past 64
+  levels, and front ends refuse files that nest deeper. `encode` returns `TooDeep` and
+  `decode` returns `Error`: two error types, by the coordinator's ruling under R16-6.
+  `spec` stores and hashes these bytes. Pinned bytes are an oracle in
+  `oracles/conformance/document/`. A new format takes a new version byte. Decided by
+  the `config` builder; approved by the coordinator (#62).
 - **HCL READER (2026-10-04)** `config-hcl` reads HCL with its own lexer and
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
@@ -1543,20 +1606,20 @@ Rules:
    else asks `clock`. Only `node` builds real seams, and only `sim` builds simulated
    ones. Below `hub`, only `home` writes channels, and only its companion samples.
 
-Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `estimate`,
-`control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2 `os` ->
-(`transport`, `buffer`) -> (`clock`, `blob`, `sim`) -> `mesh` -> (`home`, `replica`) ->
-`hub`; layer 3 `secret`
--> `connector` -> `connector-<kind>`; layer 4 (`config-hcl`, `config`) -> `ops` ->
-`node`.
+Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
+`estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
+`os` -> (`transport`, `buffer`) -> (`clock`, `blob`, `sim`) -> `mesh` -> (`home`,
+`replica`) -> `hub`; layer 3 `secret` -> `connector` -> `connector-<kind>`; layer 4
+(`config-hcl`, `config`) -> `ops` -> `node`.
 
 | Layer | Crate | Job (one sentence) | Allowed dependencies |
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
+| 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, and holds the one `unsafe impl GlobalAlloc`. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
-| 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, and shared value readers. | `types` |
+| 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
 | 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |

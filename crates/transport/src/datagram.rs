@@ -42,9 +42,8 @@ impl Sender {
     ///     sender.send(sample)
     /// }
     /// ```
-    #[expect(clippy::needless_pass_by_value, reason = "stub until implemented")]
     pub fn send(&self, message: Block) -> Result<(), Error> {
-        let _ = message;
+        drop(message);
         todo!("#68")
     }
 

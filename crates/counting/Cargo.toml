@@ -1,5 +1,5 @@
 [package]
-name = "block"
+name = "counting"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,14 +7,8 @@ publish.workspace = true
 
 [dependencies]
 
-[dev-dependencies]
-proptest = { workspace = true }
-
-[target.'cfg(loom)'.dependencies]
-loom = { workspace = true }
-
 [[test]]
-name = "alloc"
+name = "global"
 harness = false
 
 [lints]

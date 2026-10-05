@@ -47,6 +47,7 @@ jobs:
             models:
               - 'crates/ring/**'
               - 'crates/block/**'
+              - 'crates/counting/**'
               - 'xtask/**'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -112,7 +113,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy -p ring --all-targets -- -D warnings
+        run: cargo clippy -p ring -p block --all-targets -- -D warnings
         env:
           RUSTFLAGS: --cfg loom
       - name: Loom
@@ -163,4 +164,12 @@ jobs:
       - name: Mutants in the diff
         run: |
           git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
-          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch"
+          status=0
+          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch" || status=$?
+          # A timeout is a mutant that made a test hang, so a test caught it. Exit 3
+          # (timeout) wins over exit 2 (missed), so read the missed list too.
+          if [ "$status" -eq 3 ] && [ ! -s mutants.out/missed.txt ]; then
+            cat mutants.out/timeout.txt
+            status=0
+          fi
+          exit "$status"

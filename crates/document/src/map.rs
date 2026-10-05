@@ -1,8 +1,8 @@
 use crate::value::Value;
 use crate::{Error, Span};
 
-/// Attributes sorted by key, with unique keys. A document's attributes and a map value
-/// are each a map.
+/// Attributes sorted by the bytes of their keys, with unique keys. A document's
+/// attributes and a map value are each a map.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Map(Vec<Attribute>);
 
@@ -56,6 +56,11 @@ impl Map {
         } else {
             Err(errors)
         }
+    }
+
+    /// Wraps attributes whose keys strictly ascend. The caller checks the order.
+    pub(crate) fn from_sorted(attributes: Vec<Attribute>) -> Self {
+        Self(attributes)
     }
 
     /// The attribute with `key`.
