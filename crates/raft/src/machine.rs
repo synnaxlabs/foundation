@@ -2371,6 +2371,15 @@ mod tests {
             assert_eq!(to(&messages), [key(3)]);
             assert_eq!(messages[0].term, Term(1));
             assert_eq!(messages[0].body, Body::Heartbeat { commit: 3 });
+            // A PreVote from another term, a log that differs, and a voter's
+            // disruptive PreVote get nothing.
+            raft.step(message(3, 3, Body::PreVote { last: at(1, 3) }))
+                .unwrap();
+            raft.step(message(3, 2, Body::PreVote { last: at(2, 3) }))
+                .unwrap();
+            raft.step(message(2, 2, Body::PreVote { last: at(1, 3) }))
+                .unwrap();
+            assert_eq!(sent(&mut raft), []);
             raft.step(message(3, 2, Body::PreVote { last: at(1, 1) }))
                 .unwrap();
             let messages = sent(&mut raft);
@@ -2384,16 +2393,30 @@ mod tests {
                     commit: 3,
                 }
             );
-            // A log that differs, a voter's disruptive PreVote, and a PreVote from
-            // another term get nothing.
-            raft.step(message(3, 2, Body::PreVote { last: at(2, 3) }))
-                .unwrap();
-            raft.step(message(2, 2, Body::PreVote { last: at(1, 3) }))
-                .unwrap();
-            raft.step(message(3, 3, Body::PreVote { last: at(1, 3) }))
-                .unwrap();
-            assert_eq!(sent(&mut raft), []);
             assert_eq!(raft.role(), Role::Leader);
+        }
+
+        // A follower that released node 4 leaves its PreVote to the leader.
+        #[test]
+        fn a_follower_does_not_take_back_a_removed_node() {
+            let mut raft = raft(&[1, 2, 3, 4], Hard::default());
+            let mut entries = entries(&[(1, 1)]);
+            entries.push(config(1, 2, voters(&[1, 2, 3], &[1, 2, 3, 4])));
+            entries.push(config(1, 3, voters(&[1, 2, 3], &[])));
+            let append = Body::Append {
+                prev: Position::default(),
+                entries,
+                commit: 3,
+            };
+            raft.step(message(2, 1, append)).unwrap();
+            sent(&mut raft);
+            let last = Position {
+                term: Term(1),
+                index: 3,
+            };
+            raft.step(message(4, 2, Body::PreVote { last })).unwrap();
+            assert_eq!(sent(&mut raft), []);
+            assert_eq!(raft.role(), Role::Follower);
         }
 
         // Only the node a change adds counts as heard; the voters that stayed
