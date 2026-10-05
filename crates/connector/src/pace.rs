@@ -60,15 +60,15 @@ impl Timer {
         }
     }
 
-    /// Waits for the next deadline, then returns its tick. Tick 0 returns at once.
-    /// When later deadlines also passed, returns the last one that passed, with the
-    /// others in `missed`. Returns `None` at once when `cancel` is cancelled. After
-    /// the first call the timer allocates nothing; the clock's driver may allocate on
-    /// its first wait.
+    /// Waits for the next deadline, then returns its tick. The first call returns at
+    /// once. When later deadlines also passed, returns the last one that passed, with
+    /// the others in `missed`. Returns `None` at once when `cancel` is cancelled. From
+    /// the third call on, a tick allocates nothing.
     ///
     /// # Panics
     ///
-    /// When a deadline is past the end of `Monotonic`.
+    /// When a deadline is more than `i64::MAX` ns (about 292 years) after the start,
+    /// or past the end of `Monotonic`.
     pub async fn tick(&mut self, cancel: &cancel::Token) -> Option<Tick> {
         self.sleep.reset(self.start + self.rate.span(self.next));
         cancel.race(&mut self.sleep).await?;
@@ -210,6 +210,44 @@ mod tests {
         assert_eq!(tick, None);
     }
 
+    #[test]
+    fn returns_at_once_on_the_grid_when_the_first_call_is_late() {
+        let first = run(|clock, _| async move {
+            let mut timer = Timer::new(&clock, rate(10, 1));
+            clock.sleep(ms(250)).await;
+            timer.tick(&Token::new()).await
+        });
+        assert_eq!(first, Some(tick(2, 2, ms(50))));
+    }
+
+    #[test]
+    fn keeps_the_grid_after_a_cancelled_wait() {
+        let (cancelled, resumed, elapsed) = run(|clock, tasks| async move {
+            let token = Token::new();
+            let canceller = token.clone();
+            let sleeper = clock.clone();
+            tasks.spawn(async move {
+                sleeper.sleep(ms(50)).await;
+                canceller.cancel();
+            });
+            let start = clock.now();
+            let mut timer = Timer::new(&clock, rate(1, 1));
+            timer.tick(&token).await.expect("tick 0");
+            let cancelled = timer.tick(&token).await;
+            let resumed = timer.tick(&Token::new()).await;
+            (cancelled, resumed, clock.now() - start)
+        });
+        assert_eq!(cancelled, None, "cancelled");
+        assert_eq!(resumed, Some(tick(1, 0, Span::ZERO)), "tick 1 on the grid");
+        assert_eq!(elapsed, Span::SECOND, "at tick 1");
+    }
+
+    #[test]
+    #[should_panic(expected = "span overflow: 2 samples at 1/5000000000 Hz")]
+    fn panics_past_i64_max_nanoseconds_from_the_start() {
+        ticks(rate(1, 5_000_000_000), vec![Span::ZERO; 3]);
+    }
+
     proptest! {
         #[test]
         fn keeps_every_tick_on_the_grid(
@@ -218,17 +256,20 @@ mod tests {
             stalls in prop::collection::vec(0..2_000_000_000_i64, 1..16),
         ) {
             let rate = rate(num, den);
-            let stalls = stalls.into_iter().map(Span::from_nanos).collect();
+            let stalls: Vec<_> = stalls.into_iter().map(Span::from_nanos).collect();
             let mut next = 0;
-            for (tick, elapsed) in ticks(rate, stalls) {
-                prop_assert_eq!(tick.n, next + tick.missed, "n counts the missed");
-                prop_assert_eq!(
-                    elapsed.nanos(),
-                    rate.span(tick.n).nanos() + tick.late.nanos()
-                );
-                prop_assert!(tick.late >= Span::ZERO, "never early");
+            let mut call = 0;
+            let out = ticks(rate, stalls.clone());
+            for ((tick, elapsed), stall) in out.into_iter().zip(stalls) {
+                let wake = call.max(rate.span(next).nanos());
+                prop_assert_eq!(elapsed.nanos(), wake, "wakes at the next deadline");
+                prop_assert!(rate.span(tick.n) <= elapsed, "never early");
                 prop_assert!(elapsed < rate.span(tick.n + 1), "the last due tick");
+                prop_assert!(tick.n >= next, "never repeats a tick");
+                prop_assert_eq!(tick.missed, tick.n - next, "counts the skipped");
+                prop_assert_eq!(tick.late.nanos(), wake - rate.span(tick.n).nanos());
                 next = tick.n + 1;
+                call = wake + stall.nanos();
             }
         }
     }

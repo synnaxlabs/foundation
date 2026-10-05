@@ -836,16 +836,17 @@ How to read this record:
   component.
 - **DEATH RECORDS** When a writer session ends without closing, the home writes a
   "source lost" quality sample. A clean close writes nothing. Scope: X19.
-- **R12 catalog (proposal, partly adopted)** Components (cancel, pace, clock stamping,
-  retry, endpoint, link, drive, thread, queue, cycle, status, run, out, calc align) and
-  compositions (polled, clocked, pushed, cyclic, out, calc). The kind's `&self` holds
-  process-lifetime parts that `node` injects; `ctx` holds one run's capabilities.
-  Group-based parts need revision (X5).
+- **R12 catalog (proposal, partly adopted)** Components (cancel, pace (see PACE),
+  clock stamping, retry, endpoint, link, drive, thread, queue, cycle, status, run, out,
+  calc align) and compositions (polled, clocked, pushed, cyclic, out, calc). The
+  kind's `&self` holds process-lifetime parts that `node` injects; `ctx` holds one
+  run's capabilities. Group-based parts need revision (X5).
 - **PACE (2026-10-05)** `pace::Timer` ticks on a grid of deadlines at `start + n /
   rate`, from a `types::time::Rate`, and skips and counts the ticks a stall missed.
   It has one async `tick(&cancel::Token)`, with no blocking wait and no sleep, hybrid,
-  or spin mode: precision belongs to the clock driver in `os`. Replaces r12 A.3's
-  `pace` (#237).
+  or spin mode: precision belongs to the clock driver in `os` (#379). Decided by the
+  `connector` builder in the plan on #237, after EB review. Supersedes: r12 A.3
+  `pace` modes and blocking wait.
 
 ### 1.11 Config as code
 
@@ -1214,6 +1215,7 @@ How to read this record:
 | A18 quality side array | S13, BQ13 |
 | A20 channel retention, quality codes on acks | S12, S13 |
 | B1 durable reader, B2 durable and ad-hoc readers | S10 |
+| r12 A.3 `pace` modes (sleep, hybrid, spin) and blocking wait | PACE |
 | B3 one cumulative position per index | READER RULES |
 | C1 and C9a crate lists | Section 4 |
 | C3 REFINEMENT groups | GROUPS DROPPED |
