@@ -737,6 +737,11 @@ dependencies = [
 [[package]]
 name = "node"
 version = "0.0.0"
+dependencies = [
+ "env",
+ "loom",
+ "sim",
+]
 
 [[package]]
 name = "noq"
