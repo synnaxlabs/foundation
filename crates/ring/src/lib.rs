@@ -278,7 +278,7 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{Config, Consumer, Full, new, with_origin};
+    use super::{Config, Consumer, Full, Producer, new, with_origin};
 
     /// Counts the wakes it gets.
     #[derive(Default)]
@@ -609,6 +609,7 @@ mod tests {
 
     mod threads {
         use std::thread::{self, Thread};
+        use std::time::Duration;
 
         use super::*;
 
@@ -620,20 +621,40 @@ mod tests {
             }
         }
 
+        /// Drives `future` on this thread. It panics after `POLLS` polls that each
+        /// waited up to `WAIT`, so a lost wake fails the test in place of a hang.
         #[expect(
             clippy::disallowed_methods,
             reason = "this test drives the future on a real thread; `ring` has no `env`"
         )]
         fn block_on<F: Future>(future: F) -> F::Output {
+            const POLLS: u32 = 100;
+            const WAIT: Duration = Duration::from_millis(100);
             let waker = Waker::from(Arc::new(Unpark(thread::current())));
             let mut cx = Context::from_waker(&waker);
             let mut future = pin!(future);
-            loop {
+            for _ in 0..POLLS {
                 if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
                     return output;
                 }
-                thread::park();
+                thread::park_timeout(WAIT);
             }
+            panic!("no result after {POLLS} polls");
+        }
+
+        /// Pushes `value`, and yields while the ring is full. It panics after `YIELDS`
+        /// yields (about 10 seconds on an M3 Max), so a stuck consumer fails the test
+        /// in place of a hang.
+        fn push_yielding(producer: &mut Producer<usize>, mut value: usize) {
+            const YIELDS: u32 = 50_000_000;
+            for _ in 0..YIELDS {
+                match producer.push(value) {
+                    Ok(()) => return,
+                    Err(Full(back)) => value = back,
+                }
+                thread::yield_now();
+            }
+            panic!("the ring stayed full for {YIELDS} yields");
         }
 
         fn carries_every_value_in_order(spins: u32) {
@@ -641,11 +662,8 @@ mod tests {
             let (mut producer, mut consumer) = new(Config { capacity: 8, spins });
             thread::scope(|scope| {
                 scope.spawn(move || {
-                    for mut value in 0..count {
-                        while let Err(Full(back)) = producer.push(value) {
-                            value = back;
-                            thread::yield_now();
-                        }
+                    for value in 0..count {
+                        push_yielding(&mut producer, value);
                     }
                 });
                 for expected in 0..count {
@@ -657,9 +675,11 @@ mod tests {
 
         #[test]
         fn find_a_late_value_in_the_first_poll_when_the_consumer_spins() {
+            // Enough spins for the push to land, and few enough that a lost value
+            // fails the test in place of a hang.
             let (mut producer, mut consumer) = new(Config {
                 capacity: 1,
-                spins: u32::MAX,
+                spins: 1 << 30,
             });
             let polling = AtomicUsize::new(0);
             thread::scope(|scope| {

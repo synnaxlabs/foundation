@@ -606,6 +606,7 @@ version = "0.0.0"
 name = "ring"
 version = "0.0.0"
 dependencies = [
+ "counting",
  "divan",
  "loom",
  "proptest",
@@ -749,6 +750,11 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 [[package]]
 name = "sim"
 version = "0.0.0"
+dependencies = [
+ "env",
+ "proptest",
+ "types",
+]
 
 [[package]]
 name = "smallvec"

@@ -30,13 +30,16 @@ pub struct Opened {
 }
 
 /// The complete readers of one index at its home: their positions, the data they hold,
-/// and the records that let a new home continue. Sans-I/O: the home passes mesh time
-/// in, appends [`Readers::records`] to the index log after each input, and calls
-/// [`Readers::advance`] at [`Readers::deadline`].
+/// the credit each session has, and the records that let a new home continue. Sans-I/O:
+/// the home passes mesh time in, appends [`Readers::records`] to the index log after
+/// each input, and calls [`Readers::advance`] at [`Readers::deadline`].
 #[derive(Debug, Default)]
 pub struct Readers {
     /// Sorted by key.
     sessions: Vec<Session>,
+    /// The credit of each session, at its index in `sessions`. Apart so that a
+    /// `Session` stays 64 bytes, which `find` indexes with a shift, not a multiply.
+    credits: Vec<Credit>,
     /// Named readers that still hold after their session closed.
     closed: Vec<Closed>,
     next: u64,
@@ -50,6 +53,14 @@ struct Session {
     position: Position,
     /// The position moved since the last record.
     changed: bool,
+}
+
+#[derive(Debug, Default)]
+struct Credit {
+    /// Bytes sent since the session opened.
+    spent_bytes: u64,
+    /// The highest grant.
+    limit_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -126,6 +137,7 @@ impl Readers {
         };
         self.records.extend(session.record());
         self.sessions.push(session);
+        self.credits.push(Credit::default());
         Opened {
             key,
             position,
@@ -160,13 +172,45 @@ impl Readers {
         Ok(())
     }
 
+    /// Raises the session's credit to `limit_bytes` since it opened. A limit that is
+    /// not higher than the current one changes nothing.
+    ///
+    /// # Panics
+    ///
+    /// If the session is not open.
+    pub fn grant(&mut self, key: Key, limit_bytes: u64) {
+        let i = self.find(key);
+        let credit = &mut self.credits[i];
+        credit.limit_bytes = credit.limit_bytes.max(limit_bytes);
+    }
+
+    /// Spends credit on one frame whose charge is `bytes`: the bytes its pool block
+    /// pins. Returns `true` and spends when the session has spent less than its limit;
+    /// the frame may take it past the limit. Otherwise returns `false` and spends
+    /// nothing. After a refusal, send the session no later frame until it has the
+    /// refused one.
+    ///
+    /// # Panics
+    ///
+    /// If the session is not open.
+    #[must_use]
+    pub fn spend(&mut self, key: Key, bytes: u64) -> bool {
+        let i = self.find(key);
+        let credit = &mut self.credits[i];
+        if credit.spent_bytes >= credit.limit_bytes {
+            return false;
+        }
+        credit.spent_bytes += bytes;
+        true
+    }
+
     /// Ends the session at `now`.
     ///
     /// # Panics
     ///
     /// If the session is not open.
     pub fn close(&mut self, key: Key, now: Stamp) {
-        let session = self.sessions.remove(self.find(key));
+        let session = self.remove(self.find(key));
         if let Reader::Named { name, hold } = session.reader {
             let closed = Closed {
                 name,
@@ -227,7 +271,7 @@ impl Readers {
     fn take(&mut self, name: &Name) -> (Option<Position>, Option<Key>) {
         let open = self.sessions.iter().position(|s| s.name() == Some(name));
         if let Some(i) = open {
-            let session = self.sessions.remove(i);
+            let session = self.remove(i);
             return (Some(session.position), Some(session.key));
         }
         let closed = self.closed.iter().position(|closed| closed.name == *name);
@@ -238,6 +282,11 @@ impl Readers {
         self.sessions
             .binary_search_by_key(&key, |session| session.key)
             .unwrap_or_else(|_| panic!("session {key} is not open"))
+    }
+
+    fn remove(&mut self, i: usize) -> Session {
+        self.credits.remove(i);
+        self.sessions.remove(i)
     }
 }
 
@@ -827,6 +876,107 @@ mod tests {
         }
     }
 
+    mod credit {
+        use super::*;
+
+        fn opened() -> (Readers, Key) {
+            let mut readers = Readers::new();
+            let key = readers.open(Reader::Unnamed, Start::At(live(0))).key;
+            (readers, key)
+        }
+
+        #[test]
+        fn is_none_for_a_new_session() {
+            let (mut readers, key) = opened();
+            assert!(!readers.spend(key, 1));
+        }
+
+        #[test]
+        fn is_spent_up_to_the_limit() {
+            let (mut readers, key) = opened();
+            readers.grant(key, 10);
+            assert!(readers.spend(key, 4));
+            assert!(readers.spend(key, 6));
+            assert!(!readers.spend(key, 1));
+        }
+
+        #[test]
+        fn is_not_lowered_by_a_grant() {
+            let (mut readers, key) = opened();
+            readers.grant(key, 10);
+            assert!(readers.spend(key, 6));
+            readers.grant(key, 5);
+            assert!(readers.spend(key, 1));
+        }
+
+        #[test]
+        fn lets_one_frame_pass_the_limit() {
+            let (mut readers, key) = opened();
+            readers.grant(key, 10);
+            assert!(readers.spend(key, 25));
+            assert!(!readers.spend(key, 1));
+        }
+
+        #[test]
+        fn counts_a_frame_past_the_limit_against_the_next_grant() {
+            let (mut readers, key) = opened();
+            readers.grant(key, 10);
+            assert!(readers.spend(key, 25));
+            readers.grant(key, 20);
+            assert!(!readers.spend(key, 1));
+            readers.grant(key, 26);
+            assert!(readers.spend(key, 1));
+        }
+
+        #[test]
+        fn is_kept_per_session() {
+            let mut readers = Readers::new();
+            let a = readers.open(Reader::Unnamed, Start::At(live(0))).key;
+            let b = readers.open(Reader::Unnamed, Start::At(live(0))).key;
+            readers.grant(b, 10);
+            assert!(!readers.spend(a, 1));
+            assert!(readers.spend(b, 10));
+            readers.grant(a, 5);
+            assert!(!readers.spend(b, 1));
+            assert!(readers.spend(a, 1));
+        }
+
+        #[test]
+        fn is_not_spent_by_a_blocked_frame() {
+            let (mut readers, key) = opened();
+            readers.grant(key, 10);
+            assert!(readers.spend(key, 10));
+            assert!(!readers.spend(key, 5));
+            readers.grant(key, 12);
+            assert!(readers.spend(key, 1));
+        }
+
+        #[test]
+        fn is_none_after_a_takeover() {
+            let mut readers = Readers::new();
+            let old = readers.open(named("a", 10), Start::At(live(0))).key;
+            readers.grant(old, 100);
+            let new = readers.open(named("a", 10), resume(live(0))).key;
+            assert!(!readers.spend(new, 1));
+        }
+
+        #[test]
+        #[should_panic(expected = "session 0 is not open")]
+        fn grant_panics_on_a_closed_session() {
+            let (mut readers, key) = opened();
+            readers.close(key, at(0));
+            readers.grant(key, 10);
+        }
+
+        #[test]
+        #[should_panic(expected = "session 0 is not open")]
+        fn spend_panics_on_a_closed_session() {
+            let (mut readers, key) = opened();
+            readers.close(key, at(0));
+            assert!(!readers.spend(key, 1));
+        }
+    }
+
     mod properties {
         use proptest::prelude::*;
 
@@ -1109,7 +1259,56 @@ mod tests {
             }
         }
 
+        #[derive(Clone, Copy, Debug)]
+        enum Flow {
+            Grant(usize, u64),
+            Spend(usize, u64),
+        }
+
+        const SESSIONS: usize = 3;
+
+        /// Checks each spend against the credit rules stated a second way: a session's
+        /// limit is its largest grant, and its spent bytes are the sum of its frames.
+        fn check_credit(flows: Vec<Flow>) {
+            let mut readers = Readers::new();
+            let keys: Vec<Key> = (0..SESSIONS)
+                .map(|_| readers.open(Reader::Unnamed, Start::At(live(0))).key)
+                .collect();
+            let mut grants = vec![Vec::new(); SESSIONS];
+            let mut frames = vec![Vec::new(); SESSIONS];
+            for flow in flows {
+                match flow {
+                    Flow::Grant(i, limit) => {
+                        readers.grant(keys[i], limit);
+                        grants[i].push(limit);
+                    }
+                    Flow::Spend(i, bytes) => {
+                        let limit = grants[i].iter().copied().max().unwrap_or(0);
+                        let spent: u64 = frames[i].iter().sum();
+                        let accepted = readers.spend(keys[i], bytes);
+                        assert_eq!(accepted, spent < limit);
+                        if accepted {
+                            frames[i].push(bytes);
+                        }
+                    }
+                }
+            }
+        }
+
         proptest! {
+            #[test]
+            fn follow_the_credit_rules(
+                flows in proptest::collection::vec(
+                    prop_oneof![
+                        (0..SESSIONS, 0..200_u64).prop_map(|(i, b)| Flow::Grant(i, b)),
+                        (0..SESSIONS, 0..40_u64).prop_map(|(i, b)| Flow::Spend(i, b)),
+                    ],
+                    0..120,
+                ),
+            ) {
+                check_credit(flows);
+            }
+
             #[test]
             fn follow_the_delivery_rules(
                 steps in proptest::collection::vec((0..10_i64, input()), 0..60),
