@@ -501,8 +501,7 @@ impl<'a> Parser<'a> {
     ///
     /// # Panics
     ///
-    /// Panics at the end of the text, which no rule takes. So every loop that takes
-    /// tokens ends.
+    /// Panics at the end of the text, which no rule takes.
     fn take(&mut self) -> Result<Token<'a>, Error> {
         if let lex::Kind::Error(error) = &self.token.kind {
             return Err(error.clone());

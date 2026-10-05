@@ -84,7 +84,8 @@ impl<'a> Tokens<'a> {
         })
     }
 
-    /// Reads the next token. Call it no more after [`Kind::End`] or [`Kind::Error`].
+    /// Reads the next token. Each token but [`Kind::End`] and [`Kind::Error`] covers
+    /// one byte or more. Call it no more after `End` or `Error`.
     pub(crate) fn next(&mut self) -> Token<'a> {
         self.read().unwrap_or_else(|error| Token {
             kind: Kind::Error(error),
@@ -415,7 +416,26 @@ fn check_size(bytes: usize) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        #[test]
+        fn each_token_but_the_last_has_a_byte(
+            text in "[a-z0-9 \t\r\n\"\\\\\\{}\\[\\]().,:=<>!&|+*/%?#@$-]{0,40}|\\PC{0,20}"
+        ) {
+            let mut tokens = Tokens::new(Source(0), &text).unwrap();
+            for _ in 0..=text.len() {
+                let token = tokens.next();
+                if matches!(token.kind, Kind::End | Kind::Error(_)) {
+                    return Ok(());
+                }
+                prop_assert!(!token.text.is_empty(), "{:?} has no text", token.kind);
+            }
+            prop_assert!(false, "more tokens than bytes in {text:?}");
+        }
+    }
 
     #[test]
     fn refuses_a_text_past_the_largest_offset() {
