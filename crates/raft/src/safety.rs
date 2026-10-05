@@ -7,7 +7,7 @@ use proptest::prelude::*;
 use proptest::sample::Index;
 use types::node;
 
-use crate::{Config, Hard, Message, Position, Raft, Role, Term};
+use crate::{Config, Hard, Message, Position, Raft, Role, Start, Term};
 
 const ELECTION: u32 = 3;
 
@@ -85,11 +85,15 @@ impl Mesh {
     fn build(&self, node: usize, hard: Hard) -> Raft {
         let config = Config {
             key: Self::key(node),
-            voters: (0..self.logs.len()).map(Self::key).collect(),
             election_ticks: ELECTION,
             heartbeat_ticks: 1,
         };
-        Raft::new(config, hard, self.logs[node]).unwrap()
+        let start = Start {
+            hard,
+            voters: (0..self.logs.len()).map(Self::key).collect(),
+            last: self.logs[node],
+        };
+        Raft::new(config, start).unwrap()
     }
 
     fn deliver(&mut self, message: Message) {
