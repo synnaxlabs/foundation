@@ -41,7 +41,7 @@ fn check(front: Front) {
 }
 
 #[test]
-#[ignore = "waits on #295: ops plan and apply"]
+#[ignore = "waits on #337"]
 fn plan_and_apply_from_hcl_through_the_json_cli() {
     check(Front::Cli);
 }

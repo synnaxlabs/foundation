@@ -1,6 +1,6 @@
 //! A simulated mesh for the scenarios: nodes from `node` on `sim` seams, links that
 //! can be cut, simulated devices and stores, and the operator's front ends. Each
-//! method with a `todo!` waits on the surface it names.
+//! method with a `todo!` waits on the issue it names.
 
 use std::future::poll_fn;
 use std::io::IoSliceMut;
@@ -113,44 +113,44 @@ impl Lab {
 
     /// Sets the disk budget of `node` to `bytes`.
     pub(crate) fn limit(&mut self, _node: Node, _bytes: u64) {
-        todo!("waits on the per-node disk budget, open in decisions 5.1 item 5")
+        todo!("waits on #342")
     }
 
     /// The disk budget that holds `span` of one `f64` channel at `rate` samples per
     /// second, as `buffer` stores it.
     pub(crate) fn budget(&self, _rate: u64, _span: Duration) -> u64 {
-        todo!("waits on the per-node disk budget, open in decisions 5.1 item 5")
+        todo!("waits on #342")
     }
 
     /// Creates a single-use join ticket on `admin`.
     pub(crate) fn ticket(&mut self, _admin: Node) -> Ticket {
-        todo!("waits on mesh join")
+        todo!("waits on #336")
     }
 
     /// Joins `node` to the region of the ticket's issuer.
     pub(crate) fn join(&mut self, _node: Node, _ticket: Ticket) {
-        todo!("waits on mesh join")
+        todo!("waits on #336")
     }
 
     /// The members that `node` sees, by name, sorted.
     pub(crate) fn members(&self, _node: Node) -> Vec<String> {
-        todo!("waits on mesh membership")
+        todo!("waits on #336")
     }
 
     /// The spec hash that `node` holds.
     pub(crate) fn spec(&self, _node: Node) -> [u8; 32] {
-        todo!("waits on mesh spec")
+        todo!("waits on #336")
     }
 
     /// Runs `plan` of `hcl` on `node` through the JSON CLI and returns the names of
     /// the changed definitions.
     pub(crate) fn plan(&mut self, _node: Node, _hcl: &str) -> Vec<String> {
-        todo!("waits on ops plan")
+        todo!("waits on #337")
     }
 
     /// Runs `plan` then `apply` of `hcl` on `node` through the JSON CLI.
     pub(crate) fn apply(&mut self, _node: Node, _hcl: &str) {
-        todo!("waits on ops apply")
+        todo!("waits on #337")
     }
 
     /// Runs the MCP `plan` tool on `node` and returns the plan and the names of the
@@ -160,32 +160,32 @@ impl Lab {
         _node: Node,
         _hcl: &str,
     ) -> (String, Vec<String>) {
-        todo!("waits on ops MCP")
+        todo!("waits on #307")
     }
 
     /// Runs the MCP `apply` tool on `node` with a plan from [`Lab::mcp_plan`].
     pub(crate) fn mcp_apply(&mut self, _node: Node, _plan: &str) {
-        todo!("waits on ops MCP")
+        todo!("waits on #307")
     }
 
     /// Attaches a simulated device to `node` at `address`.
     pub(crate) fn device(&mut self, _node: Node, _protocol: Protocol, _address: &str) {
-        todo!("waits on connector kinds")
+        todo!("waits on #338")
     }
 
     /// Attaches a simulated Influx store to `node` at `address`.
     pub(crate) fn influx(&mut self, _node: Node, _address: &str) {
-        todo!("waits on connector-influx")
+        todo!("waits on #341")
     }
 
     /// The value of `point` on the device at `address`.
     pub(crate) fn point(&self, _address: &str, _point: &str) -> f64 {
-        todo!("waits on connector kinds")
+        todo!("waits on #338")
     }
 
     /// Sets the value of `point` on the device at `address`.
     pub(crate) fn set_point(&mut self, _address: &str, _point: &str, _value: f64) {
-        todo!("waits on connector kinds")
+        todo!("waits on #338")
     }
 
     /// Writes `count` samples to `channel` on `node` at `rate` samples per second,
@@ -197,17 +197,17 @@ impl Lab {
         _rate: u64,
         _count: u64,
     ) {
-        todo!("waits on hub writers")
+        todo!("waits on #340")
     }
 
     /// The seqs that the home gave the samples written to `channel`.
     pub(crate) fn written(&self, _channel: &str) -> Range<u64> {
-        todo!("waits on hub writers")
+        todo!("waits on #340")
     }
 
     /// The true simulated time of each sample written to `channel`, in order.
     pub(crate) fn truth(&self, _channel: &str) -> Vec<i64> {
-        todo!("waits on hub writers")
+        todo!("waits on #340")
     }
 
     /// Sends `value` to the command channel `channel` as `subject`.
@@ -218,7 +218,7 @@ impl Lab {
         _channel: &str,
         _value: f64,
     ) -> Result<(), String> {
-        todo!("waits on hub writers and control")
+        todo!("waits on #340")
     }
 
     /// Reads `channel` on `node` from the oldest sample, as `subject`.
@@ -228,7 +228,7 @@ impl Lab {
         _subject: &str,
         _channel: &str,
     ) -> Received {
-        todo!("waits on hub readers")
+        todo!("waits on #340")
     }
 
     /// Reads every sample of `channel` on `node`, as `subject`. For short runs only.
@@ -238,17 +238,17 @@ impl Lab {
         _subject: &str,
         _channel: &str,
     ) -> Vec<Sample> {
-        todo!("waits on hub readers")
+        todo!("waits on #340")
     }
 
     /// The commands recorded on `channel`, with their acknowledgments.
     pub(crate) fn audit(&mut self, _node: Node, _channel: &str) -> Vec<Command> {
-        todo!("waits on hub readers")
+        todo!("waits on #340")
     }
 
     /// What the Influx store at `address` received for `measurement`.
     pub(crate) fn stored(&self, _address: &str, _measurement: &str) -> Received {
-        todo!("waits on connector-influx")
+        todo!("waits on #341")
     }
 
     /// Cuts every link between `a` and `b`. Datagrams in flight still arrive.

@@ -27,31 +27,31 @@ fn check(protocol: Protocol, hcl: &str) {
 }
 
 #[test]
-#[ignore = "waits on #295: connector kinds"]
+#[ignore = "waits on #338"]
 fn opc_ua_reads_and_commands() {
     check(Protocol::OpcUa, include_str!("fixtures/opcua.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #295: connector kinds"]
+#[ignore = "waits on #338"]
 fn modbus_tcp_reads_and_commands() {
     check(Protocol::ModbusTcp, include_str!("fixtures/modbus_tcp.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #295: connector kinds"]
+#[ignore = "waits on #338"]
 fn modbus_rtu_reads_and_commands() {
     check(Protocol::ModbusRtu, include_str!("fixtures/modbus_rtu.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #295: connector kinds"]
+#[ignore = "waits on #338"]
 fn ni_daqmx_reads_and_commands() {
     check(Protocol::Ni, include_str!("fixtures/ni.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #295: connector-influx"]
+#[ignore = "waits on #341"]
 fn influx_receives_every_sample_the_edge_writes() {
     let mut lab = Lab::new(1);
     let cloud = lab.start("cloud");
