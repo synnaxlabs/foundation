@@ -59,7 +59,8 @@ impl Allocator {
     /// Runs `f` and returns its result and the number of blocks freed through this
     /// allocator while it ran, on every thread, that held `needle` when freed. The old
     /// block of a `realloc` counts too. As the global allocator, run it in a binary
-    /// with no test harness, like [`Self::count`].
+    /// with no test harness, like [`Self::count`]. Under Miri, a freed block that
+    /// holds a byte the program never wrote, such as padding, stops the run.
     ///
     /// # Panics
     ///
@@ -145,9 +146,10 @@ impl Scan {
         let holds = (0..=last).any(|start| {
             needle.iter().take(len).zip(start..).all(|(value, index)| {
                 let byte = block.wrapping_add(index);
-                // SAFETY: `index` is below `size`, so `byte` is in the block. A
-                // volatile read keeps the compiler from assuming the value of a byte
-                // the program never wrote, such as padding.
+                // SAFETY: `index` is below `size`, so `byte` is in the block. Rust
+                // does not define a read of a byte the program never wrote, such as
+                // padding. A volatile read is one load that the compiler cannot
+                // remove or assume a value for, which is as close as Rust allows.
                 unsafe { byte.read_volatile() == *value }
             })
         });
@@ -328,6 +330,14 @@ mod tests {
         let layout = Layout::new::<[u8; 16]>();
         let ptr = block(&allocator, layout, &SECRET[..16]);
         assert_eq!(found(&allocator, ptr, layout), 0);
+    }
+
+    #[test]
+    fn does_not_count_a_block_freed_outside_the_call() {
+        let allocator = Allocator::new();
+        let ptr = block(&allocator, LAYOUT, &SECRET);
+        free(&allocator, ptr, LAYOUT);
+        assert_eq!(allocator.freed_holding(&SECRET, || ()), ((), 0));
     }
 
     #[test]
