@@ -39,7 +39,7 @@ fn value() -> impl Strategy<Value = Value> {
     ];
     let leaf = leaf.prop_map(|kind| Value { kind, span: None });
     leaf.prop_recursive(3, 16, 4, |inner| {
-        let key = prop_oneof![identifier(), text()];
+        let key = prop_oneof![identifier(), text(), "-?(0|[1-9][0-9]{0,40})"];
         let kind = prop_oneof![
             prop::collection::vec(inner.clone(), 0..4).prop_map(Kind::List),
             prop::collection::btree_map(key, inner.clone(), 0..4)
@@ -153,7 +153,7 @@ fn value_text(out: &mut String, value: &Value) {
                 } else if !out.ends_with('\n') {
                     out.push_str(", ");
                 }
-                if identifier_text(&attribute.key) {
+                if identifier_text(&attribute.key) || integer_text(&attribute.key) {
                     out.push_str(&attribute.key);
                 } else {
                     quoted(out, &attribute.key);
@@ -184,6 +184,14 @@ fn values(out: &mut String, values: &[Value]) {
 fn identifier_text(text: &str) -> bool {
     let mut chars = text.chars();
     chars.next().is_some_and(lex::identifier_start) && chars.all(lex::identifier_part)
+}
+
+/// Reports whether `text` is an integer key as HCL reads one: no leading zeros.
+fn integer_text(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'))
 }
 
 /// Writes `text`, which ends in `\n` and has no `\r\n`, as a heredoc and a new line.

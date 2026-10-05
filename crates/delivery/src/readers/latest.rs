@@ -102,7 +102,7 @@ mod tests {
     use proptest::prelude::*;
     use types::channel::Slot;
     use types::frame::key_set::{Group, Interner, KeySet};
-    use types::frame::{Draft, Form, Label};
+    use types::frame::{Draft, Form, Path};
     use types::time::Span;
 
     use super::*;
@@ -135,11 +135,10 @@ mod tests {
 
         fn make(&self, n: u64) -> Result<Frame, types::frame::Error> {
             let series = [(0, 8)];
-            let mut draft =
-                Draft::new(&self.pool, &self.set, Label::Live, Form::Raw, &series)?;
+            let mut draft = Draft::new(&self.pool, &self.set, Form::Raw, &series)?;
             let bytes = draft.series(0).expect("the index is present");
             bytes.copy_from_slice(&n.to_le_bytes());
-            Ok(draft.freeze())
+            Ok(draft.freeze(Path::Live))
         }
 
         fn frame(&self, n: u64) -> Frame {
