@@ -557,8 +557,8 @@ How to read this record:
   the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
   Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. When only unknown bounds vote, the estimate
-  has their offset and an error of 36500 days, so a peer that measures it gets no known
-  bound. Approved by the coordinator (#437). `Measurement::unknown(at, offset)` gives
+  is unknown too, at the center of the offsets inside the most of them. Approved by the
+  coordinator (#437). `Measurement::unknown(at, offset)` gives
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
   (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap

@@ -359,9 +359,13 @@ mod tests {
         #[test]
         fn gives_an_estimate_with_no_known_bound() {
             let sources = filters(&[source(0, MAX_ERROR.nanos())]);
-            let m = combine(Monotonic(1_000_000_000), drift(1_000), &sources);
+            let now = Monotonic(1_000_000_000);
+            let m = combine(now, drift(1_000), &sources);
             let m = m.expect("an unknown source still gives an estimate");
-            assert_eq!((m.offset(), m.error()), (Span::ZERO, MAX_ERROR));
+            assert_eq!(
+                (m.at(), m.offset(), m.error()),
+                (now, Span::ZERO, MAX_ERROR)
+            );
         }
 
         /// The old bound grows past 36500 days to hold the true offset of 36500 days
@@ -392,7 +396,7 @@ mod tests {
             assert_eq!(check(&sources), Ok((widest - 1, widest)));
         }
 
-        /// A peer that measures an estimate from unknown bounds alone gets no known
+        /// A peer that reads the estimate at both ends of an exchange gets no known
         /// bound, so it cannot vote with it.
         #[test]
         fn gives_a_peer_no_known_bound() {
@@ -480,6 +484,19 @@ mod tests {
             })
         }
 
+        /// Unknown sources that hold the true offset at their own time.
+        fn unknown_truechimers() -> impl Strategy<Value = (World, Vec<Measurement>)> {
+            world().prop_flat_map(|w| {
+                let widest = MAX_ERROR.nanos();
+                let one =
+                    (0..TIME_NS, -widest..=widest).prop_map(move |(at, slack)| {
+                        let offset = nanos(w.truth(at) + i128::from(slack));
+                        Measurement::unknown(Monotonic(at), offset)
+                    });
+                (Just(w), vec(one, 1..10))
+            })
+        }
+
         proptest! {
             #[test]
             fn holds_the_truth_when_every_source_does((w, sources) in agreeing()) {
@@ -511,6 +528,26 @@ mod tests {
                     m.error() == MAX_ERROR || w.holds_truth_at(m, w.now),
                     "{m:?} misses {truth}"
                 );
+            }
+
+            /// The estimate is unknown, and holds the true offset when the bounds share
+            /// no more than 36500 days on each side of their center.
+            #[test]
+            fn gives_an_unknown_estimate_that_holds_the_truth(
+                (w, sources) in unknown_truechimers()
+            ) {
+                let now = Monotonic(w.now);
+                let m = w.combine(&sources).expect("every bound holds the truth");
+                prop_assert_eq!((m.at(), m.error()), (now, MAX_ERROR));
+                let (low, high) = sources
+                    .iter()
+                    .map(|s| s.bounds_at(now, w.drift))
+                    .reduce(|(l, h), (l2, h2)| (l.max(l2), h.min(h2)))
+                    .expect("at least one source");
+                if high - low <= 2 * i128::from(MAX_ERROR.nanos()) {
+                    let truth = w.truth(w.now);
+                    prop_assert!(w.holds_truth_at(m, w.now), "{m:?} misses {truth}");
+                }
             }
 
             #[test]
@@ -555,7 +592,7 @@ mod tests {
                     })
                     .collect();
                 match combine(Monotonic(now), drift(ppb), &filters(&unknown)) {
-                    Ok(m) => prop_assert_eq!(m.error(), MAX_ERROR),
+                    Ok(m) => prop_assert_eq!((m.at(), m.error()), (Monotonic(now), MAX_ERROR)),
                     Err(Error::NoMajority { .. }) => {}
                     Err(e @ Error::NoSources) => prop_assert!(false, "unexpected {e}"),
                 }
