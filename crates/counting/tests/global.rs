@@ -17,6 +17,10 @@ fn main() {
     let (sum, allocations) = ALLOCATOR.count(|| black_box(2_u64) + 2);
     assert_eq!((sum, allocations), (4, 0), "arithmetic does not allocate");
     counts_other_threads();
+    let needle = [0xab; 32];
+    let ((), found) =
+        ALLOCATOR.freed_holding(&needle, || drop(black_box(Box::new(needle))));
+    assert_eq!(found, 1, "a freed box that holds the needle counts");
 }
 
 /// One box made on a thread that started before the count counts once.
@@ -32,7 +36,7 @@ fn counts_other_threads() {
         }
     };
     thread::scope(|scope| {
-        scope.spawn(|| {
+        let thread = scope.spawn(|| {
             ready.store(true, Release);
             wait(&go);
             drop(black_box(Box::new(1_u8)));
@@ -44,5 +48,8 @@ fn counts_other_threads() {
             wait(&done);
         });
         assert_eq!(allocations, 1, "the other thread's box counts");
+        // The scope waits for the closure, not for the exit of the thread, which frees
+        // blocks that a later `freed_holding` scans.
+        thread.join().expect("the thread does not panic");
     });
 }
