@@ -68,8 +68,7 @@ impl Shards {
     ///
     /// # Errors
     ///
-    /// - [`Error::Start`] when the thread or its executor cannot start, or when the
-    ///   name holds a NUL byte.
+    /// - [`Error::Start`] when the thread or its executor cannot start.
     /// - [`Error::Pin`] when the thread cannot pin to `config.core`.
     ///
     /// ```
@@ -124,8 +123,9 @@ pub trait Driver: Send + Sync {
     fn cores(&self) -> NonZeroUsize;
 
     /// Starts a thread with a task executor, makes [`Tasks`] for it, and runs
-    /// `main(tasks)` on it, with the rules of [`Shards::start`]. Dropping the shard
-    /// drops every task, also one that holds a clone of its [`Tasks`].
+    /// `main(tasks)` on it, with the rules of [`Shards::start`]. `config.name` may hold
+    /// any character; `os` gives the OS the part before the first NUL byte. Dropping
+    /// the shard drops every task, also one that holds a clone of its [`Tasks`].
     ///
     /// # Errors
     ///

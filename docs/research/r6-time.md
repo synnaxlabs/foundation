@@ -252,13 +252,16 @@ Method:
 Synnax today: both NI and LabJack hardware-timed tasks use `HardwareTimedSampleClock`
 (`driver/common/sample_clock.h:144-216`; `driver/ni/read_task.h:245`,
 `driver/labjack/read_task.h:626-650`): first timestamp = system time at the first wait,
-then a fixed n x dt increment pulled toward read-return time by a P controller
-(Kp = 0.01, back-correction capped at half a stream period). It tracks the PC's realtime
-clock (affected by steps), is biased late by transfer latency because read-return time
-is treated as the sample time, and reports no error.
+then a fixed n x dt increment pulled toward read-return time by a PID controller. The
+class has P, I, and D terms with an integral cap and a back-correction cap, but the
+production clock runs P only: Kp = 0.01, Ki = Kd = 0, back-correction capped at half a
+stream period (r18). It tracks the PC's realtime clock (affected by steps), is biased
+late by transfer latency because read-return time is treated as the sample time, and
+reports no error.
 
 Rejected:
-- Keeping Synnax's P controller: latency bias, no bound, coupled to OS clock steps.
+- Keeping Synnax's PID controller (P only as deployed): latency bias, no bound,
+  coupled to OS clock steps.
 - Trusting DAQmx t0 + n x dt: drifts ~5 s/day.
 - Re-reading the host clock per read without a model: injects USB and scheduler jitter
   (ms) into every timestamp.
@@ -268,4 +271,4 @@ under 1 ms, [LSL](https://labstreaminglayer.readthedocs.io/info/time_synchroniza
 the bound must be wide during warm-up.
 
 **Decision for the user:** connectors use the oscillator model with lower-envelope
-fitting and publish the device error, replacing Synnax's P controller.
+fitting and publish the device error, replacing Synnax's PID controller.
