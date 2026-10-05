@@ -815,13 +815,24 @@ mod tests {
     mod clone {
         use super::*;
 
+        /// Puts a forged count back when it drops, so the block returns to its pool.
+        struct Reset<'a>(&'a Block);
+
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.block().refs.store(1, Relaxed);
+            }
+        }
+
         #[test]
         #[should_panic(expected = "a block has too many holders")]
         fn panics_when_the_holders_do_not_fit_in_the_count() {
             let pool = create_pool(256);
             let block = pool.alloc(1).expect("the budget has room").freeze();
+            let reset = Reset(&block);
             block.block().refs.store(usize::MAX / 2, Relaxed);
             let _clone = ManuallyDrop::new(block.clone());
+            drop(reset);
         }
     }
 
