@@ -7,14 +7,14 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
+use rustls::crypto::aws_lc_rs::sign::any_eddsa_type;
 use rustls::crypto::{
     CryptoProvider, WebPkiSupportedAlgorithms, verify_tls13_signature,
 };
-use rustls::pki_types::{
-    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
-};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::{NoServerSessionStorage, ParsedCertificate};
+use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::time_provider::TimeProvider;
 use rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName,
@@ -55,10 +55,11 @@ const _: () = assert!(
     "the certificate header holds its length"
 );
 
-/// The node's certificate and private key, made once per transport.
+/// The node's certificate, its signing key, and the crypto provider, made once per
+/// transport.
 pub(crate) struct Credentials {
-    certificate: CertificateDer<'static>,
-    private_key: PrivatePkcs8KeyDer<'static>,
+    provider: Arc<CryptoProvider>,
+    certified: Arc<CertifiedKey>,
 }
 
 impl Credentials {
@@ -77,14 +78,17 @@ impl Credentials {
         for part in [CERTIFICATE, &tbs, ED25519, SIGNATURE, signature.as_ref()] {
             certificate.extend_from_slice(part);
         }
+        let pkcs8 = PrivatePkcs8KeyDer::from([PKCS8, &private_key.0].concat());
+        let key = any_eddsa_type(&pkcs8)
+            .expect("invariant: the PKCS#8 template holds an Ed25519 key");
         Self {
-            certificate: certificate.into(),
-            private_key: [PKCS8, &private_key.0].concat().into(),
+            provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+            certified: Arc::new(CertifiedKey::new(vec![certificate.into()], key)),
         }
     }
 
-    fn private_key(&self) -> PrivateKeyDer<'static> {
-        PrivateKeyDer::Pkcs8(self.private_key.clone_key())
+    fn resolver(&self) -> Arc<SingleCertAndKey> {
+        Arc::new(SingleCertAndKey::from(Arc::clone(&self.certified)))
     }
 }
 
@@ -93,7 +97,7 @@ pub(crate) fn client(
     credentials: &Credentials,
     expected: PublicKey,
 ) -> Arc<ClientConfig> {
-    let provider = provider();
+    let provider = Arc::clone(&credentials.provider);
     let algorithms = provider.signature_verification_algorithms;
     let mut config = ClientConfig::builder_with_details(provider, Arc::new(Epoch))
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -103,11 +107,7 @@ pub(crate) fn client(
             expected,
             algorithms,
         }))
-        .with_client_auth_cert(
-            vec![credentials.certificate.clone()],
-            credentials.private_key(),
-        )
-        .expect("invariant: the private key signed the certificate");
+        .with_client_cert_resolver(credentials.resolver());
     config.alpn_protocols = vec![ALPN.to_vec()];
     config.resumption = rustls::client::Resumption::disabled();
     Arc::new(config)
@@ -115,25 +115,17 @@ pub(crate) fn client(
 
 /// Accepts nodes and clients. A client may send no certificate.
 pub(crate) fn server(credentials: &Credentials) -> Arc<ServerConfig> {
-    let provider = provider();
+    let provider = Arc::clone(&credentials.provider);
     let algorithms = provider.signature_verification_algorithms;
     let mut config = ServerConfig::builder_with_details(provider, Arc::new(Epoch))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("invariant: aws-lc-rs has TLS 1.3 suites")
         .with_client_cert_verifier(Arc::new(AnyKey { algorithms }))
-        .with_single_cert(
-            vec![credentials.certificate.clone()],
-            credentials.private_key(),
-        )
-        .expect("invariant: the private key signed the certificate");
+        .with_cert_resolver(credentials.resolver());
     config.alpn_protocols = vec![ALPN.to_vec()];
     config.session_storage = Arc::new(NoServerSessionStorage {});
     config.send_tls13_tickets = 0;
     Arc::new(config)
-}
-
-fn provider() -> Arc<CryptoProvider> {
-    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
 }
 
 /// The peer of a handshake whose certificates a verifier here accepted.
@@ -322,7 +314,7 @@ mod tests {
 
     /// A client like an SDK: it pins the server's key and has no certificate.
     fn anonymous(expected: PublicKey) -> Arc<ClientConfig> {
-        let provider = provider();
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let algorithms = provider.signature_verification_algorithms;
         let mut config = ClientConfig::builder_with_details(provider, Arc::new(Epoch))
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -337,25 +329,20 @@ mod tests {
         Arc::new(config)
     }
 
-    /// A server that presents `certificate` but signs with `signer`'s key.
-    fn borrowing(certificate: &Credentials, signer: &Credentials) -> Arc<ServerConfig> {
-        let provider = provider();
-        let algorithms = provider.signature_verification_algorithms;
-        let key = provider
-            .key_provider
-            .load_private_key(signer.private_key())
-            .expect("a valid key");
-        let certified =
-            rustls::sign::CertifiedKey::new(vec![certificate.certificate.clone()], key);
-        let mut config = ServerConfig::builder_with_details(provider, Arc::new(Epoch))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .expect("TLS 1.3 is available")
-            .with_client_cert_verifier(Arc::new(AnyKey { algorithms }))
-            .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(
-                certified,
-            )));
-        config.alpn_protocols = vec![ALPN.to_vec()];
-        Arc::new(config)
+    /// Credentials that present `certificate`'s certificate but sign with `signer`'s
+    /// key.
+    fn borrowing(certificate: &Credentials, signer: &Credentials) -> Credentials {
+        Credentials {
+            provider: Arc::clone(&signer.provider),
+            certified: Arc::new(CertifiedKey::new(
+                certificate.certified.cert.clone(),
+                Arc::clone(&signer.certified.key),
+            )),
+        }
+    }
+
+    fn certificate(credentials: &Credentials) -> &CertificateDer<'static> {
+        &credentials.certified.cert[0]
     }
 
     mod handshake {
@@ -415,7 +402,10 @@ mod tests {
             );
             let peers = handshake(
                 client(&Credentials::new(&a), public(&victim)),
-                borrowing(&Credentials::new(&victim), &Credentials::new(&thief)),
+                server(&borrowing(
+                    &Credentials::new(&victim),
+                    &Credentials::new(&thief),
+                )),
             );
             assert_eq!(peers, Err(CertificateError::BadSignature.into()));
         }
@@ -426,7 +416,8 @@ mod tests {
 
         #[test]
         fn refuses_a_key_that_is_not_ed25519() {
-            let mut der = Credentials::new(&PrivateKey([1; 32])).certificate.to_vec();
+            let credentials = Credentials::new(&PrivateKey([1; 32]));
+            let mut der = certificate(&credentials).to_vec();
             let at = der
                 .windows(SPKI.len())
                 .position(|window| window == SPKI)
@@ -457,15 +448,15 @@ mod tests {
                 let private_key = PrivateKey(bytes);
                 let credentials = Credentials::new(&private_key);
                 let expected = public(&private_key);
-                prop_assert_eq!(key(&credentials.certificate), Ok(expected));
+                prop_assert_eq!(key(certificate(&credentials)), Ok(expected));
             }
         }
 
         #[test]
         fn is_the_same_for_the_same_key() {
-            let first = Credentials::new(&PrivateKey([1; 32])).certificate;
-            let second = Credentials::new(&PrivateKey([1; 32])).certificate;
-            assert_eq!(first, second);
+            let first = Credentials::new(&PrivateKey([1; 32]));
+            let second = Credentials::new(&PrivateKey([1; 32]));
+            assert_eq!(certificate(&first), certificate(&second));
         }
     }
 }

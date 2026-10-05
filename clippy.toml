@@ -44,6 +44,16 @@ disallowed-methods = [
   { path = "std::sync::mpsc::Receiver::recv", reason = "await a future" },
   { path = "std::sync::mpsc::Receiver::recv_timeout", reason = "await a future" },
   { path = "env::wall::Wall::now", reason = "only clock reads it" },
+  # rustls: its default provider is a process global and its default time the OS clock.
+  { path = "rustls::ClientConfig::builder", reason = "global" },
+  { path = "rustls::ServerConfig::builder", reason = "global" },
+  { path = "rustls::ClientConfig::builder_with_protocol_versions", reason = "global" },
+  { path = "rustls::ServerConfig::builder_with_protocol_versions", reason = "global" },
+  { path = "rustls::ClientConfig::builder_with_provider", reason = "OS clock" },
+  { path = "rustls::ServerConfig::builder_with_provider", reason = "OS clock" },
+  { path = "rustls::crypto::CryptoProvider::install_default", reason = "global" },
+  { path = "rustls::crypto::CryptoProvider::get_default", reason = "global" },
+  { path = "rustls::pki_types::UnixTime::now", reason = "OS clock" },
 ]
 disallowed-types = [
   { path = "std::collections::HashMap", reason = "use types::hash::Map" },
