@@ -13,3 +13,7 @@ workspace = true
 
 [dev-dependencies]
 proptest = { workspace = true }
+
+[[test]]
+name = "conformance"
+path = "../../oracles/conformance/document/encoding.rs"
