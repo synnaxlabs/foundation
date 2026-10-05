@@ -531,7 +531,10 @@ fn cut(body: &[u8], start: usize, end: usize) -> Result<&[u8], BadEnd> {
 fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Error> {
     let entries = set.entries().len();
     let (mut groups, mut bytes, mut last) = (0, 0_usize, None);
-    for &(entry, len) in series {
+    // An index usually comes just before its data. Only the series from the first one
+    // whose index is not the last index seen need a search, once the order is known.
+    let (mut seen, mut unsure) = (None, series.len());
+    for (at, &(entry, len)) in series.iter().enumerate() {
         if entry >= entries {
             return Err(Error::OutOfRange { entry, entries });
         }
@@ -541,12 +544,18 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
             return Err(Error::Unordered { entry, last });
         }
         last = Some(entry);
-        groups += usize::from(set.index(entry) == entry);
+        let index = set.index(entry);
+        if index == entry {
+            groups += 1;
+            seen = Some(index);
+        } else if seen != Some(index) {
+            unsure = unsure.min(at);
+        }
         bytes = bytes
             .checked_next_multiple_of(SERIES_ALIGN)
             .map_or(usize::MAX, |start| start.saturating_add(len));
     }
-    for &(entry, _) in series {
+    for &(entry, _) in &series[unsure..] {
         let index = set.index(entry);
         if series
             .binary_search_by_key(&index, |&(entry, _)| entry)
