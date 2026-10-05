@@ -5,6 +5,8 @@ use std::str::FromStr;
 
 /// A channel's identity: a UUIDv7 made with the channel. It never changes and is never
 /// reused. Files never hold it; the stored spec maps each name to its key.
+///
+/// [`Key::v7`] makes new keys. Text, the wire, and disk read back any 128 bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(u128);
 
