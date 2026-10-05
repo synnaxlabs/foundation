@@ -4,10 +4,12 @@
 //!
 //! ```text
 //! [magic: 8][version: u16][area: u64][body_max: u32][tail offset: u64]
-//! [tail chain: u32][seq: u64][crc32c: u32][zero padding to 4096]
+//! [tail chain: u32][seq: u64][zero padding][crc32c: u32]
 //! ```
 //!
-//! Integers are little-endian. The CRC covers the bytes before it.
+//! Integers are little-endian. The CRC is the last four bytes of the block and
+//! covers all bytes before it, so a later version may put fields in the padding and
+//! this version still reads the block and reports its version.
 
 #![deny(
     clippy::indexing_slicing,
@@ -16,24 +18,25 @@
 )]
 
 use crate::crc32c::Crc32c;
-use crate::record::ALIGN;
+use crate::record::{ALIGN, BLOCK};
 use crate::wal::{Layout, Position, Unaligned, Unfit};
 
 const MAGIC: [u8; 8] = *b"FNDNRING";
 const VERSION: u16 = 1;
-const FIELDS: usize = 42;
-const CRC: usize = 46;
+const FIELDS: usize = 8 + 2 + 8 + 4 + 8 + 4 + 8;
+const CRC: usize = ALIGN - 4;
 
-/// Bytes of the ring before its area: the two header blocks.
-pub(crate) const LEN: u64 = 2 * 4096;
+/// Where the area starts: after the two header blocks.
+pub(crate) const AREA_START: u64 = 2 * BLOCK;
 
 /// Why neither header block can be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
-    /// No block has the magic and a valid CRC: the file is not a ring, or both
-    /// blocks are damaged.
+    /// No block has the magic: the file is not a ring.
     Missing,
-    /// The newer valid block has a format version this build does not read.
+    /// Both blocks have the magic and a wrong CRC: the ring is lost.
+    Damaged,
+    /// A whole block has a format version this build does not read.
     Version(u16),
     /// The newer valid block holds sizes that do not make a ring.
     Unfit(Unfit),
@@ -53,16 +56,44 @@ impl From<Unaligned> for Error {
     }
 }
 
-/// What the ring knows about itself between opens: its sizes, the boundary before
-/// its oldest live record, and the number of this checkpoint.
+/// One checkpoint of the ring: its sizes and the boundary before its oldest live
+/// record. [`new`](Self::new) makes the first; [`next`](Self::next) each later one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Header {
     pub(crate) layout: Layout,
     pub(crate) tail: Position,
-    pub(crate) seq: u64,
+    seq: u64,
 }
 
 impl Header {
+    /// The first checkpoint of a new ring, with the tail at offset 0 and `chain` as
+    /// its random chain value. Write its block to both header places.
+    pub(crate) fn new(layout: Layout, chain: u32) -> Self {
+        let tail = Position::new(0, chain).unwrap_or_else(|unaligned| {
+            unreachable!("invariant: offset 0 is aligned: {unaligned:?}")
+        });
+        Self {
+            layout,
+            tail,
+            seq: 0,
+        }
+    }
+
+    /// The checkpoint after this one, with the tail moved to `tail`.
+    pub(crate) fn next(self, tail: Position) -> Self {
+        Self {
+            tail,
+            seq: self.seq.wrapping_add(1),
+            ..self
+        }
+    }
+
+    /// The byte offset in the ring file of the block that holds this checkpoint:
+    /// the two checkpoints alternate between the first two blocks.
+    pub(crate) fn place(&self) -> u64 {
+        if self.seq.is_multiple_of(2) { 0 } else { BLOCK }
+    }
+
     /// Encodes this checkpoint as one block.
     pub(crate) fn encode(&self) -> [u8; ALIGN] {
         let body_max = u32::try_from(self.layout.body_max())
@@ -82,20 +113,15 @@ impl Header {
             slot.copy_from_slice(field);
             rest = after;
         }
-        let (fields, rest) = block.split_at_mut(FIELDS);
+        let (covered, slot) = block.split_at_mut(CRC);
         let mut crc = Crc32c::new();
-        crc.update(fields);
-        let (slot, _) = rest.split_at_mut(4);
+        crc.update(covered);
         slot.copy_from_slice(&crc.finish().to_le_bytes());
         block
     }
 
-    /// Where this checkpoint goes: block `seq mod 2`.
-    pub(crate) fn place(&self) -> u64 {
-        (self.seq % 2).saturating_mul(4096)
-    }
-
-    /// Reads the newer valid one of the two header blocks.
+    /// Reads the newer whole one of the two header blocks. A new ring has the same
+    /// block in both places; on a tie, the first.
     ///
     /// # Errors
     ///
@@ -104,25 +130,38 @@ impl Header {
         first: &[u8; ALIGN],
         second: &[u8; ALIGN],
     ) -> Result<Self, Error> {
-        let newer = [first, second]
-            .into_iter()
-            .filter_map(Raw::read)
-            .max_by_key(|raw| raw.seq)
-            .ok_or(Error::Missing)?;
-        if newer.version != VERSION {
-            return Err(Error::Version(newer.version));
+        let mut newer = None;
+        let mut magic = false;
+        for block in [first, second] {
+            magic |= block.starts_with(&MAGIC);
+            let Some(fields) = Fields::read(block) else {
+                continue;
+            };
+            if fields.version != VERSION {
+                return Err(Error::Version(fields.version));
+            }
+            if newer.is_none_or(|newer: Fields| fields.seq > newer.seq) {
+                newer = Some(fields);
+            }
         }
-        let body_max = usize::try_from(newer.body_max).unwrap_or(usize::MAX);
+        let lost = if magic {
+            Error::Damaged
+        } else {
+            Error::Missing
+        };
+        let fields = newer.ok_or(lost)?;
+        let body_max = usize::try_from(fields.body_max).unwrap_or(usize::MAX);
         Ok(Self {
-            layout: Layout::new(newer.area, body_max)?,
-            tail: Position::new(newer.offset, newer.chain)?,
-            seq: newer.seq,
+            layout: Layout::new(fields.area, body_max)?,
+            tail: Position::new(fields.offset, fields.chain)?,
+            seq: fields.seq,
         })
     }
 }
 
 /// The fields of one block whose magic and CRC are right.
-struct Raw {
+#[derive(Clone, Copy)]
+struct Fields {
     version: u16,
     area: u64,
     body_max: u32,
@@ -131,16 +170,15 @@ struct Raw {
     seq: u64,
 }
 
-impl Raw {
+impl Fields {
     fn read(block: &[u8; ALIGN]) -> Option<Self> {
-        let (fields, rest) = block.split_first_chunk::<FIELDS>()?;
-        let (stored, _) = rest.split_first_chunk::<4>()?;
+        let (covered, stored) = block.split_last_chunk::<4>()?;
         let mut crc = Crc32c::new();
-        crc.update(fields);
+        crc.update(covered);
         if crc.finish() != u32::from_le_bytes(*stored) {
             return None;
         }
-        let (magic, rest) = fields.split_first_chunk::<8>()?;
+        let (magic, rest) = covered.split_first_chunk::<8>()?;
         if *magic != MAGIC {
             return None;
         }
@@ -167,12 +205,27 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn layout(area: u64, body_max: usize) -> Layout {
+        Layout::new(area, body_max).expect("the test sizes make a ring")
+    }
+
+    /// Checkpoint `seq` of a ring, with its tail at `offset`.
     fn header(area: u64, body_max: usize, offset: u64, chain: u32, seq: u64) -> Header {
         Header {
-            layout: Layout::new(area, body_max).expect("the test sizes make a ring"),
+            layout: layout(area, body_max),
             tail: Position::new(offset, chain).expect("the test tail is aligned"),
             seq,
         }
+    }
+
+    /// Bytes to put into a block at offsets.
+    type Patch<'a> = &'a [(usize, &'a [u8])];
+
+    /// Puts the CRC of the block in its last four bytes.
+    fn seal(block: &mut [u8; ALIGN]) {
+        let mut crc = Crc32c::new();
+        crc.update(&block[..CRC]);
+        block[CRC..].copy_from_slice(&crc.finish().to_le_bytes());
     }
 
     fn any_header() -> impl Strategy<Value = Header> {
@@ -188,7 +241,7 @@ mod tests {
 
     /// The CRC comes from another CRC32C implementation.
     #[test]
-    fn lays_out_the_fields_little_endian_with_the_crc_after_them() {
+    fn lays_out_the_fields_little_endian_with_the_crc_last() {
         let block = header(8 * 4096, 3 * 4096, 2 * 4096, 0x0102_0304, 7).encode();
         let mut expected = b"FNDNRING".to_vec();
         expected.extend([1, 0]);
@@ -197,18 +250,22 @@ mod tests {
         expected.extend((2 * 4096u64).to_le_bytes());
         expected.extend(0x0102_0304u32.to_le_bytes());
         expected.extend(7u64.to_le_bytes());
-        expected.extend([0xBF, 0xC6, 0xC7, 0x09]);
-        assert_eq!(&block[..CRC], &expected[..]);
-        assert!(block[CRC..].iter().all(|byte| *byte == 0));
+        assert_eq!(&block[..FIELDS], &expected[..]);
+        assert!(block[FIELDS..CRC].iter().all(|byte| *byte == 0));
+        assert_eq!(block[CRC..], [0x33, 0x12, 0x75, 0xA7]);
     }
 
     #[test]
-    fn puts_even_checkpoints_in_the_first_block_and_odd_in_the_second() {
-        let places: Vec<u64> = (0..4)
-            .map(|seq| header(8 * 4096, 4087, 0, 1, seq).place())
-            .collect();
-        assert_eq!(places, [0, 4096, 0, 4096]);
-        assert_eq!(LEN, 2 * 4096);
+    fn starts_at_offset_zero_and_alternates_the_two_blocks() {
+        let first = Header::new(layout(8 * 4096, 4087), 9);
+        assert_eq!(first, header(8 * 4096, 4087, 0, 9, 0));
+        let second = first.next(Position::new(4096, 3).expect("aligned"));
+        assert_eq!(second, header(8 * 4096, 4087, 4096, 3, 1));
+        let third = second.next(Position::new(8192, 4).expect("aligned"));
+        let places: Vec<u64> =
+            [first, second, third].iter().map(Header::place).collect();
+        assert_eq!(places, [0, 4096, 0]);
+        assert!(places.iter().all(|place| place + BLOCK <= AREA_START));
     }
 
     #[test]
@@ -223,52 +280,71 @@ mod tests {
     fn reads_no_header_from_a_wrong_magic_with_a_right_crc() {
         let mut block = header(8 * 4096, 4087, 0, 1, 0).encode();
         block[..8].copy_from_slice(b"SYNXRING");
-        let mut crc = Crc32c::new();
-        crc.update(&block[..FIELDS]);
-        block[FIELDS..CRC].copy_from_slice(&crc.finish().to_le_bytes());
+        seal(&mut block);
         assert_eq!(Header::decode(&block, &[0; ALIGN]), Err(Error::Missing));
     }
 
     #[test]
-    fn refuses_a_version_it_does_not_read() {
-        let mut block = header(8 * 4096, 4087, 0, 1, 3).encode();
-        block[8..10].copy_from_slice(&2u16.to_le_bytes());
-        let mut crc = Crc32c::new();
-        crc.update(&block[..FIELDS]);
-        block[FIELDS..CRC].copy_from_slice(&crc.finish().to_le_bytes());
-        let older = header(8 * 4096, 4087, 0, 1, 2).encode();
-        assert_eq!(Header::decode(&block, &older), Err(Error::Version(2)));
+    fn tells_a_damaged_ring_from_no_ring() {
+        let mut block = header(8 * 4096, 4087, 0, 1, 0).encode();
+        block[ALIGN - 1] ^= 1;
+        assert_eq!(Header::decode(&block, &[0; ALIGN]), Err(Error::Damaged));
+        assert_eq!(Header::decode(&[0; ALIGN], &block), Err(Error::Damaged));
     }
 
     #[test]
+    fn takes_the_first_block_on_a_tie() {
+        let a = header(8 * 4096, 4087, 0, 1, 4);
+        let b = header(8 * 4096, 4087, 4096, 2, 4);
+        assert_eq!(Header::decode(&a.encode(), &b.encode()), Ok(a));
+        assert_eq!(Header::decode(&b.encode(), &a.encode()), Ok(b));
+    }
+
+    /// A later version may use the padding; this version must still see that
+    /// the block is whole and name the version, even when the other block is
+    /// older and readable.
+    #[test]
+    fn refuses_a_version_it_does_not_read() {
+        let mut block = header(8 * 4096, 4087, 0, 1, 3).encode();
+        block[8..10].copy_from_slice(&2u16.to_le_bytes());
+        block[FIELDS..FIELDS + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        seal(&mut block);
+        let older = header(8 * 4096, 4087, 0, 1, 2).encode();
+        assert_eq!(Header::decode(&block, &older), Err(Error::Version(2)));
+        assert_eq!(Header::decode(&older, &block), Err(Error::Version(2)));
+    }
+
+    /// Sizes come before the tail: a ring with bad sizes has no tail to check.
+    #[test]
     fn refuses_sizes_that_do_not_make_a_ring_and_an_unaligned_tail() {
         let unfit = |area, body_max| Error::Unfit(Unfit { area, body_max });
-        let cases: [(&str, usize, &[u8], Error); 3] = [
+        let unaligned = Error::Unaligned(Unaligned { offset: 4097 });
+        let part = (8 * 4096u64 + 1).to_le_bytes();
+        let off = 4097u64.to_le_bytes();
+        let cases: [(&str, Patch<'_>, Error); 4] = [
             (
                 "a body of 3 bytes",
-                18,
-                &3u32.to_le_bytes(),
+                &[(18, &3u32.to_le_bytes())],
                 unfit(8 * 4096, 3),
             ),
             (
                 "an area of a part block",
-                10,
-                &(8 * 4096u64 + 1).to_le_bytes(),
+                &[(10, &part)],
                 unfit(8 * 4096 + 1, 4087),
             ),
+            ("a tail off a boundary", &[(22, &off)], unaligned),
             (
-                "a tail off a boundary",
-                22,
-                &4097u64.to_le_bytes(),
-                Error::Unaligned(Unaligned { offset: 4097 }),
+                "both",
+                &[(10, &part), (22, &off)],
+                unfit(8 * 4096 + 1, 4087),
             ),
         ];
-        for (case, at, bytes, expected) in cases {
+        for (case, fields, expected) in cases {
             let mut block = header(8 * 4096, 4087, 0, 1, 0).encode();
-            block[at..at + bytes.len()].copy_from_slice(bytes);
-            let mut crc = Crc32c::new();
-            crc.update(&block[..FIELDS]);
-            block[FIELDS..CRC].copy_from_slice(&crc.finish().to_le_bytes());
+            for (at, bytes) in fields {
+                block[*at..at + bytes.len()].copy_from_slice(bytes);
+            }
+            seal(&mut block);
             assert_eq!(Header::decode(&block, &block), Err(expected), "{case}");
         }
     }
@@ -301,19 +377,18 @@ mod tests {
         ) {
             let whole = header.encode();
             let mut damaged = other.encode();
-            damaged[at.index(CRC)] ^= 1 << bit;
+            damaged[at.index(ALIGN)] ^= 1 << bit;
             for other in [[0; ALIGN], damaged] {
-                let (first, second) = if swap { (&other, &whole) } else { (&whole, &other) };
+                let (first, second) =
+                    if swap { (&other, &whole) } else { (&whole, &other) };
                 prop_assert_eq!(Header::decode(first, second), Ok(header));
             }
-            prop_assert_eq!(Header::decode(&damaged, &damaged), Err(Error::Missing));
-        }
-
-        #[test]
-        fn ignores_the_padding(header in any_header(), fill in any::<u8>()) {
-            let mut block = header.encode();
-            block[CRC..].fill(fill);
-            prop_assert_eq!(Header::decode(&block, &[0; ALIGN]), Ok(header));
+            let lost = if damaged.starts_with(&MAGIC) {
+                Error::Damaged
+            } else {
+                Error::Missing
+            };
+            prop_assert_eq!(Header::decode(&damaged, &damaged), Err(lost));
         }
     }
 }
