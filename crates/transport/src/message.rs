@@ -631,24 +631,27 @@ mod tests {
         }
 
         #[test]
-        fn when_a_peer_that_sent_large_prefixes_is_gone_small_messages_read() {
+        fn when_readers_that_hold_large_blocks_drop_a_small_message_reads() {
             let bytes_max = 1 << 10;
             let pool = pool(2 * block::footprint(bytes_max));
-            let mut sent = 0;
-            let mut streams = Vec::new();
+            let mut readers = Vec::new();
             for _ in 0..2 {
                 let mut source = Source::new(Prefix::new(bytes_max).to_vec(), 64);
                 source.open = true;
                 let mut reader = Reader::new(bytes_max);
                 assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-                sent += source.given;
-                streams.push(reader);
+                readers.push(reader);
             }
-            assert_eq!(sent, 4);
-            // The peer's session ends: each block it held goes back to the pool.
-            drop(streams);
             let mut source = Source::new(encode(&[vec![1; 10]]), 64);
             let mut reader = Reader::new(bytes_max);
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
+                Err(Error::Pool {
+                    bytes: 10,
+                    available: 0
+                })
+            );
+            drop(readers);
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),
                 Ok(vec![vec![1; 10]])
