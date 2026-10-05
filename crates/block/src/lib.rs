@@ -34,7 +34,7 @@ const NONE: usize = 0;
 const CLOSED: usize = usize::MAX;
 /// The most size classes a pool has. The largest payload is then 2 GiB, so a length
 /// or a position fits in a `u32` and a handle stays 16 bytes.
-const CLASSES_MAX: usize = 26;
+const CLASSES_MAX: usize = 96;
 
 /// Settings for one [`Pool`].
 #[derive(Clone, Debug)]
@@ -46,7 +46,7 @@ pub struct Config {
 
 impl Config {
     /// Bytes of address space that a pool with these settings needs from its
-    /// [`Memory`]. Each size class can grow to the full budget, so this is up to 26
+    /// [`Memory`]. Each size class can grow to the full budget, so this is up to 96
     /// times the budget.
     ///
     /// # Panics
@@ -62,45 +62,50 @@ impl Config {
     }
 }
 
-/// How many size classes fit in `budget`, at most `CLASSES_MAX`. Class `i` has a
-/// payload of `64 << i` bytes.
+/// How many size classes fit in `budget`, at most `CLASSES_MAX`.
 fn classes(budget: usize) -> usize {
     match budget.checked_sub(HEADER) {
-        Some(room) if room >= ALIGN => {
-            ((room / ALIGN).ilog2() as usize + 1).min(CLASSES_MAX)
-        }
-        _ => 0,
+        Some(room) => class_of(room + 1).min(CLASSES_MAX),
+        None => 0,
     }
 }
 
-/// The smallest class with a payload of at least `len` bytes.
-const fn class_of(len: usize) -> Option<usize> {
-    let least = if len < ALIGN { ALIGN } else { len };
-    match least.checked_next_power_of_two() {
-        Some(payload) => {
-            Some((payload.trailing_zeros() - ALIGN.trailing_zeros()) as usize)
-        }
-        None => None,
+/// The smallest class with a payload of at least `len` bytes. It can be past the
+/// last class. Payloads step by 64 bytes up to 256, then by a quarter of the lower
+/// power of two: four classes per doubling.
+const fn class_of(len: usize) -> usize {
+    let last = if len <= ALIGN { ALIGN - 1 } else { len - 1 };
+    let doubling = last.ilog2().saturating_sub(8);
+    4 * (doubling as usize) + (last >> (doubling + 6))
+}
+
+/// Bytes of payload in a block of class `index`.
+const fn class_payload(index: usize) -> usize {
+    if index < 4 {
+        ALIGN * (index + 1)
+    } else {
+        (ALIGN << ((index - 4) / 4)) * (5 + index % 4)
     }
 }
 
 /// Bytes that one block of class `index` takes.
 const fn class_footprint(index: usize) -> usize {
-    HEADER + (ALIGN << index)
+    HEADER + class_payload(index)
 }
 
 /// Bytes that a block with a payload of `len` bytes takes from its pool: the header
-/// plus the payload of the smallest size class that holds `len`.
+/// plus the payload of the smallest size class that holds `len`. Payloads step by
+/// 64 bytes up to 256, then by a quarter of the lower power of two, so the payload
+/// is at most 64 bytes or a quarter of `len` above it.
 ///
 /// # Panics
 ///
-/// If no size class holds `len` (the next power of two overflows a `usize`).
+/// If `len` passes the largest payload, 2 GiB.
 #[must_use]
 pub const fn footprint(len: usize) -> usize {
-    match class_of(len) {
-        Some(index) => class_footprint(index),
-        None => panic!("no size class holds that many bytes"),
-    }
+    let index = class_of(len);
+    assert!(index < CLASSES_MAX, "no size class holds that many bytes");
+    class_footprint(index)
 }
 
 /// The start of a pool's memory. Any thread that drops a block reaches it.
@@ -132,7 +137,7 @@ const _: () = assert!(
     "the headers fit in the bytes before a payload"
 );
 const _: () = assert!(
-    ALIGN << (CLASSES_MAX - 1) <= u32::MAX as usize,
+    class_payload(CLASSES_MAX - 1) <= u32::MAX as usize,
     "the largest payload fits in a u32"
 );
 const _: () = assert!(
@@ -165,7 +170,7 @@ impl Class {
 /// A pool is not `Sync`: only its owner shard allocates from it. Blocks it hands out
 /// may move to and drop on any thread, and stay valid after the pool drops.
 ///
-/// Blocks come in sizes: 64 bytes and each power of two above it up to 2 GiB, each
+/// Blocks come in sizes, 64 bytes up to 2 GiB with four sizes per doubling, each
 /// with 64 bytes in front. A free block keeps its budget for its own size until
 /// another size needs the budget and no block of that size is in use: `alloc` then
 /// gives the pages of the whole size back and takes the budget. `purge` gives back
@@ -229,10 +234,7 @@ impl Pool {
     /// The most bytes one block can hold.
     #[must_use]
     pub fn largest(&self) -> usize {
-        self.classes
-            .len()
-            .checked_sub(1)
-            .map_or(0, |index| ALIGN << index)
+        self.classes.len().checked_sub(1).map_or(0, class_payload)
     }
 
     /// Returns a writable block of `len` bytes, aligned to [`ALIGN`]. It never waits.
@@ -244,12 +246,13 @@ impl Pool {
     ///   succeeds later.
     /// - [`Error::Exhausted`] when the budget has no room for the block now.
     pub fn alloc(&self, len: usize) -> Result<Unique, Error> {
-        let index = class_of(len)
-            .filter(|&index| index < self.classes.len())
-            .ok_or(Error::TooLarge {
+        let index = class_of(len);
+        if index >= self.classes.len() {
+            return Err(Error::TooLarge {
                 requested: len,
                 largest: self.largest(),
-            })?;
+            });
+        }
         let class = &self.classes[index];
         if class.free.get() == NONE {
             self.reclaim();
@@ -916,15 +919,17 @@ mod tests {
             assert_eq!(reservation(127), 64);
             assert_eq!(reservation(128), 64 + 128);
             assert_eq!(reservation(200), 64 + 2 * 256);
-            assert_eq!(reservation(1 << 16), 64 + 10 * (1 << 16));
+            assert_eq!(reservation(64 + 319), 64 + 4 * 384);
+            assert_eq!(reservation(64 + 320), 64 + 5 * 384);
+            assert_eq!(reservation(1 << 16), 64 + 35 * (1 << 16));
         }
 
         #[test]
         #[cfg(target_pointer_width = "64")]
         fn stops_at_a_payload_of_two_gibibytes() {
-            assert_eq!(ALIGN << (CLASSES_MAX - 1), 1 << 31);
-            assert_eq!(class_of(1 << 31), Some(CLASSES_MAX - 1));
-            assert_eq!(class_of((1 << 31) + 1), Some(CLASSES_MAX));
+            assert_eq!(class_payload(CLASSES_MAX - 1), 1 << 31);
+            assert_eq!(class_of(1 << 31), CLASSES_MAX - 1);
+            assert_eq!(class_of((1 << 31) + 1), CLASSES_MAX);
             assert_eq!(classes((1 << 31) + 63), CLASSES_MAX - 1);
             assert_eq!(classes((1 << 31) + 64), CLASSES_MAX);
             assert_eq!(classes(1 << 40), CLASSES_MAX);
@@ -935,6 +940,32 @@ mod tests {
         #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
         fn panics_when_it_does_not_fit_in_a_usize() {
             assert_eq!(Config { budget: usize::MAX }.reservation(), 0);
+        }
+    }
+
+    mod classes {
+        use super::*;
+
+        #[test]
+        fn are_four_per_doubling_above_256_bytes() {
+            let payloads: Vec<_> = (0..12).map(class_payload).collect();
+            assert_eq!(
+                payloads,
+                [64, 128, 192, 256, 320, 384, 448, 512, 640, 768, 896, 1024]
+            );
+        }
+
+        #[test]
+        fn are_tight_and_in_order() {
+            for index in 0..CLASSES_MAX {
+                let payload = class_payload(index);
+                assert_eq!(payload % ALIGN, 0, "class {index}");
+                assert_eq!(class_of(payload), index, "class {index}");
+                assert_eq!(class_of(payload + 1), index + 1, "class {index}");
+                if index > 0 {
+                    assert!(class_payload(index - 1) < payload, "class {index}");
+                }
+            }
         }
     }
 
@@ -951,13 +982,36 @@ mod tests {
             assert_eq!(footprint(64), 128);
             assert_eq!(footprint(65), 192);
             assert_eq!(footprint(128), 192);
-            assert_eq!(footprint(129), 320);
+            assert_eq!(footprint(129), 256);
+            assert_eq!(footprint(256), 320);
+            assert_eq!(footprint(257), 384);
+            assert_eq!(footprint(512), 576);
+            assert_eq!(footprint(513), 704);
+            assert_eq!(footprint(1025), 1344);
+        }
+
+        #[test]
+        fn wastes_at_most_a_quarter_on_the_frames_from_the_issue() {
+            assert_eq!(footprint(131_256), 64 + 163_840);
+            assert_eq!(footprint(800_000), 64 + 917_504);
         }
 
         #[test]
         #[should_panic(expected = "no size class holds that many bytes")]
-        fn panics_above_the_largest_power_of_two() {
-            assert_eq!(footprint(usize::MAX), 0);
+        fn panics_above_the_largest_payload() {
+            assert_eq!(footprint((1 << 31) + 1), 0);
+        }
+
+        proptest! {
+            #![proptest_config(cases())]
+
+            #[test]
+            fn wastes_at_most_a_quarter_of_the_length(len in 0..=1_usize << 31) {
+                let payload = footprint(len) - HEADER;
+                prop_assert!(payload >= len);
+                prop_assert_eq!(payload % ALIGN, 0);
+                prop_assert!(payload - len <= ALIGN.max(len / 4));
+            }
         }
     }
 
@@ -1055,16 +1109,16 @@ mod tests {
         #[test]
         fn fails_for_good_when_the_length_is_above_each_class() {
             let pool = create_pool(256);
-            assert_eq!(pool.largest(), 128);
-            let error = pool.alloc(129).expect_err("129 bytes do not fit in 128");
-            assert_eq!(error, too_large(129, 128));
+            assert_eq!(pool.largest(), 192);
+            let error = pool.alloc(193).expect_err("193 bytes do not fit in 192");
+            assert_eq!(error, too_large(193, 192));
             assert_eq!(
                 error.to_string(),
-                "block of 129 bytes is above the largest block of 128 bytes"
+                "block of 193 bytes is above the largest block of 192 bytes"
             );
             assert_eq!(
                 pool.alloc(usize::MAX).err(),
-                Some(too_large(usize::MAX, 128))
+                Some(too_large(usize::MAX, 192))
             );
         }
 
@@ -1198,7 +1252,7 @@ mod tests {
                 calls[calls.len() - 2..],
                 [
                     Purge {
-                        offset: 1344,
+                        offset: 1984,
                         len: 320
                     },
                     Commit {
@@ -1226,7 +1280,7 @@ mod tests {
                 calls[calls.len() - 2..],
                 [
                     Purge {
-                        offset: 2496,
+                        offset: 3712,
                         len: 320
                     },
                     Commit {
@@ -1257,7 +1311,7 @@ mod tests {
                         len: 192
                     },
                     Commit {
-                        offset: 1216,
+                        offset: 1792,
                         len: 320
                     },
                 ],
