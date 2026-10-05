@@ -171,6 +171,9 @@ state on `main`.
   of the file, or, for the small body of #300, a `Layout` from the node's own
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
+- Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
+  reported durable or cannot open). Fixed: #393 (two CRC-valid fields stopped the
+  node at open); the `area` and `below_tail` inputs hold both.
 
 ### Device to connector
 
@@ -247,8 +250,8 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_span` | `Span` | Printed text reads back to the same value |
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
+| `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), the `buffer` header blocks and records (#361), `raft` messages
-(their encoding is in `mesh`), `spec` tree chunks (#64), `types::time::Rate`, and
-each connector's protocol parser.
+and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
+(#64), `types::time::Rate`, and each connector's protocol parser.
