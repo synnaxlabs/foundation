@@ -201,19 +201,24 @@ fn follower_check_msg_app() {
     }
 }
 
+/// etcd sends each append at term 2. Ours refuses an entry above the message's
+/// term, so each message carries the term of its last entry.
 #[test]
 fn follower_append_entries() {
-    let cases: [(Position, Vec<Entry>, &[u64], bool); 4] = [
-        (position(2, 2), log3(&[3]), &[1, 2, 3], true),
-        (position(1, 1), log2(&[3, 4]), &[1, 3, 4], true),
-        (position(0, 0), log(&[1]), &[1, 2], false),
-        (position(0, 0), log(&[3]), &[3], true),
+    // The message term, `prev`, the entries, the terms on disk, and whether the
+    // entries are unstable.
+    type Case = (u64, Position, Vec<Entry>, &'static [u64], bool);
+    let cases: [Case; 4] = [
+        (3, position(2, 2), log3(&[3]), &[1, 2, 3], true),
+        (4, position(1, 1), log2(&[3, 4]), &[1, 3, 4], true),
+        (2, position(0, 0), log(&[1]), &[1, 2], false),
+        (3, position(0, 0), log(&[3]), &[3], true),
     ];
-    for (i, (prev, entries, terms, unstable)) in cases.into_iter().enumerate() {
+    for (i, (term, prev, entries, terms, unstable)) in cases.into_iter().enumerate() {
         let unstable = if unstable { entries.clone() } else { vec![] };
         let (mut raft, mut disk) =
             start(1, &[1, 2, 3], ELECTION, at_term(2), log(&[1, 2]), 0);
-        raft.step(append(2, prev, entries, 0)).unwrap();
+        raft.step(append(term, prev, entries, 0)).unwrap();
         let ready = raft.ready();
         assert_eq!(ready.entries, unstable, "#{i}");
         disk.store(ready);

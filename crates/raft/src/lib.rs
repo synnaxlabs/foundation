@@ -81,16 +81,18 @@ pub enum Error {
         /// The position of the last configuration entry in the log.
         at: Position,
     },
-    /// The stored term is lower than the term of the last log entry.
+    /// A term is lower than the term of an entry it must cover: the stored term at
+    /// start against the last log entry, or an append's term against its last entry.
+    /// A node that wrote such an entry could not start again.
     TermBehindLog {
-        /// The stored term.
+        /// The stored term, or the append's term.
         term: Term,
-        /// The last log position.
+        /// The last log position, or the position of the append's last entry.
         last: Position,
     },
-    /// A message names a log index past this node's last entry. A leader names only
-    /// entries the follower holds, and a follower answers only for entries the
-    /// leader sent, so the sender is faulty.
+    /// A heartbeat, an append reply, or an append reject names a log index past this
+    /// node's last entry. A heartbeat commits only what the follower holds, and a
+    /// follower answers only for entries the leader sent, so the sender is faulty.
     IndexPastLog {
         /// The index the message names.
         index: u64,
@@ -161,8 +163,8 @@ impl fmt::Display for Error {
             ),
             Self::TermBehindLog { term, last } => write!(
                 f,
-                "stored term {term} is lower than term {} of the last log entry",
-                last.term
+                "term {term} is lower than term {} of entry {}",
+                last.term, last.index
             ),
             Self::IndexPastLog { index, last } => {
                 write!(f, "index {index} is past the last log index {last}")

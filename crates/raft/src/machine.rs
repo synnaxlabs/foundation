@@ -318,6 +318,8 @@ impl Raft {
     /// - [`Error::EntryOutOfOrder`] when an append's entries do not follow its `prev`.
     /// - [`Error::NoVoters`] when an append carries a configuration with an empty
     ///   `incoming` set.
+    /// - [`Error::TermBehindLog`] when an append carries an entry of a later term
+    ///   than the message.
     /// - [`Error::IndexPastLog`] when a heartbeat, an append reply, or an append
     ///   reject names an index past this node's log.
     ///
@@ -406,8 +408,9 @@ impl Raft {
     }
 
     // Checks a message of this term or a later one against the node's state and its
-    // log. Every index the message names is then at most the last log index, except
-    // an append's `prev`, which a follower that is behind does not hold.
+    // log. The index of a heartbeat, an append reply, or an append reject is then at
+    // most the last log index. An append and a vote can name one past it, because
+    // this node can be behind.
     fn check(&self, from: node::Key, term: Term, body: &Body) -> Result<(), Error> {
         let last = self.log.last();
         let within = |index: u64| {
@@ -427,7 +430,11 @@ impl Raft {
             }
             Body::Heartbeat { commit } => within(*commit),
             Body::Append { prev, entries, .. } => {
-                log::check(entries, *prev).map(|_| ())
+                let last = log::check(entries, *prev)?;
+                if !entries.is_empty() && last.term > term {
+                    return Err(Error::TermBehindLog { term, last });
+                }
+                Ok(())
             }
             Body::AppendReply { last } => within(*last),
             Body::AppendReject { hint } => within(*hint),
@@ -1117,10 +1124,7 @@ mod tests {
                     last
                 }
             );
-            assert_eq!(
-                err.to_string(),
-                "stored term 2 is lower than term 3 of the last log entry"
-            );
+            assert_eq!(err.to_string(), "term 2 is lower than term 3 of entry 7");
         }
     }
 
@@ -1473,6 +1477,34 @@ mod tests {
             };
             assert_eq!(err, out_of_order);
             assert_eq!(state(&mut raft), before);
+        }
+
+        #[test]
+        fn refuses_an_append_with_an_entry_above_its_term() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let before = state(&mut raft);
+            let body = append(Position::default(), entries(&[(1, 1), (3, 2)]), 0);
+            let err = raft.step(message(2, 2, body)).unwrap_err();
+            let last = position(3, 2);
+            assert_eq!(
+                err,
+                Error::TermBehindLog {
+                    term: Term(2),
+                    last
+                }
+            );
+            assert_eq!(err.to_string(), "term 2 is lower than term 3 of entry 2");
+            assert_eq!(state(&mut raft), before);
+        }
+
+        #[test]
+        fn takes_an_append_with_entries_of_its_term() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let body = append(Position::default(), entries(&[(1, 1), (2, 2)]), 0);
+            raft.step(message(2, 2, body)).unwrap();
+            let terms: Vec<Term> =
+                raft.ready().entries.iter().map(|e| e.at.term).collect();
+            assert_eq!(terms, [Term(1), Term(2)]);
         }
 
         // The term, the vote, and the leader move only for a message that is
