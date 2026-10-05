@@ -7,6 +7,9 @@ use types::time::{Interval, Monotonic, Span, Stamp};
 
 use crate::DRIFT;
 
+/// How often [`Wall::next`] measures the OS clock.
+const PERIOD: Span = Span::SECOND;
+
 /// Identifies one source of a [`Clock`](crate::Clock). A removed key is never used
 /// again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -25,15 +28,37 @@ pub struct Key(pub(crate) u64);
 /// ```
 #[derive(Debug)]
 pub struct Wall {
-    wall: env::wall::Wall,
+    os: env::wall::Wall,
     monotonic: env::clock::Clock,
+    /// When [`Wall::next`] measures next.
+    due: Monotonic,
 }
 
 impl Wall {
     /// Reads `wall` against `monotonic`, the node's monotonic clock.
     #[must_use]
     pub fn new(wall: env::wall::Wall, monotonic: env::clock::Clock) -> Self {
-        Self { wall, monotonic }
+        Self {
+            os: wall,
+            monotonic,
+            due: Monotonic(0),
+        }
+    }
+
+    /// Measures the OS clock when the next measurement is due: at once, then a second
+    /// after the last.
+    ///
+    /// # Panics
+    ///
+    /// As [`Wall::measure`], and on a thread that `env` did not start.
+    pub(crate) async fn next(&mut self) -> Measurement {
+        self.monotonic.sleep_until(self.due).await;
+        #[expect(clippy::disallowed_methods, reason = "the adapter's own loop")]
+        let measurement = self.measure();
+        // From now, not from the last due time: one measurement after a suspend, not
+        // one for each period it missed.
+        self.due = self.monotonic.now() + PERIOD;
+        measurement
     }
 
     /// Reads the OS clock between two readings of the monotonic clock. The error is
@@ -48,7 +73,7 @@ impl Wall {
     pub fn measure(&self) -> Measurement {
         let sent = self.monotonic.now();
         #[expect(clippy::disallowed_methods, reason = "clock reads the OS clock")]
-        let reading = self.wall.now();
+        let reading = self.os.now();
         let returned = self.monotonic.now();
         let bound = reading.error.inspect(|&bound| {
             assert!(
