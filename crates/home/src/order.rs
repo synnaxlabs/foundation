@@ -23,7 +23,7 @@ pub(crate) struct Accepted {
     /// The seq of the frame's samples.
     pub(crate) seq: Range<u64>,
     /// The newest stamp of the frame, or `None` when it is empty.
-    last: Option<Stamp>,
+    pub(crate) last: Option<Stamp>,
     /// The seq of the live and backfill paths at the check.
     checked: [u64; 2],
 }

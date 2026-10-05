@@ -14,7 +14,7 @@ use block::{Block, Heap, Pool};
 use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Tail, Unfit};
 use env::clock::Clock;
 use env::entropy::Entropy;
-use env::files::{Error as FileError, Mode, Operation};
+use env::files::{Error as FileError, Mode, Operation, SECTOR};
 use env::tasks::Tasks;
 use proptest::prelude::*;
 use types::channel::{self, Slot, Slots};
@@ -38,7 +38,8 @@ const RING: &str = "shard-0/ring";
 const VERSION_AT: usize = 8;
 const BODY_MAX_AT: usize = 18;
 const CRC_AT: usize = 42;
-const SECTOR: usize = 512;
+/// The bytes the header CRC covers.
+const COVER: usize = 512;
 
 /// What one test gets on its shard.
 struct Shard {
@@ -89,7 +90,7 @@ impl Shard {
             let mut block = file[place..place + to_usize(BLOCK)].to_vec();
             block[at..at + bytes.len()].copy_from_slice(bytes);
             let crc = crc32c::crc32c(&block[..CRC_AT]);
-            let crc = crc32c::crc32c_append(crc, &block[CRC_AT + 4..SECTOR]);
+            let crc = crc32c::crc32c_append(crc, &block[CRC_AT + 4..COVER]);
             block[CRC_AT..CRC_AT + 4].copy_from_slice(&crc.to_le_bytes());
             self.memory.put(RING, place, &block);
         }
@@ -815,7 +816,7 @@ fn a_file_with_no_header_is_missing() {
 fn a_file_with_bytes_past_the_first_sector_of_a_header_block_is_missing() {
     run(11, Memory::default(), |shard| async move {
         shard.zeroed(AREA_START + AREA).await;
-        shard.memory.put(RING, SECTOR, b"not a ring");
+        shard.memory.put(RING, COVER, b"not a ring");
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
     });
