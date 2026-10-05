@@ -6,7 +6,6 @@ mod stop;
 #[cfg(test)]
 #[cfg(not(loom))]
 mod tests;
-mod time;
 
 use std::fmt;
 
@@ -35,10 +34,9 @@ pub struct Node {
 }
 
 impl Node {
-    /// Starts one shard per core, named `shard-<i>` and pinned to core `i`. Shard 0
-    /// measures the OS clock for mesh time at once, then once a second. Returns once
-    /// each shard runs or one has failed to start. A failed start stops the node, and
-    /// [`Node::join`] returns its error.
+    /// Starts one shard per core, named `shard-<i>` and pinned to core `i`. Returns
+    /// once each shard runs or one has failed to start. A failed start stops the
+    /// node, and [`Node::join`] returns its error.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start(config: Config) -> Self {
         let Config {
@@ -46,9 +44,8 @@ impl Node {
             clock: monotonic,
             wall,
         } = config;
-        let wall = clock::source::Wall::new(wall, monotonic.clone());
-        let (clock, _reader) = clock::Clock::new(monotonic.clone());
-        let mut os = Some((clock, wall, monotonic));
+        let (mesh, _reader) = clock::Clock::new(monotonic);
+        let mut mesh = Some((mesh, wall));
         let stop = Stop::default();
         let mut node = Self {
             stop: stop.clone(),
@@ -60,11 +57,12 @@ impl Node {
                 name: format!("shard-{core}"),
                 core: Some(core),
             };
-            let os = os.take();
+            // Only the first shard gets the mesh clock.
+            let mesh = mesh.take();
             let guard = stop.guard();
             let main = move |tasks: env::tasks::Tasks| {
-                if let Some((clock, wall, monotonic)) = os {
-                    tasks.spawn(async { time::run(clock, wall, monotonic).await });
+                if let Some((mesh, wall)) = mesh {
+                    tasks.spawn(async { mesh.run(wall).await });
                 }
                 guard
             };

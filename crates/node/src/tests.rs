@@ -56,11 +56,31 @@ fn starts_one_pinned_shard_per_core_and_runs_until_stopped() {
     let mut run = start(7, 3, &[]);
     assert_eq!(starts(&run), named(&[0, 1, 2]));
     assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
-    let stop = format!("{:?}", run.node.stop);
-    assert_eq!(stop, "Stop { set: false, waiting: 3 }");
+    assert_eq!(run.node.stop.waiting(), 3);
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
+}
+
+#[test]
+fn shard_0_runs_the_mesh_clock_on_the_os_clock() {
+    let mut run = start(7, 3, &[]);
+    run.host.set_wall_error(Some(Span::from_nanos(-1)));
+    assert_eq!(
+        run.sim.run(),
+        Err(sim::Error::Panicked {
+            thread: "shard-0".into(),
+            message: "invariant: the OS error bound -1ns is negative".into(),
+            seed: 7,
+        })
+    );
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(
+        run.node.join(),
+        Err(Error::Panicked(thread::Panicked {
+            name: "shard-0".into()
+        }))
+    );
 }
 
 #[test]
