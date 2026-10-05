@@ -2,6 +2,7 @@ use std::num::NonZeroUsize;
 
 use env::thread;
 use sim::shard::Fault;
+use types::time::Span;
 
 use crate::{Config, Error, Node};
 
@@ -27,6 +28,8 @@ fn start(seed: u64, cores: usize, faults: &[(usize, Fault)]) -> Run {
     }
     let node = Node::start(Config {
         shards: host.shards(),
+        clock: host.clock(),
+        wall: host.wall(),
     });
     Run {
         seed,
@@ -52,13 +55,9 @@ fn named(cores: &[usize]) -> Vec<(String, Option<usize>)> {
 fn starts_one_pinned_shard_per_core_and_runs_until_stopped() {
     let mut run = start(7, 3, &[]);
     assert_eq!(starts(&run), named(&[0, 1, 2]));
-    assert_eq!(
-        run.sim.run(),
-        Err(sim::Error::Stuck {
-            threads: vec!["shard-0".into(), "shard-1".into(), "shard-2".into()],
-            seed: 7,
-        })
-    );
+    assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
+    let stop = format!("{:?}", run.node.stop);
+    assert_eq!(stop, "Stop { set: false, waiting: 3 }");
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));

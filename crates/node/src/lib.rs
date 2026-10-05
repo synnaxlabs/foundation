@@ -6,6 +6,7 @@ mod stop;
 #[cfg(test)]
 #[cfg(not(loom))]
 mod tests;
+mod time;
 
 use std::fmt;
 
@@ -19,6 +20,10 @@ use crate::stop::Stop;
 pub struct Config {
     /// Where shards run. One shard starts per core.
     pub shards: env::shards::Shards,
+    /// The monotonic clock. Mesh time runs on it.
+    pub clock: env::clock::Clock,
+    /// The OS clock, a source of mesh time.
+    pub wall: env::wall::Wall,
 }
 
 /// A running node. Call [`Node::stop`] to end it, then [`Node::join`].
@@ -30,12 +35,20 @@ pub struct Node {
 }
 
 impl Node {
-    /// Starts one shard per core, named `shard-<i>` and pinned to core `i`. Returns
-    /// once each shard runs or one has failed to start. A failed start stops the
-    /// node, and [`Node::join`] returns its error.
+    /// Starts one shard per core, named `shard-<i>` and pinned to core `i`. Shard 0
+    /// measures the OS clock for mesh time at once, then once a second. Returns once
+    /// each shard runs or one has failed to start. A failed start stops the node, and
+    /// [`Node::join`] returns its error.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start(config: Config) -> Self {
-        let Config { shards } = config;
+        let Config {
+            shards,
+            clock: monotonic,
+            wall,
+        } = config;
+        let wall = clock::source::Wall::new(wall, monotonic.clone());
+        let (clock, _reader) = clock::Clock::new(monotonic.clone());
+        let mut os = Some((clock, wall, monotonic));
         let stop = Stop::default();
         let mut node = Self {
             stop: stop.clone(),
@@ -47,8 +60,15 @@ impl Node {
                 name: format!("shard-{core}"),
                 core: Some(core),
             };
+            let os = os.take();
             let guard = stop.guard();
-            match shards.start(shard, move |_tasks| guard) {
+            let main = move |tasks: env::tasks::Tasks| {
+                if let Some((clock, wall, monotonic)) = os {
+                    tasks.spawn(async { time::run(clock, wall, monotonic).await });
+                }
+                guard
+            };
+            match shards.start(shard, main) {
                 Ok(handle) => node.handles.push(handle),
                 Err(e) => {
                     // The driver dropped `main` and its guard, which stopped the node.
