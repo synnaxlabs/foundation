@@ -339,7 +339,8 @@ mod tests {
         let step = cursor.next(&bytes[index(place)..index(place + len)]);
         assert_eq!(step, Ok(Step::End));
         let (writer, _) = cursor.writer(opened.tail, 1).expect("the ring is empty");
-        let pushed = Group::default().push(&writer, header(1, Path::Live, 0), &[]);
+        let entry = entry(header(1, Path::Live, 0), &[]);
+        let pushed = Group::default().push(&pool(1 << 20), &writer, &[entry]);
         assert_eq!(pushed, Ok(()));
     }
 
