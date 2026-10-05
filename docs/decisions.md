@@ -879,8 +879,9 @@ How to read this record:
   follower that wrote it could not restart. The conformance oracle changed to match; the
   person decided on 2026-10-05 ("a is fine", #232). A heartbeat or an append of this
   node's term from a node other than the leader it knows is `Error::SecondLeader`: one
-  term has one leader. A node that knows no leader of its term takes the first (#391).
-  A bad message changes nothing.
+  term has one leader, and a node keeps the leader of its term until the term ends,
+  through a step-down and a campaign. A node that knows no leader of its term, after a
+  restart or its vote, takes the first (#391). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
