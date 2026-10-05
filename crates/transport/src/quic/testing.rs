@@ -150,7 +150,8 @@ impl Pair {
         let pair =
             Ed25519KeyPair::from_seed_unchecked(&SERVER_KEY.0).expect("32 bytes");
         let expected =
-            PublicKey(pair.public_key().as_ref().try_into().expect("32 bytes"));
+            PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
+                .expect("aws-lc makes no key of small order");
         let dial = settings.client(expected);
         client.connection = Some(
             client
