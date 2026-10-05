@@ -821,6 +821,33 @@ mod tests {
     }
 
     #[test]
+    fn a_record_that_ends_at_the_end_of_a_file_stays_in_it() {
+        let (mut sim, node) = sim(0);
+        let empty = encode(0, None, &[bytes(1, 0)]).len();
+        let len = usize::try_from(SEGMENT).unwrap() - empty;
+        let names = on(&mut sim, &node, move |node| async move {
+            let (mut log, _) = open(&node).await.unwrap();
+            log.write(None, &[bytes(1, len)]).await.unwrap();
+            node.files().list(Path::new(DIR)).await.unwrap()
+        });
+        assert_eq!(names, [PathBuf::from("log-0")]);
+        let expected = Stored {
+            hard: Hard::default(),
+            entries: vec![bytes(1, len)],
+        };
+        assert_eq!(stored(&mut sim, &node), Ok(expected));
+    }
+
+    #[test]
+    fn refuses_a_file_that_starts_with_a_record_before_the_next_one() {
+        let records = [0, 1, 0].map(|number| encode(number, None, &[bytes(1, 10)]));
+        let [first, second, stale] = records;
+        let segments = [[first, second].concat(), stale];
+        let fault = Fault::Corrupt { offset: 0 };
+        assert_eq!(scan(&segments), Err((1, fault)));
+    }
+
+    #[test]
     fn refuses_a_bad_last_record_of_a_file_before_a_file_with_records() {
         for (name, number) in [("log-0", 0), ("log-1", 1)] {
             let (mut sim, node) = sim(0);
