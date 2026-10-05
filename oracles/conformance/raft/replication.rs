@@ -41,7 +41,7 @@ impl Disk {
         messages
     }
 
-    fn last(&self) -> u64 {
+    pub(super) fn last(&self) -> u64 {
         count(self.entries.len())
     }
 
@@ -212,13 +212,13 @@ fn position(term: u64, index: u64) -> Position {
 
 impl Network {
     /// Proposes `data` to a node, then delivers until quiet.
-    fn propose(&mut self, id: u8, data: &[u8]) {
+    pub(super) fn propose(&mut self, id: u8, data: &[u8]) {
         let peer = self.peers.get_mut(&key(id)).unwrap();
         peer.propose(data.to_vec()).unwrap();
         self.flush(id);
     }
 
-    fn disk(&self, id: u8) -> &Disk {
+    pub(super) fn disk(&self, id: u8) -> &Disk {
         &self.disks[&key(id)]
     }
 }
