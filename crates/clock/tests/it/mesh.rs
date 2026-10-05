@@ -197,6 +197,25 @@ fn holds_over_while_sources_split_then_follows_the_next_majority() {
 }
 
 #[test]
+fn keeps_its_slew_in_holdover() {
+    let (mut sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    let source = clock.add();
+    let _ = clock.push(source, measure(&node, Span::ZERO, Span::ZERO));
+    let _ = clock.push(source, measure(&node, us(400), Span::ZERO));
+    let _ = clock.add();
+    let alone = Error::NoMajority {
+        sources: 2,
+        agreeing: 1,
+        empty: 1,
+    };
+    assert_eq!(reader.status(), holdover(&node, Span::ZERO, us(400), alone));
+    sim.run_for(ms(400)).expect("the run ends");
+    assert_eq!(reader.status(), holdover(&node, us(200), us(280), alone));
+    assert_eq!(read(&node, &reader), Some(measure(&node, us(200), us(280))));
+}
+
+#[test]
 fn steps_forward_to_an_estimate_far_ahead() {
     let (mut sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());

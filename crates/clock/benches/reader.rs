@@ -79,6 +79,19 @@ fn now(bencher: Bencher<'_, '_>) {
         .bench_local(|| read_all(&reader));
 }
 
+/// Reads in holdover: one source of two has pushed.
+#[divan::bench(sample_count = 20)]
+fn now_in_holdover(bencher: Bencher<'_, '_>) {
+    let monotonic = monotonic();
+    let (mut clock, reader) = Clock::new(monotonic.clone());
+    let source = clock.add();
+    push(&mut clock, source, &monotonic);
+    let _ = clock.add();
+    bencher
+        .counter(divan::counter::ItemsCount::new(READS))
+        .bench_local(|| read_all(&reader));
+}
+
 /// Reads on 1, 4, and 8 threads at once.
 #[divan::bench(sample_count = 20, threads = [1, 4, 8])]
 fn now_on_many_threads(bencher: Bencher<'_, '_>) {
