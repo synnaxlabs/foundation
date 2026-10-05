@@ -164,6 +164,8 @@ pub(crate) struct Plan {
     pub(crate) wrap: Option<u64>,
     /// The place of the record.
     pub(crate) place: u64,
+    /// The offset of the record.
+    pub(crate) offset: u64,
     /// The offset after the record.
     pub(crate) next: u64,
     /// The length of the body the record was placed for.
@@ -256,6 +258,7 @@ impl Writer {
         Ok(Plan {
             wrap,
             place: start % area,
+            offset: start,
             next: self.head,
             len,
         })
@@ -975,14 +978,15 @@ mod tests {
             let mut writer = writer(0, 1);
             let first = writer.append(1).expect("the ring has room");
             let second = writer.append(ALIGN).expect("the ring has room");
-            let plan = |wrap, place, next, len| Plan {
+            let plan = |wrap, place, offset, next, len| Plan {
                 wrap,
                 place,
+                offset,
                 next,
                 len,
             };
-            assert_eq!(first, plan(None, 4096, 2 * 4096, 1));
-            assert_eq!(second, plan(None, 2 * 4096, 4 * 4096, ALIGN));
+            assert_eq!(first, plan(None, 4096, 4096, 2 * 4096, 1));
+            assert_eq!(second, plan(None, 2 * 4096, 2 * 4096, 4 * 4096, ALIGN));
             assert_eq!(writer.head(), second.next);
         }
 

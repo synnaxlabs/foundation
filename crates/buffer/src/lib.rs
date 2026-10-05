@@ -3,6 +3,7 @@
 
 mod buffer;
 mod crc32c;
+mod durable;
 mod entry;
 mod group;
 mod header;

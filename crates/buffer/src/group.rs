@@ -277,6 +277,7 @@ impl Closed {
         let sealed = Sealed {
             group,
             place: plan.place,
+            offset: plan.offset,
             next: plan.next,
             wrap,
         };
@@ -290,6 +291,7 @@ impl Closed {
 pub(crate) struct Sealed {
     group: Group,
     place: u64,
+    offset: u64,
     next: u64,
     wrap: Option<(u64, Block)>,
 }
@@ -304,6 +306,11 @@ impl Sealed {
             .map(|(place, block)| (*place, slice::from_ref(block)));
         wrap.into_iter()
             .chain(iter::once((self.place, &*self.group.writes)))
+    }
+
+    /// The offset of the record.
+    pub(crate) fn offset(&self) -> u64 {
+        self.offset
     }
 
     /// The offset after the record.

@@ -71,33 +71,21 @@ impl fmt::Display for Invalid {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Tails(hash::Map<(Slot, Path), Tail>);
 
-impl Tails {
-    /// The tail of `path` of the index at `slot`: `Tail::default()` before its
-    /// first entry.
-    pub(crate) fn get(&self, slot: Slot, path: Path) -> Tail {
-        self.0.get(&(slot, path)).copied().unwrap_or_default()
-    }
-
-    /// Moves the tail of the header's path past the entry: `seq` to `first + len`,
-    /// and `stamp` to `last` when the entry has one. A `first` past the tail is a
-    /// skip ahead.
+impl Tail {
+    /// Moves the tail past the entry: `seq` to `first + len`, and `stamp` to
+    /// `last` when the entry has one. A `first` past the tail is a skip ahead.
     ///
     /// # Errors
     ///
     /// [`Invalid`] when `first` is below the tail or `first + len` does not fit in
     /// a `u64`. The tail does not move.
-    pub(crate) fn advance(
-        &mut self,
-        slot: Slot,
-        header: &Header,
-    ) -> Result<(), Invalid> {
-        let tail = self.0.entry((slot, header.path)).or_default();
-        if header.first < tail.seq {
+    pub(crate) fn advance(&mut self, header: &Header) -> Result<(), Invalid> {
+        if header.first < self.seq {
             return Err(Invalid::Below {
                 index: header.index,
                 path: header.path,
                 first: header.first,
-                tail: tail.seq,
+                tail: self.seq,
             });
         }
         let past = Invalid::Past {
@@ -106,14 +94,44 @@ impl Tails {
             first: header.first,
             len: header.len,
         };
-        tail.seq = header
+        self.seq = header
             .first
             .checked_add(u64::from(header.len))
             .ok_or(past)?;
         if let Some(last) = header.last {
-            tail.stamp = Some(last);
+            self.stamp = Some(last);
         }
         Ok(())
+    }
+}
+
+impl Tails {
+    /// The tail of `path` of the index at `slot`: `Tail::default()` before its
+    /// first entry.
+    pub(crate) fn get(&self, slot: Slot, path: Path) -> Tail {
+        self.0.get(&(slot, path)).copied().unwrap_or_default()
+    }
+
+    /// Moves the tail of the header's path past the entry, as [`Tail::advance`].
+    ///
+    /// # Errors
+    ///
+    /// [`Invalid`] as [`Tail::advance`]. The tail does not move.
+    pub(crate) fn advance(
+        &mut self,
+        slot: Slot,
+        header: &Header,
+    ) -> Result<(), Invalid> {
+        self.0
+            .entry((slot, header.path))
+            .or_default()
+            .advance(header)
+    }
+}
+
+impl FromIterator<((Slot, Path), Tail)> for Tails {
+    fn from_iter<I: IntoIterator<Item = ((Slot, Path), Tail)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
     }
 }
 
