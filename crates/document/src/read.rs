@@ -31,9 +31,11 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
         let fix = if compact.parse::<byte::Size>().is_ok() {
             format!("Write \"{compact}\"")
         } else {
-            "Use a whole number of bytes in B, KiB, MiB, GiB, or TiB, with no space, \
-             such as \"200GiB\" or \"1.5GiB\""
-                .into()
+            format!(
+                "Use a whole number of bytes, at most {}, in B, KiB, MiB, GiB, or TiB, \
+                 with no space, such as \"200GiB\" or \"1.5GiB\"",
+                byte::Size::from_bytes(u64::MAX)
+            )
         };
         bad(
             format!("the byte size {text:?} is not {}", error.expected),
@@ -64,8 +66,9 @@ mod tests {
     use proptest::prelude::*;
 
     const SYNTAX: &str = "a number and a unit, such as 1023B, 1.5GiB, or 200GiB";
-    const FIX: &str = "Use a whole number of bytes in B, KiB, MiB, GiB, or TiB, with no \
-                       space, such as \"200GiB\" or \"1.5GiB\"";
+    const FIX: &str = "Use a whole number of bytes, at most 18446744073709551615B, in B, \
+                       KiB, MiB, GiB, or TiB, with no space, such as \"200GiB\" or \
+                       \"1.5GiB\"";
 
     fn span() -> Span {
         let at = |offset| Position {
