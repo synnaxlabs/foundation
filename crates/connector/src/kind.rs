@@ -277,17 +277,16 @@ mod tests {
     struct Counter;
 
     impl Kind for Counter {
-        type Config = i64;
+        type Config = i128;
 
-        fn parse(&self, config: &Document) -> Result<i64, Vec<Diagnostic>> {
+        fn parse(&self, config: &Document) -> Result<i128, Vec<Diagnostic>> {
             match config.attributes.get("n").map(|a| &a.value.kind) {
-                Some(value::Kind::Integer(n)) => i64::try_from(*n)
-                    .map_err(|_| vec![diagnostic(RANGE, "n is over 8")]),
+                Some(value::Kind::Integer(n)) => Ok(*n),
                 _ => Err(vec![diagnostic(MISSING, "no integer n")]),
             }
         }
 
-        fn check(&self, n: &i64) -> Result<Channels, Vec<Diagnostic>> {
+        fn check(&self, n: &i128) -> Result<Channels, Vec<Diagnostic>> {
             if *n > 8 {
                 return Err(vec![diagnostic(RANGE, "n is over 8")]);
             }
@@ -297,17 +296,14 @@ mod tests {
             })
         }
 
-        async fn discover(
+        fn discover(
             &self,
-            cancel: &cancel::Token,
-        ) -> Result<Vec<Document>, Error> {
-            if cancel.cancelled() {
-                return Err(Error::Retry("cancelled".into()));
-            }
-            Ok(vec![config(2)])
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(vec![config(2)]))
         }
 
-        async fn run(&self, ctx: Context<i64>) -> Result<(), Error> {
+        async fn run(&self, ctx: Context<i128>) -> Result<(), Error> {
             ctx.cancel().wait().await;
             Ok(())
         }
@@ -317,12 +313,12 @@ mod tests {
         Diagnostic::new(code, None, message.into(), "Fix it".into())
     }
 
-    fn config(n: i64) -> Document {
+    fn config(n: i128) -> Document {
         let n = Attribute {
             key: "n".into(),
             key_span: None,
             value: Value {
-                kind: value::Kind::Integer(n.into()),
+                kind: value::Kind::Integer(n),
                 span: None,
             },
         };
@@ -362,22 +358,26 @@ mod tests {
         assert_eq!(result, Err(vec![diagnostic(RANGE, "n is over 8")]));
     }
 
+    fn unknown(kind: &str, names: &str) -> Diagnostic {
+        Diagnostic::new(
+            UNKNOWN_KIND,
+            None,
+            format!("this build has no connector kind \"{kind}\""),
+            format!("Use one of {names}"),
+        )
+    }
+
     #[test]
     fn names_the_known_kinds_for_an_unknown_kind() {
         let table = table().with("other", Counter);
-        let expected = Diagnostic::new(
-            UNKNOWN_KIND,
-            None,
-            "this build has no connector kind \"modbus\"".into(),
-            "Use one of [\"counter\", \"other\"]".into(),
-        );
+        let expected = unknown("modbus", "[\"counter\", \"other\"]");
         assert_eq!(table.check("modbus", &config(1)), Err(vec![expected]));
     }
 
     #[test]
     #[should_panic(expected = "the kind \"counter\" is in the table twice")]
     fn panics_on_a_kind_added_twice() {
-        let _ = table().with("counter", Counter);
+        drop(table().with("counter", Counter));
     }
 
     #[test]
@@ -394,8 +394,7 @@ mod tests {
         let Err(Error::Config(diagnostics)) = found else {
             panic!("a config error: {found:?}");
         };
-        let codes: Vec<_> = diagnostics.iter().map(|d| d.code).collect();
-        assert_eq!(codes, [UNKNOWN_KIND]);
+        assert_eq!(diagnostics, [unknown("modbus", "[\"counter\"]")]);
     }
 
     #[test]
@@ -414,7 +413,7 @@ mod tests {
             token.cancel();
             (Counter.run(ctx).await, kind_name, n)
         });
-        assert!(out.is_ok());
+        out.expect("stops when cancelled");
         assert_eq!((kind_name, n), (name("plant.counter"), 3));
     }
 
