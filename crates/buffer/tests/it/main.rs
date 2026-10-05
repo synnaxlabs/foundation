@@ -670,6 +670,29 @@ fn a_zeroed_file_of_another_length_is_not_made_into_a_ring() {
 }
 
 #[test]
+fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
+    run(107, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let blocks = shard.memory.bytes(RING)[..to_usize(AREA_START)].to_vec();
+        let files = shard.memory.files();
+        files.remove(FilePath::new(RING)).await.expect("removes");
+        shard.zeroed(AREA_START).await;
+        shard.memory.put(RING, 0, &blocks);
+        let opened = shard
+            .open(layout(2 * AREA, BODY_MAX), &mut Slots::new())
+            .await;
+        assert_eq!(
+            opened.map(drop),
+            Err(Error::Length {
+                expected: AREA_START + AREA,
+                found: AREA_START,
+            })
+        );
+    });
+}
+
+#[test]
 fn a_file_shorter_than_the_header_blocks_is_not_read() {
     run(17, Memory::default(), |shard| async move {
         shard.zeroed(BLOCK).await;

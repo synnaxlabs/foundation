@@ -26,9 +26,9 @@ use types::time::Span;
 use crate::entry::{self, Entry};
 use crate::group::{Closed, Group, META_LEN, Rejected, Sealed};
 use crate::header::{self, Header};
-use crate::record::{self, ALIGN};
+use crate::record::{self, ALIGN, AREA_START};
 use crate::tails::{self, Tail, Tails};
-use crate::wal::{self, AREA_START, Cursor, Layout, Step, Unfit, Window, Writer};
+use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 
 /// What one shard's buffer is given at open.
 #[derive(Debug)]
@@ -231,10 +231,10 @@ impl State {
         self.queue.push(full.close(&mut self.writer));
     }
 
-    /// Moves the durable tails past the written `sealed` groups and keeps their
+    /// Moves the durable tails past the synced `sealed` groups and keeps their
     /// records as spares.
-    fn commit(&mut self, sealed: &mut Vec<Sealed>) {
-        for record in sealed.drain(..) {
+    fn synced(&mut self, sealed: impl Iterator<Item = Sealed>) {
+        for record in sealed {
             for (&slot, header) in record.slots().iter().zip(record.headers()) {
                 self.durable
                     .advance(slot, header)
@@ -583,7 +583,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         let failed = result.is_err();
         let mut state = shared.state.borrow_mut();
         match result {
-            Ok(()) => state.commit(&mut sealed),
+            Ok(()) => state.synced(sealed.drain(..)),
             Err(error) => state.failed = Some(error.into()),
         }
         woken.append(&mut state.wakers);

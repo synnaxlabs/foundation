@@ -16,7 +16,7 @@
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
 use crate::entry;
-use crate::record::{self, ALIGN, BLOCK, HEADER_LEN, Kind};
+use crate::record::{self, ALIGN, AREA_START, BLOCK, HEADER_LEN, Kind};
 
 /// The body of a restart record: one chain value.
 const RESTART_LEN: usize = 4;
@@ -60,9 +60,6 @@ impl Position {
         self.chain
     }
 }
-
-/// Where the area starts in the ring file: after the two header blocks.
-pub(crate) const AREA_START: u64 = 2 * BLOCK;
 
 /// Sizes that do not make a ring. [`Layout::new`] says which sizes do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

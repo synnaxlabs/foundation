@@ -209,7 +209,7 @@ mod tests {
     use proptest::prelude::*;
 
     use crate::entry::table_len;
-    use crate::wal::AREA_START;
+    use crate::record::AREA_START;
 
     fn layout(area: u64, body_max: usize) -> Layout {
         Layout::new(area, body_max).expect("the test sizes make a ring")
