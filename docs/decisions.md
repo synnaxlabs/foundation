@@ -385,7 +385,7 @@ How to read this record:
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
   home routes by key set.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
-  path), a range for each present index group, a descriptor for each present series,
+  label), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
   An entry is present when it has a descriptor, so the cost of a frame grows with the
   series it holds, not with the width of its key set (rule 11). The "presence mask" of
@@ -398,14 +398,15 @@ How to read this record:
 - **M5** Blocks hold offsets, never pointers.
 - **FRAME LAYOUT (refines M3, X8)** `types::frame`, little-endian, offsets from the
   start of the payload. A 16-byte header: key set key, range count, and descriptor count
-  (each u32), then form and path (each u8), then zeros. Then `{ group: u32, count: u32,
-  seq: u64 }` for each present group, sorted by group, then `{ entry: u32, end: u32 }`
-  for each present series, sorted by entry, then the series. `end` counts from the
-  start of the series bytes. Each series starts at the end before it rounded up to 8,
-  and the first at 0. A group is present when its index is, and a present series needs
-  its index. A lookup by entry or group is a binary search, and a pass in entry order
-  reads each descriptor once. The header holds no entry or group count: an entry or
-  group past the key set is absent. A frame is at most `u32::MAX` bytes.
+  (each u32), then form and label (each u8), then zeros. The label is the writer's
+  (B7): live 0, backfill 1, resend 2. Then `{ group: u32, count: u32, seq: u64 }` for
+  each present group, sorted by group, then `{ entry: u32, end: u32 }` for each present
+  series, sorted by entry, then the series. `end` counts from the start of the series
+  bytes. Each series starts at the end before it rounded up to 8, and the first at 0.
+  A group is present when its index is, and a present series needs its index. A lookup
+  by entry or group is a binary search, and a pass in entry order reads each descriptor
+  once. The header holds no entry or group count: an entry or group past the key set
+  is absent. A frame is at most `u32::MAX` bytes.
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -1238,7 +1239,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, path, form), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
+| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, label, form), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
 | View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |
