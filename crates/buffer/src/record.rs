@@ -45,9 +45,12 @@ pub(crate) struct Record<'a> {
 /// # Panics
 ///
 /// When the parts hold no bytes or more than `u32::MAX` bytes together.
-pub(crate) fn header(chain: u32, payload: &[&[u8]]) -> ([u8; HEADER_LEN], u32) {
+pub(crate) fn header<'a>(
+    chain: u32,
+    payload: impl Iterator<Item = &'a [u8]> + Clone,
+) -> ([u8; HEADER_LEN], u32) {
     let len = payload
-        .iter()
+        .clone()
         .try_fold(0u32, |len, part| {
             len.checked_add(u32::try_from(part.len()).ok()?)
         })
@@ -64,8 +67,8 @@ pub(crate) fn header(chain: u32, payload: &[&[u8]]) -> ([u8; HEADER_LEN], u32) {
     ([l0, l1, l2, l3, c0, c1, c2, c3], crc)
 }
 
-/// Reads the record at `bytes[0]` and checks that it follows `chain`. `bytes` runs
-/// from an [`ALIGN`] boundary to the end of the ring file.
+/// Reads the record at `bytes[0]` and checks that it follows `chain`. `bytes` starts
+/// at an [`ALIGN`] boundary of the ring. A record that runs past them is not read.
 ///
 /// Returns `None` when the chain ends here: the space was never written, the write
 /// was torn, the bytes are damaged, or they belong to another chain.
@@ -108,7 +111,7 @@ mod tests {
     /// A whole record as the writer puts it on disk, padded with `fill`, and the
     /// chain value of the next record.
     fn image(chain: u32, parts: &[&[u8]], fill: u8) -> (Vec<u8>, u32) {
-        let (header, crc) = header(chain, parts);
+        let (header, crc) = header(chain, parts.iter().copied());
         let mut image = header.to_vec();
         for part in parts {
             image.extend_from_slice(part);
@@ -134,22 +137,22 @@ mod tests {
         #[test]
         #[should_panic(expected = "invariant: a record holds at least one byte")]
         fn panics_on_an_empty_payload() {
-            let _ = header(7, &[&[], &[]]);
+            let _ = header(7, [&[][..], &[]].into_iter());
         }
 
         #[test]
         #[should_panic(expected = "a record holds at most u32::MAX bytes")]
         fn panics_on_a_payload_over_u32_max() {
             let part = vec![0; 1 << 20];
-            let _ = header(7, &vec![part.as_slice(); 1 << 12]);
+            let _ = header(7, std::iter::repeat_n(part.as_slice(), 1 << 12));
         }
 
         /// The CRC values come from another CRC32C implementation.
         #[test]
         fn lays_out_len_and_crc_little_endian() {
-            let first = header(0x0102_0304, &[b"ab", b"c"]);
+            let first = header(0x0102_0304, [&b"ab"[..], b"c"].into_iter());
             assert_eq!(first, ([3, 0, 0, 0, 0x13, 0xF8, 0x2F, 0x69], 0x692F_F813));
-            let second = header(first.1, &[b"defg"]);
+            let second = header(first.1, std::iter::once(&b"defg"[..]));
             assert_eq!(second, ([4, 0, 0, 0, 0x8C, 0xCE, 0x87, 0x66], 0x6687_CE8C));
         }
     }
