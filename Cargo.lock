@@ -132,8 +132,11 @@ name = "buffer"
 version = "0.0.0"
 dependencies = [
  "block",
+ "counting",
  "crc32c",
+ "env",
  "proptest",
+ "sim",
  "types",
 ]
 
