@@ -160,9 +160,10 @@ How to read this record:
   the holder closes or its control lease runs out, the waiter with the highest
   authority takes control; on a tie, the one that opened first. Each accepted write
   renews the control lease. A writer whose control lease ran out stays out of the gate
-  until it reopens. Lease and grace times are the home's monotonic time. During the
-  X18 grace the recorded holder ranks first: the first writer of its subject takes its
-  place, and a higher authority takes control. A handoff is recorded only when the
+  until it reopens. Lease and grace times are the home's monotonic time, and the X18
+  grace is a positive span like a control lease. During the grace the recorded holder
+  ranks first: the first writer of its subject takes its place, and a higher authority
+  takes control. A handoff is recorded only when the
   holder's subject or authority changes. Basis: S11, X18, r8 trace (d).
 - **S13 + BQ13** Quality is an ordinary channel of type `Quality` (OPC UA 32-bit status
   codes) that data channels point at. One quality channel can serve many channels. It

@@ -1,11 +1,8 @@
 //! The per-frame cost of the gate: one write from the holder.
 
 use control::{Authority, Gate, Lease, Writer};
-use divan::{AllocProfiler, Bencher};
+use divan::Bencher;
 use types::time::{Monotonic, Span};
-
-#[global_allocator]
-static ALLOC: AllocProfiler = AllocProfiler::system();
 
 fn main() {
     divan::main();

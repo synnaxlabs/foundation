@@ -83,9 +83,11 @@ pub struct Handoff {
 /// Why the gate refused a control lease or a write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// Another writer holds control, or the holder from before a restart has not
-    /// reopened yet.
+    /// Another writer holds control.
     Waiting,
+    /// The gate is held for the writer that held control before a restart, until it
+    /// reopens or its grace ends.
+    Reserved,
     /// The writer's control lease ran out. It stays out of the gate until it reopens.
     Expired,
     /// A control lease must be longer than zero.
@@ -101,6 +103,9 @@ impl fmt::Display for Error {
             Self::Waiting => {
                 f.write_str("not in control: another writer holds the gate")
             }
+            Self::Reserved => f.write_str(
+                "not in control: held for the writer from before the restart",
+            ),
             Self::Expired => {
                 f.write_str("control lease ran out: reopen the writer to take control")
             }
@@ -152,6 +157,10 @@ mod tests {
         assert_eq!(
             Error::Expired.to_string(),
             "control lease ran out: reopen the writer to take control"
+        );
+        assert_eq!(
+            Error::Reserved.to_string(),
+            "not in control: held for the writer from before the restart"
         );
     }
 

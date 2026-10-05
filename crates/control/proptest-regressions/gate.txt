@@ -1,10 +1,6 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
 cc a1e2ba6ac9599f2465bb0604ac59d94d9b408e506d1eaf73ef47c792343af65b # shrinks to start = Some((0, 0, 8)), steps = [(8, Close(0))]
 cc 3538ef3453fb5d119cf97768279af22a4f41cfd6c9bb2ba956f7f10cc072676e # shrinks to start = Some((1, 0, 15)), steps = [(0, Open { subject: 1, authority: 0, lease: None })]
 cc c10ffe1779f7bda94f6e5061e9624ad22fef172d0150b09f68000dc3e45f7f50 # shrinks to start = None, steps = [(0, Open { subject: 0, authority: 0, lease: Some(5) }), (5, Advance)]
 cc 4975dd7bce0b374d33ab7404ab94b6888900c88015ab241a28d41dbc5a9eb54c # shrinks to start = None, steps = [(0, Open { subject: 0, authority: 0, lease: None }), (0, Open { subject: 0, authority: 0, lease: None }), (0, Open { subject: 0, authority: 0, lease: None }), (0, Open { subject: 0, authority: 0, lease: None }), (0, Open { subject: 0, authority: 0, lease: None }), (0, Open { subject: 0, authority: 0, lease: None }), (0, Open { subject: 0, authority: 0, lease: None }), (0, Open { subject: 0, authority: 0, lease: None }), (0, Open { subject: 0, authority: 255, lease: Some(16) }), (2, Open { subject: 0, authority: 0, lease: None }), (14, Open { subject: 0, authority: 255, lease: None })]
+cc 5ff5d182b7d7ac8023bc801e0231233faafe52b6ebc761dd7b1a0be2fccbd08c # shrinks to start = Some((1, 200, 26)), steps = [(0, Open { subject: 2, authority: 200, lease: None }), (0, Open { subject: 1, authority: 0, lease: None })]
+cc 6115c41b675c545387b59d504327e75680cb55f61c36af4c6e844beab71f1d85 # shrinks to start = Some((0, 0, 19)), steps = [(0, Open { subject: 1, authority: 0, lease: None }), (0, Write(0))]

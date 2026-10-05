@@ -1,7 +1,7 @@
 use std::fmt;
 use std::mem;
 
-use types::time::{Monotonic, Span};
+use types::time::Monotonic;
 
 use crate::{Error, Handoff, Lease, Writer};
 
@@ -23,6 +23,7 @@ impl fmt::Display for Key {
 /// the one that opened first.
 #[derive(Debug, Default)]
 pub struct Gate {
+    /// Sorted by key, for `position`.
     claims: Vec<Claim>,
     seat: Seat,
     next: u64,
@@ -67,15 +68,15 @@ impl Gate {
     }
 
     /// A gate for an index whose last handoff record names `last`, after a restart or
-    /// a failover. Until `now + grace`, `last` holds control without a connected
-    /// writer: no write passes, and only a writer of the same subject or one with
-    /// higher authority takes control.
+    /// a failover. For one control lease `grace` from `now`, `last` holds control
+    /// without a connected writer: no write passes, and only a writer of the same
+    /// subject or one with higher authority takes control.
     #[must_use]
-    pub fn recover(last: Writer, now: Monotonic, grace: Span) -> Self {
+    pub fn recover(last: Writer, now: Monotonic, grace: Lease) -> Self {
         Self {
             seat: Seat::Recovered {
                 writer: last.clone(),
-                until: now + grace,
+                until: deadline(now, grace),
             },
             published: Some(last),
             ..Self::default()
@@ -138,8 +139,9 @@ impl Gate {
     ///
     /// # Errors
     ///
-    /// [`Error::Waiting`] when `key` does not hold control, and [`Error::Expired`]
-    /// when its control lease ran out.
+    /// [`Error::Waiting`] when another writer holds control, [`Error::Reserved`]
+    /// while a recovered holder may still reopen, and [`Error::Expired`] when the
+    /// control lease of `key` ran out.
     ///
     /// # Panics
     ///
@@ -156,6 +158,8 @@ impl Gate {
         }
         if self.claim(key).expired {
             Err(Error::Expired)
+        } else if let Seat::Recovered { .. } = self.seat {
+            Err(Error::Reserved)
         } else {
             Err(Error::Waiting)
         }
@@ -255,14 +259,16 @@ impl Gate {
     }
 }
 
-/// The end of a control lease taken or renewed at `now`. A lease past the end of
-/// monotonic time never runs out.
+/// The end of a control lease taken or renewed at `now`. A lease that would end past
+/// the last monotonic reading ends at that reading.
 fn deadline(now: Monotonic, lease: Lease) -> Monotonic {
     now.checked_add(lease.span()).unwrap_or(Monotonic(u64::MAX))
 }
 
 #[cfg(test)]
 mod tests {
+    use types::time::Span;
+
     use super::*;
     use crate::Authority;
 
@@ -482,11 +488,24 @@ mod tests {
         }
 
         #[test]
-        fn past_the_end_of_time_never_runs_out() {
+        fn ends_at_the_last_monotonic_reading() {
             let mut gate = Gate::new();
             let a = gate.open(writer("a", 0), Some(lease(i64::MAX)), at(u64::MAX - 1));
             assert_eq!(gate.deadline(), Some(at(u64::MAX)));
             assert_eq!(gate.write(a, at(u64::MAX - 1)), Ok(()));
+            assert_eq!(gate.write(a, at(u64::MAX)), Err(Error::Expired));
+        }
+
+        #[test]
+        fn is_not_renewed_by_inputs_from_waiters() {
+            let mut gate = Gate::new();
+            gate.open(writer("a", 100), Some(lease(10)), at(0));
+            let b = gate.open(writer("b", 100), None, at(1));
+            let c = gate.open(writer("c", 50), None, at(2));
+            assert_eq!(gate.write(b, at(3)), Err(Error::Waiting));
+            gate.close(c, at(4));
+            gate.advance(at(5));
+            assert_eq!(gate.deadline(), Some(at(10)));
         }
     }
 
@@ -494,7 +513,7 @@ mod tests {
         use super::*;
 
         fn recovered() -> Gate {
-            Gate::recover(writer("a", 100), at(0), Span::from_nanos(10))
+            Gate::recover(writer("a", 100), at(0), lease(10))
         }
 
         #[test]
@@ -539,7 +558,7 @@ mod tests {
             let mut gate = recovered();
             let b = gate.open(writer("b", 100), None, at(1));
             assert_eq!(gate.handoff(), None);
-            assert_eq!(gate.write(b, at(2)), Err(Error::Waiting));
+            assert_eq!(gate.write(b, at(2)), Err(Error::Reserved));
         }
 
         #[test]
@@ -592,6 +611,8 @@ mod tests {
     }
 
     mod properties {
+        use std::cmp::Reverse;
+
         use proptest::prelude::*;
 
         use super::*;
@@ -610,15 +631,134 @@ mod tests {
 
         const SUBJECTS: [&str; 3] = ["a", "b", "c"];
 
-        fn authority() -> impl Strategy<Value = u8> {
-            prop_oneof![Just(0), Just(100), Just(200), Just(255)]
+        /// The gate rules stated a second way: open claims in open order, election
+        /// by sorting, and expired claims kept apart.
+        #[derive(Default)]
+        struct Model {
+            open: Vec<(Key, Writer, Option<Lease>)>,
+            expired: Vec<Key>,
+            holder: Option<(Key, Option<Monotonic>)>,
+            recovered: Option<(Writer, Monotonic)>,
+        }
+
+        impl Model {
+            fn due(&mut self, now: Monotonic) {
+                if self
+                    .recovered
+                    .as_ref()
+                    .is_some_and(|(_, until)| *until <= now)
+                {
+                    self.recovered = None;
+                    self.elect(now);
+                }
+                if let Some((key, Some(end))) = self.holder
+                    && end <= now
+                {
+                    self.open.retain(|(k, ..)| *k != key);
+                    self.expired.push(key);
+                    self.elect(now);
+                }
+            }
+
+            fn elect(&mut self, now: Monotonic) {
+                self.holder = None;
+                let best = self
+                    .open
+                    .iter()
+                    .min_by_key(|(key, writer, _)| (Reverse(writer.authority), *key))
+                    .map(|(key, ..)| *key);
+                if let Some(key) = best {
+                    self.seat(key, now);
+                }
+            }
+
+            fn seat(&mut self, key: Key, now: Monotonic) {
+                let lease = self.find(key).2;
+                self.holder = Some((key, lease.map(|lease| now + lease.span())));
+            }
+
+            fn find(&self, key: Key) -> &(Key, Writer, Option<Lease>) {
+                self.open
+                    .iter()
+                    .find(|(k, ..)| *k == key)
+                    .expect("open in the model")
+            }
+
+            fn holder(&self) -> Option<&Writer> {
+                match (&self.recovered, self.holder) {
+                    (Some((writer, _)), _) => Some(writer),
+                    (None, Some((key, _))) => Some(&self.find(key).1),
+                    (None, None) => None,
+                }
+            }
+
+            fn deadline(&self) -> Option<Monotonic> {
+                match (&self.recovered, self.holder) {
+                    (Some((_, until)), _) => Some(*until),
+                    (None, Some((_, end))) => end,
+                    (None, None) => None,
+                }
+            }
+
+            fn open(
+                &mut self,
+                key: Key,
+                writer: Writer,
+                lease: Option<Lease>,
+                now: Monotonic,
+            ) {
+                self.due(now);
+                let authority = writer.authority;
+                let reopens = self
+                    .recovered
+                    .as_ref()
+                    .is_some_and(|(last, _)| last.subject == writer.subject);
+                let outranks = self.holder().is_none_or(|h| authority > h.authority);
+                self.open.push((key, writer, lease));
+                if reopens || outranks {
+                    self.recovered = None;
+                    self.seat(key, now);
+                }
+                if reopens && self.open.iter().any(|(_, w, _)| w.authority > authority)
+                {
+                    self.elect(now);
+                }
+            }
+
+            fn close(&mut self, key: Key, now: Monotonic) {
+                self.due(now);
+                if let Some(i) = self.expired.iter().position(|k| *k == key) {
+                    self.expired.remove(i);
+                    return;
+                }
+                self.open.retain(|(k, ..)| *k != key);
+                if self.holder.is_some_and(|(k, _)| k == key) {
+                    self.elect(now);
+                }
+            }
+
+            fn write(&mut self, key: Key, now: Monotonic) -> Result<(), Error> {
+                self.due(now);
+                if self.expired.contains(&key) {
+                    return Err(Error::Expired);
+                }
+                if self.recovered.is_some() {
+                    return Err(Error::Reserved);
+                }
+                if self.holder.is_some_and(|(k, _)| k == key) {
+                    self.seat(key, now);
+                    return Ok(());
+                }
+                Err(Error::Waiting)
+            }
         }
 
         fn input() -> impl Strategy<Value = Input> {
+            let authority = prop_oneof![Just(0), Just(100), Just(200), Just(255)];
             prop_oneof![
                 (
                     0..SUBJECTS.len(),
-                    authority(),
+                    authority,
                     proptest::option::of(1..30_i64)
                 )
                     .prop_map(|(subject, authority, lease)| {
@@ -635,102 +775,72 @@ mod tests {
         }
 
         fn start() -> impl Strategy<Value = Option<(usize, u8, i64)>> {
-            proptest::option::of((0..SUBJECTS.len(), authority(), 1..30_i64))
+            let authority = prop_oneof![Just(0), Just(100), Just(200), Just(255)];
+            proptest::option::of((0..SUBJECTS.len(), authority, 1..30_i64))
         }
 
-        /// The rules that hold after every input.
-        fn check_state(gate: &Gate, now: Monotonic) {
-            assert!(gate.deadline().is_none_or(|due| now < due));
-            let waiting = gate.claims.iter().filter(|c| !c.expired);
-            match &gate.seat {
-                Seat::Empty => assert_eq!(waiting.count(), 0),
-                Seat::Held { key, expiry } => {
-                    let held = gate.claim(*key);
-                    assert!(!held.expired);
-                    assert_eq!(expiry.is_some(), held.lease.is_some());
-                    for claim in waiting {
-                        assert!(claim.writer.authority <= held.writer.authority);
+        fn steps() -> impl Strategy<Value = Vec<(u64, Input)>> {
+            proptest::collection::vec((0..20_u64, input()), 0..60)
+        }
+
+        fn check(start: Option<(usize, u8, i64)>, steps: Vec<(u64, Input)>) {
+            let mut now = at(0);
+            let (mut gate, mut model) = match start {
+                None => (Gate::new(), Model::default()),
+                Some((subject, authority, grace)) => {
+                    let last = writer(SUBJECTS[subject], authority);
+                    let model = Model {
+                        recovered: Some((last.clone(), now + lease(grace).span())),
+                        ..Model::default()
+                    };
+                    (Gate::recover(last, now, lease(grace)), model)
+                }
+            };
+            let mut published = gate.holder().cloned();
+            let mut keys: Vec<Key> = Vec::new();
+            for (step, input) in steps {
+                now = Monotonic(now.0 + step);
+                match input {
+                    Input::Open {
+                        subject,
+                        authority,
+                        lease,
+                    } => {
+                        let new = writer(SUBJECTS[subject], authority);
+                        let lease = lease.map(super::lease);
+                        let key = gate.open(new.clone(), lease, now);
+                        model.open(key, new, lease, now);
+                        keys.push(key);
+                    }
+                    Input::Close(i) if !keys.is_empty() => {
+                        let key = keys.remove(i % keys.len());
+                        gate.close(key, now);
+                        model.close(key, now);
+                    }
+                    Input::Write(i) if !keys.is_empty() => {
+                        let key = keys[i % keys.len()];
+                        assert_eq!(gate.write(key, now), model.write(key, now));
+                    }
+                    Input::Close(_) | Input::Write(_) | Input::Advance => {
+                        gate.advance(now);
+                        model.due(now);
                     }
                 }
-                Seat::Recovered { writer, .. } => {
-                    for claim in waiting {
-                        assert!(claim.writer.authority <= writer.authority);
-                        assert_ne!(claim.writer.subject, writer.subject);
-                    }
-                }
+                let holder = model.holder().cloned();
+                assert_eq!(gate.holder(), holder.as_ref());
+                assert_eq!(gate.deadline(), model.deadline());
+                assert!(gate.deadline().is_none_or(|due| now < due));
+                let expected =
+                    (holder != published).then(|| Handoff { to: holder.clone() });
+                assert_eq!(gate.handoff(), expected);
+                published = holder;
             }
         }
 
         proptest! {
             #[test]
-            fn every_input_keeps_the_gate_rules(
-                start in start(),
-                steps in proptest::collection::vec((0..20_u64, input()), 0..60),
-            ) {
-                let mut now = at(0);
-                let mut gate = match start {
-                    None => Gate::new(),
-                    Some((subject, authority, grace)) => Gate::recover(
-                        writer(SUBJECTS[subject], authority),
-                        now,
-                        Span::from_nanos(grace),
-                    ),
-                };
-                let mut published = gate.holder().cloned();
-                let mut open: Vec<Key> = Vec::new();
-                for (step, input) in steps {
-                    now = Monotonic(now.0 + step);
-                    let pending = gate.deadline().is_some_and(|due| due <= now);
-                    let before = gate.holder().cloned();
-                    match input {
-                        Input::Open { subject, authority, lease } => {
-                            let new = writer(SUBJECTS[subject], authority);
-                            let reopens = matches!(
-                                &gate.seat,
-                                Seat::Recovered { writer, .. } if writer.subject == new.subject
-                            );
-                            let lease = lease.map(super::lease);
-                            open.push(gate.open(new, lease, now));
-                            if !pending
-                                && !reopens
-                                && before.as_ref().is_some_and(|h| h.authority.0 >= authority)
-                            {
-                                assert_eq!(gate.holder(), before.as_ref());
-                            }
-                        }
-                        Input::Close(i) if !open.is_empty() => {
-                            let key = open.remove(i % open.len());
-                            gate.close(key, now);
-                        }
-                        Input::Write(i) if !open.is_empty() => {
-                            let key = open[i % open.len()];
-                            let result = gate.write(key, now);
-                            let holds = matches!(
-                                gate.seat,
-                                Seat::Held { key: held, .. } if held == key
-                            );
-                            let expected = if holds {
-                                Ok(())
-                            } else if gate.claim(key).expired {
-                                Err(Error::Expired)
-                            } else {
-                                Err(Error::Waiting)
-                            };
-                            assert_eq!(result, expected);
-                        }
-                        Input::Close(_) | Input::Write(_) | Input::Advance => {
-                            gate.advance(now);
-                            if !pending {
-                                assert_eq!(gate.holder(), before.as_ref());
-                            }
-                        }
-                    }
-                    check_state(&gate, now);
-                    let holder = gate.holder().cloned();
-                    let expected = (holder != published).then(|| Handoff { to: holder.clone() });
-                    assert_eq!(gate.handoff(), expected);
-                    published = holder;
-                }
+            fn follows_the_gate_rules(start in start(), steps in steps()) {
+                check(start, steps);
             }
         }
     }
