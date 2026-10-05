@@ -11,3 +11,8 @@ path = "../../oracles/a/main.rs"
 [[test]]
 name = "ignored"
 path = "../../oracles/ignored.rs"
+
+[[bench]]
+name = "inside"
+path = "src/bench.rs"
+harness = false

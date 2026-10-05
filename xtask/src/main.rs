@@ -6,6 +6,7 @@ mod build;
 mod cfg;
 mod field;
 mod files;
+mod globals;
 mod map;
 mod miri;
 mod oracles;
@@ -25,10 +26,11 @@ fn main() -> ExitCode {
     let result = match std::env::args().nth(1).as_deref() {
         Some("layers") => layers(root),
         Some("oracles") => oracles::check(root),
+        Some("globals") => globals::check(root),
         Some(name @ ("loom" | "shuttle")) => cfg::test(root, name),
         Some("miri") => miri::run(root),
         _ => {
-            eprintln!("usage: cargo xtask <layers|oracles|loom|shuttle|miri>");
+            eprintln!("usage: cargo xtask <layers|oracles|globals|loom|shuttle|miri>");
             return ExitCode::FAILURE;
         }
     };

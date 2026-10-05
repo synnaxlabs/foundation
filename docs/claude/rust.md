@@ -18,6 +18,7 @@
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask layers
+cargo xtask globals
 cargo xtask oracles
 cargo test --workspace
 cargo bench -p <crate>
