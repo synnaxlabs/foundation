@@ -668,10 +668,9 @@ fn non_promotable_voter_with_check_quorum() {
 }
 
 /// A follower whose election times out just before a late heartbeat arrives does
-/// not make the leader step down.
-///
-/// In etcd, node 3 is also behind in the log. Here all logs are equal, so the leases
-/// alone protect the leader.
+/// not make the leader step down. Node 3 is cut off while the leader commits three
+/// entries, as in etcd, so its log is also behind. Nodes 1 and 2 hold their leases
+/// and ignore its PreVote.
 #[test]
 fn disruptive_follower_prevote() {
     let mut network = Network::of(3, &[1, 2, 3], at_term(1));
@@ -680,8 +679,16 @@ fn disruptive_follower_prevote() {
     network.check(2, Role::Follower, 2);
     network.check(3, Role::Follower, 2);
 
-    // Node 3's last election tick passes before the leader's heartbeat arrives.
+    network.isolate(3);
+    for _ in 0..3 {
+        network.propose(1, b"somedata");
+    }
+    network.recover();
+    assert_eq!(network.disk(1).last(), 4);
+    assert_eq!(network.disk(3).last(), 1);
+
     network.tick(3, 2, ELECTION + 2);
+    network.flush(3);
     network.check(1, Role::Leader, 2);
     network.check(2, Role::Follower, 2);
     network.check(3, Role::PreCandidate, 2);
@@ -690,4 +697,7 @@ fn disruptive_follower_prevote() {
     network.check(1, Role::Leader, 2);
     network.check(2, Role::Follower, 2);
     network.check(3, Role::Follower, 2);
+    assert_eq!(network.peer(3).leader(), Some(key(1)));
+    assert_eq!(network.disk(3).last(), 4);
+    assert_eq!(network.disk(3).committed.len(), 4);
 }
