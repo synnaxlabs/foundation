@@ -4,7 +4,7 @@ use document::{Attribute, Block, Document, Label, Map, Source, Span};
 use types::name::Name;
 
 use crate::lex::{self, Token, Tokens};
-use crate::{Error, Expected, Form};
+use crate::{Error, Expected, Form, Number};
 
 /// Reads HCL text as a Document. Each key, keyword, label, function name, and value
 /// has a span in `source`. A number written with digits only reads as an exact
@@ -271,13 +271,18 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Keeps the problem of `form` at the next token, then moves past the rest of the
-    /// item to the token that ends it, and leaves that token.
+    /// Keeps the problem of `form` at the next token, then skips the item.
     fn refuse(&mut self, form: Form, ends: Ends) -> Result<(), Error> {
         self.errors.push(Error::Form {
             span: self.token.span,
             form,
         });
+        self.skip_item(ends)
+    }
+
+    /// Moves past the rest of the item to the token that ends it, and leaves that
+    /// token.
+    fn skip_item(&mut self, ends: Ends) -> Result<(), Error> {
         let mut depth = 0usize;
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
@@ -341,32 +346,19 @@ impl<'a> Parser<'a> {
     }
 
     /// Reads a number, after its minus sign if `minus` holds the sign's span. Returns
-    /// `None` when the number is out of range.
+    /// `None` when the number has a problem, after it keeps the problem.
     fn number(&mut self, digits: &Token<'a>, minus: Option<Span>) -> Option<Value> {
         let span = minus.map_or(digits.span, |minus| join(minus, digits.span));
-        let kind = if digits.text.bytes().all(|b| b.is_ascii_digit()) {
-            let magnitude = digits.text.parse::<u128>().ok();
-            magnitude
-                .and_then(|n| match minus {
-                    Some(_) => 0i128.checked_sub_unsigned(n),
-                    None => i128::try_from(n).ok(),
-                })
-                .map(value::Kind::Integer)
-        } else {
-            let float = digits.text.parse::<f64>().ok();
-            float
-                .filter(|&f| f != 0.0 || !significant(digits.text))
-                .map(|f| if minus.is_some() { -f } else { f })
-                .and_then(Float::new)
-                .map(value::Kind::Float)
-        };
-        if kind.is_none() {
-            self.errors.push(Error::Number { span });
+        match read_number(digits.text, minus.is_some()) {
+            Ok(kind) => Some(Value {
+                kind,
+                span: Some(span),
+            }),
+            Err(problem) => {
+                self.errors.push(Error::Number { span, problem });
+                None
+            }
         }
-        kind.map(|kind| Value {
-            kind,
-            span: Some(span),
-        })
     }
 
     fn list(&mut self, depth: usize) -> Result<Value, Error> {
@@ -467,8 +459,9 @@ impl<'a> Parser<'a> {
 
     /// Reads an object key, where no HCL form starts: a string, an identifier, or an
     /// integer, which reads as HCL reads it: its digits without leading zeros, after a
-    /// `-` if it has one. Returns `None` for a number that HCL rounds, after it keeps
-    /// the problem and moves past the entry. Any other token is `Expected::Key`.
+    /// `-` if it has one. Returns `None` for a number that HCL rounds or refuses, after
+    /// it keeps the problem and moves past the entry. Any other token is
+    /// `Expected::Key`.
     fn key(&mut self) -> Result<Option<(Box<str>, Span)>, Error> {
         if matches!(
             self.token.kind,
@@ -485,6 +478,16 @@ impl<'a> Parser<'a> {
         };
         if self.token.kind != lex::Kind::Number {
             return Err(self.syntax(Expected::Key));
+        }
+        if malformed(self.token.text) {
+            let span = self.token.span;
+            let span = minus.map_or(span, |minus| join(minus.span, span));
+            self.errors.push(Error::Number {
+                span,
+                problem: Number::Malformed,
+            });
+            self.skip_item(Ends::Line)?;
+            return Ok(None);
         }
         let Some(digits) = integer_key(self.token.text) else {
             self.refuse(Form::NumberKey, Ends::Line)?;
@@ -661,6 +664,47 @@ fn text(token: Token<'_>) -> Box<str> {
     }
 }
 
+/// The value of a number token, negated when `negative`.
+#[expect(
+    clippy::unwrap_in_result,
+    reason = "`f64` parses each number token that is not malformed"
+)]
+fn read_number(text: &str, negative: bool) -> Result<value::Kind, Number> {
+    if malformed(text) {
+        return Err(Number::Malformed);
+    }
+    if text.bytes().all(|b| b.is_ascii_digit()) {
+        let magnitude = text.parse::<u128>().ok();
+        return magnitude
+            .and_then(|n| {
+                if negative {
+                    0i128.checked_sub_unsigned(n)
+                } else {
+                    i128::try_from(n).ok()
+                }
+            })
+            .map(value::Kind::Integer)
+            .ok_or(Number::Range);
+    }
+    let float: f64 = text
+        .parse()
+        .expect("invariant: a number token that is not malformed is a float");
+    Some(float)
+        .filter(|&f| f != 0.0 || !significant(text))
+        .map(|f| if negative { -f } else { f })
+        .and_then(Float::new)
+        .map(value::Kind::Float)
+        .ok_or(Number::Range)
+}
+
+/// Reports whether the text of a number token is not a number: it has two dots, two
+/// exponents, a dot in its exponent, or an exponent outside `i64`. HCL refuses each,
+/// even on zero.
+fn malformed(text: &str) -> bool {
+    let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
+    mantissa.matches('.').nth(1).is_some() || exponent.parse::<i64>().is_err()
+}
+
 /// Reports whether the digits of a float before its exponent are not all zero.
 fn significant(digits: &str) -> bool {
     digits
@@ -830,7 +874,9 @@ mod tests {
 
         #[test]
         fn reads_floats() {
-            let text = "a = 1.5\nb = -0.25\nc = 1e3\nd = 2.5E-3\ne = -0.0\nf = 1e+2\n";
+            let text = "a = 1.5\nb = -0.25\nc = 1e3\nd = 2.5E-3\ne = -0.0\nf = 1e+2\n\
+                        g = 1.e5\nh = 1.E+5\ni = 0.e5\nj = -1.e-2\n\
+                        k = 0e9223372036854775807\nl = 0.e-9223372036854775808\n";
             let expected = attributes(vec![
                 ("a", float(1.5)),
                 ("b", float(-0.25)),
@@ -838,6 +884,12 @@ mod tests {
                 ("d", float(0.0025)),
                 ("e", float(0.0)),
                 ("f", float(100.0)),
+                ("g", float(100_000.0)),
+                ("h", float(100_000.0)),
+                ("i", float(0.0)),
+                ("j", float(-0.01)),
+                ("k", float(0.0)),
+                ("l", float(0.0)),
             ]);
             assert_eq!(ok(text), expected);
         }
@@ -1562,6 +1614,8 @@ c = "°C # not a comment"
                             most 255 bytes in all";
         const NUMBER: &str = "the number is out of range. Use an integer that fits \
                               in 128 bits, or a float that fits in 64 bits";
+        const MALFORMED: &str = "the number is not valid. Write a number such as \
+                                 `1.5e3`, or put the text in quotes to make a string";
         const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
                               give it a different key";
 
@@ -1662,6 +1716,7 @@ c = "°C # not a comment"
                 ("a = { (k) = 1 }\n", on(6, 7), Form::Parentheses),
                 ("a = { 1.5 = 1 }\n", on(6, 9), Form::NumberKey),
                 ("a = { 1e3 = 1 }\n", on(6, 9), Form::NumberKey),
+                ("a = { 1.e5 = 1 }\n", on(6, 10), Form::NumberKey),
                 ("a = { -1.5 = 1 }\n", on(7, 10), Form::NumberKey),
                 ("a = { - = 1 }\n", on(6, 7), Form::Operator),
                 ("a = { -x = 1 }\n", on(6, 7), Form::Operator),
@@ -1737,6 +1792,11 @@ c = "°C # not a comment"
                 form: Form::NumberKey,
             };
             check(&format!("a = {{ {digits} = 1 }}\n"), &[(long, &message)]);
+            let past = Error::Form {
+                span: on(6, 18),
+                form: Form::NumberKey,
+            };
+            check("a = { 1e3000000000 = 1 }\n", &[(past, &message)]);
             let key = Error::Form {
                 span: on(6, 9),
                 form: Form::NumberKey,
@@ -1979,12 +2039,9 @@ c = "°C # not a comment"
         #[test]
         fn refuses_a_number_out_of_range() {
             let number = |start, end| {
-                (
-                    Error::Number {
-                        span: on(start, end),
-                    },
-                    NUMBER,
-                )
+                let span = on(start, end);
+                let problem = Number::Range;
+                (Error::Number { span, problem }, NUMBER)
             };
             check(
                 "i = 170141183460469231731687303715884105728\n",
@@ -2002,6 +2059,41 @@ c = "°C # not a comment"
             check("f = -1e400\n", &[number(4, 10)]);
             check("f = 1e-400\n", &[number(4, 10)]);
             check("f = 2e-324\n", &[number(4, 10)]);
+            check("f = 1e2147483647\n", &[number(4, 16)]);
+            check("f = 1e-3000000000\n", &[number(4, 17)]);
+        }
+
+        #[test]
+        fn refuses_text_that_hcl_scans_as_a_number_but_cannot_read() {
+            let malformed = |start, end| {
+                let span = on(start, end);
+                let problem = Number::Malformed;
+                (Error::Number { span, problem }, MALFORMED)
+            };
+            let cases = [
+                ("a = 1.2.3\n", malformed(4, 9)),
+                ("a = 1e5e5\n", malformed(4, 9)),
+                ("a = 1..5\n", malformed(4, 8)),
+                ("a = 1.e5.e5\n", malformed(4, 11)),
+                ("a = -1.2.3\n", malformed(4, 10)),
+                ("a = [1.2.3, 2]\n", malformed(5, 10)),
+                ("a = 0e9223372036854775808\n", malformed(4, 25)),
+                ("a = 0E9223372036854775808\n", malformed(4, 25)),
+                ("a = 0.e9223372036854775808\n", malformed(4, 26)),
+                ("a = 0.e-9223372036854775809\n", malformed(4, 27)),
+                ("a = { -1.2.3 = 1 }\n", malformed(6, 12)),
+            ];
+            for (text, error) in cases {
+                check(text, &[error]);
+            }
+            let null = Error::Form {
+                span: on(21, 25),
+                form: Form::Null,
+            };
+            check(
+                "a = { 1.2.3 = 1, b = null }\n",
+                &[malformed(6, 11), (null, NULL)],
+            );
         }
 
         #[test]
@@ -2065,7 +2157,10 @@ c = "°C # not a comment"
             };
             let escape = Error::Escape { span: on(10, 12) };
             check(r#"a = null "\q""#, &[(null, NULL), (escape, ESCAPE)]);
-            let number = Error::Number { span: on(4, 9) };
+            let number = Error::Number {
+                span: on(4, 9),
+                problem: Number::Range,
+            };
             let escape = Error::Escape { span: on(11, 13) };
             check(r#"a = 1e400 "\q""#, &[(number, NUMBER), (escape, ESCAPE)]);
         }
