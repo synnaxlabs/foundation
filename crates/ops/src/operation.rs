@@ -87,7 +87,7 @@ pub(crate) struct Reference {
 pub(crate) enum Parsed {
     Run(Request),
     Help(String),
-    Serve,
+    Mcp,
 }
 
 /// The command tree, with each operation's summary from `TABLE`.
@@ -103,7 +103,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, Error> {
         Ok(matches) => Cli::from_arg_matches(&matches)
             .map(|cli| match cli.command {
                 Command::Run(request) => Parsed::Run(request),
-                Command::Mcp => Parsed::Serve,
+                Command::Mcp => Parsed::Mcp,
             })
             .map_err(|e| from_clap(&e)),
         Err(e)
@@ -132,41 +132,42 @@ pub(crate) fn read(
     })
 }
 
-/// The unknown-operation error for `name`, with the closest name that the command
-/// line would suggest.
+/// The unknown-operation error for `name`, with the closest operation name.
 fn unknown(name: &str) -> Error {
-    match parse(&["foundation".into(), name.into()]) {
-        // The command line also suggests `mcp`, which is not an operation.
-        Err(Error::Unknown { name, closest }) => Error::Unknown {
-            name,
-            closest: closest
-                .filter(|closest| TABLE.iter().any(|spec| spec.name == closest)),
-        },
-        _ => Error::Unknown {
-            name: name.to_owned(),
-            closest: None,
-        },
+    let operations = Request::augment_subcommands(clap::Command::new("foundation"))
+        .disable_help_subcommand(true)
+        .disable_help_flag(true);
+    let closest = operations
+        .try_get_matches_from(["foundation", name])
+        .err()
+        .and_then(|e| context(&e, ContextKind::SuggestedSubcommand));
+    Error::Unknown {
+        name: name.to_owned(),
+        closest,
+    }
+}
+
+fn context(e: &clap::Error, kind: ContextKind) -> Option<String> {
+    match e.get(kind) {
+        Some(ContextValue::String(text)) => Some(text.clone()),
+        Some(ContextValue::Strings(texts)) => texts.first().cloned(),
+        _ => None,
     }
 }
 
 fn from_clap(e: &clap::Error) -> Error {
-    let context = |kind| match e.get(kind) {
-        Some(ContextValue::String(text)) => Some(text.clone()),
-        Some(ContextValue::Strings(texts)) => texts.first().cloned(),
-        _ => None,
-    };
     if e.kind() == ErrorKind::InvalidSubcommand {
         return Error::Unknown {
-            name: context(ContextKind::InvalidSubcommand)
+            name: context(e, ContextKind::InvalidSubcommand)
                 .expect("invariant: clap names an unknown subcommand"),
-            closest: context(ContextKind::SuggestedSubcommand),
+            closest: context(e, ContextKind::SuggestedSubcommand),
         };
     }
     let what = e
         .kind()
         .as_str()
         .expect("invariant: clap describes each error kind that is not help");
-    let message = match context(ContextKind::InvalidArg) {
+    let message = match context(e, ContextKind::InvalidArg) {
         Some(arg) => format!("{what}: `{arg}`"),
         None => what.to_owned(),
     };

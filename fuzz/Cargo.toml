@@ -15,6 +15,7 @@ codec = { path = "../crates/codec" }
 config-hcl = { path = "../crates/config-hcl" }
 document = { path = "../crates/document" }
 libfuzzer-sys = "0.4.13"
+ops = { path = "../crates/ops" }
 types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
 
@@ -42,6 +43,13 @@ bench = false
 [[bin]]
 name = "document_encoding"
 path = "fuzz_targets/document_encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ops_mcp"
+path = "fuzz_targets/ops_mcp.rs"
 test = false
 doc = false
 bench = false

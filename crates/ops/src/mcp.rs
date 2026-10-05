@@ -1,7 +1,8 @@
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use serde_json::{Map, Value, json};
 
+use crate::Stop;
 use crate::error::Error;
 use crate::operation::{self, TABLE};
 
@@ -14,29 +15,36 @@ const REQUEST: (i64, &str) = (-32600, "Invalid Request");
 const METHOD: (i64, &str) = (-32601, "Method not found");
 const PARAMS: (i64, &str) = (-32602, "Invalid params");
 
+/// The longest line, with its newline, that `serve` reads into memory.
+pub(crate) const LIMIT: usize = 1 << 20;
+
 /// Answers each line of `input` with at most one line on `output`, until `input` ends
 /// or the reader closes `output`.
 pub(crate) fn serve(
     mut input: impl BufRead,
     output: &mut impl Write,
-) -> Result<(), Error> {
+) -> Result<(), Stop> {
+    let failed = |e: io::Error| Error::Input {
+        message: e.to_string(),
+    };
     let mut line = Vec::new();
     loop {
         line.clear();
-        let read = input
+        let read = (&mut input)
+            .take(LIMIT as u64)
             .read_until(b'\n', &mut line)
-            .map_err(|e| Error::Input {
-                message: e.to_string(),
-            })?;
-        if read == 0 {
+            .map_err(failed)?;
+        let reply = if read == 0 {
             return Ok(());
-        }
-        // A line that is not UTF-8 is not JSON either, so "" gets the parse error.
-        let Some(reply) = respond(std::str::from_utf8(&line).unwrap_or("")) else {
-            continue;
+        } else if read == LIMIT && !line.ends_with(b"\n") {
+            input.skip_until(b'\n').map_err(failed)?;
+            Some(reply(&Value::Null, Err(fault(REQUEST))).to_string())
+        } else {
+            // A line that is not UTF-8 is not JSON either, so "" gets the parse error.
+            respond(std::str::from_utf8(&line).unwrap_or(""))
         };
-        if !crate::write(output, &format!("{reply}\n"))? {
-            return Ok(());
+        if let Some(reply) = reply {
+            crate::write(output, &format!("{reply}\n"))?;
         }
     }
 }
@@ -77,17 +85,17 @@ fn answer(mut message: Map<String, Value>) -> Option<Value> {
     };
     // Checked after the request itself, so an invalid notification gets a reply.
     let id = id?;
-    let params = match message.remove("params") {
-        None => Map::new(),
-        Some(Value::Object(params)) => params,
-        Some(_) => return Some(reply(&id, Err(fault(PARAMS)))),
+    let handle: fn(Map<String, Value>) -> Result<Value, Value> = match method.as_str() {
+        "initialize" => |_| Ok(initialize()),
+        "ping" => |_| Ok(json!({})),
+        "tools/list" => |_| Ok(tools()),
+        "tools/call" => call,
+        _ => return Some(reply(&id, Err(fault(METHOD)))),
     };
-    let result = match method.as_str() {
-        "initialize" => Ok(initialize()),
-        "ping" => Ok(json!({})),
-        "tools/list" => Ok(tools()),
-        "tools/call" => call(params),
-        _ => Err(fault(METHOD)),
+    let result = match message.remove("params") {
+        None => handle(Map::new()),
+        Some(Value::Object(params)) => handle(params),
+        Some(_) => Err(fault(PARAMS)),
     };
     Some(reply(&id, result))
 }

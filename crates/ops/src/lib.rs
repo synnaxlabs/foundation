@@ -19,8 +19,9 @@ use operation::Parsed;
 ///
 /// An operation writes its output to `output`. An error goes to `errors` with its code
 /// and fix, as JSON with `--json`. `foundation mcp` answers each line of `input` with
-/// at most one line on `output`, flushed, until `input` ends. A closed `output` ends
-/// the run with no error, because its reader has left.
+/// at most one line on `output`, flushed, until `input` ends. A line longer than 1 MiB
+/// gets an Invalid Request error. A closed `output` ends the run with no error,
+/// because its reader has left.
 pub fn cli(
     args: impl IntoIterator<Item = OsString>,
     input: impl BufRead,
@@ -33,21 +34,24 @@ pub fn cli(
         .iter()
         .take_while(|arg| *arg != "--")
         .any(|arg| arg == "--json");
-    let done = operation::parse(&args).and_then(|parsed| match parsed {
-        Parsed::Run(request) => {
-            let response = request.run();
-            let text = if json {
-                format!("{}\n", response.json())
-            } else {
-                response.text()
-            };
-            write(&mut output, &text).map(drop)
-        }
-        Parsed::Help(text) => write(&mut output, &text).map(drop),
-        Parsed::Serve => mcp::serve(input, &mut output),
-    });
-    let Err(error) = done else {
-        return 0;
+    let done = operation::parse(&args)
+        .map_err(Stop::Failed)
+        .and_then(|parsed| match parsed {
+            Parsed::Run(request) => {
+                let response = request.run();
+                let text = if json {
+                    format!("{}\n", response.json())
+                } else {
+                    response.text()
+                };
+                write(&mut output, &text)
+            }
+            Parsed::Help(text) => write(&mut output, &text),
+            Parsed::Mcp => mcp::serve(input, &mut output),
+        });
+    let error = match done {
+        Ok(()) | Err(Stop::Closed) => return 0,
+        Err(Stop::Failed(error)) => error,
     };
     let text = if json {
         format!("{}\n", error.json())
@@ -60,17 +64,28 @@ pub fn cli(
     }
 }
 
-/// Writes `text` to `output` and flushes it. Returns `false` when the reader has
-/// closed `output`.
-fn write(output: &mut impl Write, text: &str) -> Result<bool, Error> {
-    match output
+/// Why a run stopped before its end.
+enum Stop {
+    /// The reader closed `output`, so the run ends with nothing to report.
+    Closed,
+    Failed(Error),
+}
+
+impl From<Error> for Stop {
+    fn from(error: Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// Writes `text` to `output` and flushes it.
+fn write(output: &mut impl Write, text: &str) -> Result<(), Stop> {
+    output
         .write_all(text.as_bytes())
         .and_then(|()| output.flush())
-    {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(false),
-        Err(e) => Err(Error::Output {
-            message: e.to_string(),
-        }),
-    }
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::BrokenPipe => Stop::Closed,
+            _ => Stop::Failed(Error::Output {
+                message: e.to_string(),
+            }),
+        })
 }
