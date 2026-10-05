@@ -36,7 +36,8 @@ impl Clock {
     }
 
     /// Reads the clock. It never goes backwards, it counts time while the machine
-    /// sleeps, and it means nothing on another node.
+    /// sleeps, and it means nothing on another node. A read is ordered against the
+    /// loads and stores before and after it on its thread.
     ///
     /// ```
     /// fn read(clock: &env::clock::Clock) -> types::time::Monotonic {
@@ -120,7 +121,8 @@ impl fmt::Debug for Clock {
 /// ```
 pub trait Driver: Send + Sync {
     /// Reads the clock. Reads on any thread never go backwards, and the clock
-    /// counts time while the machine sleeps.
+    /// counts time while the machine sleeps. A read is ordered against the loads and
+    /// stores before and after it on its thread.
     fn now(&self) -> Monotonic;
 
     /// The std [`Instant`] at `Monotonic(0)`. It never changes.
