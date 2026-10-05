@@ -34,7 +34,6 @@ mod class;
 mod code;
 pub mod datagram;
 mod error;
-mod identity;
 mod session;
 pub mod stream;
 
@@ -42,14 +41,13 @@ use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
-use types::node::PublicKey;
+use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
 pub use address::Address;
 pub use class::Class;
 pub use code::Code;
 pub use error::Error;
-pub use identity::Identity;
 pub use session::{Peer, Session};
 
 /// The sessions of one shard. It dials peers and accepts the sessions the node
@@ -141,7 +139,8 @@ impl Transport {
 /// use std::num::NonZeroU32;
 /// use std::rc::Rc;
 ///
-/// use transport::{Config, Identity};
+/// use transport::Config;
+/// use types::node::PrivateKey;
 /// use types::time::Span;
 ///
 /// fn config(
@@ -151,7 +150,7 @@ impl Transport {
 ///     pool: Rc<block::Pool>,
 /// ) -> Config {
 ///     Config {
-///         identity: Identity::new([7; 32]),
+///         private_key: PrivateKey([7; 32]),
 ///         message_bytes_max: 16 << 20,
 ///         window_bytes: 32 << 20,
 ///         streams_max: NonZeroU32::new(1_024).expect("not zero"),
@@ -165,8 +164,8 @@ impl Transport {
 /// ```
 #[derive(Debug)]
 pub struct Config {
-    /// The node's key pair.
-    pub identity: Identity,
+    /// The node's key. Peers authenticate the node by its public key.
+    pub private_key: PrivateKey,
     /// The largest message this node accepts on a stream. Peers exchange their limits
     /// in the handshake, and each sender checks the peer's.
     pub message_bytes_max: usize,
