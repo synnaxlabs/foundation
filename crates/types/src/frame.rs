@@ -1086,6 +1086,27 @@ mod tests {
     }
 
     #[test]
+    fn finds_an_index_that_is_not_just_before_its_data() {
+        let mut interner = interner();
+        interner.slots().assign(key(1));
+        interner.slots().assign(key(3));
+        let set = interner.intern(&[
+            Group {
+                index: key(1),
+                data: &[(key(2), F64)],
+            },
+            Group {
+                index: key(3),
+                data: &[(key(4), F64)],
+            },
+        ]);
+        let pool = pool(1 << 16);
+        Draft::new(&pool, &set, Form::Raw, &[(0, 1), (1, 1), (2, 1), (3, 1)]).unwrap();
+        let error = Draft::new(&pool, &set, Form::Raw, &[(1, 1), (2, 1)]).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 2, index: 0 });
+    }
+
+    #[test]
     fn refuses_data_without_its_index_when_the_pool_is_full() {
         let set = one_group(&mut interner());
         let pool = pool(256);
