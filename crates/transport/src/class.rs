@@ -7,17 +7,19 @@
 ///
 /// async fn push(session: &Session, frame: block::Block) -> Result<(), Error> {
 ///     let mut sender = session.open_sender(Class::Latest).await?;
-///     sender.send(frame).await
+///     sender.send(frame).await?;
+///     sender.finish()
 /// }
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Class {
-    /// Commands, their acknowledgments, and consensus messages.
+    /// The highest priority, for small messages that must arrive soon.
     Command,
-    /// Latest-mode frames. A newer frame usually cancels an older stream.
+    /// Second, with a small send buffer, so a message that a newer one replaces does
+    /// not wait behind much.
     Latest,
-    /// Complete-mode frames and replication.
+    /// Third, for ordered bulk that must arrive whole.
     Complete,
-    /// Catch-up reads from disk and blob fetches.
+    /// The lowest, for bulk that waits for spare capacity.
     CatchUp,
 }

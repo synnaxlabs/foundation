@@ -1,17 +1,21 @@
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use block::Block;
 use types::node::PublicKey;
 
 use crate::class::Class;
 use crate::code::Code;
+use crate::datagram;
 use crate::error::Error;
 use crate::stream::{Incoming, Receiver, Sender};
 
 /// A connection to one peer. It carries streams of whole messages and datagrams that
-/// may drop. Clones share the session; dropping the last one closes it with
-/// `Code(0)`. It stays on the shard that made it.
+/// may drop. It stays on the shard that made it.
+///
+/// Clones share the session, and so do its streams and datagram halves. When the
+/// last of them drops, the session closes with `Code(0)` once the peer has every
+/// finished stream, or after [`Config::idle`](crate::Config::idle). The session also
+/// ends when either side closes it, or when any carrier under it fails.
 ///
 /// ```
 /// use block::Block;
@@ -41,11 +45,12 @@ impl Session {
     /// ```
     #[must_use]
     pub fn peer(&self) -> Peer {
-        todo!()
+        todo!("#68")
     }
 
-    /// Whether the session runs through a relay node. A relayed round trip is not
-    /// symmetric, so it does not measure clock offset well.
+    /// Whether the session runs through a relay node. It never changes: a session is
+    /// direct or relayed as a whole, and a better path means a new session. A relayed
+    /// round trip is not symmetric, so it does not measure clock offset well.
     ///
     /// ```
     /// fn may_sync_clocks(session: &transport::Session) -> bool {
@@ -54,11 +59,11 @@ impl Session {
     /// ```
     #[must_use]
     pub fn relayed(&self) -> bool {
-        todo!()
+        todo!("#68")
     }
 
     /// Opens a stream in both directions. It waits while the peer allows no more
-    /// streams.
+    /// streams. The peer sees the stream at its first message or finish.
     ///
     /// # Errors
     ///
@@ -74,11 +79,11 @@ impl Session {
     /// ```
     pub async fn open(&self, class: Class) -> Result<(Sender, Receiver), Error> {
         let _ = class;
-        todo!()
+        todo!("#68")
     }
 
     /// Opens a stream that only this node sends on. It waits while the peer allows no
-    /// more streams.
+    /// more streams. The peer sees the stream at its first message or finish.
     ///
     /// # Errors
     ///
@@ -93,10 +98,11 @@ impl Session {
     /// ```
     pub async fn open_sender(&self, class: Class) -> Result<Sender, Error> {
         let _ = class;
-        todo!()
+        todo!("#68")
     }
 
-    /// Waits for the next stream the peer opened.
+    /// Waits for the next stream the peer opened. Every clone shares one queue, and
+    /// each stream goes to one caller, so one dispatcher per session should take them.
     ///
     /// # Errors
     ///
@@ -113,64 +119,25 @@ impl Session {
     /// }
     /// ```
     pub async fn accept(&self) -> Result<Incoming, Error> {
-        todo!()
+        todo!("#68")
     }
 
-    /// Sends `message` as one datagram. It never waits: when the link is busy, the
-    /// oldest unsent datagram drops. A datagram may also be lost or arrive out of
-    /// order.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::TooLarge`] when `message` is over
-    /// [`datagram_bytes_max`](Self::datagram_bytes_max), or the error that ended the
-    /// session.
+    /// The session's datagrams. Every call gives halves of the same queues.
     ///
     /// ```
-    /// use transport::{Error, Session};
+    /// use transport::{Session, datagram};
     ///
-    /// fn send(session: &Session, sample: block::Block) -> Result<(), Error> {
-    ///     session.send_datagram(sample)
-    /// }
-    /// ```
-    #[expect(clippy::needless_pass_by_value, reason = "stub until implemented")]
-    pub fn send_datagram(&self, message: Block) -> Result<(), Error> {
-        let _ = message;
-        todo!()
-    }
-
-    /// Waits for the next datagram.
-    ///
-    /// # Errors
-    ///
-    /// The error that ended the session.
-    ///
-    /// ```
-    /// use transport::{Error, Session};
-    ///
-    /// async fn recv(session: &Session) -> Result<block::Block, Error> {
-    ///     session.recv_datagram().await
-    /// }
-    /// ```
-    pub async fn recv_datagram(&self) -> Result<Block, Error> {
-        todo!()
-    }
-
-    /// The largest datagram the session sends now. It changes with the path, and a
-    /// carrier with no datagrams of its own emulates them up to the message limit.
-    ///
-    /// ```
-    /// fn fits(session: &transport::Session, frame: &block::Block) -> bool {
-    ///     frame.len() <= session.datagram_bytes_max()
+    /// fn split(session: &Session) -> (datagram::Sender, datagram::Receiver) {
+    ///     session.datagrams()
     /// }
     /// ```
     #[must_use]
-    pub fn datagram_bytes_max(&self) -> usize {
-        todo!()
+    pub fn datagrams(&self) -> (datagram::Sender, datagram::Receiver) {
+        todo!("#68")
     }
 
-    /// Closes the session with `code`. Streams on it end, and the peer sees
-    /// [`Error::PeerClosed`]. It does not wait.
+    /// Closes the session with `code` now. Data not yet delivered drops, streams on
+    /// it end, and the peer sees [`Error::PeerClosed`]. It does not wait.
     ///
     /// ```
     /// fn leave(session: &transport::Session) {
@@ -179,7 +146,7 @@ impl Session {
     /// ```
     pub fn close(&self, code: Code) {
         let _ = code;
-        todo!()
+        todo!("#68")
     }
 
     /// Waits until the session ends and returns why.
@@ -190,7 +157,7 @@ impl Session {
     /// }
     /// ```
     pub async fn closed(&self) -> Error {
-        todo!()
+        todo!("#68")
     }
 }
 

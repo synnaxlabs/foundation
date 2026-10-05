@@ -35,7 +35,7 @@ impl Identity {
     #[must_use]
     pub fn public(&self) -> PublicKey {
         let _ = self.private_key;
-        todo!()
+        todo!("#54")
     }
 }
 
@@ -43,5 +43,16 @@ impl fmt::Debug for Identity {
     /// Never writes the private key.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Identity").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn never_writes_the_private_key() {
+        let identity = Identity::new([0xab; 32]);
+        assert_eq!(format!("{identity:?}"), "Identity { .. }");
     }
 }

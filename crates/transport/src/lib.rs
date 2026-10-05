@@ -1,13 +1,15 @@
 //! Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS
 //! over TCP, relays, and diodes; never calls up.
 //!
-//! Every carrier serves one session model. A [`Session`] connects this node to one
-//! peer. It carries streams of whole messages, each with a traffic [`Class`] that sets
-//! its priority and the carrier it prefers, and datagrams that may drop. A carrier
-//! that lacks a feature emulates it, so no caller sees which carrier it uses.
+//! Every carrier but the one-way diode serves one session model; the diode gets its
+//! own surface. A [`Session`] connects this node to one peer. It carries streams of
+//! whole messages, each with a traffic [`Class`] that sets its priority and the
+//! carrier it prefers, and datagrams that may drop. A carrier that lacks a feature
+//! emulates it, so no caller sees which carrier it uses.
 //!
 //! Each shard owns one [`Transport`] and the sessions it makes. Nothing here calls up:
-//! callers pull sessions with [`Transport::accept`] and decide which peers to admit.
+//! callers pull sessions with [`Transport::accept`], decide which peers to admit, and
+//! route each stream to its protocol.
 //!
 //! A complete reader on `hub` asks a remote home for frames and receives them in
 //! order:
@@ -30,12 +32,14 @@
 mod address;
 mod class;
 mod code;
+pub mod datagram;
 mod error;
 mod identity;
 mod session;
 pub mod stream;
 
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 
 use types::node::PublicKey;
@@ -48,19 +52,20 @@ pub use error::Error;
 pub use identity::Identity;
 pub use session::{Peer, Session};
 
-/// The sessions of one shard. It binds the shard's sockets, dials peers, and accepts
-/// sessions. It stays on the thread that made it.
+/// The sessions of one shard. It dials peers and accepts the sessions the node
+/// routes to this shard. It stays on the thread that made it. The node's sockets and
+/// relays belong to one node-level part that every shard shares (#77).
 #[derive(Debug)]
 pub struct Transport {
     _shard: PhantomData<Rc<()>>,
 }
 
 impl Transport {
-    /// Binds every address in `config.listen` and joins its relays.
+    /// Starts this shard's part of the transport.
     ///
     /// # Errors
     ///
-    /// None yet. The network seam adds the errors of binding a socket.
+    /// [`Error::Config`] when `config.idle` is not positive.
     ///
     /// ```
     /// use transport::{Config, Error, Transport};
@@ -71,29 +76,20 @@ impl Transport {
     /// ```
     pub fn new(config: Config) -> Result<Self, Error> {
         drop(config);
-        todo!()
+        todo!("#68")
     }
 
-    /// The addresses this transport listens on, with the ports the network gave it.
-    ///
-    /// ```
-    /// fn publish(transport: &transport::Transport) -> Vec<transport::Address> {
-    ///     transport.addresses().to_vec()
-    /// }
-    /// ```
-    #[must_use]
-    pub fn addresses(&self) -> &[Address] {
-        todo!()
-    }
-
-    /// Connects to `peer` at one of `addresses`. It tries direct UDP first, then
-    /// direct TCP, then each relay, and checks that the peer holds `peer`'s private
-    /// key.
+    /// Connects to `peer` at one of `addresses`, and checks that the peer holds
+    /// `peer`'s private key. It tries direct UDP addresses first, then direct TCP,
+    /// then relays. It starts the next address when the current one fails or has not
+    /// answered after a short stagger, and keeps the first session that completes
+    /// (RFC 8305). An address where some other key answers counts as a failure,
+    /// because addresses can be stale.
     ///
     /// # Errors
     ///
-    /// [`Error::Unreachable`] when no address answers, and
-    /// [`Error::Authentication`] when the peer cannot prove the key.
+    /// [`Error::Unreachable`] with the cause at each address when none gives a
+    /// session.
     ///
     /// ```
     /// use std::net::SocketAddr;
@@ -112,23 +108,29 @@ impl Transport {
         addresses: &[Address],
     ) -> Result<Session, Error> {
         let _ = (peer, addresses);
-        todo!()
+        todo!("#68")
     }
 
-    /// Waits for the next session that a peer opened. The peer has completed the
-    /// handshake; the caller decides whether to admit it and closes it if not.
-    /// Handshakes that fail never reach the caller.
+    /// Waits for the next session that a peer opened and the node routed to this
+    /// shard. The peer has completed the handshake; the caller decides whether to
+    /// admit it and closes it if not. Handshakes that fail never reach the caller.
+    ///
+    /// # Errors
+    ///
+    /// The error that stopped this shard's part of the transport.
     ///
     /// ```
-    /// async fn serve(transport: &transport::Transport) {
+    /// use transport::{Error, Transport};
+    ///
+    /// async fn serve(transport: &Transport) -> Result<(), Error> {
     ///     loop {
-    ///         let session = transport.accept().await;
+    ///         let session = transport.accept().await?;
     ///         let _ = session.peer();
     ///     }
     /// }
     /// ```
-    pub async fn accept(&self) -> Session {
-        todo!()
+    pub async fn accept(&self) -> Result<Session, Error> {
+        todo!("#68")
     }
 }
 
@@ -137,7 +139,9 @@ impl Transport {
 /// ```
 /// use std::rc::Rc;
 ///
-/// use transport::{Address, Config, Identity};
+/// use std::num::NonZeroU32;
+///
+/// use transport::{Config, Identity};
 /// use types::time::Span;
 ///
 /// fn config(
@@ -146,12 +150,10 @@ impl Transport {
 ///     tasks: env::tasks::Tasks,
 ///     pool: Rc<block::Pool>,
 /// ) -> Config {
-///     let at = "0.0.0.0:7400".parse().expect("a valid address");
 ///     Config {
 ///         identity: Identity::new([7; 32]),
-///         listen: vec![Address::Udp(at), Address::Tcp(at)],
 ///         message_bytes_max: 16 << 20,
-///         streams_max: 1_024,
+///         streams_max: NonZeroU32::new(1_024).expect("not zero"),
 ///         idle: Span::MINUTE,
 ///         clock,
 ///         entropy,
@@ -164,15 +166,15 @@ impl Transport {
 pub struct Config {
     /// The node's key pair.
     pub identity: Identity,
-    /// Where to accept sessions: local UDP and TCP sockets to bind, and relays to stay
-    /// joined to. Port 0 asks the network for a free port.
-    pub listen: Vec<Address>,
-    /// The largest message a stream or datagram carries, in either direction.
+    /// The largest message this node accepts on a stream. Peers exchange their limits
+    /// in the handshake, and each sender checks the peer's.
     pub message_bytes_max: usize,
-    /// The most streams a peer may have open to this node at once, per session.
-    pub streams_max: u32,
+    /// The most two-way streams, and apart from them the most one-way streams, a peer
+    /// may have open to this node at once, per session.
+    pub streams_max: NonZeroU32,
     /// A session whose peer is silent this long ends with [`Error::TimedOut`].
-    /// Sessions send keep-alives, so a live peer is never silent this long.
+    /// Sessions send keep-alives, so a live peer is never silent this long. Must be
+    /// positive.
     pub idle: Span,
     /// The monotonic clock for timeouts, pacing, and keep-alives.
     pub clock: env::clock::Clock,

@@ -9,7 +9,8 @@ use crate::class::Class;
 use crate::code::Code;
 use crate::error::Error;
 
-/// The sending half of a stream. Dropping it finishes the stream.
+/// The sending half of a stream. Dropping it without [`finish`](Self::finish) resets
+/// the stream with `Code(0)`, so the peer never reads a cut-off stream as complete.
 ///
 /// ```
 /// use block::Block;
@@ -37,15 +38,17 @@ impl Sender {
     /// ```
     #[must_use]
     pub fn class(&self) -> Class {
-        todo!()
+        todo!("#68")
     }
 
     /// Sends `message` whole. It waits while the peer's flow control has no room,
-    /// and returns once the stream holds the message, not when the peer has it.
+    /// and returns once the stream holds the message, not when the peer has it. If the
+    /// future drops before it completes, the stream resets with `Code(0)`, because
+    /// part of the message may be sent.
     ///
     /// # Errors
     ///
-    /// [`Error::TooLarge`] when `message` is over
+    /// [`Error::TooLarge`] when `message` is over the peer's
     /// [`Config::message_bytes_max`](crate::Config::message_bytes_max),
     /// [`Error::Stopped`] when the peer stopped reading, or the error that ended the
     /// session.
@@ -59,7 +62,7 @@ impl Sender {
     /// ```
     pub async fn send(&mut self, message: Block) -> Result<(), Error> {
         let _ = message;
-        todo!()
+        todo!("#68")
     }
 
     /// Ends the stream after the messages already sent. The peer's
@@ -76,7 +79,7 @@ impl Sender {
     /// }
     /// ```
     pub fn finish(self) -> Result<(), Error> {
-        todo!()
+        todo!("#68")
     }
 
     /// Cancels the stream: messages not yet delivered drop, and the peer sees
@@ -89,7 +92,7 @@ impl Sender {
     /// ```
     pub fn reset(self, code: Code) {
         let _ = code;
-        todo!()
+        todo!("#68")
     }
 }
 
@@ -118,8 +121,9 @@ impl Receiver {
     ///
     /// # Errors
     ///
-    /// [`Error::Reset`] when the sender cancelled the stream, or the error that ended
-    /// the session.
+    /// [`Error::Reset`] when the sender cancelled the stream, [`Error::Pool`] when the
+    /// pool has no room for the next message (it stays queued), or the error that
+    /// ended the session.
     ///
     /// ```
     /// use block::Block;
@@ -130,7 +134,7 @@ impl Receiver {
     /// }
     /// ```
     pub async fn recv(&mut self) -> Result<Option<Block>, Error> {
-        todo!()
+        todo!("#68")
     }
 
     /// Asks the sender to stop: messages not yet received drop, and the sender sees
@@ -143,7 +147,7 @@ impl Receiver {
     /// ```
     pub fn stop(self, code: Code) {
         let _ = code;
-        todo!()
+        todo!("#68")
     }
 }
 
