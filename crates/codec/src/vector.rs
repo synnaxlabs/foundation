@@ -194,7 +194,7 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// One vector read from a series, with its header and length checked.
+/// One vector read from a series, with its header, length, and run lengths checked.
 #[derive(Debug)]
 pub(crate) struct Vector<'a> {
     plan: Plan,
@@ -331,12 +331,19 @@ impl Vector<'_> {
                     .0
                     .iter()
                     .zip(lengths.as_chunks::<2>().0);
-                // `read` checks that the lengths sum to the samples in `out`.
                 let mut rest = samples.into_slice();
                 for (value, len) in runs {
                     let len = usize::from(u16::from_le_bytes(*len));
-                    let (run, after) = mem::take(&mut rest).split_at_mut(len);
-                    run.fill(*value);
+                    let (run, after) =
+                        mem::take(&mut rest).split_at_mut_checked(len).expect(
+                            "invariant: `read` checks that the runs sum to the samples",
+                        );
+                    // Without optimization, only a fill of bytes is a `memset`.
+                    if let [byte] = value.as_slice() {
+                        run.as_flattened_mut().fill(*byte);
+                    } else {
+                        run.fill(*value);
+                    }
                     rest = after;
                 }
             }

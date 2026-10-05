@@ -40,7 +40,7 @@ struct Shape {
     lens: &'static [usize],
 }
 
-const SHAPES: [Shape; 23] = [
+const SHAPES: [Shape; 26] = [
     Shape::new("adc16.s1", Scalar::I16, create_adc16_s1, 3.933, EVERY),
     Shape::new("adc16.s256", Scalar::I16, create_adc16_s256, 1.352, FULL),
     Shape::new("adc16.white", Scalar::I16, create_adc16_white, 0.994, FULL),
@@ -49,6 +49,9 @@ const SHAPES: [Shape; 23] = [
     Shape::new("f64.cal", Scalar::F64, create_f64_cal, 0.994, FULL),
     Shape::new("u8.state", Scalar::U8, create_state, 229.0, EVERY),
     Shape::new("u32.state", Scalar::U32, create_state, 422.0, FULL),
+    Shape::new("u8.runs64", Scalar::U8, create_runs::<64, 512>, 58.61, FULL),
+    Shape::new("u8.runs4", Scalar::U8, create_runs::<4, 16>, 3.087, FULL),
+    Shape::new("u64.runs2", Scalar::U64, create_runs::<2, 8>, 3.550, FULL),
     Shape::new("ts.fixed", Scalar::Stamp, create_ts_fixed, 339.6, FULL),
     Shape::new("ts.soft", Scalar::Stamp, create_ts_soft, 3.018, EVERY),
     Shape::new("u8.delta3", Scalar::U8, create_walk::<3>, 2.626, FULL),
@@ -241,6 +244,23 @@ fn create_state() -> Vec<i64> {
             }
             left -= 1;
             state
+        })
+        .collect()
+}
+
+/// Runs of `MIN` to `MAX - 1` samples, each of one uniform value, which RLE packs.
+fn create_runs<const MIN: u64, const MAX: u64>() -> Vec<i64> {
+    let mut random = Random(MIN);
+    let mut value = 0;
+    let mut left = 0;
+    (0..LEN)
+        .map(|_| {
+            if left == 0 {
+                value = random.next().cast_signed();
+                left = MIN + random.next() % (MAX - MIN);
+            }
+            left -= 1;
+            value
         })
         .collect()
 }
