@@ -375,8 +375,10 @@ How to read this record:
   little-endian, fixed width; `last` is a presence byte (0 or 1) then the stamp,
   which is 0 and not read under presence 0. The entries' bytes follow the table in
   order, each `bytes` long, so one table block and the callers' blocks make one
-  vectored write with no copy and no block per entry. A body that ends early, an
-  unknown path or presence byte, or bytes after the last entry is a wrong shape.
+  vectored write with no copy and no block per entry. A body holds at most 1023
+  entries, so that write stays within `IOV_MAX`. A body that ends early, a count
+  over 1023, an unknown path or presence byte, or bytes after the last entry is a
+  wrong shape.
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
@@ -1483,6 +1485,10 @@ How to read this record:
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
   session under the architecture delegation.
+- **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
+  a crash keeps or loses whole in a write that is not yet durable. It is a constant,
+  so that a store format asserts against it when it compiles. A length read from the
+  device at run time lost (#569).
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended. A `Power` crash keeps, for each 512-byte
@@ -1540,6 +1546,12 @@ How to read this record:
   host ran at 80 to 86% CPU with 14 runs queued, so a second host, an m7g.4xlarge (16
   vCPU, 300 GB) with six runners (`foundation-arm-d` to `-i`), joined it. The person
   chose "m7g.4xlarge, 6 runners".
+- **LINUX CI (2026-10-05)** For the alpha, tests run only on Linux (x86-64 and ARM).
+  No CI job runs on macOS or Windows. The design stays cross-OS: each C9d target must
+  still be a valid build, so OS-specific code goes only in `os`. The person said: "As
+  long as our systems are designed to cross compile i'm ok wiht only testing against
+  linux for an alpha. as long as the system is designed for cross os deployment"
+  (#574).
 
 ### 1.15 Releases
 

@@ -1040,6 +1040,51 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
     });
 }
 
+/// A whole record of 1023 entries opens, and one of 1024 is a wrong shape.
+#[test]
+fn a_record_over_the_most_entries_is_invalid() {
+    for (count, opens) in [(1023_u32, true), (1024, false)] {
+        run(102, Memory::default(), move |shard| async move {
+            let ring = layout(64 * BLOCK, 100_000);
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens");
+            let a = slots.assign(key(1));
+            let len = 4 + 51 * to_usize(count.into());
+            let parts = [shard.block(len - 55)];
+            buffer
+                .append(&[entry(1, a, Path::Live, 0, 1, Some(1), &parts)])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            drop(buffer);
+            let mut body = count.to_le_bytes().to_vec();
+            for first in 0..u64::from(count) {
+                let last = i64::try_from(first + 1).expect("fits");
+                body.extend_from_slice(&1_u128.to_le_bytes());
+                body.push(0);
+                body.extend_from_slice(&first.to_le_bytes());
+                body.extend_from_slice(&1_u32.to_le_bytes());
+                body.extend_from_slice(&7_i64.to_le_bytes());
+                body.push(1);
+                body.extend_from_slice(&last.to_le_bytes());
+                body.push(0);
+                body.extend_from_slice(&0_u32.to_le_bytes());
+            }
+            assert_eq!(body.len(), len);
+            shard.tamper_record(BLOCK, 0, &body);
+            let mut slots = Slots::new();
+            let opened = shard.open(ring, &mut slots).await;
+            let tails =
+                opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+            let expected = if opens {
+                Ok(tail(count.into(), Some(count.into())))
+            } else {
+                Err(Error::Invalid { offset: BLOCK })
+            };
+            assert_eq!(tails, expected, "{count} entries");
+        });
+    }
+}
+
 #[test]
 fn a_record_with_an_entry_past_the_last_seq_is_invalid() {
     run(103, Memory::default(), |shard| async move {
@@ -1413,5 +1458,37 @@ fn a_drop_during_a_commit_ends_the_task_after_the_sync() {
             tail(1, Some(1)),
             "the entry queued at the drop was not written"
         );
+    });
+}
+
+#[test]
+fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
+    run(101, Memory::default(), |mut shard| async move {
+        let parts_pool = Rc::clone(&shard.pool);
+        let config = block::Config { budget: 96 << 10 };
+        shard.pool =
+            Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+        assert_eq!(shard.pool.largest(), 80 << 10);
+        let ring = layout(64 * BLOCK, 100_000);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let mut part = parts_pool.alloc(30_000).expect("the pool has a block");
+        part.fill(7);
+        let parts = [part.freeze()];
+        buffer
+            .append(&[
+                entry(1, a, Path::Live, 0, 1, Some(1), &parts),
+                entry(1, a, Path::Live, 1, 1, Some(2), &parts),
+                entry(1, a, Path::Live, 2, 1, Some(3), &parts),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(3)));
+        drop(buffer);
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(3, Some(3))));
     });
 }
