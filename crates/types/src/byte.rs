@@ -179,6 +179,7 @@ mod tests {
 
     #[test]
     fn reads_a_number_and_a_unit() {
+        let largest = format!("16777215{}", &ONE_BYTE_SHORT[1..]);
         for (text, size) in [
             ("0B", Size::ZERO),
             ("1B", Size::from_bytes(1)),
@@ -198,6 +199,7 @@ mod tests {
                 Size::from_bytes(1),
             ),
             (ONE_BYTE_SHORT, Size::from_bytes((1 << 40) - 1)),
+            (&largest, Size::from_bytes(u64::MAX)),
         ] {
             assert_eq!(text.parse(), Ok(size), "{text}");
         }
