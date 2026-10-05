@@ -322,12 +322,12 @@ mod tests {
     use std::sync::Arc;
 
     use proptest::prelude::*;
-    use types::channel::Slot;
-    use types::frame::key_set::{Group, Interner};
+    use types::channel::{self, Slot};
+    use types::frame::key_set::Group;
     use types::frame::{Form, Frame, Path, Range};
 
     use super::*;
-    use crate::common::pool;
+    use crate::common::{interner, key, pool};
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -426,17 +426,17 @@ mod tests {
     /// 3 (index 1), 4 (`U16`, group 1), 5 (`F64`, group 0).
     fn two_groups() -> Arc<KeySet> {
         let zero = Group {
-            index: Slot::new(1),
+            index: key(Slot::new(1)),
             data: &[
-                (Slot::new(2), Type::Scalar(Scalar::I32)),
-                (Slot::new(5), Type::Scalar(Scalar::F64)),
+                (key(Slot::new(2)), Type::Scalar(Scalar::I32)),
+                (key(Slot::new(5)), Type::Scalar(Scalar::F64)),
             ],
         };
         let one = Group {
-            index: Slot::new(3),
-            data: &[(Slot::new(4), Type::Scalar(Scalar::U16))],
+            index: key(Slot::new(3)),
+            data: &[(key(Slot::new(4)), Type::Scalar(Scalar::U16))],
         };
-        Interner::new().intern(&[zero, one])
+        interner().intern(&[zero, one])
     }
 
     /// A write of both groups of [`two_groups`], with every entry present.
@@ -462,20 +462,23 @@ mod tests {
     /// Two groups of 30 `U8` channels each, with interleaved slots, and a write of
     /// every entry.
     fn many_series() -> (Arc<KeySet>, BTreeMap<u32, Samples>) {
-        let data: Vec<Vec<(Slot, Type)>> = (0..2)
+        let data: Vec<Vec<(channel::Key, Type)>> = (0..2)
             .map(|group| {
                 (0..30)
-                    .map(|n| (Slot::new(3 + 2 * n + group), Type::Scalar(Scalar::U8)))
+                    .map(|n| {
+                        let slot = Slot::new(3 + 2 * n + group);
+                        (key(slot), Type::Scalar(Scalar::U8))
+                    })
                     .collect()
             })
             .collect();
-        let set = Interner::new().intern(&[
+        let set = interner().intern(&[
             Group {
-                index: Slot::new(1),
+                index: key(Slot::new(1)),
                 data: &data[0],
             },
             Group {
-                index: Slot::new(2),
+                index: key(Slot::new(2)),
                 data: &data[1],
             },
         ]);
@@ -737,13 +740,13 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is of key set 1, not of key set 0")]
             fn on_a_frame_of_another_key_set() {
-                let mut interner = Interner::new();
+                let mut interner = interner();
                 let set = interner.intern(&[Group {
-                    index: Slot::new(1),
+                    index: key(Slot::new(1)),
                     data: &[],
                 }]);
                 let other = interner.intern(&[Group {
-                    index: Slot::new(2),
+                    index: key(Slot::new(2)),
                     data: &[],
                 }]);
                 let write = BTreeMap::from([(
@@ -806,9 +809,9 @@ mod tests {
             #[test]
             #[should_panic(expected = "codec does not take a series of String yet")]
             fn on_a_series_of_a_type_codec_does_not_take() {
-                let set = Interner::new().intern(&[Group {
-                    index: Slot::new(1),
-                    data: &[(Slot::new(2), Type::String)],
+                let set = interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[(key(Slot::new(2)), Type::String)],
                 }]);
                 let samples = Samples {
                     count: 1,
@@ -928,14 +931,19 @@ mod tests {
                         (index, data)
                     })
                     .collect();
+                let keys: Vec<Vec<(channel::Key, Type)>> = data
+                    .iter()
+                    .map(|(_, data)| data.iter().map(|&(s, t)| (key(s), t)).collect())
+                    .collect();
                 let shapes: Vec<Group<'_>> = data
                     .iter()
-                    .map(|(index, data)| Group {
-                        index: *index,
+                    .zip(&keys)
+                    .map(|((index, _), data)| Group {
+                        index: key(*index),
                         data,
                     })
                     .collect();
-                let set = Interner::new().intern(&shapes);
+                let set = interner().intern(&shapes);
                 let mut write = BTreeMap::new();
                 for (n, (index, data)) in data.iter().enumerate() {
                     let &(_, present, count) = &groups[n];
