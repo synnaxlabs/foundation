@@ -556,14 +556,15 @@ How to read this record:
   the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
   Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. `Measurement::unknown(at, offset)` gives the
-  "unknown" error, so a source never writes 36500 days itself: 1 ns less is known and
-  votes. Approved by the coordinator (#144). An exchange with an error over 36500 days
-  fails with `Bound`, and an overlap whose readings allow one before drift gives `None`:
-  a stopped bound stored as a measurement could miss the true offset. Decided by the
-  `time` builder (#258). Each function returns only the errors it can give: one `Error`
-  per module (`exchange`, `overlap`, `combine`), and `Option` where a caller does the
-  same for each cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by
-  the coordinator (#272).
+  "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
+  bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
+  (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
+  whose readings allow one before drift gives `None`: a stopped bound stored as a
+  measurement could miss the true offset. Decided by the `time` builder (#258). Each
+  function returns only the errors it can give: one `Error` per module (`exchange`,
+  `overlap`, `combine`), and `Option` where a caller does the same for each cause
+  (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the coordinator
+  (#272).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -609,10 +610,10 @@ How to read this record:
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
-  `clock` reads that as the largest error, 36500 days: a node alone still gets OS time,
-  with an error that says "unknown", and beside a known bound the reading does not vote
-  (ESTIMATE COMBINE). A fixed invented error lost: a wrong value gives a bound that is
-  not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
+  `clock` reads that as `Measurement::unknown` (36500 days): a node alone still gets OS
+  time, with an error that says "unknown", and beside a known bound the reading does not
+  vote (ESTIMATE COMBINE). A fixed invented error lost: a wrong value gives a bound that
+  is not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
   'unknown'"), #144. The split between `env::wall` and `clock` is from #172. When known
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
