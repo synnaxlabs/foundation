@@ -71,6 +71,16 @@ impl Measurement {
     }
 }
 
+/// The center and half-width of a hull from `low` to `high`, rounded outward.
+pub(crate) fn center(low: i128, high: i128) -> (Span, Span) {
+    let offset = (low + high).div_euclid(2);
+    let offset = i64::try_from(offset)
+        .expect("invariant: the hull's midpoint lies between two bound centers");
+    let error = i64::try_from(high - i128::from(offset))
+        .expect("invariant: the hull lies inside one widened bound");
+    (Span::from_nanos(offset), Span::from_nanos(error))
+}
+
 #[cfg(test)]
 mod tests {
     use types::time::{Monotonic, Span};

@@ -12,6 +12,8 @@ mod combine;
 mod drift;
 mod filter;
 mod measurement;
+#[cfg(test)]
+mod world;
 
 use std::fmt;
 
