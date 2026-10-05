@@ -470,8 +470,25 @@ impl Rate {
     ///
     /// When `num` or `den` is zero.
     pub fn new(num: u64, den: u64) -> Result<Self, ParseError> {
-        let _ = (num, den);
-        todo!()
+        Self::reduced(u128::from(num), u128::from(den)).map_err(|expected| ParseError {
+            input: format!("{num}/{den}"),
+            expected,
+        })
+    }
+
+    /// Reduces `num / den`, or returns what the parts should be.
+    fn reduced(num: u128, den: u128) -> Result<Self, &'static str> {
+        if num == 0 {
+            return Err(RATE_ZERO);
+        }
+        if den == 0 {
+            return Err(RATE_DENOMINATOR);
+        }
+        let divisor = gcd(num, den);
+        match (u64::try_from(num / divisor), u64::try_from(den / divisor)) {
+            (Ok(num), Ok(den)) => Ok(Self { num, den }),
+            _ => Err(RATE_RANGE),
+        }
     }
 
     /// The numerator of the reduced fraction.
@@ -493,28 +510,103 @@ impl Rate {
     ///
     /// When the result does not fit in a [`Stamp`].
     #[must_use]
+    #[track_caller]
     pub fn stamp(self, start: Stamp, n: u64) -> Stamp {
-        let _ = (start, n);
-        todo!()
+        let seconds = u128::from(n) * u128::from(self.den);
+        let num = u128::from(self.num);
+        let per_second = NANOS_PER_SECOND.unsigned_abs().into();
+        let fraction = seconds % num * per_second / num;
+        let stamp = (seconds / num)
+            .checked_mul(per_second)
+            .and_then(|whole| i64::try_from(whole + fraction).ok())
+            .and_then(|nanos| start.checked_add(Span(nanos)));
+        let Some(stamp) = stamp else {
+            panic!("stamp overflow: sample {n} at {self} after {start}")
+        };
+        stamp
     }
 }
 
 impl fmt::Display for Rate {
-    /// Writes the rate in hertz: `1kHz`, `100Hz`, `1/3Hz`.
+    /// Writes the rate in hertz: `1kHz`, `100Hz`, `1/3Hz`. A whole rate uses the
+    /// largest of `M` and `k` that divides it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        if self.den != 1 {
+            return write!(f, "{}/{}Hz", self.num, self.den);
+        }
+        for (prefix, scale) in [("M", 1_000_000), ("k", 1_000)] {
+            if self.num.is_multiple_of(scale) {
+                return write!(f, "{}{prefix}Hz", self.num / scale);
+            }
+        }
+        write!(f, "{}Hz", self.num)
     }
 }
 
 impl FromStr for Rate {
     type Err = ParseError;
 
-    /// Reads a rate in hertz, with an optional `k` or `M` prefix or a fraction.
+    /// Reads a rate in hertz: a whole number, a decimal, or a fraction, with an
+    /// optional `k` or `M` prefix (`100Hz`, `2.5MHz`, `1/3Hz`).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let _ = s;
-        todo!()
+        let error = |expected| ParseError {
+            input: s.into(),
+            expected,
+        };
+        let value = s.strip_suffix("Hz").ok_or_else(|| error(RATE_SYNTAX))?;
+        let (value, scale) = if let Some(value) = value.strip_suffix('M') {
+            (value, 1_000_000)
+        } else if let Some(value) = value.strip_suffix('k') {
+            (value, 1_000)
+        } else {
+            (value, 1)
+        };
+        let (num, den) = match value.split_once('/') {
+            Some((num, den)) => (whole(num), whole(den)),
+            None => decimal(value),
+        };
+        let num = num.and_then(|num| num.checked_mul(scale).ok_or(RATE_RANGE));
+        Self::reduced(num.map_err(error)?, den.map_err(error)?).map_err(error)
     }
+}
+
+const RATE_SYNTAX: &str = "a rate in hertz, such as 100Hz, 2.5kHz, 1MHz, or 1/3Hz";
+const RATE_ZERO: &str = "a rate above zero";
+const RATE_DENOMINATOR: &str = "a fraction with a denominator above zero";
+const RATE_RANGE: &str =
+    "a rate whose reduced numerator and denominator fit in 64 bits";
+
+/// Reads digits as a whole number, or returns what the text should be.
+fn whole(text: &str) -> Result<u128, &'static str> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(RATE_SYNTAX);
+    }
+    text.bytes()
+        .try_fold(0_u128, |n, b| {
+            n.checked_mul(10)?.checked_add(u128::from(b - b'0'))
+        })
+        .ok_or(RATE_RANGE)
+}
+
+/// Reads `<digits>[.<digits>]` as a numerator and denominator.
+fn decimal(text: &str) -> (Result<u128, &'static str>, Result<u128, &'static str>) {
+    let (integer, fraction) = text.split_once('.').unwrap_or((text, "0"));
+    if fraction.is_empty() || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return (Err(RATE_SYNTAX), Ok(1));
+    }
+    let num = whole(integer).and_then(|_| whole(&format!("{integer}{fraction}")));
+    let den = fraction
+        .bytes()
+        .try_fold(1_u128, |den, _| den.checked_mul(10))
+        .ok_or(RATE_RANGE);
+    (num, den)
+}
+
+fn gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 #[cfg(test)]
@@ -922,6 +1014,217 @@ mod tests {
                 let (start, end) = (a.min(b), a.max(b));
                 let range = range(Stamp::from_nanos(start), Stamp::from_nanos(end));
                 prop_assert_eq!(range.to_string().parse(), Ok(range));
+            }
+        }
+    }
+
+    mod rate {
+        use super::*;
+
+        const RATE_SYNTAX: &str = super::super::RATE_SYNTAX;
+
+        fn rate(num: u64, den: u64) -> Rate {
+            Rate::new(num, den).unwrap()
+        }
+
+        mod new {
+            use super::*;
+
+            #[test]
+            fn reduces_the_fraction() {
+                let rate = rate(6, 4);
+                assert_eq!((rate.num(), rate.den()), (3, 2));
+                assert_eq!(rate, Rate::new(3, 2).unwrap());
+            }
+
+            #[test]
+            fn rejects_zero() {
+                assert_eq!(Rate::new(0, 1), Err(error("0/1", RATE_ZERO)));
+                assert_eq!(Rate::new(1, 0), Err(error("1/0", RATE_DENOMINATOR)));
+            }
+        }
+
+        mod stamp {
+            use super::*;
+
+            #[test]
+            fn rounds_each_sample_down_to_the_nanosecond() {
+                let start = seconds(1_791_115_200);
+                for (rate, n, offset) in [
+                    (rate(1_000, 1), 3, 3_000_000),
+                    (rate(3, 1), 1, 333_333_333),
+                    (rate(3, 1), 2, 666_666_666),
+                    (rate(3, 1), 3, NANOS_PER_SECOND),
+                    (rate(1, 3), 1, 3 * NANOS_PER_SECOND),
+                    (rate(1, 1), 0, 0),
+                ] {
+                    let expected = start + Span::from_nanos(offset);
+                    assert_eq!(rate.stamp(start, n), expected, "{rate} sample {n}");
+                }
+            }
+
+            #[test]
+            fn never_drifts() {
+                let day = 86_400;
+                assert_eq!(
+                    rate(48_000, 1).stamp(Stamp::EPOCH, 48_000 * day),
+                    seconds(86_400)
+                );
+                assert_eq!(
+                    rate(30_000, 1_001).stamp(Stamp::EPOCH, 30_000 * day),
+                    seconds(1_001 * 86_400)
+                );
+            }
+
+            #[test]
+            fn reaches_the_last_stamp() {
+                let max = i64::MAX.unsigned_abs();
+                let rate = rate(1_000_000_000, 1);
+                assert_eq!(rate.stamp(Stamp::EPOCH, max), Stamp::from_nanos(i64::MAX));
+                let rate = super::rate(1, u64::MAX);
+                assert_eq!(
+                    rate.stamp(Stamp::from_nanos(i64::MIN), 0),
+                    Stamp::from_nanos(i64::MIN)
+                );
+            }
+
+            #[test]
+            #[should_panic(
+                expected = "stamp overflow: sample 9223372036854775808 at 1000MHz after \
+                            1970-01-01T00:00:00.000000000Z"
+            )]
+            fn panics_past_the_last_stamp() {
+                let rate = rate(1_000_000_000, 1);
+                std::hint::black_box(rate.stamp(Stamp::EPOCH, 1 << 63));
+            }
+
+            #[test]
+            #[should_panic(
+                expected = "stamp overflow: sample 18446744073709551615 at 1/18446744073709551615Hz"
+            )]
+            fn panics_when_the_offset_passes_u128() {
+                let rate = rate(1, u64::MAX);
+                std::hint::black_box(rate.stamp(Stamp::EPOCH, u64::MAX));
+            }
+
+            proptest! {
+                #[test]
+                fn matches_exact_math(
+                    num in 1_u64..1 << 40,
+                    den in 1_u64..1 << 40,
+                    n in 0_u64..1 << 40,
+                ) {
+                    let rate = rate(num, den);
+                    let exact = u128::from(n) * u128::from(rate.den()) * 1_000_000_000
+                        / u128::from(rate.num());
+                    let expected = i64::try_from(exact).ok().map(Span::from_nanos);
+                    let actual = expected.map(|_| rate.stamp(Stamp::EPOCH, n) - Stamp::EPOCH);
+                    prop_assert_eq!(actual, expected);
+                }
+            }
+        }
+
+        mod display {
+            use super::*;
+
+            #[test]
+            fn uses_the_largest_exact_prefix_or_a_fraction() {
+                for (rate, text) in [
+                    (rate(1, 1), "1Hz"),
+                    (rate(100, 1), "100Hz"),
+                    (rate(1_000, 1), "1kHz"),
+                    (rate(1_500, 1), "1500Hz"),
+                    (rate(2_500_000, 1), "2500kHz"),
+                    (rate(3_000_000, 1), "3MHz"),
+                    (rate(1, 3), "1/3Hz"),
+                    (rate(5, 2), "5/2Hz"),
+                    (
+                        rate(u64::MAX, u64::MAX - 1),
+                        "18446744073709551615/18446744073709551614Hz",
+                    ),
+                ] {
+                    assert_eq!(rate.to_string(), text);
+                }
+            }
+        }
+
+        mod parse {
+            use super::*;
+
+            #[test]
+            fn reads_whole_decimal_and_fraction_rates() {
+                for (text, rate) in [
+                    ("100Hz", rate(100, 1)),
+                    ("1kHz", rate(1_000, 1)),
+                    ("2.5kHz", rate(2_500, 1)),
+                    ("2.5MHz", rate(2_500_000, 1)),
+                    ("0.5Hz", rate(1, 2)),
+                    ("33.3333Hz", rate(333_333, 10_000)),
+                    ("1.000Hz", rate(1, 1)),
+                    ("1/3Hz", rate(1, 3)),
+                    ("2/6Hz", rate(1, 3)),
+                    ("1/3kHz", rate(1_000, 3)),
+                    ("0.000000000000000001MHz", rate(1, 1_000_000_000_000)),
+                ] {
+                    assert_eq!(text.parse(), Ok(rate), "{text}");
+                }
+            }
+
+            #[test]
+            fn rejects_bad_syntax() {
+                for text in [
+                    "", "Hz", "100", "100hz", "1k", "1 Hz", " 1Hz", "-1Hz", "+1Hz",
+                    "1e3Hz", "1.Hz", ".5Hz", "1.5.5Hz", "1/Hz", "/3Hz", "1.5/2Hz",
+                    "1/2/3Hz", "1GHz", "1kkHz", "1MkHz",
+                ] {
+                    assert_eq!(
+                        text.parse::<Rate>(),
+                        Err(error(text, RATE_SYNTAX)),
+                        "{text}"
+                    );
+                }
+            }
+
+            #[test]
+            fn rejects_zero() {
+                for text in ["0Hz", "0.0kHz", "0/3Hz"] {
+                    assert_eq!(
+                        text.parse::<Rate>(),
+                        Err(error(text, RATE_ZERO)),
+                        "{text}"
+                    );
+                }
+                assert_eq!(
+                    "1/0Hz".parse::<Rate>(),
+                    Err(error("1/0Hz", RATE_DENOMINATOR))
+                );
+            }
+
+            #[test]
+            fn rejects_rates_that_do_not_fit() {
+                for text in [
+                    "18446744073709551616Hz",
+                    "18446744073709552kHz",
+                    "0.00000000000000000001Hz",
+                    "1/18446744073709551616Hz",
+                    "999999999999999999999999999999999999999Hz",
+                ] {
+                    assert_eq!(
+                        text.parse::<Rate>(),
+                        Err(error(text, RATE_RANGE)),
+                        "{text}"
+                    );
+                }
+                assert_eq!("18446744073709551615Hz".parse(), Ok(rate(u64::MAX, 1)));
+                assert_eq!("36893488147419103230/2Hz".parse(), Ok(rate(u64::MAX, 1)));
+            }
+
+            proptest! {
+                #[test]
+                fn rates_round_trip(num in 1..=u64::MAX, den in 1..=u64::MAX) {
+                    let rate = rate(num, den);
+                    prop_assert_eq!(rate.to_string().parse(), Ok(rate));
+                }
             }
         }
     }
