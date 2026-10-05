@@ -11,6 +11,9 @@ use crate::{Error, Unwritable};
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
 const WIDTH: usize = 88;
 
+/// What each level of a body or a value goes in by.
+pub(crate) const INDENT: &str = "  ";
+
 /// Writes `document` as HCL text that [`read`](crate::read) reads as an equal
 /// Document.
 ///
@@ -36,12 +39,8 @@ pub fn write(document: &Document) -> Result<String, Vec<Error>> {
         }]);
     }
     let mut writer = Writer::default();
-    writer.body(document.attributes.iter(), &document.blocks, 0);
-    if writer.errors.is_empty() {
-        Ok(writer.out)
-    } else {
-        Err(writer.errors)
-    }
+    writer.body(document.attributes.iter(), &document.blocks, 0, false);
+    writer.finish()
 }
 
 /// A value with items.
@@ -87,7 +86,7 @@ impl<'a> Items<'a> {
 /// accepts.
 #[derive(Default)]
 pub(crate) struct Writer<'a> {
-    pub(crate) out: String,
+    out: String,
     errors: Vec<Error>,
     /// What each line starts with, before its indent.
     margin: &'a str,
@@ -106,15 +105,26 @@ impl<'a> Writer<'a> {
         }
     }
 
+    /// The text written, or each part that HCL text cannot hold.
+    pub(crate) fn finish(self) -> Result<String, Vec<Error>> {
+        if self.errors.is_empty() {
+            Ok(self.out)
+        } else {
+            Err(self.errors)
+        }
+    }
+
     /// Writes each attribute on its own lines, then each block after a blank line,
-    /// `indent` levels in.
+    /// `indent` levels in. `preceded` tells that an item of the body is before them,
+    /// so the first block gets a blank line too.
     pub(crate) fn body<'d>(
         &mut self,
         attributes: impl IntoIterator<Item = &'d Attribute>,
         blocks: impl IntoIterator<Item = &'d Block>,
         indent: usize,
+        preceded: bool,
     ) {
-        let mut written = false;
+        let mut written = preceded;
         for attribute in attributes {
             self.pad(indent);
             if lex::word(&attribute.key) != Some(lex::Kind::Identifier) {
@@ -128,7 +138,7 @@ impl<'a> Writer<'a> {
         }
         for block in blocks {
             if written {
-                self.out.push('\n');
+                self.gap();
             }
             self.pad(indent);
             self.block(block, indent);
@@ -158,6 +168,7 @@ impl<'a> Writer<'a> {
             body.attributes.iter(),
             &body.blocks,
             indent.saturating_add(1),
+            false,
         );
         self.pad(indent);
         self.out.push('}');
@@ -292,10 +303,15 @@ impl<'a> Writer<'a> {
         self.errors.push(Error::Unwritable { span, part });
     }
 
+    /// Writes the blank line between an item and a block after it.
+    pub(crate) fn gap(&mut self) {
+        self.out.push('\n');
+    }
+
     fn pad(&mut self, indent: usize) {
         self.out.push_str(self.margin);
         for _ in 0..indent {
-            self.out.push_str("  ");
+            self.out.push_str(INDENT);
         }
     }
 

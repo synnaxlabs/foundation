@@ -5,14 +5,15 @@ use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
 use crate::parse::Ends;
-use crate::write::Writer;
+use crate::write::{INDENT, Writer};
 use crate::{Error, read, write};
 
 /// Changes `text` so that [`read`] reads it as `document`, and returns the new text.
-/// Each part whose value does not change keeps its bytes, with its comments, blank
-/// lines, and order. A changed value is written over the old one. A new attribute
-/// or block goes into its body, and a removed one is cut with its lines and the
-/// comments directly above it.
+/// Each attribute and block that keeps its value and its place keeps its bytes, with
+/// its comments and blank lines. A changed value and a changed block on one line are
+/// written again, without the comments in them. A block that moves past another is
+/// cut and written again. A new attribute or block goes into its body, and a removed
+/// one is cut with its lines and the comments directly above it.
 ///
 /// # Errors
 ///
@@ -26,14 +27,18 @@ pub fn update(
     let old = read(source, text)?;
     write(document)?;
     let file = File::new(source, text);
+    let mut diff = Diff {
+        file: &file,
+        edits: Vec::new(),
+    };
+    let end = file.marks.len().saturating_sub(1);
     let body = Body {
-        margin: String::new(),
+        margin: file.margin_of_first(0..end).unwrap_or_default().to_owned(),
         start: file.floor,
         end: text.len(),
     };
-    let mut edits = Vec::new();
-    file.body(&old, document, &body, &mut edits);
-    Ok(file.apply(edits))
+    diff.body(&old, document, &body);
+    Ok(file.apply(diff.edits))
 }
 
 /// A token's place in the text.
@@ -59,6 +64,28 @@ struct Body {
     /// Where new text after the last item goes: the end of the text, or the start of
     /// the line of `}`.
     end: usize,
+}
+
+/// New items that wait for a place in a body.
+#[derive(Default)]
+struct Pending<'d> {
+    /// The end of the lines of the last kept item.
+    anchor: Option<usize>,
+    attributes: Vec<&'d Attribute>,
+    blocks: Vec<&'d Block>,
+}
+
+impl Pending<'_> {
+    /// A writer that took the waiting items, or `None` when none wait.
+    fn writer<'b>(&mut self, body: &'b Body) -> Option<Writer<'b>> {
+        if self.attributes.is_empty() && self.blocks.is_empty() {
+            return None;
+        }
+        let mut writer = Writer::new(&body.margin, 0);
+        let (attributes, blocks) = (self.attributes.drain(..), self.blocks.drain(..));
+        writer.body(attributes, blocks, 0, self.anchor.is_some());
+        Some(writer)
+    }
 }
 
 /// A text that `read` takes, with its tokens. Between two tokens there are only
@@ -89,11 +116,10 @@ impl<'a> File<'a> {
             if token.kind != lex::Kind::End {
                 continue;
             }
-            // A comment before a new line takes its `\r`.
-            let crlf = marks.iter().find(|mark| mark.newline).is_some_and(|mark| {
-                text.get(..mark.end)
-                    .is_some_and(|line| line.ends_with("\r\n"))
-            });
+            // Not from the tokens: a heredoc or a comment can hold the first line end.
+            let crlf = text
+                .split_once('\n')
+                .is_some_and(|(line, _)| line.ends_with('\r'));
             return Self {
                 text,
                 marks,
@@ -106,200 +132,18 @@ impl<'a> File<'a> {
         unreachable!("invariant: each token but the last covers a byte")
     }
 
-    /// Adds the edits that change a body from `old` to `new`.
-    fn body(&self, old: &Document, new: &Document, body: &Body, edits: &mut Vec<Edit>) {
-        let mut cuts = Vec::new();
-        let front = self.attributes(old, new, body, edits, &mut cuts);
-        self.blocks(old, new, body, front, edits, &mut cuts);
-        cuts.sort_by_key(|cut| cut.start);
-        let mut runs: Vec<Range<usize>> = Vec::new();
-        for cut in cuts {
-            match runs.last_mut() {
-                Some(run) if self.blank(run.end, cut.start) => run.end = cut.end,
-                _ => runs.push(cut),
-            }
-        }
-        for run in runs {
-            edits.push(Edit {
-                range: self.widen(run, body),
-                text: String::new(),
-            });
-        }
-    }
-
-    /// Adds the edits that change the attributes of a body, and the lines to cut.
-    /// Puts each new attribute after the kept one before it in key order, and
-    /// returns the new attributes before the first kept one, if no attribute is
-    /// kept.
-    fn attributes<'d>(
-        &self,
-        old: &Document,
-        new: &'d Document,
-        body: &Body,
-        edits: &mut Vec<Edit>,
-        cuts: &mut Vec<Range<usize>>,
-    ) -> Vec<&'d Attribute> {
-        let mut previous = None;
-        let mut front = Vec::new();
-        for attribute in new.attributes.iter() {
-            let Some(was) = old.attributes.get(&attribute.key) else {
-                match previous {
-                    Some(at) => edits.push(insert(at, items(body, &[attribute], &[]))),
-                    None => front.push(attribute),
-                }
-                continue;
-            };
-            let lines = self.lines(was.key_span, was.value.span);
-            if previous.is_none() && !front.is_empty() {
-                edits.push(insert(lines.start, items(body, &front, &[])));
-                front.clear();
-            }
-            if was.value != attribute.value {
-                edits.push(self.value(was, attribute));
-            }
-            previous = Some(lines.end);
-        }
-        for attribute in old.attributes.iter() {
-            if new.attributes.get(&attribute.key).is_none() {
-                cuts.push(self.lines(attribute.key_span, attribute.value.span));
-            }
-        }
-        front
-    }
-
-    /// Adds the edits that change the blocks of a body, and the lines to cut. Puts
-    /// each new block after the kept one before it, and `front` before the first
-    /// kept block.
-    fn blocks(
-        &self,
-        old: &Document,
-        new: &Document,
-        body: &Body,
-        mut front: Vec<&Attribute>,
-        edits: &mut Vec<Edit>,
-        cuts: &mut Vec<Range<usize>>,
-    ) {
-        let pairs = pair(&old.blocks, &new.blocks);
-        let mut kept = pairs.iter().map(|&(o, _)| o).peekable();
-        for (o, block) in old.blocks.iter().enumerate() {
-            if kept.next_if_eq(&o).is_none() {
-                cuts.push(self.lines(block.span, block.span));
-            }
-        }
-        // The end of the last kept block, and the new blocks after it.
-        let mut anchor = None;
-        let mut group = Vec::new();
-        let mut pairs = pairs.into_iter().peekable();
-        for (n, block) in new.blocks.iter().enumerate() {
-            let Some((o, _)) = pairs.next_if(|&(_, m)| m == n) else {
-                group.push(block);
-                continue;
-            };
-            let was = old
-                .blocks
-                .get(o)
-                .expect("invariant: `pair` gives old indices");
-            let lines = self.lines(was.span, was.span);
-            match anchor {
-                Some(at) if !group.is_empty() => {
-                    edits.push(insert(at, after_blank(body, &group)));
-                }
-                None if !front.is_empty() || !group.is_empty() => {
-                    let mut text = items(body, &front, &group);
-                    text.push('\n');
-                    edits.push(insert(lines.start, text));
-                    front.clear();
-                }
-                _ => {}
-            }
-            group.clear();
-            if was != block {
-                self.block(was, block, edits);
-            }
-            anchor = Some(lines.end);
-        }
-        // Some attribute is kept, and so `front` is empty.
-        let kept = new.attributes.iter().len() > front.len();
-        let text = match anchor {
-            _ if group.is_empty() && front.is_empty() => return,
-            Some(_) => after_blank(body, &group),
-            None if kept => after_blank(body, &group),
-            None => items(body, &front, &group),
-        };
-        edits.push(insert(anchor.unwrap_or(body.end), text));
-    }
-
-    /// The edit that writes the value of `new` over the value of `old`.
-    fn value(&self, old: &Attribute, new: &Attribute) -> Edit {
-        let (start, end) = offsets(old.value.span);
-        let next = self.mark(self.token(end));
-        // A heredoc ends its line, so a value with a comment after it is quoted, as
-        // in a list.
-        let ends = if self.blank(end, next.start) {
-            Ends::Line
-        } else {
-            Ends::Comma
-        };
-        let mut writer = Writer::new(self.margin(old.key_span), column(old.value.span));
-        writer.value(&new.value, 0, ends);
-        Edit {
-            range: start..end,
-            text: writer.out,
-        }
-    }
-
-    /// Adds the edits that change block `old` to `new`, which has the same keyword
-    /// and labels.
-    fn block(&self, old: &Block, new: &Block, edits: &mut Vec<Edit>) {
-        let (start, end) = offsets(old.span);
-        let keyword = self.token(start);
-        let margin = self.margin(old.span);
-        let open = keyword
-            .checked_add(old.labels.len())
-            .and_then(|i| i.checked_add(1))
-            .expect("invariant: the tokens of a block fit a usize");
-        let after = open
-            .checked_add(1)
-            .expect("invariant: `{` is not the last token");
-        let close = self
-            .token(end)
-            .checked_sub(1)
-            .expect("invariant: `}` is a token");
-        if self.mark(after).newline {
-            // The first token after the new line of `{` that is not a new line starts
-            // the first item, or is the `}`.
-            let first = (after..close).find(|&i| !self.mark(i).newline);
-            let margin = match first {
-                Some(i) => self.margin_at(i).to_owned(),
-                None => format!("{margin}  "),
-            };
-            let body = Body {
-                margin,
-                start: self.mark(after).end,
-                end: self
-                    .first(close)
-                    .expect("invariant: `}` of a body of lines starts its line"),
-            };
-            self.body(&old.body, &new.body, &body, edits);
-        } else {
-            // A block on one line holds one attribute or none, so it is written again.
-            let mut writer = Writer::new(margin, column(old.span));
-            writer.block(new, 0);
-            edits.push(Edit {
-                range: start..end,
-                text: writer.out,
-            });
-        }
-    }
-
     /// The lines of an item from the start of `first` to the end of `last`, with
     /// the comments directly above it and its new line.
     fn lines(&self, first: Option<Span>, last: Option<Span>) -> Range<usize> {
         let mut i = self.token(offsets(first).0);
-        let mut start = self.first(i).expect("invariant: an item starts its line");
+        let mut start = self
+            .line_start(i)
+            .expect("invariant: an item starts its line");
         // Each pass moves up a line or returns.
         while let Some(above) = i.checked_sub(1) {
-            let Some(line) = self.first(above) else { break };
+            let Some(line) = self.line_start(above) else {
+                break;
+            };
             if self.blank(line, self.mark(above).start) {
                 break;
             }
@@ -336,12 +180,12 @@ impl<'a> File<'a> {
     /// The start of the line that ends at `end` when that line is blank.
     fn blank_above(&self, end: usize) -> Option<usize> {
         let newline = self.token(end).checked_sub(1)?;
-        let line = self.first(newline)?;
+        let line = self.line_start(newline)?;
         self.blank(line, self.mark(newline).start).then_some(line)
     }
 
     /// The start of the line of token `i`, when no token is before it on its line.
-    fn first(&self, i: usize) -> Option<usize> {
+    fn line_start(&self, i: usize) -> Option<usize> {
         match i.checked_sub(1) {
             None => Some(self.floor),
             Some(before) => {
@@ -367,13 +211,21 @@ impl<'a> File<'a> {
 
     /// The spaces at the start of the line of token `i`, which starts its line.
     fn margin_at(&self, i: usize) -> &'a str {
-        let line = self.first(i).expect("invariant: an item starts its line");
+        let line = self
+            .line_start(i)
+            .expect("invariant: an item starts its line");
         let rest = self
             .text
             .get(line..)
             .expect("invariant: a line starts at a character");
         rest.strip_suffix(rest.trim_start_matches(lex::space))
             .expect("invariant: a trimmed text ends its text")
+    }
+
+    /// The spaces at the start of the line of the first item in tokens `items`.
+    fn margin_of_first(&self, mut items: Range<usize>) -> Option<&'a str> {
+        let item = items.find(|&i| !self.mark(i).newline)?;
+        Some(self.margin_at(item))
     }
 
     /// The index of the first token that starts at `offset` or after it.
@@ -388,19 +240,30 @@ impl<'a> File<'a> {
             .expect("invariant: the last token is the end")
     }
 
+    /// The edit that puts the text of `writer` at `at`, which takes no other insert.
+    /// At the end of a text with no final new line, the text starts a new line.
+    fn insert(&self, at: usize, writer: Writer<'_>) -> Edit {
+        let mut text = written(writer);
+        let open =
+            at == self.text.len() && at > self.floor && !self.text.ends_with('\n');
+        if open {
+            text.insert(0, '\n');
+        }
+        Edit {
+            range: at..at,
+            text,
+        }
+    }
+
     /// Applies `edits`, which do not overlap, to the text.
     fn apply(&self, mut edits: Vec<Edit>) -> String {
-        // Stable, so inserts at one place keep their order and come before a cut there.
+        // An insert comes before a cut at its place.
         edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
         let mut out = String::with_capacity(self.text.len());
         let mut at = 0;
         for Edit { range, text } in edits {
             let kept = self.text.get(at..range.start);
             out.push_str(kept.expect("invariant: edits do not overlap"));
-            if range.is_empty() && out.len() > self.floor && !out.ends_with('\n') {
-                // Only at the end of a text with no final new line.
-                out.push_str(self.line_end);
-            }
             out.push_str(&text.replace('\n', self.line_end));
             at = range.end;
         }
@@ -413,25 +276,173 @@ impl<'a> File<'a> {
     }
 }
 
-fn insert(at: usize, text: String) -> Edit {
-    Edit {
-        range: at..at,
-        text,
+/// The edits that change a file so that it reads as a new Document.
+struct Diff<'f, 'a> {
+    file: &'f File<'a>,
+    edits: Vec<Edit>,
+}
+
+impl Diff<'_, '_> {
+    /// Adds the edits that change a body from `old` to `new`. Walks the attributes in
+    /// key order, then the blocks in order, and puts each new item after the kept
+    /// item before it, or else before the first kept item, or else at the end of the
+    /// body.
+    fn body(&mut self, old: &Document, new: &Document, body: &Body) {
+        let file = self.file;
+        let mut cuts = Vec::new();
+        let mut pending = Pending::default();
+        for attribute in new.attributes.iter() {
+            let Some(was) = old.attributes.get(&attribute.key) else {
+                pending.attributes.push(attribute);
+                continue;
+            };
+            let lines = file.lines(was.key_span, was.value.span);
+            self.keep(body, &mut pending, lines, false);
+            if was.value != attribute.value {
+                self.value(was, attribute);
+            }
+        }
+        for attribute in old.attributes.iter() {
+            if new.attributes.get(&attribute.key).is_none() {
+                cuts.push(file.lines(attribute.key_span, attribute.value.span));
+            }
+        }
+        let pairs = pair(&old.blocks, &new.blocks);
+        let mut kept = pairs.iter().map(|&(o, _)| o).peekable();
+        for (o, block) in old.blocks.iter().enumerate() {
+            if kept.next_if_eq(&o).is_none() {
+                cuts.push(file.lines(block.span, block.span));
+            }
+        }
+        let mut pairs = pairs.into_iter().peekable();
+        for (n, block) in new.blocks.iter().enumerate() {
+            let Some((o, _)) = pairs.next_if(|&(_, m)| m == n) else {
+                pending.blocks.push(block);
+                continue;
+            };
+            let was = old
+                .blocks
+                .get(o)
+                .expect("invariant: `pair` gives old indices");
+            self.keep(body, &mut pending, file.lines(was.span, was.span), true);
+            if was != block {
+                self.block(was, block);
+            }
+        }
+        if let Some(writer) = pending.writer(body) {
+            let at = pending.anchor.unwrap_or(body.end);
+            self.edits.push(file.insert(at, writer));
+        }
+        self.cut(cuts, body);
+    }
+
+    /// Puts the waiting items after the kept item before them, or else before the
+    /// kept item at `lines`, with a blank line between them and a kept block.
+    fn keep(
+        &mut self,
+        body: &Body,
+        pending: &mut Pending<'_>,
+        lines: Range<usize>,
+        block: bool,
+    ) {
+        if let Some(mut writer) = pending.writer(body) {
+            let at = if let Some(at) = pending.anchor {
+                at
+            } else {
+                if block {
+                    writer.gap();
+                }
+                lines.start
+            };
+            self.edits.push(self.file.insert(at, writer));
+        }
+        pending.anchor = Some(lines.end);
+    }
+
+    /// Cuts the lines of removed items, as runs that merge across blank lines.
+    fn cut(&mut self, mut cuts: Vec<Range<usize>>, body: &Body) {
+        let file = self.file;
+        cuts.sort_by_key(|cut| cut.start);
+        let mut runs: Vec<Range<usize>> = Vec::new();
+        for cut in cuts {
+            match runs.last_mut() {
+                Some(run) if file.blank(run.end, cut.start) => run.end = cut.end,
+                _ => runs.push(cut),
+            }
+        }
+        self.edits.extend(runs.into_iter().map(|run| Edit {
+            range: file.widen(run, body),
+            text: String::new(),
+        }));
+    }
+
+    /// Writes the value of `new` over the value of `old`.
+    fn value(&mut self, old: &Attribute, new: &Attribute) {
+        let file = self.file;
+        let (start, end) = offsets(old.value.span);
+        let next = file.mark(file.token(end));
+        // A heredoc ends its line, so a value with a comment after it is quoted, as
+        // in a list.
+        let ends = if file.blank(end, next.start) {
+            Ends::Line
+        } else {
+            Ends::Comma
+        };
+        let mut writer = Writer::new(file.margin(old.key_span), column(old.value.span));
+        writer.value(&new.value, 0, ends);
+        self.edits.push(Edit {
+            range: start..end,
+            text: written(writer),
+        });
+    }
+
+    /// Adds the edits that change block `old` to `new`, which has the same keyword
+    /// and labels.
+    fn block(&mut self, old: &Block, new: &Block) {
+        let file = self.file;
+        let (start, end) = offsets(old.span);
+        let keyword = file.token(start);
+        let margin = file.margin(old.span);
+        let open = keyword
+            .checked_add(old.labels.len())
+            .and_then(|i| i.checked_add(1))
+            .expect("invariant: the tokens of a block fit a usize");
+        let after = open
+            .checked_add(1)
+            .expect("invariant: `{` is not the last token");
+        let close = file
+            .token(end)
+            .checked_sub(1)
+            .expect("invariant: `}` is a token");
+        if file.mark(after).newline {
+            let margin = file
+                .margin_of_first(after..close)
+                .map_or_else(|| format!("{margin}{INDENT}"), str::to_owned);
+            let body = Body {
+                margin,
+                start: file.mark(after).end,
+                end: file
+                    .line_start(close)
+                    .expect("invariant: `}` of a body of lines starts its line"),
+            };
+            self.body(&old.body, &new.body, &body);
+        } else {
+            // A block on one line holds one attribute or none, so it is written again.
+            let mut writer = Writer::new(margin, column(old.span));
+            writer.block(new, 0);
+            self.edits.push(Edit {
+                range: start..end,
+                text: written(writer),
+            });
+        }
     }
 }
 
-/// Writes items on their own lines, as a body does.
-fn items(body: &Body, attributes: &[&Attribute], blocks: &[&Block]) -> String {
-    let mut writer = Writer::new(&body.margin, 0);
-    writer.body(attributes.iter().copied(), blocks.iter().copied(), 0);
-    writer.out
-}
-
-/// Writes blocks on their own lines, after a blank line.
-fn after_blank(body: &Body, blocks: &[&Block]) -> String {
-    let mut text = String::from("\n");
-    text.push_str(&items(body, &[], blocks));
-    text
+/// The text of a writer that wrote a part of the Document that `write` took.
+fn written(writer: Writer<'_>) -> String {
+    writer
+        .finish()
+        .expect("invariant: `write` took the document")
 }
 
 /// Pairs the indices of old and new blocks that keep their place: the longest list
@@ -441,7 +452,7 @@ fn pair(old: &[Block], new: &[Block]) -> Vec<(usize, usize)> {
     let (mut olds, mut news) = (sorted(old).peekable(), sorted(new).peekable());
     let mut candidates = vec![None; new.len()];
     while let (Some(&(o, a)), Some(&(n, b))) = (olds.peek(), news.peek()) {
-        match kind(a, b) {
+        match order(a, b) {
             Ordering::Less => drop(olds.next()),
             Ordering::Greater => drop(news.next()),
             Ordering::Equal => {
@@ -464,7 +475,9 @@ fn pair(old: &[Block], new: &[Block]) -> Vec<(usize, usize)> {
     let mut tails: Vec<usize> = Vec::new();
     let mut links = Vec::with_capacity(pairs.len());
     for (p, &(o, _)) in pairs.iter().enumerate() {
-        let k = tails.partition_point(|&tail| old_of(tail) < o);
+        let k = tails
+            .binary_search_by_key(&o, |&tail| old_of(tail))
+            .expect_err("invariant: an old block pairs once");
         links.push(k.checked_sub(1).and_then(|k| tails.get(k).copied()));
         match tails.get_mut(k) {
             Some(tail) => *tail = p,
@@ -481,15 +494,15 @@ fn pair(old: &[Block], new: &[Block]) -> Vec<(usize, usize)> {
     run
 }
 
-/// The blocks with their indices, sorted by [`kind`] and stable.
+/// The blocks with their indices, sorted by [`order`] and stable.
 fn sorted(blocks: &[Block]) -> impl Iterator<Item = (usize, &Block)> {
     let mut sorted: Vec<(usize, &Block)> = blocks.iter().enumerate().collect();
-    sorted.sort_by(|a, b| kind(a.1, b.1));
+    sorted.sort_by(|a, b| order(a.1, b.1));
     sorted.into_iter()
 }
 
 /// Orders blocks by keyword, then by labels.
-fn kind(a: &Block, b: &Block) -> Ordering {
+fn order(a: &Block, b: &Block) -> Ordering {
     let labels = |a: &[Label], b: &[Label]| {
         a.iter().map(|l| &l.text).cmp(b.iter().map(|l| &l.text))
     };
@@ -523,8 +536,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::Unwritable;
     use crate::arbitrary::document;
+    use crate::{Expected, Unwritable};
 
     fn parsed(text: &str) -> Document {
         read(Source(0), text).unwrap()
@@ -771,6 +784,7 @@ mod tests {
             "a = 1\nb = 2\nc = 3\n\nd = 4\ne = 5\n\nx {}\n"
         );
         assert_eq!(updated("x {}\n", "a = 1\nx {}"), "a = 1\n\nx {}\n");
+        assert_eq!(updated("a = 1\n", "a = 1\nx {}"), "a = 1\n\nx {}\n");
         assert_eq!(updated("", "a = 1\nx {}"), "a = 1\n\nx {}\n");
     }
 
@@ -800,6 +814,7 @@ mod tests {
 
     #[test]
     fn writes_new_lines_with_the_margin_of_their_body() {
+        assert_eq!(updated("  a = 1\n", "a = 1\nb = 2"), "  a = 1\n  b = 2\n");
         let text = "b {\n    x = 1\n\n    c {\n        y = 1\n    }\n}\n\n\td {\n\t}\n";
         assert_eq!(
             updated(
@@ -837,6 +852,14 @@ mod tests {
             "a = 1\r\nd = <<EOT\r\nx\r\nEOT\r\nb {\r\n  c = 2\r\n  e = 3\r\n}\r\n"
         );
         assert_eq!(updated("a = 1", "a = 1\nb = 2"), "a = 1\nb = 2\n");
+        assert_eq!(
+            updated("a = <<EOT\r\nx\r\nEOT", "a = \"x\\n\"\nb = 2"),
+            "a = <<EOT\r\nx\r\nEOT\r\nb = 2\r\n"
+        );
+        assert_eq!(
+            updated("/* c\r\n*/ a = 1", "a = 1\nb = 2"),
+            "/* c\r\n*/ a = 1\r\nb = 2\r\n"
+        );
         assert_eq!(updated("a = 1", "a = \"x\\n\""), "a = <<EOT\nx\nEOT");
         assert_eq!(
             updated("\u{feff}b = 1\n", "a = 0\nb = 1"),
@@ -846,12 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_the_errors_of_the_text_then_of_the_document() {
-        let text = "a = \n";
-        assert_eq!(
-            update(Source(0), text, &Document::default()),
-            Err(read(Source(0), text).unwrap_err())
-        );
+    fn returns_the_errors_of_the_text_or_else_of_the_document() {
         let document = Document {
             attributes: Map::new(vec![Attribute {
                 key: "my key".into(),
@@ -864,6 +882,18 @@ mod tests {
             .unwrap(),
             blocks: Vec::new(),
         };
+        let at = |offset, line, column| Position {
+            offset,
+            line,
+            column,
+        };
+        assert_eq!(
+            update(Source(0), "a = \n", &document),
+            Err(vec![Error::Syntax {
+                span: Span::new(Source(0), at(4, 0, 4), at(5, 1, 0)).unwrap(),
+                expected: Expected::Value,
+            }])
+        );
         assert_eq!(
             update(Source(0), "a = 1\n", &document),
             Err(vec![Error::Unwritable {
