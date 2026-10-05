@@ -1,7 +1,8 @@
 //! The file system of one node: directories, and sparse files of 512-byte sectors.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::mem;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
@@ -30,29 +31,45 @@ pub(crate) enum Cause {
 
 pub(crate) struct Disk {
     bytes: u64,
-    /// The bytes of the directories, and of the files that are linked or held.
+    /// The bytes of the directories, and of the files that a directory entry names
+    /// or a hold keeps.
     used: u64,
     inodes: BTreeMap<u64, Inode>,
 }
 
 enum Inode {
     File(File),
-    Dir(BTreeMap<OsString, u64>),
+    Dir(Dir),
+}
+
+#[derive(Default)]
+struct Dir {
+    entries: BTreeMap<OsString, u64>,
+    /// The entries when the last `sync_dir` on the directory ended.
+    durable: BTreeMap<OsString, u64>,
 }
 
 pub(crate) struct File {
     len: u64,
     /// The sectors written, by index. A missing sector holds zeros.
     sectors: BTreeMap<u64, Sector>,
+    /// The sectors with more than one version.
+    dirty: BTreeSet<u64>,
     /// The descriptors and the calls in flight that use the file.
     holds: u64,
-    /// The file is in a directory.
+    /// An entry names the file.
     linked: bool,
+    /// A durable entry names the file.
+    durable: bool,
 }
 
-struct Sector {
+/// The durable bytes of a sector, then its bytes after each write on it since
+/// then, in order. A read sees the last.
+struct Sector(Vec<Version>);
+
+struct Version {
     bytes: [u8; 512],
-    /// The tick at which the last write on it ended.
+    /// The tick at which its write ended.
     written: u64,
 }
 
@@ -62,7 +79,7 @@ impl Disk {
         Self {
             bytes,
             used: 0,
-            inodes: BTreeMap::from([(ROOT, Inode::Dir(BTreeMap::new()))]),
+            inodes: BTreeMap::from([(ROOT, Inode::Dir(Dir::default()))]),
         }
     }
 
@@ -74,10 +91,10 @@ impl Disk {
     pub(crate) fn dir(&self, segments: &[&OsStr]) -> Result<u64, Cause> {
         let mut at = ROOT;
         for segment in segments {
-            let Inode::Dir(entries) = &self.inodes[&at] else {
+            let Inode::Dir(dir) = &self.inodes[&at] else {
                 return Err(Cause::Code(NOT_DIRECTORY));
             };
-            at = *entries.get(*segment).ok_or(Cause::NotFound)?;
+            at = *dir.entries.get(*segment).ok_or(Cause::NotFound)?;
         }
         match self.inodes[&at] {
             Inode::Dir(_) => Ok(at),
@@ -87,7 +104,7 @@ impl Disk {
 
     fn entries(&mut self, dir: u64) -> &mut BTreeMap<OsString, u64> {
         match self.inodes.get_mut(&dir) {
-            Some(Inode::Dir(entries)) => entries,
+            Some(Inode::Dir(dir)) => &mut dir.entries,
             _ => unreachable!("invariant: inode {dir} is a directory"),
         }
     }
@@ -127,8 +144,10 @@ impl Disk {
                 let file = File {
                     len,
                     sectors: BTreeMap::new(),
+                    dirty: BTreeSet::new(),
                     holds: 0,
                     linked: true,
+                    durable: false,
                 };
                 self.inodes.insert(key, Inode::File(file));
                 key
@@ -165,7 +184,7 @@ impl Disk {
             None => {
                 self.take(DIR_BYTES)?;
                 self.entries(dir).insert(name.into(), key);
-                self.inodes.insert(key, Inode::Dir(BTreeMap::new()));
+                self.inodes.insert(key, Inode::Dir(Dir::default()));
                 Ok(())
             }
         }
@@ -198,12 +217,72 @@ impl Disk {
         self.collect(inode);
     }
 
-    /// Frees file `inode` when it is unlinked and has no hold.
+    /// Frees file `inode` when no entry, no durable entry, and no hold keeps it.
     fn collect(&mut self, inode: u64) {
         let file = self.file(inode);
-        if !file.linked && file.holds == 0 {
+        if !file.linked && !file.durable && file.holds == 0 {
             self.used -= file.len;
             self.inodes.remove(&inode);
+        }
+    }
+
+    /// Makes the entries of the directory at `segments` durable, and frees each file
+    /// that only its old durable entries kept.
+    pub(crate) fn sync_dir(&mut self, segments: &[&OsStr]) -> Result<(), Cause> {
+        let key = self.dir(segments)?;
+        let Some(Inode::Dir(dir)) = self.inodes.get_mut(&key) else {
+            unreachable!("invariant: inode {key} is a directory")
+        };
+        let old = mem::replace(&mut dir.durable, dir.entries.clone());
+        let new: BTreeSet<u64> = dir.durable.values().copied().collect();
+        for &inode in &new {
+            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
+                file.durable = true;
+            }
+        }
+        for inode in old.into_values().filter(|inode| !new.contains(inode)) {
+            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
+                file.durable = false;
+                self.collect(inode);
+            }
+        }
+        Ok(())
+    }
+
+    /// Cuts the power: each directory goes back to its durable entries, what they no
+    /// longer reach is freed, and each sector keeps its durable bytes or those of
+    /// one write since then, by `rng`. No descriptor and no call in flight may hold
+    /// a file.
+    pub(crate) fn cut_power(&mut self, rng: &mut Rng) {
+        let mut reached = BTreeSet::from([ROOT]);
+        let mut next = vec![ROOT];
+        while let Some(at) = next.pop() {
+            if let Some(Inode::Dir(dir)) = self.inodes.get_mut(&at) {
+                dir.entries.clone_from(&dir.durable);
+                reached.extend(dir.entries.values());
+                next.extend(dir.entries.values());
+            }
+        }
+        for (key, mut inode) in mem::take(&mut self.inodes) {
+            if !reached.contains(&key) {
+                self.used -= inode.bytes();
+                continue;
+            }
+            if let Inode::File(file) = &mut inode {
+                file.linked = true;
+                file.settle(u64::MAX, |count| rng.below(count));
+            }
+            self.inodes.insert(key, inode);
+        }
+    }
+}
+
+impl Inode {
+    /// The bytes that it takes.
+    fn bytes(&self) -> u64 {
+        match self {
+            Self::File(file) => file.len,
+            Self::Dir(_) => DIR_BYTES,
         }
     }
 }
@@ -215,7 +294,8 @@ impl File {
         for (sector, part) in sectors(&range) {
             if let Some(found) = self.sectors.get(&sector) {
                 let to = within(range.start, &part);
-                bytes[to].copy_from_slice(&found.bytes[within(sector * SECTOR, &part)]);
+                let from = within(sector * SECTOR, &part);
+                bytes[to].copy_from_slice(&found.last().bytes[from]);
             }
         }
         bytes
@@ -223,7 +303,8 @@ impl File {
 
     /// Ends a write of `bytes` at `offset` that started at tick `started`. Each
     /// sector that another write ended on since then, and each sector of a write
-    /// whose future dropped, keeps its bytes or takes the new ones by a coin.
+    /// whose future dropped, keeps its bytes or takes the new ones by a coin. Each
+    /// sector that takes them gets a new version.
     pub(crate) fn write(
         &mut self,
         offset: u64,
@@ -235,17 +316,57 @@ impl File {
     ) {
         for (sector, part) in sectors(&(offset..offset + len(bytes))) {
             let found = self.sectors.get(&sector);
-            let raced = found.is_some_and(|found| found.written > started);
+            let raced = found.is_some_and(|found| found.last().written > started);
             if (raced || dropped) && rng.below(2) == 0 {
                 continue;
             }
-            let found = self.sectors.entry(sector).or_insert(Sector {
-                bytes: [0; 512],
+            let zeros = || {
+                Sector(vec![Version {
+                    bytes: [0; 512],
+                    written: 0,
+                }])
+            };
+            let found = self.sectors.entry(sector).or_insert_with(zeros);
+            let mut new = found.last().bytes;
+            new[within(sector * SECTOR, &part)]
+                .copy_from_slice(&bytes[within(offset, &part)]);
+            found.0.push(Version {
+                bytes: new,
                 written: tick,
             });
-            let to = within(sector * SECTOR, &part);
-            found.bytes[to].copy_from_slice(&bytes[within(offset, &part)]);
-            found.written = tick;
+            self.dirty.insert(sector);
+        }
+    }
+
+    /// Makes durable, in each sector, the last version of a write that ended before
+    /// tick `started`.
+    pub(crate) fn sync(&mut self, started: u64) {
+        self.settle(started, |count| count - 1);
+    }
+
+    /// Makes durable, in each sector, its durable bytes or the bytes of a write that
+    /// ended before tick `started`, by `rng`, as a sync that fails.
+    pub(crate) fn tear(&mut self, started: u64, rng: &mut Rng) {
+        self.settle(started, |count| rng.below(count));
+    }
+
+    /// Makes one version of each sector durable and visible: of the durable version
+    /// and the versions of the writes that ended before tick `started`, the one that
+    /// `pick` gives for their count. The versions of later writes stay.
+    fn settle(&mut self, started: u64, mut pick: impl FnMut(u64) -> u64) {
+        for sector in mem::take(&mut self.dirty) {
+            let Sector(versions) = (self.sectors.get_mut(&sector))
+                .expect("invariant: a dirty sector is written");
+            let before = versions.partition_point(|version| version.written < started);
+            if before > 1 {
+                let count = u64::try_from(before).expect("invariant: usize fits u64");
+                let kept = index(pick(count));
+                versions.drain(kept + 1..before);
+                versions.drain(..kept);
+            }
+            if versions.len() > 1 {
+                self.dirty.insert(sector);
+            }
         }
     }
 
@@ -282,6 +403,13 @@ impl File {
             }
         }
         bytes
+    }
+}
+
+impl Sector {
+    /// The bytes that a read sees.
+    fn last(&self) -> &Version {
+        self.0.last().expect("invariant: a sector has a version")
     }
 }
 

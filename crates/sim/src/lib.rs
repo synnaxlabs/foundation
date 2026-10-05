@@ -36,7 +36,7 @@ use types::time::{Monotonic, Span};
 use crate::files::Files;
 use crate::net::Network;
 use crate::node::Node;
-use crate::state::{Futures, Next, Shared, Start, State, lock};
+use crate::state::{Futures, Next, Outcome, Shared, Start, State, lock};
 
 /// Settings for one run. Build it with `..Config::default()`: fields get added.
 ///
@@ -144,6 +144,27 @@ impl Sim {
         lock(&self.shared).link(from.0.node, to.0.node, config);
     }
 
+    /// Crashes `node` now, between runs. Each thread of the node ends at once: no
+    /// task of it polls again, its futures and its threads that have not run drop,
+    /// so its sockets close and its timers stop, and
+    /// [`env::thread::Handle::join`] on one of them panics. The node keeps its disk
+    /// and its addresses: start new threads on it to restart it.
+    ///
+    /// # Panics
+    ///
+    /// When `node` belongs to another run.
+    pub fn crash(&mut self, node: &Node, crash: Crash) {
+        let own = Arc::ptr_eq(&node.0.shared, &self.shared);
+        assert!(own, "{node:?} belongs to another sim");
+        let (tasks, starts) = lock(&self.shared).crash(node.0.node);
+        self.drop_futures(&tasks);
+        drop(starts);
+        if crash == Crash::Power {
+            let orphans = lock(&self.shared).cut_power(node.0.node);
+            drop(orphans);
+        }
+    }
+
     /// A hash of every scheduler pick, every datagram event, and every end of a file
     /// call so far: the time, addresses, length, and fate of a datagram, and the
     /// time, kind, and success of a call, never the bytes. In one build, the same
@@ -234,7 +255,7 @@ impl Sim {
         let Err(payload) = run else { return Ok(()) };
         let name = lock(&self.shared).name(thread);
         let panicked = env::thread::Error::Panicked { name: name.clone() };
-        let tasks = lock(&self.shared).end(thread, Err(panicked));
+        let tasks = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
         self.drop_futures(&tasks);
         Err(Error::Panicked {
             thread: name,
@@ -300,6 +321,25 @@ impl fmt::Debug for Sim {
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
+}
+
+/// How a node crashes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Crash {
+    /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
+    /// keeps each call that ended, and each file call in flight still ends, as if
+    /// its future dropped.
+    Process,
+    /// The machine loses power and boots again.
+    ///
+    /// - Each 512-byte sector of a file keeps the bytes that a sync made durable,
+    ///   or the bytes of any one write on it since then, a write in flight too.
+    /// - Each directory goes back to its entries when its last `sync_dir` ended,
+    ///   and what those entries no longer reach is gone.
+    /// - Other file calls in flight have no effect.
+    /// - The monotonic clock reads [`node::Config::monotonic`] again. The wall
+    ///   clock runs on.
+    Power,
 }
 
 /// Why a run failed. Each variant carries the seed that replays it, and its message

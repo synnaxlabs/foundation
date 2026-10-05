@@ -250,6 +250,10 @@ impl Files {
         let segments = disk::segments(&path);
         let disk = &mut self.disks[node];
         let result = match &call {
+            Call::Sync { inode } if failed => {
+                disk.file(*inode).tear(key, &mut self.rng);
+                Err(Cause::Code(IO))
+            }
             _ if failed => Err(Cause::Code(IO)),
             Call::Open(mode) => disk
                 .open(key, &segments, *mode)
@@ -257,7 +261,7 @@ impl Files {
             Call::List => disk.list(&segments).map(Done::Names),
             Call::CreateDir => disk.create_dir(key, &segments).map(|()| Done::Unit),
             Call::Remove => disk.remove(&segments).map(|()| Done::Unit),
-            Call::SyncDir => disk.dir(&segments).map(|_| Done::Unit),
+            Call::SyncDir => disk.sync_dir(&segments).map(|()| Done::Unit),
             Call::Free => Ok(Done::Free(disk.free())),
             Call::Write {
                 inode,
@@ -275,7 +279,10 @@ impl Files {
                 let bytes = file.read(range, &before, &writes, &mut self.rng);
                 Ok(Done::Read(bytes))
             }
-            Call::Sync { .. } => Ok(Done::Unit),
+            Call::Sync { inode } => {
+                disk.file(*inode).sync(key);
+                Ok(Done::Unit)
+            }
         };
         if let Some(inode) = call.inode() {
             disk.release(inode);
@@ -325,6 +332,38 @@ impl Files {
             self.disks[node].release(inode);
         }
         (None, ended.held)
+    }
+
+    /// Cuts the power of `node`, whose calls in flight have all dropped: each write
+    /// ends with any subset of its sectors, the other calls have no effect, and the
+    /// disk keeps what is durable. Returns the blocks of the calls, for the caller
+    /// to drop after it releases the lock.
+    pub(crate) fn cut_power(&mut self, node: usize) -> Vec<Held> {
+        let flights = &self.flights;
+        self.queue.retain(|(_, key)| flights[key].node != node);
+        let (cut, flights) = mem::take(&mut self.flights)
+            .into_iter()
+            .partition(|(_, flight)| flight.node == node);
+        self.flights = flights;
+        let mut orphans = Vec::new();
+        for (key, flight) in cut {
+            if let Call::Write {
+                inode,
+                offset,
+                bytes,
+            } = &flight.call
+            {
+                let tick = self.tick();
+                let file = self.disks[node].file(*inode);
+                file.write(*offset, bytes, key, tick, true, &mut self.rng);
+            }
+            if let Some(inode) = flight.call.inode() {
+                self.disks[node].release(inode);
+            }
+            orphans.extend(flight.held);
+        }
+        self.disks[node].cut_power(&mut self.rng);
+        orphans
     }
 
     /// Closes a descriptor of file `inode` of `node`.
