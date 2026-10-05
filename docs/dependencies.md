@@ -40,6 +40,10 @@ We never open issues or PRs on projects outside `synnaxlabs`. To change a depend
 carry a local patch through `[patch.crates-io]` in the root `Cargo.toml`, keep the
 change small, and list it here with its reason.
 
+| Crate | Release | Change | Why |
+| --- | --- | --- | --- |
+| `noq-proto` | 1.3.0 | None yet | A stream stopped before or after the peer resets it gives the peer its unread bytes of window twice (#620) |
+
 ## Tests, benchmarks, and tools
 
 These never ship in the binary.

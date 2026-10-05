@@ -31,6 +31,7 @@ jobs:
               - 'fuzz/**'
               - 'xtask/**'
               - 'oracles/**'
+              - 'patches/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
