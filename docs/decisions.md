@@ -692,6 +692,17 @@ How to read this record:
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
   session under the architecture delegation.
+- **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
+  `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
+  `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
+  implements it over `std::alloc` for tests, Miri, and `sim`. `block` makes no OS
+  call. `reclaim` takes back returned blocks on each loop turn; `purge` gives idle
+  pages back on a timer that the shard owns (#2).
+- **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
+  globals": "Allow in test binaries". A test or benchmark binary may hold one
+  counting `#[global_allocator]` `static` with an atomic count, because Rust has no
+  other way to count allocations. Never in a library or the `node` binary. The
+  `xtask globals` check allows only this case.
 
 ### 1.15 Releases
 
@@ -1410,7 +1421,7 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams on the real operating system: monotonic and wall clocks, files, randomness, and threads. The only crate allowed to call them. | `env`, `types` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`, `append_at`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `env`, `types`, `estimate`, `wire`, `transport` |

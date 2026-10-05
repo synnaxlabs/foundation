@@ -145,7 +145,8 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - Hash iteration order never decides behavior. Sort, or use a `BTreeMap` (r16 44).
 - Never print a pointer. Addresses change from run to run (r16 45).
 - No mutable globals: no `thread_local!` and no `static` with interior mutability
-  (r16 46).
+  (r16 46). The one exception is a counting `#[global_allocator]` in a test or
+  benchmark binary, never in a library or the `node` binary.
 
 ## Async and threads
 
