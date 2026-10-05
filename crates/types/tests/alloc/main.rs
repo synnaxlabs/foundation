@@ -4,7 +4,7 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use types::channel::{Key, Slots};
+use types::channel::Key;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{self, Draft, Form, Path, Range};
 use types::sample::{Scalar, Type};
@@ -32,7 +32,7 @@ fn main() {
             data: &[],
         },
     ];
-    let set = Interner::new().intern(&mut Slots::new(), &groups);
+    let set = Interner::new().intern(&groups);
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let series = [(0, 16), (2, 16)];

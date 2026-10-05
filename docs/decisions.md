@@ -1928,11 +1928,12 @@ but `home` (below `hub`) routes by key set and writes companion samples, so a
 `hub`-owned table would point upward.
 Resolution (memory delegation): both tables are layer-1 data structures, the slot table
 (`types::channel::Slots`) and the interner (`types::frame::key_set::Interner`). `node`
-constructs one of each per node and injects them into `hub` and `home`. Interning
-happens at session open; each shard reads a snapshot. `buffer` keys its in-memory
-tails, floors, and read cursors by slot, and keeps the key on disk. `Buffer::open`
-takes the slot table and assigns a slot to each index it recovers; `node` opens
-every buffer before it opens sessions (#219, 2026-10-05).
+constructs one interner per node, which owns the slot table, and passes that table to
+`Buffer::open`. `node` injects the interner into `hub` and `home`. Interning happens
+at session open; each shard reads a snapshot. `buffer` keys its in-memory tails,
+floors, and read cursors by slot, and keeps the key on disk. `Buffer::open` assigns a
+slot to each index it recovers; `node` opens every buffer before it opens sessions
+(#219, 2026-10-05). Approved by the coordinator on PR #449.
 Basis: M1, root principle on injected registries.
 
 **X43. Which crate serves readers at a read copy.**

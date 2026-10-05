@@ -100,7 +100,7 @@ mod tests {
     use std::sync::Arc;
 
     use proptest::prelude::*;
-    use types::channel::{self, Slots};
+    use types::channel;
     use types::frame::key_set::{Group, Interner, KeySet};
     use types::frame::{Draft, Form, Path};
     use types::time::Span;
@@ -129,7 +129,7 @@ mod tests {
             };
             Self {
                 pool: block::Pool::new(config, memory),
-                set: Interner::new().intern(&mut Slots::new(), &[index]),
+                set: Interner::new().intern(&[index]),
             }
         }
 

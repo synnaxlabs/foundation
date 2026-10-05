@@ -3,7 +3,7 @@
 
 use delivery::{Key, Readers};
 use divan::Bencher;
-use types::channel::{self, Slots};
+use types::channel;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{Draft, Form, Frame, Path};
 use types::time::Stamp;
@@ -14,13 +14,10 @@ fn main() {
 
 /// A frame of one index, and `sessions` latest readers of it.
 fn opened(sessions: usize) -> (Frame, Readers, Vec<Key>) {
-    let set = Interner::new().intern(
-        &mut Slots::new(),
-        &[Group {
-            index: channel::Key::from_u128(1),
-            data: &[],
-        }],
-    );
+    let set = Interner::new().intern(&[Group {
+        index: channel::Key::from_u128(1),
+        data: &[],
+    }]);
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let frame = Draft::new(&pool, &set, Form::Raw, &[(0, 8)])

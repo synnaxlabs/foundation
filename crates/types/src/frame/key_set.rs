@@ -95,46 +95,52 @@ pub struct Group<'a> {
     pub data: &'a [(channel::Key, Type)],
 }
 
-/// The node's table of key sets. `node` makes one and injects it into `hub` and `home`,
-/// which intern at session open. Methods take `&mut self`: the caller serializes them.
+/// The node's table of key sets, which owns the node's slot table. `node` makes one and
+/// injects it into `hub` and `home`, which intern at session open. Methods take
+/// `&mut self`: the caller serializes them.
 #[derive(Debug, Default)]
 pub struct Interner {
+    slots: Slots,
     sets: hash::Map<Shape, Arc<KeySet>>,
     snapshot: Snapshot,
 }
 
 impl Interner {
-    /// An interner with no key sets.
+    /// An interner with no key sets and no slots.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// The node's slot table, for a caller that needs a slot outside a key set, such as
+    /// the index of a recovered buffer.
+    pub fn slots(&mut self) -> &mut Slots {
+        &mut self.slots
+    }
+
     /// The key set of `groups`: each index, with type `Stamp`, and each data channel.
-    /// Each channel gets its slot from `slots`, which must be the same table on every
-    /// call: with another table, equal groups can give two key sets, and one slot can
-    /// name two channels. `slots` assigns a slot to each new key in the order of
-    /// `groups`, each index before its data. Groups are numbered in the order of their
-    /// index slots. Equal groups, in any order, give the same key set. A new
-    /// key set copies the snapshot's list, so it takes time linear in the number of key
-    /// sets.
+    /// Each channel gets its slot from [`Self::slots`], which assigns one to each new
+    /// key in the order of `groups`, each index before its data. Groups are numbered
+    /// in the order of their index slots. Equal groups, in any order, give the same key
+    /// set. A new key set copies the snapshot's list, so it takes time linear in the
+    /// number of key sets.
     ///
     /// # Panics
     ///
     /// If a channel appears twice: the `hub` builds groups from the spec, so that is a
-    /// bug. Also if `slots` already holds 2^32 channels, or the node already holds
-    /// 2^32 key sets.
-    pub fn intern(&mut self, slots: &mut Slots, groups: &[Group<'_>]) -> Arc<KeySet> {
+    /// bug. Also if the slot table already holds 2^32 channels, or the node already
+    /// holds 2^32 key sets.
+    pub fn intern(&mut self, groups: &[Group<'_>]) -> Arc<KeySet> {
         let stamp = Type::Scalar(Scalar::Stamp);
         let len = groups.iter().map(|group| group.data.len()).sum::<usize>();
         let mut channels = Vec::with_capacity(len.strict_add(groups.len()));
         let mut indexes = Vec::with_capacity(groups.len());
         for group in groups {
-            let index = slots.assign(group.index);
+            let index = self.slots.assign(group.index);
             indexes.push(index);
             channels.push((index, group.index, stamp, index));
             for &(key, data_type) in group.data {
-                channels.push((slots.assign(key), key, data_type, index));
+                channels.push((self.slots.assign(key), key, data_type, index));
             }
         }
         channels.sort_unstable_by_key(|&(slot, ..)| slot);
@@ -224,13 +230,13 @@ mod tests {
         channel::Key::from_u128(u128::from(n))
     }
 
-    /// A table where key `n` has slot `n`, for each `n` below `len`.
-    fn table(len: u32) -> Slots {
-        let mut slots = Slots::new();
+    /// An interner where key `n` has slot `n`, for each `n` below `len`.
+    fn interner(len: u32) -> Interner {
+        let mut interner = Interner::new();
         for n in 0..len {
-            slots.assign(key(n));
+            interner.slots().assign(key(n));
         }
-        slots
+        interner
     }
 
     fn entry(n: u32, data_type: Type, group: u32) -> Entry {
@@ -244,21 +250,17 @@ mod tests {
 
     #[test]
     fn sorts_entries_and_numbers_groups_by_index_slot() {
-        let mut interner = Interner::new();
-        let mut slots = table(10);
-        let set = interner.intern(
-            &mut slots,
-            &[
-                Group {
-                    index: key(9),
-                    data: &[(key(2), F64)],
-                },
-                Group {
-                    index: key(4),
-                    data: &[(key(7), U8), (key(1), F64)],
-                },
-            ],
-        );
+        let mut interner = interner(10);
+        let set = interner.intern(&[
+            Group {
+                index: key(9),
+                data: &[(key(2), F64)],
+            },
+            Group {
+                index: key(4),
+                data: &[(key(7), U8), (key(1), F64)],
+            },
+        ]);
         assert_eq!(
             set.entries(),
             [
@@ -279,15 +281,11 @@ mod tests {
 
     #[test]
     fn finds_the_entry_of_each_slot() {
-        let mut interner = Interner::new();
-        let mut slots = table(10);
-        let set = interner.intern(
-            &mut slots,
-            &[Group {
-                index: key(5),
-                data: &[(key(8), F64), (key(2), F64)],
-            }],
-        );
+        let mut interner = interner(10);
+        let set = interner.intern(&[Group {
+            index: key(5),
+            data: &[(key(8), F64), (key(2), F64)],
+        }]);
         assert_eq!(set.find(slot(2)), Some(0));
         assert_eq!(set.find(slot(5)), Some(1));
         assert_eq!(set.find(slot(8)), Some(2));
@@ -296,41 +294,31 @@ mod tests {
 
     #[test]
     fn gives_equal_groups_the_same_key_set() {
-        let mut interner = Interner::new();
-        let mut slots = table(10);
-        let first = interner.intern(
-            &mut slots,
-            &[
-                Group {
-                    index: key(1),
-                    data: &[(key(2), F64), (key(3), U8)],
-                },
-                Group {
-                    index: key(4),
-                    data: &[],
-                },
-            ],
-        );
-        let reordered = interner.intern(
-            &mut slots,
-            &[
-                Group {
-                    index: key(4),
-                    data: &[],
-                },
-                Group {
-                    index: key(1),
-                    data: &[(key(3), U8), (key(2), F64)],
-                },
-            ],
-        );
-        let other = interner.intern(
-            &mut slots,
-            &[Group {
+        let mut interner = interner(10);
+        let first = interner.intern(&[
+            Group {
                 index: key(1),
-                data: &[(key(2), U8), (key(3), U8)],
-            }],
-        );
+                data: &[(key(2), F64), (key(3), U8)],
+            },
+            Group {
+                index: key(4),
+                data: &[],
+            },
+        ]);
+        let reordered = interner.intern(&[
+            Group {
+                index: key(4),
+                data: &[],
+            },
+            Group {
+                index: key(1),
+                data: &[(key(3), U8), (key(2), F64)],
+            },
+        ]);
+        let other = interner.intern(&[Group {
+            index: key(1),
+            data: &[(key(2), U8), (key(3), U8)],
+        }]);
         assert!(Arc::ptr_eq(&first, &reordered));
         assert_eq!(first.key().get(), 0);
         assert_eq!(other.key().get(), 1);
@@ -338,22 +326,15 @@ mod tests {
 
     #[test]
     fn tells_an_index_from_a_stamp_channel_on_it() {
-        let mut interner = Interner::new();
-        let mut slots = table(10);
-        let first = interner.intern(
-            &mut slots,
-            &[Group {
-                index: key(1),
-                data: &[(key(2), STAMP)],
-            }],
-        );
-        let swapped = interner.intern(
-            &mut slots,
-            &[Group {
-                index: key(2),
-                data: &[(key(1), STAMP)],
-            }],
-        );
+        let mut interner = interner(10);
+        let first = interner.intern(&[Group {
+            index: key(1),
+            data: &[(key(2), STAMP)],
+        }]);
+        let swapped = interner.intern(&[Group {
+            index: key(2),
+            data: &[(key(1), STAMP)],
+        }]);
         assert_eq!(first.entries(), swapped.entries());
         assert_eq!(first.groups(), [0]);
         assert_eq!(swapped.groups(), [1]);
@@ -362,58 +343,44 @@ mod tests {
 
     #[test]
     fn tells_an_index_from_a_stamp_channel_beside_another_group() {
-        let mut interner = Interner::new();
-        let mut slots = table(10);
-        let first = interner.intern(
-            &mut slots,
-            &[
-                Group {
-                    index: key(1),
-                    data: &[(key(2), STAMP)],
-                },
-                Group {
-                    index: key(5),
-                    data: &[],
-                },
-            ],
-        );
-        let swapped = interner.intern(
-            &mut slots,
-            &[
-                Group {
-                    index: key(2),
-                    data: &[(key(1), STAMP)],
-                },
-                Group {
-                    index: key(5),
-                    data: &[],
-                },
-            ],
-        );
+        let mut interner = interner(10);
+        let first = interner.intern(&[
+            Group {
+                index: key(1),
+                data: &[(key(2), STAMP)],
+            },
+            Group {
+                index: key(5),
+                data: &[],
+            },
+        ]);
+        let swapped = interner.intern(&[
+            Group {
+                index: key(2),
+                data: &[(key(1), STAMP)],
+            },
+            Group {
+                index: key(5),
+                data: &[],
+            },
+        ]);
         assert_eq!(first.groups(), [0, 2]);
         assert_eq!(swapped.groups(), [1, 2]);
     }
 
     #[test]
     fn snapshots_hold_the_key_sets_interned_before_them() {
-        let mut interner = Interner::new();
-        let mut slots = table(10);
+        let mut interner = interner(10);
         let empty = interner.snapshot();
-        let first = interner.intern(
-            &mut slots,
-            &[Group {
-                index: key(0),
-                data: &[],
-            }],
-        );
+        let first = interner.intern(&[Group {
+            index: key(0),
+            data: &[],
+        }]);
         let one = interner.snapshot();
-        let second = interner.intern(
-            &mut slots,
-            &[Group {
-                index: key(1),
-                data: &[],
-            }],
-        );
+        let second = interner.intern(&[Group {
+            index: key(1),
+            data: &[],
+        }]);
         let two = interner.snapshot();
         assert!(empty.get(first.key()).is_none());
         assert!(Arc::ptr_eq(one.get(first.key()).unwrap(), &first));
@@ -425,20 +392,16 @@ mod tests {
     #[test]
     fn assigns_slots_to_new_keys_in_group_order() {
         let mut interner = Interner::new();
-        let mut slots = Slots::new();
-        let first = interner.intern(
-            &mut slots,
-            &[
-                Group {
-                    index: key(50),
-                    data: &[(key(45), F64), (key(40), U8)],
-                },
-                Group {
-                    index: key(30),
-                    data: &[(key(20), U8)],
-                },
-            ],
-        );
+        let first = interner.intern(&[
+            Group {
+                index: key(50),
+                data: &[(key(45), F64), (key(40), U8)],
+            },
+            Group {
+                index: key(30),
+                data: &[(key(20), U8)],
+            },
+        ]);
         let known = |n, k, data_type, group| Entry {
             slot: slot(n),
             key: key(k),
@@ -455,13 +418,10 @@ mod tests {
                 known(4, 20, U8, 1),
             ]
         );
-        let second = interner.intern(
-            &mut slots,
-            &[Group {
-                index: key(30),
-                data: &[(key(10), F64)],
-            }],
-        );
+        let second = interner.intern(&[Group {
+            index: key(30),
+            data: &[(key(10), F64)],
+        }]);
         assert_eq!(
             second.entries(),
             [known(3, 30, STAMP, 0), known(5, 10, F64, 0)]
@@ -469,17 +429,33 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_slot_assigned_before_the_key_set() {
+        let mut interner = Interner::new();
+        let early = interner.slots().assign(key(7));
+        let set = interner.intern(&[Group {
+            index: key(3),
+            data: &[(key(7), F64)],
+        }]);
+        let known = |n, k, data_type| Entry {
+            slot: slot(n),
+            key: key(k),
+            data_type,
+            group: 0,
+        };
+        assert_eq!(early, slot(0));
+        assert_eq!(set.entries(), [known(0, 7, F64), known(1, 3, STAMP)]);
+        assert_eq!(interner.slots().assign(key(3)), slot(1));
+    }
+
+    #[test]
     #[should_panic(
         expected = "channel 00000000-0000-0000-0000-000000000002 appears twice in a key set"
     )]
     fn refuses_a_data_channel_twice() {
-        Interner::new().intern(
-            &mut table(10),
-            &[Group {
-                index: key(1),
-                data: &[(key(2), F64), (key(2), U8)],
-            }],
-        );
+        interner(10).intern(&[Group {
+            index: key(1),
+            data: &[(key(2), F64), (key(2), U8)],
+        }]);
     }
 
     #[test]
@@ -487,19 +463,16 @@ mod tests {
         expected = "channel 00000000-0000-0000-0000-000000000001 appears twice in a key set"
     )]
     fn refuses_an_index_that_is_also_data() {
-        Interner::new().intern(
-            &mut table(10),
-            &[
-                Group {
-                    index: key(1),
-                    data: &[],
-                },
-                Group {
-                    index: key(3),
-                    data: &[(key(1), STAMP)],
-                },
-            ],
-        );
+        interner(10).intern(&[
+            Group {
+                index: key(1),
+                data: &[],
+            },
+            Group {
+                index: key(3),
+                data: &[(key(1), STAMP)],
+            },
+        ]);
     }
 
     #[test]
@@ -511,7 +484,7 @@ mod tests {
             index: key(6),
             data: &[],
         };
-        Interner::new().intern(&mut table(10), &[group, group]);
+        interner(10).intern(&[group, group]);
     }
 
     #[test]
@@ -522,7 +495,7 @@ mod tests {
                 data: &[],
             })
             .collect();
-        let set = Interner::new().intern(&mut Slots::new(), &groups);
+        let set = Interner::new().intern(&groups);
         assert_eq!(set.groups().len(), 70_000);
         assert_eq!(set.entries().last(), Some(&entry(69_999, STAMP, 69_999)));
     }
@@ -608,12 +581,11 @@ mod tests {
         #[test]
         fn holds_each_channel_once_under_its_index(groups in groups()) {
             let mut interner = Interner::new();
-            let mut slots = Slots::new();
             let other = swapped(&groups);
-            let first = interner.intern(&mut slots, &borrowed(&groups));
-            let second = interner.intern(&mut slots, &borrowed(&other));
-            check(&first, &groups, &mut slots)?;
-            check(&second, &other, &mut slots)?;
+            let first = interner.intern(&borrowed(&groups));
+            let second = interner.intern(&borrowed(&other));
+            check(&first, &groups, interner.slots())?;
+            check(&second, &other, interner.slots())?;
         }
 
         #[test]
@@ -624,9 +596,8 @@ mod tests {
                 data.reverse();
             }
             let mut interner = Interner::new();
-            let mut slots = Slots::new();
-            let first = interner.intern(&mut slots, &borrowed(&groups));
-            let second = interner.intern(&mut slots, &borrowed(&reversed));
+            let first = interner.intern(&borrowed(&groups));
+            let second = interner.intern(&borrowed(&reversed));
             prop_assert!(Arc::ptr_eq(&first, &second));
         }
     }

@@ -636,7 +636,7 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
-    use crate::channel::{self, Slots};
+    use crate::channel;
     use crate::sample::{Scalar, Type};
     use key_set::{Group, Interner};
     use proptest::collection::vec;
@@ -649,13 +649,13 @@ mod tests {
         channel::Key::from_u128(u128::from(n))
     }
 
-    /// A table where key `n` has slot `n`, for each `n` below 1000.
-    fn table() -> Slots {
-        let mut slots = Slots::new();
+    /// An interner where key `n` has slot `n`, for each `n` below 1000.
+    fn interner() -> Interner {
+        let mut interner = Interner::new();
         for n in 0..1000 {
-            slots.assign(key(n));
+            interner.slots().assign(key(n));
         }
-        slots
+        interner
     }
 
     fn pool(budget: usize) -> block::Pool {
@@ -665,54 +665,44 @@ mod tests {
     }
 
     /// One group: index key 1 (entry 0), then keys 2 and 3 (entries 1 and 2).
-    fn one_group(interner: &mut Interner, slots: &mut Slots) -> std::sync::Arc<KeySet> {
-        interner.intern(
-            slots,
-            &[Group {
-                index: key(1),
-                data: &[(key(2), F64), (key(3), U8)],
-            }],
-        )
+    fn one_group(interner: &mut Interner) -> std::sync::Arc<KeySet> {
+        interner.intern(&[Group {
+            index: key(1),
+            data: &[(key(2), F64), (key(3), U8)],
+        }])
     }
 
     /// Two groups: index key 1 with key 2, and index key 3 with key 4.
     fn two_groups() -> std::sync::Arc<KeySet> {
-        Interner::new().intern(
-            &mut table(),
-            &[
-                Group {
-                    index: key(1),
-                    data: &[(key(2), F64)],
-                },
-                Group {
-                    index: key(3),
-                    data: &[(key(4), F64)],
-                },
-            ],
-        )
+        interner().intern(&[
+            Group {
+                index: key(1),
+                data: &[(key(2), F64)],
+            },
+            Group {
+                index: key(3),
+                data: &[(key(4), F64)],
+            },
+        ])
     }
 
     /// The error of a draft of `series` over [`one_group`].
     fn refusal(series: &[(usize, usize)]) -> Error {
-        let set = one_group(&mut Interner::new(), &mut table());
+        let set = one_group(&mut interner());
         let result = Draft::new(&pool(1 << 16), &set, Form::Raw, series);
         result.unwrap_err()
     }
 
     #[test]
     fn lays_out_a_frame_byte_for_byte() {
-        let mut interner = Interner::new();
-        let mut slots = table();
+        let mut interner = interner();
         for n in 10..13 {
-            interner.intern(
-                &mut slots,
-                &[Group {
-                    index: key(n),
-                    data: &[],
-                }],
-            );
+            interner.intern(&[Group {
+                index: key(n),
+                data: &[],
+            }]);
         }
-        let set = one_group(&mut interner, &mut slots);
+        let set = one_group(&mut interner);
         let pool = pool(1 << 16);
         let mut dirty = pool.alloc(58).unwrap();
         dirty.fill(0xff);
@@ -764,19 +754,15 @@ mod tests {
 
     #[test]
     fn reads_the_header_of_a_draft() {
-        let mut interner = Interner::new();
-        let mut slots = table();
+        let mut interner = interner();
         // A key wider than one byte, and unlike the counts in the header.
         for n in 0..256 {
-            interner.intern(
-                &mut slots,
-                &[Group {
-                    index: key(1000 + n),
-                    data: &[],
-                }],
-            );
+            interner.intern(&[Group {
+                index: key(1000 + n),
+                data: &[],
+            }]);
         }
-        let set = one_group(&mut interner, &mut slots);
+        let set = one_group(&mut interner);
         assert_eq!(set.key().get(), 256);
         let pool = pool(1 << 16);
         let draft = Draft::new(&pool, &set, Form::Encoded, &[(0, 8)]).unwrap();
@@ -962,7 +948,7 @@ mod tests {
                 data: &[],
             })
             .collect();
-        let set = Interner::new().intern(&mut table(), &groups);
+        let set = interner().intern(&groups);
         let pool = pool(1 << 16);
         let series = [(0, 8), (64, 8), (129, 8)];
         let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
@@ -986,7 +972,7 @@ mod tests {
     #[test]
     fn returns_the_pool_error() {
         let pool = pool(512);
-        let set = one_group(&mut Interner::new(), &mut table());
+        let set = one_group(&mut interner());
         let result = Draft::new(&pool, &set, Form::Raw, &[(0, 1000)]);
         let error = result.unwrap_err();
         let cause = block::Error::TooLarge {
@@ -1006,13 +992,10 @@ mod tests {
 
     #[test]
     fn returns_the_pool_error_past_u32_max_bytes() {
-        let set = Interner::new().intern(
-            &mut table(),
-            &[Group {
-                index: key(1),
-                data: &[],
-            }],
-        );
+        let set = interner().intern(&[Group {
+            index: key(1),
+            data: &[],
+        }]);
         let pool = pool(1 << 16);
         let len = usize::try_from(u32::MAX).unwrap() + 1;
         let result = Draft::new(&pool, &set, Form::Raw, &[(0, len - 40)]);
@@ -1192,7 +1175,7 @@ mod tests {
                 data,
             })
             .collect();
-        let set = Interner::new().intern(&mut table(), &groups);
+        let set = interner().intern(&groups);
         let series = (0..set.entries().len())
             .filter(|&entry| {
                 let group = usize::try_from(set.entries()[entry].group).unwrap();

@@ -139,7 +139,7 @@ mod tests {
 
     use control::{Handoff, Lease, Writer};
     use types::authority::Authority;
-    use types::channel::{self, Slots};
+    use types::channel;
     use types::frame::key_set::{Group, Interner, KeySet};
     use types::frame::{self, Form};
     use types::time::{Span, Stamp};
@@ -161,7 +161,7 @@ mod tests {
             };
             Self {
                 pool: pool(4096),
-                set: Interner::new().intern(&mut Slots::new(), &[index]),
+                set: Interner::new().intern(&[index]),
             }
         }
 

@@ -85,8 +85,8 @@ impl Slot {
     }
 }
 
-/// The node's table of channel slots. `node` makes one per node and injects it into
-/// `hub` and `home`.
+/// The node's table of channel slots. The node's
+/// [`Interner`](crate::frame::key_set::Interner) owns it.
 #[derive(Debug, Default)]
 pub struct Slots(hash::Map<Key, Slot>);
 

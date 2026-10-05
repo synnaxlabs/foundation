@@ -204,7 +204,6 @@ mod tests {
     use proptest::prelude::*;
     use std::collections::BTreeMap;
 
-    use types::channel::Slots;
     use types::frame::key_set::{Group, Interner};
     use types::frame::{Draft, Path};
 
@@ -234,13 +233,13 @@ mod tests {
         channel::Key::from_u128(bits << 120 | bits)
     }
 
-    /// A table where `key(slot)` has `slot`, for each slot below 16.
-    fn table() -> Slots {
-        let mut slots = Slots::new();
+    /// An interner where `key(slot)` has `slot`, for each slot below 16.
+    fn interner() -> Interner {
+        let mut interner = Interner::new();
         for n in 0..16 {
-            slots.assign(key(Slot::new(n)));
+            interner.slots().assign(key(Slot::new(n)));
         }
-        slots
+        interner
     }
 
     /// A live frame of `set` in `form` with each present entry and its bytes, in
@@ -271,13 +270,10 @@ mod tests {
 
     /// The stored body of one index series of 8 bytes: 38 bytes.
     fn stored() -> Vec<u8> {
-        let set = Interner::new().intern(
-            &mut table(),
-            &[Group {
-                index: key(Slot::new(1)),
-                data: &[],
-            }],
-        );
+        let set = interner().intern(&[Group {
+            index: key(Slot::new(1)),
+            data: &[],
+        }]);
         let pool = pool(4096);
         let frame = frame(&pool, &set, &[(0, &[9; 8])]);
         joined(&body(&pool, &frame, &set, key).expect("room"))
@@ -289,13 +285,10 @@ mod tests {
         #[test]
         fn lays_out_the_header_then_the_series() {
             let data = [(key(Slot::new(2)), Type::Scalar(Scalar::U8))];
-            let set = Interner::new().intern(
-                &mut table(),
-                &[Group {
-                    index: key(Slot::new(1)),
-                    data: &data,
-                }],
-            );
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(1)),
+                data: &data,
+            }]);
             let pool = pool(4096);
             let stamps = [7; 16];
             let frame = frame(&pool, &set, &[(0, &stamps), (1, &[1, 2, 3])]);
@@ -352,13 +345,10 @@ mod tests {
                 .zip(cases)
                 .map(|(slot, (data_type, _))| (key(Slot::new(slot)), data_type))
                 .collect();
-            let set = Interner::new().intern(
-                &mut table(),
-                &[Group {
-                    index: key(Slot::new(1)),
-                    data: &data,
-                }],
-            );
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(1)),
+                data: &data,
+            }]);
             let pool = pool(4096);
             let series: Vec<(usize, &[u8])> = (0..set.entries().len())
                 .map(|entry| (entry, &[][..]))
@@ -384,13 +374,10 @@ mod tests {
 
         #[test]
         fn returns_the_pool_error_when_the_pool_is_full() {
-            let set = Interner::new().intern(
-                &mut table(),
-                &[Group {
-                    index: key(Slot::new(1)),
-                    data: &[],
-                }],
-            );
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(1)),
+                data: &[],
+            }]);
             let frames = pool(4096);
             let frame = frame(&frames, &set, &[(0, &[0; 8])]);
             let heads = pool(4096);
@@ -421,13 +408,10 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is not encoded")]
             fn panics_on_a_raw_frame() {
-                let set = Interner::new().intern(
-                    &mut table(),
-                    &[Group {
-                        index: key(Slot::new(1)),
-                        data: &[],
-                    }],
-                );
+                let set = interner().intern(&[Group {
+                    index: key(Slot::new(1)),
+                    data: &[],
+                }]);
                 let pool = pool(4096);
                 let frame = draft(&pool, &set, Form::Raw, &[(0, &[0; 8])]);
                 drop(body(&pool, &frame, &set, key));
@@ -436,16 +420,12 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is not of the key set")]
             fn panics_on_a_frame_of_another_key_set() {
-                let mut interner = Interner::new();
-                let mut slots = table();
+                let mut interner = interner();
                 let [of, other] = [1, 2].map(|slot| {
-                    interner.intern(
-                        &mut slots,
-                        &[Group {
-                            index: key(Slot::new(slot)),
-                            data: &[],
-                        }],
-                    )
+                    interner.intern(&[Group {
+                        index: key(Slot::new(slot)),
+                        data: &[],
+                    }])
                 });
                 let pool = pool(4096);
                 let frame = frame(&pool, &of, &[(0, &[0; 8])]);
@@ -455,13 +435,10 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame has more than one group")]
             fn panics_on_a_frame_of_two_groups() {
-                let set = Interner::new().intern(
-                    &mut table(),
-                    &[1, 2].map(|slot| Group {
-                        index: key(Slot::new(slot)),
-                        data: &[],
-                    }),
-                );
+                let set = interner().intern(&[1, 2].map(|slot| Group {
+                    index: key(Slot::new(slot)),
+                    data: &[],
+                }));
                 let pool = pool(4096);
                 let frame = frame(&pool, &set, &[(0, &[0; 8]), (1, &[0; 8])]);
                 drop(body(&pool, &frame, &set, key));
@@ -592,7 +569,7 @@ mod tests {
                     data,
                 })
                 .collect();
-            Interner::new().intern(&mut Slots::new(), &groups)
+            Interner::new().intern(&groups)
         }
 
         proptest! {

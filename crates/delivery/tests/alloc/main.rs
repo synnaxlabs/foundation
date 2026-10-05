@@ -5,7 +5,7 @@
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use delivery::{Key, Readers};
-use types::channel::{self, Slots};
+use types::channel;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{Draft, Form, Frame, Path};
 use types::time::Stamp;
@@ -22,13 +22,10 @@ fn main() {
         "the allocator counts"
     );
 
-    let set = Interner::new().intern(
-        &mut Slots::new(),
-        &[Group {
-            index: channel::Key::from_u128(1),
-            data: &[],
-        }],
-    );
+    let set = Interner::new().intern(&[Group {
+        index: channel::Key::from_u128(1),
+        data: &[],
+    }]);
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let frame = || {

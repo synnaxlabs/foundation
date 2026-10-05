@@ -375,7 +375,7 @@ impl std::error::Error for Error {}
 )]
 mod tests {
     use proptest::prelude::*;
-    use types::channel::{self, Slots};
+    use types::channel;
     use types::frame::key_set::{Group, Interner};
     use types::frame::{Draft, Form, Path};
 
@@ -421,13 +421,10 @@ mod tests {
     /// The count and series of a frame in `form` that holds `bytes` as the series of
     /// its one group, when the writer did not call `set_count`.
     fn uncounted(form: Form, bytes: &[u8]) -> (usize, Vec<u8>) {
-        let set = Interner::new().intern(
-            &mut Slots::new(),
-            &[Group {
-                index: channel::Key::from_u128(1),
-                data: &[],
-            }],
-        );
+        let set = Interner::new().intern(&[Group {
+            index: channel::Key::from_u128(1),
+            data: &[],
+        }]);
         let config = block::Config { budget: 1 << 16 };
         let memory = block::Heap::new(config.reservation());
         let pool = block::Pool::new(config, memory);
