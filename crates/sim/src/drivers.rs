@@ -1,5 +1,7 @@
 //! The `env` drivers of a simulated node.
 
+mod net;
+
 use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -12,7 +14,7 @@ use env::shards::{Config, Main};
 use env::tasks::Task;
 use env::thread::{Error, Handle};
 use env::threads::Body;
-use types::time::{Monotonic, Stamp};
+use types::time::Monotonic;
 
 use crate::state::{Due, Futures, Shared, Start, lock};
 
@@ -37,6 +39,24 @@ impl Node {
             })
         })
     }
+
+    /// The sim thread that runs now. `what` names the caller in a panic.
+    ///
+    /// # Panics
+    ///
+    /// Outside a thread that the sim started, and on a thread of another node.
+    fn running(&self, what: &str) -> u64 {
+        let current = lock(&self.shared).current();
+        let Some((thread, on)) = current else {
+            panic!("{what} needs a thread that the sim started")
+        };
+        let node = self.node;
+        assert!(
+            on == node,
+            "{what} of node {node} runs on a thread of node {on}"
+        );
+        thread
+    }
 }
 
 impl env::clock::Driver for Node {
@@ -49,18 +69,8 @@ impl env::clock::Driver for Node {
     }
 
     fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
-        let mut state = lock(&self.shared);
-        let on = state.current();
-        let key = state.key();
-        drop(state);
-        let Some(on) = on else {
-            panic!("a sleep needs a thread that the sim started")
-        };
-        assert!(
-            on == self.node,
-            "a clock of node {} sleeps on a thread of node {on}",
-            self.node
-        );
+        self.running("a sleep");
+        let key = lock(&self.shared).key();
         Box::pin(Timer {
             shared: Arc::clone(&self.shared),
             node: self.node,
@@ -71,7 +81,7 @@ impl env::clock::Driver for Node {
 }
 
 impl env::wall::Driver for Node {
-    fn now(&self) -> Stamp {
+    fn now(&self) -> env::wall::Reading {
         lock(&self.shared).wall(self.node)
     }
 }
@@ -88,10 +98,6 @@ impl env::shards::Driver for Node {
     }
 
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error> {
-        if let Some(core) = config.core.filter(|&core| core >= self.cores().get()) {
-            let name = config.name;
-            return Err(Error::Pin { name, core });
-        }
         Ok(self.thread(config.name, Start::Shard(main)))
     }
 }

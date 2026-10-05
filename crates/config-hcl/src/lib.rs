@@ -135,7 +135,7 @@ impl std::error::Error for Error {}
 pub enum Form {
     /// `null`.
     Null,
-    /// An interpolation `${` or a directive `%{` in a string.
+    /// An interpolation `${` or a directive `%{` in a string or a heredoc.
     Template,
     /// An operator, such as `+`, `==`, `!`, or `-` before a value that is not a
     /// number.
@@ -154,6 +154,9 @@ pub enum Form {
     Namespace,
     /// An argument expanded with `...`, such as `f(xs...)`.
     Expansion,
+    /// An object key that is a number HCL rounds: one with a fraction or an exponent,
+    /// or an integer of more than 154 digits, such as `{ 1.5 = 1 }`.
+    NumberKey,
 }
 
 impl fmt::Display for Form {
@@ -194,6 +197,10 @@ impl fmt::Display for Form {
                 "argument expansion does not exist in Foundation files. Write each \
                  argument"
             }
+            Self::NumberKey => {
+                "number keys with a fraction, an exponent, or more than 154 digits do not \
+                 exist in Foundation files. Write the key as a quoted string"
+            }
         })
     }
 }
@@ -227,6 +234,10 @@ pub enum Expected {
     ArgumentsEnd,
     /// `"` at the end of a string.
     Quote,
+    /// A marker, such as `EOT`, and a new line after `<<` or `<<-`.
+    HeredocStart,
+    /// The marker on a line of its own at the end of a heredoc.
+    HeredocEnd,
     /// `*/` at the end of a comment.
     CommentEnd,
 }
@@ -247,6 +258,10 @@ impl fmt::Display for Expected {
             Self::ObjectEnd => "`,`, a new line, or `}`",
             Self::ArgumentsEnd => "`,` or `)`",
             Self::Quote => "`\"` to end the string",
+            Self::HeredocStart => {
+                "a marker, such as `EOT`, and a new line to start the heredoc"
+            }
+            Self::HeredocEnd => "the marker on a line of its own to end the heredoc",
             Self::CommentEnd => "`*/` to end the comment",
         })
     }
@@ -285,6 +300,14 @@ mod tests {
             (Expected::ObjectEnd, "`,`, a new line, or `}`"),
             (Expected::ArgumentsEnd, "`,` or `)`"),
             (Expected::Quote, "`\"` to end the string"),
+            (
+                Expected::HeredocStart,
+                "a marker, such as `EOT`, and a new line to start the heredoc",
+            ),
+            (
+                Expected::HeredocEnd,
+                "the marker on a line of its own to end the heredoc",
+            ),
             (Expected::CommentEnd, "`*/` to end the comment"),
         ];
         for (expected, phrase) in cases {
@@ -345,6 +368,11 @@ mod tests {
                 Form::Expansion,
                 "argument expansion does not exist in Foundation files. Write each \
                  argument",
+            ),
+            (
+                Form::NumberKey,
+                "number keys with a fraction, an exponent, or more than 154 digits do not \
+                 exist in Foundation files. Write the key as a quoted string",
             ),
         ];
         for (form, message) in cases {

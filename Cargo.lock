@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "acceptance"
+version = "0.0.0"
+
+[[package]]
 name = "access"
 version = "0.0.0"
 
@@ -126,6 +130,7 @@ dependencies = [
 name = "buffer"
 version = "0.0.0"
 dependencies = [
+ "block",
  "crc32c",
  "proptest",
  "types",
@@ -347,6 +352,8 @@ dependencies = [
 name = "delivery"
 version = "0.0.0"
 dependencies = [
+ "block",
+ "counting",
  "divan",
  "proptest",
  "types",
@@ -1377,9 +1384,12 @@ version = "0.0.0"
 dependencies = [
  "aws-lc-rs",
  "block",
+ "bytes",
  "env",
+ "noq-proto",
  "proptest",
  "rustls",
+ "sim",
  "types",
 ]
 

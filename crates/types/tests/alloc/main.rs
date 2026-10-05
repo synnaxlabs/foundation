@@ -36,17 +36,17 @@ fn main() {
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let series = [(0, 16), (2, 16)];
     let (sum, allocations) = ALLOCATOR.count(|| {
-        let mut draft = Draft::new(&pool, &set, Path::Live, Form::Raw, &series)
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &series)
             .expect("the pool holds the frame");
         for (entry, bytes) in draft.iter_mut() {
             bytes.fill(u8::try_from(entry).expect("entries are small"));
         }
         draft.series(0).expect("entry 0 is present").fill(1);
         draft.set_range(0, Range { seq: 9, count: 2 });
-        let frame = draft.freeze();
+        let frame = draft.freeze(Path::Backfill);
         let copy = frame.clone();
         assert_eq!(frame.key_set(), set.key(), "the frame names its key set");
-        assert_eq!(frame.path(), Path::Live, "the frame keeps its path");
+        assert_eq!(frame.path(), Path::Backfill, "the frame keeps its path");
         assert_eq!(frame.form(), Form::Raw, "the frame keeps its form");
         assert_eq!(frame.series(1), None, "entry 1 is absent");
         assert_eq!(frame.range(1), None, "group 1 is absent");

@@ -30,13 +30,13 @@ mod at {
     pub(super) const PATH: usize = 13;
 }
 
-/// One of an index's two write paths, each with its own seq. Backfill is late data,
-/// labeled by the writer, that live readers never see.
+/// One of an index's two write paths, each with its own seq. Backfill is late data
+/// that live readers never see.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Path {
     /// The newest data.
     Live,
-    /// Late data, labeled by the writer. It ends before the newest live sample.
+    /// Late data. It ends before the newest live sample.
     Backfill,
 }
 
@@ -55,6 +55,17 @@ impl Path {
             other => unreachable!("invariant: only a draft writes a path, not {other}"),
         }
     }
+}
+
+/// What a writer says a write holds. The home applies a write labeled with a path to
+/// that path, and checks a resend against both paths first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Label {
+    /// Data the writer has not sent before, for this path.
+    Path(Path),
+    /// A frame that the writer sends again after a reconnect, with its original
+    /// boundaries. Each of its indexes lands on one path or on none.
+    Resend,
 }
 
 /// How a frame's series hold their samples.
@@ -163,10 +174,10 @@ impl From<block::Error> for Error {
 pub struct Draft(block::Unique);
 
 impl Draft {
-    /// Takes a block from `pool` for a frame of `set` on `path`, and writes its header,
-    /// ranges, and descriptors. `series` holds each present entry and the byte length
-    /// of its series, in increasing entry order. A group is present when its index is.
-    /// Each range starts at zero, and series bytes are not cleared.
+    /// Takes a block from `pool` for a frame of `set`, and writes its header, ranges,
+    /// and descriptors. `series` holds each present entry and the byte length of its
+    /// series, in increasing entry order. A group is present when its index is. Each
+    /// range starts at zero, and series bytes are not cleared.
     ///
     /// # Errors
     ///
@@ -175,7 +186,6 @@ impl Draft {
     pub fn new(
         pool: &block::Pool,
         set: &KeySet,
-        path: Path,
         form: Form,
         series: &[(usize, usize)],
     ) -> Result<Self, Error> {
@@ -188,7 +198,6 @@ impl Draft {
         put(head, at::RANGES, &to_u32(groups).to_le_bytes());
         put(head, at::SERIES, &to_u32(series.len()).to_le_bytes());
         head[at::FORM] = form.byte();
-        head[at::PATH] = path.byte();
         let (ranges, descriptors, body) = split_mut(&mut block);
         let indexes = series
             .iter()
@@ -252,9 +261,10 @@ impl Draft {
         put(&mut ranges[n], 8, &range.seq.to_le_bytes());
     }
 
-    /// The finished frame.
+    /// The finished frame on `path`, the path whose seq its ranges count on.
     #[must_use]
-    pub fn freeze(self) -> Frame {
+    pub fn freeze(mut self, path: Path) -> Frame {
+        self.0[at::PATH] = path.byte();
         Frame(self.0.freeze())
     }
 }
@@ -270,7 +280,7 @@ impl Frame {
         key_set::Key::new(u32::from_le_bytes(get(&self.0, at::KEY_SET)))
     }
 
-    /// The frame's write path.
+    /// The path whose seq the frame's ranges count on.
     #[must_use]
     pub fn path(&self) -> Path {
         Path::from_byte(self.0[at::PATH])
@@ -460,7 +470,7 @@ mod tests {
     /// The error of a draft of `series` over [`one_group`].
     fn refusal(series: &[(usize, usize)]) -> Error {
         let set = one_group(&mut Interner::new());
-        let result = Draft::new(&pool(1 << 16), &set, Path::Live, Form::Raw, series);
+        let result = Draft::new(&pool(1 << 16), &set, Form::Raw, series);
         result.unwrap_err()
     }
 
@@ -479,17 +489,16 @@ mod tests {
         dirty.fill(0xff);
         drop(dirty);
         let series = [(0, 3), (2, 2)];
-        let mut draft =
-            Draft::new(&pool, &set, Path::Live, Form::Encoded, &series).unwrap();
+        let mut draft = Draft::new(&pool, &set, Form::Encoded, &series).unwrap();
         draft.series(0).unwrap().copy_from_slice(&[0xaa; 3]);
         draft.series(2).unwrap().copy_from_slice(&[1, 2]);
         draft.set_range(0, Range { seq: 7, count: 2 });
-        let frame = draft.freeze();
+        let frame = draft.freeze(Path::Backfill);
         let mut expected = Vec::new();
         for n in [3_u32, 1, 2] {
             expected.extend(n.to_le_bytes());
         }
-        expected.extend([1, 0, 0, 0]);
+        expected.extend([1, 1, 0, 0]);
         for n in [0_u32, 2] {
             expected.extend(n.to_le_bytes());
         }
@@ -502,12 +511,33 @@ mod tests {
     }
 
     #[test]
+    fn writes_the_path_at_freeze() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        for (path, byte) in [(Path::Live, 0), (Path::Backfill, 1)] {
+            let frame = Draft::new(&pool, &set, Form::Raw, &[])
+                .unwrap()
+                .freeze(path);
+            assert_eq!(frame.0[13], byte, "{path:?}");
+            assert_eq!(frame.path(), path);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: only a draft writes a path, not 2")]
+    fn panics_on_an_unknown_path_byte() {
+        let mut block = pool(1 << 16).alloc(HEAD).unwrap();
+        block.fill(2);
+        let path = Frame(block.freeze()).path();
+        unreachable!("read {path:?} from byte 2");
+    }
+
+    #[test]
     fn reads_the_header_and_absent_parts() {
         let set = two_groups();
         let pool = pool(1 << 16);
-        let draft =
-            Draft::new(&pool, &set, Path::Backfill, Form::Raw, &[(0, 8)]).unwrap();
-        let frame = draft.freeze();
+        let draft = Draft::new(&pool, &set, Form::Raw, &[(0, 8)]).unwrap();
+        let frame = draft.freeze(Path::Backfill);
         assert_eq!(frame.key_set(), set.key());
         assert_eq!(frame.path(), Path::Backfill);
         assert_eq!(frame.form(), Form::Raw);
@@ -535,8 +565,7 @@ mod tests {
         let set = Interner::new().intern(&groups);
         let pool = pool(1 << 16);
         let series = [(0, 8), (64, 8), (129, 8)];
-        let mut draft =
-            Draft::new(&pool, &set, Path::Live, Form::Raw, &series).unwrap();
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
         for (seq, &(entry, _)) in (1..).zip(&series) {
             draft
                 .series(entry)
@@ -545,7 +574,7 @@ mod tests {
             let group = u32::try_from(entry).unwrap();
             draft.set_range(group, Range { seq, count: 1 });
         }
-        let frame = draft.freeze();
+        let frame = draft.freeze(Path::Live);
         assert_eq!(frame.range(64), Some(Range { seq: 2, count: 1 }));
         assert_eq!(frame.range(129), Some(Range { seq: 3, count: 1 }));
         assert_eq!(frame.range(128), None);
@@ -557,7 +586,7 @@ mod tests {
     fn returns_the_pool_error() {
         let pool = pool(512);
         let set = one_group(&mut Interner::new());
-        let result = Draft::new(&pool, &set, Path::Live, Form::Raw, &[(0, 1000)]);
+        let result = Draft::new(&pool, &set, Form::Raw, &[(0, 1000)]);
         let error = result.unwrap_err();
         let cause = block::Error::TooLarge {
             requested: 1040,
@@ -582,7 +611,7 @@ mod tests {
         }]);
         let pool = pool(1 << 16);
         let len = usize::try_from(u32::MAX).unwrap() + 1;
-        let result = Draft::new(&pool, &set, Path::Live, Form::Raw, &[(0, len - 40)]);
+        let result = Draft::new(&pool, &set, Form::Raw, &[(0, len - 40)]);
         let expected = block::Error::TooLarge {
             requested: len,
             largest: pool.largest(),
@@ -645,14 +674,9 @@ mod tests {
 
     #[test]
     fn refuses_data_whose_index_is_another_groups() {
-        let error = Draft::new(
-            &pool(1 << 16),
-            &two_groups(),
-            Path::Live,
-            Form::Raw,
-            &[(0, 1), (3, 1)],
-        )
-        .unwrap_err();
+        let error =
+            Draft::new(&pool(1 << 16), &two_groups(), Form::Raw, &[(0, 1), (3, 1)])
+                .unwrap_err();
         assert_eq!(error, Error::IndexAbsent { entry: 3, index: 2 });
     }
 
@@ -661,8 +685,7 @@ mod tests {
     fn refuses_a_range_for_an_absent_group() {
         let pool = pool(1 << 16);
         let series = [(0, 1)];
-        let mut draft =
-            Draft::new(&pool, &two_groups(), Path::Live, Form::Raw, &series).unwrap();
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
         draft.set_range(1, Range::default());
     }
 
@@ -785,7 +808,7 @@ mod tests {
         let (set, series) = shape(case);
         let entries = set.entries().len();
         let pool = pool(1 << 20);
-        let mut draft = Draft::new(&pool, &set, case.path, case.form, &series)
+        let mut draft = Draft::new(&pool, &set, case.form, &series)
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
         fill(&mut draft, &series, entries, case.in_order)?;
         let mut ranges = Vec::new();
@@ -799,7 +822,7 @@ mod tests {
             ranges.push(range);
         }
         ranges.push(None);
-        let frame = draft.freeze();
+        let frame = draft.freeze(case.path);
 
         prop_assert_eq!(frame.key_set(), set.key());
         prop_assert_eq!(frame.path(), case.path);
