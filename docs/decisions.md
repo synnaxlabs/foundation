@@ -808,7 +808,13 @@ How to read this record:
   its own voter list votes and follows, but never campaigns while that configuration
   is committed. `step` does not check
   that a sender is a voter (a voter can learn late that a peer joined), so the caller
-  authenticates the sender and decides which nodes may send.
+  authenticates the sender and decides which nodes may send. When the term of the
+  last entry is above `hard.term`, `Raft::new` starts at that term with no vote. The
+  node sends nothing before its write, so no peer counted a vote or an answer that a
+  lost `hard` held. The caller writes `hard` and `entries` in any order, with no
+  atomic write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that
+  each caller must keep and that shows only at a restart. The person decided on
+  2026-10-05 ("I approve long term fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
