@@ -37,6 +37,9 @@ pub struct Opened {
 pub struct Readers {
     /// Sorted by key.
     sessions: Vec<Session>,
+    /// The credit of each session, at its index in `sessions`. Apart so that a
+    /// `Session` stays 64 bytes, which `find` indexes with a shift, not a multiply.
+    credits: Vec<Credit>,
     /// Named readers that still hold after their session closed.
     closed: Vec<Closed>,
     next: u64,
@@ -50,6 +53,10 @@ struct Session {
     position: Position,
     /// The position moved since the last record.
     changed: bool,
+}
+
+#[derive(Debug, Default)]
+struct Credit {
     /// Bytes sent since the session opened.
     spent_bytes: u64,
     /// The highest grant.
@@ -127,11 +134,10 @@ impl Readers {
             reader,
             position,
             changed: false,
-            spent_bytes: 0,
-            limit_bytes: 0,
         };
         self.records.extend(session.record());
         self.sessions.push(session);
+        self.credits.push(Credit::default());
         Opened {
             key,
             position,
@@ -174,8 +180,8 @@ impl Readers {
     /// If the session is not open.
     pub fn grant(&mut self, key: Key, limit_bytes: u64) {
         let i = self.find(key);
-        let session = &mut self.sessions[i];
-        session.limit_bytes = session.limit_bytes.max(limit_bytes);
+        let credit = &mut self.credits[i];
+        credit.limit_bytes = credit.limit_bytes.max(limit_bytes);
     }
 
     /// Spends credit on one frame of `bytes`: the length of its encoded series. A frame
@@ -190,11 +196,11 @@ impl Readers {
     #[must_use]
     pub fn spend(&mut self, key: Key, bytes: u64) -> bool {
         let i = self.find(key);
-        let session = &mut self.sessions[i];
-        if session.spent_bytes >= session.limit_bytes {
+        let credit = &mut self.credits[i];
+        if credit.spent_bytes >= credit.limit_bytes {
             return false;
         }
-        session.spent_bytes += bytes.max(1);
+        credit.spent_bytes += bytes.max(1);
         true
     }
 
@@ -204,7 +210,7 @@ impl Readers {
     ///
     /// If the session is not open.
     pub fn close(&mut self, key: Key, now: Stamp) {
-        let session = self.sessions.remove(self.find(key));
+        let session = self.remove(self.find(key));
         if let Reader::Named { name, hold } = session.reader {
             let closed = Closed {
                 name,
@@ -265,7 +271,7 @@ impl Readers {
     fn take(&mut self, name: &Name) -> (Option<Position>, Option<Key>) {
         let open = self.sessions.iter().position(|s| s.name() == Some(name));
         if let Some(i) = open {
-            let session = self.sessions.remove(i);
+            let session = self.remove(i);
             return (Some(session.position), Some(session.key));
         }
         let closed = self.closed.iter().position(|closed| closed.name == *name);
@@ -276,6 +282,11 @@ impl Readers {
         self.sessions
             .binary_search_by_key(&key, |session| session.key)
             .unwrap_or_else(|_| panic!("session {key} is not open"))
+    }
+
+    fn remove(&mut self, i: usize) -> Session {
+        self.credits.remove(i);
+        self.sessions.remove(i)
     }
 }
 

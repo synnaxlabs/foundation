@@ -37,13 +37,19 @@ fn ack(bencher: Bencher<'_, '_>, sessions: usize) {
     });
 }
 
-/// The last of `sessions` recording readers spends credit on a frame.
+/// Each of `sessions` recording readers spends credit on one frame, as the home does
+/// for each frame it sends.
 #[divan::bench(args = [1, 16])]
 fn spend(bencher: Bencher<'_, '_>, sessions: usize) {
     let (mut readers, keys) = opened(sessions);
-    let key = keys[sessions - 1];
-    readers.grant(key, u64::MAX);
-    bencher.bench_local(|| readers.spend(divan::black_box(key), 1_000));
+    for &key in &keys {
+        readers.grant(key, u64::MAX);
+    }
+    bencher.bench_local(|| {
+        for &key in &keys {
+            divan::black_box(readers.spend(divan::black_box(key), 1_000));
+        }
+    });
 }
 
 #[divan::bench(args = [1, 16, 256])]

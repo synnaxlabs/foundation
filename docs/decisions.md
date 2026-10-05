@@ -246,14 +246,20 @@ How to read this record:
   refused one; frames from catch-up spend credit too. A frame costs one credit byte per
   byte of its encoded series (X35), and at least one byte, so a frame with only empty
   series still uses credit. The home, every connection, and a local reader see the same
-  length, and per-connection framing does not count. Credits apply only to complete
+  length, and per-connection framing does not count. A frame's block also holds a header
+  and descriptors (M3), so for small frames the window bounds the blocks a reader pins
+  better than their bytes. `wire` sets a charge per frame and per series with the frame
+  layout, and that charge replaces the one-byte floor. Credits apply only to complete
   delivery, which is reliable: a lost frame would leak credit. The `hub` raises the
   limit only after it releases a frame, and it bounds its decoded copies itself, since a
-  small encoded frame can decode to much more. It sizes one window per reader from the
-  link's bandwidth-delay product, adapts it, and divides it among the indexes the reader
-  reads, so the memory a reader can pin does not grow with its indexes. Replaces r11 5.2
-  (a window beyond the acknowledged position): flow control stays apart from durable
-  acks. Basis: B3, MEMORY BOUNDS, X35, r11 5.2, #41.
+  small encoded frame can decode to much more. It sends a `Credit` only when the room it
+  has not announced reaches half the window, and puts the grants for all sessions on one
+  link into one message. It sizes one window per reader from the link's bandwidth-delay
+  product, adapts it, and divides it among the indexes the reader reads. Each session
+  with room can pass its limit by one frame, so the `hub` counts one largest frame per
+  such session against the window, and a reader pins at most its window. Replaces r11
+  5.2 (a window beyond the acknowledged position): flow control stays apart from durable
+  acks. Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync.
