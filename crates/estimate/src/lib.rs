@@ -2,9 +2,9 @@
 //! device oscillator fits.
 //!
 //! Each time source gives [`Measurement`]s. A [`Filter`] keeps the recent ones of one
-//! source, and [`combine`] intersects the best of each source into one estimate. The
-//! crate never knows what a source is, and it reads no clock: the caller passes the
-//! local monotonic time.
+//! source, and [`combine`] intersects the best of each source into one estimate. An
+//! [`Overlap`] keeps what every measurement of one device clock allows. The crate never
+//! knows what a source is, and it reads no clock: the caller passes the local time.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
@@ -12,15 +12,19 @@ mod combine;
 mod drift;
 mod filter;
 mod measurement;
+mod overlap;
+#[cfg(test)]
+mod world;
 
 use std::fmt;
 
-use types::time::Span;
+use types::time::{Monotonic, Span};
 
 pub use combine::combine;
 pub use drift::Drift;
 pub use filter::Filter;
 pub use measurement::Measurement;
+pub use overlap::Overlap;
 
 /// Why an estimate failed.
 ///
@@ -40,6 +44,15 @@ pub enum Error {
         /// The rate in parts per billion.
         ppb: u32,
     },
+    /// A measurement is older than the newest one in an [`Overlap`].
+    Backwards {
+        /// The local time of the measurement.
+        at: Monotonic,
+        /// The local time of the newest measurement in the overlap.
+        newest: Monotonic,
+    },
+    /// A measurement shares no offset with an [`Overlap`].
+    Disjoint,
     /// There are no measurements to combine.
     NoSources,
     /// No offset is inside the bounds of more than half of the sources.
@@ -61,6 +74,14 @@ impl fmt::Display for Error {
             ),
             Self::Drift { ppb } => {
                 write!(f, "drift {ppb} ppb is more than 100000000 ppb (10%)")
+            }
+            Self::Backwards { at, newest } => write!(
+                f,
+                "measurement at {}ns is older than the newest at {}ns",
+                at.0, newest.0
+            ),
+            Self::Disjoint => {
+                f.write_str("measurement shares no offset with the overlap")
             }
             Self::NoSources => f.write_str("no time sources to combine"),
             Self::NoMajority { sources, agreeing } => write!(

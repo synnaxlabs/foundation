@@ -23,8 +23,8 @@ use types::sample::Scalar;
 
 use crate::vector::Vector;
 
-/// The format version of encoded vectors. Sessions agree on it at setup and disk
-/// footers record it; a series does not carry it.
+/// The format version of encoded vectors. A series does not carry it: each wire version
+/// fixes one codec version, and disk footers record it.
 pub const VERSION: u16 = 1;
 
 /// Samples in a full vector. The last vector of a series may hold fewer.
