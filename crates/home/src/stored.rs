@@ -208,6 +208,7 @@ mod tests {
     use types::frame::{Draft, Path};
 
     use super::*;
+    use crate::common::pool;
 
     const SCALARS: [Scalar; 14] = [
         Scalar::Bool,
@@ -225,12 +226,6 @@ mod tests {
         Scalar::Span,
         Scalar::Uuid,
     ];
-
-    fn pool(budget: usize) -> block::Pool {
-        let config = block::Config { budget };
-        let memory = block::Heap::new(config.reservation());
-        block::Pool::new(config, memory)
-    }
 
     /// A key with the slot number in its first and last byte.
     fn key(slot: Slot) -> channel::Key {
