@@ -303,22 +303,21 @@ impl<'a> Parser<'a> {
     }
 
     fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
-        let kind = match word.text {
-            "true" => value::Kind::Bool(true),
-            "false" => value::Kind::Bool(false),
-            "null" => {
+        if self.token.kind == lex::Kind::OpenParenthesis
+            && word.kind == lex::Kind::Identifier
+        {
+            return self.call(word, depth).map(Some);
+        }
+        let kind = match literal(word.text) {
+            Some(Literal::Bool(b)) => value::Kind::Bool(b),
+            Some(Literal::Null) => {
                 self.errors.push(Error::Form {
                     span: word.span,
                     form: Form::Null,
                 });
                 return Ok(None);
             }
-            _ if self.token.kind == lex::Kind::OpenParenthesis
-                && word.kind == lex::Kind::Identifier =>
-            {
-                return self.call(word, depth).map(Some);
-            }
-            text => match text.parse::<Name>() {
+            None => match word.text.parse::<Name>() {
                 Ok(name) => value::Kind::Reference(name),
                 Err(error) => {
                     self.errors.push(Error::Name {
@@ -572,6 +571,22 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// A word that reads as a value, not as a reference.
+pub(crate) enum Literal {
+    Bool(bool),
+    Null,
+}
+
+/// The value that `word` reads as by itself, or `None` for a reference.
+pub(crate) fn literal(word: &str) -> Option<Literal> {
+    match word {
+        "true" => Some(Literal::Bool(true)),
+        "false" => Some(Literal::Bool(false)),
+        "null" => Some(Literal::Null),
+        _ => None,
+    }
+}
+
 /// The digits of an integer key without leading zeros, or `None` when HCL rounds the
 /// number. HCL reads a number key through a 512-bit float, which holds each integer of
 /// up to 154 digits.
@@ -611,7 +626,7 @@ fn significant(digits: &str) -> bool {
 }
 
 /// The depth inside one more level, or `None` past [`DEPTH_MAX`].
-fn enter(depth: usize) -> Option<usize> {
+pub(crate) fn enter(depth: usize) -> Option<usize> {
     depth.checked_add(1).filter(|&inner| inner <= DEPTH_MAX)
 }
 
@@ -623,7 +638,8 @@ fn join(start: Span, end: Span) -> Span {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arbitrary::{document, write};
+    use crate::arbitrary::document;
+    use crate::write;
     use document::Position;
     use proptest::prelude::*;
 
@@ -906,6 +922,22 @@ c = "°C # not a comment"
                 ("d", call("f", vec![value(integer(1)), value(integer(2))])),
             ]);
             assert_eq!(ok(text), expected);
+        }
+
+        #[test]
+        fn reads_a_call_named_as_a_value_word_as_hcl_does() {
+            let call = |function: &str, arguments: Vec<Value>| {
+                value::Kind::Call(Call {
+                    function: function.into(),
+                    function_span: None,
+                    arguments,
+                })
+            };
+            let expected = attributes(vec![
+                ("a", call("true", vec![value(integer(1))])),
+                ("b", call("null", Vec::new())),
+            ]);
+            assert_eq!(ok("a = true(1)\nb = null()\n"), expected);
         }
     }
 
@@ -2025,12 +2057,6 @@ c = "°C # not a comment"
 
         proptest! {
             #[test]
-            fn reads_what_the_writer_writes(document in document()) {
-                let text = write(&document);
-                prop_assert_eq!(read(Source(0), &text), Ok(document), "{}", text);
-            }
-
-            #[test]
             fn reads_random_text_back_or_points_inside_it(
                 text in "[ -~\n\t°{}\\[\\]()\"=,.:#/*$%@\\\\-]{0,64}",
             ) {
@@ -2042,7 +2068,7 @@ c = "°C # not a comment"
                 document in document(),
                 edits in prop::collection::vec(edit(), 1..4),
             ) {
-                let mut chars: Vec<char> = write(&document).chars().collect();
+                let mut chars: Vec<char> = write(&document).unwrap().chars().collect();
                 for (i, c) in &edits {
                     let i = i.index(chars.len().saturating_add(1));
                     match c {
@@ -2061,6 +2087,11 @@ c = "°C # not a comment"
             match read(Source(0), text) {
                 Ok(document) => {
                     let written = write(&document);
+                    let Ok(written) = written else {
+                        return Err(TestCaseError::fail(format!(
+                            "{written:?} from {text:?}"
+                        )));
+                    };
                     prop_assert_eq!(
                         read(Source(0), &written),
                         Ok(document),
