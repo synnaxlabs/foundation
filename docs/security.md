@@ -225,7 +225,7 @@ The rule is one target for each decoder of outside input
 | `types_span` | `Span` | Printed text reads back to the same value |
 | `types_range` | `Range` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
-| `buffer_open` | `Buffer::open`, on a ring file the production path wrote and the input edited | An `Err`, or a commit on the opened ring survives a reopen |
+| `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
 
 No target yet, because the decoder is private or not built: `transport::message`
 and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
