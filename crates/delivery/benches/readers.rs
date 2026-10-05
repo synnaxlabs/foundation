@@ -65,7 +65,7 @@ fn release(bencher: Bencher<'_, '_>, sessions: usize) {
     let frame = frame();
     let mut seq = 0;
     bencher.bench_local(|| {
-        readers.queue(frame.clone(), seq..seq + 1);
+        readers.queue(&frame, seq..seq + 1);
         seq += 1;
         divan::black_box(readers.release(seq));
         for &key in &keys {

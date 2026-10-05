@@ -102,14 +102,16 @@ fn complete(frame: &impl Fn() -> Frame) {
     );
 
     keys.push(open(&mut readers, seq));
-    flow(&mut readers, &keys, frame, &mut seq);
-    let (delivered, allocations) =
-        ALLOCATOR.count(|| flow(&mut readers, &keys, frame, &mut seq));
+    let (delivered, allocations) = ALLOCATOR.count(|| {
+        (0..2)
+            .map(|_| flow(&mut readers, &keys, frame, &mut seq))
+            .sum::<usize>()
+    });
     assert_eq!(allocations, 0, "the live path allocated after an open");
     assert_eq!(
         delivered,
-        3 * (SESSIONS + 1),
-        "the round takes from and wakes the new session"
+        6 * SESSIONS + 4,
+        "two rounds wake every session and take from the new one once"
     );
 }
 
@@ -126,7 +128,7 @@ fn flow(
         .map(|&key| std::iter::from_fn(|| readers.take(key)).count())
         .sum();
     for _ in 0..2 {
-        readers.queue(frame(), *seq..*seq + 1);
+        readers.queue(&frame(), *seq..*seq + 1);
         *seq += 1;
     }
     taken + readers.release(*seq).len()
