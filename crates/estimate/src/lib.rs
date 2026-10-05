@@ -4,8 +4,9 @@
 //! Each time source gives [`Measurement`]s. A [`Filter`] keeps the recent ones of one
 //! source, and [`combine`] intersects the best of each source into one estimate. An
 //! [`Overlap`] keeps what every reading of one device clock allows. An [`Exchange`]
-//! turns one round trip to another clock into a measurement. The crate never knows
-//! what a source is, and it reads no clock: the caller passes the local time.
+//! turns one round trip to another clock into a measurement. A [`Slew`] moves mesh
+//! time toward an estimate without going back. The crate never knows what a source
+//! is, and it reads no clock: the caller passes the local time.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
@@ -15,6 +16,7 @@ mod exchange;
 mod filter;
 mod measurement;
 mod overlap;
+mod slew;
 #[cfg(test)]
 mod world;
 
@@ -28,6 +30,7 @@ pub use exchange::Exchange;
 pub use filter::Filter;
 pub use measurement::Measurement;
 pub use overlap::Overlap;
+pub use slew::Slew;
 
 /// Why an estimate failed.
 ///

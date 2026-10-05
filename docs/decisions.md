@@ -499,6 +499,11 @@ How to read this record:
   and its error grows by drift. It never follows the largest group or one side of a tie.
   `push` returns the holdover and its cause, and `node` publishes it. The next majority
   ends the holdover. Decided by the `time` builder (#142).
+- **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
+  estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The
+  part not yet applied goes into the error, so a slew of 1 s takes 2000 s and its
+  error says so. Only the first estimate steps. A clock in holdover keeps its slew.
+  Decided by the `time` builder (#202).
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), the reading has the largest
@@ -1808,7 +1813,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
-| 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits. | `types` |
+| 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits, and slews mesh time. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
 | 1 | `delivery` | Keeps each reader's state per index: positions, credits, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |

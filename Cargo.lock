@@ -447,6 +447,7 @@ dependencies = [
 name = "estimate"
 version = "0.0.0"
 dependencies = [
+ "divan",
  "proptest",
  "types",
 ]
