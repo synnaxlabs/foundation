@@ -9,8 +9,9 @@ exclude_re = [
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
-  # `len < ALIGN` and `len <= ALIGN` pick the same payload at `len == ALIGN`.
-  'crates/block/src/lib\.rs:.*replace < with <= in class_of',
+  # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
+  # `(ALIGN << 0) * 5`.
+  'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
   # Stubs that panic until #68 fills them; #68 removes this line.
   'crates/transport/src/(datagram|session|stream)\.rs:',
   # `Vec::leak(Vec::new())` is the same empty slice as `&[]`.

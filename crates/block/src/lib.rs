@@ -71,8 +71,7 @@ fn classes(budget: usize) -> usize {
 }
 
 /// The smallest class with a payload of at least `len` bytes. It can be past the
-/// last class. Payloads step by 64 bytes up to 256, then by a quarter of the lower
-/// power of two: four classes per doubling.
+/// last class.
 const fn class_of(len: usize) -> usize {
     let last = if len <= ALIGN { ALIGN - 1 } else { len - 1 };
     let doubling = last.ilog2().saturating_sub(8);
@@ -170,11 +169,12 @@ impl Class {
 /// A pool is not `Sync`: only its owner shard allocates from it. Blocks it hands out
 /// may move to and drop on any thread, and stay valid after the pool drops.
 ///
-/// Blocks come in sizes, 64 bytes up to 2 GiB with four sizes per doubling, each
-/// with 64 bytes in front. A free block keeps its budget for its own size until
-/// another size needs the budget and no block of that size is in use: `alloc` then
-/// gives the pages of the whole size back and takes the budget. `purge` gives back
-/// the pages of a size that stayed idle across two of its calls.
+/// Blocks come in sizes, 64-byte steps up to 256 bytes and then four sizes per
+/// doubling up to 2 GiB, each with 64 bytes in front. A free block keeps its budget
+/// for its own size until another size needs the budget and no block of that size
+/// is in use: `alloc` then gives the pages of the whole size back and takes the
+/// budget. `purge` gives back the pages of a size that stayed idle across two of
+/// its calls.
 pub struct Pool {
     region: NonNull<Region>,
     budget: usize,
@@ -349,7 +349,8 @@ impl Pool {
     /// budget has room for one block of class `index`. Returns the room. `alloc`
     /// calls it when `index` has no free block.
     ///
-    /// Nothing is purged when the idle classes cannot cover the need together. The
+    /// It walks nothing when the budget has the room already, and purges nothing
+    /// when the idle classes cannot cover the need together. The
     /// classes above `index` go first, smallest first, so one purge covers the
     /// need. Then the classes below it, largest first. The walk starts at `index`
     /// itself: it has no free block, so it has nothing idle, and the range reads
@@ -357,6 +358,9 @@ impl Pool {
     fn press(&self, index: usize) -> usize {
         let size = class_footprint(index);
         let mut available = self.budget - self.committed.get();
+        if available >= size {
+            return available;
+        }
         let spare: usize = self
             .classes
             .iter()
@@ -369,11 +373,11 @@ impl Pool {
         let above = index..self.classes.len();
         let below = (0..index).rev();
         for other in above.chain(below) {
-            if available >= size {
-                break;
-            }
             if self.classes[other].idle() {
                 available += self.release(other);
+                if available >= size {
+                    break;
+                }
             }
         }
         available
@@ -1002,6 +1006,12 @@ mod tests {
             assert_eq!(footprint((1 << 31) + 1), 0);
         }
 
+        #[test]
+        #[should_panic(expected = "no size class holds that many bytes")]
+        fn panics_at_the_largest_length() {
+            assert_eq!(footprint(usize::MAX), 0);
+        }
+
         proptest! {
             #![proptest_config(cases())]
 
@@ -1148,6 +1158,23 @@ mod tests {
     mod pressure {
         use super::fixture::Call::{Commit, Purge};
         use super::*;
+
+        #[test]
+        fn carves_without_a_purge_when_the_budget_has_the_room() {
+            let (pool, watch) = create_watched_pool(320);
+            drop(pool.alloc(64).expect("the budget has room"));
+            pool.reclaim();
+            let block = pool.alloc(128).expect("the budget has room");
+            assert_eq!(pool.committed(), 320, "the idle 64-byte class stays");
+            assert_eq!(
+                watch.calls().last(),
+                Some(&Commit {
+                    offset: 384,
+                    len: 192
+                })
+            );
+            drop(block);
+        }
 
         #[test]
         fn moves_the_budget_of_a_free_block_to_another_class() {
