@@ -781,7 +781,17 @@ How to read this record:
   protocol when it sends another class byte, ends a stream inside a message, sends a
   message over the limit, or resets or stops a stream with a code over 32 bits. The
   node then closes the connection with application code 2^32 and the reason as text,
-  and the caller gets `Error::Broken`. Proposed by `network` in #55.
+  and the caller gets `Error::Broken`. Each connection keeps two budgets, which count
+  the length of each message. A sender starts a message only when the messages it
+  started and the streams have not taken in full stay within the peer's
+  `window_bytes`; else the write waits for `Writable`. A receiver takes a block only
+  when the messages that hold one stay within `window_bytes` plus
+  `message_bytes_max`; else the read waits for `Readable`. So bytes that wait for a
+  block never use up the credit that a started message needs, and a peer that breaks
+  the send rule holds at most the receive budget and stops only its own connection.
+  Until the hello carries the peer's window, a sender uses its own. Proposed by
+  `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
+  `network` in #228.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
