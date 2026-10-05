@@ -21,6 +21,9 @@ pub(crate) enum After {
     Line,
     /// A `,`, which counts in the width of the line.
     Comma,
+    /// A comment, or the end of a text with no line end, so the value is not a
+    /// heredoc.
+    Other,
 }
 
 /// Writes `document` as HCL text that [`read`](crate::read) reads as an equal
