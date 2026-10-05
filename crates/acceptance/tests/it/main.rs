@@ -8,5 +8,6 @@ mod connectors;
 mod control;
 mod join;
 mod lab;
+mod slice;
 mod store_and_forward;
 mod time;
