@@ -59,8 +59,8 @@ impl Index {
     pub(crate) fn new(limits: order::Config, live: Tail, backfill: Tail) -> Self {
         Self {
             gate: Gate::new(),
+            readers: Readers::new(live.seq),
             order: Order::new(limits, live, backfill),
-            readers: Readers::new(),
         }
     }
 
