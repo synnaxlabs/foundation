@@ -102,6 +102,8 @@ pub(crate) struct Network {
     asked: BTreeMap<(node::Key, Term, bool), Vec<Position>>,
     /// Every entry some node applied, in index order.
     pub(crate) applied: Vec<Entry>,
+    // The term of the leader that committed each entry of `applied`.
+    committed: Vec<Term>,
     proposed: u16,
     // The state of a splitmix64 generator for the ticks of `round`.
     random: u64,
@@ -136,6 +138,7 @@ impl Network {
             leaders: BTreeMap::new(),
             asked: BTreeMap::new(),
             applied: Vec::new(),
+            committed: Vec::new(),
             proposed: 0,
             random,
         };
@@ -306,6 +309,7 @@ impl Network {
         } else {
             assert_eq!(self.applied.len(), index, "applied past the sequence");
             self.applied.push(entry);
+            self.committed.push(self.nodes[at].term());
         }
     }
 
@@ -335,15 +339,19 @@ impl Network {
     }
 
     // Election safety and leader completeness, at the first sight of each leader.
+    // A candidate can win a stale term after a later leader committed entries, so
+    // a leader must hold only the entries committed in a term below its own.
     fn check_leader(&mut self, at: usize) {
         let node = &self.nodes[at];
-        if let Some(leader) = self.leaders.get(&node.term()) {
-            assert_eq!(*leader, node.key(), "two leaders in term {}", node.term());
+        let term = node.term();
+        if let Some(leader) = self.leaders.get(&term) {
+            assert_eq!(*leader, node.key(), "two leaders in term {term:?}");
             return;
         }
-        self.leaders.insert(node.term(), node.key());
+        self.leaders.insert(term, node.key());
+        let before = self.committed.iter().take_while(|&&c| c < term).count();
         assert!(
-            self.disks[at].entries.starts_with(&self.applied),
+            self.disks[at].entries.starts_with(&self.applied[..before]),
             "leader completeness"
         );
     }
