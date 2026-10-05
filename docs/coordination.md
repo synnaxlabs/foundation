@@ -148,8 +148,14 @@ next issue for a crate early, labeled `blocked` with a link to the open one.
   the diff, and their findings go on the PR as comments. The author fixes each finding
   or answers it on the PR. When the PR changes how a crate is used, the author also
   asks the owners of the crates that use it.
-- **Merge:** the coordinator adds `ready` and messages the person. The person merges
-  with a squash.
+- **Ready:** the author adds `ready` when every check on the PR's current head passed,
+  the PR has no conflict with `main`, every review finding is fixed or answered, and
+  the body is complete: oracle changes, Complexity, Shape decisions, and the six
+  performance answers on a hot path. The exception is a PR that changes a public
+  surface, a locked decision, or an oracle: the author messages the coordinator
+  instead, and only the coordinator adds `ready`.
+- **Merge:** the coordinator tells the person about each new `ready` PR, one line
+  each. The person merges with a squash.
 
 ## Interface changes
 
@@ -205,6 +211,12 @@ Sessions message each other with `SendMessage`, by name. Find names with
 
 Comment on each open issue you own: what is done, the next step, and open questions. A
 new session starts from that comment.
+
+## Outside projects
+
+Never open an issue, PR, or comment on a project outside `synnaxlabs`. It publishes
+from the person's account. Fix a dependency with a local patch
+(`docs/dependencies.md`).
 
 ## Escalate to the person when
 
