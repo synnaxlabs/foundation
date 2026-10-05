@@ -347,7 +347,9 @@ mod tests {
     use rustls::client::ResolvesClientCert;
     use rustls::crypto::SupportedKxGroup;
     use rustls::crypto::aws_lc_rs::sign::any_ecdsa_type;
-    use rustls::crypto::aws_lc_rs::{cipher_suite, default_provider, kx_group};
+    use rustls::crypto::aws_lc_rs::{
+        ALL_CIPHER_SUITES, ALL_KX_GROUPS, default_provider,
+    };
     use rustls::pki_types::PrivateKeyDer;
     use rustls::sign::{Signer, SigningKey};
     use rustls::{
@@ -744,39 +746,50 @@ mod tests {
             );
         }
 
-        /// The suites of NODE KEY TLS, in the order a node offers them.
-        fn suites() -> [SupportedCipherSuite; 3] {
-            [
-                cipher_suite::TLS13_AES_128_GCM_SHA256,
-                cipher_suite::TLS13_AES_256_GCM_SHA384,
-                cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
-            ]
+        const SUITES: &str =
+            include_str!("../../../oracles/conformance/transport/suites.txt");
+        const GROUPS: &str =
+            include_str!("../../../oracles/conformance/transport/groups.txt");
+
+        /// The code points of an oracle list, which holds one in hex and its name on
+        /// each line, in the order a node offers them.
+        fn codes(list: &str) -> Vec<u16> {
+            let code = |line: &str| {
+                let code = line.split_whitespace().next().expect("a code point");
+                u16::from_str_radix(code, 16).expect("hex")
+            };
+            list.lines().map(code).collect()
         }
 
-        /// The groups of NODE KEY TLS, in the order a node offers them.
-        fn groups() -> [&'static dyn SupportedKxGroup; 4] {
-            [
-                kx_group::X25519MLKEM768,
-                kx_group::X25519,
-                kx_group::SECP256R1,
-                kx_group::SECP384R1,
-            ]
+        /// aws-lc's suites of [`SUITES`].
+        fn suites() -> Vec<SupportedCipherSuite> {
+            let find = |code| {
+                let mut all = ALL_CIPHER_SUITES.iter();
+                *all.find(|suite| u16::from(suite.suite()) == code)
+                    .expect("aws-lc has the suite")
+            };
+            codes(SUITES).into_iter().map(find).collect()
+        }
+
+        /// aws-lc's groups of [`GROUPS`].
+        fn groups() -> Vec<&'static dyn SupportedKxGroup> {
+            let find = |code| {
+                let mut all = ALL_KX_GROUPS.iter();
+                *all.find(|group| u16::from(group.name()) == code)
+                    .expect("aws-lc has the group")
+            };
+            codes(GROUPS).into_iter().map(find).collect()
         }
 
         #[test]
         fn when_a_node_dials_it_offers_the_suites_and_groups_in_order() {
             let provider = provider();
-            let ids = |suites: &[SupportedCipherSuite]| {
-                suites
-                    .iter()
-                    .map(SupportedCipherSuite::suite)
-                    .collect::<Vec<_>>()
-            };
-            assert_eq!(ids(&provider.cipher_suites), ids(&suites()));
-            let names = |groups: &[&dyn SupportedKxGroup]| {
-                groups.iter().map(|group| group.name()).collect::<Vec<_>>()
-            };
-            assert_eq!(names(&provider.kx_groups), names(&groups()));
+            let suites = provider.cipher_suites.iter();
+            let suites = suites.map(|suite| u16::from(suite.suite()));
+            assert_eq!(suites.collect::<Vec<_>>(), codes(SUITES));
+            let groups = provider.kx_groups.iter();
+            let groups = groups.map(|group| u16::from(group.name()));
+            assert_eq!(groups.collect::<Vec<_>>(), codes(GROUPS));
         }
 
         #[test]
@@ -916,6 +929,16 @@ mod tests {
                 let certificate = certificate(&Tls::new(&private_key));
                 prop_assert_eq!(key(&certificate, &[]), Ok(public(&private_key)));
             }
+        }
+
+        #[test]
+        fn is_the_golden_certificate() {
+            let golden =
+                include_str!("../../../oracles/conformance/transport/certificate.txt");
+            let golden = golden.split_whitespace().collect::<String>();
+            let certificate = certificate(&Tls::new(&PrivateKey([1; 32])));
+            let hex = certificate.iter().map(|byte| format!("{byte:02x}"));
+            assert_eq!(hex.collect::<String>(), golden);
         }
 
         #[test]

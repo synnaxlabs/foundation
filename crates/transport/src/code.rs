@@ -4,7 +4,7 @@
 /// [`Error::Broken`](crate::Error::Broken).
 ///
 /// ```
-/// const SUPERSEDED: transport::Code = transport::Code(1);
+/// const SUPERSEDED: transport::Code = transport::Code(16);
 ///
 /// fn cancel(sender: transport::stream::Sender) {
 ///     sender.reset(SUPERSEDED);

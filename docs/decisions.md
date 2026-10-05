@@ -768,19 +768,22 @@ How to read this record:
   limit is part of `foundation/1`: a certificate over it needs a new ALPN. The person
   approved it on 2026-10-05 ("approve"), #383. A node sends its certificate when it
   dials; an SDK client sends none and pins the node key the same way. ALPN is
-  `foundation/1`, and a new session protocol gets a new name. A session that agrees no
-  ALPN, or another name, ends on every carrier. The suites are AES-128-GCM, AES-256-GCM,
-  and ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A
-  dialing node offers them in that order, and the client's order decides, so nodes agree
+  `foundation/1`, and a new session protocol gets a new name. During an upgrade, a node
+  offers its own ALPN name and the previous one (C9d). A session that agrees no ALPN, or
+  another name, ends on every carrier. The suites are AES-128-GCM, AES-256-GCM, and
+  ChaCha20-Poly1305; the groups are X25519MLKEM768, X25519, P-256, and P-384. A dialing
+  node offers them in that order, and the client's order decides, so nodes agree
   AES-128-GCM and X25519MLKEM768. The person chose "AES-128-GCM" first between nodes and
   "Hybrid first" on 2026-10-05. A node accepts any one suite and group, so an SDK may
   offer only one. Resumption and 0-RTT are off, so rustls gets a fixed time and never
   reads the OS clock. Randomness inside TLS comes from aws-lc (TLS RANDOMNESS). Decided
-  by `network` in #54; the ALPN check, suites, and groups in #108. A key of small order
-  is not a node key: a signature for it passes with no private key, so every Ed25519
-  check refuses it (BQ12). `types::node::PublicKey` refuses such a key when it is built,
-  so no check site needs its own test. The person decided on 2026-10-05 ("Yeah that's
-  fine"), #227, #277.
+  by `network` in #54; the ALPN check, suites, and groups in #108. The person accepted
+  it as a contract on 2026-10-05 ("yes to both"). The golden certificate and the suite
+  and group lists are an oracle in `oracles/conformance/transport/`. A key of small
+  order is not a node key: a signature for it passes with no private key, so every
+  Ed25519 check refuses it (BQ12). `types::node::PublicKey` refuses such a key when it
+  is built, so no check site needs its own test. The person decided on 2026-10-05 ("Yeah
+  that's fine"), #227, #277.
 
 ### 1.8 Consensus, regions, and the spec
 

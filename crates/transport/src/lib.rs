@@ -200,7 +200,8 @@ pub struct Config {
     pub idle: Span,
     /// The monotonic clock for timeouts, pacing, and keep-alives.
     pub clock: env::clock::Clock,
-    /// Randomness for keys and nonces.
+    /// Every random value the carriers use outside TLS: the connection IDs and the
+    /// random generator of each QUIC endpoint. TLS draws its own.
     pub entropy: env::entropy::Entropy,
     /// Spawns the tasks that drive each carrier on this shard.
     pub tasks: env::tasks::Tasks,
