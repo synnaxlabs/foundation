@@ -1,21 +1,21 @@
 //! The canonical bytes of a document. Each document has exactly one encoding, with no
 //! spans, and `decode` refuses every byte string that `encode` cannot write.
 //!
-//! Format, little-endian:
+//! Format, with every integer little-endian:
 //!
 //! ```text
 //! document := version:u8 body
 //! body     := map count block*
 //! block    := keyword:string count label:string* body
 //! map      := count (key:string value)*        keys strictly ascend, by bytes
-//! value    := 0 false | 1 true | 2 integer:zigzag varint | 3 float:8 bytes
+//! value    := 0 false | 1 true | 2 integer:i128 | 3 float:f64
 //!           | 4 string | 5 reference:string | 6 list:count value*
 //!           | 7 map:map | 8 call:function:string count value*
-//! string   := length:varint UTF-8 bytes
+//! string   := length:u64 UTF-8 bytes
+//! count    := u64
 //! ```
 //!
-//! A varint is unsigned LEB128 in its shortest form. A float is finite and never
-//! -0.0.
+//! A float is finite and never -0.0.
 
 use std::fmt;
 use std::str;
@@ -23,7 +23,7 @@ use std::str;
 use types::name;
 
 use crate::value::{Call, Float, Kind, Value};
-use crate::{Attribute, Block, Document, Label, Map};
+use crate::{Attribute, Block, Document, Label, Map, Span};
 
 const VERSION: u8 = 1;
 
@@ -45,8 +45,8 @@ const CALL: u8 = 8;
 ///
 /// # Errors
 ///
-/// Returns [`Error::TooDeep`] when `document` nests deeper than [`DEPTH_MAX`].
-pub fn encode(document: &Document) -> Result<Vec<u8>, Error> {
+/// Returns [`TooDeep`] when `document` nests deeper than [`DEPTH_MAX`].
+pub fn encode(document: &Document) -> Result<Vec<u8>, TooDeep> {
     let mut writer = Writer { out: vec![VERSION] };
     writer.body(document, 0)?;
     Ok(writer.out)
@@ -62,7 +62,7 @@ pub fn decode(bytes: &[u8]) -> Result<Document, Error> {
         rest: bytes,
         len: bytes.len(),
     };
-    let version = reader.byte()?;
+    let [version] = reader.chunk()?;
     if version != VERSION {
         return Err(Error::Version { found: version });
     }
@@ -73,6 +73,24 @@ pub fn decode(bytes: &[u8]) -> Result<Document, Error> {
     Ok(document)
 }
 
+/// A document that nests deeper than [`DEPTH_MAX`], so it has no encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TooDeep {
+    /// Where the first level past the limit is, when the document has spans.
+    pub span: Option<Span>,
+}
+
+impl fmt::Display for TooDeep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the document nests deeper than {DEPTH_MAX} levels. Make it flatter"
+        )
+    }
+}
+
+impl std::error::Error for TooDeep {}
+
 /// Bytes that are not the encoding of a document. `at` is a byte offset into the
 /// bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,10 +100,9 @@ pub enum Error {
         /// The version in the bytes.
         found: u8,
     },
-    /// The bytes end before the document does, or a count or length is larger than
-    /// the bytes left.
+    /// The bytes end before the document does.
     Truncated {
-        /// Where more bytes were needed.
+        /// Where the part that runs past the end starts.
         at: usize,
     },
     /// Bytes follow the end of the document.
@@ -99,11 +116,6 @@ pub enum Error {
         at: usize,
         /// The tag.
         tag: u8,
-    },
-    /// A varint is longer than its shortest form, or too large.
-    Varint {
-        /// Where the varint starts.
-        at: usize,
     },
     /// A string is not UTF-8.
     Utf8 {
@@ -131,9 +143,9 @@ pub enum Error {
         /// Why the name is not valid.
         error: name::Error,
     },
-    /// The document nests deeper than [`DEPTH_MAX`].
-    TooDeep {
-        /// Where the level that is too deep starts.
+    /// The bytes nest deeper than [`DEPTH_MAX`].
+    Depth {
+        /// Where the first level past the limit starts.
         at: usize,
     },
 }
@@ -141,14 +153,20 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Version { found } if *found > VERSION => write!(
+                f,
+                "the document has format version {found}, and this node reads only \
+                 version {VERSION}. Upgrade the node"
+            ),
             Self::Version { found } => write!(
                 f,
-                "the document has format version {found}, and this node reads version \
-                 {VERSION}. Upgrade the node"
+                "the document has format version {found}, which does not exist. It is \
+                 corrupt"
             ),
-            Self::Truncated { at } => {
-                write!(f, "the document bytes end early at byte {at}. They are cut")
-            }
+            Self::Truncated { at } => write!(
+                f,
+                "the part at byte {at} runs past the end of the document. It is cut"
+            ),
             Self::TrailingBytes { at } => write!(
                 f,
                 "the document ends at byte {at}, but more bytes follow. They are \
@@ -160,31 +178,27 @@ impl fmt::Display for Error {
                     "byte {at} holds {tag}, which is not a value tag. It is corrupt"
                 )
             }
-            Self::Varint { at } => write!(
-                f,
-                "the number at byte {at} is not in its shortest form, or is too large. \
-                 It is corrupt"
-            ),
             Self::Utf8 { at } => {
                 write!(f, "the text at byte {at} is not UTF-8. It is corrupt")
             }
             Self::KeyOrder { at, key } => write!(
                 f,
-                "the key {key:?} at byte {at} is not after the key before it. Keys \
-                 must strictly ascend"
+                "the key {key:?} at byte {at} is not after the key before it. It is \
+                 corrupt"
             ),
             Self::Float { at, bits } => write!(
                 f,
                 "the float at byte {at} (bits {bits:#018x}) is NaN, an infinity, or \
                  -0.0. It is corrupt"
             ),
-            Self::Reference { at, error } => {
-                write!(f, "the reference at byte {at}: {error}")
-            }
-            Self::TooDeep { at } => write!(
+            Self::Reference { at, .. } => write!(
                 f,
-                "the document nests deeper than {DEPTH_MAX} levels at byte {at}. Make \
-                 it flatter"
+                "the reference at byte {at} is not a valid name. It is corrupt"
+            ),
+            Self::Depth { at } => write!(
+                f,
+                "the document nests deeper than {DEPTH_MAX} levels at byte {at}. It is \
+                 corrupt"
             ),
         }
     }
@@ -199,20 +213,9 @@ impl std::error::Error for Error {
     }
 }
 
-/// The depth inside one more level, or [`Error::TooDeep`] at `at`.
-fn enter(depth: usize, at: usize) -> Result<usize, Error> {
-    depth
-        .checked_add(1)
-        .filter(|&inner| inner <= DEPTH_MAX)
-        .ok_or(Error::TooDeep { at })
-}
-
-fn zigzag(n: i128) -> u128 {
-    (n.wrapping_shl(1) ^ n.wrapping_shr(127)).cast_unsigned()
-}
-
-fn unzigzag(n: u128) -> i128 {
-    n.wrapping_shr(1).cast_signed() ^ 0i128.wrapping_sub((n & 1).cast_signed())
+/// The depth inside one more level, or `None` past [`DEPTH_MAX`].
+fn enter(depth: usize) -> Option<usize> {
+    depth.checked_add(1).filter(|&inner| inner <= DEPTH_MAX)
 }
 
 struct Writer {
@@ -220,11 +223,11 @@ struct Writer {
 }
 
 impl Writer {
-    fn body(&mut self, document: &Document, depth: usize) -> Result<(), Error> {
+    fn body(&mut self, document: &Document, depth: usize) -> Result<(), TooDeep> {
         self.map(&document.attributes, depth)?;
         self.count(document.blocks.len());
         for block in &document.blocks {
-            let depth = enter(depth, self.out.len())?;
+            let depth = enter(depth).ok_or(TooDeep { span: block.span })?;
             self.string(&block.keyword);
             self.count(block.labels.len());
             for label in &block.labels {
@@ -235,7 +238,7 @@ impl Writer {
         Ok(())
     }
 
-    fn map(&mut self, map: &Map, depth: usize) -> Result<(), Error> {
+    fn map(&mut self, map: &Map, depth: usize) -> Result<(), TooDeep> {
         self.count(map.iter().len());
         for attribute in map.iter() {
             self.string(&attribute.key);
@@ -244,19 +247,18 @@ impl Writer {
         Ok(())
     }
 
-    fn value(&mut self, value: &Value, depth: usize) -> Result<(), Error> {
-        let at = self.out.len();
+    fn value(&mut self, value: &Value, depth: usize) -> Result<(), TooDeep> {
+        let inner = || enter(depth).ok_or(TooDeep { span: value.span });
         match &value.kind {
             Kind::Bool(false) => self.out.push(FALSE),
             Kind::Bool(true) => self.out.push(TRUE),
             Kind::Integer(n) => {
                 self.out.push(INTEGER);
-                self.varint(zigzag(*n));
+                self.out.extend_from_slice(&n.to_le_bytes());
             }
             Kind::Float(float) => {
                 self.out.push(FLOAT);
-                self.out
-                    .extend_from_slice(&float.get().to_bits().to_le_bytes());
+                self.out.extend_from_slice(&float.get().to_le_bytes());
             }
             Kind::String(text) => {
                 self.out.push(STRING);
@@ -267,17 +269,17 @@ impl Writer {
                 self.string(name.as_str());
             }
             Kind::List(items) => {
-                let depth = enter(depth, at)?;
+                let depth = inner()?;
                 self.out.push(LIST);
                 self.values(items, depth)?;
             }
             Kind::Map(map) => {
-                let depth = enter(depth, at)?;
+                let depth = inner()?;
                 self.out.push(MAP);
                 self.map(map, depth)?;
             }
             Kind::Call(call) => {
-                let depth = enter(depth, at)?;
+                let depth = inner()?;
                 self.out.push(CALL);
                 self.string(&call.function);
                 self.values(&call.arguments, depth)?;
@@ -286,7 +288,7 @@ impl Writer {
         Ok(())
     }
 
-    fn values(&mut self, values: &[Value], depth: usize) -> Result<(), Error> {
+    fn values(&mut self, values: &[Value], depth: usize) -> Result<(), TooDeep> {
         self.count(values.len());
         values.iter().try_for_each(|value| self.value(value, depth))
     }
@@ -297,20 +299,9 @@ impl Writer {
     }
 
     fn count(&mut self, n: usize) {
-        self.varint(u128::try_from(n).expect("invariant: a usize fits in a u128"));
+        let n = u64::try_from(n).expect("invariant: a usize fits in a u64");
+        self.out.extend_from_slice(&n.to_le_bytes());
     }
-
-    fn varint(&mut self, mut n: u128) {
-        while n >= 0x80 {
-            self.out.push(low_seven(n) | 0x80);
-            n = n.wrapping_shr(7);
-        }
-        self.out.push(low_seven(n));
-    }
-}
-
-fn low_seven(n: u128) -> u8 {
-    u8::try_from(n & 0x7f).expect("invariant: seven bits fit in a byte")
 }
 
 struct Reader<'a> {
@@ -320,14 +311,17 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn at(&self) -> usize {
-        self.len.saturating_sub(self.rest.len())
+        self.len
+            .checked_sub(self.rest.len())
+            .expect("invariant: the rest is a suffix of the bytes")
     }
 
     fn body(&mut self, depth: usize) -> Result<Document, Error> {
         let attributes = self.map(depth)?;
         let mut blocks = Vec::new();
         for _ in 0..self.count()? {
-            let depth = enter(depth, self.at())?;
+            let at = self.at();
+            let depth = enter(depth).ok_or(Error::Depth { at })?;
             let keyword = self.string()?;
             let mut labels = Vec::new();
             for _ in 0..self.count()? {
@@ -366,13 +360,14 @@ impl Reader<'_> {
 
     fn value(&mut self, depth: usize) -> Result<Value, Error> {
         let at = self.at();
-        let kind = match self.byte()? {
-            FALSE => Kind::Bool(false),
-            TRUE => Kind::Bool(true),
-            INTEGER => Kind::Integer(unzigzag(self.varint()?)),
-            FLOAT => Kind::Float(self.float()?),
-            STRING => Kind::String(self.string()?),
-            REFERENCE => {
+        let inner = || enter(depth).ok_or(Error::Depth { at });
+        let kind = match self.chunk()? {
+            [FALSE] => Kind::Bool(false),
+            [TRUE] => Kind::Bool(true),
+            [INTEGER] => Kind::Integer(i128::from_le_bytes(self.chunk()?)),
+            [FLOAT] => Kind::Float(self.float()?),
+            [STRING] => Kind::String(self.string()?),
+            [REFERENCE] => {
                 let at = self.at();
                 let text = self.string()?;
                 Kind::Reference(
@@ -380,17 +375,17 @@ impl Reader<'_> {
                         .map_err(|error| Error::Reference { at, error })?,
                 )
             }
-            LIST => Kind::List(self.values(enter(depth, at)?)?),
-            MAP => Kind::Map(self.map(enter(depth, at)?)?),
-            CALL => {
-                let depth = enter(depth, at)?;
+            [LIST] => Kind::List(self.values(inner()?)?),
+            [MAP] => Kind::Map(self.map(inner()?)?),
+            [CALL] => {
+                let depth = inner()?;
                 Kind::Call(Call {
                     function: self.string()?,
                     function_span: None,
                     arguments: self.values(depth)?,
                 })
             }
-            tag => return Err(Error::Tag { at, tag }),
+            [tag] => return Err(Error::Tag { at, tag }),
         };
         Ok(Value { kind, span: None })
     }
@@ -405,12 +400,7 @@ impl Reader<'_> {
 
     fn float(&mut self) -> Result<Float, Error> {
         let at = self.at();
-        let (bytes, rest) = self
-            .rest
-            .split_first_chunk::<8>()
-            .ok_or(Error::Truncated { at })?;
-        self.rest = rest;
-        let bits = u64::from_le_bytes(*bytes);
+        let bits = u64::from_le_bytes(self.chunk()?);
         // `Float::new` turns -0.0 into 0.0, so the bits differ.
         Float::new(f64::from_bits(bits))
             .filter(|float| float.get().to_bits() == bits)
@@ -420,9 +410,9 @@ impl Reader<'_> {
     fn string(&mut self) -> Result<Box<str>, Error> {
         let len = self.count()?;
         let at = self.at();
-        let (bytes, rest) = self
-            .rest
-            .split_at_checked(len)
+        let (bytes, rest) = usize::try_from(len)
+            .ok()
+            .and_then(|len| self.rest.split_at_checked(len))
             .ok_or(Error::Truncated { at })?;
         self.rest = rest;
         str::from_utf8(bytes)
@@ -432,45 +422,18 @@ impl Reader<'_> {
             })
     }
 
-    /// Each counted item takes at least one byte, so a count larger than the bytes
-    /// left is [`Error::Truncated`].
-    fn count(&mut self) -> Result<usize, Error> {
-        let at = self.at();
-        let n = self.varint()?;
-        usize::try_from(n)
-            .ok()
-            .filter(|&n| n <= self.rest.len())
-            .ok_or(Error::Truncated { at })
+    fn count(&mut self) -> Result<u64, Error> {
+        self.chunk().map(u64::from_le_bytes)
     }
 
-    fn varint(&mut self) -> Result<u128, Error> {
+    fn chunk<const N: usize>(&mut self) -> Result<[u8; N], Error> {
         let at = self.at();
-        let mut n = 0u128;
-        for shift in (0..u128::BITS).step_by(7) {
-            let byte = self.byte()?;
-            let low = u128::from(byte & 0x7f);
-            // Refuses bits that would shift past bit 127.
-            if low.wrapping_shl(shift).wrapping_shr(shift) != low {
-                return Err(Error::Varint { at });
-            }
-            n |= low.wrapping_shl(shift);
-            if byte & 0x80 == 0 {
-                if byte == 0 && shift > 0 {
-                    return Err(Error::Varint { at });
-                }
-                return Ok(n);
-            }
-        }
-        Err(Error::Varint { at })
-    }
-
-    fn byte(&mut self) -> Result<u8, Error> {
-        let (&byte, rest) = self
+        let (chunk, rest) = self
             .rest
-            .split_first()
-            .ok_or(Error::Truncated { at: self.at() })?;
+            .split_first_chunk::<N>()
+            .ok_or(Error::Truncated { at })?;
         self.rest = rest;
-        Ok(byte)
+        Ok(*chunk)
     }
 }
 
@@ -478,30 +441,22 @@ impl Reader<'_> {
 mod tests {
     use super::*;
     use crate::arbitrary::document;
+    use crate::{Position, Source};
     use proptest::prelude::*;
 
-    fn value(kind: Kind) -> Value {
-        Value { kind, span: None }
+    fn count(n: u64) -> [u8; 8] {
+        n.to_le_bytes()
     }
 
-    fn attribute(key: &str, kind: Kind) -> Attribute {
-        Attribute {
-            key: key.into(),
-            key_span: None,
-            value: value(kind),
-        }
+    fn string(text: &str) -> Vec<u8> {
+        let len = u64::try_from(text.len()).unwrap();
+        [&count(len)[..], text.as_bytes()].concat()
     }
 
-    /// A list nested `levels` deep inside attribute `a`.
-    fn nested(levels: usize) -> Document {
-        let mut kind = Kind::Bool(true);
-        for _ in 0..levels {
-            kind = Kind::List(vec![value(kind)]);
-        }
-        Document {
-            attributes: Map::new(vec![attribute("a", kind)]).unwrap(),
-            blocks: Vec::new(),
-        }
+    /// The bytes of a document whose one attribute, `a`, holds `value`. The value
+    /// starts at byte 18.
+    fn attribute(value: &[u8]) -> Vec<u8> {
+        [&[VERSION][..], &count(1), &string("a"), value, &count(0)].concat()
     }
 
     fn check(bytes: &[u8], expected: &Error, message: &str) {
@@ -515,42 +470,16 @@ mod tests {
 
         #[test]
         fn writes_the_version_and_an_empty_body() {
-            assert_eq!(encode(&Document::default()).unwrap(), [VERSION, 0, 0]);
+            let empty = [&[VERSION][..], &count(0), &count(0)].concat();
+            assert_eq!(encode(&Document::default()).unwrap(), empty);
         }
 
         #[test]
-        fn writes_up_to_the_deepest_level() {
-            let bytes = encode(&nested(DEPTH_MAX)).unwrap();
-            assert_eq!(decode(&bytes).unwrap(), nested(DEPTH_MAX));
-        }
-
-        #[test]
-        fn refuses_a_level_past_the_deepest() {
-            let at = 4usize.saturating_add(DEPTH_MAX.saturating_mul(2));
+        fn too_deep_names_the_fix() {
             assert_eq!(
-                encode(&nested(DEPTH_MAX.saturating_add(1))),
-                Err(Error::TooDeep { at })
+                TooDeep { span: None }.to_string(),
+                "the document nests deeper than 64 levels. Make it flatter"
             );
-        }
-
-        #[test]
-        fn refuses_a_block_past_the_deepest() {
-            let mut document = Document::default();
-            for _ in 0..=DEPTH_MAX {
-                document = Document {
-                    attributes: Map::default(),
-                    blocks: vec![Block {
-                        keyword: "b".into(),
-                        keyword_span: None,
-                        labels: Vec::new(),
-                        body: document,
-                        span: None,
-                    }],
-                };
-            }
-            // Each level: keyword length, keyword, label count, map count, block count.
-            let at = 3usize.saturating_add(DEPTH_MAX.saturating_mul(5));
-            assert_eq!(encode(&document), Err(Error::TooDeep { at }));
         }
 
         proptest! {
@@ -564,6 +493,206 @@ mod tests {
                 let again = decode(&encode(&document).unwrap()).unwrap();
                 prop_assert_eq!(encode(&again).unwrap(), encode(&document).unwrap());
             }
+        }
+    }
+
+    mod depth {
+        use super::*;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Level {
+            Block,
+            List,
+            Map,
+            Call,
+        }
+
+        /// `total` levels: some blocks, then lists, maps, and calls in any order.
+        fn levels(total: usize) -> impl Strategy<Value = Vec<Level>> {
+            (0..=total).prop_flat_map(move |blocks| {
+                let value =
+                    prop_oneof![Just(Level::List), Just(Level::Map), Just(Level::Call)];
+                let values = prop::collection::vec(value, total.saturating_sub(blocks));
+                values.prop_map(move |values| {
+                    let mut levels = vec![Level::Block; blocks];
+                    levels.extend(values);
+                    levels
+                })
+            })
+        }
+
+        fn blocks(levels: &[Level]) -> usize {
+            levels
+                .iter()
+                .take_while(|&&level| level == Level::Block)
+                .count()
+        }
+
+        /// The bytes of a document nested through `levels`, outermost first, with
+        /// `true` inside, and where each level starts.
+        fn nested_bytes(levels: &[Level]) -> (Vec<u8>, Vec<usize>) {
+            let mut bytes = vec![VERSION];
+            let mut starts = Vec::new();
+            for _ in 0..blocks(levels) {
+                bytes.extend(count(0));
+                bytes.extend(count(1));
+                starts.push(bytes.len());
+                bytes.extend(string("b"));
+                bytes.extend(count(0));
+            }
+            bytes.extend(count(1));
+            bytes.extend(string("a"));
+            for level in levels.iter().skip(blocks(levels)) {
+                starts.push(bytes.len());
+                match level {
+                    Level::List => {
+                        bytes.push(LIST);
+                        bytes.extend(count(1));
+                    }
+                    Level::Map => {
+                        bytes.push(MAP);
+                        bytes.extend(count(1));
+                        bytes.extend(string("k"));
+                    }
+                    Level::Call => {
+                        bytes.push(CALL);
+                        bytes.extend(string("f"));
+                        bytes.extend(count(1));
+                    }
+                    Level::Block => panic!("a block inside a value: {levels:?}"),
+                }
+            }
+            bytes.push(TRUE);
+            bytes.extend(count(0));
+            (bytes, starts)
+        }
+
+        /// The document of [`nested_bytes`], with a span on each level.
+        fn nested_document(levels: &[Level]) -> (Document, Vec<Span>) {
+            let spans: Vec<Span> = (0u32..)
+                .zip(levels)
+                .map(|(i, _)| {
+                    let at = Position {
+                        offset: i,
+                        line: 0,
+                        column: i,
+                    };
+                    Span::new(Source(0), at, at).unwrap()
+                })
+                .collect();
+            let mut value = Value {
+                kind: Kind::Bool(true),
+                span: None,
+            };
+            for (level, span) in levels.iter().zip(&spans).skip(blocks(levels)).rev() {
+                let kind = match level {
+                    Level::List => Kind::List(vec![value]),
+                    Level::Map => Kind::Map(
+                        Map::new(vec![Attribute {
+                            key: "k".into(),
+                            key_span: None,
+                            value,
+                        }])
+                        .unwrap(),
+                    ),
+                    Level::Call => Kind::Call(Call {
+                        function: "f".into(),
+                        function_span: None,
+                        arguments: vec![value],
+                    }),
+                    Level::Block => panic!("a block inside a value: {levels:?}"),
+                };
+                value = Value {
+                    kind,
+                    span: Some(*span),
+                };
+            }
+            let attribute = Attribute {
+                key: "a".into(),
+                key_span: None,
+                value,
+            };
+            let mut document = Document {
+                attributes: Map::new(vec![attribute]).unwrap(),
+                blocks: Vec::new(),
+            };
+            for span in spans.iter().take(blocks(levels)).rev() {
+                let block = Block {
+                    keyword: "b".into(),
+                    keyword_span: None,
+                    labels: Vec::new(),
+                    body: document,
+                    span: Some(*span),
+                };
+                document = Document {
+                    attributes: Map::default(),
+                    blocks: vec![block],
+                };
+            }
+            (document, spans)
+        }
+
+        /// Both sides count each level and refuse the same one.
+        fn check_depth(levels: &[Level]) {
+            let (bytes, starts) = nested_bytes(levels);
+            let (document, spans) = nested_document(levels);
+            if let (Some(&at), Some(&span)) =
+                (starts.get(DEPTH_MAX), spans.get(DEPTH_MAX))
+            {
+                assert_eq!(encode(&document), Err(TooDeep { span: Some(span) }));
+                assert_eq!(decode(&bytes), Err(Error::Depth { at }));
+            } else {
+                assert_eq!(encode(&document).unwrap(), bytes);
+                assert_eq!(decode(&bytes).unwrap(), document);
+            }
+        }
+
+        #[test]
+        fn counts_each_kind_of_level() {
+            for level in [Level::Block, Level::List, Level::Map, Level::Call] {
+                for total in [DEPTH_MAX, DEPTH_MAX.saturating_add(1)] {
+                    check_depth(&vec![level; total]);
+                }
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn counts_any_mix_of_levels(
+                levels in prop_oneof![
+                    levels(DEPTH_MAX),
+                    levels(DEPTH_MAX.saturating_add(1)),
+                ],
+            ) {
+                check_depth(&levels);
+            }
+        }
+
+        #[test]
+        fn refuses_a_hostile_depth_without_recursing() {
+            for level in [Level::Block, Level::Map] {
+                let (bytes, starts) = nested_bytes(&vec![level; 100_000]);
+                assert_eq!(
+                    decode(&bytes),
+                    Err(Error::Depth {
+                        at: starts[DEPTH_MAX]
+                    })
+                );
+            }
+        }
+
+        #[test]
+        fn depth_says_the_bytes_are_corrupt() {
+            let (bytes, starts) = nested_bytes(&[Level::List; 65]);
+            let at = starts[DEPTH_MAX];
+            check(
+                &bytes,
+                &Error::Depth { at },
+                &format!(
+                    "the document nests deeper than 64 levels at byte {at}. It is \
+                     corrupt"
+                ),
+            );
         }
     }
 
@@ -620,10 +749,6 @@ mod tests {
             fn reads_only_random_bytes_that_encode_writes(
                 bytes in prop::collection::vec(any::<u8>(), 0..64),
             ) {
-                let mut bytes = bytes;
-                if let Some(first) = bytes.first_mut() {
-                    *first = VERSION;
-                }
                 if let Ok(decoded) = decode(&bytes) {
                     prop_assert_eq!(encode(&decoded).unwrap(), bytes);
                 }
@@ -631,12 +756,22 @@ mod tests {
         }
 
         #[test]
-        fn refuses_another_version() {
+        fn refuses_a_newer_version() {
             check(
-                &[2, 0, 0],
+                &[2],
                 &Error::Version { found: 2 },
-                "the document has format version 2, and this node reads version 1. \
-                 Upgrade the node",
+                "the document has format version 2, and this node reads only version \
+                 1. Upgrade the node",
+            );
+        }
+
+        #[test]
+        fn refuses_a_version_that_does_not_exist() {
+            check(
+                &[0],
+                &Error::Version { found: 0 },
+                "the document has format version 0, which does not exist. It is \
+                 corrupt",
             );
         }
 
@@ -645,122 +780,117 @@ mod tests {
             check(
                 &[],
                 &Error::Truncated { at: 0 },
-                "the document bytes end early at byte 0. They are cut",
+                "the part at byte 0 runs past the end of the document. It is cut",
             );
         }
 
         #[test]
-        fn refuses_a_count_larger_than_the_bytes_left() {
-            check(
-                &[VERSION, 4, 1, b'a', TRUE],
-                &Error::Truncated { at: 1 },
-                "the document bytes end early at byte 1. They are cut",
-            );
+        fn refuses_a_cut_count() {
+            assert_eq!(decode(&[VERSION, 0, 0, 0]), Err(Error::Truncated { at: 1 }));
+        }
+
+        #[test]
+        fn refuses_a_count_past_the_end() {
+            let mut bytes = attribute(&[TRUE]);
+            bytes.splice(1..9, count(2));
+            bytes.truncate(19);
+            assert_eq!(decode(&bytes), Err(Error::Truncated { at: 19 }));
+        }
+
+        #[test]
+        fn refuses_a_string_past_the_end() {
+            let bytes = [&[VERSION][..], &count(1), &count(5), b"a"].concat();
+            assert_eq!(decode(&bytes), Err(Error::Truncated { at: 17 }));
+        }
+
+        #[test]
+        fn refuses_a_cut_integer() {
+            let bytes = attribute(&[INTEGER, 1]);
+            assert_eq!(decode(&bytes[..20]), Err(Error::Truncated { at: 19 }));
         }
 
         #[test]
         fn refuses_a_cut_float() {
-            check(
-                &[VERSION, 1, 1, b'a', FLOAT, 0, 0],
-                &Error::Truncated { at: 5 },
-                "the document bytes end early at byte 5. They are cut",
-            );
+            let bytes = attribute(&[FLOAT, 0, 0, 0, 0]);
+            assert_eq!(decode(&bytes[..23]), Err(Error::Truncated { at: 19 }));
         }
 
         #[test]
         fn refuses_trailing_bytes() {
+            let bytes = [&[VERSION][..], &count(0), &count(0), &[0]].concat();
             check(
-                &[VERSION, 0, 0, 0],
-                &Error::TrailingBytes { at: 3 },
-                "the document ends at byte 3, but more bytes follow. They are corrupt",
+                &bytes,
+                &Error::TrailingBytes { at: 17 },
+                "the document ends at byte 17, but more bytes follow. They are corrupt",
             );
         }
 
         #[test]
         fn refuses_an_unknown_tag() {
             check(
-                &[VERSION, 1, 1, b'a', 9, 0],
-                &Error::Tag { at: 4, tag: 9 },
-                "byte 4 holds 9, which is not a value tag. It is corrupt",
-            );
-        }
-
-        #[test]
-        fn refuses_a_varint_longer_than_its_shortest_form() {
-            check(
-                &[VERSION, 0x80, 0x00, 0],
-                &Error::Varint { at: 1 },
-                "the number at byte 1 is not in its shortest form, or is too large. It \
-                 is corrupt",
-            );
-        }
-
-        #[test]
-        fn refuses_a_varint_past_128_bits() {
-            let mut bytes = vec![VERSION, 1, 1, b'a', INTEGER];
-            bytes.extend([0xff; 18]);
-            bytes.extend([0x04, 0]);
-            check(
-                &bytes,
-                &Error::Varint { at: 5 },
-                "the number at byte 5 is not in its shortest form, or is too large. It \
-                 is corrupt",
-            );
-        }
-
-        #[test]
-        fn refuses_a_varint_of_twenty_bytes() {
-            let mut bytes = vec![VERSION, 1, 1, b'a', INTEGER];
-            bytes.extend([0x80; 19]);
-            bytes.extend([0x01, 0]);
-            check(
-                &bytes,
-                &Error::Varint { at: 5 },
-                "the number at byte 5 is not in its shortest form, or is too large. It \
-                 is corrupt",
+                &attribute(&[9]),
+                &Error::Tag { at: 18, tag: 9 },
+                "byte 18 holds 9, which is not a value tag. It is corrupt",
             );
         }
 
         #[test]
         fn refuses_text_that_is_not_utf8() {
+            let bytes =
+                [&[VERSION][..], &count(1), &count(2), b"a\xff", &[TRUE]].concat();
             check(
-                &[VERSION, 1, 2, b'a', 0xff, TRUE, 0],
-                &Error::Utf8 { at: 4 },
-                "the text at byte 4 is not UTF-8. It is corrupt",
+                &[&bytes[..], &count(0)].concat(),
+                &Error::Utf8 { at: 18 },
+                "the text at byte 18 is not UTF-8. It is corrupt",
             );
         }
 
         #[test]
         fn refuses_keys_out_of_order() {
+            let bytes = [
+                &[VERSION][..],
+                &count(2),
+                &string("b"),
+                &[TRUE],
+                &string("a"),
+                &[TRUE],
+                &count(0),
+            ]
+            .concat();
             check(
-                &[VERSION, 2, 1, b'b', TRUE, 1, b'a', TRUE, 0],
+                &bytes,
                 &Error::KeyOrder {
-                    at: 5,
+                    at: 19,
                     key: "a".into(),
                 },
-                "the key \"a\" at byte 5 is not after the key before it. Keys must \
-                 strictly ascend",
+                "the key \"a\" at byte 19 is not after the key before it. It is \
+                 corrupt",
             );
         }
 
         #[test]
         fn refuses_a_repeated_key() {
-            check(
-                &[VERSION, 2, 1, b'a', TRUE, 1, b'a', FALSE, 0],
-                &Error::KeyOrder {
-                    at: 5,
+            let bytes = [
+                &[VERSION][..],
+                &count(2),
+                &string("a"),
+                &[TRUE],
+                &string("a"),
+                &[FALSE],
+                &count(0),
+            ]
+            .concat();
+            assert_eq!(
+                decode(&bytes),
+                Err(Error::KeyOrder {
+                    at: 19,
                     key: "a".into(),
-                },
-                "the key \"a\" at byte 5 is not after the key before it. Keys must \
-                 strictly ascend",
+                })
             );
         }
 
         fn float(bits: u64) -> Vec<u8> {
-            let mut bytes = vec![VERSION, 1, 1, b'a', FLOAT];
-            bytes.extend(bits.to_le_bytes());
-            bytes.push(0);
-            bytes
+            attribute(&[&[FLOAT][..], &bits.to_le_bytes()].concat())
         }
 
         #[test]
@@ -768,64 +898,39 @@ mod tests {
             check(
                 &float((-0.0f64).to_bits()),
                 &Error::Float {
-                    at: 5,
+                    at: 19,
                     bits: 0x8000_0000_0000_0000,
                 },
-                "the float at byte 5 (bits 0x8000000000000000) is NaN, an infinity, or \
-                 -0.0. It is corrupt",
+                "the float at byte 19 (bits 0x8000000000000000) is NaN, an infinity, \
+                 or -0.0. It is corrupt",
             );
         }
 
         #[test]
         fn refuses_nan_and_the_infinities() {
             for bits in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY].map(f64::to_bits) {
-                assert_eq!(decode(&float(bits)), Err(Error::Float { at: 5, bits }));
+                assert_eq!(decode(&float(bits)), Err(Error::Float { at: 19, bits }));
             }
         }
 
         #[test]
         fn refuses_a_reference_that_is_not_a_name() {
             let error = "a..b".parse::<types::name::Name>().unwrap_err();
-            check(
-                &[VERSION, 1, 1, b'x', REFERENCE, 4, b'a', b'.', b'.', b'b', 0],
-                &Error::Reference { at: 5, error },
-                "the reference at byte 5: \"a..b\" has a segment that is not valid: \
-                 \"\". Use letters, digits, `_`, and `-`, separated by dots",
+            let bytes = attribute(&[&[REFERENCE][..], &string("a..b")].concat());
+            let err = decode(&bytes).unwrap_err();
+            assert_eq!(
+                err,
+                Error::Reference {
+                    at: 19,
+                    error: error.clone()
+                }
             );
-        }
-
-        #[test]
-        fn refuses_a_level_past_the_deepest() {
-            let mut bytes = vec![VERSION, 1, 1, b'a'];
-            bytes.extend([LIST, 1].repeat(DEPTH_MAX.saturating_add(1)));
-            bytes.extend([TRUE, 0]);
-            let at = 4usize.saturating_add(DEPTH_MAX.saturating_mul(2));
-            check(
-                &bytes,
-                &Error::TooDeep { at },
-                &format!(
-                    "the document nests deeper than 64 levels at byte {at}. Make it \
-                     flatter"
-                ),
+            assert_eq!(
+                err.to_string(),
+                "the reference at byte 19 is not a valid name. It is corrupt"
             );
-        }
-
-        #[test]
-        fn refuses_a_block_past_the_deepest() {
-            let mut bytes = vec![VERSION, 0, 1];
-            for _ in 0..DEPTH_MAX {
-                bytes.extend([1, b'b', 0, 0, 1]);
-            }
-            bytes.extend([1, b'b', 0, 0, 0]);
-            let at = 3usize.saturating_add(DEPTH_MAX.saturating_mul(5));
-            check(
-                &bytes,
-                &Error::TooDeep { at },
-                &format!(
-                    "the document nests deeper than 64 levels at byte {at}. Make it \
-                     flatter"
-                ),
-            );
+            let source = std::error::Error::source(&err).unwrap();
+            assert_eq!(source.to_string(), error.to_string());
         }
     }
 }

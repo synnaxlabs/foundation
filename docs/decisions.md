@@ -509,11 +509,12 @@ How to read this record:
   Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
 - **DOCUMENT ENCODING (2026-10-04)** `document::encoding` gives each Document exactly
   one byte string, with no spans: a version byte, then tagged values, keys in byte
-  order, shortest LEB128 varints, and floats as 8 little-endian bytes. `decode`
-  refuses every byte string that `encode` cannot write, and both refuse nesting past
-  64 levels. `spec` stores and hashes these bytes. Pinned bytes are an oracle in
-  `oracles/conformance/document/`. A new format takes a new version byte, and the
-  decoder keeps reading the old ones. Decided by the `config` builder (#62).
+  order, and fixed-width little-endian integers (`u64` counts and lengths, `i128`
+  integers, `f64` floats). `decode` refuses every byte string that `encode` cannot
+  write. Both refuse nesting past 64 levels, and front ends refuse files that nest
+  deeper. `spec` stores and hashes these bytes. Pinned bytes are an oracle in
+  `oracles/conformance/document/`. A new format takes a new version byte. Decided by
+  the `config` builder (#62).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.
@@ -1433,7 +1434,7 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
-| 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, and shared value readers. | `types` |
+| 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
 | 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
