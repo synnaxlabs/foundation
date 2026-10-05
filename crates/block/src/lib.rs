@@ -144,6 +144,9 @@ const _: () = assert!(
 struct Class {
     /// Bytes of this class's span that are cut into blocks.
     carved: Cell<usize>,
+    /// The most bytes `carved` ever was. A purge covers this range, so the pages
+    /// past `carved` that an earlier carve touched go back too.
+    reached: Cell<usize>,
     free: Cell<usize>,
     /// Blocks that holders have, or that wait in `Region::returned`.
     lent: Cell<usize>,
@@ -241,7 +244,7 @@ impl Pool {
         }
         let header = if class.free.get() == NONE {
             let size = class_footprint(index);
-            let available = self.press(index, size);
+            let available = self.press(index);
             if size > available {
                 return Err(Error::Exhausted {
                     requested: len,
@@ -250,7 +253,9 @@ impl Pool {
             }
             let offset = HEADER + index * self.span + class.carved.get();
             self.shared().memory.commit(offset, size);
-            class.carved.set(class.carved.get() + size);
+            let carved = class.carved.get() + size;
+            class.carved.set(carved);
+            class.reached.set(class.reached.get().max(carved));
             self.committed.set(self.committed.get() + size);
             // SAFETY: the carved bytes of a class are at most `committed`, which the
             // room check keeps at or below the budget, and a span is at least that.
@@ -306,13 +311,27 @@ impl Pool {
     }
 
     /// Gives back the carved range of each class with no block in use until the
-    /// budget has `size` bytes of room for class `index`. Returns the room. `alloc`
+    /// budget has room for one block of class `index`. Returns the room. `alloc`
     /// calls it when `index` has no free block.
     ///
-    /// The classes above `index` go first, smallest first, so one purge covers the
-    /// need. Then the classes below it, largest first.
-    fn press(&self, index: usize, size: usize) -> usize {
+    /// Nothing is purged when the idle classes cannot cover the need together. The
+    /// classes above `index` go first, smallest first, so one purge covers the
+    /// need. Then the classes below it, largest first. The walk starts at `index`
+    /// itself: it has no free block, so it has nothing idle, and the range reads
+    /// the same for the mutation check either way.
+    fn press(&self, index: usize) -> usize {
+        let size = class_footprint(index);
         let mut available = self.budget - self.committed.get();
+        let idle = |class: &Class| class.lent.get() == 0 && class.carved.get() != 0;
+        let spare: usize = self
+            .classes
+            .iter()
+            .filter(|class| idle(class))
+            .map(|class| class.carved.get())
+            .sum();
+        if available + spare < size {
+            return available;
+        }
         let above = index..self.classes.len();
         let below = (0..index).rev();
         for other in above.chain(below) {
@@ -320,11 +339,11 @@ impl Pool {
                 break;
             }
             let class = &self.classes[other];
-            let carved = class.carved.get();
-            if class.lent.get() == 0 && carved != 0 {
+            if idle(class) {
+                let carved = class.carved.get();
                 self.shared()
                     .memory
-                    .purge(HEADER + other * self.span, carved);
+                    .purge(HEADER + other * self.span, class.reached.get());
                 class.carved.set(0);
                 class.free.set(NONE);
                 self.committed.set(self.committed.get() - carved);
@@ -725,6 +744,71 @@ mod fixture {
         Pool::new(config, heap)
     }
 
+    /// Memory with pages, to check what stays resident.
+    #[cfg(not(loom))]
+    pub(crate) mod paged {
+        use std::ops::Range;
+
+        use super::*;
+
+        /// Bytes per page.
+        pub(crate) const PAGE: usize = 128;
+
+        /// Which pages are resident.
+        pub(crate) type Pages = Arc<Mutex<Vec<bool>>>;
+
+        /// Heap memory with a set of resident pages: `commit` rounds out to
+        /// [`PAGE`] and `purge` rounds in, as an OS mapping does.
+        pub(crate) struct Paged {
+            heap: Heap,
+            pages: Pages,
+        }
+
+        // SAFETY: each method is the one of `Heap`.
+        unsafe impl Memory for Paged {
+            fn base(&self) -> NonNull<u8> {
+                self.heap.base()
+            }
+
+            fn len(&self) -> usize {
+                self.heap.len()
+            }
+
+            fn commit(&self, offset: usize, len: usize) {
+                let mut pages = self.pages.lock().expect("no test panicked");
+                for page in offset / PAGE..(offset + len).div_ceil(PAGE) {
+                    pages[page] = true;
+                }
+                self.heap.commit(offset, len);
+            }
+
+            fn purge(&self, offset: usize, len: usize) {
+                let mut pages = self.pages.lock().expect("no test panicked");
+                for page in offset.div_ceil(PAGE)..(offset + len) / PAGE {
+                    pages[page] = false;
+                }
+                self.heap.purge(offset, len);
+            }
+        }
+
+        pub(crate) fn create_paged_pool(budget: usize) -> (Pool, Pages) {
+            let config = Config { budget };
+            let len = config.reservation();
+            let pages = Arc::new(Mutex::new(vec![false; len.div_ceil(PAGE)]));
+            let memory = Paged {
+                heap: Heap::new(len),
+                pages: Arc::clone(&pages),
+            };
+            (Pool::new(config, memory), pages)
+        }
+
+        /// Resident bytes among the pages in `range`.
+        pub(crate) fn resident(pages: &Pages, range: Range<usize>) -> usize {
+            let pages = pages.lock().expect("no test panicked");
+            range.filter(|&page| pages[page]).count() * PAGE
+        }
+    }
+
     pub(crate) fn create_watched_pool(budget: usize) -> (Pool, Arc<Watch>) {
         let config = Config { budget };
         let watch = Arc::new(Watch::default());
@@ -1082,6 +1166,34 @@ mod tests {
         }
 
         #[test]
+        fn purges_the_smallest_idle_class_above_first() {
+            let (pool, watch) = create_watched_pool(1216);
+            let held = pool.alloc(128).expect("the budget has room");
+            drop(pool.alloc(256).expect("the budget has room"));
+            drop(pool.alloc(512).expect("the budget has room"));
+            pool.reclaim();
+            assert_eq!(pool.committed(), 1088);
+            let second = pool.alloc(128).expect("the idle 256-byte class gives room");
+            assert_eq!(pool.committed(), 960);
+            let calls = watch.calls();
+            assert_eq!(
+                calls[calls.len() - 2..],
+                [
+                    Purge {
+                        offset: 2496,
+                        len: 320
+                    },
+                    Commit {
+                        offset: 1472,
+                        len: 192
+                    },
+                ],
+                "the smaller class above goes first, and the 512-byte class stays"
+            );
+            drop((held, second));
+        }
+
+        #[test]
         fn purges_the_largest_idle_class_below_first() {
             let (pool, watch) = create_watched_pool(576);
             drop(pool.alloc(64).expect("the budget has room"));
@@ -1109,15 +1221,33 @@ mod tests {
         }
 
         #[test]
-        fn fails_after_it_took_the_budget_of_each_idle_class() {
-            let pool = create_pool(384);
+        fn purges_nothing_when_the_idle_classes_cannot_cover_the_need() {
+            let (pool, watch) = create_watched_pool(384);
             drop(pool.alloc(64).expect("the budget has room"));
             let held = pool.alloc(128).expect("the budget has room");
             pool.reclaim();
             assert_eq!(pool.committed(), 320);
-            assert_eq!(pool.alloc(256).err(), Some(exhausted(256, 192)));
-            assert_eq!(pool.committed(), 192, "the idle class gave its budget");
+            assert_eq!(pool.alloc(256).err(), Some(exhausted(256, 64)));
+            assert_eq!(pool.committed(), 320, "the idle class kept its budget");
+            assert!(
+                !watch
+                    .calls()
+                    .iter()
+                    .any(|call| matches!(call, Purge { .. })),
+                "a purge that cannot serve the alloc"
+            );
             drop(held);
+        }
+
+        #[test]
+        fn takes_the_budget_when_the_idle_classes_cover_the_need_exactly() {
+            let pool = create_pool(384);
+            drop(pool.alloc(64).expect("the budget has room"));
+            let held = pool.alloc(128).expect("the budget has room");
+            pool.reclaim();
+            let second = pool.alloc(128).expect("the idle 64-byte class gives room");
+            assert_eq!(pool.committed(), 384);
+            drop((held, second));
         }
 
         #[test]
@@ -1132,6 +1262,51 @@ mod tests {
                 .expect("the freed large blocks give their budget");
             assert_eq!(small.len(), 10);
             assert_eq!(pool.committed(), footprint(10));
+        }
+
+        #[test]
+        fn keeps_resident_memory_within_two_partial_pages_per_class() {
+            use super::fixture::paged::{PAGE, create_paged_pool, resident};
+
+            const BUDGET: usize = 4096;
+            let (pool, pages) = create_paged_pool(BUDGET);
+            let classes = pool.classes.len();
+            let span = pool.span;
+            let held = pool.alloc(1024).expect("the budget has room");
+            // Each round carves the 64-byte class to a shorter end than the round
+            // before, drops it all, and lets a 2048-byte block press it out.
+            for count in (8..=23).rev() {
+                let small: Vec<_> = (0..count)
+                    .map(|_| pool.alloc(64).expect("the budget has room"))
+                    .collect();
+                drop(small);
+                pool.reclaim();
+                let large =
+                    pool.alloc(2048).expect("the idle 64-byte class gives room");
+                assert_eq!(pool.classes[0].carved.get(), 0, "the class was purged");
+                drop(large);
+                pool.reclaim();
+            }
+            drop(held);
+            pool.reclaim();
+            let class_pages = |index: usize| {
+                let start = HEADER + index * span;
+                resident(&pages, start / PAGE..(start + span).div_ceil(PAGE))
+            };
+            let first = class_pages(0);
+            let total: usize = (0..classes).map(class_pages).sum();
+            assert_eq!(pool.committed(), 1088 + 2112);
+            assert!(
+                total <= pool.committed() + 2 * PAGE * classes,
+                "resident {total} bytes pass committed {} by more than two partial \
+                 pages per class ({})",
+                pool.committed(),
+                2 * PAGE * classes
+            );
+            assert!(
+                first <= 2 * PAGE,
+                "the idle 64-byte class keeps {first} resident bytes with nothing carved"
+            );
         }
 
         proptest! {
@@ -1167,6 +1342,8 @@ mod tests {
                             let room = BUDGET - held;
                             let need = footprint(len);
                             prop_assert!(need > room, "{error} with {room} room");
+                            let available = BUDGET - pool.committed();
+                            prop_assert_eq!(error, exhausted(len, available));
                         }
                     }
                     let carved: usize =
