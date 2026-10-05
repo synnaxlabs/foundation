@@ -23,16 +23,19 @@ fn main() -> ExitCode {
         .parent()
         .expect("invariant: xtask is a directory of the workspace root");
     #[expect(clippy::disallowed_methods, reason = "a dev tool reads its arguments")]
-    let result = match std::env::args().nth(1).as_deref() {
-        Some("layers") => layers(root),
-        Some("globals") => globals::check(root),
-        Some("oracles") => oracles::check(root),
-        Some(name @ ("loom" | "shuttle")) => cfg::test(root, name),
-        Some("miri") => miri::run(root),
-        _ => {
-            eprintln!("usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>");
-            return ExitCode::FAILURE;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args.split_first() {
+        Some((task, rest)) if task == "globals" => {
+            packages(rest).and_then(|names| globals::check(root, &names))
         }
+        Some((task, _)) => match task.as_str() {
+            "layers" => layers(root),
+            "oracles" => oracles::check(root),
+            name @ ("loom" | "shuttle") => cfg::test(root, name),
+            "miri" => miri::run(root),
+            _ => Err(vec![USAGE.to_string()]),
+        },
+        None => Err(vec![USAGE.to_string()]),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -43,6 +46,21 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+const USAGE: &str =
+    "usage: cargo xtask <layers|globals [-p <crate>]...|oracles|loom|shuttle|miri>";
+
+/// The package names in `args`, each given as `-p <name>`.
+fn packages(args: &[String]) -> Result<Vec<String>, Vec<String>> {
+    let mut names = Vec::new();
+    for pair in args.chunks(2) {
+        match pair {
+            [flag, name] if flag == "-p" => names.push(name.clone()),
+            _ => return Err(vec![USAGE.to_string()]),
+        }
+    }
+    Ok(names)
 }
 
 /// Checks every dependency of the workspace at `root` against the crate map in
@@ -155,6 +173,21 @@ mod tests {
             layers(&fixture()),
             Err(vec![missing("a"), missing("globals"), missing("model")])
         );
+    }
+
+    #[test]
+    fn packages_reads_each_flag_and_name() {
+        let args = |args: &[&str]| -> Vec<String> {
+            args.iter().map(ToString::to_string).collect()
+        };
+        assert_eq!(packages(&[]), Ok(Vec::new()));
+        assert_eq!(
+            packages(&args(&["-p", "a", "-p", "b"])),
+            Ok(args(&["a", "b"]))
+        );
+        for wrong in [&["-p"][..], &["a"], &["--package", "a"], &["-p", "a", "b"]] {
+            assert_eq!(packages(&args(wrong)), Err(vec![USAGE.to_string()]));
+        }
     }
 
     #[test]

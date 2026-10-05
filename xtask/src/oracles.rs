@@ -36,7 +36,7 @@ fn problems(root: &Path) -> Result<Vec<String>, String> {
     let (targets, mut problems) = targets(&metadata, &oracles)?;
     let mut compiled = BTreeSet::new();
     for (target, exe) in build(root, &targets)? {
-        compiled.extend(build::sources(&workspace, &exe)?);
+        compiled.extend(build::sources(&workspace, &exe.with_extension("d"))?);
         if tests(&exe)? == 0 {
             problems.push(format!(
                 "oracle test target `{}` of `{}` runs no tests. An oracle must run at \

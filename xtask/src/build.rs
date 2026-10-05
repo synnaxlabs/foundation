@@ -1,4 +1,5 @@
-//! Builds test executables and reads which source files rustc compiled into each.
+//! Builds test executables, checks targets, and reads which source files rustc
+//! compiled into each.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,11 +52,71 @@ pub(crate) fn executables(cargo: &mut Command) -> Result<Vec<Executable>, String
     Ok(built)
 }
 
-/// The Rust source files that rustc compiled into `exe`, from the dep-info file beside
-/// it. Rustc writes paths relative to `workspace`.
-pub(crate) fn sources(workspace: &Path, exe: &Path) -> Result<Vec<PathBuf>, String> {
-    let info = exe.with_extension("d");
-    let text = std::fs::read_to_string(&info)
+/// A unit that `cargo check` checked, other than a test or benchmark.
+#[derive(Debug)]
+pub(crate) struct Checked {
+    pub(crate) package_id: String,
+    /// The dep-info file of the unit.
+    pub(crate) info: PathBuf,
+}
+
+/// Runs `cargo`, a `cargo check --message-format=json` command, and returns each unit
+/// it checked that is not a test or benchmark.
+pub(crate) fn checked(cargo: &mut Command) -> Result<Vec<Checked>, String> {
+    let output = cargo.output().map_err(|e| format!("cargo check: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot check the targets:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let mut checked = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let message: Value =
+            serde_json::from_str(line).map_err(|e| format!("cargo check: {e}"))?;
+        if field::text(&message, "reason")? != "compiler-artifact"
+            || field::flag(&message["profile"], "test")?
+        {
+            continue;
+        }
+        checked.push(Checked {
+            package_id: field::text(&message, "package_id")?.to_string(),
+            info: info(&message)?,
+        });
+    }
+    Ok(checked)
+}
+
+/// The dep-info file of the unit of `artifact`, a `compiler-artifact` message. It is
+/// `<name>-<hash>.d` beside the unit's first file, which is `lib<name>-<hash>.rmeta`,
+/// or a build script in a directory named `<package>-<hash>`.
+fn info(artifact: &Value) -> Result<PathBuf, String> {
+    let target = &artifact["target"];
+    let name = field::text(target, "name")?.replace('-', "_");
+    let file = field::list(artifact, "filenames")?
+        .first()
+        .and_then(Value::as_str)
+        .map(Path::new)
+        .ok_or_else(|| format!("cargo check built no file for `{name}`"))?;
+    let dir = file
+        .parent()
+        .ok_or_else(|| format!("{} has no directory", file.display()))?;
+    let script = field::list(target, "kind")?
+        .iter()
+        .any(|kind| kind == "custom-build");
+    let named = if script { dir } else { file };
+    let hash = named
+        .file_stem()
+        .and_then(|stem| stem.to_str()?.rsplit_once('-'))
+        .map(|(_, hash)| hash)
+        .ok_or_else(|| format!("{} has no hash in its name", named.display()))?;
+    Ok(dir.join(format!("{name}-{hash}.d")))
+}
+
+/// The Rust source files that rustc compiled, from the dep-info file `info`. Rustc
+/// writes paths relative to `workspace`.
+pub(crate) fn sources(workspace: &Path, info: &Path) -> Result<Vec<PathBuf>, String> {
+    let text = std::fs::read_to_string(info)
         .map_err(|e| format!("{}: {e}", info.display()))?;
     Ok(text
         .lines()

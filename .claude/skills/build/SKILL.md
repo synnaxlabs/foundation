@@ -43,7 +43,7 @@ You own a set of crates. Your session name is your owner label (`owner:<name>`).
    cargo fmt --check
    cargo clippy -p <crate>... --all-targets -- -D warnings
    cargo xtask layers
-   cargo xtask globals
+   cargo xtask globals -p <crate>...
    cargo xtask oracles
    cargo test -p <crate>...
    ```

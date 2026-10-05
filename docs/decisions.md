@@ -1577,7 +1577,9 @@ How to read this record:
   globals": "Allow in test binaries". A test or benchmark binary may hold one
   counting `#[global_allocator]` `static` with an atomic count, because Rust has no
   other way to count allocations. Never in a library or the `node` binary. The
-  `xtask globals` check allows only this case. The static also holds the state of
+  `xtask globals` check allows only this case, but it reads text: a `static` whose
+  type holds an atomic inside, such as `counting::Allocator`, passes it anywhere, and
+  review catches that case (#150). The static also holds the state of
   `Allocator::freed_holding` (#349): a phase with a count of the frees that scan, the
   caller's needle while a call runs, and a found count, because Rust has no other way
   to see a freed block. `freed_holding` is the one exception to "Safe code is sound

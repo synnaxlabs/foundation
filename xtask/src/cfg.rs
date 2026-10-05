@@ -73,7 +73,7 @@ fn problems(root: &Path, name: &str) -> Result<Vec<String>, String> {
 /// Reports whether a source file of the test executable `exe` names `name` in a
 /// `cfg`.
 fn names(workspace: &Path, exe: &Path, name: &str) -> Result<bool, String> {
-    for file in build::sources(workspace, exe)? {
+    for file in build::sources(workspace, &exe.with_extension("d"))? {
         let text = std::fs::read_to_string(&file)
             .map_err(|e| format!("{}: {e}", file.display()))?;
         if select::names_cfg(&text, name) {

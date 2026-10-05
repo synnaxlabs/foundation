@@ -159,7 +159,10 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   counting::Allocator` in a test or benchmark binary, never in a library or the
   `node` binary. Clippy refuses `global_allocator`, and only a crate-level
   `#![expect(clippy::disallowed_macros)]` lifts it. `cargo xtask globals` refuses
-  that lift outside a test or benchmark root.
+  that lift outside a test or benchmark root. It also refuses a `static mut`, and a
+  `static` whose type names `Atomic*`, a lock, or a cell, in each file that a target
+  other than a test or benchmark compiles. It reads text, so a `static` of a type
+  that holds an atomic inside passes. Review catches that case.
 
 ## Async and threads
 

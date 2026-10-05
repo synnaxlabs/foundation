@@ -2,4 +2,6 @@
 
 #![expect(clippy::disallowed_macros, reason = "the counting allocator")]
 
+static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn main() {}
