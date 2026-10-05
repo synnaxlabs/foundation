@@ -59,6 +59,7 @@ struct Node {
     base: Monotonic,
     monotonic: Monotonic,
     wall: Stamp,
+    wall_error: Option<Span>,
     /// The true time at which the node runs again after its pause, or `None` when the
     /// pause never ends.
     resumes: Option<Monotonic>,
@@ -142,6 +143,7 @@ impl State {
             base: self.now,
             monotonic: config.monotonic,
             wall: config.wall,
+            wall_error: config.wall_error,
             resumes: Some(self.now),
             cores: config.cores,
             entropy,
@@ -170,12 +172,19 @@ impl State {
         Monotonic(self.nodes[node].monotonic.0 + self.since(node))
     }
 
-    pub(crate) fn wall(&self, node: usize) -> Stamp {
+    pub(crate) fn wall(&self, node: usize) -> env::wall::Reading {
         let nanos =
             i128::from(self.nodes[node].wall.nanos()) + i128::from(self.since(node));
         let nanos = i64::try_from(nanos)
             .expect("invariant: true time ends before a wall clock");
-        Stamp::from_nanos(nanos)
+        env::wall::Reading {
+            time: Stamp::from_nanos(nanos),
+            error: self.nodes[node].wall_error,
+        }
+    }
+
+    pub(crate) fn set_wall_error(&mut self, node: usize, error: Option<Span>) {
+        self.nodes[node].wall_error = error;
     }
 
     pub(crate) fn cores(&self, node: usize) -> NonZeroUsize {
@@ -189,7 +198,7 @@ impl State {
     /// Steps the wall of `node` by `span`, or returns `false` when the wall would
     /// leave the range of a [`Stamp`].
     pub(crate) fn step_wall(&mut self, node: usize, span: Span) -> bool {
-        let Some(wall) = self.wall(node).checked_add(span) else {
+        let Some(wall) = self.wall(node).time.checked_add(span) else {
             return false;
         };
         let (now, monotonic) = (self.now, self.monotonic(node));
