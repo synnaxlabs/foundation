@@ -141,7 +141,7 @@ mod tests {
             let mut key = [0; 32];
             key[0] = 0xab;
             key[31] = 0x01;
-            PublicKey(key)
+            PublicKey::new(key).expect("not a point of small order")
         }
 
         fn hex() -> String {
