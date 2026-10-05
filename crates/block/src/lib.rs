@@ -768,13 +768,11 @@ mod tests {
                 let pool = create_pool(1 << 16);
                 let mut blocks = Vec::new();
                 for (len, fill) in lens.iter().copied().zip(1_u8..) {
+                    let before = pool.committed();
                     let mut block = pool.alloc(len).expect("the budget has room");
+                    prop_assert_eq!(pool.committed() - before, footprint(len));
                     prop_assert_eq!(block.len(), len);
                     prop_assert_eq!(block.as_ptr().addr() % ALIGN, 0);
-                    let fresh = create_pool(1 << 16);
-                    drop(fresh.alloc(len));
-                    fresh.reclaim();
-                    prop_assert_eq!(fresh.committed(), footprint(len));
                     block.fill(fill);
                     blocks.push((block, fill));
                 }
