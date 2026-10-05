@@ -215,7 +215,8 @@ impl Receiver {
     /// [`Meta`] at the same index. Gives the count of batches, at least 1.
     ///
     /// Size each buffer for [`Receiver::batch_max`] datagrams of the largest size
-    /// you accept. The bytes of a datagram past the end of its buffer are lost.
+    /// you accept. The bytes of a datagram past the end of its buffer are lost, and
+    /// that datagram is the last of its batch.
     ///
     /// # Errors
     ///

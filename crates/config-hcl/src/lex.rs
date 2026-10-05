@@ -21,6 +21,9 @@ pub(crate) enum Kind {
     Number,
     /// A quoted string, with its escapes read.
     String(Box<str>),
+    /// A heredoc, with `\n` for each line end and, after `<<-`, without the indent
+    /// that its lines share.
+    Heredoc(Box<str>),
     /// `!`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `+`, `/`, or `%`.
     Operator,
     Star,
@@ -46,8 +49,7 @@ pub(crate) enum Kind {
     Other,
     /// The end of the text.
     End,
-    /// A string or comment that does not end, a string escape that HCL does not
-    /// have, or a template in a string. Reading stops here.
+    /// A problem that stops reading.
     Error(Error),
 }
 
@@ -84,7 +86,8 @@ impl<'a> Tokens<'a> {
         })
     }
 
-    /// Reads the next token. Call it no more after [`Kind::End`] or [`Kind::Error`].
+    /// Reads the next token. Each token but [`Kind::End`] and [`Kind::Error`] covers
+    /// one byte or more. Call it no more after `End` or `Error`.
     pub(crate) fn next(&mut self) -> Token<'a> {
         self.read().unwrap_or_else(|error| Token {
             kind: Kind::Error(error),
@@ -109,15 +112,17 @@ impl<'a> Tokens<'a> {
         self.skip()?;
         let start = self.at;
         let rest = self.rest;
+        if self.eat_newline() {
+            return Ok(self.token(Kind::Newline, rest, start));
+        }
         let Some(c) = self.bump() else {
             return Ok(self.token(Kind::End, rest, start));
         };
         let kind = match c {
-            '\n' => Kind::Newline,
-            '\r' if self.eat('\n') => Kind::Newline,
             '"' => Kind::String(self.string(start)?),
             '=' if self.eat('=') => Kind::Operator,
             '=' => Kind::Equals,
+            '<' if self.eat('<') => Kind::Heredoc(self.heredoc(start)?),
             '!' | '<' | '>' => {
                 self.eat('=');
                 Kind::Operator
@@ -146,7 +151,7 @@ impl<'a> Tokens<'a> {
                 self.number();
                 Kind::Number
             }
-            c if c.is_ascii_alphabetic() || c == '_' || c == '@' => self.word(c),
+            c if identifier_start(c) || c == '@' => self.word(c),
             _ => Kind::Other,
         };
         Ok(self.token(kind, rest, start))
@@ -293,24 +298,21 @@ impl<'a> Tokens<'a> {
 
     /// Moves past the rest of a word after its first character, `first`.
     fn word(&mut self, first: char) -> Kind {
-        let bytes = self.rest.as_bytes();
-        let part = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'@');
+        let rest = self.rest;
         // A dot is part of the word unless it starts a splat or an expansion.
         let dot = |i: usize| {
-            let rest = bytes.get(i..).unwrap_or_default();
-            !rest.starts_with(b".*") && !rest.starts_with(b"...")
+            let after = rest.get(i..).unwrap_or_default();
+            !after.starts_with(".*") && !after.starts_with("...")
         };
-        let len = bytes
-            .iter()
-            .enumerate()
-            .position(|(i, &b)| !(part(b) || b == b'.' && dot(i)))
-            .unwrap_or(bytes.len());
-        let reference = first == '@'
-            || bytes
-                .get(..len)
-                .is_some_and(|rest| rest.iter().any(|b| matches!(b, b'.' | b'@')));
+        let len = rest
+            .char_indices()
+            .find(|&(i, c)| !(identifier_part(c) || c == '@' || c == '.' && dot(i)))
+            .map_or(rest.len(), |(i, _)| i);
+        let word = rest
+            .get(..len)
+            .expect("invariant: a word ends on a character boundary");
         self.skip_bytes(len);
-        if reference {
+        if first == '@' || word.contains(['.', '@']) {
             Kind::Reference
         } else {
             Kind::Identifier
@@ -340,21 +342,7 @@ impl<'a> Tokens<'a> {
                 }
                 Some(c @ ('$' | '%')) => {
                     self.bump();
-                    if self.peek() == Some('{') {
-                        self.bump();
-                        return Err(Error::Form {
-                            span: self.span(at),
-                            form: Form::Template,
-                        });
-                    }
-                    if self.peek() == Some(c) && self.second(|c| c == '{') {
-                        self.bump();
-                        self.bump();
-                        text.push(c);
-                        text.push('{');
-                    } else {
-                        text.push(c);
-                    }
+                    self.sigil(c, at, &mut text)?;
                 }
                 Some(c) => {
                     self.bump();
@@ -363,6 +351,118 @@ impl<'a> Tokens<'a> {
             }
         }
         unreachable!("invariant: each pass moves past a character")
+    }
+
+    /// Reads what follows `sigil`, a `$` or `%` at `start`, into `text`: `$${` and
+    /// `%%{` are the text `${` and `%{`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Form::Template`] when `sigil` starts a template.
+    fn sigil(
+        &mut self,
+        sigil: char,
+        start: Position,
+        text: &mut String,
+    ) -> Result<(), Error> {
+        if self.eat('{') {
+            return Err(Error::Form {
+                span: self.span(start),
+                form: Form::Template,
+            });
+        }
+        text.push(sigil);
+        if self.peek() == Some(sigil) && self.second(|c| c == '{') {
+            self.bump();
+            self.bump();
+            text.push('{');
+        }
+        Ok(())
+    }
+
+    /// Reads a heredoc after its `<<` at `start`.
+    fn heredoc(&mut self, start: Position) -> Result<Box<str>, Error> {
+        let indented = self.eat('-');
+        let marker = self.marker();
+        if marker.is_empty() || !self.eat_newline() {
+            return Err(Error::Syntax {
+                span: self.span(start),
+                expected: Expected::HeredocStart,
+            });
+        }
+        let mut text = String::new();
+        let mut line_start = true;
+        // Each pass moves past a character or returns.
+        for _ in 0..=self.rest.len() {
+            if line_start && self.close(marker) {
+                return Ok(if indented { dedent(&text) } else { text }.into());
+            }
+            let at = self.at;
+            line_start = self.eat_newline();
+            if line_start {
+                text.push('\n');
+                continue;
+            }
+            match self.bump() {
+                None => {
+                    return Err(Error::Syntax {
+                        span: self.span(start),
+                        expected: Expected::HeredocEnd,
+                    });
+                }
+                Some(c @ ('$' | '%')) => self.sigil(c, at, &mut text)?,
+                Some(c) => text.push(c),
+            }
+        }
+        unreachable!("invariant: each pass moves past a character")
+    }
+
+    /// Moves past an identifier, and returns it, or `""` when none starts here.
+    fn marker(&mut self) -> &'a str {
+        let rest = self.rest;
+        let len = if rest.starts_with(identifier_start) {
+            rest.find(|c| !identifier_part(c)).unwrap_or(rest.len())
+        } else {
+            0
+        };
+        self.skip_bytes(len);
+        rest.get(..len)
+            .expect("invariant: an identifier ends on a character boundary")
+    }
+
+    /// Moves past the rest of the line when it holds only `marker`, with whitespace
+    /// around it, and reports whether it did.
+    fn close(&mut self, marker: &str) -> bool {
+        let mut end = self.clone();
+        end.eat_while(space);
+        if !end.rest.starts_with(marker) {
+            return false;
+        }
+        end.skip_bytes(marker.len());
+        end.eat_while(space);
+        let closed = end.rest.is_empty() || end.line_end() > 0;
+        if closed {
+            *self = end;
+        }
+        closed
+    }
+
+    /// Returns the length of the line end here: 1 for `\n`, 2 for `\r\n`, else 0.
+    fn line_end(&self) -> usize {
+        if self.rest.starts_with('\n') {
+            1
+        } else if self.rest.starts_with("\r\n") {
+            2
+        } else {
+            0
+        }
+    }
+
+    /// Moves past a `\n` or `\r\n`, and reports whether one was there.
+    fn eat_newline(&mut self) -> bool {
+        let len = self.line_end();
+        self.skip_bytes(len);
+        len > 0
     }
 
     /// Reads an escape after its backslash at `start`.
@@ -404,6 +504,53 @@ impl<'a> Tokens<'a> {
     }
 }
 
+/// The kind of the word that all of `text` reads as: [`Kind::Identifier`] or
+/// [`Kind::Reference`]. `None` when `text` reads as any other token, or as more than
+/// one.
+pub(crate) fn word(text: &str) -> Option<Kind> {
+    let token = Tokens::new(Source(0), text).ok()?.next();
+    (matches!(token.kind, Kind::Identifier | Kind::Reference) && token.text == text)
+        .then_some(token.kind)
+}
+
+/// Reports whether `c` can start an identifier.
+pub(crate) fn identifier_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+/// Reports whether `c` can follow the first character of an identifier.
+pub(crate) fn identifier_part(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
+}
+
+/// Reports whether `c` is whitespace inside a line, as a heredoc counts it: Unicode
+/// whitespace other than `\n` and `\r`.
+pub(crate) fn space(c: char) -> bool {
+    c.is_whitespace() && !matches!(c, '\n' | '\r')
+}
+
+/// Removes the indent, in characters, that the lines of `text` that are not blank
+/// share. A blank line holds only whitespace, and stays as written, as in HCL.
+fn dedent(text: &str) -> String {
+    let blank = |line: &str| line.trim_start_matches(space) == "\n";
+    let shared = text
+        .split_inclusive('\n')
+        .filter(|line| !blank(line))
+        .map(|line| line.chars().take_while(|&c| space(c)).count())
+        .min()
+        .unwrap_or(0);
+    text.split_inclusive('\n')
+        .map(|line| {
+            if blank(line) {
+                return line;
+            }
+            let mut chars = line.chars();
+            chars.by_ref().take(shared).for_each(drop);
+            chars.as_str()
+        })
+        .collect()
+}
+
 /// Refuses a text whose offsets do not fit in a span.
 fn check_size(bytes: usize) -> Result<(), Error> {
     if u32::try_from(bytes).is_ok() {
@@ -415,7 +562,26 @@ fn check_size(bytes: usize) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    proptest! {
+        #[test]
+        fn each_token_but_the_last_has_a_byte(
+            text in "[a-z0-9 \t\r\n\"\\\\\\{}\\[\\]().,:=<>!&|+*/%?#@$-]{0,40}|\\PC{0,20}"
+        ) {
+            let mut tokens = Tokens::new(Source(0), &text).unwrap();
+            for _ in 0..=text.len() {
+                let token = tokens.next();
+                if matches!(token.kind, Kind::End | Kind::Error(_)) {
+                    return Ok(());
+                }
+                prop_assert!(!token.text.is_empty(), "{:?} has no text", token.kind);
+            }
+            prop_assert!(false, "more tokens than bytes in {text:?}");
+        }
+    }
 
     #[test]
     fn refuses_a_text_past_the_largest_offset() {

@@ -1,6 +1,7 @@
 //! The time to build a frame (header, ranges, and descriptors, but not the series
-//! bytes), to fill and read every series in order, and to look each one up, for a dense
-//! frame and for frames of 100,000 channels.
+//! bytes), to fill and read every series in order, to look each one up, to give its
+//! charge, and to view the series bytes, for a dense frame and for frames of 100,000
+//! channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -103,7 +104,6 @@ fn draft(pool: &block::Pool, case: &Case) -> Draft {
     Draft::new(
         pool,
         black_box(&case.set),
-        Path::Live,
         Form::Encoded,
         black_box(&case.series),
     )
@@ -115,7 +115,7 @@ fn frame(pool: &block::Pool, case: &Case) -> Frame {
     for (_, bytes) in draft.iter_mut() {
         bytes.fill(1);
     }
-    draft.freeze()
+    draft.freeze(Path::Live)
 }
 
 /// Builds a frame and sets each present group's range.
@@ -127,7 +127,7 @@ fn build(bencher: Bencher<'_, '_>, case: &Case) {
         for &group in &case.groups {
             draft.set_range(group, Range { seq: 1, count: 1 });
         }
-        drop(draft.freeze());
+        drop(draft.freeze(Path::Live));
     });
 }
 
@@ -140,7 +140,7 @@ fn fill(bencher: Bencher<'_, '_>, case: &Case) {
         for (_, bytes) in draft.iter_mut() {
             bytes.fill(1);
         }
-        drop(draft.freeze());
+        drop(draft.freeze(Path::Live));
     });
 }
 
@@ -170,4 +170,20 @@ fn lookup(bencher: Bencher<'_, '_>, case: &Case) {
             .map(<[u8]>::len)
             .sum::<usize>()
     });
+}
+
+/// Gives the frame's credit charge.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    bencher.bench_local(|| black_box(&frame).charge());
+}
+
+/// Views the series bytes, then drops the view.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn body(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    bencher.bench_local(|| black_box(&frame).body().len());
 }

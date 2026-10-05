@@ -30,13 +30,13 @@ mod at {
     pub(super) const PATH: usize = 13;
 }
 
-/// One of an index's two write paths, each with its own seq. Backfill is late data,
-/// labeled by the writer, that live readers never see.
+/// One of an index's two write paths, each with its own seq. Backfill is late data
+/// that live readers never see.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Path {
     /// The newest data.
     Live,
-    /// Late data, labeled by the writer. It ends before the newest live sample.
+    /// Late data. It ends before the newest live sample.
     Backfill,
 }
 
@@ -55,6 +55,17 @@ impl Path {
             other => unreachable!("invariant: only a draft writes a path, not {other}"),
         }
     }
+}
+
+/// What a writer says a write holds. The home applies a write labeled with a path to
+/// that path, and checks a resend against both paths first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Label {
+    /// Data the writer has not sent before, for this path.
+    Path(Path),
+    /// A frame that the writer sends again after a reconnect, with its original
+    /// boundaries. Each of its indexes lands on one path or on none.
+    Resend,
 }
 
 /// How a frame's series hold their samples.
@@ -163,10 +174,10 @@ impl From<block::Error> for Error {
 pub struct Draft(block::Unique);
 
 impl Draft {
-    /// Takes a block from `pool` for a frame of `set` on `path`, and writes its header,
-    /// ranges, and descriptors. `series` holds each present entry and the byte length
-    /// of its series, in increasing entry order. A group is present when its index is.
-    /// Each range starts at zero, and series bytes are not cleared.
+    /// Takes a block from `pool` for a frame of `set`, and writes its header, ranges,
+    /// and descriptors. `series` holds each present entry and the byte length of its
+    /// series, in increasing entry order. A group is present when its index is. Each
+    /// range starts at zero, and series bytes are not cleared.
     ///
     /// # Errors
     ///
@@ -175,12 +186,11 @@ impl Draft {
     pub fn new(
         pool: &block::Pool,
         set: &KeySet,
-        path: Path,
         form: Form,
         series: &[(usize, usize)],
     ) -> Result<Self, Error> {
         let (groups, len) = measure(set, series)?;
-        let start = HEAD + RANGE * groups + DESCRIPTOR * series.len();
+        let start = body_start(groups, series.len());
         let mut block = pool.alloc(start.saturating_add(len))?;
         let head = &mut block[..HEAD];
         head.fill(0);
@@ -188,7 +198,6 @@ impl Draft {
         put(head, at::RANGES, &to_u32(groups).to_le_bytes());
         put(head, at::SERIES, &to_u32(series.len()).to_le_bytes());
         head[at::FORM] = form.byte();
-        head[at::PATH] = path.byte();
         let (ranges, descriptors, body) = split_mut(&mut block);
         let indexes = series
             .iter()
@@ -252,9 +261,10 @@ impl Draft {
         put(&mut ranges[n], 8, &range.seq.to_le_bytes());
     }
 
-    /// The finished frame.
+    /// The finished frame on `path`, the path whose seq its ranges count on.
     #[must_use]
-    pub fn freeze(self) -> Frame {
+    pub fn freeze(mut self, path: Path) -> Frame {
+        self.0[at::PATH] = path.byte();
         Frame(self.0.freeze())
     }
 }
@@ -270,7 +280,7 @@ impl Frame {
         key_set::Key::new(u32::from_le_bytes(get(&self.0, at::KEY_SET)))
     }
 
-    /// The frame's write path.
+    /// The path whose seq the frame's ranges count on.
     #[must_use]
     pub fn path(&self) -> Path {
         Path::from_byte(self.0[at::PATH])
@@ -315,6 +325,24 @@ impl Frame {
             (to_usize(lead(descriptor)), series)
         })
     }
+
+    /// The credit that sending the frame to a reader spends: the bytes a block of the
+    /// frame's length takes from its pool. It depends only on that length.
+    #[must_use]
+    pub fn charge(&self) -> u64 {
+        to_u64(block::footprint(self.0.len()))
+    }
+
+    /// The series bytes of every present entry, as one view that shares the frame's
+    /// block, from the first series to the end. The end of each series in the
+    /// descriptors is an offset into this view. Copies nothing. Until it drops, the
+    /// view keeps the whole block in use: [`Frame::charge`] bytes of the pool, not its
+    /// length.
+    #[must_use]
+    pub fn body(&self) -> block::Block {
+        let (ranges, series) = counts(&self.0);
+        self.0.clone().skip(body_start(ranges, series))
+    }
 }
 
 /// The present groups of a frame of `series`, and the bytes of its series with the
@@ -343,8 +371,8 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
 /// A frame's ranges, its descriptors, and its series bytes.
 fn split(bytes: &[u8]) -> (&[[u8; RANGE]], &[[u8; DESCRIPTOR]], &[u8]) {
     let (ranges, series) = counts(bytes);
-    let (ranges, rest) = bytes[HEAD..].split_at(RANGE * ranges);
-    let (descriptors, body) = rest.split_at(DESCRIPTOR * series);
+    let (head, body) = bytes.split_at(body_start(ranges, series));
+    let (ranges, descriptors) = head[HEAD..].split_at(RANGE * ranges);
     (ranges.as_chunks().0, descriptors.as_chunks().0, body)
 }
 
@@ -352,13 +380,19 @@ fn split_mut(
     bytes: &mut [u8],
 ) -> (&mut [[u8; RANGE]], &mut [[u8; DESCRIPTOR]], &mut [u8]) {
     let (ranges, series) = counts(bytes);
-    let (ranges, rest) = bytes[HEAD..].split_at_mut(RANGE * ranges);
-    let (descriptors, body) = rest.split_at_mut(DESCRIPTOR * series);
+    let (head, body) = bytes.split_at_mut(body_start(ranges, series));
+    let (ranges, descriptors) = head[HEAD..].split_at_mut(RANGE * ranges);
     (
         ranges.as_chunks_mut().0,
         descriptors.as_chunks_mut().0,
         body,
     )
+}
+
+/// Where the series bytes start in a frame of `ranges` ranges and `series`
+/// descriptors.
+const fn body_start(ranges: usize, series: usize) -> usize {
+    HEAD + RANGE * ranges + DESCRIPTOR * series
 }
 
 /// The counts of ranges and descriptors in a frame's header.
@@ -403,6 +437,11 @@ fn put(bytes: &mut [u8], at: usize, value: &[u8]) {
 
 fn to_usize(n: u32) -> usize {
     usize::try_from(n).expect("invariant: a usize holds a u32")
+}
+
+/// A byte count as a `u64`.
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).expect("invariant: a u64 holds a usize")
 }
 
 /// An entry, count, or offset of a frame as a `u32`. An entry fits because a key set's
@@ -460,7 +499,7 @@ mod tests {
     /// The error of a draft of `series` over [`one_group`].
     fn refusal(series: &[(usize, usize)]) -> Error {
         let set = one_group(&mut Interner::new());
-        let result = Draft::new(&pool(1 << 16), &set, Path::Live, Form::Raw, series);
+        let result = Draft::new(&pool(1 << 16), &set, Form::Raw, series);
         result.unwrap_err()
     }
 
@@ -479,17 +518,16 @@ mod tests {
         dirty.fill(0xff);
         drop(dirty);
         let series = [(0, 3), (2, 2)];
-        let mut draft =
-            Draft::new(&pool, &set, Path::Live, Form::Encoded, &series).unwrap();
+        let mut draft = Draft::new(&pool, &set, Form::Encoded, &series).unwrap();
         draft.series(0).unwrap().copy_from_slice(&[0xaa; 3]);
         draft.series(2).unwrap().copy_from_slice(&[1, 2]);
         draft.set_range(0, Range { seq: 7, count: 2 });
-        let frame = draft.freeze();
+        let frame = draft.freeze(Path::Backfill);
         let mut expected = Vec::new();
         for n in [3_u32, 1, 2] {
             expected.extend(n.to_le_bytes());
         }
-        expected.extend([1, 0, 0, 0]);
+        expected.extend([1, 1, 0, 0]);
         for n in [0_u32, 2] {
             expected.extend(n.to_le_bytes());
         }
@@ -502,12 +540,33 @@ mod tests {
     }
 
     #[test]
+    fn writes_the_path_at_freeze() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        for (path, byte) in [(Path::Live, 0), (Path::Backfill, 1)] {
+            let frame = Draft::new(&pool, &set, Form::Raw, &[])
+                .unwrap()
+                .freeze(path);
+            assert_eq!(frame.0[13], byte, "{path:?}");
+            assert_eq!(frame.path(), path);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: only a draft writes a path, not 2")]
+    fn panics_on_an_unknown_path_byte() {
+        let mut block = pool(1 << 16).alloc(HEAD).unwrap();
+        block.fill(2);
+        let path = Frame(block.freeze()).path();
+        unreachable!("read {path:?} from byte 2");
+    }
+
+    #[test]
     fn reads_the_header_and_absent_parts() {
         let set = two_groups();
         let pool = pool(1 << 16);
-        let draft =
-            Draft::new(&pool, &set, Path::Backfill, Form::Raw, &[(0, 8)]).unwrap();
-        let frame = draft.freeze();
+        let draft = Draft::new(&pool, &set, Form::Raw, &[(0, 8)]).unwrap();
+        let frame = draft.freeze(Path::Backfill);
         assert_eq!(frame.key_set(), set.key());
         assert_eq!(frame.path(), Path::Backfill);
         assert_eq!(frame.form(), Form::Raw);
@@ -525,6 +584,67 @@ mod tests {
     }
 
     #[test]
+    fn charges_the_bytes_its_block_takes() {
+        let set = two_groups();
+        // Fixed values: nodes of two versions must agree on a charge.
+        let cases: [(&[(usize, usize)], u64); 7] = [
+            (&[], 128),
+            (&[(0, 0)], 128),
+            (&[(0, 0), (2, 0)], 128),
+            (&[(0, 24)], 128),
+            (&[(0, 25)], 192),
+            (&[(0, 89)], 320),
+            (&[(0, 8), (1, 8), (2, 4000)], 4160),
+        ];
+        for (series, charge) in cases {
+            let pool = pool(1 << 16);
+            let before = pool.committed();
+            let draft = Draft::new(&pool, &set, Form::Raw, series).unwrap();
+            let taken = to_u64(pool.committed() - before);
+            let frame = draft.freeze(Path::Live);
+            assert_eq!(frame.charge(), charge, "{series:?}");
+            assert_eq!(frame.charge(), taken, "{series:?}");
+        }
+    }
+
+    #[test]
+    fn views_the_series_bytes() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        let series = [(0, 3), (1, 0), (2, 9)];
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
+        draft.series(0).unwrap().fill(1);
+        draft.series(2).unwrap().fill(2);
+        let frame = draft.freeze(Path::Live);
+        let expected = [[1, 1, 1, 0, 0, 0, 0, 0].as_slice(), &[2; 9]].concat();
+        assert_eq!(&*frame.body(), expected.as_slice());
+        let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
+        assert!(empty.freeze(Path::Live).body().is_empty());
+    }
+
+    #[test]
+    fn gives_the_block_back_when_the_frame_and_view_drop() {
+        let set = two_groups();
+        let pool = pool(1 << 16);
+        let series = [(0, 3), (1, 0), (2, 9)];
+        let frame = Draft::new(&pool, &set, Form::Raw, &series)
+            .unwrap()
+            .freeze(Path::Live);
+        let committed = pool.committed();
+        let len = frame.0.len();
+        let body = frame.body();
+        drop(frame);
+        drop(body);
+        let again = pool.alloc(len).unwrap();
+        assert_eq!(
+            pool.committed(),
+            committed,
+            "the pool reuses the frame's block"
+        );
+        drop(again);
+    }
+
+    #[test]
     fn finds_ranges_and_series_among_many() {
         let groups: Vec<Group<'_>> = (0..130)
             .map(|n| Group {
@@ -535,8 +655,7 @@ mod tests {
         let set = Interner::new().intern(&groups);
         let pool = pool(1 << 16);
         let series = [(0, 8), (64, 8), (129, 8)];
-        let mut draft =
-            Draft::new(&pool, &set, Path::Live, Form::Raw, &series).unwrap();
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &series).unwrap();
         for (seq, &(entry, _)) in (1..).zip(&series) {
             draft
                 .series(entry)
@@ -545,7 +664,7 @@ mod tests {
             let group = u32::try_from(entry).unwrap();
             draft.set_range(group, Range { seq, count: 1 });
         }
-        let frame = draft.freeze();
+        let frame = draft.freeze(Path::Live);
         assert_eq!(frame.range(64), Some(Range { seq: 2, count: 1 }));
         assert_eq!(frame.range(129), Some(Range { seq: 3, count: 1 }));
         assert_eq!(frame.range(128), None);
@@ -557,7 +676,7 @@ mod tests {
     fn returns_the_pool_error() {
         let pool = pool(512);
         let set = one_group(&mut Interner::new());
-        let result = Draft::new(&pool, &set, Path::Live, Form::Raw, &[(0, 1000)]);
+        let result = Draft::new(&pool, &set, Form::Raw, &[(0, 1000)]);
         let error = result.unwrap_err();
         let cause = block::Error::TooLarge {
             requested: 1040,
@@ -582,7 +701,7 @@ mod tests {
         }]);
         let pool = pool(1 << 16);
         let len = usize::try_from(u32::MAX).unwrap() + 1;
-        let result = Draft::new(&pool, &set, Path::Live, Form::Raw, &[(0, len - 40)]);
+        let result = Draft::new(&pool, &set, Form::Raw, &[(0, len - 40)]);
         let expected = block::Error::TooLarge {
             requested: len,
             largest: pool.largest(),
@@ -645,14 +764,9 @@ mod tests {
 
     #[test]
     fn refuses_data_whose_index_is_another_groups() {
-        let error = Draft::new(
-            &pool(1 << 16),
-            &two_groups(),
-            Path::Live,
-            Form::Raw,
-            &[(0, 1), (3, 1)],
-        )
-        .unwrap_err();
+        let error =
+            Draft::new(&pool(1 << 16), &two_groups(), Form::Raw, &[(0, 1), (3, 1)])
+                .unwrap_err();
         assert_eq!(error, Error::IndexAbsent { entry: 3, index: 2 });
     }
 
@@ -661,8 +775,7 @@ mod tests {
     fn refuses_a_range_for_an_absent_group() {
         let pool = pool(1 << 16);
         let series = [(0, 1)];
-        let mut draft =
-            Draft::new(&pool, &two_groups(), Path::Live, Form::Raw, &series).unwrap();
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
         draft.set_range(1, Range::default());
     }
 
@@ -785,8 +898,10 @@ mod tests {
         let (set, series) = shape(case);
         let entries = set.entries().len();
         let pool = pool(1 << 20);
-        let mut draft = Draft::new(&pool, &set, case.path, case.form, &series)
+        let before = pool.committed();
+        let mut draft = Draft::new(&pool, &set, case.form, &series)
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let taken = to_u64(pool.committed() - before);
         fill(&mut draft, &series, entries, case.in_order)?;
         let mut ranges = Vec::new();
         for ((group, &(seq, count)), &present) in
@@ -799,11 +914,12 @@ mod tests {
             ranges.push(range);
         }
         ranges.push(None);
-        let frame = draft.freeze();
+        let frame = draft.freeze(case.path);
 
         prop_assert_eq!(frame.key_set(), set.key());
         prop_assert_eq!(frame.path(), case.path);
         prop_assert_eq!(frame.form(), case.form);
+        prop_assert_eq!(frame.charge(), taken);
         for (group, range) in (0_u32..).zip(ranges) {
             prop_assert_eq!(frame.range(group), range);
         }
@@ -820,6 +936,12 @@ mod tests {
             .iter()
             .map(|(entry, bytes)| (entry, bytes.to_vec()))
             .collect();
+        let mut body = Vec::new();
+        for (_, bytes) in &written {
+            body.resize(body.len().next_multiple_of(SERIES_ALIGN), 0);
+            body.extend(bytes);
+        }
+        prop_assert_eq!(&*frame.body(), body.as_slice());
         prop_assert_eq!(read, written);
         Ok(())
     }
