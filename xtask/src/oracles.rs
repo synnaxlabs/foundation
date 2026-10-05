@@ -227,8 +227,9 @@ mod tests {
 
             fn orphan(path: &str) -> String {
                 format!(
-                    "`{path}` is not the root of a test target, so no gate runs it. Add \
-                     a `[[test]]` entry with this `path` to the crate that it checks."
+                    "`{path}` is not the root of a test target, so no gate runs it. \
+                     Add a `[[test]]` entry with this `path` to the crate that it \
+                     checks."
                 )
             }
 
@@ -266,8 +267,8 @@ mod tests {
             assert_eq!(
                 problems,
                 vec![
-                    "oracle test target `conformance` of `raft` sets `test = false`, so \
-                     `cargo test` skips it. Remove the setting."
+                    "oracle test target `conformance` of `raft` sets `test = false`, \
+                     so `cargo test` skips it. Remove the setting."
                         .to_string()
                 ]
             );

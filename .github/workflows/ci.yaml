@@ -57,7 +57,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Loom
         run: |
-          crates=$({ grep -rlE --include='*.rs' 'cfg\(loom\)' crates || true; } \
+          crates=$({ grep -rlE --include='*.rs' 'cfg!?\(.*\bloom\b' crates || true; } \
             | cut -d/ -f2 | sort -u)
           if [ -z "$crates" ]; then
             echo "No crate has loom tests."

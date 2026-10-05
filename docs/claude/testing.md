@@ -69,7 +69,7 @@ again once to prove that the failure replays (r16 59).
 - **Wake protocols and lock-free code** get loom for small models and shuttle (PCT)
   for larger ones. Only `ring` gates std types behind `cfg(loom)`. Code with `unsafe`
   runs under Miri (r16 61). CI runs `RUSTFLAGS="--cfg loom" cargo test --release
-  --tests` on each crate whose source contains `cfg(loom)`.
+  --tests` on each crate whose source names `loom` in a `cfg`.
 - **Hot paths** run under a counting allocator that fails on any allocation.
 - **Unit tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject
   and condition with nested modules. Name each test as the behavior it checks, with
