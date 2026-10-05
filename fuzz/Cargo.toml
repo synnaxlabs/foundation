@@ -15,6 +15,7 @@ block = { path = "../crates/block" }
 buffer = { path = "../crates/buffer" }
 codec = { path = "../crates/codec" }
 config-hcl = { path = "../crates/config-hcl" }
+connector-modbus = { path = "../crates/connector-modbus" }
 crc32c = "0.6.8"
 document = { path = "../crates/document" }
 env = { path = "../crates/env" }
@@ -55,6 +56,13 @@ bench = false
 [[bin]]
 name = "config_hcl_write"
 path = "fuzz_targets/config_hcl_write.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connector_modbus_tcp"
+path = "fuzz_targets/connector_modbus_tcp.rs"
 test = false
 doc = false
 bench = false
