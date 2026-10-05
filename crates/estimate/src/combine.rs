@@ -13,8 +13,9 @@ use crate::{Drift, Filter, Measurement};
 /// bounds (Marzullo's intersection). The estimate covers all of them, so a tie between
 /// groups that disagree gives a wide bound, not a guess. When all sources agree, the
 /// bound is not wider than the narrowest one. The estimate holds the true offset when
-/// the bounds that hold it are a majority and every other bound misses them all. A
-/// falseticker that overlaps some of them can move it, as in NTP.
+/// the bounds that hold it are a majority of the bounds that vote, and every other
+/// bound that votes misses them all. A falseticker that overlaps some of them can move
+/// it, as in NTP.
 ///
 /// A bound of 36500 days at `now` is unknown. It votes only when no bound is known, so
 /// it never turns a split into an estimate.
@@ -312,6 +313,23 @@ mod tests {
                 agreeing: 1,
             };
             assert_eq!(check(&sources), Err(split));
+        }
+
+        #[test]
+        fn starts_at_exactly_36500_days() {
+            let os = source(0, MAX_ERROR.nanos() - 1);
+            let sources = [source(0, 1_000), source(10_000_000_000, 1_000), os];
+            assert_eq!(check(&sources), Ok((5_000_000_000, 5_000_001_000)));
+        }
+
+        /// Two unknown bounds hold the true offset of zero, and the known bound misses
+        /// both.
+        #[test]
+        fn loses_to_a_known_bound_even_as_a_majority() {
+            let widest = MAX_ERROR.nanos();
+            let liar = source(widest + widest / 2, 1);
+            let sources = [source(0, widest), source(0, widest), liar];
+            assert_eq!(check(&sources), Ok((widest + widest / 2, 1)));
         }
 
         /// The old bound grows to 36500 days at `now`, so the known bound it misses
