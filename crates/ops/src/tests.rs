@@ -1,26 +1,47 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
-use crate::operation::{Response, TABLE};
-use crate::{Error, Exit};
+use crate::Exit;
+use crate::error::Error;
+use crate::operation::{self, Response, TABLE};
 
 fn cli(args: &[&str]) -> Exit {
     let args = ["foundation"].iter().chain(args).map(OsString::from);
     crate::cli(args)
 }
 
+fn failed(stderr: &str) -> Exit {
+    Exit {
+        stdout: String::new(),
+        stderr: stderr.to_owned(),
+        status: 2,
+    }
+}
+
+fn names(map: &Map<String, Value>) -> BTreeSet<&str> {
+    map.keys().map(String::as_str).collect()
+}
+
+#[test]
+fn the_table_names_each_input_and_output_once() {
+    let names_in_table: BTreeSet<_> = TABLE.iter().map(|spec| spec.name).collect();
+    assert_eq!(names_in_table.len(), TABLE.len());
+    assert_eq!(names(&operation::inputs()), names_in_table);
+    assert_eq!(names(&operation::outputs()), names_in_table);
+}
+
 #[test]
 fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
-    let command = crate::operation::command();
+    let command = operation::command();
     let tools = crate::tools();
     let tools = tools["tools"].as_array().expect("tools is a list");
-    let docs = crate::docs();
-    let names: BTreeSet<_> = TABLE.iter().map(|spec| spec.name).collect();
-    assert_eq!(names.len(), TABLE.len(), "names are unique");
+    let docs = operation::docs();
     assert_eq!(command.get_subcommands().count(), TABLE.len());
     assert_eq!(tools.len(), TABLE.len());
+    let inputs = operation::inputs();
+    let outputs = operation::outputs();
     for spec in TABLE {
         let sub = command
             .find_subcommand(spec.name)
@@ -34,7 +55,9 @@ fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
         assert_eq!(tool[0]["description"], spec.summary);
         assert_eq!(tool[0]["annotations"]["readOnlyHint"], spec.read_only);
         assert_eq!(tool[0]["annotations"]["destructiveHint"], spec.destructive);
-        assert_eq!(tool[0]["inputSchema"]["type"], "object", "{}", spec.name);
+        assert_eq!(tool[0]["inputSchema"], inputs[spec.name]);
+        assert_eq!(tool[0]["outputSchema"], outputs[spec.name]);
+        let yes = |flag| if flag { "yes" } else { "no" };
         let section = format!(
             "## `{}`\n\n{}\n\n- Read-only: {}\n- Destructive: {}\n",
             spec.name,
@@ -47,8 +70,18 @@ fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
     }
 }
 
-fn yes(flag: bool) -> &'static str {
-    if flag { "yes" } else { "no" }
+#[test]
+fn each_schema_is_a_closed_object() {
+    for (name, schema) in operation::inputs().iter().chain(&operation::outputs()) {
+        assert_eq!(schema["type"], "object", "{name}");
+    }
+    for name in operation::inputs().keys() {
+        assert_eq!(
+            operation::inputs()[name]["additionalProperties"],
+            false,
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -61,13 +94,15 @@ fn json_output_parses_back_to_the_typed_output() {
             "{}",
             spec.name
         );
-        let response = Response::parse(spec.name, &exit.stdout).expect(spec.name);
-        let call = crate::call(spec.name, json!({})).expect(spec.name);
-        assert_eq!(serde_json::to_value(&response).expect("serializes"), call);
-        assert_eq!(
-            serde_json::from_str::<Value>(&exit.stdout).expect("json"),
-            call
-        );
+        let output: Value = serde_json::from_str(&exit.stdout).expect("json");
+        let response: Response =
+            serde_json::from_value(json!({ spec.name: output.clone() }))
+                .expect(spec.name);
+        assert_eq!(response.json(), output);
+        let call = crate::call(spec.name, json!({}));
+        assert_eq!(call["isError"], false);
+        assert_eq!(call["structuredContent"], output);
+        assert_eq!(call["content"][0]["text"], output.to_string());
     }
 }
 
@@ -89,7 +124,7 @@ fn docs_prints_the_reference() {
     assert_eq!(
         exit,
         Exit {
-            stdout: crate::docs(),
+            stdout: operation::docs(),
             stderr: String::new(),
             status: 0
         }
@@ -107,16 +142,12 @@ fn help_goes_to_standard_output() {
 
 #[test]
 fn a_bad_argument_gives_the_code_message_and_fix_as_text() {
-    let exit = cli(&["version", "--nope"]);
     assert_eq!(
-        exit,
-        Exit {
-            stdout: String::new(),
-            stderr: "error[ops.argument]: unexpected argument '--nope' found\n\
-                     fix: Match the arguments to the operation in `foundation docs`\n"
-                .to_owned(),
-            status: 2,
-        }
+        cli(&["version", "--nope"]),
+        failed(
+            "error[ops.argument]: unexpected argument found: `--nope`\n\
+             fix: Match the arguments to the operation in `foundation docs`\n"
+        )
     );
 }
 
@@ -129,48 +160,102 @@ fn a_bad_argument_gives_the_code_message_and_fix_as_json() {
         error,
         json!({
             "code": "ops.argument",
-            "message": "unexpected argument '--nope' found",
+            "message": "unexpected argument found: `--nope`",
             "fix": "Match the arguments to the operation in `foundation docs`",
         })
     );
 }
 
 #[test]
-fn an_unknown_operation_on_the_command_line_is_a_bad_argument() {
-    let exit = cli(&["nope"]);
-    assert_eq!(exit.status, 2);
-    assert!(
-        exit.stderr
-            .starts_with("error[ops.argument]: unrecognized subcommand 'nope'\n"),
-        "{}",
-        exit.stderr
+fn no_operation_gives_the_same_error_as_text_and_as_json() {
+    let message = "a subcommand is required but one was not provided";
+    let fix = "Match the arguments to the operation in `foundation docs`";
+    assert_eq!(
+        cli(&[]),
+        failed(&format!("error[ops.argument]: {message}\nfix: {fix}\n"))
+    );
+    let json = cli(&["--json"]);
+    let error: Value = serde_json::from_str(&json.stderr).expect("json");
+    assert_eq!(
+        error,
+        json!({ "code": "ops.argument", "message": message, "fix": fix })
     );
 }
 
 #[test]
-fn a_call_to_an_unknown_tool_names_it() {
-    let error = crate::call("nope", json!({})).expect_err("unknown");
+fn json_after_a_double_dash_is_not_the_flag() {
     assert_eq!(
-        error,
-        Error::Unknown {
-            name: "nope".to_owned()
-        }
+        cli(&["version", "--", "--json"]),
+        failed(
+            "error[ops.argument]: unexpected argument found: `--json`\n\
+             fix: Match the arguments to the operation in `foundation docs`\n"
+        )
     );
-    assert_eq!(error.to_string(), "no operation is named `nope`");
-    assert_eq!(error.code().as_str(), "ops.unknown-operation");
-    assert_eq!(error.fix(), "Use a name from `foundation docs`");
+}
+
+#[test]
+fn an_unknown_operation_suggests_the_closest_name() {
+    assert_eq!(
+        cli(&["versoin"]),
+        failed(
+            "error[ops.unknown-operation]: no operation is named `versoin`\n\
+             fix: Use `version`, the closest name\n"
+        )
+    );
+    let call = crate::call("versoin", json!({}));
+    assert_eq!(call["isError"], true);
+    assert_eq!(
+        call["structuredContent"],
+        json!({
+            "code": "ops.unknown-operation",
+            "message": "no operation is named `versoin`",
+            "fix": "Use `version`, the closest name",
+        })
+    );
+}
+
+#[test]
+fn an_unknown_operation_far_from_every_name_points_to_the_docs() {
+    let expected = json!({
+        "code": "ops.unknown-operation",
+        "message": "no operation is named `zzz`",
+        "fix": "Use a name from `foundation docs`",
+    });
+    assert_eq!(crate::call("zzz", json!({}))["structuredContent"], expected);
+    let exit = cli(&["zzz", "--json"]);
+    assert_eq!((exit.status, exit.stdout.as_str()), (2, ""));
+    assert_eq!(
+        serde_json::from_str::<Value>(&exit.stderr).expect("json"),
+        expected
+    );
 }
 
 #[test]
 fn a_call_with_a_bad_argument_names_it() {
-    let error = crate::call("version", json!({ "nope": 1 })).expect_err("bad argument");
+    let call = crate::call("version", json!({ "nope": 1 }));
+    assert_eq!(call["isError"], true);
     assert_eq!(
-        error,
-        Error::Argument {
-            message: "unknown field `nope`, there are no fields".to_owned()
-        }
+        call["structuredContent"],
+        json!({
+            "code": "ops.argument",
+            "message": "unknown field `nope`, there are no fields",
+            "fix": "Match the arguments to the operation in `foundation docs`",
+        })
     );
-    assert_eq!(error.code().as_str(), "ops.argument");
+    assert_eq!(
+        call["content"][0]["text"],
+        call["structuredContent"].to_string()
+    );
+}
+
+#[test]
+fn a_call_with_no_arguments_runs() {
+    let call = crate::call("version", Value::Null);
+    assert_eq!(call["isError"], false);
+    assert_eq!(
+        call["structuredContent"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 #[test]
@@ -181,6 +266,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
         },
         Error::Unknown {
             name: String::new(),
+            closest: None,
         },
     ];
     for error in &every {
@@ -193,6 +279,5 @@ fn error_codes_and_fixes_match_the_golden_file() {
         .iter()
         .map(|error| format!("{}\t{}\n", error.code(), error.fix()))
         .collect();
-    let lines = lines.concat();
-    assert_eq!(lines, include_str!("codes.golden"));
+    assert_eq!(lines.concat(), include_str!("codes.golden"));
 }
