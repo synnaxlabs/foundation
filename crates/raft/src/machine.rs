@@ -430,11 +430,14 @@ impl Raft {
             }
             Body::Heartbeat { commit } => within(*commit),
             Body::Append { prev, entries, .. } => {
-                let last = log::check(entries, *prev)?;
-                if !entries.is_empty() && last.term > term {
-                    return Err(Error::TermBehindLog { term, last });
+                log::check(entries, *prev)?;
+                match entries.last() {
+                    Some(entry) if entry.at.term > term => Err(Error::TermBehindLog {
+                        term,
+                        last: entry.at,
+                    }),
+                    _ => Ok(()),
                 }
-                Ok(())
             }
             Body::AppendReply { last } => within(*last),
             Body::AppendReject { hint } => within(*hint),
@@ -1495,6 +1498,30 @@ mod tests {
             );
             assert_eq!(err.to_string(), "term 2 is lower than term 3 of entry 2");
             assert_eq!(state(&mut raft), before);
+        }
+
+        // An append is checked for order before its term.
+        #[test]
+        fn refuses_an_append_out_of_order_before_one_above_its_term() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let body = append(Position::default(), entries(&[(3, 2)]), 0);
+            let err = raft.step(message(2, 2, body)).unwrap_err();
+            let out_of_order = Error::EntryOutOfOrder {
+                at: position(3, 2),
+                before: Position::default(),
+            };
+            assert_eq!(err, out_of_order);
+        }
+
+        // A `prev` is never written, so its term can be above the message's.
+        #[test]
+        fn rejects_an_empty_append_with_a_prev_above_its_term() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            let body = append(position(3, 1), vec![], 0);
+            raft.step(message(2, 2, body)).unwrap();
+            let bodies: Vec<Body> =
+                sent(&mut raft).into_iter().map(|m| m.body).collect();
+            assert_eq!(bodies, [Body::AppendReject { hint: 0 }]);
         }
 
         #[test]

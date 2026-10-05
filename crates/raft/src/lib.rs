@@ -81,13 +81,11 @@ pub enum Error {
         /// The position of the last configuration entry in the log.
         at: Position,
     },
-    /// A term is lower than the term of an entry it must cover: the stored term at
-    /// start against the last log entry, or an append's term against its last entry.
-    /// A node that wrote such an entry could not start again.
+    /// A term is lower than the term of an entry it must cover.
     TermBehindLog {
-        /// The stored term, or the append's term.
+        /// The covering term.
         term: Term,
-        /// The last log position, or the position of the append's last entry.
+        /// The position of the last entry it must cover.
         last: Position,
     },
     /// A heartbeat, an append reply, or an append reject names a log index past this

@@ -55,7 +55,7 @@ fn body() -> impl Strategy<Value = Body> {
 
 // The node at `to` after `run`, its last log position, and the key of `from`,
 // which ranges one past the nodes, so a stranger sends too.
-fn node(
+fn receiver(
     (logs, actions): &(Vec<Position>, Vec<Action>),
     to: Index,
     from: Index,
@@ -88,7 +88,7 @@ proptest! {
         term in edge(),
         body in body(),
     ) {
-        let (mut raft, _, from) = node(&run, to, from)?;
+        let (mut raft, _, from) = receiver(&run, to, from)?;
         let (hard, role, leader) = (raft.hard(), raft.role(), raft.leader());
         let message = Message { from, to: raft.key(), term: Term(term), body };
         if raft.step(message).is_err() {
@@ -108,7 +108,7 @@ proptest! {
         ahead in 0..3u64,
         rises in prop::collection::vec(0..3u64, 1..4),
     ) {
-        let (mut raft, prev, from) = node(&run, to, from)?;
+        let (mut raft, prev, from) = receiver(&run, to, from)?;
         let mut at = prev;
         let entries = rises
             .iter()
