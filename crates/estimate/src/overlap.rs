@@ -424,6 +424,14 @@ mod tests {
         }
 
         #[test]
+        fn fails_on_a_gap_of_one_billionth_of_a_nanosecond() {
+            let gap = [m(0, 0, 0), Push::Low(999_999_999, 1)];
+            assert_eq!(check(1, &gap, 0), Err(Error::Disjoint));
+            let touch = [m(0, 0, 0), Push::Low(SECOND_NS, 1)];
+            assert_eq!(check(1, &touch, SECOND_NS), Ok((1, 0)));
+        }
+
+        #[test]
         fn fails_on_a_low_edge_above_its_high_edge() {
             let mut overlap = overlap(0, &[]).expect("valid");
             let crossed = Push::Both(0, 5, 4);
