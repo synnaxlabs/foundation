@@ -53,16 +53,19 @@ impl Position {
     }
 }
 
-/// Sizes that do not make a ring.
+/// Sizes that do not make a ring. [`Layout::new`] says which sizes do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Unfit {
-    pub(crate) area: u64,
-    pub(crate) body_max: usize,
+pub struct Unfit {
+    /// The area that was asked for, in bytes.
+    pub area: u64,
+    /// The largest record body that was asked for, in bytes.
+    pub body_max: usize,
 }
 
-/// The sizes of one ring.
+/// The sizes of one ring: the area in bytes and the most bytes one record body
+/// holds. A record is one group commit, so `body_max` bounds a commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Layout {
+pub struct Layout {
     area: u64,
     body_max: usize,
     /// The size of the largest record.
@@ -78,7 +81,7 @@ impl Layout {
     /// under 4 or over `u32::MAX`, or when `area` is less than twice the largest
     /// record less one block. An empty ring of that length takes any record,
     /// wherever its head is.
-    pub(crate) fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
+    pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         let window = HEADER_LEN
             .checked_add(body_max)
             .and_then(|len| len.checked_next_multiple_of(ALIGN))
@@ -101,11 +104,15 @@ impl Layout {
         }
     }
 
-    pub(crate) fn area(self) -> u64 {
+    /// The area in bytes.
+    #[must_use]
+    pub fn area(self) -> u64 {
         self.area
     }
 
-    pub(crate) fn body_max(self) -> usize {
+    /// The most bytes one record body holds.
+    #[must_use]
+    pub fn body_max(self) -> usize {
         self.body_max
     }
 }
@@ -150,6 +157,7 @@ pub(crate) struct Writer {
 
 impl Writer {
     /// Where the next record starts.
+    #[cfg(test)]
     pub(crate) fn head(&self) -> Position {
         self.head
     }
@@ -318,6 +326,11 @@ impl Cursor {
             want: BLOCK,
             ended: false,
         }
+    }
+
+    /// The offset of the record that [`next`](Self::next) reads.
+    pub(crate) fn offset(&self) -> u64 {
+        self.at.offset
     }
 
     pub(crate) fn window(&self) -> Window {

@@ -107,6 +107,6 @@ An oracle test target is a `[[test]]` target whose root is under `oracles/`.
 `cargo xtask oracles` fails when no oracle test target compiles a `.rs` file under
 `oracles/`, or when an oracle test target runs no tests.
 
-Each PR description starts with an oracle section that lists changes under `oracles/`
+Each PR description has an oracle section that lists changes under `oracles/`
 and flags any weakening. A fresh adversarial reviewer checks each flagged change and
 argues for fixing the code instead.

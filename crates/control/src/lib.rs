@@ -2,9 +2,10 @@
 //! start state after failover.
 //!
 //! A [`Gate`] is the state machine for one index. It does no I/O and reads no clock:
-//! the caller passes the home's monotonic time to each input. After each input, the
-//! caller takes [`Gate::handoff`], records it in the index log before any frame that
-//! input accepted, and publishes it on the control channel.
+//! the caller passes the home's monotonic time to each input. Before a frame that an
+//! input accepted is stored, the caller records [`Gate::handoff`] in the index log,
+//! then calls [`Gate::recorded`]. The control channel publishes each recorded
+//! handoff.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
@@ -16,7 +17,7 @@ use types::authority::Authority;
 use types::name::Name;
 use types::time::Span;
 
-pub use gate::{Gate, Key};
+pub use gate::{Gate, Key, Permit};
 
 /// A writer as the gate sees it. The holder's value is what the home records and
 /// publishes.
@@ -58,11 +59,11 @@ impl Lease {
     }
 }
 
-/// A change of holder.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Handoff {
+/// A change of holder, borrowed from the [`Gate`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Handoff<'a> {
     /// The new holder, or `None` when the gate is now empty.
-    pub to: Option<Writer>,
+    pub to: Option<&'a Writer>,
 }
 
 /// Why the gate refused a control lease or a write.

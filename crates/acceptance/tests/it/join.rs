@@ -3,11 +3,11 @@ use std::time::Duration;
 use crate::lab::Lab;
 
 #[test]
-#[ignore = "waits on #212"]
+#[ignore = "waits on #336"]
 fn two_nodes_join_by_ticket_and_agree_on_the_spec() {
     let mut lab = Lab::new(1);
-    let cloud = lab.start("cloud", 1 << 30);
-    let edge = lab.start("edge", 1 << 30);
+    let cloud = lab.start("cloud");
+    let edge = lab.start("edge");
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
     let before = lab.spec(cloud);
@@ -18,4 +18,5 @@ fn two_nodes_join_by_ticket_and_agree_on_the_spec() {
     }
     assert_ne!(lab.spec(cloud), before, "apply changed the spec");
     assert_eq!(lab.spec(edge), lab.spec(cloud), "edge holds the new spec");
+    lab.stop();
 }

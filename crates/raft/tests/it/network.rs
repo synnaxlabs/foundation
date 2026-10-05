@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use proptest::prelude::*;
 use proptest::sample::Index;
 use raft::{
-    Body, Config, Entry, Error, Hard, Message, Position, Raft, Role, Start, Term,
+    Body, Config, Data, Entry, Error, Hard, Message, Position, Raft, Role, Start, Term,
     Voters,
 };
 use types::node;
@@ -125,7 +125,7 @@ impl Network {
                             term: last.term,
                             index,
                         },
-                        data: Vec::new(),
+                        data: Data::Empty,
                     })
                     .collect(),
                 applied: 0,
