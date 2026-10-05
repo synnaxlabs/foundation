@@ -914,8 +914,7 @@ How to read this record:
   `Config` returns to the caller, which starts a new supervisor when the spec
   changes (R12-4). Restart errors reach the connector's status in #420. Decided by the
   `connector` builder in the plan on #338, after `/eb-review`; approved by the
-  coordinator (#338), except the reset after a long run, which waits for approval on
-  #338.
+  coordinator (#338), with the reset after a long run approved on #338 later.
 - **BQ15** A set of devices that the driver acquires as one unit is one connector.
   Otherwise, separate connectors and indexes, never two writers.
 - **R7 starting points** OPC UA: open62541 compiled in, with our own crypto plugin on
