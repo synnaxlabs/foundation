@@ -148,8 +148,13 @@ next issue for a crate early, labeled `blocked` with a link to the open one.
   the diff, and their findings go on the PR as comments. The author fixes each finding
   or answers it on the PR. When the PR changes how a crate is used, the author also
   asks the owners of the crates that use it.
-- **Merge:** the coordinator adds `ready` and messages the person. The person merges
-  with a squash.
+- **Ready:** the author adds `ready` when CI passes, every review finding is fixed or
+  answered, and the body is complete: oracle changes, Complexity, Shape decisions,
+  and the six performance answers on a hot path. The exception is a PR that changes a
+  public surface, a locked decision, or an oracle: the author messages the coordinator
+  instead, and only the coordinator adds `ready`.
+- **Merge:** the coordinator tells the person about each new `ready` PR, one line
+  each. The person merges with a squash.
 
 ## Interface changes
 
