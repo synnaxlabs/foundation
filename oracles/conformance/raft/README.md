@@ -8,9 +8,16 @@ to weaken the oracle.
 
 `LICENSE` is the license of the etcd source. `election.rs` and `replication.rs` are
 modified works: ports from Go to Rust, and the port rules below list the changes.
+`quorum/` holds etcd's `quorum/testdata` tables unchanged; the unit tests of
+`crates/raft/src/voters.rs` read them with `include_str!`. Each case is a `committed`
+or `vote` line with `cfg` (the incoming voters), `cfgj` (the outgoing voters in a joint
+phase, or `zero`), and `idx` or `votes` (one value per distinct id, in order of first
+appearance; `_` is absent), then `----` and a result block whose last line is the
+committed index (`∞` for no voters) or `VoteWon`, `VoteLost`, or `VotePending`.
 
 ```sh
 cargo test -p raft --test conformance
+cargo test -p raft --lib voters
 ```
 
 ## Port rules

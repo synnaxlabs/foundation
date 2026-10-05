@@ -6,7 +6,8 @@ use types::node;
 use crate::log;
 use crate::log::Log;
 use crate::progress::Progress;
-use crate::{Body, Config, Entry, Error, Hard, Message, Position, Start, Term};
+use crate::voters::Tally;
+use crate::{Body, Config, Entry, Error, Hard, Message, Position, Start, Term, Voters};
 
 /// What a node is doing in its term.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -65,6 +66,7 @@ pub struct Ready {
 #[derive(Debug)]
 pub struct Raft {
     key: node::Key,
+    voters: Voters,
     peers: BTreeMap<node::Key, Peer>,
     election_ticks: u64,
     heartbeat_ticks: u64,
@@ -89,7 +91,7 @@ impl Raft {
     ///
     /// - [`Error::Ticks`] when `heartbeat_ticks` is 0 or `election_ticks` is not
     ///   greater than `heartbeat_ticks`.
-    /// - [`Error::DuplicateVoter`] when `voters` names a node twice.
+    /// - [`Error::DuplicateVoter`] when a list in `voters` names a node twice.
     /// - [`Error::EntryOutOfOrder`] when `entries` do not run from index 1 with
     ///   terms that never decrease.
     /// - [`Error::AppliedPastLog`] when `applied` is past the last entry.
@@ -102,7 +104,7 @@ impl Raft {
         } = config;
         let Start {
             hard,
-            voters,
+            mut voters,
             entries,
             applied,
         } = start;
@@ -112,12 +114,8 @@ impl Raft {
                 heartbeat: heartbeat_ticks,
             });
         }
-        let mut peers = BTreeMap::new();
-        for voter in voters {
-            if peers.insert(voter, Peer::new()).is_some() {
-                return Err(Error::DuplicateVoter(voter));
-            }
-        }
+        voters.normalize()?;
+        let peers = voters.peers().map(|key| (key, Peer::new())).collect();
         let log = Log::new(entries, applied)?;
         let last = log.last();
         if hard.term < last.term {
@@ -128,6 +126,7 @@ impl Raft {
         }
         Ok(Self {
             key,
+            voters,
             peers,
             outbox: Vec::new(),
             election_ticks: u64::from(election_ticks),
@@ -167,6 +166,12 @@ impl Raft {
     #[must_use]
     pub fn leader(&self) -> Option<node::Key> {
         self.leader
+    }
+
+    /// The nodes whose votes count, each list sorted.
+    #[must_use]
+    pub fn voters(&self) -> &Voters {
+        &self.voters
     }
 
     /// The term and vote that must be on disk before a message of this term leaves.
@@ -377,19 +382,14 @@ impl Raft {
     // Commits the highest index that a quorum holds, when an entry of the leader's
     // own term is there. Returns whether the commit index moved.
     fn commit(&mut self) -> bool {
-        let mut matched: Vec<u64> = self
-            .peers
-            .iter()
-            .map(|(&key, peer)| {
-                if key == self.key {
-                    self.log.last().index
-                } else {
-                    peer.progress.matched()
-                }
-            })
-            .collect();
-        matched.sort_unstable();
-        let index = matched[matched.len() - self.quorum()];
+        let last = self.log.last().index;
+        let index = self.voters.committed(|key| {
+            if key == self.key {
+                last
+            } else {
+                self.peer(key).progress.matched()
+            }
+        });
         let current = self.log.at(index).is_some_and(|at| at.term == self.term);
         if index > self.log.committed() && current {
             self.log.commit_to(index);
@@ -493,14 +493,12 @@ impl Raft {
         if self.election_elapsed >= self.election_ticks {
             self.election_elapsed = 0;
             let heard = self
-                .peers
-                .iter()
-                .filter(|(key, peer)| peer.active || **key == self.key)
-                .count();
+                .voters
+                .reached(|key| key == self.key || self.peer(key).active);
             for peer in self.peers.values_mut() {
                 peer.active = false;
             }
-            if heard < self.quorum() {
+            if !heard {
                 self.become_follower(self.term, None);
                 return;
             }
@@ -621,23 +619,16 @@ impl Raft {
             return;
         };
         peer.vote.get_or_insert(granted);
-        let count = |answer| {
-            self.peers
-                .values()
-                .filter(|peer| peer.vote == Some(answer))
-                .count()
-        };
-        let (yes, no) = (count(true), count(false));
-        if yes >= self.quorum() {
-            match self.role {
+        match self.voters.tally(|key| self.peer(key).vote) {
+            Tally::Won => match self.role {
                 Role::PreCandidate => self.become_candidate(),
                 Role::Candidate => self.become_leader(),
                 Role::Follower | Role::Leader => {
                     unreachable!("invariant: only a campaign counts votes")
                 }
-            }
-        } else if self.peers.len() - no < self.quorum() {
-            self.become_follower(self.term, None);
+            },
+            Tally::Lost => self.become_follower(self.term, None),
+            Tally::Open => {}
         }
     }
 
@@ -654,8 +645,10 @@ impl Raft {
         self.peers.contains_key(&self.key)
     }
 
-    fn quorum(&self) -> usize {
-        self.peers.len() / 2 + 1
+    fn peer(&self, key: node::Key) -> &Peer {
+        self.peers
+            .get(&key)
+            .expect("invariant: every voter has a peer")
     }
 
     fn broadcast(&mut self, term: Term, body: &Body) {
@@ -699,7 +692,10 @@ mod tests {
     fn start(voters: &[u8], hard: Hard) -> Start {
         Start {
             hard,
-            voters: voters.iter().copied().map(key).collect(),
+            voters: Voters {
+                incoming: voters.iter().copied().map(key).collect(),
+                outgoing: Vec::new(),
+            },
             entries: Vec::new(),
             applied: 0,
         }
@@ -1777,6 +1773,118 @@ mod tests {
                 heartbeats,
                 [(key(2), 0), (key(3), 1), (key(4), 0), (key(5), 1)]
             );
+        }
+    }
+
+    mod joint {
+        use super::*;
+
+        fn joint(incoming: &[u8], outgoing: &[u8]) -> Raft {
+            let start = Start {
+                voters: Voters {
+                    incoming: incoming.iter().copied().map(key).collect(),
+                    outgoing: outgoing.iter().copied().map(key).collect(),
+                },
+                ..start(&[], Hard::default())
+            };
+            Raft::new(CONFIG, start).unwrap()
+        }
+
+        #[test]
+        fn rejects_a_duplicate_in_the_outgoing_list() {
+            let start = Start {
+                voters: Voters {
+                    incoming: vec![key(1), key(2)],
+                    outgoing: vec![key(2), key(3), key(2)],
+                },
+                ..start(&[], Hard::default())
+            };
+            let error = Raft::new(CONFIG, start).unwrap_err();
+            assert_eq!(error, Error::DuplicateVoter(key(2)));
+        }
+
+        #[test]
+        fn reports_each_list_sorted() {
+            let raft = joint(&[3, 1], &[2, 1]);
+            let voters = Voters {
+                incoming: vec![key(1), key(3)],
+                outgoing: vec![key(1), key(2)],
+            };
+            assert_eq!(raft.voters(), &voters);
+        }
+
+        #[test]
+        fn a_node_only_in_the_outgoing_list_campaigns() {
+            let mut raft = joint(&[2, 3], &[1, 2, 3]);
+            raft.campaign();
+            assert_eq!(
+                (raft.role(), sent(&mut raft).len()),
+                (Role::PreCandidate, 2)
+            );
+        }
+
+        #[test]
+        fn an_election_needs_a_majority_of_each_set() {
+            let mut raft = joint(&[1, 2, 3], &[4, 5, 6]);
+            raft.campaign();
+            sent(&mut raft);
+            let granted = Body::PreVoteReply { granted: true };
+            raft.step(message(2, 1, granted.clone())).unwrap();
+            raft.step(message(3, 1, granted.clone())).unwrap();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            raft.step(message(4, 1, granted.clone())).unwrap();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            raft.step(message(5, 1, granted)).unwrap();
+            assert_eq!(raft.role(), Role::Candidate);
+        }
+
+        #[test]
+        fn an_election_is_lost_when_either_set_rejects() {
+            let mut raft = joint(&[1, 2, 3], &[4, 5, 6]);
+            raft.campaign();
+            sent(&mut raft);
+            raft.step(message(2, 1, Body::PreVoteReply { granted: true }))
+                .unwrap();
+            raft.step(message(4, 0, Body::PreVoteReply { granted: false }))
+                .unwrap();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            raft.step(message(5, 0, Body::PreVoteReply { granted: false }))
+                .unwrap();
+            assert_eq!((raft.role(), raft.term()), (Role::Follower, Term(0)));
+        }
+
+        #[test]
+        fn a_commit_needs_a_majority_of_each_set() {
+            let mut raft = joint(&[1, 2, 3], &[1, 4, 5]);
+            elect(&mut raft, &[2, 4]);
+            raft.propose(vec![7]).unwrap();
+            sent(&mut raft);
+            let accepted = Body::AppendReply { last: 2 };
+            raft.step(message(2, 1, accepted.clone())).unwrap();
+            raft.step(message(3, 1, accepted.clone())).unwrap();
+            assert_eq!(raft.ready().committed, []);
+            raft.step(message(4, 1, accepted)).unwrap();
+            let committed: Vec<u64> = raft
+                .ready()
+                .committed
+                .iter()
+                .map(|entry| entry.at.index)
+                .collect();
+            assert_eq!(committed, [1, 2]);
+        }
+
+        #[test]
+        fn a_leader_steps_down_without_a_majority_of_each_set() {
+            let mut raft = joint(&[1, 2, 3], &[1, 4, 5]);
+            elect(&mut raft, &[2, 4]);
+            raft.step(message(2, 1, Body::HeartbeatReply)).unwrap();
+            raft.step(message(4, 1, Body::HeartbeatReply)).unwrap();
+            tick_times(&mut raft, 10);
+            assert_eq!(raft.role(), Role::Leader);
+            raft.step(message(2, 1, Body::HeartbeatReply)).unwrap();
+            raft.step(message(3, 1, Body::HeartbeatReply)).unwrap();
+            tick_times(&mut raft, 10);
+            assert_eq!(raft.role(), Role::Follower);
         }
     }
 }

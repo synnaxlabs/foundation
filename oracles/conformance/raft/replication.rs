@@ -4,6 +4,7 @@
 
 use raft::{
     Body, Config, Entry, Hard, Message, Position, Raft, Ready, Role, Start, Term,
+    Voters,
 };
 
 use super::{ELECTION, Network, at_term, key};
@@ -90,7 +91,10 @@ pub(super) fn start(
     };
     let start = Start {
         hard,
-        voters: voters.iter().copied().map(key).collect(),
+        voters: Voters {
+            incoming: voters.iter().copied().map(key).collect(),
+            outgoing: Vec::new(),
+        },
         entries: entries.clone(),
         applied,
     };

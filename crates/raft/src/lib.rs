@@ -12,6 +12,7 @@ mod log;
 mod machine;
 mod message;
 mod progress;
+mod voters;
 
 use std::fmt;
 
@@ -21,6 +22,7 @@ pub use config::{Config, Start};
 pub use log::Entry;
 pub use machine::{Raft, Ready, Role};
 pub use message::{Body, Message};
+pub use voters::Voters;
 
 /// An election term. A term has at most one leader.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -68,7 +70,7 @@ pub enum Error {
         /// The configured heartbeat ticks.
         heartbeat: u32,
     },
-    /// The voter list names a node twice.
+    /// One voter list names a node twice.
     DuplicateVoter(node::Key),
     /// The stored term is lower than the term of the last log entry.
     TermBehindLog {
