@@ -11,12 +11,13 @@ use types::sample::{Scalar, Type};
 /// heap allocation once they are large enough.
 #[derive(Debug, Default)]
 pub(crate) struct Scratch {
-    /// Each present series, sorted by group and then entry once checked.
+    /// Each series that fits its group's count, sorted by group and then entry once
+    /// all are checked.
     series: Vec<Series>,
     /// Each present group, in group order.
     parts: Vec<Part>,
-    /// The place in `parts` of each group, by group number. Only present groups are
-    /// read.
+    /// The place in `parts` of each group, by group number. The place of an absent
+    /// group is left from an earlier frame.
     places: Vec<usize>,
     /// The encoded series of a raw frame, back to back.
     bytes: Vec<u8>,
@@ -82,32 +83,21 @@ impl Scratch {
         }
     }
 
-    /// Records each present series of `draft` and each present group with its count.
+    /// Records each present group of `draft` with its count.
     fn collect(&mut self, set: &KeySet, draft: &mut Draft) {
         self.series.clear();
         self.parts.clear();
         self.bytes.clear();
         self.stamps.clear();
-        if self.places.len() < set.groups().len() {
-            self.places.resize(set.groups().len(), 0);
-        }
+        self.places
+            .resize(self.places.len().max(set.groups().len()), 0);
         for (entry, _) in draft.iter_mut() {
-            self.series.push(Series {
-                group: set.entries()[entry].group,
-                entry,
-                start: 0,
-                len: 0,
-            });
-        }
-        for series in &self.series {
-            if set.index(series.entry) == series.entry {
-                self.places[to_usize(series.group)] = self.parts.len();
-                let range = draft
-                    .range(series.group)
-                    .expect("invariant: a present index has a range");
+            if set.index(entry) == entry {
+                let group = set.entries()[entry].group;
+                self.places[to_usize(group)] = self.parts.len();
                 self.parts.push(Part {
-                    group: series.group,
-                    count: range.count,
+                    group,
+                    count: 0,
                     series: 0..0,
                     stamps: 0..0,
                     check: Ok(()),
@@ -115,15 +105,22 @@ impl Scratch {
                 });
             }
         }
+        for part in &mut self.parts {
+            let range = draft
+                .range(part.group)
+                .expect("invariant: a present index has a range");
+            part.count = range.count;
+        }
     }
 
     /// Checks each series against the count of its group, until the first error in
-    /// the group. Encodes a raw series into `bytes`, and puts the stamps of each index
-    /// in `stamps`.
+    /// the group, and records each series that fits. Encodes a raw series into
+    /// `bytes`, and puts the stamps of each index in `stamps`.
     fn check(&mut self, set: &KeySet, draft: &mut Draft) {
         let form = draft.form();
-        for (series, (entry, bytes)) in self.series.iter_mut().zip(draft.iter_mut()) {
-            let part = &mut self.parts[self.places[to_usize(series.group)]];
+        for (entry, bytes) in draft.iter_mut() {
+            let group = set.entries()[entry].group;
+            let part = &mut self.parts[self.places[to_usize(group)]];
             if part.check.is_err() {
                 continue;
             }
@@ -147,8 +144,12 @@ impl Scratch {
             };
             match checked {
                 Ok(len) => {
-                    series.start = start;
-                    series.len = len;
+                    self.series.push(Series {
+                        group,
+                        entry,
+                        start,
+                        len,
+                    });
                     if index {
                         part.stamps = self.stamps.len() - count..self.stamps.len();
                     }
@@ -158,7 +159,7 @@ impl Scratch {
         }
     }
 
-    /// Sorts the series by group and entry, and gives each part its series.
+    /// Sorts the checked series by group and entry, and gives each part its series.
     fn gather(&mut self) {
         self.series
             .sort_unstable_by_key(|series| (series.group, series.entry));
@@ -179,7 +180,8 @@ impl Scratch {
 pub(crate) struct Split<'a> {
     scratch: &'a mut Scratch,
     set: &'a KeySet,
-    /// The writer's frame when it is encoded: its series are the encoded bytes.
+    /// The writer's frame when it is encoded, as its series are the encoded bytes.
+    /// `None` for a raw frame, or once the frame of its one group was given out.
     draft: Option<Draft>,
 }
 
@@ -204,7 +206,7 @@ impl Split<'_> {
     ///
     /// # Errors
     ///
-    /// [`frame::Error::Pool`] when `pool` has no block for it.
+    /// [`block::Error`] when `pool` has no block for it.
     ///
     /// # Panics
     ///
@@ -213,12 +215,15 @@ impl Split<'_> {
         &mut self,
         pool: &block::Pool,
         group: u32,
-    ) -> Result<Draft, frame::Error> {
+    ) -> Result<Draft, block::Error> {
         let scratch = &mut *self.scratch;
-        let Ok(at) = scratch
-            .parts
-            .binary_search_by_key(&group, |part| part.group)
-        else {
+        let at = scratch.places.get(to_usize(group)).copied().filter(|&at| {
+            scratch
+                .parts
+                .get(at)
+                .is_some_and(|part| part.group == group)
+        });
+        let Some(at) = at else {
             panic!("group {group} is absent from the frame");
         };
         let part = &scratch.parts[at];
@@ -240,7 +245,13 @@ impl Split<'_> {
         scratch
             .lens
             .extend(series.iter().map(|series| (series.entry, series.len)));
-        let mut index = Draft::new(pool, self.set, Form::Encoded, &scratch.lens)?;
+        let mut index = match Draft::new(pool, self.set, Form::Encoded, &scratch.lens) {
+            Ok(index) => index,
+            Err(frame::Error::Pool(error)) => return Err(error),
+            Err(error) => {
+                panic!("invariant: a group's checked series make a frame: {error}")
+            }
+        };
         for ((_, out), series) in index.iter_mut().zip(series) {
             let bytes = match &mut self.draft {
                 Some(draft) => draft
@@ -337,7 +348,7 @@ mod tests {
             for (&entry, values) in &samples.series {
                 let series = match form {
                     Form::Raw => values.clone(),
-                    Form::Encoded => encode(set, entry, samples.count, values),
+                    Form::Encoded => encoded(set, entry, values),
                 };
                 bytes.insert(entry, series);
             }
@@ -354,17 +365,18 @@ mod tests {
         draft
     }
 
-    fn scalar(set: &KeySet, entry: usize) -> Scalar {
+    fn scalar_of(set: &KeySet, entry: usize) -> Scalar {
         match set.entries()[entry].data_type {
             Type::Scalar(scalar) => scalar,
             other => panic!("a test channel of type {other:?}"),
         }
     }
 
-    fn encode(set: &KeySet, entry: usize, count: u32, values: &[u8]) -> Vec<u8> {
-        let scalar = scalar(set, entry);
+    /// `values` encoded as a series of `entry`, with as many samples as they hold.
+    fn encoded(set: &KeySet, entry: usize, values: &[u8]) -> Vec<u8> {
+        let scalar = scalar_of(set, entry);
         let mut out = vec![0; codec::max_len(scalar, values.len())];
-        let count = usize::try_from(count).expect("a small count");
+        let count = values.len() / scalar.width();
         let len = codec::Encoder::new(scalar)
             .encode(count, values, &mut out)
             .expect("values that fit the count");
@@ -372,8 +384,8 @@ mod tests {
         out
     }
 
-    fn decode(set: &KeySet, entry: usize, count: u32, bytes: &[u8]) -> Vec<u8> {
-        let scalar = scalar(set, entry);
+    fn decoded(set: &KeySet, entry: usize, count: u32, bytes: &[u8]) -> Vec<u8> {
+        let scalar = scalar_of(set, entry);
         let count = usize::try_from(count).expect("a small count");
         let mut out = vec![0; count * scalar.width()];
         codec::decode(scalar, count, bytes, &mut out).expect("an encoded series");
@@ -401,7 +413,7 @@ mod tests {
         }
         let series: BTreeMap<usize, Vec<u8>> = frame
             .iter()
-            .map(|(entry, bytes)| (entry, decode(set, entry, samples.count, bytes)))
+            .map(|(entry, bytes)| (entry, decoded(set, entry, samples.count, bytes)))
             .collect();
         assert_eq!(series, samples.series, "the series of group {group}");
     }
@@ -445,6 +457,43 @@ mod tests {
             ]),
         };
         BTreeMap::from([(0, zero), (1, one)])
+    }
+
+    /// Two groups of 30 `U8` channels each, with interleaved slots, and a write of
+    /// every entry.
+    fn many_series() -> (Arc<KeySet>, BTreeMap<u32, Samples>) {
+        let data: Vec<Vec<(Slot, Type)>> = (0..2)
+            .map(|group| {
+                (0..30)
+                    .map(|n| (Slot::new(3 + 2 * n + group), Type::Scalar(Scalar::U8)))
+                    .collect()
+            })
+            .collect();
+        let set = Interner::new().intern(&[
+            Group {
+                index: Slot::new(1),
+                data: &data[0],
+            },
+            Group {
+                index: Slot::new(2),
+                data: &data[1],
+            },
+        ]);
+        let write = (0..2)
+            .map(|group| {
+                let count = 3 - group;
+                let series = (0..set.entries().len())
+                    .filter(|&entry| set.entries()[entry].group == group)
+                    .map(|entry| {
+                        let state = u64::try_from(entry + 1).expect("few");
+                        let width = scalar_of(&set, entry).width();
+                        (entry, values(state, count, width))
+                    })
+                    .collect();
+                (group, Samples { count, series })
+            })
+            .collect();
+        (set, write)
     }
 
     mod groups {
@@ -491,35 +540,47 @@ mod tests {
             use super::*;
 
             #[test]
-            fn refuses_a_raw_series_of_the_wrong_length_in_its_group_only() {
+            fn refuses_a_data_series_of_too_few_samples_in_its_group_only() {
                 let set = two_groups();
                 let mut write = both();
-                write
-                    .get_mut(&0)
-                    .expect("group 0")
-                    .series
-                    .insert(1, vec![0; 8]);
-                let pool = pool(1 << 16);
-                let mut scratch = Scratch::default();
-
-                let split = scratch.split(&set, draft(&pool, &set, Form::Raw, &write));
-
-                let groups: Vec<_> = split.groups().collect();
-                let expected = codec::Error::Length {
+                let short = [-1_i32, 0].map(i32::to_le_bytes).concat();
+                write.get_mut(&0).expect("group 0").series.insert(1, short);
+                let length = codec::Error::Length {
                     expected: 12,
                     actual: 8,
                 };
-                assert_eq!(groups[0], (0, Err(expected.clone())));
-                assert_eq!(
-                    expected.to_string(),
-                    "the values hold 8 bytes, but the samples take 12"
-                );
-                let stamps = stamps(&write[&1].series[&2]);
-                assert_eq!(groups[1], (1, Ok(&stamps[..])));
+                let truncated = codec::Error::Truncated {
+                    vector: 0,
+                    needed: 16,
+                    available: 12,
+                };
+                for (form, expected, message) in [
+                    (
+                        Form::Raw,
+                        length,
+                        "the values hold 8 bytes, but the samples take 12",
+                    ),
+                    (
+                        Form::Encoded,
+                        truncated,
+                        "vector 0 needs 16 bytes, but 12 are left",
+                    ),
+                ] {
+                    let pool = pool(1 << 16);
+                    let mut scratch = Scratch::default();
+
+                    let split = scratch.split(&set, draft(&pool, &set, form, &write));
+
+                    let groups: Vec<_> = split.groups().collect();
+                    assert_eq!(expected.to_string(), message);
+                    assert_eq!(groups[0], (0, Err(expected)), "{form:?}");
+                    let stamps = stamps(&write[&1].series[&2]);
+                    assert_eq!(groups[1], (1, Ok(&stamps[..])), "{form:?}");
+                }
             }
 
             #[test]
-            fn refuses_an_encoded_series_with_the_validate_error() {
+            fn refuses_an_encoded_index_of_too_few_stamps_with_the_decode_error() {
                 let set = two_groups();
                 let write = both();
                 let pool = pool(1 << 16);
@@ -530,9 +591,15 @@ mod tests {
                 let split = scratch.split(&set, draft);
 
                 let groups: Vec<_> = split.groups().collect();
-                let bytes = encode(&set, 2, 2, &write[&1].series[&2]);
-                let expected = codec::validate(Scalar::Stamp, 3, &bytes)
-                    .expect_err("2 samples do not fit a count of 3");
+                let expected = codec::Error::Truncated {
+                    vector: 0,
+                    needed: 32,
+                    available: 24,
+                };
+                assert_eq!(
+                    expected.to_string(),
+                    "vector 0 needs 32 bytes, but 24 are left"
+                );
                 assert_eq!(groups[1], (1, Err(expected)));
                 let stamps = stamps(&write[&0].series[&0]);
                 assert_eq!(groups[0], (0, Ok(&stamps[..])));
@@ -588,6 +655,22 @@ mod tests {
         }
 
         #[test]
+        fn makes_the_index_frames_of_a_frame_of_many_series() {
+            let (set, write) = many_series();
+            for form in [Form::Raw, Form::Encoded] {
+                let pool = pool(1 << 16);
+                let mut scratch = Scratch::default();
+                let mut split = scratch.split(&set, draft(&pool, &set, form, &write));
+
+                for group in [0, 1] {
+                    let frame = split.frame(&pool, group).expect("room");
+
+                    assert_index_frame(&set, &write, group, &frame.freeze(Path::Live));
+                }
+            }
+        }
+
+        #[test]
         fn keeps_the_frame_of_one_encoded_group_with_no_copy() {
             let set = two_groups();
             let write = BTreeMap::from([(0, both()[&0].clone())]);
@@ -622,13 +705,10 @@ mod tests {
                 requested: 128,
                 available,
             };
-            assert_eq!(error, types::frame::Error::Pool(exhausted));
+            assert_eq!(error, exhausted);
             assert_eq!(
                 error.to_string(),
-                format!(
-                    "no block for the frame: pool is full: asked for 128 bytes, \
-                     {available} bytes free"
-                )
+                format!("pool is full: asked for 128 bytes, {available} bytes free")
             );
         }
 
@@ -745,6 +825,46 @@ mod tests {
         }
     }
 
+    mod scratch {
+        use super::*;
+
+        /// The address and capacity of each buffer of `scratch`.
+        fn buffers(scratch: &Scratch) -> [(usize, usize); 6] {
+            [
+                (scratch.series.as_ptr().addr(), scratch.series.capacity()),
+                (scratch.parts.as_ptr().addr(), scratch.parts.capacity()),
+                (scratch.places.as_ptr().addr(), scratch.places.capacity()),
+                (scratch.bytes.as_ptr().addr(), scratch.bytes.capacity()),
+                (scratch.stamps.as_ptr().addr(), scratch.stamps.capacity()),
+                (scratch.lens.as_ptr().addr(), scratch.lens.capacity()),
+            ]
+        }
+
+        #[test]
+        fn keeps_its_buffers_from_a_larger_write() {
+            let (large, many) = many_series();
+            let small = two_groups();
+            for form in [Form::Raw, Form::Encoded] {
+                let pool = pool(1 << 16);
+                let mut scratch = Scratch::default();
+                let mut split =
+                    scratch.split(&large, draft(&pool, &large, form, &many));
+                for group in [0, 1] {
+                    drop(split.frame(&pool, group).expect("room"));
+                }
+                let kept = buffers(&scratch);
+
+                let mut split =
+                    scratch.split(&small, draft(&pool, &small, form, &both()));
+                for group in [0, 1] {
+                    drop(split.frame(&pool, group).expect("room"));
+                }
+
+                assert_eq!(buffers(&scratch), kept, "{form:?}");
+            }
+        }
+    }
+
     const SCALARS: [Scalar; 14] = [
         Scalar::Bool,
         Scalar::I8,
@@ -834,7 +954,7 @@ mod tests {
                         if k > 0 && (state >> (k + n)) & 1 == 1 {
                             continue;
                         }
-                        let width = scalar(&set, entry).width();
+                        let width = scalar_of(&set, entry).width();
                         let state = state ^ u64::try_from(entry + 1).expect("few");
                         series.insert(entry, values(state, count, width));
                     }
