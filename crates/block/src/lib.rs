@@ -688,6 +688,7 @@ mod fixture {
     }
 
     impl Watch {
+        #[cfg(not(loom))]
         pub(crate) fn calls(&self) -> Vec<Call> {
             self.calls.lock().expect("no test panicked").clone()
         }
