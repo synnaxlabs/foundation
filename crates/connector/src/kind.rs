@@ -106,7 +106,6 @@ pub struct Context<C> {
 }
 
 impl<C> Context<C> {
-    #[cfg_attr(not(test), expect(dead_code, reason = "the supervisor calls it"))]
     pub(crate) fn new(
         name: Name,
         config: C,
@@ -120,6 +119,17 @@ impl<C> Context<C> {
             cancel,
             clock,
             entropy,
+        }
+    }
+
+    /// Gives the context `config`.
+    fn with<D>(self, config: D) -> Context<D> {
+        Context {
+            name: self.name,
+            config,
+            cancel: self.cancel,
+            clock: self.clock,
+            entropy: self.entropy,
         }
     }
 
@@ -221,6 +231,16 @@ impl Table {
             .await
     }
 
+    /// Parses `config` and starts one run of `kind` with `ctx`.
+    pub(crate) fn run<'a>(
+        &'a self,
+        kind: &str,
+        config: &Document,
+        ctx: Context<()>,
+    ) -> Result<Run<'a>, Vec<Diagnostic>> {
+        self.get(kind)?.run(config, ctx)
+    }
+
     fn get(&self, kind: &str) -> Result<&dyn Erased, Vec<Diagnostic>> {
         let erased = self.kinds.get(kind).ok_or_else(|| {
             let names: Vec<_> = self.kinds.keys().copied().collect();
@@ -248,6 +268,9 @@ impl fmt::Debug for Table {
 
 const UNKNOWN_KIND: Code = Code::new("connector.unknown-kind");
 
+/// One run of a kind.
+pub(crate) type Run<'a> = Pin<Box<dyn Future<Output = Result<(), Error>> + 'a>>;
+
 /// A [`Kind`] with its config type erased, so one table holds every kind.
 trait Erased: Send + Sync {
     fn check(&self, config: &Document) -> Result<Channels, Vec<Diagnostic>>;
@@ -256,6 +279,12 @@ trait Erased: Send + Sync {
         &'a self,
         cancel: &'a cancel::Token,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Document>, Error>> + 'a>>;
+
+    fn run(
+        &self,
+        config: &Document,
+        ctx: Context<()>,
+    ) -> Result<Run<'_>, Vec<Diagnostic>>;
 }
 
 impl<K: Kind> Erased for K {
@@ -268,6 +297,15 @@ impl<K: Kind> Erased for K {
         cancel: &'a cancel::Token,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Document>, Error>> + 'a>> {
         Box::pin(Kind::discover(self, cancel))
+    }
+
+    fn run(
+        &self,
+        config: &Document,
+        ctx: Context<()>,
+    ) -> Result<Run<'_>, Vec<Diagnostic>> {
+        let config = self.parse(config)?;
+        Ok(Box::pin(Kind::run(self, ctx.with(config))))
     }
 }
 
@@ -445,7 +483,7 @@ mod tests {
             let out = Rc::new(RefCell::new(None));
             let slot = Rc::clone(&out);
             tasks.spawn(async move {
-                *slot.borrow_mut() = Some(Counter.run(ctx).await);
+                *slot.borrow_mut() = Some(Kind::run(&Counter, ctx).await);
             });
             clock.sleep(ms(50)).await;
             let early = out.borrow().is_some();
