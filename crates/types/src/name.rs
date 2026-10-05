@@ -107,9 +107,8 @@ impl Selector {
     ///
     /// The first pattern that does not read, or [`Error::Empty`] when no pattern
     /// includes a name.
-    #[expect(clippy::needless_pass_by_value, reason = "stub until implemented")]
     pub fn new<'a>(patterns: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
-        let _ = patterns;
+        drop(patterns);
         todo!()
     }
 

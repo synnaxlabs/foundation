@@ -5,6 +5,7 @@
 //! `spec`.
 
 pub mod channel;
+pub mod hash;
 pub mod name;
 pub mod node;
 pub mod quality;

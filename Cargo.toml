@@ -13,6 +13,27 @@ publish = false
 unsafe_code = "deny"
 missing_docs = "warn"
 unused_must_use = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+non_ascii_idents = "deny"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+let_underscore_drop = "warn"
+redundant_lifetimes = "warn"
+unused_lifetimes = "warn"
+elided_lifetimes_in_paths = "warn"
+meta_variable_misuse = "warn"
+unused_macro_rules = "warn"
+ffi_unwind_calls = "warn"
+ambiguous_negative_literals = "warn"
+redundant_imports = "warn"
+unnameable_types = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(loom)",
+  "cfg(shuttle)",
+  "cfg(fuzzing)",
+] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -22,3 +43,53 @@ print_stdout = "deny"
 print_stderr = "deny"
 mem_forget = "deny"
 undocumented_unsafe_blocks = "deny"
+
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+non_send_fields_in_send_ty = "warn"
+transmute_undefined_repr = "warn"
+as_ptr_cast_mut = "warn"
+as_pointer_underscore = "deny"
+fn_to_numeric_cast_any = "deny"
+
+missing_assert_message = "warn"
+assertions_on_result_states = "deny"
+unused_result_ok = "deny"
+let_underscore_must_use = "deny"
+map_err_ignore = "deny"
+unwrap_in_result = "warn"
+get_unwrap = "deny"
+fallible_impl_from = "warn"
+unimplemented = "deny"
+exit = "deny"
+
+iter_over_hash_type = "deny"
+pointer_format = "deny"
+cfg_not_test = "deny"
+host_endian_bytes = "deny"
+
+clone_on_ref_ptr = "warn"
+mutex_integer = "deny"
+mutex_atomic = "deny"
+rc_buffer = "warn"
+missing_asserts_for_indexing = "warn"
+infinite_loop = "deny"
+large_stack_frames = "warn"
+
+module_name_repetitions = "warn"
+partial_pub_fields = "deny"
+tests_outside_test_module = "deny"
+redundant_test_prefix = "warn"
+doc_paragraphs_missing_punctuation = "warn"
+wildcard_dependencies = "deny"
+
+[profile.release]
+overflow-checks = true
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+debug = "line-tables-only"

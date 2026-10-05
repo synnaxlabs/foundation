@@ -1,14 +1,19 @@
 # Testing
 
-Testing is the bedrock of Foundation. A change without tests is not done.
+Testing is the bedrock of Foundation. A change without tests is not done. "(r16 N)"
+names rule N in `docs/research/r16-rust-guides.md`.
 
 ## Injection
 
 Every component gets clock, network, disk, and randomness as inputs (`env`). Production
 passes the real ones. Tests pass the simulated ones from `sim`. Nothing reads the OS
 clock, the network, the disk, or a random source directly. Clippy's
-`disallowed-methods` list in `clippy.toml` enforces this, and only the real adapters in
-`env` and `clock` may allow it.
+`disallowed-methods` list in `clippy.toml` enforces this. Only `os` implements the
+`env` seams and calls the OS, and `transport` owns its sockets.
+
+A simulated run never reads OS randomness, OS time, or a random hash order (r16
+43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
+behavior. Never print a pointer. No `thread_local!` state.
 
 ## Layers
 
@@ -24,7 +29,12 @@ clock, the network, the disk, or a random source directly. Clippy's
 | 8 | Hardware in the loop with real devices | Nightly and release |
 
 Benchmarks run on a dedicated machine. Mutation testing (`cargo-mutants --in-diff`)
-checks that agent-written tests catch real changes.
+checks that agent-written tests catch real changes. Miri and cargo-fuzz run on one
+pinned nightly that only those gates use.
+
+Simulation checks liveness as well as safety: after faults stop, the mesh converges
+within a bound (r16 60). A failed run prints its replay value, and CI runs that value
+again once to prove that the failure replays (r16 59).
 
 ## Rules
 
@@ -32,24 +42,49 @@ checks that agent-written tests catch real changes.
   diagnosed, then fix the code.
 - **Pin the exact error.** Assert the variant and its fields or message
   (`assert!(matches!(err, Error::Backwards { .. }))`, `assert_eq!(err.to_string(),
-  "...")`), never only `is_err()`.
+  "...")`), never only `is_err()`. Clippy denies `assertions_on_result_states`
+  (r16 21).
+- **`#[should_panic]` always has `expected = "..."`** (r16 22).
 - **Construct the real thing with test inputs.** No mocks of our own types. Use `sim`
   for clock, network, and disk.
 - **Test through the production path.** A component that passes its unit tests but
-  fails when composed in `node` is broken.
-- **Wake protocols and lock-free code** are checked with loom or shuttle. Code with
-  `unsafe` runs under Miri.
+  fails when composed in `node` is broken. Production code never checks `cfg(test)`
+  (r16 47).
+- **Test-only constructors and hooks sit behind the `sim` feature.** A crate has no
+  second test feature (r16 57).
+- **Test both spaces:** valid input, invalid input, and data that goes bad (truncated
+  frames, bad offsets, stale fences) (r16 54).
+- **Pair assertions.** Check data before it goes to disk or the wire, and again after
+  it comes back (r16 55).
+- **No tautological tests.** Never repeat the implementation's formula or assert that
+  a constant equals itself. Assert properties: order, round trip, bounds (r16 56).
+- **No `#[ignore]`.** A known bug is a test that asserts today's wrong result, with a
+  comment and an issue link (r16 53).
+- **One `check` helper per feature under test.** Inputs and expected output are data,
+  so a signature change edits one helper (r16 50).
+- **Snapshot tests for text output** (`plan`, diagnostics, formatted HCL, error
+  `Display`) and **coverage marks** that prove a test reached a branch. Both need a
+  dependency approval in `docs/dependencies.md` first (r16 51, 52).
+- **Wake protocols and lock-free code** get loom for small models and shuttle (PCT)
+  for larger ones. Only `ring` gates std types behind `cfg(loom)`. Code with `unsafe`
+  runs under Miri (r16 61).
 - **Hot paths** run under a counting allocator that fails on any allocation.
-- **Tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject and
-  condition with nested modules, and name each test as the behavior it checks:
+- **Unit tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject
+  and condition with nested modules. Name each test as the behavior it checks, with
+  no `test_` prefix (r16 48):
   `mod write { mod when_pool_full { #[test] fn records_a_gap() } }`.
+- **Production-path tests across crates** that use only public APIs go in one
+  integration binary per crate: `tests/it/main.rs` with modules, never many
+  `tests/*.rs` files (r16 49).
 
 ## Oracles
 
 Oracles live in `oracles/`: simulation invariants, P1 targets and benchmark baselines,
-conformance suites, and fuzz inputs. People own them. Agents add to them freely and
-never weaken them. Weakening means a removed test or assertion, a loosened threshold, a
-raised benchmark baseline, or a deleted fuzz input.
+conformance suites, and fuzz inputs. Committed proptest failure files
+(`proptest-regressions/` in each crate) are oracles too (r16 58). People own them.
+Agents add to them freely and never weaken them. Weakening means a removed test or
+assertion, a loosened threshold, a raised benchmark baseline, or a deleted fuzz input
+or proptest failure file.
 
 Each PR description starts with an oracle section that lists changes under `oracles/`
 and flags any weakening. A fresh adversarial reviewer checks each flagged change and

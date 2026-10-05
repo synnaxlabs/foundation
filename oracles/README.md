@@ -8,3 +8,5 @@ and never weaken them (see `docs/claude/testing.md`).
 - `invariants/` -> properties every simulated mesh run must keep.
 - `conformance/` -> vectors every codec and SDK must match.
 - `fuzz/` -> fuzz inputs. Crashes become permanent inputs here.
+- `proptest-regressions/` in each crate -> committed proptest failure files. Agents
+  add them and never delete them.

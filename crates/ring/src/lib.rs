@@ -4,6 +4,8 @@
 //! A producer never waits: a full ring gives the value back. A consumer spins for a
 //! set number of checks before it parks, and the producer wakes it.
 
+use std::fmt;
+
 /// Settings for one ring.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -32,9 +34,8 @@ impl<T: Send> Producer<T> {
     /// # Errors
     ///
     /// [`Full`] holds the value when the ring has no room.
-    #[expect(clippy::needless_pass_by_value, reason = "stub until implemented")]
     pub fn push(&mut self, value: T) -> Result<(), Full<T>> {
-        let _ = value;
+        drop(value);
         todo!()
     }
 
@@ -78,6 +79,18 @@ impl<T: Send> Consumer<T> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         todo!()
+    }
+}
+
+impl<T> fmt::Debug for Producer<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Producer").finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Debug for Consumer<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Consumer").finish_non_exhaustive()
     }
 }
 

@@ -165,9 +165,9 @@ How to read this record:
   span unit strings, and keys as UUID strings, and never appears on the data path;
   R9-D8 exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal
   overflow and checked math for outside values; R9-D13 `types` modules are time,
-  sample, series, frame, channel, node, quality, and name; R9-D14 checks run once, at
-  the home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block` module (by SRP
-  PASS).
+  sample, series, frame, channel, node, quality, name, and hash (R16-7); R9-D14 checks
+  run once, at the home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block`
+  module (by SRP PASS).
 - **MODEL MAP (current)** Data channel -> index, -> quality (optional), -> data type,
   -> unit. Index -> error channel (optional), -> control channel (optional). Type ->
   other types; types never point at channels. Policies -> names through selectors;
@@ -560,6 +560,33 @@ How to read this record:
   top of each PR summary and flags weakening. Each flagged change gets its own
   adversarial reviewer. A person merges every PR. Supersedes: T2 enforcement level.
 - **AGENT REQUIREMENT** Every task must be easy to do with agents. C7 carries it.
+- **R16-1 (2026-10-04)** Release builds keep integer overflow checks
+  (`overflow-checks = true`), so R9-D10 holds in release too. An intended wrap uses
+  `wrapping_*`. The 5% gate measures the cost. Decided by the advisor under the
+  quality delegation.
+- **R16-2 (2026-10-04)** Release builds set `panic = "abort"`. A broken invariant
+  crashes the node, and crash recovery restarts it. Tests keep unwinding. Confirmed by
+  the person on 2026-10-04.
+- **R16-3 (2026-10-04)** A lint exception is `#[expect(lint, reason = "...")]`, never
+  `#[allow]`. Clippy denies `allow_attributes`. Decided by the advisor under the
+  quality delegation.
+- **R16-4 (2026-10-04)** The workspace turns on the r16 lints that check rules the
+  repo already has: `Debug` on public types, one path per item, one unsafe operation
+  per block, exact error assertions, no discarded results, determinism, bounded
+  loops, and names. The lists are in the root `Cargo.toml` and `clippy.toml`;
+  `docs/claude/rust.md` gives the rules. Decided by the advisor under the quality
+  delegation.
+- **R16-5 (2026-10-04)** The strict decoder lints (`indexing_slicing`,
+  `arithmetic_side_effects`, `as_conversions`, `string_slice`) apply only in crates
+  that decode outside input: `codec`, `wire`, `document`, `config-hcl`, and each
+  protocol parser in a `connector-<kind>`. Layer 1 decision crates (`raft`,
+  `control`, `delivery`, `access`, `estimate`) deny `wildcard_enum_match_arm`.
+  Decided by the advisor under the quality delegation.
+- **R16-6 (2026-10-04)** Each crate keeps one public `Error` enum, or one per
+  sub-boundary module. Microsoft's canonical error structs and
+  `clippy::error_impl_error` are rejected: an enum lets a test pin the variant, and
+  backtrace capture costs time on hot paths. Decided by the advisor under the quality
+  delegation.
 
 ### 1.14 Testing
 
@@ -579,6 +606,17 @@ How to read this record:
   connectors. Simulation replaces any connector through `hub`.
 - **R13 invariants (oracles)** The eight invariants in r13 section 9 become simulation
   invariants in `oracles/invariants/`.
+- **R16-7 (2026-10-04)** `clippy.toml` bans `std::collections::HashMap`, `HashSet`,
+  and `std::hash::RandomState`. Code uses `types::hash::Map` and `Set`, which have a
+  fixed hasher, so a simulated run replays. A map keyed by outside input will get a
+  keyed hasher with its key from `env` randomness. Decided by the advisor under the
+  quality delegation.
+- **R16-8 (2026-10-04)** `thread_local!` state is banned like every other mutable
+  global. `clippy.toml` denies the macro. Decided by the advisor under the quality
+  delegation.
+- **R16-9 (2026-10-04)** Miri and cargo-fuzz run on one pinned nightly toolchain that
+  only those gates use. The workspace toolchain stays stable. Decided by the advisor
+  under the quality delegation.
 
 ### 1.15 Releases
 
@@ -1280,8 +1318,8 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 
 | Layer | Crate | Job (one sentence) | Allowed dependencies |
 | --- | --- | --- | --- |
-| 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and all unsafe memory code. | none |
-| 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, and owns the wake protocol (loom-checked). | none |
+| 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
+| 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked), and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, and shared value readers. | `types` |
@@ -1352,9 +1390,11 @@ Parameters and later choices, recorded and not asked:
 
 ### 5.2 Settled under a delegation
 
-- Quality: X10 (ack quality on the ack's index), X19 (death record scope).
+- Quality: X10 (ack quality on the ack's index), X19 (death record scope), R16-1 and
+  R16-3 to R16-9 (r16 Rust guides).
 - Memory and performance: X8 (seq per index group), X30 (merge rule), X42 (interner),
-  S4 disk format starting point, r12 I4 (`buffer` driven, not self-running).
+  S4 disk format starting point, r12 I4 (`buffer` driven, not self-running), `ring`
+  holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
