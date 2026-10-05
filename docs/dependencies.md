@@ -15,7 +15,7 @@ approval; pin the version you build against there.
 | `blake3` | `spec`, `blob` | Hashes of spec chunks and blobs (R4 SETTLED, r7 area 7) | CC0-1.0 or Apache-2.0 | 1.8.7 | 2026-10-04 |
 | `rustix` | `block`, `os` | Reserve, commit, and purge pool pages; OS calls behind `env` | Apache-2.0 with LLVM exception, Apache-2.0, or MIT | 1.1.5 | 2026-10-04 |
 | `tokio` | `os`, `transport`, `hub`, `node`, benchmarks | One `LocalRuntime` per shard (C2) | MIT | 1.53.2 | 2026-10-04 |
-| `rustls` | `transport` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
+| `rustls` | `transport`, `bench/carrier` | TLS 1.3 for the TCP and relay carriers (r7 area 7) | Apache-2.0, ISC, or MIT | 0.23.x stable | 2026-10-04 |
 | `aws-lc-rs` | `transport`, signing | The only crypto provider (r7 area 7) | ISC and (Apache-2.0 or ISC) | 1.18.1 | 2026-10-04 |
 | `noq-proto` | `transport` | Sans-I/O QUIC core (TRANSPORT SHAPE LOCKED, r5) | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
 
@@ -33,3 +33,5 @@ These never ship in the binary.
 | `libfuzzer-sys` | Fuzz targets | Coverage-guided fuzzing with `cargo-fuzz` (testing layer 2) | (MIT or Apache-2.0) and NCSA | 0.4.13 | 2026-10-04 |
 | `hdrhistogram` | Benchmarks | Latency percentiles | MIT or Apache-2.0 | 7.6.0 | 2026-10-04 |
 | `core_affinity` | Benchmarks | Pin benchmark threads to cores on Linux | MIT or Apache-2.0 | 0.8.3 | 2026-10-04 |
+| `noq` | `bench/carrier` only | QUIC endpoint on Tokio for the carrier benchmark (#10). Its own workspace keeps it out of the product build | MIT or Apache-2.0 | 1.3.0 | 2026-10-04 |
+| `tokio-rustls` | `bench/carrier` only | TLS over TCP on Tokio for the carrier benchmark (#10) | MIT or Apache-2.0 | 0.26.6 | 2026-10-04 |
