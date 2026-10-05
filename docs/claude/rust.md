@@ -149,7 +149,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - No mutable globals: no `thread_local!` and no `static` with interior mutability
   (r16 46). The one exception is `#[global_allocator] static ALLOCATOR:
   counting::Allocator` in a test or benchmark binary, never in a library or the
-  `node` binary.
+  `node` binary. Clippy refuses `global_allocator`, and only a crate-level
+  `#![expect(clippy::disallowed_macros)]` lifts it. `cargo xtask globals` refuses
+  that lift outside a test or benchmark root.
 
 ## Async and threads
 

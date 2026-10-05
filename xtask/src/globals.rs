@@ -1,15 +1,15 @@
-//! The globals check: a `#[global_allocator]` only in test and benchmark targets.
+//! The globals check. Clippy's `disallowed-macros` refuses `global_allocator` and
+//! `thread_local`, and only an attribute at the root of a crate lifts that lint. This
+//! check allows the lift only in a test or benchmark target, where COUNTING ALLOCATOR
+//! allows one global allocator.
 
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde_json::Value;
+use crate::{field, files, select};
 
-use crate::{field, files};
-
-/// Checks that `#[global_allocator]` appears only in test and benchmark targets of the
-/// workspace at `root`. It reads each `.rs` file in the directory of each library and
-/// binary root, except the roots of test and benchmark targets. Comments do not count.
+/// Checks that no target of the workspace at `root`, other than a test or benchmark
+/// target, names `disallowed_macros` in its root file outside a `//` comment. It
+/// never reads `xtask`, whose tests hold sample source.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     let problems = problems(root).map_err(|e| vec![e])?;
     if problems.is_empty() {
@@ -21,76 +21,61 @@ pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
 
 fn problems(root: &Path) -> Result<Vec<String>, String> {
     let metadata = crate::metadata(root)?;
+    let workspace = Path::new(field::text(&metadata, "workspace_root")?);
     let mut problems = Vec::new();
-    for file in sources(&metadata)? {
-        let text = std::fs::read_to_string(&file)
-            .map_err(|e| format!("{}: {e}", file.display()))?;
-        let shown = file.strip_prefix(root).unwrap_or(&file).display();
-        for (index, line) in text.lines().enumerate() {
-            if line.trim_start().starts_with("#[global_allocator]") {
-                problems.push(format!(
-                    "`{shown}:{}` declares a `#[global_allocator]` outside a test or \
-                     benchmark target. Fix: declare it in a binary under `tests/` or \
-                     `benches/`; a library or `node` never holds one (COUNTING \
-                     ALLOCATOR).",
-                    index + 1
-                ));
-            }
+    for package in field::list(&metadata, "packages")? {
+        if field::text(package, "name")? == "xtask" {
+            continue;
         }
-    }
-    Ok(problems)
-}
-
-/// Each `.rs` file in the directory of the root of a target that is not a test, a
-/// benchmark, or a build script, except the roots of test and benchmark targets.
-fn sources(metadata: &Value) -> Result<BTreeSet<PathBuf>, String> {
-    let mut dirs = BTreeSet::new();
-    let mut roots = BTreeSet::new();
-    for package in field::list(metadata, "packages")? {
         for target in field::list(package, "targets")? {
-            let root = files::normalize(Path::new(field::text(target, "src_path")?));
             let kinds = field::list(target, "kind")?;
-            if kinds.iter().any(|k| k == "test" || k == "bench") {
-                roots.insert(root);
-            } else if kinds.iter().all(|k| k != "custom-build") {
-                let dir = root
-                    .parent()
-                    .ok_or_else(|| format!("{} has no directory", root.display()))?;
-                dirs.insert(dir.to_path_buf());
+            if kinds.iter().any(|kind| kind == "test" || kind == "bench") {
+                continue;
+            }
+            let file = files::normalize(Path::new(field::text(target, "src_path")?));
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| format!("{}: {e}", file.display()))?;
+            let shown = file.strip_prefix(workspace).unwrap_or(&file).display();
+            for (index, line) in text.lines().enumerate() {
+                if !line.trim_start().starts_with("//")
+                    && select::has_word(line, "disallowed_macros")
+                {
+                    problems.push(format!(
+                        "`{shown}:{}` lifts `clippy::disallowed_macros` outside a test \
+                         or benchmark target. Fix: remove the lift. Only a test or \
+                         benchmark binary may hold a `#[global_allocator]` (COUNTING \
+                         ALLOCATOR), and no target holds a `thread_local!`.",
+                        index + 1
+                    ));
+                }
             }
         }
     }
-    let mut sources = BTreeSet::new();
-    for dir in &dirs {
-        for file in files::rust(dir)? {
-            if !roots.contains(&file) {
-                sources.insert(file);
-            }
-        }
-    }
-    Ok(sources)
+    problems.sort();
+    Ok(problems)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn refuses_a_global_allocator_only_outside_tests_and_benchmarks() {
-        assert_eq!(
-            check(&crate::fixture()),
-            Err(vec![
-                "`crates/a/src/alloc.rs:4` declares a `#[global_allocator]` outside a \
-                 test or benchmark target. Fix: declare it in a binary under `tests/` \
-                 or `benches/`; a library or `node` never holds one (COUNTING \
-                 ALLOCATOR)."
-                    .to_string()
-            ])
-        );
+    fn refused(at: &str) -> String {
+        format!(
+            "`{at}` lifts `clippy::disallowed_macros` outside a test or benchmark \
+             target. Fix: remove the lift. Only a test or benchmark binary may hold a \
+             `#[global_allocator]` (COUNTING ALLOCATOR), and no target holds a \
+             `thread_local!`."
+        )
     }
 
     #[test]
-    fn passes_on_the_workspace() {
-        assert_eq!(check(&crate::fixture().join("../..")), Ok(()));
+    fn refuses_a_lift_only_outside_test_and_benchmark_roots() {
+        assert_eq!(
+            check(&crate::fixture()),
+            Err(vec![
+                refused("crates/globals/build.rs:1"),
+                refused("crates/globals/src/lib.rs:4"),
+            ])
+        );
     }
 }
