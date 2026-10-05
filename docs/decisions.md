@@ -884,6 +884,12 @@ How to read this record:
   does (Unicode `XID_Start` and `XID_Continue`, through `unicode-ident`), so
   `température = 1` reads. A new error for each such identifier lost: a valid HCL file
   would fail. The person decided on 2026-10-05 ("go with yes"), with low priority, #263.
+  A reference outside ASCII is still an `Error::Name`, because names are ASCII (A3).
+  Measured against HCL v2.25.0, two differences remain. HCL reads the 23 compatibility
+  characters in `ID_Start` but not in `XID_Start` (U+037A, U+0E33, and others), and
+  the reader refuses them. The reader and the writer accept the characters new in
+  Unicode 18, and HCL (Unicode 17) refuses them. Lost: a hand-kept list of the 23, and
+  own tables generated from Unicode 17.
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`

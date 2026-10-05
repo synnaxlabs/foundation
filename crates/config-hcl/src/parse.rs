@@ -903,6 +903,36 @@ c = "°C # not a comment"
         }
 
         #[test]
+        fn reads_identifiers_outside_ascii_as_hcl_does() {
+            let text =
+                "température = 1\n_é-1 = é(2)\nx = { e\u{301}t = 3 }\nétape {\n}\n";
+            let call = value::Kind::Call(Call {
+                function: "é".into(),
+                function_span: None,
+                arguments: vec![value(integer(2))],
+            });
+            let mut expected = attributes(vec![
+                ("température", integer(1)),
+                ("_é-1", call),
+                ("x", value::Kind::Map(map(vec![("e\u{301}t", integer(3))]))),
+            ]);
+            expected
+                .blocks
+                .push(block("étape", &[], Document::default()));
+            let document = ok(text);
+            assert_eq!(document, expected);
+
+            let key = document.attributes.get("température").unwrap();
+            assert_eq!(key.key_span, Some(span(at(0, 0, 0), at(12, 0, 11))));
+            let x = document.attributes.get("x").unwrap();
+            let value::Kind::Map(object) = &x.value.kind else {
+                panic!("not a map: {x:?}");
+            };
+            let key = object.get("e\u{301}t").unwrap();
+            assert_eq!(key.key_span, Some(span(at(37, 2, 6), at(41, 2, 9))));
+        }
+
+        #[test]
         fn reads_for_as_a_word_when_no_identifier_follows() {
             let expected = attributes(vec![
                 ("a", value::Kind::List(vec![value(reference("for"))])),
@@ -1745,6 +1775,48 @@ c = "°C # not a comment"
                 error,
             };
             check(&format!("r = {long}"), &[(name, NAME)]);
+        }
+
+        #[test]
+        fn refuses_each_reference_outside_ascii() {
+            let name = |text: &str, span| {
+                let error = text.parse::<Name>().unwrap_err();
+                (Error::Name { span, error }, NAME)
+            };
+            check(
+                "a = x.température\nb = [é]\nc = f(x.é)\n",
+                &[
+                    name("x.température", span(at(4, 0, 4), at(18, 0, 17))),
+                    name("é", span(at(24, 1, 5), at(26, 1, 6))),
+                    name("x.é", span(at(34, 2, 6), at(38, 2, 9))),
+                ],
+            );
+        }
+
+        #[test]
+        fn refuses_a_character_that_no_identifier_holds() {
+            let cases = [
+                (
+                    "\u{200b}a = 1\n",
+                    span(at(0, 0, 0), at(3, 0, 1)),
+                    Expected::Item,
+                ),
+                (
+                    "a\u{200b} = 1\n",
+                    span(at(1, 0, 1), at(4, 0, 2)),
+                    Expected::AttributeOrBlock,
+                ),
+                // In `ID_Start` but not `XID_Start`: HCL reads it.
+                (
+                    "\u{37a} = 1\n",
+                    span(at(0, 0, 0), at(2, 0, 1)),
+                    Expected::Item,
+                ),
+            ];
+            for (text, span, expected) in cases {
+                let message = needs(expected);
+                check(text, &[(syntax(span, expected), &message)]);
+            }
         }
 
         #[test]

@@ -513,14 +513,15 @@ pub(crate) fn word(text: &str) -> Option<Kind> {
         .then_some(token.kind)
 }
 
-/// Reports whether `c` can start an identifier.
+/// Reports whether `c` can start an identifier: `XID_Start` or `_`.
 pub(crate) fn identifier_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_'
+    unicode_ident::is_xid_start(c) || c == '_'
 }
 
-/// Reports whether `c` can follow the first character of an identifier.
+/// Reports whether `c` can follow the first character of an identifier:
+/// `XID_Continue` or `-`.
 pub(crate) fn identifier_part(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
+    unicode_ident::is_xid_continue(c) || c == '-'
 }
 
 /// Reports whether `c` is whitespace inside a line, as a heredoc counts it: Unicode
