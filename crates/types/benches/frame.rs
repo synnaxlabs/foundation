@@ -70,15 +70,6 @@ fn cases() -> Vec<Case> {
         }]
     };
     let wide = interner.intern(&one(&wide));
-    // Data slots assigned before the index slot, so each index sorts after its data.
-    let late: Vec<_> = (100_001..200_000).map(|n| (key(n), F64)).collect();
-    for &(key, _) in &late {
-        interner.slots().assign(key);
-    }
-    let late = interner.intern(&[Group {
-        index: key(200_000),
-        data: &late,
-    }]);
     let private = interner.intern(&private);
     let tenth = |n: usize| (0..10).map(move |k| k * n / 10);
     vec![
@@ -104,7 +95,12 @@ fn cases() -> Vec<Case> {
         ),
         case(
             "100k of 100k in one group, index last",
-            late,
+            index_last(&mut interner),
+            (0..100_000).map(|entry| (entry, 8)).collect(),
+        ),
+        case(
+            "100k of 100k in two groups, data in turn",
+            in_turn(&mut interner),
             (0..100_000).map(|entry| (entry, 8)).collect(),
         ),
         case(
@@ -113,6 +109,39 @@ fn cases() -> Vec<Case> {
             (0..100_000).map(|entry| (entry, 8)).collect(),
         ),
     ]
+}
+
+/// One group whose data slots come before its index slot.
+fn index_last(interner: &mut Interner) -> Arc<KeySet> {
+    let data: Vec<_> = (100_001..200_000).map(|n| (key(n), F64)).collect();
+    for &(key, _) in &data {
+        interner.slots().assign(key);
+    }
+    interner.intern(&[Group {
+        index: key(200_000),
+        data: &data,
+    }])
+}
+
+/// Two groups: both index slots first, then the data slots of the groups in turn.
+fn in_turn(interner: &mut Interner) -> Arc<KeySet> {
+    for n in 300_000..400_000 {
+        interner.slots().assign(key(n));
+    }
+    let data = |from| -> Vec<_> {
+        (from..400_000).step_by(2).map(|n| (key(n), F64)).collect()
+    };
+    let (even, odd) = (data(300_002), data(300_003));
+    interner.intern(&[
+        Group {
+            index: key(300_000),
+            data: &even,
+        },
+        Group {
+            index: key(300_001),
+            data: &odd,
+        },
+    ])
 }
 
 fn pool() -> block::Pool {

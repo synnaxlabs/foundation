@@ -534,10 +534,11 @@ fn cut(body: &[u8], start: usize, end: usize) -> Result<&[u8], BadEnd> {
 fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Error> {
     let entries = set.entries().len();
     let (mut groups, mut bytes, mut last) = (0, 0_usize, None);
-    // An index usually comes just before its data, so only the series from `from` on
-    // need a search, after the order check.
-    let (mut last_index, mut from) = (None, None);
-    for (n, &(entry, len)) in series.iter().enumerate() {
+    // An index usually comes just before its data. Other data search `series`, once
+    // per group while `found` holds its index. An absent index waits for the order
+    // checks, without which the search means nothing.
+    let (mut last_index, mut found, mut absent) = (None, [usize::MAX; 16], None);
+    for &(entry, len) in series {
         if entry >= entries {
             return Err(Error::OutOfRange { entry, entries });
         }
@@ -547,32 +548,28 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
             return Err(Error::Unordered { entry, last });
         }
         last = Some(entry);
-        let index = set.index(entry);
+        let group = to_usize(set.entries()[entry].group);
+        let index = set.groups()[group];
         if index == entry {
             groups += 1;
             last_index = Some(index);
-        } else if last_index != Some(index) {
-            from.get_or_insert(n);
+        } else if last_index != Some(index) && absent.is_none() {
+            let memo = &mut found[group % found.len()];
+            if *memo != index {
+                if series
+                    .binary_search_by_key(&index, |&(entry, _)| entry)
+                    .is_err()
+                {
+                    absent = Some(Error::IndexAbsent { entry, index });
+                }
+                *memo = index;
+            }
         }
         bytes = bytes
             .checked_next_multiple_of(SERIES_ALIGN)
             .map_or(usize::MAX, |start| start.saturating_add(len));
     }
-    let mut found = None;
-    for &(entry, _) in &series[from.unwrap_or(series.len())..] {
-        let index = set.index(entry);
-        if index == entry || found == Some(index) {
-            continue;
-        }
-        if series
-            .binary_search_by_key(&index, |&(entry, _)| entry)
-            .is_err()
-        {
-            return Err(Error::IndexAbsent { entry, index });
-        }
-        found = Some(index);
-    }
-    Ok((groups, bytes))
+    absent.map_or(Ok((groups, bytes)), Err)
 }
 
 /// A frame's ranges, its descriptors, and its series bytes.
@@ -1144,6 +1141,30 @@ mod tests {
     }
 
     #[test]
+    fn finds_the_index_of_data_that_alternate_groups() {
+        // Entries 0 and 1 are the indexes, and the data of groups 0 and 1 alternate.
+        let set = interner().intern(&[
+            Group {
+                index: key(1),
+                data: &[(key(3), F64), (key(5), F64)],
+            },
+            Group {
+                index: key(2),
+                data: &[(key(4), F64), (key(6), F64)],
+            },
+        ]);
+        let pool = pool(1 << 16);
+        let all: Vec<_> = (0..6).map(|entry| (entry, 1)).collect();
+        Draft::new(&pool, &set, Form::Raw, &all).unwrap();
+        let error = Draft::new(&pool, &set, Form::Raw, &all[1..]).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 2, index: 0 });
+        let error =
+            Draft::new(&pool, &set, Form::Raw, &[(0, 1), (2, 1), (3, 1), (4, 1)])
+                .unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 3, index: 1 });
+    }
+
+    #[test]
     fn refuses_data_whose_index_sorts_after_it() {
         let set = interner().intern(&[Group {
             index: key(3),
@@ -1409,12 +1430,27 @@ mod tests {
             round_trip(&case)?;
         }
 
+        /// Key n has slot n, so shuffled keys give any slot order, and more groups
+        /// than `measure` remembers.
         #[test]
         fn refuses_the_first_entry_whose_index_is_absent(
-            case in cases(),
-            kept in vec(any::<bool>(), 4 * 41),
+            sizes in vec(0_usize..10, 1..20),
+            keys in Just((0..1000).collect::<Vec<u32>>()).prop_shuffle(),
+            kept in vec(any::<bool>(), 200),
         ) {
-            let (set, _) = shape(&case);
+            let mut keys = keys.into_iter().map(key);
+            let data: Vec<Vec<(channel::Key, Type)>> = sizes
+                .iter()
+                .map(|&size| keys.by_ref().take(size).map(|key| (key, F64)).collect())
+                .collect();
+            let groups: Vec<Group<'_>> = data
+                .iter()
+                .map(|data| Group {
+                    index: keys.next().unwrap(),
+                    data,
+                })
+                .collect();
+            let set = interner().intern(&groups);
             let series: Vec<(usize, usize)> = (0..set.entries().len())
                 .filter(|&entry| kept[entry])
                 .map(|entry| (entry, 1))
