@@ -370,15 +370,23 @@ mod tests {
 
     #[test]
     fn refuses_an_encapsulated_key_of_small_order() {
-        let opener = Opener::generate(&entropy(10));
-        let token = name("site.secrets.token");
-        let mut sealed = seal(
-            &opener.public(),
-            &token,
-            &Value::new(b"t".to_vec()),
-            &entropy(11),
-        );
-        sealed[..32].fill(0);
-        assert_eq!(opener.open(&token, &sealed).unwrap_err(), Error::Refused);
+        let own = key(vector::SK_R);
+        for small in [
+            "00",
+            "01",
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+        ] {
+            let mut enc = hex(small);
+            enc.resize(32, 0);
+            let pk_r = hex(vector::PK_R);
+            assert!(schedule(&own, &enc, &enc, &pk_r, INFO).is_none(), "{small}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_public_key_with_the_top_bit_set() {
+        let mut bytes = Opener::generate(&entropy(21)).public().to_bytes();
+        bytes[31] |= 0x80;
+        assert_eq!(SealKey::new(bytes), Err(types::node::BadSealKey));
     }
 }
