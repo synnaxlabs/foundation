@@ -155,6 +155,7 @@ dependencies = [
 name = "codec"
 version = "0.0.0"
 dependencies = [
+ "divan",
  "proptest",
  "types",
 ]
