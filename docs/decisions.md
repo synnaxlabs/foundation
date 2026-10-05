@@ -547,8 +547,7 @@ How to read this record:
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
   same estimator serves device clocks in the connector library. Amended by ESTIMATE FIT:
   a device clock gives `Overlap` readings with a low edge, a high edge, or both, not
-  `Measurement`s. Amended by CLOCK RUN: the loops of the adapters run in
-  `clock::Clock::run`, and `node` passes the table to it.
+  `Measurement`s.
 - **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about one local clock (the node's
   monotonic clock, or a device's sample clock in nanoseconds, #84): its offset is mesh
   time minus the local reading at `at`, and its error is a half-width from 0 to 36500
@@ -689,17 +688,6 @@ How to read this record:
   time" that takes the source out of the vote, because a node with a bad OS clock then
   syncs on itself; `node` removes a silent source after a timeout, a patch that puts
   time policy in layer 4. The person decided on 2026-10-05 ("Yeah that's fine"), #145.
-- **CLOCK RUN (2026-10-05)** `clock::Clock::run` runs all time sources of one clock in
-  one task on the clock's shard. `node` builds the source table and passes it to `run`.
-  Today the table is the OS clock. Each adapter keeps its own loop and decides when it
-  measures: the OS clock at once, then one second after the last measurement, so once
-  after a suspend. `run` adds a source for each adapter and pushes each measurement.
-  `run` owns every source, so it panics on a clock that has a source already: nothing
-  could push to that source. `run` does not give out each `Status` yet (#598). Lost: a
-  task for each adapter with a shared clock (`Rc<RefCell>` or a queue), because then
-  the caller shares the clock; the loop in `node`, because the peer exchange adds and
-  removes sources, and `node` would pass its events through. Decided by the `time`
-  builder (#144, #600). The coordinator approved `Clock::run` on #144.
   So a node that starts while no peer answers stays unsynced, even with a good OS
   bound. Its samples keep their local monotonic reading, and the node stamps them in
   mesh time when the first estimate comes, with the error of that estimate at each
@@ -712,6 +700,18 @@ How to read this record:
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
   suspend lost: mesh time would fall behind by the time asleep, outside its bound.
   Amends ENV SEAMS. The person decided on 2026-10-05 ("Count time asleep"), #144.
+- **CLOCK RUN (2026-10-05)** Within TIME ADAPTERS. `clock::Clock::run` runs all time
+  sources of one clock in one task on the clock's shard. `node` builds the source table
+  and passes it to `run`. Today the table is the OS clock. Each adapter keeps its own
+  loop and decides when it measures: the OS clock at once, then one second after the
+  last measurement, so once after a suspend. `run` adds a source for each adapter and
+  pushes each measurement. `run` owns every source, so it panics on a clock that has a
+  source already: nothing could push to that source. `run` does not give out each
+  `Status` yet (#598). Lost: a task for each adapter with a shared clock
+  (`Rc<RefCell>` or a queue), because then the caller shares the clock; the loop in
+  `node`, because the peer exchange adds and removes sources, and `node` would pass its
+  events through. Decided by the `time` builder (#144, #600). The coordinator approved
+  it on #144 and #600.
 
 ### 1.7 Transport
 
