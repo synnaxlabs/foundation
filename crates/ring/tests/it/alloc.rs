@@ -89,6 +89,6 @@ fn push_try_pop_and_pop_do_not_allocate() {
         }
     });
     assert_eq!(allocations, 0, "the hot path allocated");
-    let wakes = tallies.each_ref().map(|tally| tally.0.load(Relaxed));
-    assert_eq!(wakes, [32, 32], "each park got one wake");
+    let counts = tallies.each_ref().map(|tally| tally.0.load(Relaxed));
+    assert_eq!(counts, [32, 32], "each park got one wake");
 }
