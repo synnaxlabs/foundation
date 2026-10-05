@@ -585,7 +585,11 @@ How to read this record:
   with nine fraction digits; input needs an offset, takes up to nine fraction digits,
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
-  trips; input rejects an end before the start.
+  trips; input rejects an end before the start. A byte size follows the span rules: one
+  number and one unit with no space (`200GiB`), and a decimal fraction only when it
+  gives whole bytes (`1.5GiB`). Its type lives in `types` beside `time::Span`, and the
+  `document` reader is an adapter over it. The person decided on 2026-10-05 ("A yes I
+  approve", #479).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -1140,7 +1144,7 @@ How to read this record:
   settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
   SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
-  that selects node names: `node_settings { select = "site-a/*" disk = "200 GiB" }`.
+  that selects node names: `node_settings { select = "site-a/*" disk = "200GiB" }`.
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
