@@ -890,10 +890,14 @@ How to read this record:
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.
-  A node the change removed stays a peer of the leader, and keeps getting appends, until
-  it holds the committed leave: then the leader sends it the commit in a heartbeat and
-  releases it, so the node learns it is out and never campaigns. A removed node that
-  answered nothing over a whole quorum check period is released at that check instead.
+  A node the change removed stays a peer of the leader, and gets appends up to the
+  leave, or up to the leader's first entry when that is later, until it holds them and
+  the leave is committed: then the leader sends it the commit in a heartbeat and
+  releases it, so the node learns it is out and never campaigns. The leader's first
+  entry replaces each entry that an older leader left past the leave on the node, such
+  as a configuration that makes it a voter again. A removed node that answered nothing
+  over a whole quorum check period is released at that check instead, and the next
+  configuration releases any that is still a peer.
   A follower releases the removed nodes when the leave commits. A removed node that
   missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
   only from a voter of the newest configuration in this node's log, and a node whose
