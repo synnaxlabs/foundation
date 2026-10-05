@@ -58,9 +58,11 @@ fn main() {
         );
         let body = frame.body();
         assert_eq!(body.len(), 32, "the body views both series");
-        let ends = frame.ends().map(|(_, end)| end);
+        assert_eq!(frame::check(&body, frame.ends()), Ok(()), "the ends fit");
         assert_eq!(
-            frame::series(&body, ends).map(<[u8]>::len).sum::<usize>(),
+            frame::series(&body, frame.ends())
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>(),
             32,
             "the ends give both series"
         );

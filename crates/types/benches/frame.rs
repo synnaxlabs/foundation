@@ -1,7 +1,8 @@
 //! The time to build a frame (header, ranges, and descriptors, but not the series
 //! bytes), to fill and read every series in order, to look each one up, to give its
-//! charge, to view the series bytes, and to give the end of each series, for a dense
-//! frame and for frames of 100,000 channels.
+//! charge, to view the series bytes, to give the end of each series, and to check and
+//! walk the series from stored ends, for a dense frame and for frames of 100,000
+//! channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use divan::Bencher;
 use types::channel::Slot;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{Draft, Form, Frame, Path, Range};
+use types::frame::{self, Draft, Form, Frame, Path, Range};
 use types::sample::{Scalar, Type};
 
 const F64: Type = Type::Scalar(Scalar::F64);
@@ -194,4 +195,41 @@ fn ends(bencher: Bencher<'_, '_>, case: &Case) {
     let pool = pool();
     let frame = frame(&pool, case);
     bencher.bench_local(|| black_box(&frame).ends().map(|(_, end)| end).sum::<usize>());
+}
+
+/// Sums the length of every series, in order.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn walk(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    bencher.bench_local(|| {
+        black_box(&frame)
+            .iter()
+            .map(|(_, bytes)| bytes.len())
+            .sum::<usize>()
+    });
+}
+
+/// Checks stored ends against the series bytes.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn check(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let (body, ends): (_, Vec<_>) = (frame.body(), frame.ends().collect());
+    bencher.bench_local(|| {
+        frame::check(black_box(&body), black_box(&ends).iter().copied())
+    });
+}
+
+/// Sums the length of every series, in order, from stored ends.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn stored(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let (body, ends): (_, Vec<_>) = (frame.body(), frame.ends().collect());
+    bencher.bench_local(|| {
+        frame::series(black_box(&body), black_box(&ends).iter().copied())
+            .map(|(_, bytes)| bytes.len())
+            .sum::<usize>()
+    });
 }

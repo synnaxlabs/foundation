@@ -6,7 +6,7 @@
 
 pub mod key_set;
 
-use std::{fmt, mem};
+use std::{fmt, iter, mem};
 
 use key_set::KeySet;
 
@@ -237,13 +237,11 @@ impl Draft {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut [u8])> {
         let (_, descriptors, mut body) = split_mut(&mut self.0);
         let mut offset = 0_usize;
-        descriptors.iter().map(move |descriptor| {
-            let start = offset.next_multiple_of(SERIES_ALIGN);
-            let end = end_of(*descriptor);
+        checked(body.len(), ends(descriptors)).map(move |(entry, start, end)| {
             let (_, rest) = mem::take(&mut body).split_at_mut(start - offset);
             let (series, rest) = rest.split_at_mut(end - start);
             (body, offset) = (rest, end);
-            (to_usize(lead(descriptor)), series)
+            (entry, series)
         })
     }
 
@@ -316,9 +314,8 @@ impl Frame {
 
     /// Each present entry and its series bytes, in entry order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        let (_, descriptors, body) = split(&self.0);
-        let entries = descriptors.iter().map(lead).map(to_usize);
-        entries.zip(series(body, descriptors.iter().copied().map(end_of)))
+        let (_, _, body) = split(&self.0);
+        series(body, self.ends())
     }
 
     /// The credit that sending the frame to a reader spends: the bytes a block of the
@@ -329,8 +326,8 @@ impl Frame {
     }
 
     /// The series bytes of every present entry, as one view that shares the frame's
-    /// block, from the first series to the end. The end of each series in the
-    /// descriptors is an offset into this view. Copies nothing. Until it drops, the
+    /// block, from the first series to the end. [`Frame::ends`] gives where each
+    /// series ends in this view. Copies nothing. Until it drops, the
     /// view keeps the whole block in use: [`Frame::charge`] bytes of the pool, not its
     /// length.
     #[must_use]
@@ -344,30 +341,125 @@ impl Frame {
     /// [`series`] reads each series back from the body and these ends.
     pub fn ends(&self) -> impl Iterator<Item = (usize, usize)> {
         let (_, descriptors, _) = split(&self.0);
-        descriptors
-            .iter()
-            .map(|descriptor| (to_usize(lead(descriptor)), end_of(*descriptor)))
+        ends(descriptors)
     }
 }
 
-/// Each series in `body`, the series bytes of a frame, from the end of each, in
-/// order. Copies nothing.
+/// Each series in `body`, a frame's [`Frame::body`], with its tag. `ends` gives a tag
+/// and the end of each series, in order, as [`Frame::ends`] gives them. Copies nothing.
 ///
 /// # Panics
 ///
-/// The iterator panics when an end is past `body` or before the start of its series.
-/// The body and ends of one frame never panic.
-pub fn series(
+/// The iterator panics where [`check`] refuses `body` and `ends`. The body and ends of
+/// one frame never panic. Run [`check`] once on a body and ends from another node
+/// before the first read.
+pub fn series<T>(
     body: &[u8],
-    ends: impl IntoIterator<Item = usize>,
-) -> impl Iterator<Item = &[u8]> {
-    let mut start = 0;
-    ends.into_iter().map(move |end| {
-        let series = body.get(start..end).unwrap_or_else(|| {
-            panic!("the end {end} is outside {start}..={}", body.len())
-        });
-        start = end.next_multiple_of(SERIES_ALIGN);
-        series
+    ends: impl IntoIterator<Item = (T, usize)>,
+) -> impl Iterator<Item = (T, &[u8])> {
+    checked(body.len(), ends).map(|(tag, start, end)| (tag, &body[start..end]))
+}
+
+/// Checks that `ends` fit `body`, so that [`series`] reads them without a panic.
+///
+/// # Errors
+///
+/// Returns the first [`BadEnd`] in the order of `ends`.
+pub fn check<T>(
+    body: &[u8],
+    ends: impl IntoIterator<Item = (T, usize)>,
+) -> Result<(), BadEnd> {
+    spans(body.len(), ends).try_for_each(|span| span.map(drop))
+}
+
+/// Why [`check`] refused the ends of a body of series.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BadEnd {
+    /// An end is past the body.
+    Past {
+        /// The end.
+        end: usize,
+        /// The bytes of the body.
+        len: usize,
+    },
+    /// An end is before the start of its series, the end before it rounded up to 8.
+    Before {
+        /// The end.
+        end: usize,
+        /// The start of its series.
+        start: usize,
+    },
+    /// The last end is not the end of the body.
+    Short {
+        /// The last end, or 0 when there is none.
+        last: usize,
+        /// The bytes of the body.
+        len: usize,
+    },
+}
+
+impl fmt::Display for BadEnd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Past { end, len } => {
+                write!(f, "the end {end} is past the body of {len} bytes")
+            }
+            Self::Before { end, start } => {
+                write!(
+                    f,
+                    "the end {end} is before {start}, the start of its series"
+                )
+            }
+            Self::Short { last, len } => write!(
+                f,
+                "the last end {last} is not the end of the body of {len} bytes"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BadEnd {}
+
+/// The entry and the end of each descriptor's series.
+fn ends(descriptors: &[[u8; DESCRIPTOR]]) -> impl Iterator<Item = (usize, usize)> + '_ {
+    descriptors
+        .iter()
+        .map(|descriptor| (to_usize(lead(descriptor)), end_of(*descriptor)))
+}
+
+/// The tag, start, and end of each series in `len` bytes of series, from `ends`.
+///
+/// # Panics
+///
+/// The iterator panics where [`check`] refuses.
+fn checked<T>(
+    len: usize,
+    ends: impl IntoIterator<Item = (T, usize)>,
+) -> impl Iterator<Item = (T, usize, usize)> {
+    spans(len, ends).map(|span| span.unwrap_or_else(|error| panic!("{error}")))
+}
+
+/// The tag, start, and end of each series in `len` bytes of series, from `ends`, up to
+/// the first end that does not fit. Once `ends` stops, it checks that the last end is
+/// `len`.
+fn spans<T>(
+    len: usize,
+    ends: impl IntoIterator<Item = (T, usize)>,
+) -> impl Iterator<Item = Result<(T, usize, usize), BadEnd>> {
+    let (mut ends, mut last) = (ends.into_iter(), 0_usize);
+    iter::from_fn(move || {
+        let Some((tag, end)) = ends.next() else {
+            return (last != len).then_some(Err(BadEnd::Short { last, len }));
+        };
+        let start = last.next_multiple_of(SERIES_ALIGN);
+        last = end;
+        Some(if end > len {
+            Err(BadEnd::Past { end, len })
+        } else if end < start {
+            Err(BadEnd::Before { end, start })
+        } else {
+            Ok((tag, start, end))
+        })
     })
 }
 
@@ -660,24 +752,78 @@ mod tests {
         let ends: Vec<_> = frame.ends().collect();
         assert_eq!(ends, [(0, 3), (1, 8), (2, 17)]);
         let body = frame.body();
-        let read: Vec<_> = series(&body, ends.iter().map(|&(_, end)| end)).collect();
-        assert_eq!(read, [[1; 3].as_slice(), &[], &[2; 9]]);
+        assert_eq!(check(&body, ends.iter().copied()), Ok(()));
+        let read: Vec<_> = series(&body, ends).collect();
+        assert_eq!(read, [(0, [1; 3].as_slice()), (1, &[]), (2, &[2; 9])]);
         let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
         let empty = empty.freeze(Path::Live);
         assert_eq!(empty.ends().count(), 0);
-        assert_eq!(series(&empty.body(), []).count(), 0);
+        assert_eq!(check(&empty.body(), empty.ends()), Ok(()));
+        assert_eq!(series(&empty.body(), empty.ends()).count(), 0);
+    }
+
+    /// Tags `ends` with their positions.
+    fn tagged(ends: &[usize]) -> impl Iterator<Item = (usize, usize)> + '_ {
+        ends.iter().copied().enumerate()
     }
 
     #[test]
-    #[should_panic(expected = "the end 5 is outside 0..=4")]
+    fn refuses_an_end_past_the_body() {
+        let error = check(&[0; 4], tagged(&[5])).unwrap_err();
+        assert_eq!(error, BadEnd::Past { end: 5, len: 4 });
+        assert_eq!(error.to_string(), "the end 5 is past the body of 4 bytes");
+    }
+
+    #[test]
+    fn refuses_an_end_before_the_start_of_its_series() {
+        let error = check(&[0; 16], tagged(&[3, 2])).unwrap_err();
+        assert_eq!(error, BadEnd::Before { end: 2, start: 8 });
+        assert_eq!(
+            error.to_string(),
+            "the end 2 is before 8, the start of its series"
+        );
+    }
+
+    #[test]
+    fn refuses_an_end_inside_the_padding() {
+        let error = check(&[0; 4], tagged(&[3, 4])).unwrap_err();
+        assert_eq!(error, BadEnd::Before { end: 4, start: 8 });
+    }
+
+    #[test]
+    fn refuses_ends_that_stop_before_the_body() {
+        let error = check(&[1; 17], tagged(&[3, 8])).unwrap_err();
+        assert_eq!(error, BadEnd::Short { last: 8, len: 17 });
+        assert_eq!(
+            error.to_string(),
+            "the last end 8 is not the end of the body of 17 bytes"
+        );
+        let error = check(&[1; 16], tagged(&[])).unwrap_err();
+        assert_eq!(error, BadEnd::Short { last: 0, len: 16 });
+    }
+
+    #[test]
+    fn refuses_the_first_bad_end() {
+        let error = check(&[0; 4], tagged(&[9, 2])).unwrap_err();
+        assert_eq!(error, BadEnd::Past { end: 9, len: 4 });
+    }
+
+    #[test]
+    #[should_panic(expected = "the end 5 is past the body of 4 bytes")]
     fn panics_on_an_end_past_the_body() {
-        series(&[0; 4], [5]).for_each(drop);
+        series(&[0; 4], tagged(&[5])).for_each(drop);
     }
 
     #[test]
-    #[should_panic(expected = "the end 2 is outside 8..=16")]
+    #[should_panic(expected = "the end 2 is before 8, the start of its series")]
     fn panics_on_an_end_before_the_start_of_its_series() {
-        series(&[0; 16], [3, 2]).for_each(drop);
+        series(&[0; 16], tagged(&[3, 2])).for_each(drop);
+    }
+
+    #[test]
+    #[should_panic(expected = "the last end 8 is not the end of the body of 17 bytes")]
+    fn panics_when_the_ends_stop_before_the_body() {
+        series(&[1; 17], tagged(&[3, 8])).for_each(drop);
     }
 
     #[test]
@@ -1001,11 +1147,8 @@ mod tests {
         }
         prop_assert_eq!(&*frame.body(), body.as_slice());
         let view = frame.body();
-        let ends: Vec<(usize, usize)> = frame.ends().collect();
-        let from_ends: Vec<(usize, Vec<u8>)> = ends
-            .iter()
-            .map(|&(entry, _)| entry)
-            .zip(super::series(&view, ends.iter().map(|&(_, end)| end)))
+        prop_assert_eq!(check(&view, frame.ends()), Ok(()));
+        let from_ends: Vec<(usize, Vec<u8>)> = super::series(&view, frame.ends())
             .map(|(entry, bytes)| (entry, bytes.to_vec()))
             .collect();
         prop_assert_eq!(&from_ends, &written);
