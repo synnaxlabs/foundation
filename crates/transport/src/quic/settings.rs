@@ -1,5 +1,6 @@
-//! What noq-proto gets from a [`Config`]. Every option that changes behavior is set
-//! by name, and every random value outside TLS comes from `Entropy`.
+//! What noq-proto gets from a [`Config`], and the datagrams it never gets. Every
+//! option that changes behavior is set by name, and every random value outside TLS
+//! comes from `Entropy`.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -105,8 +106,25 @@ fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
         .rng_seed(Some(rng))
         .supported_versions(vec![QUIC_V1])
         .grease_quic_bit(true)
-        .min_reset_interval(Duration::from_millis(20));
+        // A reset is smaller than the datagram that caused it, so it needs no rate
+        // limit, and one shared limit lets junk from one address take every reset.
+        .min_reset_interval(Duration::ZERO);
     endpoint
+}
+
+/// Whether the endpoint drops `datagram` unread: a long header of an unknown
+/// version in fewer than [`MTU_MIN`] bytes. noq-proto answers such a header at any
+/// size, so a spoofed source would get more bytes than it sent. Version 0 is a
+/// version negotiation for a dial, so it passes.
+pub(super) fn dropped(datagram: &[u8]) -> bool {
+    match *datagram {
+        [form, a, b, c, d, ..]
+            if form & 0x80 != 0 && datagram.len() < usize::from(MTU_MIN) =>
+        {
+            !matches!(u32::from_be_bytes([a, b, c, d]), 0 | QUIC_V1)
+        }
+        _ => false,
+    }
 }
 
 fn server(tls: &Tls, transport: Arc<TransportConfig>) -> ServerConfig {
@@ -224,6 +242,7 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::task::Poll;
 
+    use env::net::udp::Meta;
     use noq_proto::Dir;
     use noq_proto::crypto::HmacKey;
     use types::time::Monotonic;
@@ -274,6 +293,31 @@ mod tests {
             panic!("no message");
         };
         message.to_vec()
+    }
+
+    /// The meta of `datagram` alone, from `source`.
+    fn meta(source: SocketAddr, datagram: &[u8]) -> Meta {
+        let len = datagram.len();
+        Meta {
+            source,
+            destination: None,
+            ecn: None,
+            len,
+            stride: len,
+        }
+    }
+
+    /// What `endpoint` sends back for `datagram` from `source` at `now`.
+    fn reply(
+        endpoint: &mut Endpoint,
+        now: Monotonic,
+        source: SocketAddr,
+        datagram: &[u8],
+    ) -> Option<Vec<u8>> {
+        endpoint.receive(now, &meta(source, datagram), datagram);
+        let mut buffer = Vec::new();
+        let transmit = endpoint.transmit(now, &mut buffer)?;
+        Some(transmit.contents.to_vec())
     }
 
     /// The destination ID of a datagram's first packet, and its source ID when the
@@ -505,6 +549,57 @@ mod tests {
             });
             assert_eq!(versions, [QUIC_V1]);
         }
+
+        #[test]
+        fn ignores_another_version_in_fewer_than_1200_bytes() {
+            let replies = testing::run(1, |shard| {
+                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let mut endpoint =
+                    Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+                let (_, mut initial) = testing::draft_29();
+                initial.pop();
+                let bare = [0xc0, 0xff, 0, 0, 0x1d, 0, 0];
+                [bare.as_slice(), &initial].map(|datagram| {
+                    reply(&mut endpoint, Monotonic(0), testing::CLIENT, datagram)
+                })
+            });
+            assert_eq!(replies, [None, None]);
+        }
+
+        #[test]
+        fn ends_a_dial_at_a_version_negotiation() {
+            let reason = testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                pair.server.silent = true;
+                pair.dial(tls::public(&testing::SERVER_KEY));
+                pair.run(Duration::ZERO);
+                let (.., initial) = &pair.client.sent[0];
+                let (destination, Some(source)) = ids(initial) else {
+                    panic!("not a long header: {initial:02x?}");
+                };
+                let len = [u8::try_from(cid::LEN).expect("fits")];
+                let unknown = [0x0a, 0x1a, 0x2a, 0x3a];
+                let negotiation = [
+                    [0x80, 0, 0, 0, 0].as_slice(),
+                    &len,
+                    source,
+                    &len,
+                    destination,
+                    &unknown,
+                ]
+                .concat();
+                let meta = meta(testing::SERVER, &negotiation);
+                pair.client
+                    .endpoint
+                    .receive(pair.now(), &meta, &negotiation);
+                pair.run(Duration::ZERO);
+                lost(&pair.client).map(|(_, reason)| reason.clone())
+            });
+            let broken = Error::Broken {
+                reason: "peer doesn't implement any supported version".into(),
+            };
+            assert_eq!(reason, Some(broken));
+        }
     }
 
     mod idle {
@@ -606,6 +701,35 @@ mod tests {
                 reason: "reset by peer".into(),
             };
             assert_eq!(reason, broken);
+        }
+
+        #[test]
+        fn resets_each_stale_datagram_while_another_address_sends_junk() {
+            let resets = testing::run(1, |shard| {
+                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let mut endpoint =
+                    Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+                let attacker = SocketAddr::new(testing::CLIENT.ip(), 9);
+                let short = |id, len| {
+                    let mut datagram = vec![0x40, SERVER_SHARD];
+                    datagram.resize(len, id);
+                    datagram
+                };
+                let (junk, stale) = (short(9, 23), short(1, 40));
+                let mut resets = 0;
+                for ms in 0..1_000 {
+                    let now = testing::at(Duration::from_millis(ms));
+                    if ms % 10 == 0 {
+                        reply(&mut endpoint, now, attacker, &junk);
+                    }
+                    if ms % 100 == 5 {
+                        let reset = reply(&mut endpoint, now, testing::CLIENT, &stale);
+                        resets += usize::from(reset.is_some());
+                    }
+                }
+                resets
+            });
+            assert_eq!(resets, 10);
         }
     }
 }

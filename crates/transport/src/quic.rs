@@ -154,7 +154,9 @@ impl Endpoint {
         let mut datagrams = self.received.split();
         while !datagrams.is_empty() {
             let datagram = datagrams.split_to(meta.stride.min(datagrams.len()));
-            self.handle(now, path, ecn, datagram);
+            if !settings::dropped(&datagram) {
+                self.handle(now, path, ecn, datagram);
+            }
         }
     }
 
