@@ -1,5 +1,7 @@
 # Mutants that no test can catch, each with the reason.
 exclude_re = [
+  # Benchmarks ship in no binary; the run itself checks them.
+  '^bench/',
   # `main` reads the arguments and calls a task. Each task has its own tests.
   'xtask/src/main\.rs:.*(replace main ->| in main$)',
   # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
