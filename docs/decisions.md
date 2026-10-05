@@ -268,8 +268,14 @@ How to read this record:
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
 - **B7** A frame applies whole or not at all, per index. Live writes are never retried.
-  Backfill frames carry numbers, and the home drops repeats. A writer may resend
-  unconfirmed live data as backfill.
+  A writer may resend unconfirmed live data as backfill. The home finds a repeat by
+  timestamp: it checks a backfill frame that starts at or before the last backfill
+  stamp against the index on both paths. When every sample exists with the same
+  values, the frame is a repeat, and the home drops and confirms it. When no sample
+  exists, the frame is out of order. Some samples stored and some not, a stored
+  timestamp with other values, or a range below the buffer's floor is an error. Writers
+  assign no numbers: a resend comes in a new session, and the writer never learned
+  them. The person decided on 2026-10-05 ("By timestamp + same values"), #148.
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
