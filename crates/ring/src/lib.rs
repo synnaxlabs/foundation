@@ -97,11 +97,3 @@ impl<T> fmt::Debug for Consumer<T> {
 /// A value that did not fit because the ring was full.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Full<T>(pub T);
-
-#[cfg(all(test, loom))]
-mod loom_break {
-    #[test]
-    fn fails() {
-        panic!("deliberate break: the loom job must fail");
-    }
-}

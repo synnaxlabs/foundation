@@ -6,8 +6,6 @@ publish = false
 
 [dependencies]
 serde_json = "1"
-# Deliberate break: MPL-2.0 is not an allowed license.
-option-ext = "0.2.0"
 
 [lints]
 workspace = true
