@@ -367,20 +367,19 @@ How to read this record:
   monotonic clock, or a device's sample clock in nanoseconds, #84): its offset is mesh
   time minus the local reading at `at`, and its error is a half-width from 0 to 36500
   days. A bound grows by the drift bound times the time from `at`, in both directions.
-  The drift bound is at most 10%; `Drift::UNDISCIPLINED` is 200 ppm. A measured
-  oscillator rate goes into `Drift` later, as an additive change. Each source keeps its
-  last 8 measurements and offers the one with the smallest bound now. This reads R6 TIME
-  LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a fresh
-  slower one. `combine` takes one `Filter` per source and returns the hull of the
+  The drift bound is at most 10%; `Drift::UNDISCIPLINED` is 200 ppm. Each source keeps
+  its last 8 measurements and offers the one with the smallest bound now. This reads R6
+  TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
+  fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
   offsets inside the most bounds (Marzullo). It fails when no offset is inside more than
   half of them. This reads C6's "follows the smallest measured bound": when sources
   agree, the result is never wider than the narrowest. The result holds the true offset
   when the bounds that hold it are a majority and every other bound misses them. Decided
-  by the `time` builder (#49). A device's measurements go to the oscillator fit (`Fit`),
-  never to `combine`. Node sources keep `Filter`, not `Fit`: a network exchange puts the
-  true offset at about the same place in each bracket, so an overlap gains little, and a
-  broken drift bound would stay wrong for the life of a fit, not for 8 exchanges.
-  Decided by the coordinator (#84).
+  by the `time` builder (#49). A device's measurements go to the oscillator fit
+  (`Overlap`), never to `combine`. Node sources keep `Filter`, not `Overlap`: a network
+  exchange puts the true offset at about the same place in each bracket, so an overlap
+  gains little, and a broken drift bound would stay wrong for the life of an overlap,
+  not for 8 exchanges. Decided by the coordinator (#84).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -396,6 +395,25 @@ How to read this record:
   and rejects second 60. A range is the ISO 8601 interval `<start>/<end>`. A `Range`
   never ends before it starts (`Range::new` returns `None`), so its text always round
   trips; input rejects an end before the start.
+- **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock.
+  It keeps the offsets that every measurement of that clock allows, each widened by
+  drift, so it holds only the measurement with the highest low edge and the one with
+  the lowest high edge. Measurements come in local time order. An older one returns
+  `Backwards` (the device restarted), and one that shares no offset returns `Disjoint`
+  (the clock jumped, or it drifts faster than its bound). Neither changes the overlap,
+  and the caller starts a new one with a gap. Each measurement holds true mesh time,
+  with the node's own error in its bound, so the drift covers only the device
+  oscillator. The drift is fixed for the life of an overlap, because a smaller drift
+  would need measurements that it dropped. This reads r6 Q5's lower-envelope fit with
+  the rate bounded by `Drift`, not fitted. A line fit of offset and rate lost: it is
+  honest only if the rate stays constant, and no datasheet bounds oscillator wander. A
+  measured rate needs a signed rate in the model, not a smaller `Drift`. A device
+  adapter must give each measurement a two-sided bound. The return time of a read
+  bounds its last sample only from above. The lower bound comes from a device counter
+  read between two mesh stamps, or from a latency that the hardware guarantees: one
+  read over a stated latency gives a low edge above the truth, and the overlap keeps it.
+  Decided by the `time` builder; the person accepted it on 2026-10-05 ('#1 is fine').
+  Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper bounds).
 
 ### 1.7 Transport
 

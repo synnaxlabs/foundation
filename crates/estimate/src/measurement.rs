@@ -1,13 +1,14 @@
 use types::time::{Monotonic, Span};
 
+use crate::drift::PER_NANO;
 use crate::{Drift, Error};
 
 /// The widest error bound. With the largest drift over the longest time, a widened
 /// bound still fits in a [`Span`].
 pub(crate) const MAX_ERROR: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
 
-/// What one time source says about this node's monotonic clock: at monotonic time
-/// `at`, mesh time minus monotonic time is within `error` of `offset`.
+/// What one time source says about a local clock, a node's or a device's: at local
+/// time `at`, mesh time minus local time is within `error` of `offset`.
 ///
 /// ```
 /// use types::time::{Monotonic, Span};
@@ -36,13 +37,13 @@ impl Measurement {
         Ok(Self { at, offset, error })
     }
 
-    /// The monotonic time of the measurement.
+    /// The local time of the measurement.
     #[must_use]
     pub const fn at(self) -> Monotonic {
         self.at
     }
 
-    /// Mesh time minus monotonic time.
+    /// Mesh time minus local time.
     #[must_use]
     pub const fn offset(self) -> Span {
         self.offset
@@ -69,6 +70,35 @@ impl Measurement {
         let offset = i128::from(self.offset.nanos());
         (offset - error, offset + error)
     }
+
+    /// [`Measurement::bounds_at`] in billionths of a nanosecond, not rounded.
+    pub(crate) fn exact_bounds_at(self, now: Monotonic, drift: Drift) -> (i128, i128) {
+        let growth = drift.over_exact(now.0.abs_diff(self.at.0));
+        let offset = i128::from(self.offset.nanos()) * PER_NANO;
+        let error = i128::from(self.error.nanos()) * PER_NANO + growth;
+        (offset - error, offset + error)
+    }
+
+    /// The measurement at `at` that covers every offset from `low` to `high`, rounded
+    /// outward. The midpoint must lie between the offsets of two measurements.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Bound`] when the half-width is more than 36500 days.
+    pub(crate) fn between(at: Monotonic, low: i128, high: i128) -> Result<Self, Error> {
+        let (offset, error) = center(low, high);
+        Self::new(at, offset, error)
+    }
+}
+
+/// The center and half-width of a hull from `low` to `high`, rounded outward.
+fn center(low: i128, high: i128) -> (Span, Span) {
+    let offset = (low + high).div_euclid(2);
+    let offset = i64::try_from(offset)
+        .expect("invariant: the hull's midpoint lies between two bound centers");
+    let error = i64::try_from(high - i128::from(offset))
+        .expect("invariant: the hull lies inside one widened bound");
+    (Span::from_nanos(offset), Span::from_nanos(error))
 }
 
 #[cfg(test)]
