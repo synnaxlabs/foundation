@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use config_hcl::{read, write};
 use document::diagnostic::Diagnostic;
 use document::value::{Kind, Value};
-use document::{Attribute, Document, Source};
+use document::{Attribute, Document, Map, Source};
 
 /// What HCL does with a text.
 enum Verdict {
@@ -162,24 +162,19 @@ fn join(codes: &BTreeSet<String>) -> String {
         .join(" ")
 }
 
-/// The failures of `read` against `values.txt`: each text in `data` that `read` reads
-/// must give the values HCL reads.
+/// The failures of `read` against `values.txt`: each text in `data()` that `read`
+/// reads must give the values HCL reads.
 fn value_failures(read: impl Fn(&str) -> Option<Document>) -> Vec<String> {
     let texts = texts();
-    let values: BTreeMap<_, _> = values().into_iter().collect();
+    let data = data();
     let mut failures = Vec::new();
-    for name in data() {
+    for (name, hcl) in values().into_iter().filter(|(name, _)| data.contains(name)) {
         let Some(document) = texts.get(&name).and_then(|text| read(text)) else {
             continue;
         };
         let ours = body(&document);
-        match values.get(&name) {
-            None => failures.push(format!("{name}: has no values; run `go run .`")),
-            Some(hcl) if *hcl != ours => {
-                failures
-                    .push(format!("{name}: read gives {ours}, and HCL reads {hcl}"));
-            }
-            Some(_) => {}
+        if ours != hcl {
+            failures.push(format!("{name}: read gives {ours}, and HCL reads {hcl}"));
         }
     }
     failures
@@ -189,7 +184,7 @@ fn value_failures(read: impl Fn(&str) -> Option<Document>) -> Vec<String> {
 fn body(document: &Document) -> String {
     let attributes = document.attributes.iter().map(attribute);
     let blocks = document.blocks.iter().map(|block| {
-        once(block.keyword.to_string())
+        once(quote(&block.keyword))
             .chain(block.labels.iter().map(|label| quote(&label.text)))
             .chain(once(body(&block.body)))
             .collect::<Vec<_>>()
@@ -201,30 +196,27 @@ fn body(document: &Document) -> String {
     )
 }
 
-fn attribute(attribute: &Attribute) -> String {
-    format!("{} = {}", quote(&attribute.key), value(&attribute.value))
+fn attribute(item: &Attribute) -> String {
+    format!("{} = {}", quote(&item.key), value(&item.value))
 }
 
-fn value(value: &Value) -> String {
-    let join = |values: &[Value]| {
-        values
-            .iter()
-            .map(self::value)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    match &value.kind {
-        Kind::Bool(bool) => bool.to_string(),
+fn value(item: &Value) -> String {
+    let items =
+        |values: &[Value]| values.iter().map(value).collect::<Vec<_>>().join(", ");
+    match &item.kind {
+        Kind::Bool(truth) => truth.to_string(),
         Kind::Integer(integer) => integer.to_string(),
-        Kind::Float(float) => format!("{:e}", float.get()),
+        Kind::Float(float) => format!("f{:016x}", float.get().to_bits()),
         Kind::String(text) => quote(text),
-        Kind::Reference(name) => name.to_string(),
-        Kind::List(values) => format!("[{}]", join(values)),
+        Kind::Reference(name) => format!("${name}"),
+        Kind::List(values) => format!("[{}]", items(values)),
         Kind::Map(map) => format!(
             "{{{}}}",
             map.iter().map(attribute).collect::<Vec<_>>().join(", ")
         ),
-        Kind::Call(call) => format!("{}({})", call.function, join(&call.arguments)),
+        Kind::Call(call) => {
+            format!("{}({})", quote(&call.function), items(&call.arguments))
+        }
     }
 }
 
@@ -244,6 +236,26 @@ fn quote(text: &str) -> String {
     quoted
 }
 
+/// The names in `file`, with a failure for each name that has no text and each name
+/// that `file` lists twice.
+fn listed(
+    file: &str,
+    names: impl IntoIterator<Item = String>,
+    texts: &BTreeMap<String, String>,
+    failures: &mut Vec<String>,
+) -> BTreeSet<String> {
+    let mut listed = BTreeSet::new();
+    for name in names {
+        if !texts.contains_key(&name) {
+            failures.push(format!("{name}: is in {file} but has no text"));
+        }
+        if !listed.insert(name.clone()) {
+            failures.push(format!("{name}: is in {file} twice"));
+        }
+    }
+    listed
+}
+
 fn fail(failures: &[String]) {
     assert!(
         failures.is_empty(),
@@ -256,36 +268,26 @@ fn fail(failures: &[String]) {
 #[test]
 fn each_text_has_one_verdict() {
     let texts = texts();
+    let verdicts = verdicts();
     let mut failures = Vec::new();
-    let mut seen = BTreeSet::new();
-    for (name, _) in verdicts() {
-        if !texts.contains_key(&name) {
-            failures.push(format!("{name}: has a verdict but no text"));
-        }
-        if !seen.insert(name.clone()) {
-            failures.push(format!("{name}: has two verdicts"));
-        }
-    }
-    for name in texts.keys().filter(|name| !seen.contains(*name)) {
+    let names = verdicts.iter().map(|(name, _)| name.clone());
+    let judged = listed("verdicts.txt", names, &texts, &mut failures);
+    for name in texts.keys().filter(|name| !judged.contains(*name)) {
         failures.push(format!("{name}: has no verdict; run `go run .`"));
     }
-    let mut listed = BTreeSet::new();
-    for (name, _) in differences() {
-        if !texts.contains_key(&name) {
-            failures.push(format!("{name}: is in differences.txt but has no text"));
-        }
-        if !listed.insert(name.clone()) {
-            failures.push(format!("{name}: is in differences.txt twice"));
-        }
-    }
-    let mut valued = BTreeSet::new();
-    for (name, _) in values() {
-        if !texts.contains_key(&name) {
-            failures.push(format!("{name}: is in values.txt but has no text"));
-        }
-        if !valued.insert(name.clone()) {
-            failures.push(format!("{name}: is in values.txt twice"));
-        }
+    let names = differences().into_iter().map(|(name, _)| name);
+    listed("differences.txt", names, &texts, &mut failures);
+    let names = values().into_iter().map(|(name, _)| name);
+    let valued = listed("values.txt", names, &texts, &mut failures);
+    let data: BTreeSet<String> = verdicts
+        .into_iter()
+        .filter_map(|(name, verdict)| match verdict {
+            Verdict::Accepted(forms) if forms.is_empty() => Some(name),
+            _ => None,
+        })
+        .collect();
+    for name in data.symmetric_difference(&valued) {
+        failures.push(format!("{name}: values.txt is out of date; run `go run .`"));
     }
     fail(&failures);
 }
@@ -329,7 +331,7 @@ fn reads_as_hcl_does() {
 #[test]
 fn writes_text_hcl_accepts() {
     let texts = texts();
-    let data: BTreeSet<&str> = data()
+    let accepted: BTreeSet<&str> = data()
         .iter()
         .filter_map(|name| texts.get(name).map(String::as_str))
         .collect();
@@ -345,7 +347,7 @@ fn writes_text_hcl_accepts() {
                      another Document"
                 ));
             }
-            Ok(written) if data.contains(written.as_str()) => {}
+            Ok(written) if accepted.contains(written.as_str()) => {}
             Ok(written) => failures.push(format!(
                 "{name}: write gives {written:?}, which is not a text with only \
                  data; add it as a text and run `go run .`"
@@ -381,5 +383,25 @@ fn finds_a_read_that_takes_an_escape_wrong() {
     let ours = r#"{"a" = "\u{a}\u{d}t\"\\\u{e9}\u{1f600}"}"#;
     let hcl = r#"{"a" = "\u{a}\u{d}\u{9}\"\\\u{e9}\u{1f600}"}"#;
     let expected = format!("string-escapes: read gives {ours}, and HCL reads {hcl}");
+    assert!(failures.contains(&expected), "{failures:#?}");
+}
+
+#[test]
+fn finds_a_read_that_gives_references_for_bools() {
+    let failures = value_failures(|text| {
+        let mut document = read(Source(0), text).ok()?;
+        let mut attributes: Vec<Attribute> =
+            document.attributes.iter().cloned().collect();
+        for item in &mut attributes {
+            if let Kind::Bool(truth) = item.value.kind {
+                item.value.kind = Kind::Reference(truth.to_string().parse().ok()?);
+            }
+        }
+        document.attributes = Map::new(attributes).ok()?;
+        Some(document)
+    });
+    let ours = r#"{"a" = $true, "b" = $false}"#;
+    let hcl = r#"{"a" = true, "b" = false}"#;
+    let expected = format!("bool: read gives {ours}, and HCL reads {hcl}");
     assert!(failures.contains(&expected), "{failures:#?}");
 }

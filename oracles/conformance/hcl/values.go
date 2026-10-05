@@ -1,10 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"maps"
-	"math/big"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,19 +16,20 @@ import (
 	"github.com/zclconf/go-cty/cty/convert"
 )
 
-// values is the form of the values HCL reads from body, a body with only data. The
+// body is the form of the values HCL reads from root, a body with only data. The
 // README tells the form. It stops the program at a node it cannot print.
-func values(name string, src []byte, body *hclsyntax.Body) string {
+func body(name string, src []byte, root *hclsyntax.Body) string {
 	var items []string
-	for _, key := range slices.Sorted(maps.Keys(body.Attributes)) {
-		items = append(items, quote(key)+" = "+value(name, src, body.Attributes[key].Expr))
+	for _, key := range slices.Sorted(maps.Keys(root.Attributes)) {
+		val := value(name, src, root.Attributes[key].Expr)
+		items = append(items, quote(key)+" = "+val)
 	}
-	for _, block := range body.Blocks {
-		words := []string{block.Type}
+	for _, block := range root.Blocks {
+		words := []string{quote(block.Type)}
 		for _, label := range block.Labels {
 			words = append(words, quote(label))
 		}
-		words = append(words, values(name, src, block.Body))
+		words = append(words, body(name, src, block.Body))
 		items = append(items, strings.Join(words, " "))
 	}
 	return "{" + strings.Join(items, ", ") + "}"
@@ -58,7 +60,8 @@ func value(name string, src []byte, expr hclsyntax.Expression) string {
 			if err != nil {
 				log.Fatalf("%s: %s", name, err)
 			}
-			items[key.AsString()] = quote(key.AsString()) + " = " + value(name, src, item.ValueExpr)
+			text := key.AsString()
+			items[text] = quote(text) + " = " + value(name, src, item.ValueExpr)
 		}
 		var sorted []string
 		for _, key := range slices.Sorted(maps.Keys(items)) {
@@ -70,13 +73,13 @@ func value(name string, src []byte, expr hclsyntax.Expression) string {
 		for _, step := range expr.Traversal[1:] {
 			steps = append(steps, step.(hcl.TraverseAttr).Name)
 		}
-		return strings.Join(steps, ".")
+		return "$" + strings.Join(steps, ".")
 	case *hclsyntax.FunctionCallExpr:
 		var args []string
 		for _, arg := range expr.Args {
 			args = append(args, value(name, src, arg))
 		}
-		return expr.Name + "(" + strings.Join(args, ", ") + ")"
+		return quote(expr.Name) + "(" + strings.Join(args, ", ") + ")"
 	}
 	log.Fatalf("%s: %T at %s has no form for its value", name, expr, expr.Range())
 	return ""
@@ -90,28 +93,29 @@ func evaluate(name string, expr hclsyntax.Expression) cty.Value {
 	return val
 }
 
-// number is the exact integer when the text has only digits, as a Document holds it.
-// Otherwise it is the nearest float64, with no sign on zero, as `1.5e0`.
+// number is the exact integer when the number is written with digits only.
+// Otherwise it is the bits of the float64 nearest to the written number, with no
+// sign on zero, such as `f3ff8000000000000` for 1.5.
 func number(src []byte, literal *hclsyntax.LiteralValueExpr, negative bool) string {
-	val := new(big.Float).Copy(literal.Val.AsBigFloat())
-	if negative {
-		val.Neg(val)
-	}
-	if _, integer := new(big.Int).SetString(string(literal.Range().SliceBytes(src)), 10); integer {
-		i, _ := val.Int(nil)
+	if i, integer := digits(src, literal); integer {
+		if negative {
+			i.Neg(i)
+		}
 		return i.String()
 	}
-	f, _ := val.Float64()
+	// HCL holds a 512-bit value, and rounding it again to a float64 can miss the
+	// nearest float64.
+	f, err := strconv.ParseFloat(string(literal.Range().SliceBytes(src)), 64)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		log.Fatalf("%s", err)
+	}
+	if negative {
+		f = -f
+	}
 	if f == 0 {
-		f = 0
+		f = math.Abs(f)
 	}
-	text := strconv.FormatFloat(f, 'e', -1, 64)
-	mantissa, exponent, found := strings.Cut(text, "e")
-	if !found {
-		return text
-	}
-	e, _ := strconv.Atoi(exponent)
-	return fmt.Sprintf("%se%d", mantissa, e)
+	return fmt.Sprintf("f%016x", math.Float64bits(f))
 }
 
 // quote puts text in `"`, with `\` before `"` and `\`, and each character outside

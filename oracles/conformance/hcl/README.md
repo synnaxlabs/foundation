@@ -23,9 +23,9 @@ oracle.
   has one of those codes.
 - For a text in `differences.txt`, `read` gives the outcome there, and that outcome is
   not what the verdict asks. So a difference that stops must be removed.
-- Each name in `values.txt` has a text. For each text that is accepted with no code,
-  is not in `differences.txt`, and reads, the Document has the values in
-  `values.txt`.
+- `values.txt` has a line for each text that is accepted with no code, and no other
+  line. For each such text that is not in `differences.txt` and reads, the Document
+  has the values in `values.txt`.
 - For each text that reads, `write` gives the bytes of a text that is accepted with no
   code and is not in `differences.txt`, and those bytes read as the same Document.
 
@@ -57,14 +57,15 @@ them, such as `{ a.b = 1 }`. The program only parses, so their verdict is "accep
 `values.txt` and the test write values in one form:
 
 - A body is `{`, then its attributes by key as `"key" = value`, then its blocks in
-  order as `keyword "label"... body`, joined by `, `, then `}`.
+  order as `"keyword" "label"... body`, joined by `, `, then `}`.
 - A number written with digits only is its exact integer, such as `-7`.
-- Any other number is the nearest `f64`, as the shortest text that reads back to it,
-  such as `1.5e0` or `-2.5e-3`. Zero has no sign.
-- A string, a key, or a label is in `"`, with `\` before `"` and `\`. Printable
-  ASCII is as it is, and each other character is `\u{hex}`.
-- A reference is its name, a call is `f(value, ...)`, a list is `[value, ...]`, and a
-  map is `{"key" = value, ...}`, by key.
+- Any other number is `f` and the hex bits of the `f64` nearest to the written
+  number, such as `f3ff8000000000000` for `1.5`. Zero has no sign, and a number
+  past the largest `f64` is infinity.
+- A string, a key, a label, a keyword, or a function name is in `"`, with `\` before
+  `"` and `\`. Printable ASCII is as it is, and each other character is `\u{hex}`.
+- A reference is `$` and its name, such as `$a.b`. A call is `"f"(value, ...)`, a
+  list is `[value, ...]`, and a map is `{"key" = value, ...}`, by key.
 
 HCL makes each object key a string: the number key `007` is `"7"`. A value outside
 this form stops the program with its type and position.

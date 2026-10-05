@@ -1105,8 +1105,9 @@ How to read this record:
   recursive-descent parser for the data-only subset (K1, DOCUMENT MODEL), not with
   `hcl-edit`. Evidence on #85: a 2 KB file of 500 nested lists overflowed the stack and
   ended the process, `hcl-primitives` read `-18446744073709551615` as 1, and its errors
-  had no fix-it hints. The reader refuses nesting past the Document limit, reads
-  integers exactly, refuses a float that an `f64` cannot hold (past the largest, or
+  had no fix-it hints. The reader refuses nesting past the Document limit, reads a
+  number written with digits only as an exact integer and any other number as a
+  float, refuses a float that an `f64` cannot hold (past the largest, or
   rounded to zero from digits that are not all zero), refuses an object key that is a
   number with a fraction, an exponent, or more than 154 digits (HCL can change such a
   key when it makes a string of it), and gives each unsupported HCL form an error with
@@ -1136,14 +1137,21 @@ How to read this record:
   outcome and the decision behind it, and the test checks that outcome instead. For
   each text that reads, `write` must give the bytes of a text in the directory that is
   accepted with no code and is not in `differences.txt`, and those bytes must read as
-  the same Document. The program also writes the values HCL reads from each text with
-  only data, in a small text form. For each such text that reads and is not in
-  `differences.txt`, the test prints the Document in the same form, and the two must
-  be equal (#497). An integer is a number written with digits only, and the test
-  compares each float by its `f64` bits. The program records the HCL
+  the same Document. The program records the HCL
   version. A person runs it by hand when the texts change; CI does not run it and
   needs no Go. It is the only Go code in the repo. The person decided on 2026-10-05
   ("Yeah that's fine", #460); the coordinator approved the plan on #460.
+  The program also writes the values HCL reads from each text with only data, in a
+  small text form. For each such text that reads and is not in `differences.txt`, the
+  test prints the Document in the same form, and the two must be equal. So the test
+  checks which numbers are integers (HCL READER), and it compares the bits of each
+  float with the `f64` nearest to the written number. HCL holds a 512-bit value,
+  and a second rounding to `f64` can miss the nearest one. Lost: cty JSON, which has
+  no value for a reference, a call, or a block, and gives a number as a 512-bit
+  decimal; the shortest decimal of a float, which Go and Rust write differently for
+  some floats; Rust that reads the form into a Document, which is more code than a
+  printer; and Go that writes `document::encoding`, a second implementation of the
+  encoding. Decided by the `config` builder (#497).
 - **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
   a new Document. Each attribute and block that keeps its value and its place keeps its
   bytes, comments, and blank lines. A changed value and a changed block on one line

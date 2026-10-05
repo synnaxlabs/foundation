@@ -27,8 +27,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var verdicts, read strings.Builder
-	for _, out := range []*strings.Builder{&verdicts, &read} {
+	var verdicts, values strings.Builder
+	for _, out := range []*strings.Builder{&verdicts, &values} {
 		fmt.Fprintf(out, "# %s %s. Made by main.go; do not edit.\n", module, version())
 	}
 	for _, path := range paths {
@@ -42,15 +42,16 @@ func main() {
 			fmt.Fprintf(&verdicts, "%s refused\n", name)
 			continue
 		}
-		body := file.Body.(*hclsyntax.Body)
-		found := codes(name, src, body)
-		fmt.Fprintf(&verdicts, "%s %s\n", name, strings.Join(slices.Concat([]string{"accepted"}, found), " "))
+		root := file.Body.(*hclsyntax.Body)
+		found := codes(name, src, root)
+		verdict := strings.Join(slices.Concat([]string{"accepted"}, found), " ")
+		fmt.Fprintf(&verdicts, "%s %s\n", name, verdict)
 		if len(found) == 0 {
-			fmt.Fprintf(&read, "%s %s\n", name, values(name, src, body))
+			fmt.Fprintf(&values, "%s %s\n", name, body(name, src, root))
 		}
 	}
 	write("verdicts.txt", verdicts.String())
-	write("values.txt", read.String())
+	write("values.txt", values.String())
 }
 
 func write(path, text string) {
@@ -161,7 +162,8 @@ func forms(name string, src []byte, node hclsyntax.Node) []string {
 // key. Any other key is an expression, which is not known.
 func key(src []byte, node *hclsyntax.ObjectConsKeyExpr) (codes []string, known bool) {
 	switch wrapped := node.Wrapped.(type) {
-	case *hclsyntax.ParenthesesExpr, *hclsyntax.TemplateExpr, *hclsyntax.TemplateWrapExpr:
+	case *hclsyntax.ParenthesesExpr, *hclsyntax.TemplateExpr,
+		*hclsyntax.TemplateWrapExpr:
 		return nil, true
 	case *hclsyntax.ScopeTraversalExpr:
 		return nil, len(wrapped.Traversal) == 1
@@ -191,7 +193,7 @@ func rounded(src []byte, literal *hclsyntax.LiteralValueExpr) []string {
 	if literal.Val.IsNull() || literal.Val.Type() != cty.Number {
 		return nil
 	}
-	written, integer := new(big.Int).SetString(string(literal.Range().SliceBytes(src)), 10)
+	written, integer := digits(src, literal)
 	if !integer {
 		return []string{"hcl.number-key"}
 	}
@@ -199,4 +201,10 @@ func rounded(src []byte, literal *hclsyntax.LiteralValueExpr) []string {
 		return []string{"hcl.number-key"}
 	}
 	return nil
+}
+
+// digits is the integer that literal is written as, when it is written with digits
+// only. A Document holds such a number as an integer, and any other as a float.
+func digits(src []byte, literal *hclsyntax.LiteralValueExpr) (*big.Int, bool) {
+	return new(big.Int).SetString(string(literal.Range().SliceBytes(src)), 10)
 }

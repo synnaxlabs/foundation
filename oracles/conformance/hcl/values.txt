@@ -1,30 +1,37 @@
 # github.com/hashicorp/hcl/v2 v2.25.0. Made by main.go; do not edit.
 attribute {"a" = 1}
-block-labels-written {b "x" "y" {}}
-block-labels {b "x" "y" {}}
-block-one-line {b {"a" = 1}}
-block {b {"a" = 1}}
-blocks-nested-written {b {c "d" {"e" = 1}}, b {}}
-blocks-nested {b {c "d" {"e" = 1}}, b {}}
+block-labels-written {"b" "x" "y" {}}
+block-labels {"b" "x" "y" {}}
+block-one-line {"b" {"a" = 1}}
+block {"b" {"a" = 1}}
+blocks-nested-written {"b" {"c" "d" {"e" = 1}}, "b" {}}
+blocks-nested {"b" {"c" "d" {"e" = 1}}, "b" {}}
 bool {"a" = true, "b" = false}
-call {"a" = f(1, "x", [g()]), "b" = h()}
+call {"a" = "f"(1, "x", ["g"()]), "b" = "h"()}
 comment-block {"a" = 1}
 comment-hash {"a" = 1}
 comment-slash {"a" = 1}
-crlf-written {"a" = 1, b {"c" = 2}}
-crlf {"a" = 1, b {"c" = 2}}
+crlf-written {"a" = 1, "b" {"c" = 2}}
+crlf {"a" = 1, "b" {"c" = 2}}
 empty {}
-float-past-f64 {"a" = +Inf}
-float-to-zero {"a" = 0e0}
-float-written {"a" = 1.5e0, "b" = 1e3, "c" = -2.5e-3}
-float-zero-written {"a" = 0e0}
-float-zero {"a" = 0e0}
-float {"a" = 1.5e0, "b" = 1e3, "c" = -2.5e-3}
-for-after-dash {"a" = [a-b, for]}
-for-after-item-written {"a" = {"for" = 2, "k" = 1}, "b" = [c, for]}
-for-after-item {"a" = {"for" = 2, "k" = 1}, "b" = [c, for]}
-for-in-block-written {h {"for" = 1}}
-for-in-block {h {"for" = 1}}
+float-digits {"a" = f3fd3333333333334, "b" = f000fffffffffffff, "c" = f0000000000000001, "d" = f7fefffffffffffff}
+float-near-largest-written {"a" = f7fefffffffffffff}
+float-near-largest {"a" = f7fefffffffffffff}
+float-near-smallest-written {"a" = f0000000000000001}
+float-near-smallest {"a" = f0000000000000001}
+float-near-tie-written {"a" = f3ff0000000000001}
+float-near-tie {"a" = f3ff0000000000001}
+float-past-f64 {"a" = f7ff0000000000000}
+float-to-zero {"a" = f0000000000000000}
+float-written {"a" = f3ff8000000000000, "b" = f408f400000000000, "c" = fbf647ae147ae147b}
+float-zero-written {"a" = f0000000000000000}
+float-zero {"a" = f0000000000000000}
+float {"a" = f3ff8000000000000, "b" = f408f400000000000, "c" = fbf647ae147ae147b}
+for-after-dash {"a" = [$a-b, $for]}
+for-after-item-written {"a" = {"for" = 2, "k" = 1}, "b" = [$c, $for]}
+for-after-item {"a" = {"for" = 2, "k" = 1}, "b" = [$c, $for]}
+for-in-block-written {"h" {"for" = 1}}
+for-in-block {"h" {"for" = 1}}
 for-quoted-key {"a" = {"for" = 1}}
 heredoc-indented-written {"a" = "line\u{a}  more\u{a}"}
 heredoc-indented {"a" = "line\u{a}  more\u{a}"}
@@ -39,7 +46,7 @@ keyword-attributes {"for" = 1, "if" = 2, "null" = 3, "true" = 4}
 list-lines-written {"a" = [1, 2]}
 list-lines {"a" = [1, 2]}
 list {"a" = [1, "b", [true], {}], "b" = []}
-negate-float {"a" = -1.5e0}
+negate-float {"a" = fbff8000000000000}
 negate-space-written {"a" = -1}
 negate-space {"a" = -1}
 object-bool-key-string-written {"a" = {"true" = 1}}
@@ -60,8 +67,8 @@ object-number-key {"a" = {"1" = 1}}
 object-one-line {"a" = {"b" = 1, "c" = 2}}
 object-written {"a" = {"b" = 1, "c" = 2}, "b" = {}}
 object {"a" = {"b" = 1, "c" = 2}, "b" = {}}
-reference-unicode {"a" = température}
-reference {"a" = b, "c" = d.e-f.g_h}
+reference-unicode {"a" = $température}
+reference {"a" = $b, "c" = $d.e-f.g_h}
 string-escapes-written {"a" = "\u{a}\u{d}\u{9}\"\\\u{e9}\u{1f600}"}
 string-escapes {"a" = "\u{a}\u{d}\u{9}\"\\\u{e9}\u{1f600}"}
 string-template-escapes {"a" = "${b} %{c}"}
