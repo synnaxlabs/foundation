@@ -89,6 +89,9 @@ How to read this record:
   the dot. MQTT maps `.` to `/`. Letters are ASCII (decided by the person,
   2026-10-04). Widening to Unicode later stays backward compatible. `discover` maps
   non-ASCII device tags to ASCII names.
+- **NAME LENGTH (2026-10-04)** A name or pattern holds at most 255 bytes. The person
+  chose "255 bytes": it fits a one-byte length prefix, and raising it later stays
+  backward compatible.
 - **SPECIFICITY (#3)** Pattern specificity orders by more literal segments, then fewer
   `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` > `**`. A run of wildcards
   counts as its `*`s and one `**` (`a.**.*.**` is `a.*.**`). Two different patterns may
@@ -169,13 +172,13 @@ How to read this record:
   blocks are 64-byte aligned; R9-D4 variable-length series are `ends[n]` then data;
   R9-D5 `types` is byte layout only and meaning lives in the spec; R9-D6 `time::Span`
   value and `duration` keyword; R9-D7 JSON uses RFC 3339 UTC with 9 fraction digits,
-  span unit strings, and keys as UUID strings, and never appears on the data path;
-  R9-D8 exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal
-  overflow and checked math for outside values; R9-D13 `types` modules are time,
-  sample, series, frame, channel, node, quality, name, hash (R16-7), and authority
-  (#57: `access`, `spec`, `wire`, and `control` all use it); R9-D14 checks
-  run once, at the home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block`
-  module (by SRP PASS).
+  span unit strings, and keys as UUID strings, and never appears on the data path; R9-D8
+  exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal overflow
+  and checked math for outside values; R9-D13 `types` modules are time, sample, series,
+  frame, channel, node, quality, name, hash (R16-7), authority (#57: `access`, `spec`,
+  `wire`, and `control` all use it), and digest (the BLAKE3 address of spec chunks and
+  blobs, which `spec`, `blob`, `wire`, and `mesh` share); R9-D14 checks run once, at the
+  home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block` module (by SRP PASS).
 - **MODEL MAP (current)** Data channel -> index, -> quality (optional), -> data type,
   -> unit. Index -> error channel (optional), -> control channel (optional). Type ->
   other types; types never point at channels. Policies -> names through selectors;
@@ -325,6 +328,24 @@ How to read this record:
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
   same estimator serves device clocks in the connector library.
+- **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about one local clock (the node's
+  monotonic clock, or a device's sample clock in nanoseconds, #84): its offset is mesh
+  time minus the local reading at `at`, and its error is a half-width from 0 to 36500
+  days. A bound grows by the drift bound times the time from `at`, in both directions.
+  The drift bound is at most 10%; `Drift::UNDISCIPLINED` is 200 ppm. A measured
+  oscillator rate goes into `Drift` later, as an additive change. Each source keeps its
+  last 8 measurements and offers the one with the smallest bound now. This reads R6 TIME
+  LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a fresh
+  slower one. `combine` takes one `Filter` per source and returns the hull of the
+  offsets inside the most bounds (Marzullo). It fails when no offset is inside more than
+  half of them. This reads C6's "follows the smallest measured bound": when sources
+  agree, the result is never wider than the narrowest. The result holds the true offset
+  when the bounds that hold it are a majority and every other bound misses them. Decided
+  by the `time` builder (#49). A device's measurements go to the oscillator fit (`Fit`),
+  never to `combine`. Node sources keep `Filter`, not `Fit`: a network exchange puts the
+  true offset at about the same place in each bracket, so an overlap gains little, and a
+  broken drift bound would stay wrong for the life of a fit, not for 8 exchanges.
+  Decided by the coordinator (#84).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -359,6 +380,33 @@ How to read this record:
   core. The diode carrier is UDP, Noise K, RaptorQ, seq, and codec keyframes: best
   effort with recorded gaps; commands, Raft, and clock exchange cannot cross it.
 - **A4 (wire part)** Each connection swaps keys for short numbers.
+- **STREAM DISPATCH (2026-10-04)** `transport` is blind to protocols. The first
+  message of each stream, and each datagram, starts with a header from `wire` that
+  names the protocol (`clock`, `mesh`, `replica`, `blob`, `hub`). `node` holds the
+  table from protocol to handler and runs one accept loop per session. A protocol
+  that the table does not know comes from a peer, so the loop resets that stream with
+  a code and goes on. Decided by the coordinator (network's review of #53).
+- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
+  however many shards it runs, so each site's firewall needs one known port per
+  conduit. Each QUIC connection belongs to one shard, and every connection ID a node
+  issues encodes that shard. A receive loop on one shard reads the UDP socket in
+  batches and hands each batch to the owning shard over the C2 ring; every shard
+  sends on the same socket. The TCP listener accepts and moves each stream to its
+  shard. `env::net` therefore splits a UDP socket into a receive half with one owner
+  and a send half that any shard may use, and `sim` models the split. Rejected: a
+  port per shard (a port range in every firewall), kernel reuse-port hashing (routes
+  by address, breaks on NAT rebinding), and one shard doing all network work. If the
+  receive loop saturates on Linux, add a reuse-port group steered by the same
+  connection ID. Decided by the design session under the architecture delegation
+  (#53).
+- **TLS RANDOMNESS (2026-10-04)** All randomness inside TLS (key shares, client
+  random, nonces) comes from aws-lc, not from `env`. rustls holds its random source
+  as a `&'static` value, and aws-lc makes X25519 key shares with its own randomness,
+  so neither can be injected without a leak per `Transport`. It changes bytes, never
+  sizes or timing. Simulated runs still replay because nothing branches on those
+  bytes; replay traces leave out ciphertext and handshake randoms, and a `sim` test
+  runs one value twice and compares the traces. The person accepted it ("Accept TLS
+  RANDOMNESS"), from `network`'s proposal on #54.
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
 
@@ -1529,8 +1577,8 @@ Parameters and later choices, recorded and not asked:
   grace, standby send point (after sync or on receipt), SSD rule for Pi homes.
 - Consensus and spec: Raft timeouts, prolly chunk size (~4 KiB) and chunker quality,
   root GC depth (last N roots).
-- Time: exchange period, source discovery period, drift rate for bound widening, stamp
-  limits near 1970 and far future (A5).
+- Time: exchange period, source discovery period, drift rate for bound widening
+  (starts at 200 ppm, ESTIMATE COMBINE), stamp limits near 1970 and far future (A5).
 - Transport: default carrier per traffic class (QUIC vs TLS over TCP, measured on
   Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection.
 - Compression and reduction defaults; retention defaults; disk budget defaults.
