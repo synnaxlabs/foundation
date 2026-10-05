@@ -48,9 +48,10 @@ with its type and position. Add it to the table.
 | `p::f()` | `hcl.namespace` |
 | `f(a...)` | `hcl.expansion` |
 | An object key that is a number with a fraction or an exponent, or an integer that HCL rounds | `hcl.number-key` |
-An object key that is an expression, such as `{ f() = 1 }`, is not in the table:
-`read` has no form for it yet (#506). HCL refuses some texts only when it evaluates
-them, such as `{ a.b = 1 }`. The program only parses, so their verdict is "accepted".
+| Any other object key that is not a name, a string, or `(a)`, such as `{ f() = 1 }` | `hcl.key` |
+
+HCL refuses some texts only when it evaluates them, such as `{ a.b = 1 }`. The program
+only parses, so their verdict is "accepted".
 
 ## The values
 

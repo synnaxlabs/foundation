@@ -49,6 +49,14 @@ enum Ends {
     Close,
 }
 
+/// An object key that `read` reads.
+enum Key {
+    /// The key as HCL reads it: a name, a string, or an integer.
+    Text(Box<str>),
+    /// A number that HCL rounds.
+    Rounded,
+}
+
 struct Parser<'a> {
     tokens: Tokens<'a>,
     /// The next token, not yet taken.
@@ -452,25 +460,13 @@ impl<'a> Parser<'a> {
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::CloseBrace => return Ok(()),
-                _ => {
-                    if let Some(form) = self.leading_form() {
-                        self.refuse(form, Ends::Line)?;
-                    } else if let Some((key, key_span)) = self.key()? {
-                        if !matches!(
-                            self.token.kind,
-                            lex::Kind::Equals | lex::Kind::Colon
-                        ) {
-                            return Err(self.syntax(Expected::ObjectEquals));
-                        }
-                        self.take()?;
-                        let value = self.value(depth, Ends::Line)?;
-                        attributes.extend(value.map(|value| Attribute {
-                            key,
-                            key_span: Some(key_span),
-                            value,
-                        }));
-                    }
+                lex::Kind::OpenBracket | lex::Kind::OpenBrace => {
+                    self.refuse(Form::Key, Ends::Line)?;
                 }
+                _ => match self.leading_form() {
+                    Some(form) => self.refuse(form, Ends::Line)?,
+                    None => attributes.extend(self.entry(depth)?),
+                },
             }
             match self.token.kind {
                 lex::Kind::Comma | lex::Kind::Newline => {
@@ -483,19 +479,53 @@ impl<'a> Parser<'a> {
         unreachable!("invariant: each pass takes a token")
     }
 
-    /// Reads an object key, where no HCL form starts: a string, an identifier, or an
-    /// integer, which reads as HCL reads it: its digits without leading zeros, after a
-    /// `-` if it has one. Returns `None` for a number that HCL rounds or refuses, after
-    /// it keeps the problem and moves past the entry. Any other token is
-    /// `Expected::Key`.
-    fn key(&mut self) -> Result<Option<(Box<str>, Span)>, Error> {
+    /// Reads an object entry from its key. Returns `None` when the entry has a problem
+    /// that does not stop reading.
+    fn entry(&mut self, depth: usize) -> Result<Option<Attribute>, Error> {
+        let Some((key, key_span)) = self.key()? else {
+            return Ok(None);
+        };
+        if !matches!(self.token.kind, lex::Kind::Equals | lex::Kind::Colon) {
+            if self.trailing_form().is_some()
+                || self.token.kind == lex::Kind::OpenParenthesis
+            {
+                self.refuse(Form::Key, Ends::Line)?;
+                return Ok(None);
+            }
+            return Err(self.syntax(Expected::ObjectEquals));
+        }
+        let key = match key {
+            Key::Text(key) => Some(key),
+            Key::Rounded => {
+                self.errors.push(Error::Form {
+                    span: key_span,
+                    form: Form::NumberKey,
+                });
+                None
+            }
+        };
+        self.take()?;
+        let value = self.value(depth, Ends::Line)?;
+        Ok(key.zip(value).map(|(key, value)| Attribute {
+            key,
+            key_span: Some(key_span),
+            value,
+        }))
+    }
+
+    /// Reads an object key, where no HCL form starts: a string, an identifier, or a
+    /// number after an optional `-`, and returns it with its span. An integer reads as
+    /// its digits without leading zeros, after its `-`. Returns `None` for a number
+    /// that HCL refuses, after it keeps the problem and moves past the entry. Any other
+    /// token is `Expected::Key`.
+    fn key(&mut self) -> Result<Option<(Key, Span)>, Error> {
         if matches!(
             self.token.kind,
             lex::Kind::String(_) | lex::Kind::Identifier
         ) {
             let key = self.take()?;
             let span = key.span;
-            return Ok(Some((text(key), span)));
+            return Ok(Some((Key::Text(text(key)), span)));
         }
         let minus = if self.token.kind == lex::Kind::Minus {
             Some(self.take()?)
@@ -505,9 +535,10 @@ impl<'a> Parser<'a> {
         if self.token.kind != lex::Kind::Number {
             return Err(self.syntax(Expected::Key));
         }
+        let span = minus
+            .as_ref()
+            .map_or(self.token.span, |minus| join(minus.span, self.token.span));
         if parts(self.token.text).is_none() {
-            let span = self.token.span;
-            let span = minus.map_or(span, |minus| join(minus.span, span));
             self.errors.push(Error::Number {
                 span,
                 problem: Number::Malformed,
@@ -515,15 +546,12 @@ impl<'a> Parser<'a> {
             self.skip_item(Ends::Line)?;
             return Ok(None);
         }
-        let Some(digits) = integer_key(self.token.text) else {
-            self.refuse(Form::NumberKey, Ends::Line)?;
-            return Ok(None);
-        };
         let number = self.take()?;
-        Ok(Some(match minus {
-            Some(minus) => (format!("-{digits}").into(), join(minus.span, number.span)),
-            None => (digits.into(), number.span),
-        }))
+        let key = integer_key(number.text).map_or(Key::Rounded, |digits| match minus {
+            Some(_) => Key::Text(format!("-{digits}").into()),
+            None => Key::Text(digits.into()),
+        });
+        Ok(Some((key, span)))
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
@@ -1806,7 +1834,7 @@ c = "°C # not a comment"
                 ("a = { 1.5 = 1 }\n", on(6, 9), Form::NumberKey),
                 ("a = { 1e3 = 1 }\n", on(6, 9), Form::NumberKey),
                 ("a = { 1.e5 = 1 }\n", on(6, 10), Form::NumberKey),
-                ("a = { -1.5 = 1 }\n", on(7, 10), Form::NumberKey),
+                ("a = { -1.5 = 1 }\n", on(6, 10), Form::NumberKey),
                 ("a = { - = 1 }\n", on(6, 7), Form::Operator),
                 ("a = { -x = 1 }\n", on(6, 7), Form::Operator),
             ];
@@ -1905,6 +1933,51 @@ c = "°C # not a comment"
                 "a = null.x\n",
                 &[(null, NULL), (index, &refused(Form::Index))],
             );
+        }
+
+        #[test]
+        fn refuses_an_object_key_that_is_an_expression_and_reads_on() {
+            let cases = [
+                ("a = { f() = 1 }\n", on(7, 8)),
+                ("a = { b.c = 1 }\n", on(7, 8)),
+                ("a = { b[0] = 1 }\n", on(7, 8)),
+                ("a = { [1] = 1 }\n", on(6, 7)),
+                ("a = { {} = 1 }\n", on(6, 7)),
+                ("a = { 1 + 2 = 3 }\n", on(8, 9)),
+                ("a = { b - 1 = 2 }\n", on(8, 9)),
+                ("a = { b * 2 = 2 }\n", on(8, 9)),
+                ("a = { 1.5 + 2 = 3 }\n", on(10, 11)),
+                ("a = { \"k\" + \"j\" = 1 }\n", on(10, 11)),
+                ("a = { b ? 1 : 2 = 3 }\n", on(8, 9)),
+                ("a = { p::f() = 1 }\n", on(7, 9)),
+                ("a = { k... = 1 }\n", on(7, 10)),
+                ("a = {\n  b.c = 1\n}\n", span(at(9, 1, 3), at(10, 1, 4))),
+            ];
+            let message = refused(Form::Key);
+            for (text, span) in cases {
+                let key = Error::Form {
+                    span,
+                    form: Form::Key,
+                };
+                check(text, &[(key, &message)]);
+            }
+            let key = Error::Form {
+                span: on(7, 8),
+                form: Form::Key,
+            };
+            let null = Error::Form {
+                span: on(19, 23),
+                form: Form::Null,
+            };
+            check(
+                "a = { f() = 1, b = null }\n",
+                &[(key, &message), (null, NULL)],
+            );
+            let not = Error::Form {
+                span: on(6, 7),
+                form: Form::Operator,
+            };
+            check("a = { !b = 1 }\n", &[(not, &refused(Form::Operator))]);
         }
 
         #[test]
@@ -2029,8 +2102,8 @@ c = "°C # not a comment"
                     Expected::ListEnd,
                 ),
                 ("a = { = 1 }\n", on(6, 7), Expected::Key),
-                ("a = { k.j = 1 }\n", on(7, 8), Expected::ObjectEquals),
                 ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
+                ("a = { a b = 1 }\n", on(8, 9), Expected::ObjectEquals),
                 ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
                 ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
                 ("40001 = 1\n", on(0, 5), Expected::Item),
