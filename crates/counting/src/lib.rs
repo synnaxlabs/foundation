@@ -5,7 +5,7 @@
 #![expect(unsafe_code, reason = "the allocator implements `GlobalAlloc`")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize};
 use std::{fmt, hint, ptr, slice};
@@ -92,7 +92,7 @@ impl fmt::Debug for Allocator {
 
 /// The state of [`Allocator::freed_holding`].
 struct Scan {
-    /// The phase in the bits of [`PHASE`], and the number of frees in [`Scan::check`]
+    /// The phase in the bits of [`PHASE`], and the number of frees in [`Scan::search`]
     /// as a multiple of [`SCANNER`].
     state: AtomicUsize,
     /// The caller's needle, which lives until the phase leaves [`RUNNING`] and no free
@@ -144,33 +144,29 @@ impl Scan {
         found
     }
 
-    /// Counts the block of `size` bytes at `block` if a call runs and the block holds
-    /// its needle.
-    ///
-    /// # Safety
-    ///
-    /// `block` is valid for reads of `size` bytes.
-    unsafe fn check(&self, block: *const u8, size: usize) {
-        if self.state.load(Relaxed) & PHASE != RUNNING {
-            return;
+    /// Counts `block` if a call runs and the block holds its needle.
+    fn check(&self, block: &[MaybeUninit<u8>]) {
+        if self.state.load(Relaxed) & PHASE == RUNNING {
+            self.search(block);
         }
+    }
+
+    /// Counts `block` if a call still runs and the block holds its needle. A free
+    /// calls it after it saw a call run, which may have ended since.
+    fn search(&self, block: &[MaybeUninit<u8>]) {
         if self.state.fetch_add(SCANNER, Acquire) & PHASE == RUNNING {
             // SAFETY: the call that set the needle holds its borrow until `end`, which
             // waits for this scan.
             let needle = unsafe {
                 slice::from_raw_parts(self.needle.load(Relaxed), self.len.load(Relaxed))
             };
-            let holds = size.checked_sub(needle.len()).is_some_and(|last| {
-                (0..=last).any(|start| {
-                    needle.iter().zip(start..).all(|(value, index)| {
-                        let byte = block.wrapping_add(index);
-                        // SAFETY: `index` is below `size`, so `byte` is in the block.
-                        // Rust does not define a read of a byte the program never
-                        // wrote, such as padding. A volatile read is one load that the
-                        // compiler cannot remove or assume a value for, which is as
-                        // close as Rust allows.
-                        unsafe { byte.read_volatile() == *value }
-                    })
+            let holds = block.windows(needle.len()).any(|window| {
+                window.iter().zip(needle).all(|(byte, value)| {
+                    // SAFETY: `byte` is a `u8` in the block. Rust does not define a
+                    // read of a byte the program never wrote, such as padding. A
+                    // volatile read is one load that the compiler cannot remove or
+                    // assume a value for, which is as close as Rust allows.
+                    unsafe { byte.as_ptr().read_volatile() == *value }
                 })
             });
             if holds {
@@ -214,8 +210,11 @@ unsafe impl GlobalAlloc for Allocator {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // SAFETY: the caller keeps the contract of `GlobalAlloc::dealloc`, so `ptr`
-        // holds `layout.size()` bytes.
-        unsafe { self.scan.check(ptr, layout.size()) };
+        // holds `layout.size()` bytes, and nothing writes them before the free.
+        let block = unsafe {
+            slice::from_raw_parts(ptr.cast::<MaybeUninit<u8>>(), layout.size())
+        };
+        self.scan.check(block);
         // SAFETY: the caller keeps the contract of `GlobalAlloc::dealloc`, and every
         // pointer this allocator returns comes from `System`.
         unsafe { System.dealloc(ptr, layout) }
@@ -371,7 +370,7 @@ mod tests {
     #[test]
     fn does_not_count_a_block_that_holds_part_of_the_needle() {
         let allocator = Allocator::new();
-        let ptr = block(&allocator, LAYOUT, 33, &SECRET[..31]);
+        let ptr = block(&allocator, LAYOUT, 32, &SECRET[..31]);
         assert_eq!(found(&allocator, &SECRET, ptr, LAYOUT), 0);
     }
 
@@ -423,6 +422,15 @@ mod tests {
             freer.join().expect("the free does not panic");
             assert_eq!(found, 1);
         });
+    }
+
+    /// A free that saw the call run, and searches after it ended.
+    #[test]
+    fn does_not_count_a_search_after_the_call() {
+        let scan = Scan::new();
+        scan.start(&SECRET).end();
+        scan.search(&SECRET.map(MaybeUninit::new));
+        assert_eq!(scan.start(&SECRET).end(), 0);
     }
 
     #[test]
