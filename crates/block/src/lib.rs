@@ -319,14 +319,15 @@ impl Pool {
         self.committed.get()
     }
 
-    /// Purges free blocks of the classes other than `index` until the budget has
-    /// `size` bytes of room or no such block is left. Returns the room.
+    /// Purges free blocks until the budget has `size` bytes of room for class `index`
+    /// or no free block is left. Returns the room. `alloc` calls it when `index` has
+    /// no free block.
     ///
     /// The classes above `index` go first, smallest first, so one purge covers the
     /// need. Then the classes below it, largest first.
     fn press(&self, index: usize, size: usize) -> usize {
         let mut available = self.budget - self.committed.get();
-        let above = index + 1..self.classes.len();
+        let above = index..self.classes.len();
         let below = (0..index).rev();
         for other in above.chain(below) {
             let class = &self.classes[other];
@@ -1030,24 +1031,28 @@ mod tests {
 
         #[test]
         fn purges_only_the_room_the_alloc_needs() {
-            let (pool, watch) = create_watched_pool(576);
+            let (pool, watch) = create_watched_pool(448);
             let blocks: Vec<_> = (0..3)
-                .map(|_| pool.alloc(128).expect("the budget has room"))
+                .map(|_| pool.alloc(64).expect("the budget has room"))
                 .collect();
-            drop(blocks);
-            let large = pool.alloc(256).expect("two free blocks give their budget");
-            assert_eq!(pool.committed(), 512);
+            let held = blocks.into_iter().next();
+            pool.reclaim();
+            assert_eq!(pool.committed(), 384);
+            let large = pool
+                .alloc(128)
+                .expect("one free block makes the room exact");
+            assert_eq!(pool.committed(), 448);
             let purges = watch
                 .calls()
                 .iter()
                 .filter(|call| matches!(call, Purge { .. }))
                 .count();
-            assert_eq!(purges, 2);
+            assert_eq!(purges, 1);
             let calls = watch.calls().len();
-            let small = pool.alloc(128).expect("the third free block is left");
-            assert_eq!(pool.committed(), 512);
+            let small = pool.alloc(64).expect("the second free block is left");
+            assert_eq!(pool.committed(), 448);
             assert_eq!(watch.calls().len(), calls, "a free block needs no commit");
-            drop((large, small));
+            drop((held, large, small));
         }
 
         #[test]
