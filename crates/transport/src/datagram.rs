@@ -48,7 +48,8 @@ impl Sender {
     }
 
     /// The largest datagram the session sends now. It changes with the path and the
-    /// carrier, and it is never so large that a datagram cannot drop.
+    /// carrier. It is never over the peer's `message_bytes_max`, and never so large
+    /// that a datagram cannot drop.
     ///
     /// ```
     /// fn fits(sender: &transport::datagram::Sender, frame: &block::Block) -> bool {

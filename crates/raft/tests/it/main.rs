@@ -4,3 +4,5 @@
 #![cfg(test)]
 
 mod election;
+mod network;
+mod replication;

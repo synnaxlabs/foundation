@@ -638,7 +638,8 @@ mod tests {
                         Ok(()) | Err(Error::Disjoint) => {}
                         Err(e @ (Error::Backwards { .. } | Error::Bound { .. }
                             | Error::Drift { .. } | Error::NoSources
-                            | Error::NoMajority { .. } | Error::Open)) => {
+                            | Error::NoMajority { .. } | Error::Open
+                            | Error::Crossed)) => {
                             prop_assert!(false, "unexpected {e}");
                         }
                     }
@@ -648,7 +649,7 @@ mod tests {
                     Err(Error::Bound { .. } | Error::Open) => {}
                     Err(e @ (Error::Backwards { .. } | Error::Disjoint
                         | Error::Drift { .. } | Error::NoSources
-                        | Error::NoMajority { .. })) => {
+                        | Error::NoMajority { .. } | Error::Crossed)) => {
                         prop_assert!(false, "unexpected {e}");
                     }
                 }

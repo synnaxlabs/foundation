@@ -7,6 +7,10 @@ name = "a"
 version = "0.0.0"
 
 [[package]]
+name = "b"
+version = "0.0.0"
+
+[[package]]
 name = "globals"
 version = "0.0.0"
 

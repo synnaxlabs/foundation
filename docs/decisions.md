@@ -267,15 +267,20 @@ How to read this record:
 - **B6** One write call is one frame. Smart batching is the default. Catch-up may merge
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
-- **B7** A frame applies whole or not at all, per index. Live writes are never retried.
-  A writer may resend unconfirmed live data as backfill. The home finds a repeat by
-  timestamp: it checks a backfill frame that starts at or before the last backfill
-  stamp against the index on both paths. When every sample exists with the same
-  values, the frame is a repeat, and the home drops and confirms it. When no sample
-  exists, the frame is out of order. Some samples stored and some not, a stored
-  timestamp with other values, or a range below the buffer's floor is an error. Writers
-  assign no numbers: a resend comes in a new session, and the writer never learned
-  them. The person decided on 2026-10-05 ("By timestamp + same values"), #148.
+- **B7** A frame applies whole or not at all, per index. A writer never resends on the
+  live path. After a reconnect, it resends each unconfirmed live frame, with its
+  original boundaries, labeled `resend`. `resend` is a frame label, not a third path:
+  the home checks a resend frame by timestamp against both paths of the index, and it
+  lands on one of them or on none. When every sample exists with the same values, the
+  frame is a repeat, and the home drops and confirms it. When no sample exists and the
+  frame starts after the newest live stamp, it never landed, and the home applies it
+  to the live path. When no sample exists and the frame fits A6, it applies as
+  backfill. Anything else is an error: some samples stored and some not, a stored
+  timestamp with other values, a frame that fits neither path, or a range below the
+  buffer's floor. Live and backfill frames pay no check. Values are compared decoded,
+  not as bytes. Writers assign no numbers: a resend comes in a new session, and the
+  writer never learned them. The person decided on 2026-10-05: "By timestamp + same
+  values" (#148), then "A `resend` label" (#168).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -332,6 +337,14 @@ How to read this record:
   is the offset modulo the area length. The area is at least twice the largest record
   less one block, so an empty ring takes any record. A body is at most `u32::MAX`
   bytes.
+  Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
+  2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
+  u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
+  little-endian, fixed width; `last` is a presence byte (0 or 1) then the stamp,
+  which is 0 and not read under presence 0. The entries' bytes follow the table in
+  order, each `bytes` long, so one table block and the callers' blocks make one
+  vectored write with no copy and no block per entry. A body that ends early, an
+  unknown path or presence byte, or bytes after the last entry is a wrong shape.
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open. The restart record needs one free block: an open of a full ring first moves
@@ -619,11 +632,23 @@ How to read this record:
   only delays the next round trip. A candidate counts its own vote at once because
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
   enters only through `tick`: a node draws its election timeout on the first tick
-  after a reset. PreVote and CheckQuorum have no off switch. Until replication lands,
-  a new leader announces itself with a heartbeat. A node that is not in its own voter
-  list votes and follows, but never campaigns. `step` does not check that a sender is
-  a voter (a voter can learn late that a peer joined), so the caller authenticates
-  the sender and decides which nodes may send.
+  after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
+  its own voter list votes and follows, but never campaigns. `step` does not check
+  that a sender is a voter (a voter can learn late that a peer joined), so the caller
+  authenticates the sender and decides which nodes may send.
+- **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
+  or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
+  empty entry of its term first, so it can commit what came before. It replicates with
+  `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
+  (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
+  (its hint for the next `prev`). A malformed `Append` (entries that do not follow
+  `prev`) is `Error::EntryOutOfOrder`. `Body::Heartbeat { commit }` carries the commit
+  index, capped at what that follower is known to hold. A leader commits an index only
+  when a quorum holds it and its entry is of the leader's own term. A follower commits
+  no further than the last entry the leader sent it. `Ready.committed` gives each entry
+  once, after it is written. Batch size (64 entries) and the number of appends in flight
+  per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
+  `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -852,11 +877,11 @@ How to read this record:
 
 - **Factory constraint** Two people, each on an individual Max plan. The factory runs in
   attended, locally started sessions, not as an unattended daemon.
-- **BENCH SPEND (2026-10-04)** Linux benchmarks that need real machines run on rented
-  AWS machines. The person: "you're welcome to provision AWS machines. SET STRICT COST
-  LIMITS. I don't want more than $100 spent". The limit is 100 USD in total, across
-  all benchmarks, until the person raises it. Only the coordinator provisions, by the
-  procedure in `docs/coordination.md`.
+- **BENCH SPEND (2026-10-04, replaced by the test budget in 5.5 on 2026-10-05)** Linux
+  benchmarks that need real machines run on rented AWS machines. The person: "you're
+  welcome to provision AWS machines. SET STRICT COST LIMITS. I don't want more than $100
+  spent". The limit is 100 USD in total, across all benchmarks, until the person raises
+  it. Only the coordinator provisions, by the procedure in `docs/coordination.md`.
 - **C7** One operation table (typed input and output, error codes, read-only and
   destructive flags) generates the CLI (`--json`), annotated MCP tools, and docs
   embedded in the binary. Every error has a stable code and a fix-it hint. Status is
@@ -938,6 +963,42 @@ How to read this record:
   `clippy::error_impl_error` are rejected: an enum lets a test pin the variant, and
   backtrace capture costs time on hot paths. Decided by the advisor under the quality
   delegation.
+- **FACTORY HOST (2026-10-05)** The person approved one AWS c7i.16xlarge (64 vCPU, 128
+  GiB, about 69 USD a day) for builder sessions: "that 480 a week is fine. let's only
+  allocate a day at a time in budget". It is outside the test budget. The advisor
+  launched it; the coordinator owns it from then on. Each boot stops it after 24 hours.
+  Each day, at least two hours before the stop, the coordinator asks the person to renew
+  one more day. On a yes it runs `sudo shutdown -c; sudo shutdown -h +1440` on the host
+  and posts the day on the ledger (#163). Without a yes, the host stops. The person's
+  laptop keeps the first nine builders, the coordinator, and the advisor. On the host,
+  sessions use a fine-grained GitHub token for `synnaxlabs/foundation` only (contents,
+  issues, and pull requests), not the person's login, and an instance role that can
+  start and stop only instances tagged `project=foundation-test`.
+- **REMOTE CONTROL (2026-10-05)** Sessions on the laptop and on the factory host
+  message each other through Remote Control ("remote control is fine"). Every session
+  name is unique across both machines. There is one coordinator. If Remote Control
+  fails, the fallback is one `inbox:<name>` GitHub issue per session, not a new
+  socket.
+- **QUALITY SESSIONS (2026-10-05)** The person approved `verify` and `red-team` and
+  asked for `audit` and `ux`. `verify` owns the MVP acceptance tests (in `acceptance`,
+  written before the pieces land) and the chaos lab. `red-team` attacks merged code,
+  security and vulnerabilities included, and owns `fuzz/` and additions under
+  `oracles/`. `audit` checks architecture boundaries, software practices, and
+  performance across merged code. `ux` checks the end user's experience: CLI, files,
+  errors, plan output, MCP, and docs. Each finding is an issue; `verify` and `red-team`
+  findings come with a failing test.
+- **BREAKER REVIEW (2026-10-05)** Every PR gets a third reviewer, the `breaker`, whose
+  only output is a test that fails against the PR, or nothing. It runs on Fable for
+  layer 1 and layer 2 crates, in its own worktree.
+- **CLOUD ROUTINES (2026-10-05)** The person has 250 USD of cloud session credits: "we
+  should use up the usage credits quickly", and the quality passes "should be running
+  more often than nightly". `audit`, `ux`, and the `red-team` attack pass on layer 1
+  and layer 2 code run as Claude Code routines in the cloud, one run per merged PR,
+  plus an hourly sweep for merges whose event was dropped. Each run files issues and
+  needs no reply, so the one-way messaging of cloud sessions does not matter. A pilot
+  checks first that a run can use `gh`. After the pilot, the `breaker` moves to a
+  routine on each opened PR. `red-team` keeps a host session for fuzzing, simulation
+  swarms, and the threat model.
 
 ### 1.14 Testing
 
@@ -1332,6 +1393,12 @@ the oscillator fit move to a layer-1 crate (`estimate`), used by both
 `clock` and the connector library. Rename the connector module to `stamp`
 (`stamp::Midpoint`, `stamp::Window`, `stamp::Fit`). Basis: R9-D13, TIME ADAPTERS, the
 SRP PASS layer-1 rule, BQ21 (names).
+Amended (2026-10-05, #143): there is no exchange state machine. The request carries
+`sent` and the peer echoes it, so `estimate::Exchange` is plain data, and
+`Exchange::measure` turns one round trip into a `Measurement`. `clock` sends requests
+on a fixed timer and keeps no state for each one: a late answer is still an exchange,
+and a lost one needs no timeout. The person approved it on 2026-10-05 ("Yeah I
+approve").
 
 **X12. The old term vs "region".**
 Conflict: S9, K5, the MODEL MAP, C3, C6, C8, BQ8, R4 RESULTS, r4, r8 (including its
@@ -1623,8 +1690,8 @@ SIMPLICITY DIRECTIVE.
 Conflict: A1 and A20 say "writes to the home are never buffered". BQ7 and r13 let a
 writer keep unconfirmed frames and resend them after failover.
 Resolution: live delivery is never queued for retry. A writer may keep unconfirmed
-frames in a bounded memory window only to resend them as backfill after failover (B7).
-Basis: BQ7, B7.
+frames in a bounded memory window only to resend them, labeled `resend`, after
+failover (B7). Basis: BQ7, B7.
 
 **X42. The owner of the slot and key set tables.**
 Conflict: M1 needs one node-wide slot table and key set interner. `hub` opens sessions,
@@ -1765,6 +1832,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
 | 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
+| 4 | `acceptance` | Runs the MVP acceptance scenarios against whole meshes built from `node`. Test-only. | all crates |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
 
 Outside the binary: the Rust SDK reuses `block`, `types`, `codec`, and `wire`; other
@@ -1866,7 +1934,40 @@ Parameters and later choices, recorded and not asked:
 - A plugin system (D5).
 - Copy-on-write mesh branching, the reason the word "branch" is reserved (VOCABULARY).
 
-### 5.5 First phase
+### 5.5 MVP
+
+Decided with the person on 2026-10-05. The MVP is an edge-to-cloud mesh that survives
+a bad link:
+
+- Two or more nodes (an edge node and a cloud node), joined by ticket, in one region,
+  with Raft for the spec and membership.
+- Inbound connectors, each with commands back to the device: OPC UA client, Modbus
+  TCP and RTU, and NI DAQmx. Outbound: InfluxDB. The person cut LabJack, MQTT with
+  Sparkplug B, and Kafka from the MVP ("eliminate 3 of those"). CI tests the NI
+  connector against a stub `libnidaqmx.so` (R7 loads the library at run time). NI's
+  simulated devices run only on the factory host, if NI's driver builds for its kernel.
+- Store-and-forward: an edge node writes 1M samples/s (1% of P1) while its link to the
+  cloud is cut for one hour. With a disk budget that covers the hour, the InfluxDB out
+  connector (a named reader whose hold covers the cut) receives every sample, in seq
+  order. With a budget that covers 30 minutes, it receives exactly one gap, whose count
+  equals the trimmed samples. `verify` runs both.
+- A time error bound on every sample.
+- Command authority and audit (D2).
+- The mesh as code: `plan` and `apply` from HCL, operated through the JSON CLI and MCP.
+- Robust means: simulation-tested, fuzzed, and chaos-tested on real AWS links.
+
+Out of the MVP: standby failover (`replica`), more than one region, the calculation
+engine, and performance work past the P1 targets.
+
+**Test budget (2026-10-05).** The person approved 1000 USD for AWS testing, and it
+replaces BENCH SPEND: a nightly chaos lab (about 2 USD a day), a spot simulation swarm
+of four c7i.8xlarge for four hours (ledger cap 22.85 USD at the on-demand price, about
+9 USD at spot), a nightly P1 benchmark on a c7i.metal-24xl (about 4 USD), and
+benchmarks for hot-path PRs (about 10 USD). Hard cap: 100 USD a day ("test budget
+should be capped at $100 a day"). Every launch goes in the ledger (#15) with its cap
+and an automatic shutdown first.
+
+### 5.6 First phase
 
 The first wave builds the riskiest pieces in parallel: `block` and `ring` (`memory`),
 `types`, `codec`, and `wire` (`data-path`), `raft` and `spec` (`consensus`), and
