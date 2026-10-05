@@ -164,7 +164,8 @@ impl Node {
     }
 
     /// Sets the error bound of the node's next wall readings, as when the time daemon
-    /// updates it. The wall does not move.
+    /// updates it. The wall does not move. A negative bound makes the driver broken,
+    /// as in [`Config::wall_error`].
     pub fn set_wall_error(&self, error: Option<Span>) {
         lock(&self.0.shared).set_wall_error(self.0.node, error);
     }
@@ -202,7 +203,8 @@ pub struct Config {
     /// The wall time when the node is added.
     pub wall: Stamp,
     /// The error bound that the OS gives with each wall reading, or `None` when it
-    /// gives none.
+    /// gives none. A negative bound makes the driver broken, as a test of what meets
+    /// one.
     pub wall_error: Option<Span>,
     /// The bytes of the node's disk.
     pub disk_bytes: u64,
