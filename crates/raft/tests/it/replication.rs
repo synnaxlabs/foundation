@@ -3,7 +3,7 @@
 
 use proptest::prelude::*;
 
-use crate::network::{ELECTION, Network, run, run_of_many};
+use crate::network::{Network, run, run_of_many};
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(CASES))]
@@ -30,12 +30,8 @@ proptest! {
         let mut network = Network::new(&logs, random);
         let (leader, _) = network.settle(&actions)?;
         let at = network.propose(leader).unwrap();
-        for _ in 0..4 * ELECTION {
-            network.round();
-            if network.disks.iter().all(|disk| disk.applied >= at.index) {
-                break;
-            }
-        }
+        let nodes: Vec<usize> = (0..network.nodes.len()).collect();
+        network.apply_until(&nodes, at.index);
         let index = usize::try_from(at.index - 1).unwrap();
         prop_assert_eq!(network.applied[index].at, at);
         for disk in &network.disks {
@@ -52,12 +48,7 @@ proptest! {
         let (leader, _) = network.settle(&actions)?;
         let at = network.propose(leader).unwrap();
         let voters: Vec<usize> = network.voters(leader).collect();
-        for _ in 0..4 * ELECTION {
-            network.round();
-            if voters.iter().all(|&node| network.disks[node].applied >= at.index) {
-                break;
-            }
-        }
+        network.apply_until(&voters, at.index);
         let configuration = network.nodes[leader].voters().clone();
         for &node in &voters {
             prop_assert_eq!(network.nodes[node].voters(), &configuration);
