@@ -9,11 +9,21 @@ publish.workspace = true
 types = { path = "../types" }
 
 [dev-dependencies]
+block = { path = "../block" }
+counting = { path = "../counting" }
 divan = { workspace = true }
 proptest = { workspace = true }
 
 [[bench]]
+name = "latest"
+harness = false
+
+[[bench]]
 name = "readers"
+harness = false
+
+[[test]]
+name = "alloc"
 harness = false
 
 [lints]
