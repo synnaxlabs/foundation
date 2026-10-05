@@ -54,6 +54,13 @@ const _: () = assert!(
     CERTIFICATE_BYTES == 3 + 0xd8,
     "the certificate header holds its length"
 );
+/// The largest certificate a peer may present. It is part of `foundation/1`, so a
+/// larger one needs a new ALPN.
+const CERTIFICATE_BYTES_MAX: usize = 1024;
+const _: () = assert!(
+    CERTIFICATE_BYTES <= CERTIFICATE_BYTES_MAX,
+    "a node takes a peer's template"
+);
 
 /// The node's TLS: its certificate and key, and the configs that use them. Made once
 /// per transport.
@@ -199,12 +206,12 @@ pub(crate) fn peer(
 }
 
 /// The node key that a chain carries. Refuses a chain that is not one certificate of
-/// at most the template's size, so a peer cannot make the node hold more.
+/// at most `CERTIFICATE_BYTES_MAX`, so a peer cannot make the node hold more.
 fn key(
     end_entity: &CertificateDer<'_>,
     intermediates: &[CertificateDer<'_>],
 ) -> Result<PublicKey, rustls::Error> {
-    if !intermediates.is_empty() || end_entity.len() > CERTIFICATE_BYTES {
+    if !intermediates.is_empty() || end_entity.len() > CERTIFICATE_BYTES_MAX {
         return Err(CertificateError::ApplicationVerificationFailure.into());
     }
     let parsed = ParsedCertificate::try_from(end_entity)?;
@@ -449,9 +456,17 @@ mod tests {
         Tls::with(CertifiedKey::new(chain, Arc::clone(&certified(tls).key)))
     }
 
-    /// TLS with one self-signed certificate for `private_key`, like the template but
-    /// with a subject name of `subject_bytes` junk bytes.
+    /// TLS with [`padded_der`]'s certificate.
     fn padded(private_key: &PrivateKey, subject_bytes: usize) -> Tls {
+        Tls::with(CertifiedKey::new(
+            vec![padded_der(private_key, subject_bytes).into()],
+            Arc::clone(&certified(&Tls::new(private_key)).key),
+        ))
+    }
+
+    /// A self-signed certificate for `private_key`, like the template but with a
+    /// subject name of `subject_bytes` junk bytes.
+    fn padded_der(private_key: &PrivateKey, subject_bytes: usize) -> Vec<u8> {
         fn seq(content: &[u8]) -> Vec<u8> {
             let len = u16::try_from(content.len()).expect("under 64 KiB");
             [&[0x30, 0x82], len.to_be_bytes().as_slice(), content].concat()
@@ -471,11 +486,12 @@ mod tests {
         ]
         .concat());
         let signature = pair.sign(&tbs);
-        let der = seq(&[&tbs[..], ED25519, SIGNATURE, signature.as_ref()].concat());
-        Tls::with(CertifiedKey::new(
-            vec![der.into()],
-            Arc::clone(&certified(&Tls::new(private_key)).key),
-        ))
+        seq(&[&tbs[..], ED25519, SIGNATURE, signature.as_ref()].concat())
+    }
+
+    /// The subject bytes that make [`padded_der`] `bytes` long.
+    fn subject_bytes(private_key: &PrivateKey, bytes: usize) -> usize {
+        bytes - padded_der(private_key, 0).len()
     }
 
     /// TLS with an ECDSA P-256 certificate, that signs with ECDSA whatever schemes
@@ -690,6 +706,14 @@ mod tests {
         }
 
         #[test]
+        fn when_both_certificates_are_at_the_limit_each_side_takes_the_other() {
+            let (a, b) = (PrivateKey([1; 32]), PrivateKey([2; 32]));
+            let full = |key| padded(key, subject_bytes(key, CERTIFICATE_BYTES_MAX));
+            let peers = handshake(full(&a).client(public(&b)), full(&b).server());
+            assert_eq!(peers, Ok((Peer::Node(public(&b)), Peer::Node(public(&a)))));
+        }
+
+        #[test]
         fn when_client_key_is_ecdsa_the_server_refuses() {
             let b = PrivateKey([2; 32]);
             let peers = handshake(ecdsa().client(public(&b)), Tls::new(&b).server());
@@ -850,9 +874,23 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_certificate_over_the_template_size() {
-            let mut der = certificate(&Tls::new(&PrivateKey([1; 32]))).to_vec();
-            der.push(0);
+        fn takes_a_certificate_at_the_limit() {
+            let private_key = PrivateKey([1; 32]);
+            let subject = subject_bytes(&private_key, CERTIFICATE_BYTES_MAX);
+            let der = padded_der(&private_key, subject);
+            assert_eq!(der.len(), 1024);
+            assert_eq!(
+                key(&CertificateDer::from(der), &[]),
+                Ok(public(&private_key))
+            );
+        }
+
+        #[test]
+        fn refuses_a_certificate_over_the_limit() {
+            let private_key = PrivateKey([1; 32]);
+            let subject = subject_bytes(&private_key, CERTIFICATE_BYTES_MAX + 1);
+            let der = padded_der(&private_key, subject);
+            assert_eq!(der.len(), 1025);
             assert_eq!(
                 key(&CertificateDer::from(der), &[]),
                 Err(CertificateError::ApplicationVerificationFailure.into())
