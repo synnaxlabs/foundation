@@ -798,10 +798,13 @@ How to read this record:
   `Body::Append { prev, entries, commit }`, answered by `Body::AppendReply { last }`
   (the last index the follower holds of what was sent) or `Body::AppendReject { hint }`
   (its hint for the next `prev`). A malformed `Append` (entries that do not follow
-  `prev`) is `Error::EntryOutOfOrder`. `Body::Heartbeat { commit }` carries the commit
-  index, capped at what that follower is known to hold. A leader commits an index only
-  when a quorum holds it and its entry is of the leader's own term. A follower commits
-  no further than the last entry the leader sent it. `Ready.committed` gives each entry
+  `prev`) is `Error::EntryOutOfOrder`. An `Append` with an entry whose term is above
+  the message's term is `Error::TermBehindLog`: no leader sends one, and a follower
+  that wrote it could not restart. The conformance oracle changed to match; the person
+  decided on 2026-10-05 ("a is fine", #232). `Body::Heartbeat { commit }` carries
+  the commit index, capped at what that follower is known to hold. A leader commits
+  an index only when a quorum holds it and its entry is of the leader's own term. A
+  follower commits no further than the last entry the leader sent it. `Ready.committed` gives each entry
   once, after it is written. Batch size (64 entries) and the number of appends in flight
   per follower (8) are constants, not `Config` fields: nothing measured asks for a knob.
   `Message` and `Body` are `Clone`, not `Copy`, because an append carries entries.
