@@ -84,18 +84,18 @@ impl Edges {
         // local time zero orders it exactly at every later time. Of equal edges, the
         // later one wins, so push order never matters.
         let ppb = i128::from(drift.ppb());
-        let low = |m: &Measurement| {
+        let by_low = |m: &Measurement| {
             let (low, _) = m.bounds_at(m.at(), drift);
             (low * NANOS_PER_SECOND + ppb * i128::from(m.at().0), m.at())
         };
-        let high = |m: &Measurement| {
+        let by_high = |m: &Measurement| {
             let (_, high) = m.bounds_at(m.at(), drift);
             let at = Reverse(m.at());
             (high * NANOS_PER_SECOND - ppb * i128::from(m.at().0), at)
         };
         Self {
-            low: cmp::max_by_key(self.low, measurement, low),
-            high: cmp::min_by_key(self.high, measurement, high),
+            low: cmp::max_by_key(self.low, measurement, by_low),
+            high: cmp::min_by_key(self.high, measurement, by_high),
         }
     }
 
