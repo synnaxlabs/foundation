@@ -144,12 +144,20 @@ const _: () = assert!(
 struct Class {
     /// Bytes of this class's span that are cut into blocks.
     carved: Cell<usize>,
-    /// The most bytes `carved` ever was. A purge covers this range, so the pages
-    /// past `carved` that an earlier carve touched go back too.
+    /// The most bytes `carved` ever was: the range a release purges.
     reached: Cell<usize>,
     free: Cell<usize>,
     /// Blocks that holders have, or that wait in `Region::returned`.
     lent: Cell<usize>,
+    /// `Pool::purges` when a block last returned.
+    idle_since: Cell<u64>,
+}
+
+impl Class {
+    /// Carved, with no block in use.
+    fn idle(&self) -> bool {
+        self.lent.get() == 0 && self.carved.get() != 0
+    }
 }
 
 /// A pool of blocks owned by one shard.
@@ -160,12 +168,15 @@ struct Class {
 /// Blocks come in sizes: 64 bytes and each power of two above it up to 2 GiB, each
 /// with 64 bytes in front. A free block keeps its budget for its own size until
 /// another size needs the budget and no block of that size is in use: `alloc` then
-/// gives the pages of the whole size back and takes the budget.
+/// gives the pages of the whole size back and takes the budget. `purge` gives back
+/// the pages of a size that stayed idle across two of its calls.
 pub struct Pool {
     region: NonNull<Region>,
     budget: usize,
     span: usize,
     committed: Cell<usize>,
+    /// Calls of `purge` so far: the clock that `Class::idle_since` reads.
+    purges: Cell<u64>,
     classes: Box<[Class]>,
 }
 
@@ -210,6 +221,7 @@ impl Pool {
             budget,
             span: budget.next_multiple_of(ALIGN),
             committed: Cell::new(0),
+            purges: Cell::new(0),
             classes: (0..classes(budget)).map(|_| Class::default()).collect(),
         }
     }
@@ -301,6 +313,26 @@ impl Pool {
         }
     }
 
+    /// Gives the pages of each idle size back to the system.
+    ///
+    /// A size is idle when no block of it is in use now and none was in use at the
+    /// previous `purge` call. The shard calls it on its own timer: a size then keeps
+    /// its pages for one to two timer intervals after its last block returned, and
+    /// `alloc` carves it again on demand. It takes back returned blocks first, as
+    /// `reclaim` does. Returns the bytes given back.
+    pub fn purge(&self) -> usize {
+        self.reclaim();
+        let purges = self.purges.get();
+        let before = self.committed.get();
+        for (index, class) in self.classes.iter().enumerate() {
+            if class.idle() && class.idle_since.get() < purges {
+                self.release(index);
+            }
+        }
+        self.purges.set(purges + 1);
+        before - self.committed.get()
+    }
+
     /// Bytes of the budget in use: the carved range of each size class, which holds
     /// the blocks that holders have and the free blocks that keep their pages. A size
     /// whose blocks are all free gives its range back when another size needs the
@@ -322,11 +354,10 @@ impl Pool {
     fn press(&self, index: usize) -> usize {
         let size = class_footprint(index);
         let mut available = self.budget - self.committed.get();
-        let idle = |class: &Class| class.lent.get() == 0 && class.carved.get() != 0;
         let spare: usize = self
             .classes
             .iter()
-            .filter(|class| idle(class))
+            .filter(|class| class.idle())
             .map(|class| class.carved.get())
             .sum();
         if available + spare < size {
@@ -338,19 +369,26 @@ impl Pool {
             if available >= size {
                 break;
             }
-            let class = &self.classes[other];
-            if idle(class) {
-                let carved = class.carved.get();
-                self.shared()
-                    .memory
-                    .purge(HEADER + other * self.span, class.reached.get());
-                class.carved.set(0);
-                class.free.set(NONE);
-                self.committed.set(self.committed.get() - carved);
-                available += carved;
+            if self.classes[other].idle() {
+                available += self.release(other);
             }
         }
         available
+    }
+
+    /// Gives back the carved range of class `index`, which has no block in use, and
+    /// returns the bytes it held. The purge covers `reached`, so pages that an
+    /// earlier, longer carve touched go back too.
+    fn release(&self, index: usize) -> usize {
+        let class = &self.classes[index];
+        let carved = class.carved.get();
+        self.shared()
+            .memory
+            .purge(HEADER + index * self.span, class.reached.get());
+        class.carved.set(0);
+        class.free.set(NONE);
+        self.committed.set(self.committed.get() - carved);
+        carved
     }
 
     /// Blocks that holders have, or that wait in `Region::returned`.
@@ -376,6 +414,7 @@ impl Pool {
 
     /// Moves a list of returned blocks to the free lists.
     fn take(&self, mut offset: usize) {
+        let purges = self.purges.get();
         while offset != NONE {
             // SAFETY: a returned block has a header. Its last holder gave it up with
             // the store that the swap of `returned` read.
@@ -387,6 +426,7 @@ impl Pool {
             header.next.store(class.free.get(), Relaxed);
             class.free.set(offset);
             class.lent.set(class.lent.get() - 1);
+            class.idle_since.set(purges);
             offset = next;
         }
     }
@@ -1359,6 +1399,176 @@ mod tests {
                 for (block, fill) in &blocks {
                     prop_assert!(block.iter().all(|byte| byte == fill));
                 }
+            }
+        }
+    }
+
+    mod purge {
+        use super::fixture::Call::{Commit, Purge};
+        use super::fixture::{Call, Watch};
+        use super::*;
+
+        fn purges(watch: &Watch) -> Vec<Call> {
+            watch
+                .calls()
+                .into_iter()
+                .filter(|call| matches!(call, Purge { .. }))
+                .collect()
+        }
+
+        #[test]
+        fn releases_a_size_idle_across_two_purge_calls() {
+            let (pool, watch) = create_watched_pool(256);
+            drop(pool.alloc(64).expect("the budget has room"));
+            pool.reclaim();
+            assert_eq!(pool.purge(), 0, "the size returned a block this interval");
+            assert_eq!(pool.committed(), 128);
+            assert_eq!(purges(&watch), []);
+            assert_eq!(pool.purge(), 128, "the size stayed idle for an interval");
+            assert_eq!(pool.committed(), 0);
+            assert_eq!(
+                purges(&watch),
+                [Purge {
+                    offset: 64,
+                    len: 128
+                }]
+            );
+        }
+
+        #[test]
+        fn keeps_a_size_that_returned_a_block_since_the_last_purge() {
+            let (pool, watch) = create_watched_pool(256);
+            drop(pool.alloc(64).expect("the budget has room"));
+            pool.reclaim();
+            assert_eq!(pool.purge(), 0);
+            drop(pool.alloc(64).expect("the free block serves"));
+            pool.reclaim();
+            assert_eq!(pool.purge(), 0, "a block returned since the last call");
+            assert_eq!(purges(&watch), []);
+            assert_eq!(pool.purge(), 128);
+            assert_eq!(pool.committed(), 0);
+        }
+
+        #[test]
+        fn keeps_a_size_with_a_block_in_use() {
+            let (pool, watch) = create_watched_pool(256);
+            let held = pool.alloc(64).expect("the budget has room");
+            drop(pool.alloc(64).expect("the budget has room"));
+            pool.reclaim();
+            assert_eq!(pool.purge(), 0);
+            assert_eq!(pool.purge(), 0, "a block is in use");
+            assert_eq!(pool.committed(), 256);
+            assert_eq!(purges(&watch), []);
+            drop(held);
+        }
+
+        #[test]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a thread test; `block` has no `env`"
+        )]
+        fn takes_back_returned_blocks_first() {
+            let pool = create_pool(256);
+            let block = pool.alloc(64).expect("the budget has room");
+            thread::scope(|scope| {
+                scope.spawn(move || std::mem::drop(block));
+            });
+            assert_eq!(pool.purge(), 0, "the block came back in this call");
+            assert_eq!(pool.purge(), 128);
+            assert_eq!(pool.committed(), 0);
+        }
+
+        #[test]
+        fn releases_the_reached_range() {
+            let (pool, watch) = create_watched_pool(1472);
+            let blocks: Vec<_> = (0..11)
+                .map(|_| pool.alloc(64).expect("the budget has room"))
+                .collect();
+            drop(blocks);
+            pool.reclaim();
+            assert_eq!(pool.purge(), 0);
+            assert_eq!(pool.purge(), 1408);
+            drop(pool.alloc(64).expect("the budget has room"));
+            pool.reclaim();
+            assert_eq!(pool.purge(), 0);
+            assert_eq!(pool.purge(), 128);
+            assert_eq!(
+                purges(&watch),
+                [
+                    Purge {
+                        offset: 64,
+                        len: 1408
+                    },
+                    Purge {
+                        offset: 64,
+                        len: 1408
+                    },
+                ],
+                "the second release covers the pages the first carve touched"
+            );
+        }
+
+        #[test]
+        fn carves_a_released_size_again() {
+            let (pool, watch) = create_watched_pool(256);
+            drop(pool.alloc(64).expect("the budget has room"));
+            pool.reclaim();
+            pool.purge();
+            pool.purge();
+            let block = pool.alloc(64).expect("the budget has room");
+            assert_eq!(pool.committed(), 128);
+            let calls = watch.calls();
+            assert_eq!(
+                calls[calls.len() - 1],
+                Commit {
+                    offset: 64,
+                    len: 128
+                },
+                "the carve starts at the span again"
+            );
+            drop(block);
+        }
+
+        proptest! {
+            #![proptest_config(cases())]
+
+            /// Two purge calls with no alloc between leave only the sizes in use
+            /// committed, and a purge gives back what it takes off `committed`.
+            #[test]
+            fn leaves_only_the_sizes_in_use_after_two_idle_calls(
+                steps in proptest::collection::vec(
+                    (1_usize..=1024, proptest::option::of(0_usize..8), any::<bool>()),
+                    1..32,
+                ),
+            ) {
+                const BUDGET: usize = 4096;
+                let pool = create_pool(BUDGET);
+                let mut blocks = Vec::new();
+                for (len, drop_index, purge) in steps {
+                    if let Ok(block) = pool.alloc(len) {
+                        blocks.push(block);
+                    }
+                    if let Some(index) = drop_index.filter(|index| *index < blocks.len()) {
+                        blocks.swap_remove(index);
+                    }
+                    if purge {
+                        let before = pool.committed();
+                        let released = pool.purge();
+                        prop_assert_eq!(before - pool.committed(), released);
+                    }
+                    let carved: usize =
+                        pool.classes.iter().map(|class| class.carved.get()).sum();
+                    prop_assert_eq!(pool.committed(), carved);
+                }
+                pool.purge();
+                pool.purge();
+                let held: usize = pool
+                    .classes
+                    .iter()
+                    .filter(|class| class.lent.get() != 0)
+                    .map(|class| class.carved.get())
+                    .sum();
+                prop_assert_eq!(pool.committed(), held);
             }
         }
     }
