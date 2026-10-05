@@ -288,6 +288,13 @@ dependencies = [
 [[package]]
 name = "connector"
 version = "0.0.0"
+dependencies = [
+ "counting",
+ "env",
+ "proptest",
+ "sim",
+ "types",
+]
 
 [[package]]
 name = "constant_time_eq"
