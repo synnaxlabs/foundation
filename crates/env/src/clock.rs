@@ -80,7 +80,7 @@ impl Clock {
     /// ```
     #[must_use]
     pub fn sleep(&self, span: Span) -> Sleep {
-        self.sleep_until(after(self.now(), span))
+        self.sleep_until(self.now() + span.max(Span::ZERO))
     }
 }
 
@@ -88,19 +88,6 @@ impl fmt::Debug for Clock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Clock").finish_non_exhaustive()
     }
-}
-
-/// The time `span` after `start`. A negative span gives `start`.
-pub(crate) fn after(start: Monotonic, span: Span) -> Monotonic {
-    let Ok(span) = u64::try_from(span.nanos()) else {
-        return start;
-    };
-    Monotonic(
-        start
-            .0
-            .checked_add(span)
-            .expect("invariant: monotonic time plus a span fits in u64"),
-    )
 }
 
 /// What `os` and `sim` implement to run a [`Clock`]. Only they implement it.
@@ -290,25 +277,14 @@ mod tests {
                 Monotonic(100)
             );
         }
-    }
-
-    mod after {
-        use super::*;
 
         #[test]
-        fn adds_a_positive_span() {
-            assert_eq!(after(Monotonic(10), Span::from_nanos(5)), Monotonic(15));
-        }
-
-        #[test]
-        fn keeps_the_start_for_a_negative_span() {
-            assert_eq!(after(Monotonic(10), Span::from_nanos(-20)), Monotonic(10));
-        }
-
-        #[test]
-        #[should_panic(expected = "invariant: monotonic time plus a span fits in u64")]
+        #[should_panic(
+            expected = "monotonic overflow: 18446744073709551614 ns + 1000000000 ns"
+        )]
         fn panics_past_the_end_of_the_clock() {
-            let _ = after(Monotonic(u64::MAX - 1), Span::SECOND);
+            let (clock, _) = clock_at(u64::MAX - 1);
+            drop(clock.sleep(Span::SECOND));
         }
     }
 }
