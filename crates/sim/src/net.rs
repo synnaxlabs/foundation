@@ -314,10 +314,11 @@ impl Network {
         } else {
             V6_HEADERS
         };
-        if datagram.contents.len() + header > link.mtu || self.chance(link.loss) {
+        if datagram.contents.len() + header > link.mtu || roll(&mut self.rng, link.loss)
+        {
             return Fate::Lost;
         }
-        let duplicated = self.chance(link.duplication);
+        let duplicated = roll(&mut self.rng, link.duplication);
         if duplicated {
             let copy = Datagram {
                 contents: datagram.contents.clone(),
@@ -346,13 +347,6 @@ impl Network {
             let key = self.key();
             self.flights.insert((at, key), datagram);
         }
-    }
-
-    /// Whether a draw falls under `chance`, from 0 to 1.
-    fn chance(&mut self, chance: f64) -> bool {
-        let draw = u32::try_from(self.rng.next_u64() >> 32)
-            .expect("invariant: the high half of a u64 fits u32");
-        under(draw, chance)
     }
 
     /// The true time of the first arrival.
@@ -415,6 +409,13 @@ impl Network {
         }
         (Poll::Ready(count), Some(waker))
     }
+}
+
+/// Draws from `rng`, and gives whether the draw falls under `chance`, from 0 to 1.
+pub(crate) fn roll(rng: &mut Rng, chance: f64) -> bool {
+    let draw = u32::try_from(rng.next_u64() >> 32)
+        .expect("invariant: the high half of a u64 fits u32");
+    under(draw, chance)
 }
 
 /// Whether `draw`, uniform over `u32`, falls under `chance`, from 0 to 1. A chance of
