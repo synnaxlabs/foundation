@@ -175,7 +175,11 @@ How to read this record:
   time (as-of). Supersedes: A18 side array.
 - **S8 (identity part)** A node has a stable `node::Key` (UUIDv7) separate from its
   rotatable Ed25519 public key. No role fields. Anything that changes about a node is a
-  channel under its name. Supersedes: S8 node as a spec definition (by BQ11a).
+  channel under its name. Supersedes: S8 node as a spec definition (by BQ11a). A node
+  also has an X25519 seal key, which callers seal secret values to. The node makes it
+  at join, signs it with its Ed25519 key, and rotates it with that key. A voter and a
+  caller check the signature. The person decided on 2026-10-05: "ok fine" and "Add an
+  encryption key" (#211).
 - **R9 type decisions (SETTLED BY ME)** R9-D1 per-entry types are interned once in the
   key set; R9-D2 bools are one byte; R9-D3 raw series are padded to element width and
   blocks are 64-byte aligned; R9-D4 variable-length series are `ends[n]` then data;
@@ -261,7 +265,9 @@ How to read this record:
   acks. Basis: B3, M3, MEMORY BOUNDS, X35, r11 5.2, #41.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
-  replay after a disconnect. Frames go out before the disk sync.
+  replay after a disconnect. Frames go out before the disk sync. The current value is
+  the index's newest live frame, even when it holds none of the reader's channels (M3).
+  The person decided on 2026-10-05: "Newest frame" (#139).
 - **B5** Live writes never wait. If the disk queue or the pool is full, the home records
   an explicit gap and warns. Backfill waits for room.
 - **B6** One write call is one frame. Smart batching is the default. Catch-up may merge
@@ -410,7 +416,9 @@ How to read this record:
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
-  gap and backfill waits.
+  gap and backfill waits. The current value of B4 pins one block per index that had a
+  live frame, with no reader open and no cap. A smaller copy is a 5.3 tunable. The
+  person decided on 2026-10-05: "Accept it" (#139).
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
@@ -580,20 +588,21 @@ How to read this record:
   RANDOMNESS"), from `network`'s proposal on #54.
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
-- **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and
-  accepts; the node's sockets and relays sit in one node-level part (ONE PORT PER
-  NODE). A `Session` goes to one peer over one path, direct or relayed, fixed for its
-  life, and runs every class on one carrier. A second carrier for some classes waits
-  for the measurement in TRANSPORT SHAPE LOCKED, which must show that `Latest` p99
-  holds while `CatchUp` runs on the other carrier. Streams carry whole messages in
-  pool blocks, not bytes; the QUIC carrier benchmark decides whether decode reads
-  chunks in place instead. A stream reaches the peer with its first message, and a
+- **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and accepts;
+  the node's sockets and relays sit in one node-level part (ONE PORT PER NODE). A
+  `Session` goes to one peer over one path, direct or relayed, fixed for its life, and
+  runs every class on one carrier. A second carrier for some classes waits for the
+  measurement in TRANSPORT SHAPE LOCKED, which must show that `Latest` p99 holds while
+  `CatchUp` runs on the other carrier. Until then, QUIC is the one carrier (r19): it
+  keeps `Latest` p99 low while bulk shares the connection, at 1.5 times the CPU per byte
+  of TLS over TCP. The person decided on 2026-10-05: "QUIC" (#10). Streams carry whole
+  messages in pool blocks, not bytes; the QUIC carrier benchmark decides whether decode
+  reads chunks in place instead. A stream reaches the peer with its first message, and a
   `Sender` dropped without `finish` resets it. Each stream has a `Class` (`Command`,
-  `Latest`, `Complete`, `CatchUp`) that sets its priority and preferred carrier. A
-  peer is a node key or a `Client` (an SDK, proved by its signed hello above).
-  Callers admit peers, dispatch streams (STREAM DISPATCH), and cancel stale latest
-  frames. Builds on SIM NETWORK. Proposed by `network` in #45; approved by the
-  coordinator on PR #53.
+  `Latest`, `Complete`, `CatchUp`) that sets its priority and preferred carrier. A peer
+  is a node key or a `Client` (an SDK, proved by its signed hello above). Callers admit
+  peers, dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on
+  SIM NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -1202,7 +1211,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Node | Region state: membership record `{ key, name, public key, version, ephemeral expiry }` in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
+| Node | Region state: membership record `{ key, name, public key, seal key, version, ephemeral expiry }` in the region that holds the node's name. Private key: node-local. Files only name nodes | Voters at join (ticket); removal operation; ephemeral expiry | `mesh`, `hub` (authentication), `access`, `plan` (name checks) | `mesh` (record), `node` (key material) |
 | Membership | Region state: node records plus each region's voter set | Voters | Everyone | `mesh` |
 | Node lease | Region state of the node's own region | The node renews; a renewal carries its version and seq block requests | Voters (promotion), `home` (fence, with the clock bound) | `mesh`, `home` |
 | Actual home of an index | Region state of the home node's region: `{ home node, holder, seq block }` | Voters (promotion), `apply` (planned moves) | `hub` routing through `mesh` watches | `mesh` |
@@ -1230,6 +1239,7 @@ Storage classes used in the table:
 | Gaps | Index log records (explicit gap with a count) | `home`, `buffer` | Complete readers | `home`, `buffer` |
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
 | Latest mailbox | Memory: depth 1 per latest reader per index | `delivery` | The reader session | `delivery` |
+| Current value | Memory: the index's newest live frame, one pinned pool block per index (B4, MEMORY BOUNDS) | `delivery` | A new latest reader | `delivery` |
 | Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; the home spends | `delivery` | `delivery`, `wire` |
 | Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `delivery` |
 | Death records | Quality channel samples (X19) | `home` | Sinks | `home` |
@@ -1908,7 +1918,7 @@ Parameters and later choices, recorded and not asked:
   (R10-D7), short-vector packing.
 - Memory: allocator (mimalloc 3 off the hot path), pool size classes and budget, commit
   and purge policy, queue kinds and capacities, spin windows (0 on a Pi), latest
-  mailbox mechanics, cache-line padding.
+  mailbox mechanics, a compact copy of the current value (B4), cache-line padding.
 - Replication: seq block size, node lease length, check-in period, fence margin, gate
   grace, standby send point (after sync or on receipt), SSD rule for Pi homes.
 - Consensus and spec: Raft timeouts, prolly chunk size (~4 KiB) and chunker quality,
