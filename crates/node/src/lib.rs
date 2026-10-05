@@ -13,8 +13,8 @@ use env::thread::Handle;
 
 use crate::stop::Stop;
 
-/// The seams a node runs on: real ones from `os` in production, simulated ones from
-/// `sim` in tests.
+/// The seams a node runs on. `node`'s entry point builds the real ones from `os`;
+/// tests and `acceptance` pass simulated ones from `sim`.
 #[derive(Debug)]
 pub struct Config {
     /// Where shards run. One shard starts per core.
@@ -34,24 +34,21 @@ impl Node {
     /// once each shard runs or one has failed to start. A failed start stops the
     /// node, and [`Node::join`] returns its error.
     #[must_use = "a dropped Node leaves its shards running"]
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "the node owns its seams; later fields move into its shards"
-    )]
     pub fn start(config: Config) -> Self {
+        let Config { shards } = config;
         let stop = Arc::new(Stop::default());
         let mut node = Self {
             stop: Arc::clone(&stop),
             handles: Vec::new(),
             failed: None,
         };
-        for core in 0..config.shards.cores().get() {
+        for core in 0..shards.cores().get() {
             let shard = env::shards::Config {
                 name: format!("shard-{core}"),
                 core: Some(core),
             };
-            let ends = Ends(Arc::clone(&stop));
-            match config.shards.start(shard, move |_tasks| ends.wait()) {
+            let guard = stop.guard();
+            match shards.start(shard, move |_tasks| guard) {
                 Ok(handle) => node.handles.push(handle),
                 Err(e) => {
                     stop.set();
@@ -105,23 +102,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Thread(e) => Some(e),
+            Self::Thread(e) => e.source(),
         }
-    }
-}
-
-/// A shard's hold on the node: when the shard ends for any reason, its future
-/// drops this, and the node stops.
-struct Ends(Arc<Stop>);
-
-impl Ends {
-    async fn wait(self) {
-        self.0.wait().await;
-    }
-}
-
-impl Drop for Ends {
-    fn drop(&mut self) {
-        self.0.set();
     }
 }

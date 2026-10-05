@@ -13,7 +13,8 @@ enum Fault {
     Panic,
 }
 
-/// Starts shards on a `sim` node, records each request, and injects one fault.
+/// Starts shards on a `sim` node, records each request, and injects one fault. Goes
+/// when `sim` injects shard faults (#245).
 struct Driver {
     inner: Shards,
     fault: Option<(usize, Fault)>,

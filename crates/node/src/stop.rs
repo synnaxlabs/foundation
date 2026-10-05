@@ -1,7 +1,7 @@
 //! A one-time signal that every shard of a node waits on.
 
 use std::pin::Pin;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 
 /// Set once, from any thread. Each shard touches it once to wait and once to end,
@@ -16,7 +16,7 @@ struct State {
 }
 
 impl Stop {
-    /// Sets the signal and wakes every waiter. Later calls do nothing.
+    /// Sets the signal and wakes every guard. Later calls do nothing.
     pub(crate) fn set(&self) {
         let wakers = {
             let mut state = self.lock();
@@ -28,30 +28,31 @@ impl Stop {
         }
     }
 
-    /// Completes once the signal is set.
-    pub(crate) fn wait(&self) -> Wait<'_> {
-        Wait {
-            stop: self,
+    /// A shard's hold on the signal: it completes once the signal is set, and it sets
+    /// the signal when dropped, so any shard that ends stops the node.
+    pub(crate) fn guard(self: &Arc<Self>) -> Guard {
+        Guard {
+            stop: Arc::clone(self),
             slot: None,
         }
     }
 
-    /// `set` runs in `Drop` while a shard unwinds, so a poisoned lock is read, not
-    /// raised: the state stays valid across a panic.
+    /// Nothing panics while it holds the lock. `into_inner` keeps `Guard::drop` from
+    /// panicking all the same.
     fn lock(&self) -> MutexGuard<'_, State> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// The future of [`Stop::wait`]. It keeps one waker slot, so polling it again does
-/// not grow the list.
+/// The future of [`Stop::guard`]. It keeps one waker slot, so a repeated poll does not
+/// grow the list.
 #[derive(Debug)]
-pub(crate) struct Wait<'a> {
-    stop: &'a Stop,
+pub(crate) struct Guard {
+    stop: Arc<Stop>,
     slot: Option<usize>,
 }
 
-impl Future for Wait<'_> {
+impl Future for Guard {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
@@ -68,5 +69,11 @@ impl Future for Wait<'_> {
             self.slot = Some(slot);
         }
         Poll::Pending
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.stop.set();
     }
 }
