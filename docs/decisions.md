@@ -1316,6 +1316,10 @@ the oscillator fit move to a layer-1 crate (`estimate`), used by both
 `clock` and the connector library. Rename the connector module to `stamp`
 (`stamp::Midpoint`, `stamp::Window`, `stamp::Fit`). Basis: R9-D13, TIME ADAPTERS, the
 SRP PASS layer-1 rule, BQ21 (names).
+Amended (2026-10-05, #143): there is no exchange state machine. The request carries
+`sent` and the peer echoes it, so `estimate::Exchange` is plain data, and
+`Exchange::measure` turns one round trip into a `Measurement`. The schedule of requests
+(rate, timeouts, backoff) is I/O and lives in `clock`. Approved by the coordinator.
 
 **X12. The old term vs "region".**
 Conflict: S9, K5, the MODEL MAP, C3, C6, C8, BQ8, R4 RESULTS, r4, r8 (including its
