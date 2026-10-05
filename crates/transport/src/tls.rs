@@ -795,7 +795,8 @@ mod tests {
                 client.write_tls(&mut wire).expect("writes to a Vec");
             }
             let mut acceptor = Acceptor::default();
-            acceptor.read_tls(&mut wire.as_slice()).expect("reads from a slice");
+            let mut rest = wire.as_slice();
+            acceptor.read_tls(&mut rest).expect("reads from a slice");
             let accepted = acceptor.accept().expect("a hello").expect("a whole hello");
             let hello = accepted.client_hello();
             let alpn = hello.alpn().expect("ALPN").collect::<Vec<_>>();
