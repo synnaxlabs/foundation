@@ -50,6 +50,17 @@ fn position() -> impl Strategy<Value = Position> {
 /// The last log position of each node, and the actions to run.
 fn run() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
     let nodes = prop_oneof![1 => 1..=2_usize, 5 => Just(3), 1 => Just(4), 4 => Just(5)];
+    run_of(nodes)
+}
+
+/// A run of a group that keeps a quorum when one node is cut off.
+fn run_of_many() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
+    run_of(prop_oneof![5 => Just(3_usize), 1 => Just(4), 4 => Just(5)])
+}
+
+fn run_of(
+    nodes: impl Strategy<Value = usize>,
+) -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
     nodes.prop_flat_map(|nodes| {
         (
             prop::collection::vec(position(), nodes),
@@ -201,17 +212,25 @@ impl Network {
         agreed.then_some((at, leader.term()))
     }
 
-    /// Runs the actions, mends the network, and runs rounds until the nodes agree.
+    /// Runs the actions, mends the network, and runs rounds until the nodes agree
+    /// on one leader for two election timeouts.
     fn settle(&mut self, actions: &[Action]) -> Result<(usize, Term), TestCaseError> {
         for action in actions {
             self.apply(action);
         }
         self.cut.fill(false);
-        // A round ends with no message in flight, so nothing from before can
-        // change the leader after the nodes agree.
+        // A leader that was cut off can step down once after the network mends,
+        // because it counts the nodes it heard from over a full election timeout.
+        let mut held = (None, 0);
         for _ in 0..100 * ELECTION {
             self.round();
-            if let Some(agreed) = self.agreed() {
+            let agreed = self.agreed();
+            held = if agreed == held.0 {
+                (agreed, held.1 + 1)
+            } else {
+                (agreed, 1)
+            };
+            if let (Some(agreed), true) = (held.0, held.1 >= 2 * ELECTION) {
                 return Ok(agreed);
             }
         }
@@ -247,15 +266,14 @@ proptest! {
 
     #[test]
     fn a_node_that_was_cut_off_does_not_replace_the_leader(
-        (logs, actions) in run(),
+        (logs, actions) in run_of_many(),
         random in any::<u64>(),
         pick in any::<Index>(),
     ) {
         let mut network = Network::new(logs, random);
         let agreed = network.settle(&actions)?;
-        let follower = pick.index(network.nodes.len());
-        // The other nodes must stay a quorum without the follower.
-        prop_assume!(follower != agreed.0 && network.nodes.len() > 2);
+        let others = network.nodes.len() - 1;
+        let follower = (agreed.0 + 1 + pick.index(others)) % network.nodes.len();
         network.cut[follower] = true;
         for _ in 0..4 * ELECTION {
             network.round();
@@ -268,18 +286,25 @@ proptest! {
     }
 
     #[test]
-    fn a_leader_without_a_quorum_steps_down(
-        (logs, actions) in run(),
+    fn a_leader_without_a_quorum_steps_down_and_the_rest_elect_another(
+        (logs, actions) in run_of_many(),
         random in any::<u64>(),
     ) {
         let mut network = Network::new(logs, random);
         let (leader, _) = network.settle(&actions)?;
-        prop_assume!(network.nodes.len() > 1);
         network.cut[leader] = true;
         for _ in 0..2 * ELECTION {
             network.round();
         }
         prop_assert_ne!(network.nodes[leader].role(), Role::Leader);
+        // `collect` checks the log of the new leader against a quorum.
+        for _ in 0..20 * ELECTION {
+            network.round();
+        }
+        let elected = network.nodes.iter().enumerate();
+        let elected = elected.filter(|(_, node)| node.role() == Role::Leader);
+        let elected: Vec<usize> = elected.map(|(at, _)| at).collect();
+        prop_assert!(elected.len() == 1 && elected[0] != leader, "{elected:?}");
     }
 }
 
