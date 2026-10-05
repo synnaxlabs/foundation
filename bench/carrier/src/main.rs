@@ -91,7 +91,7 @@ impl Options {
                         list.split(',').map(str::parse).collect::<Result<_, _>>()?;
                 }
                 Some(("samples", path)) if client => {
-                    options.samples = Some(path.into())
+                    options.samples = Some(path.into());
                 }
                 _ => return Err(format!("unknown option {arg:?}\n{USAGE}").into()),
             }

@@ -717,7 +717,7 @@ async fn paced_datagrams(
         loop {
             match timeout(LOST_AFTER, datagrams.read()).await {
                 Ok(back) => {
-                    rtts.extend(measured(base, &back?.ok_or("the session closed")?))
+                    rtts.extend(measured(base, &back?.ok_or("the session closed")?));
                 }
                 Err(_) if done.get() => return Ok::<_, Error>(rtts),
                 Err(_) => {}
