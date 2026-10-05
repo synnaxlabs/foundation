@@ -7,8 +7,9 @@
 //!
 //! A header is `index: u128, path: u8, first: u64, len: u32, stored_at: i64,
 //! last: u8 + i64, tag: u8, bytes: u32`, little-endian and fixed width. `last` is a
-//! presence byte then the stamp. One table block and the callers' blocks make one
-//! vectored write, with no copy and no block per entry.
+//! presence byte then the stamp; under presence 0 the stamp is written as 0 and not
+//! read. One table block and the callers' blocks make one vectored write, with no
+//! copy and no block per entry.
 
 #![deny(
     clippy::indexing_slicing,
@@ -29,8 +30,9 @@ pub(crate) const HEADER_LEN: usize = 16 + 1 + 8 + 4 + 8 + 9 + 1 + 4;
 pub(crate) struct Header {
     pub(crate) index: channel::Key,
     pub(crate) path: Path,
-    /// The first seq, and how many samples. A caller record has `len` 0.
+    /// The first seq.
     pub(crate) first: u64,
+    /// How many samples. A caller record has `len` 0.
     pub(crate) len: u32,
     /// Mesh time at which the home stored it.
     pub(crate) stored_at: Stamp,
@@ -43,7 +45,7 @@ pub(crate) struct Header {
 }
 
 impl Header {
-    pub(crate) fn encode(&self) -> [u8; HEADER_LEN] {
+    fn encode(&self) -> [u8; HEADER_LEN] {
         let mut out = [0; HEADER_LEN];
         let mut rest: &mut [u8] = &mut out;
         for field in [
@@ -65,7 +67,7 @@ impl Header {
     }
 
     fn decode(bytes: &[u8; HEADER_LEN]) -> Result<Self, Invalid> {
-        let mut fields = Fields(bytes);
+        let mut fields = Cursor(bytes);
         let index = channel::Key::from_u128(u128::from_le_bytes(fields.take()));
         let path = match fields.take::<1>() {
             [0] => Path::Live,
@@ -99,9 +101,9 @@ impl Header {
 }
 
 /// Reads fixed-width fields from the front of a header.
-struct Fields<'a>(&'a [u8]);
+struct Cursor<'a>(&'a [u8]);
 
-impl Fields<'_> {
+impl Cursor<'_> {
     fn take<const N: usize>(&mut self) -> [u8; N] {
         let (field, rest) = self
             .0
@@ -131,28 +133,31 @@ pub(crate) fn table_len(count: usize) -> usize {
         .expect("invariant: a table fits in memory")
 }
 
-/// Writes the table of `headers` into `into`.
+/// Writes the table of `headers` at the front of `into` and returns its size,
+/// `table_len(headers.len())`.
 ///
 /// # Panics
 ///
-/// When `into` is not `table_len(headers.len())` bytes, or when there are over
-/// `u32::MAX` headers.
-pub(crate) fn write_table(headers: &[Header], into: &mut [u8]) {
-    assert_eq!(
-        into.len(),
-        table_len(headers.len()),
-        "invariant: the table of {} headers takes {} bytes",
-        headers.len(),
-        table_len(headers.len())
-    );
+/// When `into` is shorter than the table, or when there are over `u32::MAX`
+/// headers.
+pub(crate) fn write_table(headers: &[Header], into: &mut [u8]) -> usize {
+    let len = table_len(headers.len());
+    let Some((table, _)) = into.split_at_mut_checked(len) else {
+        panic!(
+            "invariant: the table of {} headers takes {len} bytes, given {}",
+            headers.len(),
+            into.len()
+        );
+    };
     let count = u32::try_from(headers.len()).expect("invariant: a group fits a u32");
-    let (slot, mut rest) = into.split_at_mut(4);
+    let (slot, mut rest) = table.split_at_mut(4);
     slot.copy_from_slice(&count.to_le_bytes());
     for header in headers {
         let (slot, after) = rest.split_at_mut(HEADER_LEN);
         slot.copy_from_slice(&header.encode());
         rest = after;
     }
+    len
 }
 
 /// Why a body is not an entry table.
@@ -164,9 +169,12 @@ pub(crate) enum Invalid {
     Path(u8),
     /// A `last` presence byte that is not 0 or 1.
     Presence(u8),
+    /// This many bytes follow the last entry and no header names them.
+    Trailing(usize),
 }
 
-/// Reads the table of `body` and gives each entry with its bytes, in order.
+/// Reads the table of `body` and gives each entry with its bytes, in order. The
+/// entries end at the first invalid one, which is the last item.
 ///
 /// # Errors
 ///
@@ -196,24 +204,35 @@ impl<'a> Iterator for Entries<'a> {
     type Item = Result<(Header, &'a [u8]), Invalid>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (header, rest) = self.headers.split_first_chunk::<HEADER_LEN>()?;
-        self.headers = rest;
-        Some(self.entry(header))
+        let item = self.entry()?;
+        if item.is_err() {
+            self.headers = &[];
+            self.bytes = &[];
+        }
+        Some(item)
     }
 }
 
 impl<'a> Entries<'a> {
-    fn entry(
-        &mut self,
-        header: &[u8; HEADER_LEN],
-    ) -> Result<(Header, &'a [u8]), Invalid> {
-        let header = Header::decode(header)?;
-        let len =
-            usize::try_from(header.bytes).map_err(|_overflow| Invalid::Truncated)?;
-        let (bytes, rest) =
-            self.bytes.split_at_checked(len).ok_or(Invalid::Truncated)?;
+    fn entry(&mut self) -> Option<Result<(Header, &'a [u8]), Invalid>> {
+        let Some((header, rest)) = self.headers.split_first_chunk::<HEADER_LEN>()
+        else {
+            return (!self.bytes.is_empty())
+                .then_some(Err(Invalid::Trailing(self.bytes.len())));
+        };
+        self.headers = rest;
+        let header = match Header::decode(header) {
+            Ok(header) => header,
+            Err(invalid) => return Some(Err(invalid)),
+        };
+        let Some(len) = usize::try_from(header.bytes).ok() else {
+            return Some(Err(Invalid::Truncated));
+        };
+        let Some((bytes, rest)) = self.bytes.split_at_checked(len) else {
+            return Some(Err(Invalid::Truncated));
+        };
         self.bytes = rest;
-        Ok((header, bytes))
+        Some(Ok((header, bytes)))
     }
 }
 
@@ -239,7 +258,8 @@ mod tests {
     fn body(entries: &[(Header, &[u8])]) -> Vec<u8> {
         let headers: Vec<Header> = entries.iter().map(|(header, _)| *header).collect();
         let mut body = vec![0; table_len(headers.len())];
-        write_table(&headers, &mut body);
+        let len = write_table(&headers, &mut body);
+        assert_eq!(len, body.len(), "the table fills the slice");
         for (_, bytes) in entries {
             body.extend_from_slice(bytes);
         }
@@ -306,9 +326,53 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invariant: the table of 1 headers takes 55 bytes")]
-    fn write_table_panics_on_a_slice_of_the_wrong_size() {
+    fn ends_at_the_first_bad_entry() {
+        let mut whole = body(&[(header(3), b"abc"), (header(2), b"de")]);
+        whole[4 + 16] = 2;
+        let mut entries = parse(&whole).expect("the table is whole");
+        assert_eq!(entries.next(), Some(Err(Invalid::Path(2))), "the bad entry");
+        assert_eq!(entries.next(), None, "nothing after the bad entry");
+        whole[4 + 16] = 1;
+        let short = &whole[..whole.len() - 1];
+        let mut entries = parse(short).expect("the table is whole");
+        assert!(
+            entries.next().is_some_and(|entry| entry.is_ok()),
+            "the first"
+        );
+        assert_eq!(entries.next(), Some(Err(Invalid::Truncated)), "the cut");
+        assert_eq!(entries.next(), None, "nothing after the cut");
+    }
+
+    #[test]
+    fn refuses_bytes_that_no_header_names() {
+        let mut whole = body(&[(header(3), b"abc")]);
+        whole.extend_from_slice(b"junk");
+        assert_eq!(parsed(&whole), Err(Invalid::Trailing(4)));
+        let mut entries = parse(&whole).expect("the table is whole");
+        assert!(
+            entries.next().is_some_and(|entry| entry.is_ok()),
+            "the entry"
+        );
+        assert_eq!(entries.next(), Some(Err(Invalid::Trailing(4))), "the junk");
+        assert_eq!(entries.next(), None, "nothing after the junk");
+        assert_eq!(parsed(&[0, 0, 0, 0, 1]), Err(Invalid::Trailing(1)));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: the table of 1 headers takes 55 bytes, given 54"
+    )]
+    fn write_table_panics_on_a_short_slice() {
         write_table(&[header(0)], &mut [0; 54]);
+    }
+
+    #[test]
+    fn write_table_fills_the_front_of_a_longer_slice() {
+        let mut block = [0xFF; 64];
+        assert_eq!(write_table(&[header(3)], &mut block), 55, "the table size");
+        assert_eq!(block[..4], [1, 0, 0, 0], "the count");
+        assert_eq!(block[4..55], header(3).encode(), "the header");
+        assert_eq!(block[55..], [0xFF; 9], "the rest is untouched");
     }
 
     fn any_header() -> impl Strategy<Value = Header> {

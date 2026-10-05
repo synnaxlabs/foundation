@@ -332,6 +332,14 @@ How to read this record:
   is the offset modulo the area length. The area is at least twice the largest record
   less one block, so an empty ring takes any record. A body is at most `u32::MAX`
   bytes.
+  Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
+  2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
+  u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
+  little-endian, fixed width; `last` is a presence byte (0 or 1) then the stamp,
+  which is 0 and not read under presence 0. The entries' bytes follow the table in
+  order, each `bytes` long, so one table block and the callers' blocks make one
+  vectored write with no copy and no block per entry. A body that ends early, an
+  unknown path or presence byte, or bytes after the last entry is a wrong shape.
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open. The restart record needs one free block: an open of a full ring first moves
