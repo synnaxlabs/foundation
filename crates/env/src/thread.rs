@@ -71,7 +71,7 @@ pub enum Error {
         /// What the OS or the simulation reported.
         reason: String,
     },
-    /// A shard could not pin its thread to its core.
+    /// A shard could not pin its thread to a core.
     Pin {
         /// The thread's name.
         name: String,
