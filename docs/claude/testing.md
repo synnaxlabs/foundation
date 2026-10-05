@@ -9,7 +9,7 @@ Every component gets clock, network, disk, and randomness as inputs (`env`). Pro
 passes the real ones. Tests pass the simulated ones from `sim`. Nothing reads the OS
 clock, the network, the disk, or a random source directly. Clippy's
 `disallowed-methods` list in `clippy.toml` enforces this. Only `os` implements the
-`env` seams and calls the OS, and `transport` owns its sockets.
+`env` seams and calls the OS, sockets included.
 
 A simulated run never reads OS randomness, OS time, or a random hash order (r16
 43-46). Use `types::hash::Map` and `Set`. Never let hash iteration order decide
@@ -31,6 +31,15 @@ behavior. Never print a pointer. No `thread_local!` state.
 Benchmarks run on a dedicated machine. Mutation testing (`cargo-mutants --in-diff`)
 checks that agent-written tests catch real changes. Miri and cargo-fuzz run on one
 pinned nightly that only those gates use.
+
+## Fuzzing
+
+- Targets live in one `fuzz/` crate at the root (`cargo-fuzz`), outside the
+  workspace members, because it needs nightly. Each decoder of outside input has one
+  target, named `<crate>_<decoder>`, such as `spec_tree`.
+- Inputs live in `oracles/fuzz/<target>/`. A crash becomes a permanent input there.
+- Each PR runs every target for 60 seconds. A nightly schedule runs them longer on
+  the ARM runner, which is idle at night.
 
 Simulation checks liveness as well as safety: after faults stop, the mesh converges
 within a bound (r16 60). A failed run prints its replay value, and CI runs that value

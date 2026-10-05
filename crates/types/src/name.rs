@@ -8,8 +8,9 @@ use std::cmp::Reverse;
 use std::fmt;
 use std::str::{FromStr, Split};
 
-/// A name: dot-separated segments of letters, digits, `_`, and `-`. Names are
-/// case-sensitive. A segment that starts with `@` is reserved for Foundation.
+/// A name: dot-separated segments of letters, digits, `_`, and `-`, at most
+/// [`Name::MAX_BYTES`] long. Names are case-sensitive. A segment that starts with `@`
+/// is reserved for Foundation.
 ///
 /// Letters and digits are ASCII, so `str::eq_ignore_ascii_case` finds two names that
 /// differ only in case.
@@ -17,6 +18,9 @@ use std::str::{FromStr, Split};
 pub struct Name(Box<str>);
 
 impl Name {
+    /// The most bytes a name or pattern holds.
+    pub const MAX_BYTES: usize = 255;
+
     /// The name as written.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -243,6 +247,9 @@ fn split(s: &str) -> Result<Split<'_, char>, Error> {
     if s.is_empty() {
         return Err(Error::Empty);
     }
+    if s.len() > Name::MAX_BYTES {
+        return Err(Error::Long { bytes: s.len() });
+    }
     Ok(s.split('.'))
 }
 
@@ -269,6 +276,11 @@ fn check_literal(input: &str, segment: &str) -> Result<(), Error> {
 pub enum Error {
     /// The text of a name or pattern is empty.
     Empty,
+    /// The text of a name or pattern is longer than [`Name::MAX_BYTES`].
+    Long {
+        /// The length of the text.
+        bytes: usize,
+    },
     /// A selector has no pattern that includes names: every pattern is an exclusion.
     NoInclude,
     /// A segment is empty or holds a character other than letters, digits, `_`, `-`,
@@ -290,6 +302,11 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("a name or pattern is empty"),
+            Self::Long { bytes } => write!(
+                f,
+                "a name or pattern is {bytes} bytes long. The limit is {} bytes",
+                Name::MAX_BYTES
+            ),
             Self::NoInclude => f.write_str(
                 "a selector includes no names. Add a pattern without a leading `!`",
             ),
@@ -357,6 +374,20 @@ mod tests {
         fn rejects_empty_text() {
             assert_eq!("".parse::<Name>(), Err(Error::Empty));
             assert_eq!(Error::Empty.to_string(), "a name or pattern is empty");
+        }
+
+        #[test]
+        fn holds_up_to_the_limit() {
+            let text = format!("a.{}", "b".repeat(Name::MAX_BYTES - 2));
+            assert_eq!(name(&text).as_str().len(), 255);
+            assert_eq!(
+                format!("{text}c").parse::<Name>(),
+                Err(Error::Long { bytes: 256 })
+            );
+            assert_eq!(
+                Error::Long { bytes: 256 }.to_string(),
+                "a name or pattern is 256 bytes long. The limit is 255 bytes"
+            );
         }
 
         #[test]

@@ -89,6 +89,9 @@ How to read this record:
   the dot. MQTT maps `.` to `/`. Letters are ASCII (decided by the person,
   2026-10-04). Widening to Unicode later stays backward compatible. `discover` maps
   non-ASCII device tags to ASCII names.
+- **NAME LENGTH (2026-10-04)** A name or pattern holds at most 255 bytes. The person
+  chose "255 bytes": it fits a one-byte length prefix, and raising it later stays
+  backward compatible.
 - **SPECIFICITY (#3)** Pattern specificity orders by more literal segments, then fewer
   `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` > `**`. A run of wildcards
   counts as its `*`s and one `**` (`a.**.*.**` is `a.*.**`). Two different patterns may
@@ -169,12 +172,13 @@ How to read this record:
   blocks are 64-byte aligned; R9-D4 variable-length series are `ends[n]` then data;
   R9-D5 `types` is byte layout only and meaning lives in the spec; R9-D6 `time::Span`
   value and `duration` keyword; R9-D7 JSON uses RFC 3339 UTC with 9 fraction digits,
-  span unit strings, and keys as UUID strings, and never appears on the data path;
-  R9-D8 exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal
-  overflow and checked math for outside values; R9-D13 `types` modules are time,
-  sample, series, frame, channel, node, quality, name, and hash (R16-7); R9-D14 checks
-  run once, at the home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block`
-  module (by SRP PASS).
+  span unit strings, and keys as UUID strings, and never appears on the data path; R9-D8
+  exact reduced-fraction `Rate` with u128 offset math; R9-D10 panic on internal overflow
+  and checked math for outside values; R9-D13 `types` modules are time, sample, series,
+  frame, channel, node, quality, name, hash (R16-7), authority (#57: `access`, `spec`,
+  `wire`, and `control` all use it), and digest (the BLAKE3 address of spec chunks and
+  blobs, which `spec`, `blob`, `wire`, and `mesh` share); R9-D14 checks run once, at the
+  home. R9-D11 rejected (slots won). Supersedes: R9-D13 `block` module (by SRP PASS).
 - **MODEL MAP (current)** Data channel -> index, -> quality (optional), -> data type,
   -> unit. Index -> error channel (optional), -> control channel (optional). Type ->
   other types; types never point at channels. Policies -> names through selectors;
@@ -311,6 +315,20 @@ How to read this record:
   The estimator never knows what a source is. Each source is an adapter with its own
   loop. `node` builds the source table. Adapters probe for hardware and privileges. The
   same estimator serves device clocks in the connector library.
+- **ESTIMATE COMBINE (2026-10-04)** A `Measurement` is about the node's monotonic
+  clock: its offset is mesh time minus the monotonic reading at `at`, and its error is
+  a half-width from 0 to 36500 days. Device clocks use the oscillator fit, whose issue
+  sets its input. A bound grows by the drift bound times the time from `at`, in both
+  directions. The drift bound is at most 10%; `Drift::UNDISCIPLINED` is 200 ppm. A
+  measured oscillator rate goes into `Drift` later, as an additive change. Each source
+  keeps its last 8 measurements and offers the one with the smallest bound now. This
+  reads R6 TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange
+  loses to a fresh slower one. `combine` takes one `Filter` per source and returns the
+  hull of the offsets inside the most bounds (Marzullo). It fails when no offset is
+  inside more than half of them. This reads C6's "follows the smallest measured
+  bound": when sources agree, the result is never wider than the narrowest. The
+  result holds the true offset when the bounds that hold it are a majority and every
+  other bound misses them. Decided by the `time` builder (#49).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -337,12 +355,33 @@ How to read this record:
   over TCP; complete is reliable and ordered with credits; catch-up is lowest. The
   default carrier per traffic class comes from measurement.
 - **T1 seam** Foundation's own `Transport` trait sits in front of every carrier.
+  Amended by SIM NETWORK: the trait is private to `transport`, and `sim` replaces the
+  network below the carriers (`env::net`), not the transport.
 - **R5 starting points** Addresses come from the mesh, not DNS. A TCP path is
   mandatory. Try direct UDP, then direct TCP, then a relay. Relays admit only known
   keys. No n0 infrastructure. iroh `Endpoint` is rejected; quinn-proto is the fallback
   core. The diode carrier is UDP, Noise K, RaptorQ, seq, and codec keyframes: best
   effort with recorded gaps; commands, Raft, and clock exchange cannot cross it.
 - **A4 (wire part)** Each connection swaps keys for short numbers.
+- **STREAM DISPATCH (2026-10-04)** `transport` is blind to protocols. The first
+  message of each stream, and each datagram, starts with a header from `wire` that
+  names the protocol (`clock`, `mesh`, `replica`, `blob`, `hub`). `node` holds the
+  table from protocol to handler and runs one accept loop per session. A protocol
+  that the table does not know comes from a peer, so the loop resets that stream with
+  a code and goes on. Decided by the coordinator (network's review of #53).
+- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
+  however many shards it runs, so each site's firewall needs one known port per
+  conduit. Each QUIC connection belongs to one shard, and every connection ID a node
+  issues encodes that shard. A receive loop on one shard reads the UDP socket in
+  batches and hands each batch to the owning shard over the C2 ring; every shard
+  sends on the same socket. The TCP listener accepts and moves each stream to its
+  shard. `env::net` therefore splits a UDP socket into a receive half with one owner
+  and a send half that any shard may use, and `sim` models the split. Rejected: a
+  port per shard (a port range in every firewall), kernel reuse-port hashing (routes
+  by address, breaks on NAT rebinding), and one shard doing all network work. If the
+  receive loop saturates on Linux, add a reuse-port group steered by the same
+  connection ID. Decided by the design session under the architecture delegation
+  (#53).
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
 
@@ -677,8 +716,35 @@ How to read this record:
   task ends its shard, and its `Handle::join` returns `Error::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
-  scheduler runs them. No other crate calls Tokio's timers or spawn. Files come later
-  (S4).
+  scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
+  (#37) gives files under one data directory, with owned blocks and a sync that
+  poisons the file on failure (S4). `env::net` (#44) gives UDP sockets that move GSO
+  and GRO batches with ECN and the local address, TCP streams, and listeners.
+- **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
+  The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
+  unchanged under simulation, which is why r5 rejected iroh. The network seam lives
+  in `env` (`env::net`): `os` implements real sockets, and `sim` implements the
+  simulated network with loss, delay, reorder, duplication, and partitions. `sim` does
+  not depend on `transport`. `transport` owns the carriers and the session model, and
+  its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
+  `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
+  session under the architecture delegation.
+- **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
+  `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
+  `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
+  implements it over `std::alloc` for tests, Miri, and `sim`. `block` makes no OS
+  call. `reclaim` takes back returned blocks on each loop turn; `purge` gives idle
+  pages back on a timer that the shard owns (#2).
+- **COUNTING ALLOCATOR (2026-10-04)** The person allowed one exception to "no mutable
+  globals": "Allow in test binaries". A test or benchmark binary may hold one
+  counting `#[global_allocator]` `static` with an atomic count, because Rust has no
+  other way to count allocations. Never in a library or the `node` binary. The
+  `xtask globals` check allows only this case.
+- **ARM RUNNER (2026-10-04)** CI runs every test on aarch64 too, because a wake
+  protocol can pass on x86 and fail on ARM (r11 4.1). The person chose "AWS runner
+  always on" and said "I have tons of AWS credits". The runner is `foundation-arm-1`,
+  an AWS c7g.2xlarge in us-east-1 with no inbound ports, tagged
+  `project=foundation-ci`, outside BENCH SPEND. The coordinator owns it.
 
 ### 1.15 Releases
 
@@ -1368,10 +1434,10 @@ Rules:
 4. Layer 3 may depend on any layer-1 crate and, from layer 2, only on `hub`.
 5. Layer 4 may depend on anything below it.
 6. Upward flow goes only through values the upper crate pulls (watches, streams).
-   Seams that lower crates define and upper crates implement (`env` traits,
-   `Transport`) are injected downward.
-7. Only `os` touches the real clock, files, randomness, and threads, through the
-   `env` seams it implements. Only `clock` reads wall time through `env`; everyone
+   Seams that lower crates define and upper crates implement (`env` traits) are
+   injected downward.
+7. Only `os` touches the real clock, files, network, randomness, and threads, through
+   the `env` seams it implements. Only `clock` reads wall time through `env`; everyone
    else asks `clock`. Only `node` builds real seams, and only `sim` builds simulated
    ones. Below `hub`, only `home` writes channels, and only its companion samples.
 
@@ -1397,12 +1463,12 @@ Order: layer 1 (`block`, `ring`) -> `types` -> (`env`, `document`, `raft`, `esti
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams on the real operating system: monotonic and wall clocks, files, randomness, and threads. The only crate allowed to call them. | `env`, `types` |
-| 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes; never calls up. | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
+| 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`, `append_at`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `env`, `types`, `estimate`, `wire`, `transport` |
 | 2 | `blob` | Stores content by hash and fetches it from peers (spec chunks, binaries). | `env`, `types`, `block`, `wire`, `transport` |
-| 2 | `sim` | Simulates env and transport with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block`, `transport` |
+| 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
 | 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
 | 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append_at`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
@@ -1486,8 +1552,8 @@ Parameters and later choices, recorded and not asked:
   grace, standby send point (after sync or on receipt), SSD rule for Pi homes.
 - Consensus and spec: Raft timeouts, prolly chunk size (~4 KiB) and chunker quality,
   root GC depth (last N roots).
-- Time: exchange period, source discovery period, drift rate for bound widening, stamp
-  limits near 1970 and far future (A5).
+- Time: exchange period, source discovery period, drift rate for bound widening
+  (starts at 200 ppm, ESTIMATE COMBINE), stamp limits near 1970 and far future (A5).
 - Transport: default carrier per traffic class (QUIC vs TLS over TCP, measured on
   Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection.
 - Compression and reduction defaults; retention defaults; disk budget defaults.
