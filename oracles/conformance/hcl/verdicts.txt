@@ -91,6 +91,19 @@ operator-negate-reference accepted hcl.operator
 operator-not accepted hcl.operator
 operator accepted hcl.operator
 parentheses accepted hcl.parentheses
+reference-at-start refused
+reference-bracket-lines-written accepted
+reference-bracket-lines accepted
+reference-digit-part refused
+reference-dot-end refused
+reference-keyword-first accepted hcl.index
+reference-keyword-parts accepted
+reference-line-before-dot refused
+reference-null-first accepted hcl.index hcl.null
+reference-number-part accepted hcl.index
+reference-reserved refused
+reference-spaces-written accepted
+reference-spaces accepted
 reference-unicode accepted
 reference accepted
 splat-attribute accepted hcl.splat

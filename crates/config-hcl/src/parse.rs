@@ -1674,19 +1674,6 @@ c = "°C # not a comment"
                 ("a = b[0]\n", on(5, 6), Form::Index),
                 ("a = f(1).b\n", on(8, 9), Form::Index),
                 ("a = 1.x\n", on(5, 6), Form::Index),
-                ("a = true.f\n", on(8, 9), Form::Index),
-                ("a = false.x\n", on(9, 10), Form::Index),
-                ("a = b.0\n", on(5, 6), Form::Index),
-                ("a = site_a.1\n", on(10, 11), Form::Index),
-                ("a = b.1-2\n", on(5, 6), Form::Index),
-                ("a = b.0c\n", on(5, 6), Form::Index),
-                ("a = b.-c\n", on(5, 6), Form::Index),
-                ("a = [kf1.5true]\n", on(8, 9), Form::Index),
-                ("a = b.c.@d\n", on(7, 8), Form::Index),
-                ("a = b.\n", on(5, 6), Form::Index),
-                ("a = b..c\n", on(5, 6), Form::Index),
-                ("a = b.c[0]\n", on(7, 8), Form::Index),
-                ("a = b.c.*\n", on(7, 8), Form::Splat),
                 ("a = [1][0]\n", on(7, 8), Form::Index),
                 ("a = b[*].c\n", on(5, 6), Form::Splat),
                 ("a = b[ * ]\n", on(5, 6), Form::Splat),
@@ -1714,6 +1701,29 @@ c = "°C # not a comment"
                 ("a = { -1.5 = 1 }\n", on(7, 10), Form::NumberKey),
                 ("a = { - = 1 }\n", on(6, 7), Form::Operator),
                 ("a = { -x = 1 }\n", on(6, 7), Form::Operator),
+            ];
+            for (text, span, form) in cases {
+                let message = refused(form);
+                check(text, &[(Error::Form { span, form }, &message)]);
+            }
+        }
+
+        #[test]
+        fn refuses_each_form_after_a_reference_or_a_keyword_at_its_token() {
+            let cases = [
+                ("a = true.f\n", on(8, 9), Form::Index),
+                ("a = false.x\n", on(9, 10), Form::Index),
+                ("a = b.0\n", on(5, 6), Form::Index),
+                ("a = site_a.1\n", on(10, 11), Form::Index),
+                ("a = b.1-2\n", on(5, 6), Form::Index),
+                ("a = b.0c\n", on(5, 6), Form::Index),
+                ("a = b.-c\n", on(5, 6), Form::Index),
+                ("a = [kf1.5true]\n", on(8, 9), Form::Index),
+                ("a = b.c.@d\n", on(7, 8), Form::Index),
+                ("a = b.\n", on(5, 6), Form::Index),
+                ("a = b..c\n", on(5, 6), Form::Index),
+                ("a = b.c[0]\n", on(7, 8), Form::Index),
+                ("a = b.c.*\n", on(7, 8), Form::Splat),
             ];
             for (text, span, form) in cases {
                 let message = refused(form);
@@ -1787,7 +1797,10 @@ c = "°C # not a comment"
                 span: on(8, 9),
                 form: Form::Index,
             };
-            check("a = null.x\n", &[(null, NULL), (index, &refused(Form::Index))]);
+            check(
+                "a = null.x\n",
+                &[(null, NULL), (index, &refused(Form::Index))],
+            );
         }
 
         #[test]
@@ -1871,7 +1884,11 @@ c = "°C # not a comment"
                 ("a.b = 1\n", on(1, 2), Expected::AttributeOrBlock),
                 ("@a = 1\n", on(0, 1), Expected::Item),
                 ("a = @system.x\n", on(4, 5), Expected::Value),
-                ("a = x\n.b\n", span(at(6, 1, 0), at(7, 1, 1)), Expected::Item),
+                (
+                    "a = x\n.b\n",
+                    span(at(6, 1, 0), at(7, 1, 1)),
+                    Expected::Item,
+                ),
                 ("a = [1 2]\n", on(7, 8), Expected::ListEnd),
                 (
                     "a = [1, 2\n",
