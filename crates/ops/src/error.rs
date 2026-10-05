@@ -68,8 +68,15 @@ impl Error {
         json!({ "code": self.code().as_str(), "message": self.to_string(), "fix": self.fix() })
     }
 
+    /// The error as two lines for a terminal. A control character from the caller's
+    /// text is written as its escape, so it cannot add a line or move the cursor.
     pub(crate) fn text(&self) -> String {
-        format!("error[{}]: {self}\nfix: {}\n", self.code(), self.fix())
+        let message = escape(&self.to_string());
+        format!(
+            "error[{}]: {message}\nfix: {}\n",
+            self.code(),
+            escape(&self.fix())
+        )
     }
 }
 
@@ -86,4 +93,16 @@ impl fmt::Display for Error {
             }
         }
     }
+}
+
+fn escape(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }

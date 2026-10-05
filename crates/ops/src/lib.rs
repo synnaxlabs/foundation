@@ -4,6 +4,8 @@
 use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 
+use serde_json::json;
+
 mod error;
 mod mcp;
 mod operation;
@@ -33,7 +35,8 @@ pub fn cli(
     let json = args
         .iter()
         .take_while(|arg| *arg != "--")
-        .any(|arg| arg == "--json");
+        .filter_map(|arg| arg.to_str())
+        .any(|arg| arg == "--json" || arg.starts_with("--json="));
     let done = operation::parse(&args)
         .map_err(Stop::Failed)
         .and_then(|parsed| match parsed {
@@ -45,6 +48,9 @@ pub fn cli(
                     response.text()
                 };
                 write(&mut output, &text)
+            }
+            Parsed::Help(text) if json => {
+                write(&mut output, &format!("{}\n", json!({ "help": text })))
             }
             Parsed::Help(text) => write(&mut output, &text),
             Parsed::Mcp => mcp::serve(input, &mut output),
