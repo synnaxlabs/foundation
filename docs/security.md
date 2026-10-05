@@ -72,8 +72,12 @@ state on `main`.
   reset for it. The router is not built. #77 asks that it hands such a datagram
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
-  byte arrives), #298 (datagrams that are not valid, from one address, stop every
-  stateless reset; a small datagram of an unknown version gets a reply).
+  byte arrives). A connection now holds at most its receive budget (#467), and a
+  size takes the budget of a size with no block in use (#270). Still open: a test
+  that a stream on another connection reads while one connection holds its budget,
+  and many connections before admission (#563).
+- Open: #298 (datagrams that are not valid, from one address, stop every stateless
+  reset; a small datagram of an unknown version gets a reply).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
   session). A chain is one certificate of at most 1 KiB.
 - Not decided: a limit on handshakes before admission. Each one costs the node a key
