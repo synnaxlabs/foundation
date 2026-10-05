@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 serde_json = "1"
+# Deliberate break: the crates.io `ring` through `rustls`.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [lints]
 workspace = true
