@@ -535,27 +535,33 @@ How to read this record:
   TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
   fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
   offsets inside the most bounds (Marzullo). It fails when no offset is inside more than
-  half of them. This reads C6's "follows the smallest measured bound": when sources
-  agree, the result is never wider than the narrowest. The result holds the true offset
-  when the bounds that hold it are a majority and every other bound misses them. Decided
-  by the `time` builder (#49). A device's readings go to the oscillator fit
-  (`Overlap`), never to `combine`. Node sources keep `Filter`, not `Overlap`: a network
-  exchange puts the true offset at about the same place in each bracket, so an overlap
-  gains little, and a broken drift bound would stay wrong for the life of an overlap,
-  not for 8 exchanges. Decided by the coordinator (#84). An error that grows past 36500
-  days stops at 36500 days ("unknown") and never fails, so a lone Windows node gets OS
-  time as OS CLOCK BOUND says. An error over 36500 days fails only in a new measurement:
-  `Measurement::new` gives `None`. The person decided on 2026-10-05 ("Ok that's fine"),
-  #225. In an `Interval` from `Measurement::interval`, "unknown" is a half-width of
-  36500 days, and the true time can be outside it. Decided by the `time` builder
-  (#142). `combine` uses each bound with its full growth, so a bound that grew to
-  "unknown" never cuts a known one. An exchange with an error over 36500 days fails with
-  `Bound`, and an overlap whose readings allow one before drift gives `None`: a stopped
-  bound stored as a measurement could miss the true offset. Decided by the `time`
-  builder (#258). Each function returns only the errors it can give: one `Error` per
-  module (`exchange`, `overlap`, `combine`), and `Option` where a caller does the same
-  for each cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the
-  coordinator (#272).
+  half of the bounds that vote. This reads C6's "follows the smallest measured bound":
+  when sources agree, the result is never wider than the narrowest. The result holds the
+  true offset when the bounds that hold it are a majority of the bounds that vote, and
+  every other bound that votes misses them. Decided by the `time` builder (#49). A
+  device's readings go to the oscillator fit (`Overlap`), never to `combine`. Node
+  sources keep `Filter`, not `Overlap`: a network exchange puts the true offset at about
+  the same place in each bracket, so an overlap gains little, and a broken drift bound
+  would stay wrong for the life of an overlap, not for 8 exchanges. Decided by the
+  coordinator (#84). An error that grows past 36500 days stops at 36500 days ("unknown")
+  and never fails, so a lone Windows node gets OS time as OS CLOCK BOUND says. An error
+  over 36500 days fails only in a new measurement: `Measurement::new` gives `None`. The
+  person decided on 2026-10-05 ("Ok that's fine"), #225. In an `Interval` from
+  `Measurement::interval`, "unknown" is a half-width of 36500 days, and the true time
+  can be outside it. Decided by the `time` builder (#142). `combine` uses each bound
+  with its full growth, so an "unknown" bound never cuts another. A bound of 36500 days
+  at `now`, given or grown by drift, votes only when no bound is known. A vote for it
+  lost: it turned a peer split into a wide estimate that no peer gave. The person chose
+  this (OS CLOCK BOUND); counting a grown bound is from the `time` builder, approved by
+  the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
+  Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
+  showed this case before the person chose. An exchange with an error over 36500 days
+  fails with `Bound`, and an overlap whose readings allow one before drift gives `None`:
+  a stopped bound stored as a measurement could miss the true offset. Decided by the
+  `time` builder (#258). Each function returns only the errors it can give: one `Error`
+  per module (`exchange`, `overlap`, `combine`), and `Option` where a caller does the
+  same for each cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by
+  the coordinator (#272).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -601,11 +607,15 @@ How to read this record:
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
-  `clock` reads that as the largest error, 36500 days: a node alone still gets OS
-  time, with an error that says "unknown", and in a mesh the reading adds a vote but
-  does not move the estimate. A fixed invented error lost: a wrong value gives a bound
-  that is not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
-  'unknown'"), #144. The split between `env::wall` and `clock` is from #172.
+  `clock` reads that as the largest error, 36500 days: a node alone still gets OS time,
+  with an error that says "unknown", and beside a known bound the reading does not vote
+  (ESTIMATE COMBINE). A fixed invented error lost: a wrong value gives a bound that is
+  not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
+  'unknown'"), #144. The split between `env::wall` and `clock` is from #172. When known
+  peers split, `combine` fails, so the clock is unsynced before its first estimate and
+  holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
+  source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
+  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314.
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
