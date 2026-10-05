@@ -4,8 +4,8 @@
 //! One [`Sim`] runs every node of a mesh on the calling thread. A seeded scheduler
 //! polls one ready task at a time, and true time moves only when no task is ready: to
 //! the next timer, arrival, or end of a file call. Datagrams cross [`link`]s with
-//! delay and faults, and bytes cross serial [`line`]s at the line rate. The same seed
-//! and the same calls give the same run.
+//! delay and faults, and bytes cross serial [`line`](mod@line)s at the line rate.
+//! The same seed and the same calls give the same run.
 //!
 //! A task panic becomes [`Error::Panicked`] only in a build that unwinds on panic, as
 //! tests do. A build with `panic = "abort"` ends the process at the panic.
@@ -41,6 +41,7 @@ use types::time::{Monotonic, Span};
 use crate::files::Files;
 use crate::net::Network;
 use crate::node::Node;
+use crate::serial::Serial;
 use crate::state::{Futures, Next, Outcome, Shared, Start, State, lock};
 
 /// Settings for one run. Build it with `..Config::default()`: fields get added.
@@ -115,7 +116,8 @@ impl Sim {
         let scheduler = Rng::from_seed(streams.next_u64());
         let net = Network::new(config.link, Rng::from_seed(streams.next_u64()));
         let files = Files::new(Rng::from_seed(streams.next_u64()));
-        let state = State::new(Instant::now(), net, files);
+        let serial = Serial::new(Rng::from_seed(streams.next_u64()));
+        let state = State::new(Instant::now(), net, files, serial);
         Self {
             config,
             shared: Arc::new(Mutex::new(state)),
@@ -149,18 +151,14 @@ impl Sim {
     /// Sets the line that joins port `a_path` of `a` and port `b_path` of `b`, for the
     /// bytes sent from now on. An open of either path on its node opens that end.
     ///
-    /// - A character is 1 start bit, 8 data bits, the parity bit if any, and the
-    ///   stop bits. Byte `k` of a run of bytes sent back to back, from 1, arrives
-    ///   `k * bits * 10^9 / baud` ns, rounded down, after the run starts, at the
-    ///   rate of the sender's settings.
+    /// - Byte `k` of a run of bytes sent back to back, from 1, arrives
+    ///   [`span(k)`](types::time::Rate::span) of the
+    ///   [`rate`](env::serial::Settings::rate) of the sender's settings after the
+    ///   run starts.
     /// - A byte arrives intact only when both ends have the same settings. Otherwise
     ///   it arrives as a random byte.
-    /// - Each end holds at most 4 KiB of bytes written that have not arrived: a
-    ///   write queues up to that and then waits for room. Each end also holds at
-    ///   most 4 KiB of bytes not read, and loses the bytes past that.
-    /// - A byte that arrives at an end that is not open is lost, and so are the
-    ///   bytes in flight from a port that drops.
-    /// - Setting the line again keeps its ends and draws a new stream of faults.
+    /// - Each line draws its faults from its own stream as each byte is sent.
+    ///   Setting the line again keeps its ends and draws a new stream.
     ///
     /// # Panics
     ///
@@ -182,8 +180,7 @@ impl Sim {
             "port {path} of node {node} cannot be both ends of a line"
         );
         config.check();
-        let rng = Rng::from_seed(self.streams.next_u64());
-        let joined = lock(&self.shared).serial().join(a, b, config, rng);
+        let joined = lock(&self.shared).serial().join(a, b, config);
         if let Err((node, path)) = joined {
             let path = path.display();
             panic!("port {path} of node {node} is on another line");

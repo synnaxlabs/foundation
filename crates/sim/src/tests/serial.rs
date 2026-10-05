@@ -8,12 +8,12 @@ use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use env::serial::{Config as Port, Error, Parity, Settings, StopBits};
+use env::serial::{Config, Error, Parity, Settings, StopBits};
 use env::thread::Handle;
 use types::time::{Monotonic, Span};
 
 use super::{millis, shard};
-use crate::{Config, Crash, Sim, line, node};
+use crate::{Crash, Sim, line, node};
 
 /// The path of the end of each line on node `a`.
 const A: &str = "/dev/ttyS0";
@@ -24,8 +24,8 @@ const B: &str = "/dev/ttyUSB0";
 type Log = Arc<Mutex<Vec<(Monotonic, Vec<u8>)>>>;
 
 /// The settings of the port at `path` at `baud`, with `parity` and one stop bit.
-fn port(path: &str, baud: u32, parity: Option<Parity>) -> Port {
-    Port {
+fn config(path: &str, baud: u32, parity: Option<Parity>) -> Config {
+    Config {
         path: path.into(),
         settings: Settings {
             baud: NonZeroU32::new(baud).unwrap(),
@@ -36,7 +36,7 @@ fn port(path: &str, baud: u32, parity: Option<Parity>) -> Port {
 }
 
 /// Opens `config` on `node` outside the sim, where an open ends at its first poll.
-fn open(node: &node::Node, config: &Port) -> Result<env::serial::Port, Error> {
+fn open(node: &node::Node, config: &Config) -> Result<env::serial::Port, Error> {
     let serial = node.serial();
     let open = pin!(serial.open(config));
     let cx = &mut Context::from_waker(Waker::noop());
@@ -49,10 +49,10 @@ fn open(node: &node::Node, config: &Port) -> Result<env::serial::Port, Error> {
 /// A run of two nodes, `a` and `b`, with `line` between [`A`] on `a` and [`B`] on
 /// `b`.
 fn pair(seed: u64, line: line::Config) -> (Sim, node::Node, node::Node) {
-    let mut sim = Sim::new(Config {
+    let mut sim = Sim::new(crate::Config {
         seed,
         steps_max: 1_000_000,
-        ..Config::default()
+        ..crate::Config::default()
     });
     let a = sim.node(node::Config::default());
     let b = sim.node(node::Config::default());
@@ -77,7 +77,7 @@ async fn write(port: &mut env::serial::Port, bytes: &[u8]) {
 
 /// Starts a shard on `node` that opens `config`, writes `bytes`, and holds the
 /// port open.
-fn send(node: &node::Node, config: Port, bytes: Vec<u8>) -> Handle {
+fn send(node: &node::Node, config: Config, bytes: Vec<u8>) -> Handle {
     let serial = node.serial();
     let handle = node.shards().start(shard("send"), move |_| async move {
         let mut port = serial.open(&config).await.unwrap();
@@ -89,7 +89,7 @@ fn send(node: &node::Node, config: Port, bytes: Vec<u8>) -> Handle {
 
 /// Starts a shard on `node` that waits for `wait`, opens `config`, and reads into
 /// `log` forever.
-fn receive(node: &node::Node, config: Port, wait: Span, log: &Log) -> Handle {
+fn receive(node: &node::Node, config: Config, wait: Span, log: &Log) -> Handle {
     let (clock, serial, log) = (node.clock(), node.serial(), Arc::clone(log));
     let handle = node.shards().start(shard("receive"), move |_| async move {
         clock.sleep(wait).await;
@@ -116,8 +116,8 @@ fn received(log: &Log) -> Vec<u8> {
 fn exchange(
     seed: u64,
     line: line::Config,
-    writer: Port,
-    reader: Port,
+    writer: Config,
+    reader: Config,
     bytes: Vec<u8>,
 ) -> (Sim, Log) {
     let (mut sim, a, b) = pair(seed, line);
@@ -131,7 +131,7 @@ fn exchange(
 /// Sends the bytes 0 to 199 from [`A`] to [`B`], both at 9,600 baud with `parity`,
 /// and gives the digest and the bytes that arrived.
 fn noisy(seed: u64, line: line::Config, parity: Option<Parity>) -> (u64, Vec<u8>) {
-    let (writer, reader) = (port(A, 9_600, parity), port(B, 9_600, parity));
+    let (writer, reader) = (config(A, 9_600, parity), config(B, 9_600, parity));
     let (sim, log) = exchange(seed, line, writer, reader, (0..200).collect());
     (sim.digest(), received(&log))
 }
@@ -152,13 +152,13 @@ fn bytes_arrive_in_order_at_the_line_rate() {
     for (parity, stop_bits, bits) in cases {
         let settings = Settings {
             stop_bits,
-            ..port(A, 9_600, parity).settings
+            ..config(A, 9_600, parity).settings
         };
-        let writer = Port {
+        let writer = Config {
             path: A.into(),
             settings,
         };
-        let reader = Port {
+        let reader = Config {
             path: B.into(),
             settings,
         };
@@ -179,8 +179,8 @@ fn a_long_run_of_bytes_keeps_the_exact_line_rate() {
     let (mut sim, a, b) = pair(0, line::Config::default());
     let bytes: Vec<u8> = (0..2_000u32).map(|i| i.to_le_bytes()[0]).collect();
     let log = Log::default();
-    let _send = send(&a, port(A, 9_600, None), bytes.clone());
-    let _receive = receive(&b, port(B, 9_600, None), Span::ZERO, &log);
+    let _send = send(&a, config(A, 9_600, None), bytes.clone());
+    let _receive = receive(&b, config(B, 9_600, None), Span::ZERO, &log);
     sim.run_for(Span::from_nanos(3 * Span::SECOND.nanos()))
         .unwrap();
     let expected: Vec<(Monotonic, Vec<u8>)> = (1..=2_000)
@@ -197,7 +197,7 @@ fn a_long_run_of_bytes_keeps_the_exact_line_rate() {
 /// reads into `log` forever.
 fn duplex(node: &node::Node, path: &str, bytes: Vec<u8>, log: &Log) -> Handle {
     let (clock, serial, log) = (node.clock(), node.serial(), Arc::clone(log));
-    let config = port(path, 19_200, None);
+    let config = config(path, 19_200, None);
     let handle = node.shards().start(shard(path), move |_| async move {
         let mut port = serial.open(&config).await.unwrap();
         write(&mut port, &bytes).await;
@@ -231,7 +231,7 @@ fn a_write_past_the_send_queue_waits_for_room() {
     let (serial, log, sent) = (a.serial(), Log::default(), Arc::clone(&counts));
     let all = bytes.clone();
     let _send = a.shards().start(shard("send"), move |_| async move {
-        let mut port = serial.open(&port(A, 1_000_000, None)).await.unwrap();
+        let mut port = serial.open(&config(A, 1_000_000, None)).await.unwrap();
         let mut done = 0;
         while done < all.len() {
             let n = poll_fn(|cx| port.poll_write(cx, &all[done..]))
@@ -242,7 +242,7 @@ fn a_write_past_the_send_queue_waits_for_room() {
         }
         pending::<()>().await;
     });
-    let _receive = receive(&b, port(B, 1_000_000, None), Span::ZERO, &log);
+    let _receive = receive(&b, config(B, 1_000_000, None), Span::ZERO, &log);
     sim.run_for(Span::SECOND).unwrap();
     let counts = counts.lock().unwrap().clone();
     assert_eq!(counts[0], 4_096, "the first write fills the send queue");
@@ -264,12 +264,12 @@ fn a_write_past_the_send_queue_waits_for_room() {
 fn an_end_keeps_at_most_four_kib_not_read() {
     let (mut sim, a, b) = pair(0, line::Config::default());
     let bytes: Vec<u8> = (0..5_000u32).map(|i| i.to_le_bytes()[0]).collect();
-    let _send = send(&a, port(A, 1_000_000, None), bytes.clone());
+    let _send = send(&a, config(A, 1_000_000, None), bytes.clone());
     let (clock, serial, out) =
         (b.clock(), b.serial(), Arc::new(Mutex::new(Vec::new())));
     let slot = Arc::clone(&out);
     let _receive = b.shards().start(shard("receive"), move |_| async move {
-        let mut port = serial.open(&port(B, 1_000_000, None)).await.unwrap();
+        let mut port = serial.open(&config(B, 1_000_000, None)).await.unwrap();
         clock.sleep(Span::SECOND).await;
         let mut buffer = vec![0; 8_192];
         let n = poll_fn(|cx| port.poll_read(cx, &mut buffer)).await.unwrap();
@@ -339,13 +339,13 @@ fn a_line_with_loss_one_is_cut_until_set_again() {
     let (mut sim, a, b) = pair(0, cut);
     let (clock, serial, log) = (a.clock(), a.serial(), Log::default());
     let _send = a.shards().start(shard("send"), move |_| async move {
-        let mut port = serial.open(&port(A, 9_600, None)).await.unwrap();
+        let mut port = serial.open(&config(A, 9_600, None)).await.unwrap();
         write(&mut port, &[1, 2, 3]).await;
         clock.sleep(Span::SECOND).await;
         write(&mut port, &[4, 5, 6]).await;
         pending::<()>().await;
     });
-    let _receive = receive(&b, port(B, 9_600, None), Span::ZERO, &log);
+    let _receive = receive(&b, config(B, 9_600, None), Span::ZERO, &log);
     sim.run_for(millis(500)).unwrap();
     assert!(received(&log).is_empty());
     sim.line(&a, Path::new(A), &b, Path::new(B), line::Config::default());
@@ -354,8 +354,31 @@ fn a_line_with_loss_one_is_cut_until_set_again() {
 }
 
 #[test]
+fn a_line_set_again_keeps_the_fate_of_the_bytes_in_flight() {
+    let lossy = line::Config {
+        loss: 0.3,
+        ..line::Config::default()
+    };
+    let run = |again: bool| {
+        let (mut sim, a, b) = pair(0, lossy);
+        let log = Log::default();
+        let _send = send(&a, config(A, 9_600, None), (0..100).collect());
+        let _receive = receive(&b, config(B, 19_200, None), Span::ZERO, &log);
+        sim.run_for(millis(50)).unwrap();
+        if again {
+            sim.line(&a, Path::new(A), &b, Path::new(B), lossy);
+        }
+        sim.run_for(Span::SECOND).unwrap();
+        received(&log)
+    };
+    let kept = run(false);
+    assert!((1..100).contains(&kept.len()), "{} bytes", kept.len());
+    assert_eq!(run(true), kept);
+}
+
+#[test]
 fn ends_with_other_settings_get_other_bytes() {
-    let (writer, reader) = (port(A, 9_600, None), port(B, 19_200, None));
+    let (writer, reader) = (config(A, 9_600, None), config(B, 19_200, None));
     let sent: Vec<u8> = (0..100).collect();
     let (_sim, log) =
         exchange(0, line::Config::default(), writer, reader, sent.clone());
@@ -374,13 +397,13 @@ fn bytes_that_arrive_at_a_closed_end_are_lost() {
     let (mut sim, a, b) = pair(0, line::Config::default());
     let (clock, serial, log) = (a.clock(), a.serial(), Log::default());
     let _send = a.shards().start(shard("send"), move |_| async move {
-        let mut port = serial.open(&port(A, 9_600, None)).await.unwrap();
+        let mut port = serial.open(&config(A, 9_600, None)).await.unwrap();
         write(&mut port, &[1, 2, 3]).await;
         clock.sleep(Span::SECOND).await;
         write(&mut port, &[4, 5, 6]).await;
         pending::<()>().await;
     });
-    let _receive = receive(&b, port(B, 9_600, None), millis(500), &log);
+    let _receive = receive(&b, config(B, 9_600, None), millis(500), &log);
     sim.run_for(Span::from_nanos(2 * Span::SECOND.nanos()))
         .unwrap();
     assert_eq!(received(&log), [4, 5, 6]);
@@ -391,11 +414,11 @@ fn a_dropped_port_loses_the_bytes_not_yet_arrived() {
     let (mut sim, a, b) = pair(0, line::Config::default());
     let (clock, serial, log) = (a.clock(), a.serial(), Log::default());
     let _send = a.shards().start(shard("send"), move |_| async move {
-        let mut port = serial.open(&port(A, 9_600, None)).await.unwrap();
+        let mut port = serial.open(&config(A, 9_600, None)).await.unwrap();
         write(&mut port, &(0..100).collect::<Vec<u8>>()).await;
         clock.sleep(millis(10)).await;
     });
-    let _receive = receive(&b, port(B, 9_600, None), Span::ZERO, &log);
+    let _receive = receive(&b, config(B, 9_600, None), Span::ZERO, &log);
     sim.run_for(Span::SECOND).unwrap();
     assert_eq!(received(&log), (0..9).collect::<Vec<u8>>());
 }
@@ -404,7 +427,7 @@ fn a_dropped_port_loses_the_bytes_not_yet_arrived() {
 fn an_open_of_a_path_with_no_line_is_not_found() {
     let (_sim, a, b) = pair(0, line::Config::default());
     let missing = |node: &node::Node, path: &str| {
-        open(node, &port(path, 9_600, None)).unwrap_err()
+        open(node, &config(path, 9_600, None)).unwrap_err()
     };
     let path = "/dev/ttyS9";
     assert_eq!(missing(&a, path), Error::NotFound { path: path.into() });
@@ -414,7 +437,7 @@ fn an_open_of_a_path_with_no_line_is_not_found() {
 #[test]
 fn an_end_opens_once_until_its_port_drops() {
     let (_sim, a, _b) = pair(0, line::Config::default());
-    let config = port(A, 9_600, None);
+    let config = config(A, 9_600, None);
     let first = open(&a, &config).unwrap();
     let busy = open(&a, &config).unwrap_err();
     assert_eq!(busy, Error::Busy { path: A.into() });
@@ -427,13 +450,13 @@ fn a_crash_closes_the_ports_of_its_node() {
     let (mut sim, a, _b) = pair(0, line::Config::default());
     let serial = a.serial();
     let held = a.shards().start(shard("hold"), move |_| async move {
-        let _port = serial.open(&port(A, 9_600, None)).await.unwrap();
+        let _port = serial.open(&config(A, 9_600, None)).await.unwrap();
         pending::<()>().await;
     });
     drop(held.unwrap());
     sim.run_for(millis(1)).unwrap();
     sim.crash(&a, Crash::Process);
-    open(&a, &port(A, 9_600, None)).unwrap();
+    open(&a, &config(A, 9_600, None)).unwrap();
 }
 
 #[test]
@@ -449,7 +472,7 @@ fn the_digest_holds_the_fate_of_each_byte() {
 #[test]
 #[should_panic(expected = "port /dev/ttyS0 of node 0 cannot be both ends of a line")]
 fn a_line_from_an_end_to_itself_panics() {
-    let mut sim = Sim::new(Config::default());
+    let mut sim = Sim::new(crate::Config::default());
     let a = sim.node(node::Config::default());
     sim.line(&a, Path::new(A), &a, Path::new(A), line::Config::default());
 }
@@ -471,7 +494,7 @@ fn a_line_to_an_end_of_another_line_panics() {
 fn a_line_set_again_from_its_other_end_keeps_its_ends() {
     let (mut sim, a, b) = pair(0, line::Config::default());
     sim.line(&b, Path::new(B), &a, Path::new(A), line::Config::default());
-    open(&a, &port(A, 9_600, None)).unwrap();
+    open(&a, &config(A, 9_600, None)).unwrap();
 }
 
 #[test]
@@ -493,7 +516,7 @@ fn read_once(port: &mut env::serial::Port) {
 #[test]
 fn a_port_polled_on_a_second_thread_panics() {
     let (mut sim, a, _b) = pair(0, line::Config::default());
-    let mut port = open(&a, &port(A, 9_600, None)).unwrap();
+    let mut port = open(&a, &config(A, 9_600, None)).unwrap();
     let slot = Arc::new(Mutex::new(None));
     let give = Arc::clone(&slot);
     let _first = a.shards().start(shard("first"), move |_| async move {
@@ -520,6 +543,6 @@ fn a_port_polled_on_a_second_thread_panics() {
 #[should_panic(expected = "a serial port needs a thread that the sim started")]
 fn a_port_polled_outside_the_sim_panics() {
     let (_sim, a, _b) = pair(0, line::Config::default());
-    let mut port = open(&a, &port(A, 9_600, None)).unwrap();
+    let mut port = open(&a, &config(A, 9_600, None)).unwrap();
     read_once(&mut port);
 }

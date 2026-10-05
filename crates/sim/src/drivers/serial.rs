@@ -6,16 +6,16 @@ use std::task::{Context, Poll};
 use env::serial::{Config, Error, Open, port};
 
 use super::{Node, Owner};
-use crate::serial::Side;
+use crate::serial::End;
 use crate::state::lock;
 
 impl env::serial::Driver for Node {
     fn open<'a>(&'a self, config: &'a Config) -> Open<'a> {
-        let side = lock(&self.shared).serial().open(self.node, config);
-        let port = side.map(|side| -> Box<dyn port::Driver> {
+        let end = lock(&self.shared).serial().open(self.node, config);
+        let port = end.map(|end| -> Box<dyn port::Driver> {
             Box::new(Port {
                 node: self.clone(),
-                side,
+                end,
                 owner: Owner::new("a serial port"),
             })
         });
@@ -26,7 +26,7 @@ impl env::serial::Driver for Node {
 /// One open end of a line. A drop closes it.
 struct Port {
     node: Node,
-    side: Side,
+    end: End,
     owner: Owner,
 }
 
@@ -40,7 +40,7 @@ impl port::Driver for Port {
         let waker = cx.waker().clone();
         let (poll, unused) = lock(&self.node.shared)
             .serial()
-            .read(self.side, waker, buffer);
+            .read(self.end, waker, buffer);
         drop(unused);
         poll.map(Ok)
     }
@@ -52,7 +52,11 @@ impl port::Driver for Port {
     ) -> Poll<Result<usize, Error>> {
         self.owner.check(&self.node);
         let waker = cx.waker().clone();
-        let (poll, unused) = lock(&self.node.shared).write(self.side, waker, bytes);
+        let (poll, unused) = {
+            let mut state = lock(&self.node.shared);
+            let now = state.now();
+            state.serial().write(now, self.end, waker, bytes)
+        };
         drop(unused);
         poll.map(Ok)
     }
@@ -60,7 +64,7 @@ impl port::Driver for Port {
 
 impl Drop for Port {
     fn drop(&mut self) {
-        let wakers = lock(&self.node.shared).serial().close(self.side);
+        let wakers = lock(&self.node.shared).serial().close(self.end);
         drop(wakers);
     }
 }

@@ -20,7 +20,7 @@ use types::time::{Monotonic, Span, Stamp};
 
 use crate::files::{Call, Files, Held};
 use crate::net::{Bound, Network};
-use crate::serial::{Serial, Side};
+use crate::serial::Serial;
 use crate::{link, node, shard};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
@@ -127,7 +127,12 @@ pub(crate) enum Start {
 }
 
 impl State {
-    pub(crate) fn new(epoch: Instant, net: Network, files: Files) -> Self {
+    pub(crate) fn new(
+        epoch: Instant,
+        net: Network,
+        files: Files,
+        serial: Serial,
+    ) -> Self {
         Self {
             now: Monotonic::default(),
             nodes: Vec::new(),
@@ -141,7 +146,7 @@ impl State {
             next: 0,
             net,
             files,
-            serial: Serial::default(),
+            serial,
             digest: DefaultHasher::new(),
         }
     }
@@ -179,6 +184,11 @@ impl State {
     /// read. It is never below `now`.
     fn last(&self) -> Monotonic {
         (self.nodes.iter().map(Node::last).min()).unwrap_or(Monotonic(u64::MAX))
+    }
+
+    /// True time.
+    pub(crate) fn now(&self) -> Monotonic {
+        self.now
     }
 
     /// True time `span` from now, or `None` past the end of true time.
@@ -339,16 +349,6 @@ impl State {
 
     pub(crate) fn serial(&mut self) -> &mut Serial {
         &mut self.serial
-    }
-
-    /// Sends from `bytes` on `side` now, as [`Serial::write`].
-    pub(crate) fn write(
-        &mut self,
-        side: Side,
-        waker: Waker,
-        bytes: &[u8],
-    ) -> (Poll<usize>, Option<Waker>) {
-        self.serial.write(self.now, side, waker, bytes)
     }
 
     pub(crate) fn digest(&self) -> u64 {
