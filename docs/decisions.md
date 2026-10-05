@@ -494,9 +494,11 @@ How to read this record:
 - **DOCUMENT MODEL (2026-10-04)** A Document is attributes in a map sorted by key
   (keys unique) plus blocks in order. Values: bool, integer (`i128`), finite float,
   string, reference (`types::name::Name`), list, map, and call. No null and no
-  expressions. Spans are optional, and `==` never reads them, so a Document from a
-  file equals the same Document from the spec. Decided by the `config` builder;
-  approved by the coordinator and `consensus` (#42).
+  expressions. Refines K1: a front end gives every key, keyword, label, function
+  name, and value a span (byte offset, then line and column in Unicode scalar values,
+  from 0); SDK and spec documents have none (section 2.1, kind config). `==` never
+  reads spans, so a Document from a file equals the same Document from the spec.
+  Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.

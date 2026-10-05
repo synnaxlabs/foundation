@@ -18,9 +18,14 @@ pub struct Block {
 
 impl PartialEq for Block {
     fn eq(&self, other: &Self) -> bool {
-        self.keyword == other.keyword
-            && self.labels == other.labels
-            && self.body == other.body
+        let Self {
+            keyword,
+            keyword_span: _,
+            labels,
+            body,
+            span: _,
+        } = self;
+        *keyword == other.keyword && *labels == other.labels && *body == other.body
     }
 }
 
@@ -37,7 +42,8 @@ pub struct Label {
 
 impl PartialEq for Label {
     fn eq(&self, other: &Self) -> bool {
-        self.text == other.text
+        let Self { text, span: _ } = self;
+        *text == other.text
     }
 }
 

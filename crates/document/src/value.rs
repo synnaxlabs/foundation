@@ -15,7 +15,8 @@ pub struct Value {
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
+        let Self { kind, span: _ } = self;
+        *kind == other.kind
     }
 }
 
@@ -28,7 +29,7 @@ pub enum Kind {
     Bool(bool),
     /// A whole number. Every `i64` and `u64` fits.
     Integer(i128),
-    /// A number with a fraction or an exponent. `1` and `1.0` are different values.
+    /// A finite binary64 number. `Integer(1)` and `Float(1.0)` are different values.
     Float(Float),
     /// Text.
     String(Box<str>),
@@ -54,7 +55,7 @@ impl Float {
         value.is_finite().then_some(Self(value))
     }
 
-    /// The float.
+    /// The value. It is never NaN, an infinity, or -0.0.
     #[must_use]
     pub const fn get(self) -> f64 {
         self.0
@@ -70,13 +71,29 @@ impl PartialEq for Float {
 impl Eq for Float {}
 
 /// A function applied to values, such as `secret("plc_7_password")` or `f64("rpm")`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `==` does not read spans.
+#[derive(Clone, Debug)]
 pub struct Call {
     /// The function's name.
     pub function: Box<str>,
+    /// Where the function's name is.
+    pub function_span: Option<Span>,
     /// The arguments, in order.
     pub arguments: Vec<Value>,
 }
+
+impl PartialEq for Call {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            function,
+            function_span: _,
+            arguments,
+        } = self;
+        *function == other.function && *arguments == other.arguments
+    }
+}
+
+impl Eq for Call {}
 
 #[cfg(test)]
 mod tests {
@@ -98,6 +115,11 @@ mod tests {
         }
 
         #[test]
+        fn compares_by_value() {
+            assert_ne!(Float::new(1.0).unwrap(), Float::new(2.0).unwrap());
+        }
+
+        #[test]
         fn stores_negative_zero_as_zero() {
             let zero = Float::new(-0.0).unwrap();
             assert_eq!(zero.get().to_bits(), 0.0f64.to_bits());
@@ -108,7 +130,8 @@ mod tests {
             #[test]
             fn keeps_every_other_finite_value(value in any::<f64>()) {
                 prop_assume!(value.is_finite() && value != 0.0);
-                prop_assert_eq!(Float::new(value).unwrap().get().to_bits(), value.to_bits());
+                let kept = Float::new(value).unwrap().get();
+                prop_assert_eq!(kept.to_bits(), value.to_bits());
             }
         }
     }

@@ -19,19 +19,26 @@ pub struct Attribute {
 
 impl PartialEq for Attribute {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.value == other.value
+        let Self {
+            key,
+            key_span: _,
+            value,
+        } = self;
+        *key == other.key && *value == other.value
     }
 }
 
 impl Eq for Attribute {}
 
 impl Map {
-    /// Sorts attributes by key.
+    /// Makes a map from attributes in any order. Give them in source order, so that
+    /// each error's `first` span is before its `second`.
     ///
     /// # Errors
     ///
     /// Returns one [`Error::DuplicateKey`] for each attribute whose key an earlier
-    /// attribute has. `first` is the span of the earliest attribute with that key.
+    /// attribute has, with `first` from the earliest attribute with that key. The
+    /// errors are in key order, then in the given order.
     pub fn new(mut attributes: Vec<Attribute>) -> Result<Self, Vec<Error>> {
         attributes.sort_by(|a, b| a.key.cmp(&b.key));
         let mut errors = Vec::new();
@@ -169,7 +176,7 @@ mod tests {
 
             #[test]
             fn reports_every_repeat_and_nothing_else(
-                keys in prop::collection::vec("[ab]{1,2}", 0..12),
+                keys in prop::collection::vec("[ab]{1,2}", 0..64),
             ) {
                 let given: Vec<_> = keys
                     .iter()
@@ -181,19 +188,23 @@ mod tests {
                     .enumerate()
                     .filter(|(i, k)| keys[..*i].contains(k))
                     .count();
-                match Map::new(given) {
-                    Ok(map) => prop_assert_eq!((map.iter().len(), repeats), (keys.len(), 0)),
-                    Err(errors) => {
-                        prop_assert_eq!(errors.len(), repeats);
-                        for error in errors {
-                            let Error::DuplicateKey { key, first, second } = error;
-                            let first = usize::try_from(first.unwrap().start().offset).unwrap();
-                            let second = usize::try_from(second.unwrap().start().offset).unwrap();
-                            prop_assert!(first < second, "{first} is not before {second}");
-                            prop_assert_eq!(keys.iter().position(|k| **k == *key), Some(first));
-                            prop_assert_eq!(&*keys[second], &*key);
-                        }
+                let errors = match Map::new(given) {
+                    Ok(map) => {
+                        prop_assert_eq!((map.iter().len(), repeats), (keys.len(), 0));
+                        return Ok(());
                     }
+                    Err(errors) => errors,
+                };
+                prop_assert_eq!(errors.len(), repeats);
+                let offset = |span: Option<Span>| {
+                    usize::try_from(span.unwrap().start().offset).unwrap()
+                };
+                for Error::DuplicateKey { key, first, second } in errors {
+                    let (first, second) = (offset(first), offset(second));
+                    prop_assert!(first < second, "{first} is not before {second}");
+                    let earliest = keys.iter().position(|k| **k == *key);
+                    prop_assert_eq!(earliest, Some(first));
+                    prop_assert_eq!(&*keys[second], &*key);
                 }
             }
         }

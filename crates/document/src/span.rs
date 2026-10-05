@@ -10,7 +10,7 @@ pub struct Position {
     pub offset: u32,
     /// Lines before this position.
     pub line: u32,
-    /// Characters between the start of the line and this position.
+    /// Unicode scalar values between the start of the line and this position.
     pub column: u32,
 }
 
@@ -23,10 +23,13 @@ pub struct Span {
 }
 
 impl Span {
-    /// Makes a span, or returns `None` when `end` has a smaller offset than `start`.
+    /// Makes a span, or returns `None` when `end` is before `start` by offset or by
+    /// line and column.
     #[must_use]
     pub fn new(source: Source, start: Position, end: Position) -> Option<Self> {
-        (start.offset <= end.offset).then_some(Self { source, start, end })
+        let ordered = start.offset <= end.offset
+            && (start.line, start.column) <= (end.line, end.column);
+        ordered.then_some(Self { source, start, end })
     }
 
     /// The file that holds the item.
@@ -79,6 +82,21 @@ mod tests {
         #[test]
         fn refuses_an_end_before_the_start() {
             assert_eq!(Span::new(Source(0), at(5), at(4)), None);
+        }
+
+        #[test]
+        fn refuses_an_end_line_before_the_start_line() {
+            let start = Position {
+                offset: 0,
+                line: 5,
+                column: 7,
+            };
+            let end = Position {
+                offset: 3,
+                line: 0,
+                column: 0,
+            };
+            assert_eq!(Span::new(Source(0), start, end), None);
         }
     }
 }
