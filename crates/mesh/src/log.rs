@@ -289,7 +289,7 @@ fn scan(segments: &[Vec<u8>]) -> Result<Scan, (usize, Fault)> {
         let mut rest = segments.get(segment).map_or(&[][..], Vec::as_slice);
         let len = rest.len();
         let offset = |rest: &[u8]| len.saturating_sub(rest.len());
-        while let Some(record) = record(rest, next) {
+        while let Some(record) = record(rest).filter(|record| record.number == next) {
             let fault = match record.version {
                 VERSION => Fault::Corrupt {
                     offset: offset(rest),
@@ -301,19 +301,23 @@ fn scan(segments: &[Vec<u8>]) -> Result<Scan, (usize, Fault)> {
             next = next.saturating_add(1);
         }
         let offset = offset(rest);
-        // A record with the number after `next` was written after record `next` was
+        // A record with a number above `next` was written after record `next` was
         // durable, so record `next` is lost, not torn.
-        let later = next.saturating_add(1);
         let follow = segments.get(segment.saturating_add(1));
-        if claimed_body(rest).is_some_and(|(_, after)| good(after, later))
-            || follow.is_some_and(|bytes| good(bytes, later))
+        let first = follow.map(|bytes| number(bytes));
+        let later = |found: Option<u64>| found.is_some_and(|found| found > next);
+        if later(claimed_body(rest).and_then(|(_, after)| number(after)))
+            || later(first.flatten())
         {
             return Err((segment, Fault::Corrupt { offset }));
         }
-        match follow {
-            Some(bytes) if good(bytes, next) => segment = segment.saturating_add(1),
-            // A file is made only when the file before it has a durable record.
-            Some(_) if segments.len() > segment.saturating_add(2) => {
+        match first {
+            Some(Some(found)) if found == next => segment = segment.saturating_add(1),
+            // A file starts with a record that is not in the file before it, and a
+            // file is made only when the file before it has a durable record.
+            Some(found)
+                if found.is_some() || segments.len() > segment.saturating_add(2) =>
+            {
                 let fault = Fault::Corrupt { offset: 0 };
                 return Err((segment.saturating_add(1), fault));
             }
@@ -330,8 +334,9 @@ fn scan(segments: &[Vec<u8>]) -> Result<Scan, (usize, Fault)> {
     }
 }
 
-fn good(bytes: &[u8], number: u64) -> bool {
-    record(bytes, number).is_some()
+// The number of the record at the start of `bytes`, when one is there.
+fn number(bytes: &[u8]) -> Option<u64> {
+    record(bytes).map(|record| record.number)
 }
 
 // The check of a record: the first bytes of the digest of all that follows it.
@@ -345,20 +350,22 @@ fn check(bytes: &[u8]) -> [u8; CHECK] {
 // A record that passed its check.
 struct Record<'a> {
     version: u16,
+    number: u64,
     body: &'a [u8],
     // The bytes after the record.
     after: &'a [u8],
 }
 
-// The record at the start of `bytes`, when it passes its check and has `number`.
-fn record(bytes: &[u8], number: u64) -> Option<Record<'_>> {
+// The record at the start of `bytes`, when it passes its check.
+fn record(bytes: &[u8]) -> Option<Record<'_>> {
     let (body, after) = claimed_body(bytes)?;
     let checked = bytes.get(CHECK..HEADER.saturating_add(body.len()))?;
     let mut header = checked;
     let version = u16::from_le_bytes(take(&mut header)?);
-    let found = u64::from_le_bytes(take(&mut header)?);
-    (bytes.starts_with(&check(checked)) && found == number).then_some(Record {
+    let number = u64::from_le_bytes(take(&mut header)?);
+    bytes.starts_with(&check(checked)).then_some(Record {
         version,
+        number,
         body,
         after,
     })
@@ -891,6 +898,37 @@ mod tests {
         assert_eq!(error.0, Error::Pool(expected));
     }
 
+    #[test]
+    fn refuses_a_bad_length_in_a_file_before_a_file_with_records() {
+        let (mut sim, node) = sim(0);
+        let starts = three(&mut sim, &node);
+        on(&mut sim, &node, |node| async move {
+            let (mut log, stored) = open(&node).await.unwrap();
+            assert_eq!(stored.entries.len(), 3);
+            log.write(None, &[bytes(4, LARGE)]).await.unwrap();
+            let names = node.files().list(Path::new(DIR)).await.unwrap();
+            assert_eq!(names, ["log-0", "log-1"].map(PathBuf::from));
+        });
+        sim.crash(&node, Crash::Power);
+        // One bit of the body length of record 0. Records 1 and 2 follow it in
+        // `log-0`, and record 3 is durable in `log-1`.
+        let at = starts[0] + wide(HEADER) - 8;
+        on(&mut sim, &node, move |node| async move {
+            // The body of one entry of 100 bytes is 126 bytes.
+            put(&node, "log-0", at, &[127]).await;
+        });
+        let result = stored(&mut sim, &node);
+        let names = on(&mut sim, &node, |node| async move {
+            node.files().list(Path::new(DIR)).await.unwrap()
+        });
+        let expected = Error::Corrupt {
+            path: file("log-0"),
+            offset: starts[0],
+        };
+        let kept = ["log-0", "log-1"].map(PathBuf::from).to_vec();
+        assert_eq!((result, names), (Err(expected), kept));
+    }
+
     fn data() -> impl Strategy<Value = Data> {
         let keys = || prop::collection::btree_set(any::<u128>().prop_map(key), 0..4);
         prop_oneof![
@@ -925,7 +963,8 @@ mod tests {
             entries in entries(),
         ) {
             let bytes = encode(number, hard, &entries);
-            let record = record(&bytes, number).unwrap();
+            let record = record(&bytes).unwrap();
+            prop_assert_eq!(record.number, number);
             prop_assert_eq!((record.version, record.after), (VERSION, &[][..]));
             let mut stored = Stored::default();
             prop_assert_eq!(apply(&mut stored, record.body), Some(()));
@@ -943,7 +982,7 @@ mod tests {
             let mut bytes = encode(3, hard, &entries);
             let at = at.index(bytes.len());
             bytes[at] ^= 1 << bit;
-            prop_assert!(record(&bytes, 3).is_none());
+            prop_assert!(record(&bytes).is_none_or(|record| record.number != 3));
         }
 
         #[test]
