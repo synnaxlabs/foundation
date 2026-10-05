@@ -46,7 +46,16 @@ Fable uses plan limits faster. Widen or narrow its use from what the limits show
 
 Most of the cost is context size per turn, so keep each context small:
 
-- `.claude/settings.json` compacts a session when its context reaches 300k tokens.
+- `.claude/settings.json` compacts a session near 200k tokens, keeps the prompt cache
+  five minutes (99% of calls come sooner), and turns off plugins we never use.
+- Every token in context is read again on every later call until compaction. Read the
+  lines you need (`grep -n`, then `sed -n` or Read with a range), never a whole file
+  or log; look at `--stat` or `--name-only` before a diff; and cut long output with
+  `tail`.
+- Wait for CI with one background `gh pr checks <n> --watch`, not repeated checks. A
+  Monitor must filter to events you act on.
+- Never fork from a large context. Brief a fresh subagent instead.
+- The person: a `/login` that switches organizations flushes every session's cache.
 - Read only the sections of `docs/decisions.md` and `docs/research/` you need.
 - Send reading, searching, and reviews to subagents; keep their results, not their
   file dumps.
