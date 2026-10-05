@@ -22,7 +22,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut parser = Parser {
         tokens,
         token,
-        bracketed: false,
+        newlines_skipped: false,
         errors: Vec::new(),
         len: text.len(),
     };
@@ -42,7 +42,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
 pub(crate) enum Ends {
     /// A `,` or a new line, as in a body or an object.
     Line,
-    /// A `,`, as in a list or a call, where new lines do not end an item.
+    /// A `,`, as in a list or a call.
     Comma,
     /// Only the close bracket, as in a `for` expression.
     Close,
@@ -54,7 +54,7 @@ struct Parser<'a> {
     token: Token<'a>,
     /// Inside `[` or `(`, where HCL skips new lines, so `take` never returns one.
     /// Only [`Parser::enclosed`] sets it.
-    bracketed: bool,
+    newlines_skipped: bool,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
     /// The length of the text in bytes. Each token but the last has one or more, so
@@ -112,24 +112,23 @@ impl<'a> Parser<'a> {
     fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
         let labels = self.labels()?;
         let depth = enter(depth).ok_or(Error::TooDeep { span: keyword.span })?;
-        self.take()?;
-        let body = if self.token.kind == lex::Kind::Newline {
-            let body = self.body(depth)?;
-            if self.token.kind != lex::Kind::CloseBrace {
-                return Err(self.syntax(Expected::Item));
+        let (body, span) = self.enclosed(|parser| {
+            if parser.token.kind != lex::Kind::Newline {
+                return parser.one_line(depth);
             }
-            body
-        } else {
-            self.one_line(depth)?
-        };
-        let end = self.take()?.span;
+            let body = parser.body(depth)?;
+            if parser.token.kind != lex::Kind::CloseBrace {
+                return Err(parser.syntax(Expected::Item));
+            }
+            Ok(body)
+        })?;
         self.end_line()?;
         Ok(Block {
             keyword: keyword.text.into(),
             keyword_span: Some(keyword.span),
             labels,
             body,
-            span: Some(join(keyword.span, end)),
+            span: Some(join(keyword.span, span)),
         })
     }
 
@@ -262,7 +261,6 @@ impl<'a> Parser<'a> {
 
     /// Refuses a `for` expression at the start of a list or an object.
     fn refuse_for(&mut self) -> Result<(), Error> {
-        self.skip_newlines()?;
         if self.token.kind == lex::Kind::Identifier
             && self.token.text == "for"
             && self.after().kind == lex::Kind::Identifier
@@ -293,8 +291,9 @@ impl<'a> Parser<'a> {
                     Some(outer) => depth = outer,
                     None => return Ok(()),
                 },
-                lex::Kind::Comma if depth == 0 && ends != Ends::Close => return Ok(()),
-                lex::Kind::Newline if depth == 0 && ends == Ends::Line => {
+                lex::Kind::Comma | lex::Kind::Newline
+                    if depth == 0 && ends != Ends::Close =>
+                {
                     return Ok(());
                 }
                 _ => {}
@@ -369,7 +368,7 @@ impl<'a> Parser<'a> {
         let depth = enter(depth).ok_or(Error::TooDeep {
             span: self.token.span,
         })?;
-        let (items, span) = self.enclosed(true, |parser| {
+        let (items, span) = self.enclosed(|parser| {
             parser.refuse_for()?;
             parser.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)
         })?;
@@ -383,7 +382,7 @@ impl<'a> Parser<'a> {
         let depth = enter(depth).ok_or(Error::TooDeep {
             span: self.token.span,
         })?;
-        let (map, span) = self.enclosed(false, |parser| {
+        let (map, span) = self.enclosed(|parser| {
             let mut attributes = Vec::new();
             let entries = parser.entries(&mut attributes, depth);
             let map = parser.map(attributes);
@@ -396,19 +395,23 @@ impl<'a> Parser<'a> {
     }
 
     /// Takes the open bracket, reads the inside with `inner` up to the close, and
-    /// takes the close. Inside, `take` skips new lines when `bracketed`. Returns what
+    /// takes the close. Inside `[` or `(`, `take` skips new lines. Returns what
     /// `inner` read and the span from the open to the close.
     fn enclosed<T>(
         &mut self,
-        bracketed: bool,
         inner: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<(T, Span), Error> {
+        let skipped = match self.token.kind {
+            lex::Kind::OpenBracket | lex::Kind::OpenParenthesis => true,
+            lex::Kind::OpenBrace => false,
+            ref kind => unreachable!("invariant: {kind:?} opens nothing"),
+        };
         // The mode changes before each bracket is taken, because `take` reads the
         // token after it.
-        let outer = std::mem::replace(&mut self.bracketed, bracketed);
+        let outer = std::mem::replace(&mut self.newlines_skipped, skipped);
         let open = self.take()?;
         let inside = inner(self)?;
-        self.bracketed = outer;
+        self.newlines_skipped = outer;
         let close = self.take()?;
         Ok((inside, join(open.span, close.span)))
     }
@@ -419,6 +422,7 @@ impl<'a> Parser<'a> {
         attributes: &mut Vec<Attribute>,
         depth: usize,
     ) -> Result<(), Error> {
+        self.skip_newlines()?;
         self.refuse_for()?;
         // Each pass takes a token or returns.
         for _ in 0..=self.len {
@@ -492,7 +496,7 @@ impl<'a> Parser<'a> {
         let depth = enter(depth).ok_or(Error::TooDeep {
             span: function.span,
         })?;
-        let (arguments, span) = self.enclosed(true, |parser| {
+        let (arguments, span) = self.enclosed(|parser| {
             parser.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)
         })?;
         Ok(Value {
@@ -577,7 +581,7 @@ impl<'a> Parser<'a> {
             "invariant: no rule takes the end, at {:?}",
             self.token.span
         );
-        let next = if self.bracketed {
+        let next = if self.newlines_skipped {
             self.tokens.next_past_lines()
         } else {
             self.tokens.next()
