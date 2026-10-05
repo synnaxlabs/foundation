@@ -9,7 +9,7 @@ use std::sync::Arc;
 use divan::Bencher;
 use types::channel::Slot;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{Draft, Form, Frame, Label, Range};
+use types::frame::{Draft, Form, Frame, Path, Range};
 use types::sample::{Scalar, Type};
 
 const F64: Type = Type::Scalar(Scalar::F64);
@@ -103,7 +103,6 @@ fn draft(pool: &block::Pool, case: &Case) -> Draft {
     Draft::new(
         pool,
         black_box(&case.set),
-        Label::Live,
         Form::Encoded,
         black_box(&case.series),
     )
@@ -115,7 +114,7 @@ fn frame(pool: &block::Pool, case: &Case) -> Frame {
     for (_, bytes) in draft.iter_mut() {
         bytes.fill(1);
     }
-    draft.freeze()
+    draft.freeze(Path::Live)
 }
 
 /// Builds a frame and sets each present group's range.
@@ -127,7 +126,7 @@ fn build(bencher: Bencher<'_, '_>, case: &Case) {
         for &group in &case.groups {
             draft.set_range(group, Range { seq: 1, count: 1 });
         }
-        drop(draft.freeze());
+        drop(draft.freeze(Path::Live));
     });
 }
 
@@ -140,7 +139,7 @@ fn fill(bencher: Bencher<'_, '_>, case: &Case) {
         for (_, bytes) in draft.iter_mut() {
             bytes.fill(1);
         }
-        drop(draft.freeze());
+        drop(draft.freeze(Path::Live));
     });
 }
 

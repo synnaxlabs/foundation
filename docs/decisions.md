@@ -215,7 +215,10 @@ How to read this record:
   holds are published on status channels. Supersedes: B1 durable reader, B2 durable
   and ad-hoc readers.
 - **S10 + S11 + BQ7 (writer)** A writer session is `{ subject, authority, control
-  lease, path: live or backfill, channels, confirmation: stored or replicated }`.
+  lease, channels, confirmation: stored or replicated }`. It has no path: the label on
+  each write (B7) is the only source, and a write with no label is live. The person
+  decided on 2026-10-05: "as long as you've evaluated the performance costs of your
+  decision against correctness then I'm ok with this" (#243).
 - **B2** Selectors stay live: channels created later that match join the subscription.
   A start time maps to the first sample at or after it, per index. A range the buffer no
   longer has is an explicit gap.
@@ -280,19 +283,26 @@ How to read this record:
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
 - **B7** A frame applies whole or not at all, per index. A writer never resends on the
-  live path. After a reconnect, it resends each unconfirmed live frame, with its
-  original boundaries, labeled `resend`. `resend` is a frame label, not a third path:
-  the home checks a resend frame by timestamp against both paths of the index, and it
-  lands on one of them or on none. When every sample exists with the same values, the
-  frame is a repeat, and the home drops and confirms it. When no sample exists and the
-  frame starts after the newest live stamp, it never landed, and the home applies it
-  to the live path. When no sample exists and the frame fits A6, it applies as
-  backfill. Anything else is an error: some samples stored and some not, a stored
-  timestamp with other values, a frame that fits neither path, or a range below the
-  buffer's floor. Live and backfill frames pay no check. Values are compared decoded,
-  not as bytes. Writers assign no numbers: a resend comes in a new session, and the
-  writer never learned them. The person decided on 2026-10-05: "By timestamp + same
-  values" (#148), then "A `resend` label" (#168).
+  live path. After a reconnect, it resends each unconfirmed frame, live or backfill,
+  with its original boundaries, labeled `resend`. `resend` is a write label, not a third
+  path: the home checks a resend frame by timestamp against both paths of each index,
+  and each index lands on one of them or on none. The home sets the frame's path when it
+  freezes the frame, after the check, so a resend frame carries the path it landed on.
+  When every sample of an index exists with the same values, that index is a repeat.
+  When no sample exists and the index's data starts after its newest live stamp, it
+  never landed, and the home applies it to the live path. When no sample exists and the
+  data fits A6, it applies as backfill. Anything else is an error: some samples stored
+  and some not, a stored timestamp with other values, data that fits neither path, or a
+  range below the buffer's floor. When the indexes of one resend land on different
+  paths, the home splits it into frames of one path each and drops the repeats. It
+  confirms the resend when every part has landed or was dropped. Only a mixed resend
+  pays this copy; `home` measures it when it builds the split. Live and backfill frames
+  pay no check. Values are compared decoded, not as bytes. Writers assign no numbers: a
+  resend comes in a new session, and the writer never learned them. The person decided
+  on 2026-10-05: "By timestamp + same values" (#148), then "A `resend` label" (#168),
+  then the split, a resend of every unconfirmed frame, and no session path: "as long as
+  you've evaluated the performance costs of your decision against correctness then I'm
+  ok with this" (#243).
 - **READ COPIES (delivery part)** `hub` merges latest subscriptions for one remote home
   into one upstream flow.
 - **BQ3** `hub` is the whole layer-3 window: `reader()`, `writer()`, read-only
@@ -397,7 +407,7 @@ How to read this record:
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
   home routes by key set.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
-  label), a range for each present index group, a descriptor for each present series,
+  path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
   An entry is present when it has a descriptor, so the cost of a frame grows with the
   series it holds, not with the width of its key set (rule 11). The "presence mask" of
@@ -410,21 +420,29 @@ How to read this record:
 - **M5** Blocks hold offsets, never pointers.
 - **FRAME LAYOUT (refines M3, X8)** `types::frame`, little-endian, offsets from the
   start of the payload. A 16-byte header: key set key, range count, and descriptor count
-  (each u32), then form and label (each u8), then zeros. The label is the writer's
-  (B7): live 0, backfill 1, resend 2. Then `{ group: u32, count: u32, seq: u64 }` for
-  each present group, sorted by group, then `{ entry: u32, end: u32 }` for each present
-  series, sorted by entry, then the series. `end` counts from the start of the series
-  bytes. Each series starts at the end before it rounded up to 8, and the first at 0.
-  A group is present when its index is, and a present series needs its index. A lookup
-  by entry or group is a binary search, and a pass in entry order reads each descriptor
-  once. The header holds no entry or group count: an entry or group past the key set
-  is absent. A frame is at most `u32::MAX` bytes.
+  (each u32), then form and path (each u8), then zeros. The path is live 0 or backfill
+  1, the path whose seq the ranges count on (A8).
+  Then `{ group: u32, count: u32, seq: u64 }` for each present group, sorted by group,
+  then `{ entry: u32, end: u32 }` for each present series, sorted by entry, then the
+  series. `end` counts from the start of the series bytes. Each series starts at the
+  end before it rounded up to 8, and the first at 0. A group is present when its index
+  is, and a present series needs its index. A lookup by entry or group is a binary
+  search, and a pass in entry order reads each descriptor once. The header holds no
+  entry or group count: an entry or group past the key set is absent. A frame is at
+  most `u32::MAX` bytes.
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
   gap and backfill waits. The current value of B4 pins one block per index that had a
   live frame, with no reader open and no cap. A smaller copy is a 5.3 tunable. The
-  person decided on 2026-10-05: "Accept it" (#139).
+  person decided on 2026-10-05: "Accept it" (#139). The budget counts what stays
+  resident. A purge of a block smaller than a page gives no page back, so it frees no
+  budget. When every carved block of a size class is free, the pool gives back the
+  class's whole carved range and its budget; at most two partial pages per class stay
+  resident, and `Config::budget` states that slack. A class that a reader keeps partly
+  in use keeps its budget. The person accepted this (design H) on 2026-10-05 ("Ok
+  fine"), #2, #270. Purges per block that give back every page they credit (design P)
+  wait in a follow-up issue.
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
@@ -1203,7 +1221,8 @@ Storage classes used in the table:
 | `node::Key` | Region state (membership record) | Voters at join | `hub`, `mesh`, `access` | `types` (value), `mesh` |
 | `channel::Slot` | Memory, node-wide; never on the wire or disk | The node's slot table (`channel::Slots`) when the node learns a channel (owner: X42) | `hub`, `home`, `delivery`, `buffer` | `types` (value) |
 | Key set | Memory, one per writer session: sorted slots plus per-entry types | The interner at writer open | `home` (routing), `delivery` (masks), `hub` | `types::frame` |
-| Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one | The writer; backfill is its label for late data | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
+| Path (live or backfill) | A value, `frame::Path` (A6, A8). Each frame carries one in its header | Whoever freezes the frame: the home on a write, from its label after the B7 check; a decoder or catch-up, from the path the frame came with | `home`, `buffer`, `wire`, `delivery` | `types::frame` |
+| Label (a path or resend) | A value, `frame::Label` (B7), on each write: the `hub` writer call and the wire write message. The only source of a write's path; none means live. Not in the frame block | The writer | `hub`, `wire`, `home` | `types::frame` |
 | Per-connection short numbers | Memory, per connection | The `wire` encoder at setup | The `wire` decoder | `wire` |
 | Data type | Spec, on each data channel (byte layout); interned per key set in memory | Files, then `apply` | `codec`, home checks, SDKs | `types` (layout), `spec` (meaning) |
 | Enum and flags definitions | Files, then Spec as named types with fingerprints | People, `discover` | Sinks, SDK code generation, `plan` | `spec` |
@@ -1270,7 +1289,7 @@ Storage classes used in the table:
 
 | Concept | Defined or stored | Written by | Read by | Owner crate |
 | --- | --- | --- | --- | --- |
-| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, label, form), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
+| Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
 | View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |
