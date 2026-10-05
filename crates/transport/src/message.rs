@@ -213,6 +213,10 @@ fn alloc(pool: &Pool, len: usize) -> Result<Unique, Error> {
             bytes: requested,
             available,
         }),
+        Err(block::Error::Refused { requested }) => Err(Error::Pool {
+            bytes: requested,
+            available: 0,
+        }),
         Err(error @ block::Error::TooLarge { .. }) => {
             panic!("the pool cannot hold a message of `bytes_max`: {error}")
         }

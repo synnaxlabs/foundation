@@ -14,8 +14,10 @@
 #   CARRIER_DRY=0       1 skips what a container cannot set: sysctls, IRQs, RPS,
 #                       irqbalance, and CPU idle states
 #   PROFILES="default none gro-only gso-only jumbo lowat-off awake"
-#   SECS=20             seconds of each bulk and ping run, after the warmup
-#   PACED_SECS=60       seconds of each paced run, after the warmup
+#   SECS=20             seconds of each bulk and ping run, after the warmup; at
+#                       most 86400
+#   PACED_SECS=60       seconds of each paced run, after the warmup; at most 86396,
+#                       as the link load flows run 4 s longer
 #   RUN_CPU=2           the CPU of the measured client and servers
 #   LOAD_CPUS="4 5"     the CPUs of the two link load flows
 #   IRQ_CPUS=8-15       the CPUs that take the NIC interrupts
@@ -36,6 +38,10 @@ read -r -a LOAD_CPUS <<<"${LOAD_CPUS:-4 5}"
 IRQ_CPUS=${IRQ_CPUS:-8-15}
 IRQ_LIST=$(seq "${IRQ_CPUS%-*}" "${IRQ_CPUS#*-}" | paste -sd, -)
 DRY=${CARRIER_DRY:-0}
+if ((SECS > 86400 || PACED_SECS + 4 > 86400)); then
+  echo "SECS is at most 86400 and PACED_SECS at most 86396" >&2
+  exit 2
+fi
 LONGEST=$((SECS > PACED_SECS + 4 ? SECS : PACED_SECS + 4))
 
 HERE=$(cd "$(dirname "$0")" && pwd)
