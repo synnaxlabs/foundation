@@ -34,6 +34,16 @@ disallowed-methods = [
   { path = "std::collections::HashSet::new", reason = "random hash order" },
   { path = "std::collections::HashSet::with_capacity", reason = "random hash order" },
   { path = "std::hash::RandomState::new", reason = "OS randomness breaks replay" },
+  { path = "std::thread::park", reason = "await a future" },
+  { path = "std::thread::park_timeout", reason = "await a future" },
+  { path = "std::sync::Condvar::wait", reason = "await a future" },
+  { path = "std::sync::Condvar::wait_while", reason = "await a future" },
+  { path = "std::sync::Condvar::wait_timeout", reason = "await a future" },
+  { path = "std::sync::Condvar::wait_timeout_while", reason = "await a future" },
+  { path = "std::sync::Barrier::wait", reason = "await a future" },
+  { path = "std::sync::mpsc::Receiver::recv", reason = "await a future" },
+  { path = "std::sync::mpsc::Receiver::recv_timeout", reason = "await a future" },
+  { path = "env::wall::Wall::now", reason = "only clock reads it" },
 ]
 disallowed-types = [
   { path = "std::collections::HashMap", reason = "use types::hash::Map" },

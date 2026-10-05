@@ -344,6 +344,18 @@ How to read this record:
   prolly tree keyed by full name, about 4 KiB chunks, BLAKE3. Each change record lists
   its new chunks. A region's voters sit on one LAN. A node fetches only the regions and
   ranges it uses.
+- **RAFT SURFACE (#5)** `raft::Raft::new(Config, Start)` builds a follower. `Config`
+  holds the fixed inputs (key, tick counts). `Start` holds what the node had on disk:
+  `hard` (term and vote), `voters`, and `last`, the last log position, which stands in
+  for the log until replication lands. `Raft` takes `tick(random)`, `step(message)`,
+  and `campaign()`, and gives `hard()` and `messages()`. The caller writes `hard()` to
+  disk before it sends `messages()`, so a candidate counts its own vote at once.
+  Randomness enters only through `tick`: a node draws its election timeout on the
+  first tick after a reset. PreVote and CheckQuorum have no off switch. Until
+  replication lands, a new leader announces itself with a heartbeat. A node that is
+  not in its own voter list votes and follows, but never campaigns. `step` does not
+  check that a sender is a voter (a voter can learn late that a peer joined), so the
+  caller authenticates the sender and decides which nodes may send.
 - **K5 + REGION LOCKED + K5 REVISION** There is one mesh. A region keeps changing its
   own definitions while cut off. A region changes its own voters. The parent only
   creates or removes a region, or forces a takeover (admin on the parent, `--force`,
@@ -630,6 +642,23 @@ How to read this record:
 - **R16-9 (2026-10-04)** Miri and cargo-fuzz run on one pinned nightly toolchain that
   only those gates use. The workspace toolchain stays stable. Decided by the advisor
   under the quality delegation.
+- **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
+  trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
+  `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
+  `wall::Wall`: the OS wall clock, which only `clock` reads (a lint).
+  `entropy::Entropy`: random bytes from the OS, or from the run's seed in simulation.
+  `rng::Rng` is concrete (xoshiro256++ seeded from `Entropy`), so simulation replays it.
+  `shards::Shards`, held only by `node`: the core count, and one thread per shard with
+  its own executor. `tasks::Tasks`: spawns `!Send` tasks on the current shard.
+  `threads::Threads`: dedicated threads for blocking code. Each runs one future, and it
+  waits for an event only by awaiting a future, so simulation controls every wait. A
+  lint denies the std blocking waits (`park`, `Condvar`, `Barrier`, `mpsc` receive).
+  When a shard's main future completes, the shard drops its other tasks. A panic in any
+  task ends its shard, and its `Handle::join` returns `Error::Panicked`. A dropped
+  `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
+  Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
+  scheduler runs them. No other crate calls Tokio's timers or spawn. Files come later
+  (S4).
 
 ### 1.15 Releases
 
@@ -1301,7 +1330,11 @@ T2 calls that too strict, and C9c enforces oracles by visibility only. Resolutio
 People still own contracts and oracles; agents may edit them, and every weakening gets
 an adversarial reviewer and a person's merge.
 
-Count: 53 items (X1 to X53).
+**X54. "Clock".** It means `env::clock::Clock`, the monotonic clock of one node, and
+the `clock` crate, which serves mesh time. Resolution: in prose, "monotonic clock" for
+the `env` seam and "mesh clock" for what the `clock` crate serves.
+
+Count: 54 items (X1 to X54).
 
 ---
 
