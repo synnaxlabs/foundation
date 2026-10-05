@@ -145,6 +145,7 @@ mod tests {
     use types::time::{Span, Stamp};
 
     use super::*;
+    use crate::common::pool;
 
     /// Index frames of one index with no data channels.
     struct Frames {
@@ -154,14 +155,12 @@ mod tests {
 
     impl Frames {
         fn new() -> Self {
-            let config = block::Config { budget: 4096 };
-            let memory = block::Heap::new(config.reservation());
             let index = Group {
                 index: channel::Key::from_u128(1),
                 data: &[],
             };
             Self {
-                pool: block::Pool::new(config, memory),
+                pool: pool(4096),
                 set: Interner::new().intern(&mut Slots::new(), &[index]),
             }
         }

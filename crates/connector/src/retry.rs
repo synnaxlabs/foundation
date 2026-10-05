@@ -108,7 +108,7 @@ mod tests {
     /// Waits `n` times, resetting before each wait in `resets`, and returns the span
     /// of each wait.
     fn waits(seed: u64, config: Config, n: usize, resets: Vec<usize>) -> Vec<Span> {
-        run(move |clock, _| async move {
+        run(move |clock, _, _| async move {
             let token = Token::new();
             let mut backoff = Backoff::new(&clock, Rng::from_seed(seed), config);
             let mut out = Vec::new();
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn returns_false_at_once_when_cancelled_during_a_wait() {
-        let (waited, elapsed) = run(|clock, tasks| async move {
+        let (waited, elapsed) = run(|clock, tasks, _| async move {
             let token = Token::new();
             let canceller = token.clone();
             let sleeper = clock.clone();
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn returns_false_without_a_wait_when_already_cancelled() {
-        let (waited, elapsed) = run(|clock, _| async move {
+        let (waited, elapsed) = run(|clock, _, _| async move {
             let token = Token::new();
             token.cancel();
             let config = Config {

@@ -5,7 +5,7 @@ use document::{Attribute, Block, Document, Label, Map};
 use proptest::prelude::*;
 
 fn identifier() -> impl Strategy<Value = String> {
-    "[a-z_][a-z0-9_-]{0,6}"
+    "[a-z_éü][a-z0-9_\u{301}éü-]{0,6}"
 }
 
 fn text() -> impl Strategy<Value = String> {

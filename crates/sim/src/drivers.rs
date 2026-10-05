@@ -20,7 +20,7 @@ use env::threads::Body;
 use types::time::Monotonic;
 
 use crate::shard::Fault;
-use crate::state::{Due, Futures, Shared, Start, lock};
+use crate::state::{Due, Futures, Outcome, Shared, Start, lock};
 
 /// Drives every seam of one node.
 #[derive(Clone)]
@@ -33,14 +33,20 @@ impl Node {
     /// Adds a thread that runs when the scheduler picks its first task.
     fn thread(&self, name: String, start: Start) -> Handle {
         let thread = lock(&self.shared).start(self.node, name, start);
-        let shared = Arc::clone(&self.shared);
+        let (shared, node) = (Arc::clone(&self.shared), self.node);
         Handle::new(move || {
             let state = lock(&shared);
             let (outcome, name) = (state.outcome(thread), state.name(thread));
             drop(state);
-            outcome.unwrap_or_else(|| {
-                panic!("thread {name} has not ended; run the sim until it ends")
-            })
+            match outcome {
+                Some(Outcome::Done(result)) => result,
+                Some(Outcome::Crashed) => {
+                    panic!("thread {name} ended in a crash of node {node}")
+                }
+                None => {
+                    panic!("thread {name} has not ended; run the sim until it ends")
+                }
+            }
         })
     }
 

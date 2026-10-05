@@ -764,18 +764,24 @@ mod tests {
     #[test]
     fn reads_the_header_of_a_draft() {
         let mut interner = Interner::new();
-        interner.intern(
-            &mut table(),
-            &[Group {
-                index: key(10),
-                data: &[],
-            }],
-        );
+        let mut slots = table();
+        // A key wider than one byte, and unlike the counts in the header.
+        for n in 0..256 {
+            interner.intern(
+                &mut slots,
+                &[Group {
+                    index: key(1000 + n),
+                    data: &[],
+                }],
+            );
+        }
         let set = one_group(&mut interner);
+        assert_eq!(set.key().get(), 256);
         let pool = pool(1 << 16);
         let draft = Draft::new(&pool, &set, Form::Encoded, &[(0, 8)]).unwrap();
-        assert_eq!(draft.key_set().get(), 1);
+        assert_eq!(draft.key_set(), set.key());
         assert_eq!(draft.form(), Form::Encoded);
+        assert_eq!(draft.freeze(Path::Live).key_set(), set.key());
     }
 
     #[test]

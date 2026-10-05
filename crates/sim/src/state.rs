@@ -70,6 +70,8 @@ struct Node {
     cores: NonZeroUsize,
     entropy: Rng,
     shards: shard::Starts,
+    /// The monotonic reading at boot.
+    boot: Monotonic,
 }
 
 impl Node {
@@ -86,7 +88,16 @@ struct Thread {
     name: String,
     node: usize,
     main: u64,
-    outcome: Option<Result<(), Error>>,
+    outcome: Option<Outcome>,
+}
+
+/// How a thread ended.
+#[derive(Clone)]
+pub(crate) enum Outcome {
+    /// Its first task completed, or a task panicked.
+    Done(Result<(), Error>),
+    /// A crash of its node ended it.
+    Crashed,
 }
 
 /// The next step of a run.
@@ -154,6 +165,7 @@ impl State {
             cores: config.cores,
             entropy,
             shards: shard::Starts::default(),
+            boot: config.monotonic,
         };
         self.nodes.push(node);
         self.files.add(config.disk_bytes);
@@ -351,7 +363,7 @@ impl State {
     }
 
     /// How `thread` ended, or `None` while it runs.
-    pub(crate) fn outcome(&self, thread: u64) -> Option<Result<(), Error>> {
+    pub(crate) fn outcome(&self, thread: u64) -> Option<Outcome> {
         self.threads[&thread].outcome.clone()
     }
 
@@ -424,7 +436,7 @@ impl State {
     /// futures the caller drops.
     pub(crate) fn finish(&mut self, task: u64, thread: u64) -> Vec<u64> {
         if task == self.threads[&thread].main {
-            return self.end(thread, Ok(()));
+            return self.end(thread, Outcome::Done(Ok(())));
         }
         self.tasks.remove(&task);
         self.ready.remove(&task);
@@ -433,7 +445,7 @@ impl State {
 
     /// Ends `thread` with `outcome` and returns the keys of its tasks, whose futures
     /// the caller drops.
-    pub(crate) fn end(&mut self, thread: u64, outcome: Result<(), Error>) -> Vec<u64> {
+    pub(crate) fn end(&mut self, thread: u64, outcome: Outcome) -> Vec<u64> {
         self.threads
             .get_mut(&thread)
             .expect("invariant: an ending thread exists")
@@ -466,6 +478,33 @@ impl State {
         let (ended, orphans) = self.files.end(at, &mut self.digest);
         wakers.extend(ended);
         (wakers, orphans)
+    }
+
+    /// Ends each live thread of `node` in a crash. Returns the tasks whose futures
+    /// the caller drops, and the starts of the threads that had not run, for the
+    /// caller to drop after it releases the lock.
+    pub(crate) fn crash(&mut self, node: usize) -> (Vec<u64>, Vec<Start>) {
+        let live: Vec<(u64, u64)> = (self.threads.iter())
+            .filter(|(_, thread)| thread.node == node && thread.outcome.is_none())
+            .map(|(&key, thread)| (key, thread.main))
+            .collect();
+        let (mut tasks, mut starts) = (Vec::new(), Vec::new());
+        for (thread, main) in live {
+            starts.extend(self.starts.remove(&main));
+            tasks.extend(self.end(thread, Outcome::Crashed));
+        }
+        (tasks, starts)
+    }
+
+    /// Cuts the power of `node`, whose threads a crash ended: its monotonic clock
+    /// reads its boot value again, and its disk keeps what is durable. Returns the
+    /// blocks of its file calls in flight, for the caller to drop after it releases
+    /// the lock.
+    pub(crate) fn cut_power(&mut self, node: usize) -> Vec<Held> {
+        let (now, wall) = (self.now, self.wall(node).time);
+        let booted = &mut self.nodes[node];
+        (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
+        self.files.cut_power(node, now, &mut self.digest)
     }
 
     /// Removes the starts of the threads that have not run.

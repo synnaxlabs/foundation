@@ -18,8 +18,8 @@ use types::time::Span;
 use super::{shard, sim};
 use crate::node;
 
-const KIB: u64 = 1 << 10;
-const MIB: u64 = 1 << 20;
+pub(super) const KIB: u64 = 1 << 10;
+pub(super) const MIB: u64 = 1 << 20;
 
 /// Runs `body` on a shard of a node with a disk of `disk_bytes`, and returns what it
 /// gives.
@@ -49,30 +49,30 @@ where
     out.lock().unwrap().take().expect("the shard gave a value")
 }
 
-fn pool() -> Pool {
+pub(super) fn pool() -> Pool {
     let config = block::Config { budget: 64 << 10 };
     let memory = block::Heap::new(config.reservation());
     Pool::new(config, memory)
 }
 
-fn block(pool: &Pool, bytes: &[u8]) -> Block {
+pub(super) fn block(pool: &Pool, bytes: &[u8]) -> Block {
     let mut unique = pool.alloc(bytes.len()).unwrap();
     unique.copy_from_slice(bytes);
     unique.freeze()
 }
 
 /// The `len` bytes of `file` at `offset`.
-async fn read(file: &File, pool: &Pool, offset: u64, len: usize) -> Vec<u8> {
+pub(super) async fn read(file: &File, pool: &Pool, offset: u64, len: usize) -> Vec<u8> {
     let into = pool.alloc(len).unwrap();
     file.read_at(offset, into).await.unwrap().to_vec()
 }
 
-async fn create(node: &node::Node, path: &str, len: u64) -> File {
+pub(super) async fn create(node: &node::Node, path: &str, len: u64) -> File {
     let mode = Mode::Create { len };
     node.files().open(Path::new(path), mode).await.unwrap()
 }
 
-fn io(path: &str, operation: Operation, code: i32) -> Error {
+pub(super) fn io(path: &str, operation: Operation, code: i32) -> Error {
     Error::Io {
         path: path.into(),
         operation,
@@ -82,7 +82,7 @@ fn io(path: &str, operation: Operation, code: i32) -> Error {
 
 /// The first byte of each 512-byte sector of `bytes`, after a check that each sector
 /// holds one value.
-fn sectors(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn sectors(bytes: &[u8]) -> Vec<u8> {
     (bytes.chunks(512))
         .map(|sector| {
             assert!(
@@ -294,6 +294,20 @@ fn free_counts_each_file_and_directory_until_its_last_handle_closes() {
     let expected = [MIB, created, created, created - 4 * KIB, created - 4 * KIB];
     assert_eq!(frees[..5], expected);
     assert_eq!(frees[5], MIB - 4 * KIB, "the last handle closed");
+}
+
+#[test]
+fn a_remove_frees_a_durable_file_only_after_sync_dir() {
+    let frees = run(0, MIB, |node, _| async move {
+        let files = node.files();
+        drop(create(&node, "f", 64 * KIB).await);
+        files.sync_dir(Path::new("")).await.unwrap();
+        files.remove(Path::new("f")).await.unwrap();
+        let removed = files.free().await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        (removed, files.free().await.unwrap())
+    });
+    assert_eq!(frees, (MIB - 64 * KIB, MIB));
 }
 
 #[test]
