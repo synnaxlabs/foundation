@@ -1,5 +1,7 @@
 //! UDP sockets that move batches of datagrams. A socket has two halves: a
-//! [`Sender`] that any thread may use, and a [`Receiver`] with one owner.
+//! [`Sender`] that each sending thread clones, and a [`Receiver`] with one owner.
+
+pub mod sender;
 
 use std::fmt;
 use std::io::IoSliceMut;
@@ -34,8 +36,10 @@ pub struct Config {
     pub recv_buffer_bytes: usize,
 }
 
-/// The send half of a UDP socket. Any thread may poll it, also at the same time as
-/// other threads, so each shard keeps a clone. Clones send on the same socket.
+/// The send half of a UDP socket. Each thread that sends keeps its own clone, and
+/// clones send on the same socket. A clone may move to another thread before its
+/// first poll. The first poll binds it to the thread that polls, and a poll on any
+/// other thread then panics.
 ///
 /// ```
 /// use std::future::poll_fn;
@@ -43,16 +47,21 @@ pub struct Config {
 /// use env::net::Error;
 /// use env::net::udp::{Sender, Transmit};
 ///
-/// async fn send(sender: &Sender, transmit: &Transmit<'_>) -> Result<(), Error> {
+/// async fn send(sender: &mut Sender, transmit: &Transmit<'_>) -> Result<(), Error> {
 ///     poll_fn(|cx| sender.poll_send(cx, transmit)).await
 /// }
 /// ```
-#[derive(Clone)]
-pub struct Sender(Arc<dyn Driver>);
+pub struct Sender {
+    socket: Arc<dyn Driver>,
+    driver: Box<dyn sender::Driver>,
+}
 
 impl Sender {
     pub(super) fn new(socket: Arc<dyn Driver>) -> Self {
-        Self(socket)
+        Self {
+            driver: socket.sender(),
+            socket,
+        }
     }
 
     /// The local address of the socket.
@@ -64,7 +73,7 @@ impl Sender {
     /// ```
     #[must_use]
     pub fn local(&self) -> SocketAddr {
-        self.0.local()
+        self.socket.local()
     }
 
     /// The most datagrams that one [`Transmit`] may hold: the GSO segment count, or 1
@@ -77,11 +86,12 @@ impl Sender {
     /// ```
     #[must_use]
     pub fn batch_max(&self) -> NonZeroUsize {
-        self.0.send_batch_max()
+        self.socket.send_batch_max()
     }
 
     /// Sends every datagram of `transmit`. It is pending while the OS send buffer is
-    /// full.
+    /// full. Some datagrams may have gone out before a `Pending` or an error, and a
+    /// retry sends them again.
     ///
     /// # Errors
     ///
@@ -92,7 +102,8 @@ impl Sender {
     /// # Panics
     ///
     /// When `transmit` holds more datagrams than [`Sender::batch_max`], or more bytes
-    /// than [`TRANSMIT_BYTES_MAX`].
+    /// than [`TRANSMIT_BYTES_MAX`], and on a thread other than the one of the first
+    /// poll.
     ///
     /// ```
     /// use std::task::{Context, Poll};
@@ -100,7 +111,7 @@ impl Sender {
     /// use env::net::udp::{Sender, Transmit};
     ///
     /// fn send(
-    ///     sender: &Sender,
+    ///     sender: &mut Sender,
     ///     cx: &mut Context<'_>,
     ///     transmit: &Transmit<'_>,
     /// ) -> Poll<Result<(), env::net::Error>> {
@@ -108,7 +119,7 @@ impl Sender {
     /// }
     /// ```
     pub fn poll_send(
-        &self,
+        &mut self,
         cx: &mut Context<'_>,
         transmit: &Transmit<'_>,
     ) -> Poll<Result<(), Error>> {
@@ -129,7 +140,14 @@ impl Sender {
                 len.div_ceil(segment.get())
             );
         }
-        self.0.poll_send(cx, transmit)
+        self.driver.poll_send(cx, transmit)
+    }
+}
+
+impl Clone for Sender {
+    /// Gives a sender on the same socket, not bound to a thread yet.
+    fn clone(&self) -> Self {
+        Self::new(Arc::clone(&self.socket))
     }
 }
 
@@ -250,8 +268,9 @@ impl fmt::Debug for Receiver {
 
 /// One send: one datagram, or a batch of datagrams to one destination. Each datagram
 /// travels alone: the network may lose, delay, or reorder any one of them, and the
-/// receiver may get them in other batches. On a socket bound to `[::]`, `destination`
-/// and `source` may be IPv4.
+/// receiver may get them in other batches. The driver sets don't-fragment, so a
+/// datagram over the path MTU is lost. On a socket bound to `[::]`, `destination` and
+/// `source` may be IPv4.
 ///
 /// ```
 /// fn batch(contents: &[u8]) -> env::net::udp::Transmit<'_> {
@@ -316,9 +335,14 @@ impl Default for Meta {
 /// What `os` and `sim` implement to run one UDP socket's [`Sender`] and
 /// [`Receiver`]. Only they implement it.
 ///
-/// On a socket bound to `[::]`, it gives each IPv4 address in a [`Meta`] as `V4`
-/// (`os` unmaps `::ffff:a.b.c.d`), and sends a [`Transmit`] with an IPv4
-/// `destination` and `source`. The `os` and `sim` tests each need one case for this.
+/// It sets don't-fragment on every datagram (`os`: `IP_MTU_DISCOVER` set to probe, and
+/// `IPV6_DONTFRAG`). A datagram over the path MTU is lost, not an error: `os` maps
+/// `EMSGSIZE` to a loss, and `sim` drops it.
+///
+/// On a socket bound to `[::]`, `os` sets `IPV6_V6ONLY` off explicitly. The driver
+/// gives each IPv4 address in a [`Meta`] as `V4` (`os` unmaps `::ffff:a.b.c.d`), and
+/// sends a [`Transmit`] with an IPv4 `destination` and `source`. The `os` and `sim`
+/// tests each need one case for this.
 ///
 /// ```
 /// fn local(socket: &dyn env::net::udp::Driver) -> std::net::SocketAddr {
@@ -336,14 +360,10 @@ pub trait Driver: Send + Sync {
     /// The most datagrams one buffer receives. It does not change.
     fn recv_batch_max(&self) -> NonZeroUsize;
 
-    /// Sends `transmit`, with the rules of [`Sender::poll_send`]. An error affects
-    /// only this transmit. Threads call it at the same time, and a pending call wakes
-    /// its own `cx`, whatever other threads wait.
-    fn poll_send(
-        &self,
-        cx: &mut Context<'_>,
-        transmit: &Transmit<'_>,
-    ) -> Poll<Result<(), Error>>;
+    /// Gives the driver of one more [`Sender`] clone, not bound to a thread yet. It
+    /// cannot fail, so a driver that needs a resource per clone takes it at the first
+    /// poll.
+    fn sender(&self) -> Box<dyn sender::Driver>;
 
     /// Receives, with the rules of [`Receiver::poll_recv`]. It absorbs the errors of
     /// one datagram and gives an error only when the socket is broken. It panics on a
@@ -359,14 +379,41 @@ pub trait Driver: Send + Sync {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Waker;
 
     use super::*;
     use crate::net::{self, Net, listener, tcp};
 
-    /// Sends at once and records each send. Each receive gives one datagram of
-    /// three bytes.
+    /// Sends at once and records each send with the number of its sender driver.
+    struct Sending {
+        number: usize,
+        sends: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl sender::Driver for Sending {
+        fn poll_send(
+            &mut self,
+            _: &mut Context<'_>,
+            transmit: &Transmit<'_>,
+        ) -> Poll<Result<(), Error>> {
+            self.sends
+                .lock()
+                .expect("no test panics while locked")
+                .push(format!(
+                    "sender {}: {} bytes to {}",
+                    self.number,
+                    transmit.contents.len(),
+                    transmit.destination
+                ));
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Numbers its sender drivers from 0. Each receive gives one datagram of three
+    /// bytes.
     struct Socket {
+        senders: AtomicUsize,
         sends: Arc<Mutex<Vec<String>>>,
     }
 
@@ -383,20 +430,11 @@ mod tests {
             NonZeroUsize::new(2).expect("not zero")
         }
 
-        fn poll_send(
-            &self,
-            _: &mut Context<'_>,
-            transmit: &Transmit<'_>,
-        ) -> Poll<Result<(), Error>> {
-            self.sends
-                .lock()
-                .expect("no test panics while locked")
-                .push(format!(
-                    "{} bytes to {}",
-                    transmit.contents.len(),
-                    transmit.destination
-                ));
-            Poll::Ready(Ok(()))
+        fn sender(&self) -> Box<dyn sender::Driver> {
+            Box::new(Sending {
+                number: self.senders.fetch_add(1, Ordering::Relaxed),
+                sends: Arc::clone(&self.sends),
+            })
         }
 
         fn poll_recv(
@@ -423,6 +461,7 @@ mod tests {
     impl net::Driver for Network {
         fn udp(&self, _: &Config) -> Result<Box<dyn Driver>, Error> {
             Ok(Box::new(Socket {
+                senders: AtomicUsize::new(0),
                 sends: Arc::clone(&self.sends),
             }))
         }
@@ -460,7 +499,7 @@ mod tests {
         }
     }
 
-    fn send(sender: &Sender, transmit: &Transmit<'_>) -> Poll<Result<(), Error>> {
+    fn send(sender: &mut Sender, transmit: &Transmit<'_>) -> Poll<Result<(), Error>> {
         sender.poll_send(&mut Context::from_waker(Waker::noop()), transmit)
     }
 
@@ -469,15 +508,23 @@ mod tests {
 
         #[test]
         fn gives_two_halves_of_one_socket() {
-            let (sender, receiver, sends) = bind();
+            let (mut sender, receiver, sends) = bind();
             assert_eq!(sender.local(), receiver.local());
             assert_eq!(sender.batch_max().get(), 4);
             assert_eq!(receiver.batch_max().get(), 2);
-            let clone = sender.clone();
-            assert_eq!(send(&clone, &transmit(&[0; 5], 0)), Poll::Ready(Ok(())));
+            let mut clone = sender.clone();
+            assert_eq!(clone.local(), sender.local());
+            assert_eq!(send(&mut clone, &transmit(&[0; 5], 0)), Poll::Ready(Ok(())));
+            assert_eq!(
+                send(&mut sender, &transmit(&[0; 6], 0)),
+                Poll::Ready(Ok(()))
+            );
             assert_eq!(
                 *sends.lock().expect("no panic"),
-                ["5 bytes to 10.0.0.2:4433"]
+                [
+                    "sender 1: 5 bytes to 10.0.0.2:4433",
+                    "sender 0: 6 bytes to 10.0.0.2:4433"
+                ]
             );
         }
 
@@ -497,33 +544,36 @@ mod tests {
 
         #[test]
         fn sends_a_full_batch() {
-            let (sender, _, sends) = bind();
+            let (mut sender, _, sends) = bind();
             let contents = [0; 4 * 1_200];
             assert_eq!(
-                send(&sender, &transmit(&contents, 1_200)),
+                send(&mut sender, &transmit(&contents, 1_200)),
                 Poll::Ready(Ok(()))
             );
             assert_eq!(
                 *sends.lock().expect("no panic"),
-                ["4800 bytes to 10.0.0.2:4433"]
+                ["sender 0: 4800 bytes to 10.0.0.2:4433"]
             );
         }
 
         #[test]
         fn sends_a_batch_with_a_short_last_datagram() {
-            let (sender, _, _) = bind();
+            let (mut sender, _, _) = bind();
             let contents = [0; 3 * 1_200 + 1];
             assert_eq!(
-                send(&sender, &transmit(&contents, 1_200)),
+                send(&mut sender, &transmit(&contents, 1_200)),
                 Poll::Ready(Ok(()))
             );
         }
 
         #[test]
         fn sends_one_datagram_of_the_byte_max_without_a_segment() {
-            let (sender, _, _) = bind();
+            let (mut sender, _, _) = bind();
             let contents = vec![0; TRANSMIT_BYTES_MAX];
-            assert_eq!(send(&sender, &transmit(&contents, 0)), Poll::Ready(Ok(())));
+            assert_eq!(
+                send(&mut sender, &transmit(&contents, 0)),
+                Poll::Ready(Ok(()))
+            );
         }
 
         #[test]
@@ -531,9 +581,9 @@ mod tests {
             expected = "a transmit of 65508 bytes is over the max of 65507 bytes"
         )]
         fn panics_above_the_byte_max() {
-            let (sender, _, _) = bind();
+            let (mut sender, _, _) = bind();
             let contents = vec![0; TRANSMIT_BYTES_MAX + 1];
-            drop(send(&sender, &transmit(&contents, 0)));
+            drop(send(&mut sender, &transmit(&contents, 0)));
         }
 
         #[test]
@@ -542,19 +592,19 @@ mod tests {
                         datagrams, but the batch max is 4"
         )]
         fn panics_above_the_batch_max() {
-            let (sender, _, _) = bind();
+            let (mut sender, _, _) = bind();
             let contents = [0; 4 * 1_200 + 1];
-            drop(send(&sender, &transmit(&contents, 1_200)));
+            drop(send(&mut sender, &transmit(&contents, 1_200)));
         }
 
         #[test]
         fn sends_one_datagram_when_the_segment_times_the_max_overflows() {
-            let (sender, _, _) = bind();
+            let (mut sender, _, _) = bind();
             let one = Transmit {
                 segment: NonZeroUsize::new(usize::MAX),
                 ..transmit(&[0; 5], 0)
             };
-            assert_eq!(send(&sender, &one), Poll::Ready(Ok(())));
+            assert_eq!(send(&mut sender, &one), Poll::Ready(Ok(())));
         }
     }
 

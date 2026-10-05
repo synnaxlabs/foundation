@@ -180,7 +180,7 @@ impl Tcp {
     ///
     /// # Panics
     ///
-    /// On a thread other than the one of the first poll.
+    /// When `buffer` is empty, and on a thread other than the one of the first poll.
     ///
     /// ```
     /// use std::task::{Context, Poll};
@@ -198,6 +198,10 @@ impl Tcp {
         cx: &mut Context<'_>,
         buffer: &mut [u8],
     ) -> Poll<Result<usize, Error>> {
+        assert!(
+            !buffer.is_empty(),
+            "poll_read needs a buffer of at least one byte"
+        );
         self.0.poll_read(cx, buffer)
     }
 
@@ -536,13 +540,14 @@ mod tests {
     }
 
     #[test]
-    fn moves_sockets_between_threads_and_shares_the_sender() {
+    fn moves_sockets_between_threads() {
         fn movable<T: Send>() {}
+        fn cloned<T: Send + Clone>() {}
         fn shared<T: Send + Sync + Clone>() {}
         movable::<Tcp>();
         movable::<Listener>();
         movable::<udp::Receiver>();
-        shared::<udp::Sender>();
+        cloned::<udp::Sender>();
         shared::<Net>();
     }
 
@@ -566,6 +571,15 @@ mod tests {
 
     mod tcp_polls {
         use super::*;
+
+        #[test]
+        #[should_panic(expected = "poll_read needs a buffer of at least one byte")]
+        fn panics_on_a_read_into_an_empty_buffer() {
+            let mut tcp = Tcp(Box::new(Stream {
+                peer: address("10.0.0.2:4433"),
+            }));
+            drop(tcp.poll_read(&mut cx(), &mut []));
+        }
 
         #[test]
         fn wait_while_the_driver_waits() {
