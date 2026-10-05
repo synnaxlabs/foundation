@@ -1,5 +1,5 @@
 [06:02:04] setting up <server> and <client>
-[06:02:06] server 172.31.33.122 (enp39s0), client 172.31.41.44 (enp39s0)
+[06:02:06] server <server> (enp39s0), client <client> (enp39s0)
 [06:02:08] rep 1, profile default
 [06:02:11] run: quic 4433 bulk 20 unsegmented cpus=2,8,9,10,11,12,13,14,15
 [06:02:33] run: tls 4433 bulk 20 cpus=2,8,9,10,11,12,13,14,15
