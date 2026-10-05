@@ -768,10 +768,11 @@ mod fixture {
         Purge { offset: usize, len: usize },
     }
 
-    /// What a pool did with its memory.
+    /// What a pool did with its memory, and the switch of that memory.
     pub(crate) struct Watch {
         pub(crate) drops: AtomicUsize,
         /// Makes the memory refuse commits.
+        #[cfg_attr(loom, expect(dead_code, reason = "no model refuses a commit"))]
         pub(crate) switch: Switch,
         calls: Mutex<Vec<Call>>,
     }
@@ -1165,7 +1166,7 @@ mod tests {
         #[test]
         fn fails_while_the_system_refuses_memory() {
             let (pool, watch) = create_watched_pool(256);
-            watch.switch.set(true);
+            watch.switch.refuse();
             let error = pool.alloc(10).expect_err("the system refuses memory");
             assert_eq!(error, refused(10));
             assert_eq!(
@@ -1173,7 +1174,7 @@ mod tests {
                 "the system refused memory for a block of 10 bytes"
             );
             assert_eq!(pool.committed(), 0);
-            watch.switch.set(false);
+            watch.switch.allow();
             let block = pool.alloc(10).expect("the system has memory again");
             assert_eq!(block.len(), 10);
             assert_eq!(pool.committed(), 128);
@@ -1244,11 +1245,11 @@ mod tests {
             let (pool, watch) = create_watched_pool(256);
             drop(pool.alloc(64).expect("the budget has room"));
             pool.reclaim();
-            watch.switch.set(true);
+            watch.switch.refuse();
             let error = pool.alloc(128).expect_err("the system refuses memory");
             assert_eq!(error, refused(128));
             assert_eq!(pool.committed(), 0, "the idle class went back first");
-            watch.switch.set(false);
+            watch.switch.allow();
             let block = pool.alloc(128).expect("the system has memory again");
             assert_eq!(pool.committed(), 192);
             let carve = Commit {
@@ -1278,7 +1279,7 @@ mod tests {
         fn gives_back_only_what_it_carved_after_a_refusal() {
             let (pool, watch) = create_watched_pool(256);
             let held = pool.alloc(64).expect("the budget has room");
-            watch.switch.set(true);
+            watch.switch.refuse();
             let error = pool.alloc(64).expect_err("the system refuses memory");
             assert_eq!(error, refused(64));
             drop(held);
@@ -1346,7 +1347,7 @@ mod tests {
             drop(pool.alloc(64).expect("the budget has room"));
             drop(pool.alloc(128).expect("the budget has room"));
             pool.reclaim();
-            watch.switch.set(true);
+            watch.switch.refuse();
             let error = pool.alloc(192).expect_err("the system refuses memory");
             assert_eq!(error, refused(192));
             assert_eq!(pool.committed(), 0, "each idle size went back");
@@ -1654,7 +1655,11 @@ mod tests {
                 let mut lent = 0;
                 let steps = steps.into_iter().zip(refusals).zip(1_u8..);
                 for (((len, dropped), refusing), fill) in steps {
-                    watch.switch.set(refusing);
+                    if refusing {
+                        watch.switch.refuse();
+                    } else {
+                        watch.switch.allow();
+                    }
                     let calls = watch.calls().len();
                     match pool.alloc(len) {
                         Ok(mut block) => {

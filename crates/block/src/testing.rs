@@ -1,6 +1,7 @@
 //! Memory for the tests of crates above `block`. Needs the `sim` feature.
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
@@ -8,12 +9,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::{ALIGN, Heap, Memory, Refused};
 
-/// Heap memory whose commits a test can make the system refuse. Its first [`ALIGN`]
-/// bytes are usable from the start, as the bytes of [`Heap`] are.
+/// Heap memory whose commits a test can make the system refuse.
 #[derive(Debug)]
 pub struct Scarce {
     heap: Heap,
-    switch: Switch,
+    system: Arc<System>,
 }
 
 impl Scarce {
@@ -24,19 +24,20 @@ impl Scarce {
     /// If `len` is 0 or too large to allocate.
     #[must_use]
     pub fn new(len: usize) -> (Self, Switch) {
+        let system = Arc::new(System::default());
         let switch = Switch {
-            system: Arc::new(System::default()),
+            system: Arc::clone(&system),
         };
         let memory = Self {
             heap: Heap::new(len),
-            switch: switch.clone(),
+            system,
         };
         (memory, switch)
     }
 }
 
 // SAFETY: each method is the one of `Heap`, or a `commit` that refuses and changes
-// nothing.
+// no byte.
 unsafe impl Memory for Scarce {
     fn base(&self) -> NonNull<u8> {
         self.heap.base()
@@ -47,30 +48,39 @@ unsafe impl Memory for Scarce {
     }
 
     fn commit(&self, offset: usize, len: usize) -> Result<(), Refused> {
-        if !self.switch.system.charge(offset, len) {
+        if !self.system.charge(offset, len) {
             return Err(Refused);
         }
         self.heap.commit(offset, len)
     }
 
     fn purge(&self, offset: usize, len: usize) {
-        self.switch.system.discharge(offset, len);
+        self.system.discharge(offset, len);
         self.heap.purge(offset, len);
     }
 }
 
-/// Makes the commits of one [`Scarce`] refuse or succeed. A clone moves the same
-/// switch.
+/// Makes the commits of one [`Scarce`] refuse or succeed. A clone controls the same
+/// memory.
+///
+/// A pool commits only when it cuts a new block. An alloc that it serves from a block
+/// it already holds succeeds while the memory refuses.
 #[derive(Clone, Debug)]
 pub struct Switch {
     system: Arc<System>,
 }
 
 impl Switch {
-    /// From now on each commit refuses when `refusing` is true, and succeeds when it
-    /// is false. A refused commit changes nothing.
-    pub fn set(&self, refusing: bool) {
-        self.limit(if refusing { 0 } else { usize::MAX });
+    /// From now on each commit that needs memory the system does not hold yet
+    /// refuses and changes nothing. A commit of no bytes, of the first [`ALIGN`]
+    /// bytes, or of bytes still committed needs no memory.
+    pub fn refuse(&self) {
+        self.limit(0);
+    }
+
+    /// From now on each commit succeeds.
+    pub fn allow(&self) {
+        self.limit(usize::MAX);
     }
 
     /// From now on the system holds at most `bytes` committed after the first
@@ -97,74 +107,90 @@ impl Default for System {
 }
 
 impl System {
-    /// Charges the bytes to the system. False when they go over `limit`.
+    /// Charges each unit that `len` bytes at `offset` touch and the system does not
+    /// hold yet. False, with nothing charged, when those units go over `limit`.
     fn charge(&self, offset: usize, len: usize) -> bool {
-        let units = offset / ALIGN..(offset + len).div_ceil(ALIGN);
+        let end = if len == 0 {
+            0
+        } else {
+            (offset + len).div_ceil(ALIGN)
+        };
         let mut charged = self.charged.lock().expect("no test panicked");
-        let new = units.clone().filter(|unit| !charged.contains(unit)).count();
-        let total = (charged.len() + new).saturating_mul(ALIGN);
-        let fits = total <= self.limit.load(Relaxed);
+        let new: Vec<usize> = units(offset / ALIGN..end)
+            .filter(|unit| !charged.contains(unit))
+            .collect();
+        let total = (charged.len() + new.len()).saturating_mul(ALIGN);
+        let fits = new.is_empty() || total <= self.limit.load(Relaxed);
         if fits {
-            charged.extend(units);
+            charged.extend(new);
         }
         fits
     }
 
+    /// Gives back each unit that lies fully in `len` bytes at `offset`.
     fn discharge(&self, offset: usize, len: usize) {
         let mut charged = self.charged.lock().expect("no test panicked");
-        for unit in offset.div_ceil(ALIGN)..(offset + len) / ALIGN {
+        for unit in units(offset.div_ceil(ALIGN)..(offset + len) / ALIGN) {
             charged.remove(&unit);
         }
     }
 }
 
+/// The units of `range` past the first, whose bytes are usable from the start.
+fn units(range: Range<usize>) -> Range<usize> {
+    range.start.max(1)..range.end
+}
+
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use super::*;
-    use crate::{Config, Error, Pool};
 
-    fn create_pool(budget: usize) -> (Pool, Switch) {
-        let config = Config { budget };
-        let (memory, switch) = Scarce::new(config.reservation());
-        (Pool::new(config, memory), switch)
-    }
-
-    fn refused(requested: usize) -> Error {
-        Error::Refused { requested }
+    #[test]
+    fn a_clone_controls_the_same_memory() {
+        let (memory, switch) = Scarce::new(256);
+        switch.clone().refuse();
+        assert_eq!(memory.commit(64, 64), Err(Refused));
+        switch.clone().allow();
+        assert_eq!(memory.commit(64, 64), Ok(()));
     }
 
     #[test]
-    fn refuses_each_commit_while_the_switch_is_on() {
-        let (pool, switch) = create_pool(256);
-        switch.set(true);
-        assert_eq!(pool.alloc(64).map(drop), Err(refused(64)));
-        assert_eq!(pool.alloc(64).map(drop), Err(refused(64)));
-        assert_eq!(pool.committed(), 0, "a refused commit changes nothing");
-        switch.set(false);
-        let block = pool.alloc(64).expect("the system has memory again");
-        assert_eq!(block.len(), 64);
-        assert_eq!(pool.committed(), 128);
+    fn while_refusing_succeeds_a_commit_that_needs_no_memory() {
+        let (memory, switch) = Scarce::new(256);
+        assert_eq!(memory.commit(64, 64), Ok(()));
+        switch.refuse();
+        assert_eq!(memory.commit(200, 0), Ok(()), "no bytes");
+        assert_eq!(memory.commit(0, 64), Ok(()), "usable from the start");
+        assert_eq!(memory.commit(64, 64), Ok(()), "still committed");
+        assert_eq!(memory.commit(128, 1), Err(Refused));
     }
 
     #[test]
-    fn a_clone_moves_the_same_switch() {
-        let (pool, switch) = create_pool(256);
-        let other = switch.clone();
-        other.set(true);
-        assert_eq!(pool.alloc(64).map(drop), Err(refused(64)));
-        switch.set(false);
-        assert_eq!(pool.alloc(64).map(drop), Ok(()));
+    fn charges_each_unit_a_range_touches_after_the_first() {
+        let (memory, switch) = Scarce::new(512);
+        switch.limit(64);
+        assert_eq!(memory.commit(96, 64), Err(Refused), "needs two units");
+        assert_eq!(memory.commit(0, 100), Ok(()), "needs one unit");
+        assert_eq!(memory.commit(64, 64), Ok(()), "needs no unit");
     }
 
     #[test]
-    fn a_limit_counts_the_bytes_a_purge_gives_back() {
-        let (pool, switch) = create_pool(1024);
+    fn a_refused_commit_charges_nothing() {
+        let (memory, switch) = Scarce::new(512);
+        switch.limit(128);
+        assert_eq!(memory.commit(64, 64), Ok(()));
+        assert_eq!(memory.commit(128, 128), Err(Refused));
+        assert_eq!(memory.commit(256, 64), Ok(()));
+    }
+
+    #[test]
+    fn a_purge_gives_back_only_the_units_that_lie_fully_in_its_range() {
+        let (memory, switch) = Scarce::new(512);
         switch.limit(192);
-        let block = pool.alloc(64).expect("the first block fits the limit");
-        assert_eq!(pool.alloc(128).map(drop), Err(refused(128)));
-        drop(block);
-        pool.reclaim();
-        assert_eq!(pool.alloc(128).map(drop), Ok(()), "the idle size went back");
-        assert_eq!(pool.committed(), 192);
+        assert_eq!(memory.commit(64, 192), Ok(()));
+        memory.purge(100, 100);
+        assert_eq!(memory.commit(256, 64), Ok(()), "one unit went back");
+        assert_eq!(memory.commit(320, 64), Err(Refused), "only one");
     }
 }
