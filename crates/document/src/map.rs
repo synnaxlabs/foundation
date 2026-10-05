@@ -58,6 +58,23 @@ impl Map {
         }
     }
 
+    /// Wraps attributes whose keys strictly ascend.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a key is not larger than the key before it.
+    pub(crate) fn from_sorted(attributes: Vec<Attribute>) -> Self {
+        for (a, b) in attributes.iter().zip(attributes.iter().skip(1)) {
+            assert!(
+                a.key < b.key,
+                "invariant: key {:?} follows {:?}",
+                b.key,
+                a.key
+            );
+        }
+        Self(attributes)
+    }
+
     /// The attribute with `key`.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&Attribute> {

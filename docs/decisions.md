@@ -507,6 +507,13 @@ How to read this record:
   from 0); SDK and spec documents have none (section 2.1, kind config). `==` never
   reads spans, so a Document from a file equals the same Document from the spec.
   Decided by the `config` builder; approved by the coordinator and `consensus` (#42).
+- **DOCUMENT ENCODING (2026-10-04)** `document::encoding` gives each Document exactly
+  one byte string, with no spans: a version byte, then tagged values, keys in byte
+  order, shortest LEB128 varints, and floats as 8 little-endian bytes. `decode`
+  refuses every byte string that `encode` cannot write, and both refuse nesting past
+  64 levels. `spec` stores and hashes these bytes. Pinned bytes are an oracle in
+  `oracles/conformance/document/`. A new format takes a new version byte, and the
+  decoder keeps reading the old ones. Decided by the `config` builder (#62).
 - **K2 (tunable)** The core knows only full names and regions. `plan` groups changes by
   region. One directory per region is the default layout that `init`, `discover`, and
   `export` write; `plan` warns on a mismatch. Full names everywhere, no imports.

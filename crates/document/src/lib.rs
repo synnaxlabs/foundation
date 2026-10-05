@@ -15,6 +15,7 @@
 #[cfg(test)]
 mod arbitrary;
 mod block;
+pub mod encoding;
 mod map;
 mod span;
 pub mod value;
