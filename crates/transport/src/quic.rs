@@ -115,6 +115,11 @@ impl Endpoint {
 
     /// Takes one received batch: `meta.len` bytes of `batch`, in datagrams of
     /// `meta.stride` bytes.
+    ///
+    /// # Panics
+    ///
+    /// When `meta.len` is more than `batch.len()`, or when `meta.stride` is 0 and
+    /// `meta.len` is not.
     pub(crate) fn receive(&mut self, now: Monotonic, meta: &Meta, batch: &[u8]) {
         let now = self.instant(now);
         let path = FourTuple::new(meta.source, meta.destination);
@@ -207,17 +212,6 @@ impl Endpoint {
     /// The next event, in the order they happened.
     pub(crate) fn poll(&mut self) -> Option<Event> {
         self.events.pop_front()
-    }
-
-    /// The noq-proto connection of `key`, queued for [`Endpoint::transmit`].
-    ///
-    /// # Panics
-    ///
-    /// When the connection ended and drained.
-    #[cfg(test)]
-    fn connection(&mut self, key: connection::Key) -> &mut noq_proto::Connection {
-        self.drive(key.handle);
-        &mut self.get(key).expect("a connection").inner
     }
 
     fn instant(&self, now: Monotonic) -> Instant {
@@ -368,6 +362,31 @@ mod tests {
         Event::Closed { key, error }
     }
 
+    /// Gives each datagram the client has now to the server at once, as if the OS
+    /// gave `destination` and `ecn`.
+    fn deliver(pair: &mut Pair, destination: Option<IpAddr>, ecn: Option<Ecn>) {
+        let (now, mut buffer) = (pair.now(), Vec::new());
+        while let Some(transmit) = pair.client.endpoint.transmit(now, &mut buffer) {
+            let len = transmit.contents.len();
+            let meta = Meta {
+                source: testing::CLIENT,
+                destination,
+                ecn,
+                len,
+                stride: len,
+            };
+            pair.server.endpoint.receive(now, &meta, transmit.contents);
+        }
+    }
+
+    /// Writes 100 bytes on a new stream of `side`.
+    fn write(side: &mut Side) {
+        let connection = side.connection();
+        let stream = connection.streams().open(Dir::Uni).expect("a stream");
+        let mut send = connection.send_stream(stream);
+        assert_eq!(send.write(&[0; 100]).expect("written"), 100);
+    }
+
     mod connect {
         use super::*;
 
@@ -428,6 +447,24 @@ mod tests {
                 assert_eq!(events(&pair.client)[1..], [&client]);
                 let server = closed(&pair.server, Error::PeerClosed { code });
                 assert_eq!(events(&pair.server)[1..], [&server]);
+            });
+        }
+
+        #[test]
+        fn a_dial_before_it_connects_gives_closed_and_the_server_nothing() {
+            testing::run(1, |shard| {
+                // At 15 ms the server has the dial and the client has no reply.
+                for elapsed in [Duration::ZERO, Duration::from_millis(15)] {
+                    let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                    pair.dial(server());
+                    pair.run(elapsed);
+                    let key = pair.client.key.expect("a key");
+                    pair.client.endpoint.close(pair.now(), key, Code(7));
+                    pair.run(Duration::from_secs(2));
+                    let error = Error::Closed { code: Code(7) };
+                    assert_eq!(events(&pair.client), [&closed(&pair.client, error)]);
+                    assert!(pair.server.events.is_empty(), "{:?}", pair.server.events);
+                }
             });
         }
 
@@ -504,6 +541,27 @@ mod tests {
         }
     }
 
+    mod deadline {
+        use super::*;
+
+        #[test]
+        fn stays_at_the_earliest_timer_when_a_later_dial_starts() {
+            testing::run(1, |shard| {
+                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let mut endpoint =
+                    Endpoint::new(&config, testing::CLIENT_SHARD, NonZeroUsize::MIN);
+                let mut buffer = Vec::new();
+                endpoint.connect(Monotonic(0), server(), testing::SERVER);
+                while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
+                let earliest = endpoint.deadline().expect("a deadline");
+                let later = testing::at(Duration::from_millis(500));
+                endpoint.connect(later, server(), testing::SERVER);
+                while endpoint.transmit(later, &mut buffer).is_some() {}
+                assert_eq!(endpoint.deadline(), Some(earliest));
+            });
+        }
+    }
+
     mod transmit {
         use super::*;
 
@@ -529,6 +587,30 @@ mod tests {
         }
 
         #[test]
+        fn sends_from_the_address_the_peer_sent_to() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                pair.dial(server());
+                let to = Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9)));
+                deliver(&mut pair, to, None);
+                let (now, mut buffer) = (pair.now(), Vec::new());
+                let transmit = pair.server.endpoint.transmit(now, &mut buffer);
+                assert_eq!(transmit.expect("a reply").source, to);
+            });
+        }
+
+        #[test]
+        fn marks_datagrams_ect0_once_the_peer_reports_ecn() {
+            testing::run(1, |shard| {
+                let mut pair = dial(shard, server());
+                write(&mut pair.client);
+                let (now, mut buffer) = (pair.now(), Vec::new());
+                let transmit = pair.client.endpoint.transmit(now, &mut buffer);
+                assert_eq!(transmit.expect("a datagram").ecn, Some(Ecn::Ect0));
+            });
+        }
+
+        #[test]
         fn gives_each_connection_a_turn() {
             testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
@@ -538,7 +620,8 @@ mod tests {
                 let second = pair.client.key.expect("a key");
                 pair.run(Duration::from_millis(100));
                 for key in [first, second] {
-                    let connection = pair.client.endpoint.connection(key);
+                    let connection =
+                        testing::connection(&mut pair.client.endpoint, key);
                     let stream = connection.streams().open(Dir::Uni).expect("a stream");
                     let mut send = connection.send_stream(stream);
                     send.write(&[0; 10_000]).expect("written");
@@ -557,7 +640,103 @@ mod tests {
     }
 
     mod receive {
+        use std::iter;
+        use std::sync::Arc;
+
+        use noq_proto::crypto::rustls::QuicClientConfig;
+        use noq_proto::{ConnectionId, PathId};
+        use rustls::crypto::CryptoProvider;
+        use rustls::crypto::aws_lc_rs::{default_provider, kx_group};
+
         use super::*;
+
+        /// A dial whose whole TLS client hello fits in its first Initial, and which
+        /// offers only a protocol that no node speaks.
+        fn other_protocol() -> noq_proto::ClientConfig {
+            let kx_groups = vec![kx_group::X25519];
+            let provider = CryptoProvider {
+                kx_groups,
+                ..default_provider()
+            };
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the server refuses the dial before the client checks a time"
+            )]
+            let mut tls =
+                rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+                    .with_protocol_versions(&[&rustls::version::TLS13])
+                    .expect("TLS 1.3")
+                    .with_root_certificates(rustls::RootCertStore::empty())
+                    .with_no_client_auth();
+            tls.alpn_protocols = vec![b"foundation/2".to_vec()];
+            let crypto = QuicClientConfig::try_from(tls).expect("AES-128-GCM");
+            #[expect(clippy::disallowed_methods, reason = "it sets the destination ID")]
+            let mut config = noq_proto::ClientConfig::new(Arc::new(crypto));
+            config.initial_dst_cid_provider(Arc::new(|| {
+                ConnectionId::new(&[1; cid::LEN])
+            }));
+            config
+        }
+
+        #[test]
+        fn answers_a_refused_first_initial_with_a_close() {
+            testing::run(1, |shard| {
+                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let mut server =
+                    Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
+                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let (_, mut client) = Settings::new(&config, testing::CLIENT_SHARD);
+                let now = server.instant(Monotonic(0));
+                let dial =
+                    client.connect(now, other_protocol(), testing::SERVER, SERVER_NAME);
+                let (_, mut connection) = dial.expect("a dial");
+                let mut buffer = Vec::new();
+                let initial =
+                    connection.poll_transmit(now, NonZeroUsize::MIN, &mut buffer);
+                let len = initial.expect("an Initial").size;
+                let meta = Meta {
+                    source: testing::CLIENT,
+                    destination: None,
+                    ecn: None,
+                    len,
+                    stride: len,
+                };
+                server.receive(Monotonic(0), &meta, &buffer);
+                let close =
+                    server.transmit(Monotonic(0), &mut buffer).expect("a close");
+                assert_eq!(close.destination, testing::CLIENT);
+                let datagram = BytesMut::from(close.contents);
+                let path = FourTuple::new(testing::SERVER, None);
+                let event = client.handle(now, path, None, datagram, &mut Vec::new());
+                let Some(DatagramEvent::ConnectionEvent(_, event)) = event else {
+                    panic!("no event for the dial");
+                };
+                connection.handle_event(event);
+                let reason =
+                    iter::from_fn(|| connection.poll()).find_map(|event| match event {
+                        noq_proto::Event::ConnectionLost { reason } => Some(reason),
+                        _ => None,
+                    });
+                let reason = reason.expect("lost").to_string();
+                let refusal = "aborted by peer: the cryptographic handshake failed: \
+                               error 120: peer doesn't support any known protocol";
+                assert_eq!(reason, refusal);
+                assert_eq!(server.poll(), None);
+            });
+        }
+
+        #[test]
+        fn reports_a_ce_mark_to_the_sender() {
+            testing::run(1, |shard| {
+                let mut pair = dial(shard, server());
+                write(&mut pair.client);
+                deliver(&mut pair, None, Some(Ecn::Ce));
+                pair.run(Duration::from_millis(100));
+                let client = pair.client.connection();
+                let stats = client.path_stats(PathId::ZERO).expect("a path");
+                assert_eq!(stats.congestion_events, 1);
+            });
+        }
 
         #[test]
         #[should_panic(expected = "invariant: a batch of 10 bytes has a stride")]

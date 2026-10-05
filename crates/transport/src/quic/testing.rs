@@ -53,6 +53,19 @@ pub(super) fn draft_29() -> (Meta, Vec<u8>) {
     (meta, initial)
 }
 
+/// The noq-proto connection of `key`, queued for [`Endpoint::transmit`].
+///
+/// # Panics
+///
+/// When the connection ended and drained.
+pub(super) fn connection(
+    endpoint: &mut Endpoint,
+    key: connection::Key,
+) -> &mut noq_proto::Connection {
+    endpoint.drive(key.handle);
+    &mut endpoint.get(key).expect("a connection").inner
+}
+
 /// The time `elapsed` after the start of a run.
 pub(super) fn at(elapsed: Duration) -> Monotonic {
     Monotonic(u64::try_from(elapsed.as_nanos()).expect("fits"))
@@ -263,7 +276,7 @@ impl Side {
     /// When this side has none.
     pub(super) fn connection(&mut self) -> &mut noq_proto::Connection {
         let key = self.key.expect("a connection");
-        self.endpoint.connection(key)
+        connection(&mut self.endpoint, key)
     }
 
     fn deadline(&self) -> Option<Duration> {
