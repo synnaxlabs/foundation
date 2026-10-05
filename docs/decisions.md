@@ -282,8 +282,11 @@ How to read this record:
   replay after a disconnect. Frames go out before the disk sync. The current value is
   the index's newest live frame, even when it holds none of the reader's channels (M3).
   The person decided on 2026-10-05: "Newest frame" (#139).
-- **B5** Live writes never wait. If the disk queue or the pool is full, the home records
-  an explicit gap and warns. Backfill waits for room.
+- **B5** Live writes never wait. If the disk queue or the pool is full, or the link to a
+  remote home cannot take the frame now, the home records an explicit gap and warns; on
+  the link, the writer's `hub` drops the frame and sends the gap to the home (RECV
+  WAITS). Backfill waits for room. The person decided on 2026-10-05: "Ok, as long as
+  the end user UX remains the same" (#581).
 - **B6** One write call is one frame. Smart batching is the default. Catch-up may merge
   consecutive frames (limit in X30). Acquisition and transmission settings are code,
   changeable on a running mesh, with defaults chosen by the end-to-end sweep.
