@@ -15,7 +15,6 @@ use crate::{Drift, Error, Filter, Measurement};
 ///
 /// - [`Error::NoSources`] when no filter holds a measurement.
 /// - [`Error::NoMajority`] when no offset is inside more than half of the bounds.
-/// - [`Error::Bound`] when the estimate's bound is more than 36500 days.
 ///
 /// ```
 /// use estimate::{Drift, Filter, Measurement};
@@ -54,7 +53,7 @@ pub fn combine<'a>(
     if 2 * agreeing <= sources {
         return Err(Error::NoMajority { sources, agreeing });
     }
-    Measurement::between(now, low, high)
+    Ok(Measurement::between(now, low, high))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -254,11 +253,11 @@ mod tests {
     }
 
     #[test]
-    fn fails_when_the_bound_is_over_36500_days() {
+    fn stops_the_bound_at_36500_days() {
         let sources = filters(&[source(0, MAX_ERROR.nanos())]);
-        let err = combine(Monotonic(1_000_000_000), drift(1_000), &sources);
-        let error = Span::from_nanos(MAX_ERROR.nanos() + 1_000);
-        assert_eq!(err, Err(Error::Bound { error }));
+        let m = combine(Monotonic(1_000_000_000), drift(1_000), &sources);
+        let m = m.expect("an unknown source still gives an estimate");
+        assert_eq!((m.offset(), m.error()), (Span::ZERO, MAX_ERROR));
     }
 
     mod properties {
@@ -351,10 +350,11 @@ mod tests {
                 ppb in 0..=100_000_000_u32,
             ) {
                 match combine(Monotonic(now), drift(ppb), &filters(&sources)) {
-                    Ok(_) | Err(Error::Bound { .. } | Error::NoMajority { .. }) => {}
-                    Err(e @ (Error::Backwards { .. } | Error::Disjoint
-                        | Error::Drift { .. } | Error::NoSources | Error::Open
-                        | Error::Crossed)) => {
+                    Ok(m) => prop_assert!(m.error() <= MAX_ERROR),
+                    Err(Error::NoMajority { .. }) => {}
+                    Err(e @ (Error::Backwards { .. } | Error::Bound { .. }
+                        | Error::Disjoint | Error::Drift { .. } | Error::NoSources
+                        | Error::Open | Error::Crossed)) => {
                         prop_assert!(false, "unexpected {e}");
                     }
                 }

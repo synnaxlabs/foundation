@@ -99,8 +99,7 @@ impl Overlap {
     ///
     /// # Errors
     ///
-    /// - [`Error::Open`] when no reading gave a low edge, or none gave a high edge.
-    /// - [`Error::Bound`] when its error is more than 36500 days.
+    /// [`Error::Open`] when no reading gave a low edge, or none gave a high edge.
     pub fn at(&self, now: Monotonic) -> Result<Measurement, Error> {
         let edges = [self.low, self.high]
             .into_iter()
@@ -113,7 +112,7 @@ impl Overlap {
         };
         // Whole nanoseconds, rounded outward.
         let (low, high) = (low.div_euclid(PER_NANO), -(-high).div_euclid(PER_NANO));
-        Measurement::between(now, low, high)
+        Ok(Measurement::between(now, low, high))
     }
 
     fn narrow(&mut self, reading: Reading) -> Result<(), Error> {
@@ -344,13 +343,9 @@ mod tests {
         }
 
         #[test]
-        fn fails_when_the_error_passes_36500_days() {
+        fn stops_the_error_at_36500_days() {
             let widest = MAX_ERROR.nanos();
-            let error = Span::from_nanos(widest + 1);
-            assert_eq!(
-                check(1, &[m(0, 0, widest)], SECOND_NS),
-                Err(Error::Bound { error })
-            );
+            assert_eq!(check(1, &[m(0, 0, widest)], SECOND_NS), Ok((0, widest)));
         }
 
         #[test]
@@ -363,10 +358,9 @@ mod tests {
         }
 
         #[test]
-        fn fails_with_the_largest_span_for_a_wider_error() {
-            let error = Span::from_nanos(i64::MAX);
+        fn stops_an_error_wider_than_a_span_at_36500_days() {
             let all = [Push::Both(0, i64::MIN, i64::MAX)];
-            assert_eq!(check(0, &all, 0), Err(Error::Bound { error }));
+            assert_eq!(check(0, &all, 0), Ok((-1, MAX_ERROR.nanos())));
         }
     }
 
@@ -616,7 +610,7 @@ mod tests {
                 }
                 let all = match (low, high) {
                     (Some(low), Some(high)) => {
-                        Measurement::between(Monotonic(now), low, high)
+                        Ok(Measurement::between(Monotonic(now), low, high))
                     }
                     _ => Err(Error::Open),
                 };
@@ -645,10 +639,13 @@ mod tests {
                     }
                 }
                 match overlap.at(Monotonic(now)) {
-                    Ok(m) => prop_assert_eq!(m.at(), Monotonic(now)),
-                    Err(Error::Bound { .. } | Error::Open) => {}
-                    Err(e @ (Error::Backwards { .. } | Error::Disjoint
-                        | Error::Drift { .. } | Error::NoSources
+                    Ok(m) => {
+                        prop_assert_eq!(m.at(), Monotonic(now));
+                        prop_assert!(m.error() <= MAX_ERROR);
+                    }
+                    Err(Error::Open) => {}
+                    Err(e @ (Error::Backwards { .. } | Error::Bound { .. }
+                        | Error::Disjoint | Error::Drift { .. } | Error::NoSources
                         | Error::NoMajority { .. } | Error::Crossed)) => {
                         prop_assert!(false, "unexpected {e}");
                     }
