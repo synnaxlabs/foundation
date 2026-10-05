@@ -233,14 +233,18 @@ How to read this record:
   record at once when they open, close, or are taken over, and on the home's interval
   when the position changed. A session open at a crash restores as closed at the
   restore. Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
-- **CREDIT RULES (write-path and advisor, 2026-10-05)** A complete reader's `hub` grants
-  credit per session as an absolute byte limit since the session opened, in a `Credit`
-  message apart from the ack. A grant only raises the limit, so a lost, repeated, or
-  reordered grant does no harm. A new session has no credit until its first grant. The
-  home sends a whole frame while the bytes it has spent are below the limit, so it
-  passes the limit by less than one frame and never splits a frame. Bytes are the
-  frame's length on the wire, which `wire` defines. The `hub` sizes the window from the
-  link's bandwidth-delay product and adapts it. Replaces r11 5.2 (a window beyond the
+- **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
+  `hub` grants credit per session as an absolute byte limit since the session opened, in
+  a `Credit` message apart from the ack. A grant only raises the limit, so a lost,
+  repeated, or reordered grant does no harm. A new session has no credit until its first
+  grant. The home sends a whole frame while the bytes it has spent are below the limit,
+  so it passes the limit by less than one frame and never splits a frame. A byte is one
+  byte of the frame's message on the wire (the `Block` that `transport` carries, without
+  the stream header), which `wire` defines. Credits apply only to complete delivery,
+  which is reliable: a lost frame would leak credit. The `hub` raises the limit only
+  after it releases a frame, and it bounds its decoded copies itself, since a small
+  encoded frame can decode to much more. It sizes the window from the link's
+  bandwidth-delay product and adapts it. Replaces r11 5.2 (a window beyond the
   acknowledged position): flow control stays apart from durable acks. Basis: B3, MEMORY
   BOUNDS, r11 5.2, #41.
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps

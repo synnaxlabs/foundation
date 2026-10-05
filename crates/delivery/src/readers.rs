@@ -178,9 +178,10 @@ impl Readers {
         session.limit = session.limit.max(limit);
     }
 
-    /// Spends `bytes` of the session's credit on one frame. Returns `false` and spends
-    /// nothing when the session is blocked: it has spent its limit. A frame may take the
-    /// session past its limit; then the session is blocked until a grant raises it.
+    /// Spends credit on one frame of `bytes`: the length of its message on the wire.
+    /// Returns `false` and spends nothing when the session is blocked: it has spent its
+    /// limit. A frame may take the session past its limit; then the session is blocked
+    /// until a grant raises it.
     ///
     /// # Panics
     ///
