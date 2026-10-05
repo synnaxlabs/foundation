@@ -72,6 +72,8 @@ pub struct Raft {
     // `Start.voters`: in force while no entry in the log holds a configuration.
     base: Voters,
     voters: Voters,
+    // Where the log holds `voters`, or the default position for `base`.
+    in_force: Position,
     // The voters in force, plus the nodes that the configuration in force removed,
     // until a release, a quorum check, or the next configuration drops them.
     peers: BTreeMap<node::Key, Peer>,
@@ -128,9 +130,10 @@ impl Raft {
         let log = Log::new(entries, applied)?;
         let last = log.last();
         let base = voters;
-        let voters = log
-            .voters()
-            .map_or_else(|| base.clone(), |(_, voters)| voters.clone());
+        let (in_force, voters) = log.voters().map_or_else(
+            || (Position::default(), base.clone()),
+            |(at, voters)| (at, voters.clone()),
+        );
         let peers = voters
             .peers()
             .map(|key| (key, Peer::new(last.index)))
@@ -145,6 +148,7 @@ impl Raft {
             key,
             base,
             voters,
+            in_force,
             peers,
             outbox: Vec::new(),
             election_ticks: u64::from(election_ticks),
@@ -579,27 +583,31 @@ impl Raft {
             .is_none_or(|(at, _)| at.index <= self.log.committed())
     }
 
-    // Puts the last configuration in the log in force, or `base` with none. A new
-    // peer starts at the end of the log. A node a change removed stays a peer until
-    // `release_removed` releases it.
+    // Puts the last configuration in the log in force, or `base` with none. The
+    // peers become its voters and the nodes it removed: the other voters of the
+    // configuration before it. A new peer starts at the end of the log.
     fn sync_voters(&mut self) {
         let (at, voters) = self
             .log
             .voters()
-            .map_or((0, &self.base), |(at, voters)| (at.index, voters));
-        if *voters == self.voters {
+            .map_or((Position::default(), &self.base), |(at, voters)| {
+                (at, voters)
+            });
+        // Equal voters at another position still change who was removed.
+        if at == self.in_force {
             return;
         }
+        self.in_force = at;
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
-        // A peer outside the configuration in force and the one before it is
-        // released here, so the leave of each removed peer is the configuration in
-        // force, even when one append brings several configurations.
-        let before = self.log.voters_before(at).unwrap_or(&self.base);
+        let before = self.log.voters_before(at.index).unwrap_or(&self.base);
         let voters = &self.voters;
         self.peers
             .retain(|&key, _| voters.contains(key) || before.contains(key));
-        for key in self.voters.peers() {
+        for key in before.peers() {
+            self.peers.entry(key).or_insert_with(|| Peer::new(last));
+        }
+        for key in voters.peers() {
             let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
             // A node a change adds counts as heard until the next quorum check, even
             // when a removal left its peer, so the leader does not step down before
@@ -647,8 +655,7 @@ impl Raft {
             } else {
                 leave
             };
-            let room = usize::try_from((end + 1).saturating_sub(next)).unwrap_or(BATCH);
-            let entries = self.log.slice(next, room.min(BATCH));
+            let entries = self.log.slice(next, end, BATCH);
             let last = entries.last().map_or(prev.index, |entry| entry.at.index);
             peer.progress.sent(last);
             self.outbox.push(Message {
@@ -2521,11 +2528,11 @@ mod tests {
             assert_eq!(to(&raft.ready().messages), [key(2), key(4)]);
         }
 
-        // The indexes of the entries in each `Append` to node 3.
-        fn appended_to_3(raft: &mut Raft) -> Vec<u64> {
+        // The indexes of the entries in each `Append` to node `to`.
+        fn appended(raft: &mut Raft, to: u8) -> Vec<u64> {
             sent(raft)
                 .into_iter()
-                .filter(|m| m.to == key(3))
+                .filter(|m| m.to == key(to))
                 .filter_map(|m| {
                     let Body::Append { entries, .. } = m.body else {
                         return None;
@@ -2556,9 +2563,7 @@ mod tests {
                     if answers {
                         raft.step(message(3, 1, Body::HeartbeatReply)).unwrap();
                     }
-                    past.extend(
-                        appended_to_3(&mut raft).into_iter().filter(|&i| i > 3),
-                    );
+                    past.extend(appended(&mut raft, 3).into_iter().filter(|&i| i > 3));
                 }
                 assert_eq!(raft.role(), Role::Leader);
                 assert_eq!(past, Vec::<u64>::new(), "answers: {answers}");
@@ -2590,10 +2595,10 @@ mod tests {
         }
 
         // One append brings node 1 the leave of node 3 and the next joint entry.
-        // The joint entry is in force, so node 3 is no longer a removed node of the
-        // configuration in force, and the new leader sends it nothing past index 3.
+        // The joint entry is in force, so node 3 is not a peer, and the new leader
+        // sends it nothing.
         #[test]
-        fn a_leader_elected_after_two_changes_in_one_append_holds_the_leave() {
+        fn two_changes_in_one_append_release_the_node_the_first_removed() {
             let mut raft = raft(&[1, 2, 3, 4], Hard::default());
             let body = Body::Append {
                 prev: Position::default(),
@@ -2610,12 +2615,73 @@ mod tests {
             elect(&mut raft, &[2, 4]);
             raft.step(message(3, 2, Body::AppendReject { hint: 2 }))
                 .unwrap();
-            let past: Vec<u64> = appended_to_3(&mut raft)
-                .into_iter()
-                .filter(|&i| i > 3)
-                .collect();
             assert_eq!(raft.role(), Role::Leader);
-            assert_eq!(past, Vec::<u64>::new());
+            let to_3: Vec<Message> = sent(&mut raft)
+                .into_iter()
+                .filter(|m| m.to == key(3))
+                .collect();
+            assert_eq!(to_3, []);
+        }
+
+        // Node 1 holds the leave of node 3, not committed, when a second append
+        // brings `later`. Node 1 then wins term 2, and nodes 3 and 4 reject its
+        // probe. Gives the indexes of the entries that nodes 3 and 4 get.
+        fn lead_after(later: Vec<Entry>) -> (Vec<u64>, Vec<u64>) {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let body = Body::Append {
+                prev: Position::default(),
+                entries: vec![
+                    entries(&[(1, 1)]).remove(0),
+                    config(1, 2, voters(&[1, 2], &[1, 2, 3])),
+                    config(1, 3, voters(&[1, 2], &[])),
+                ],
+                commit: 2,
+            };
+            raft.step(message(2, 1, body)).unwrap();
+            let last = later.last().unwrap().at.index;
+            let body = Body::Append {
+                prev: Position {
+                    term: Term(1),
+                    index: 3,
+                },
+                entries: later,
+                commit: last - 1,
+            };
+            raft.step(message(2, 1, body)).unwrap();
+            assert_eq!(raft.voters(), &voters(&[1, 2], &[]));
+            sent(&mut raft);
+            elect(&mut raft, &[2]);
+            raft.propose(vec![7]).unwrap();
+            sent(&mut raft);
+            let mut reject = |from| {
+                raft.step(message(from, 2, Body::AppendReject { hint: 2 }))
+                    .unwrap();
+                appended(&mut raft, from)
+            };
+            (reject(3), reject(4))
+        }
+
+        // The later change ends at the voters already in force, at another index.
+        // It releases node 3, and node 4, which it removed, gets entries up to its
+        // leave at index 7.
+        #[test]
+        fn a_later_change_to_the_same_voters_releases_a_removed_node() {
+            let later = vec![
+                config(1, 4, voters(&[1, 2, 4], &[1, 2])),
+                config(1, 5, voters(&[1, 2, 4], &[])),
+                config(1, 6, voters(&[1, 2], &[1, 2, 4])),
+                config(1, 7, voters(&[1, 2], &[])),
+            ];
+            assert_eq!(lead_after(later), (vec![], vec![3, 4, 5, 6, 7]));
+        }
+
+        #[test]
+        fn a_later_change_that_changes_no_voter_releases_a_removed_node() {
+            let later = vec![
+                config(1, 4, voters(&[1, 2], &[1, 2])),
+                config(1, 5, voters(&[1, 2], &[])),
+            ];
+            assert_eq!(lead_after(later), (vec![], vec![]));
         }
 
         // Node 3 missed its release, so it campaigns. The leader sends it nothing:

@@ -87,11 +87,13 @@ impl Log {
         self.entries.get(at).map(|entry| entry.at)
     }
 
-    // Up to `max` entries from `index`, cloned for a message.
-    pub(crate) fn slice(&self, index: u64, max: usize) -> Vec<Entry> {
-        let from = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
+    // Up to `max` entries from index `from` through index `end`, cloned for a
+    // message. Empty when `from` is past `end` or past the log.
+    pub(crate) fn slice(&self, from: u64, end: u64, max: usize) -> Vec<Entry> {
+        let offset = |index: u64| usize::try_from(index).unwrap_or(usize::MAX);
+        let end = offset(end).min(self.entries.len());
         self.entries
-            .get(from..)
+            .get(offset(from.saturating_sub(1))..end)
             .unwrap_or_default()
             .iter()
             .take(max)
@@ -163,16 +165,14 @@ impl Log {
 
     // The entries no `Ready` has given to write yet.
     pub(crate) fn take_unstable(&mut self) -> Vec<Entry> {
-        let entries = self.slice(self.stable + 1, usize::MAX);
+        let entries = self.slice(self.stable + 1, u64::MAX, usize::MAX);
         self.stable = self.last().index;
         entries
     }
 
     // The committed entries no `Ready` has given to apply yet.
     pub(crate) fn take_committed(&mut self) -> Vec<Entry> {
-        let count =
-            usize::try_from(self.committed - self.applied).unwrap_or(usize::MAX);
-        let entries = self.slice(self.applied + 1, count);
+        let entries = self.slice(self.applied + 1, self.committed, usize::MAX);
         self.applied = self.committed;
         entries
     }
@@ -470,10 +470,13 @@ mod tests {
     }
 
     #[test]
-    fn gives_entries_from_an_index_up_to_a_limit() {
+    fn gives_entries_from_an_index_through_an_end_up_to_a_limit() {
         let log = log(&[1, 1, 2, 2]);
-        assert_eq!(log.slice(2, 2), vec![entry(1, 2), entry(2, 3)]);
-        assert_eq!(log.slice(4, 10), vec![entry(2, 4)]);
-        assert_eq!(log.slice(5, 10), vec![]);
+        assert_eq!(log.slice(2, 4, 2), vec![entry(1, 2), entry(2, 3)]);
+        assert_eq!(log.slice(4, u64::MAX, 10), vec![entry(2, 4)]);
+        assert_eq!(log.slice(5, u64::MAX, 10), vec![]);
+        assert_eq!(log.slice(2, 3, 10), vec![entry(1, 2), entry(2, 3)]);
+        assert_eq!(log.slice(3, 2, 10), vec![]);
+        assert_eq!(log.slice(4, 2, 10), vec![]);
     }
 }
