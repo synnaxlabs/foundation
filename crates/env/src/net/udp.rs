@@ -480,6 +480,16 @@ mod tests {
                 ["5 bytes to 10.0.0.2:4433"]
             );
         }
+
+        #[test]
+        fn shows_the_local_address_of_each_half() {
+            let (sender, receiver, _) = bind();
+            assert_eq!(format!("{sender:?}"), "Sender { local: 127.0.0.1:4433 }");
+            assert_eq!(
+                format!("{receiver:?}"),
+                "Receiver { local: 127.0.0.1:4433 }"
+            );
+        }
     }
 
     mod poll_send {

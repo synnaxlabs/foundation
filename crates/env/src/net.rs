@@ -563,6 +563,44 @@ mod tests {
         }
     }
 
+    mod tcp_polls {
+        use super::*;
+
+        #[test]
+        fn wait_while_the_driver_waits() {
+            let mut tcp = Tcp(Box::new(Stream {
+                peer: address("10.0.0.2:4433"),
+            }));
+            assert_eq!(tcp.poll_read(&mut cx(), &mut [0; 8]), Poll::Pending);
+            assert_eq!(
+                tcp.poll_write(&mut cx(), &[IoSlice::new(&[1])]),
+                Poll::Pending
+            );
+            assert_eq!(tcp.poll_close(&mut cx()), Poll::Pending);
+        }
+    }
+
+    mod debug {
+        use super::*;
+
+        #[test]
+        fn shows_the_addresses_of_each_handle() {
+            let tcp = Tcp(Box::new(Stream {
+                peer: address("10.0.0.2:4433"),
+            }));
+            assert_eq!(
+                format!("{tcp:?}"),
+                "Tcp { local: 127.0.0.1:5000, peer: 10.0.0.2:4433 }"
+            );
+            let listener = Listener(Box::new(Accepting));
+            assert_eq!(
+                format!("{listener:?}"),
+                "Listener { local: 127.0.0.1:4433 }"
+            );
+            assert_eq!(format!("{:?}", Net::new(Network)), "Net { .. }");
+        }
+    }
+
     mod poll_accept {
         use super::*;
 
