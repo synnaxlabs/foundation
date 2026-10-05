@@ -15,6 +15,10 @@ use block::{Block, Unique};
 /// ```
 pub type Request<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
 
+/// The length of a sector in bytes: the unit that the crash rule of [`File::write_at`]
+/// keeps or loses whole. Each sector starts at a multiple of `SECTOR` in its file.
+pub const SECTOR: usize = 512;
+
 /// The files under one data directory. Paths are relative to it: a call panics on an
 /// absolute path or a `..` segment. The handle cannot leave the thread that made it,
 /// so each shard has its own. Clones use the same directory.
@@ -289,9 +293,9 @@ impl File {
 
     /// Writes `parts` back to back at `offset`, as one vectored write. A read after
     /// the write ends sees the bytes. They are not durable until a later
-    /// [`File::sync`] ends. A crash before then keeps any subset of the 512-byte
-    /// sectors of the write, independently of other writes not yet synced and of
-    /// their order.
+    /// [`File::sync`] ends. A crash before then keeps any subset of the
+    /// [sectors](SECTOR) of the write, independently of other writes not yet synced
+    /// and of their order.
     ///
     /// The future may be dropped before it ends. The driver keeps a clone of each
     /// part until the write ends, so the drop is sound, but the bytes may then be

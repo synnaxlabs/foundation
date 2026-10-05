@@ -367,8 +367,9 @@ pub enum Crash {
     Process,
     /// The machine loses power and boots again.
     ///
-    /// - Each 512-byte sector of a file keeps the bytes that a sync made durable,
-    ///   or the bytes of any one write on it since then, a write in flight too.
+    /// - Each [`SECTOR`](env::files::SECTOR) of a file keeps the bytes that a sync
+    ///   made durable, or the bytes of any one write on it since then, a write in
+    ///   flight too.
     /// - Each directory goes back to its entries when its last `sync_dir` ended,
     ///   and what those entries no longer reach is gone.
     /// - Other file calls in flight have no effect.

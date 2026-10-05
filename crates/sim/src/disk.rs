@@ -1,4 +1,4 @@
-//! The file system of one node: directories, and sparse files of 512-byte sectors.
+//! The file system of one node: directories, and sparse files of sectors.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -11,8 +11,8 @@ use env::rng::Rng;
 
 /// The key of the data directory.
 pub(crate) const ROOT: u64 = 0;
-/// The bytes of a sector: a write keeps or loses each sector whole.
-const SECTOR: u64 = 512;
+/// [`env::files::SECTOR`] as a file offset.
+const SECTOR: u64 = env::files::SECTOR as u64;
 /// The bytes that a directory takes, as on ext4.
 const DIR_BYTES: u64 = 4_096;
 /// The Linux code for a path that is there (`EEXIST`).
@@ -78,7 +78,7 @@ pub(crate) struct File {
 /// The durable bytes of a sector, and the writes on it since then in one order that
 /// the times of their calls allow.
 struct Sector {
-    durable: [u8; 512],
+    durable: [u8; env::files::SECTOR],
     writes: Vec<Write>,
 }
 
@@ -91,7 +91,7 @@ struct Write {
     /// Its bytes over `covered`.
     bytes: Vec<u8>,
     /// The sector after it and each write before it.
-    after: [u8; 512],
+    after: [u8; env::files::SECTOR],
 }
 
 impl Disk {
@@ -363,7 +363,7 @@ impl File {
                 continue;
             }
             let zeros = || Sector {
-                durable: [0; 512],
+                durable: [0; env::files::SECTOR],
                 writes: Vec::new(),
             };
             let found = self.sectors.entry(sector).or_insert_with(zeros);
@@ -375,7 +375,7 @@ impl File {
                 written: tick,
                 covered: within(sector * SECTOR, &part),
                 bytes: bytes[within(offset, &part)].to_vec(),
-                after: [0; 512],
+                after: [0; env::files::SECTOR],
             };
             found.writes.insert(place, write);
             found.replay(place);
@@ -462,7 +462,7 @@ impl File {
 
 impl Sector {
     /// The bytes that a read sees.
-    fn last(&self) -> &[u8; 512] {
+    fn last(&self) -> &[u8; env::files::SECTOR] {
         self.writes
             .last()
             .map_or(&self.durable, |write| &write.after)
