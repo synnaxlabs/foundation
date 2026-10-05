@@ -25,10 +25,10 @@ use types::time::Span;
 
 use crate::entry::{self, Entry};
 use crate::group::{Closed, Group, META_LEN, Rejected, Sealed};
-use crate::header::{self, AREA_START, Header};
+use crate::header::{self, Header};
 use crate::record::{self, ALIGN};
-use crate::tails::{Tail, Tails};
-use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
+use crate::tails::{self, Tail, Tails};
+use crate::wal::{self, AREA_START, Cursor, Layout, Step, Unfit, Window, Writer};
 
 /// What one shard's buffer is given at open.
 #[derive(Debug)]
@@ -230,6 +230,20 @@ impl State {
         let full = mem::replace(&mut self.open, spare);
         self.queue.push(full.close(&mut self.writer));
     }
+
+    /// Moves the durable tails past the written `sealed` groups and keeps their
+    /// records as spares.
+    fn commit(&mut self, sealed: &mut Vec<Sealed>) {
+        for record in sealed.drain(..) {
+            for (&slot, header) in record.slots().iter().zip(record.headers()) {
+                self.durable
+                    .advance(slot, header)
+                    .expect("invariant: append checked the entry");
+            }
+            self.spares.push(record.clear());
+        }
+        self.commits += 1;
+    }
 }
 
 impl Drop for Buffer {
@@ -258,8 +272,8 @@ impl Buffer {
     ///
     /// # Panics
     ///
-    /// When a record holds an entry below the tail of its path: a defect wrote the
-    /// ring.
+    /// When a record window of the layout does not fit in memory: `body_max` is at
+    /// most `u32::MAX`, so only on a target under 64 bits.
     pub async fn open(config: Config, slots: &mut Slots) -> Result<Self, Error> {
         let Config {
             files,
@@ -276,10 +290,8 @@ impl Buffer {
         let file = match files.open(&path, Mode::Write).await {
             Ok(file) => file,
             Err(files::Error::NotFound { .. }) => {
-                let len = AREA_START
-                    .checked_add(layout.area())
-                    .expect("invariant: a ring file fits in u64");
                 files.create_dir(&dir).await?;
+                let len = layout.file_len();
                 let file = files.open(&path, Mode::Create { len }).await?;
                 files.sync_dir(&dir).await?;
                 file
@@ -382,7 +394,10 @@ impl Buffer {
             Err(other) => return Err(rejected(other)),
         }
         for entry in entries {
-            state.tails.advance(entry.slot, &entry.header());
+            state
+                .tails
+                .advance(entry.slot, &entry.header())
+                .unwrap_or_else(|invalid| panic!("invariant: {invalid}"));
         }
         let parked = state.parked.take();
         drop(guard);
@@ -430,13 +445,13 @@ async fn read_header(
     layout: Layout,
 ) -> Result<Header, Error> {
     let found = file.len();
-    let length = |area: u64| Error::Length {
-        expected: AREA_START + area,
+    let length = |layout: Layout| Error::Length {
+        expected: layout.file_len(),
         found,
     };
-    let Some(area) = found.checked_sub(AREA_START) else {
-        return Err(length(layout.area()));
-    };
+    if found < AREA_START {
+        return Err(length(layout));
+    }
     let blocks = file.read_at(0, pool.alloc(2 * ALIGN)?).await?;
     let (first, rest) = blocks
         .split_first_chunk::<ALIGN>()
@@ -446,13 +461,13 @@ async fn read_header(
         .expect("invariant: the read gave two blocks");
     if blocks.iter().any(|&byte| byte != 0) {
         let header = Header::decode(first, second)?;
-        if area != header.layout.area() {
-            return Err(length(header.layout.area()));
+        if found != header.layout.file_len() {
+            return Err(length(header.layout));
         }
         return Ok(header);
     }
-    if area != layout.area() {
-        return Err(length(layout.area()));
+    if found != layout.file_len() {
+        return Err(length(layout));
     }
     let header = Header::new(layout, random(entropy));
     let mut block = pool.alloc(ALIGN)?;
@@ -470,10 +485,13 @@ fn recover(
     slots: &mut Slots,
     tails: &mut Tails,
 ) -> Result<(), Error> {
-    let invalid = |_| Error::Invalid { offset };
-    for entry in entry::parse(body).map_err(invalid)? {
-        let (header, _) = entry.map_err(invalid)?;
-        tails.advance(slots.assign(header.index), &header);
+    let unread = |_: entry::Invalid| Error::Invalid { offset };
+    let misplaced = |_: tails::Invalid| Error::Invalid { offset };
+    for entry in entry::parse(body).map_err(unread)? {
+        let (header, _) = entry.map_err(unread)?;
+        tails
+            .advance(slots.assign(header.index), &header)
+            .map_err(misplaced)?;
     }
     Ok(())
 }
@@ -565,15 +583,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         let failed = result.is_err();
         let mut state = shared.state.borrow_mut();
         match result {
-            Ok(()) => {
-                for record in sealed.drain(..) {
-                    for (&slot, header) in record.slots().iter().zip(record.headers()) {
-                        state.durable.advance(slot, header);
-                    }
-                    state.spares.push(record.clear());
-                }
-                state.commits += 1;
-            }
+            Ok(()) => state.commit(&mut sealed),
             Err(error) => state.failed = Some(error.into()),
         }
         woken.append(&mut state.wakers);

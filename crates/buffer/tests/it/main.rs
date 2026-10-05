@@ -755,6 +755,83 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
 }
 
 #[test]
+fn a_record_with_an_entry_past_the_last_seq_is_invalid() {
+    run(103, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append(&[entry(1, a, Path::Live, 0, 3, Some(30), &[])])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        // `first` of the first entry: after the count, the index, and the path.
+        shard.tamper_record(BLOCK, 4 + 16 + 1, &u64::MAX.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+    });
+}
+
+#[test]
+fn a_record_with_an_entry_below_the_tail_is_invalid() {
+    run(106, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append(&[
+                entry(1, a, Path::Live, 0, 3, Some(30), &[]),
+                entry(1, a, Path::Live, 3, 2, Some(50), &[]),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        // `first` of the second entry: after the count, one table of 51 bytes,
+        // the index, and the path.
+        shard.tamper_record(BLOCK, 4 + 51 + 16 + 1, &1u64.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(opened.map(drop), Err(Error::Invalid { offset: BLOCK }));
+    });
+}
+
+#[test]
+fn a_header_with_an_area_at_the_end_of_u64_is_not_read() {
+    run(104, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let area = u64::MAX - 4095;
+        // The area is 8 bytes at offset 10 of a header block.
+        shard.tamper(10, &area.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        assert_eq!(
+            opened.map(drop),
+            Err(Error::Unfit(Unfit {
+                area,
+                body_max: BODY_MAX
+            }))
+        );
+    });
+}
+
+#[test]
+fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
+    let area = u64::MAX - 4095;
+    assert_eq!(
+        Layout::new(area, BODY_MAX),
+        Err(Unfit {
+            area,
+            body_max: BODY_MAX
+        })
+    );
+}
+
+#[test]
 fn each_open_starts_a_new_chain() {
     run(20, Memory::default(), |shard| async move {
         for _ in 0..2 {

@@ -61,6 +61,9 @@ impl Position {
     }
 }
 
+/// Where the area starts in the ring file: after the two header blocks.
+pub(crate) const AREA_START: u64 = 2 * BLOCK;
+
 /// Sizes that do not make a ring. [`Layout::new`] says which sizes do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unfit {
@@ -86,9 +89,10 @@ impl Layout {
     /// # Errors
     ///
     /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
-    /// under the table of one entry or over `u32::MAX`, or when `area` is less than
-    /// twice the largest record less one block. An empty ring of that length takes
-    /// any record, wherever its head is.
+    /// under the table of one entry or over `u32::MAX`, when `area` is less than
+    /// twice the largest record less one block, or when the ring file (two header
+    /// blocks and the area) does not fit in a `u64`. An empty ring of that length
+    /// takes any record, wherever its head is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         let window = HEADER_LEN
             .checked_add(body_max)
@@ -100,6 +104,7 @@ impl Layout {
             Some(window)
                 if body.contains(&body_max)
                     && area.is_multiple_of(BLOCK)
+                    && area <= u64::MAX - AREA_START
                     && window.saturating_mul(2) - BLOCK <= area =>
             {
                 Ok(Self {
@@ -122,6 +127,11 @@ impl Layout {
     #[must_use]
     pub fn body_max(self) -> usize {
         self.body_max
+    }
+
+    /// The length of the ring file: the two header blocks and the area.
+    pub(crate) fn file_len(self) -> u64 {
+        AREA_START + self.area
     }
 }
 
@@ -717,11 +727,22 @@ mod tests {
                 ("an area under two records less a block", 2 * block, 4088),
                 ("a body over u32::MAX", u64::MAX - 4095, usize::MAX),
                 ("a record size over u64", u64::MAX - 4095, usize::MAX - 8),
+                ("a file over u64", u64::MAX - 4095, 4087),
+                ("a file one byte over u64", u64::MAX - 8191, 4087),
             ];
             for (case, area, body_max) in cases {
                 let unfit = Unfit { area, body_max };
                 assert_eq!(Layout::new(area, body_max), Err(unfit), "{case}");
             }
+        }
+
+        #[test]
+        fn takes_the_largest_aligned_area() {
+            let area = u64::MAX - 12287;
+            assert_eq!(
+                Layout::new(area, 4087).map(Layout::file_len),
+                Ok(u64::MAX - 4095)
+            );
         }
 
         #[test]
@@ -1124,7 +1145,7 @@ mod tests {
 
         #[test]
         fn reports_a_wrap_record_at_the_tail_in_the_largest_area() {
-            let area = u64::MAX - 4095;
+            let area = u64::MAX - 12287;
             let layout = Layout::new(area, BODY_MAX).expect("the sizes make a ring");
             let tail = Position::new(area - 4096, 7).expect("aligned");
             let mut blocks = vec![0; 2 * ALIGN];
