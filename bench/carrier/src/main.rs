@@ -35,6 +35,7 @@ tests:
                                     frames at a fixed rate, echoed; `shared` adds a
                                     bulk flow on the same connection and thread
   <frames> is `stream` or `datagram` (QUIC only).
+  <secs> is at most 86400, a day.
   A test measures for <secs> after a 1 s warmup, and on until each flow measured once.
   A flow that measured nothing 5 s after that fails.
 options:

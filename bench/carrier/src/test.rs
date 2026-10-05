@@ -38,6 +38,9 @@ const WARMUP: Duration = Duration::from_secs(1);
 const LOST_AFTER: Duration = Duration::from_millis(100);
 /// How long a flow runs on past its `secs` to measure once.
 const GRACE: Duration = Duration::from_secs(5);
+/// The longest `secs` of a test. It keeps each deadline a flow adds to its start in
+/// range.
+const MAX_SECS: u64 = 24 * 60 * 60;
 /// Marks a CPU time the server could not read.
 const NONE: u64 = u64::MAX;
 
@@ -119,7 +122,12 @@ impl Test {
         args: &'a [&'a str],
     ) -> Result<(Self, &'a [&'a str]), Error> {
         let secs = |s: &str| -> Result<Duration, Error> {
-            Ok(Duration::from_secs(s.parse()?))
+            let secs = s.parse()?;
+            if secs > MAX_SECS {
+                let error = format!("a test runs for at most {MAX_SECS} s, not {secs}");
+                return Err(error.into());
+            }
+            Ok(Duration::from_secs(secs))
         };
         let size = |s: &str| -> Result<usize, Error> {
             let size = s.parse()?;
@@ -1329,6 +1337,19 @@ mod tests {
     fn parse_rejects_a_frame_larger_than_the_server_reads() {
         let error = parse_error(&["ping", "stream", "70000", "1"]);
         assert_eq!(error, "frame size 70000 is not in 16..=65536");
+    }
+
+    #[test]
+    fn parse_rejects_a_test_longer_than_a_day() {
+        let error = parse_error(&["ping", "stream", "64", "18446744073709551615"]);
+        assert_eq!(
+            error,
+            "a test runs for at most 86400 s, not 18446744073709551615"
+        );
+        let error = parse_error(&["bulk", "86401"]);
+        assert_eq!(error, "a test runs for at most 86400 s, not 86401");
+        let (test, _) = Test::parse(&["bulk", "86400"]).unwrap();
+        assert!(matches!(test, Test::Bulk { secs } if secs.as_secs() == 86_400));
     }
 
     #[test]
