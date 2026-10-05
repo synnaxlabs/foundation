@@ -1353,6 +1353,8 @@ mod tests {
         );
         let error = parse_error(&["bulk", "86401"]);
         assert_eq!(error, "a test runs for at most 86400 s, not 86401");
+        let error = parse_error(&["paced", "stream", "256", "1000", "86401", "none"]);
+        assert_eq!(error, "a test runs for at most 86400 s, not 86401");
         let (test, _) = Test::parse(&["bulk", "86400"]).unwrap();
         assert!(matches!(test, Test::Bulk { secs } if secs.as_secs() == 86_400));
     }
