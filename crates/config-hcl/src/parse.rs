@@ -7,7 +7,9 @@ use crate::lex::{self, Token, Tokens};
 use crate::{Error, Expected, Form};
 
 /// Reads HCL text as a Document. Each key, keyword, label, function name, and value
-/// has a span in `source`. A heredoc's lines end in `\n`, whatever the file uses.
+/// has a span in `source`. A heredoc's lines end in `\n`, whatever the file uses. An
+/// integer key in an object reads as HCL reads it: its digits without leading zeros,
+/// after a `-` if it has one.
 ///
 /// # Errors
 ///
@@ -21,6 +23,7 @@ pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
         tokens,
         token,
         errors: Vec::new(),
+        len: text.len(),
     };
     let document = parser.file();
     let mut errors = parser.errors;
@@ -50,6 +53,9 @@ struct Parser<'a> {
     token: Token<'a>,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
+    /// The length of the text in bytes. Each token but the last has one or more, so
+    /// this bounds the passes of each loop.
+    len: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -78,7 +84,8 @@ impl<'a> Parser<'a> {
         blocks: &mut Vec<Block>,
         depth: usize,
     ) -> Result<(), Error> {
-        loop {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::End | lex::Kind::CloseBrace => return Ok(()),
@@ -95,26 +102,11 @@ impl<'a> Parser<'a> {
                 blocks.push(self.block(&name, depth)?);
             }
         }
+        unreachable!("invariant: each pass takes a token")
     }
 
     fn block(&mut self, keyword: &Token<'a>, depth: usize) -> Result<Block, Error> {
-        let mut labels = Vec::new();
-        loop {
-            match self.token.kind {
-                lex::Kind::String(_) | lex::Kind::Identifier => {}
-                lex::Kind::OpenBrace => break,
-                _ if labels.is_empty() => {
-                    return Err(self.syntax(Expected::AttributeOrBlock));
-                }
-                _ => return Err(self.syntax(Expected::BlockStart)),
-            }
-            let label = self.take()?;
-            let span = Some(label.span);
-            labels.push(Label {
-                text: text(label),
-                span,
-            });
-        }
+        let labels = self.labels()?;
         let depth = enter(depth).ok_or(Error::TooDeep { span: keyword.span })?;
         self.take()?;
         let body = if self.token.kind == lex::Kind::Newline {
@@ -135,6 +127,29 @@ impl<'a> Parser<'a> {
             body,
             span: Some(join(keyword.span, end)),
         })
+    }
+
+    /// Reads the labels of a block up to its `{`, and leaves that token.
+    fn labels(&mut self) -> Result<Vec<Label>, Error> {
+        let mut labels = Vec::new();
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
+            match self.token.kind {
+                lex::Kind::String(_) | lex::Kind::Identifier => {}
+                lex::Kind::OpenBrace => return Ok(labels),
+                _ if labels.is_empty() => {
+                    return Err(self.syntax(Expected::AttributeOrBlock));
+                }
+                _ => return Err(self.syntax(Expected::BlockStart)),
+            }
+            let label = self.take()?;
+            let span = Some(label.span);
+            labels.push(Label {
+                text: text(label),
+                span,
+            });
+        }
+        unreachable!("invariant: each pass takes a token")
     }
 
     /// Reads the body of a one-line block, which holds one attribute or none, and
@@ -263,7 +278,8 @@ impl<'a> Parser<'a> {
             form,
         });
         let mut depth = 0usize;
-        loop {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
             match self.token.kind {
                 lex::Kind::End => return Ok(()),
                 lex::Kind::OpenBrace
@@ -283,6 +299,7 @@ impl<'a> Parser<'a> {
             }
             self.take()?;
         }
+        unreachable!("invariant: each pass takes a token")
     }
 
     fn word(&mut self, word: &Token<'a>, depth: usize) -> Result<Option<Value>, Error> {
@@ -350,22 +367,8 @@ impl<'a> Parser<'a> {
     fn list(&mut self, open: &Token<'a>, depth: usize) -> Result<Value, Error> {
         let depth = enter(depth).ok_or(Error::TooDeep { span: open.span })?;
         self.refuse_for()?;
-        let mut items = Vec::new();
-        let close = loop {
-            self.skip_newlines()?;
-            if self.token.kind == lex::Kind::CloseBracket {
-                break self.take()?;
-            }
-            items.extend(self.value(depth, Ends::Comma)?);
-            self.skip_newlines()?;
-            match self.token.kind {
-                lex::Kind::Comma => {
-                    self.take()?;
-                }
-                lex::Kind::CloseBracket => break self.take()?,
-                _ => return Err(self.syntax(Expected::ListEnd)),
-            }
-        };
+        let (items, close) =
+            self.values(&lex::Kind::CloseBracket, Expected::ListEnd, depth)?;
         Ok(Value {
             kind: value::Kind::List(items),
             span: Some(join(open.span, close.span)),
@@ -390,24 +393,30 @@ impl<'a> Parser<'a> {
         depth: usize,
     ) -> Result<Token<'a>, Error> {
         self.refuse_for()?;
-        loop {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
             self.skip_newlines()?;
             match self.token.kind {
                 lex::Kind::CloseBrace => return self.take(),
-                lex::Kind::OpenParenthesis => {
-                    self.refuse(Form::Parentheses, Ends::Line)?;
-                }
-                lex::Kind::String(_) | lex::Kind::Identifier => {
-                    let key = self.take()?;
-                    if !matches!(self.token.kind, lex::Kind::Equals | lex::Kind::Colon)
-                    {
-                        return Err(self.syntax(Expected::ObjectEquals));
+                _ => {
+                    if let Some(form) = self.leading_form() {
+                        self.refuse(form, Ends::Line)?;
+                    } else if let Some((key, key_span)) = self.key()? {
+                        if !matches!(
+                            self.token.kind,
+                            lex::Kind::Equals | lex::Kind::Colon
+                        ) {
+                            return Err(self.syntax(Expected::ObjectEquals));
+                        }
+                        self.take()?;
+                        let value = self.value(depth, Ends::Line)?;
+                        attributes.extend(value.map(|value| Attribute {
+                            key,
+                            key_span: Some(key_span),
+                            value,
+                        }));
                     }
-                    self.take()?;
-                    let value = self.value(depth, Ends::Line)?;
-                    attributes.extend(value.map(|value| attribute(key, value)));
                 }
-                _ => return Err(self.syntax(Expected::Key)),
             }
             match self.token.kind {
                 lex::Kind::Comma | lex::Kind::Newline => {
@@ -417,6 +426,39 @@ impl<'a> Parser<'a> {
                 _ => return Err(self.syntax(Expected::ObjectEnd)),
             }
         }
+        unreachable!("invariant: each pass takes a token")
+    }
+
+    /// Reads an object key, where no HCL form starts: a string, an identifier, or an
+    /// integer, which reads as HCL reads it: its digits without leading zeros, after a
+    /// `-` if it has one. Returns `None` for a number that HCL rounds, after it keeps
+    /// the problem and moves past the entry. Any other token is `Expected::Key`.
+    fn key(&mut self) -> Result<Option<(Box<str>, Span)>, Error> {
+        if matches!(
+            self.token.kind,
+            lex::Kind::String(_) | lex::Kind::Identifier
+        ) {
+            let key = self.take()?;
+            let span = key.span;
+            return Ok(Some((text(key), span)));
+        }
+        let minus = if self.token.kind == lex::Kind::Minus {
+            Some(self.take()?)
+        } else {
+            None
+        };
+        if self.token.kind != lex::Kind::Number {
+            return Err(self.syntax(Expected::Key));
+        }
+        let Some(digits) = integer_key(self.token.text) else {
+            self.refuse(Form::NumberKey, Ends::Line)?;
+            return Ok(None);
+        };
+        let number = self.take()?;
+        Ok(Some(match minus {
+            Some(minus) => (format!("-{digits}").into(), join(minus.span, number.span)),
+            None => (digits.into(), number.span),
+        }))
     }
 
     fn call(&mut self, function: &Token<'a>, depth: usize) -> Result<Value, Error> {
@@ -424,22 +466,8 @@ impl<'a> Parser<'a> {
             span: function.span,
         })?;
         self.take()?;
-        let mut arguments = Vec::new();
-        let close = loop {
-            self.skip_newlines()?;
-            if self.token.kind == lex::Kind::CloseParenthesis {
-                break self.take()?;
-            }
-            arguments.extend(self.value(depth, Ends::Comma)?);
-            self.skip_newlines()?;
-            match self.token.kind {
-                lex::Kind::Comma => {
-                    self.take()?;
-                }
-                lex::Kind::CloseParenthesis => break self.take()?,
-                _ => return Err(self.syntax(Expected::ArgumentsEnd)),
-            }
-        };
+        let (arguments, close) =
+            self.values(&lex::Kind::CloseParenthesis, Expected::ArgumentsEnd, depth)?;
         Ok(Value {
             kind: value::Kind::Call(Call {
                 function: function.text.into(),
@@ -448,6 +476,33 @@ impl<'a> Parser<'a> {
             }),
             span: Some(join(function.span, close.span)),
         })
+    }
+
+    /// Reads values split by `,` up to `close`, and returns them and the `close`
+    /// token. Any other token after a value is `expected`.
+    fn values(
+        &mut self,
+        close: &lex::Kind,
+        expected: Expected,
+        depth: usize,
+    ) -> Result<(Vec<Value>, Token<'a>), Error> {
+        let mut values = Vec::new();
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
+            self.skip_newlines()?;
+            if self.token.kind == *close {
+                return Ok((values, self.take()?));
+            }
+            values.extend(self.value(depth, Ends::Comma)?);
+            match &self.token.kind {
+                lex::Kind::Comma => {
+                    self.take()?;
+                }
+                kind if kind == close => return Ok((values, self.take()?)),
+                _ => return Err(self.syntax(expected)),
+            }
+        }
+        unreachable!("invariant: each pass takes a token")
     }
 
     /// Builds a map, and keeps its problems. The map is empty when it has problems,
@@ -468,10 +523,14 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_newlines(&mut self) -> Result<(), Error> {
-        while self.token.kind == lex::Kind::Newline {
+        // Each pass takes a token or returns.
+        for _ in 0..=self.len {
+            if self.token.kind != lex::Kind::Newline {
+                return Ok(());
+            }
             self.take()?;
         }
-        Ok(())
+        unreachable!("invariant: each pass takes a token")
     }
 
     /// Takes the next token and reads the one after it.
@@ -482,8 +541,7 @@ impl<'a> Parser<'a> {
     ///
     /// # Panics
     ///
-    /// Panics at the end of the text, which no rule takes. So every loop that takes
-    /// tokens ends.
+    /// Panics at the end of the text, which no rule takes.
     fn take(&mut self) -> Result<Token<'a>, Error> {
         if let lex::Kind::Error(error) = &self.token.kind {
             return Err(error.clone());
@@ -512,6 +570,18 @@ impl<'a> Parser<'a> {
             },
         }
     }
+}
+
+/// The digits of an integer key without leading zeros, or `None` when HCL rounds the
+/// number. HCL reads a number key through a 512-bit float, which holds each integer of
+/// up to 154 digits.
+fn integer_key(number: &str) -> Option<&str> {
+    let digits = match number.trim_start_matches('0') {
+        "" => "0",
+        digits => digits,
+    };
+    (digits.len() <= 154 && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(digits)
 }
 
 fn attribute(key: Token<'_>, value: Value) -> Attribute {
@@ -759,6 +829,47 @@ c = "°C # not a comment"
         }
 
         #[test]
+        fn reads_integer_keys_as_hcl_does() {
+            let digits = "9".repeat(154);
+            let text = format!(
+                "a = {{ 40001 = 1, 007 = 2, -12 = 3, -0 = 4, 00{digits} = 5 }}"
+            );
+            let document = ok(&text);
+            let a = document.attributes.get("a").unwrap();
+            let value::Kind::Map(object) = &a.value.kind else {
+                panic!("not a map: {a:?}");
+            };
+            let keys = [
+                ("40001", 6, 11, 1),
+                ("7", 17, 20, 2),
+                ("-12", 26, 29, 3),
+                ("-0", 35, 37, 4),
+                (digits.as_str(), 43, 199, 5),
+            ];
+            assert_eq!(object.iter().len(), keys.len());
+            for (key, start, end, n) in keys {
+                let entry = object.get(key).unwrap();
+                assert_eq!(entry.key_span, Some(on(start, end)), "{key}");
+                assert_eq!(entry.value.kind, integer(n), "{key}");
+            }
+        }
+
+        #[test]
+        fn reads_non_ascii_text_in_strings() {
+            let expected = attributes(vec![
+                ("a", string("température")),
+                (
+                    "b",
+                    value::Kind::Map(map(vec![("température", integer(1))])),
+                ),
+            ]);
+            assert_eq!(
+                ok("a = \"température\"\nb = { \"température\" = 1 }\n"),
+                expected
+            );
+        }
+
+        #[test]
         fn reads_for_as_a_word_when_no_identifier_follows() {
             let expected = attributes(vec![
                 ("a", value::Kind::List(vec![value(reference("for"))])),
@@ -970,8 +1081,8 @@ c = "°C # not a comment"
     mod heredocs {
         use super::*;
 
-        const START: &str = "the file needs a marker, such as `EOT`, and a new line to start the \
-             heredoc here";
+        const START: &str = "the file needs a marker, such as `EOT`, and a new line to \
+                             start the heredoc here";
         const END: &str =
             "the file needs the marker on a line of its own to end the heredoc here";
         /// Checks that `a = ` and then each heredoc reads as its string.
@@ -1343,6 +1454,11 @@ c = "°C # not a comment"
                     Form::Operator,
                 ),
                 ("a = { (k) = 1 }\n", on(6, 7), Form::Parentheses),
+                ("a = { 1.5 = 1 }\n", on(6, 9), Form::NumberKey),
+                ("a = { 1e3 = 1 }\n", on(6, 9), Form::NumberKey),
+                ("a = { -1.5 = 1 }\n", on(7, 10), Form::NumberKey),
+                ("a = { - = 1 }\n", on(6, 7), Form::Operator),
+                ("a = { -x = 1 }\n", on(6, 7), Form::Operator),
             ];
             for (text, span, form) in cases {
                 let message = form.to_string();
@@ -1397,6 +1513,29 @@ c = "°C # not a comment"
             check(
                 "a = null\nb = 1 + 2\n",
                 &[(null, NULL), (operator, &message)],
+            );
+        }
+
+        #[test]
+        fn refuses_a_number_key_that_hcl_rounds_and_reads_on() {
+            let message = Form::NumberKey.to_string();
+            let digits = "9".repeat(155);
+            let long = Error::Form {
+                span: on(6, 161),
+                form: Form::NumberKey,
+            };
+            check(&format!("a = {{ {digits} = 1 }}\n"), &[(long, &message)]);
+            let key = Error::Form {
+                span: on(6, 9),
+                form: Form::NumberKey,
+            };
+            let null = Error::Form {
+                span: span(at(27, 1, 4), at(31, 1, 8)),
+                form: Form::Null,
+            };
+            check(
+                "a = { 1.5 = 1, b = 2 }\nc = null\n",
+                &[(key, &message), (null, NULL)],
             );
         }
 
@@ -1462,6 +1601,22 @@ c = "°C # not a comment"
                 ("a = { k 1 }\n", on(8, 9), Expected::ObjectEquals),
                 ("a = { k = 1 j = 2 }\n", on(12, 13), Expected::ObjectEnd),
                 ("a = f(1 2)\n", on(8, 9), Expected::ArgumentsEnd),
+                ("40001 = 1\n", on(0, 5), Expected::Item),
+                ("b 1 {}\n", on(2, 3), Expected::AttributeOrBlock),
+            ];
+            for (text, span, expected) in cases {
+                let message = format!("the file needs {expected} here");
+                check(text, &[(syntax(span, expected), &message)]);
+            }
+        }
+
+        #[test]
+        fn refuses_the_close_of_another_bracket() {
+            let cases = [
+                ("a = [1)\n", on(6, 7), Expected::ListEnd),
+                ("a = [)\n", on(5, 6), Expected::Value),
+                ("a = f(1]\n", on(7, 8), Expected::ArgumentsEnd),
+                ("a = f(]\n", on(6, 7), Expected::Value),
             ];
             for (text, span, expected) in cases {
                 let message = format!("the file needs {expected} here");
@@ -1588,6 +1743,19 @@ c = "°C # not a comment"
             let second = span(at(6, 1, 0), at(7, 1, 1));
             check("a = 1\na = 2\n", &[repeat(on(0, 1), second)]);
             check("m = { a = 1, a = 2 }", &[repeat(on(6, 7), on(13, 14))]);
+            let error = document::Error::DuplicateKey {
+                key: "1".into(),
+                first: Some(on(6, 8)),
+                second: Some(on(14, 17)),
+            };
+            check(
+                "m = { 01 = 1, \"1\" = 2 }",
+                &[(
+                    Error::Document(error),
+                    "the key \"1\" repeats an earlier key. Remove it, or give it a \
+                     different key",
+                )],
+            );
             assert_eq!(ok("b { a = 1 }\nb { a = 2 }\n").blocks.len(), 2);
         }
 

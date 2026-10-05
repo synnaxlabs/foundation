@@ -825,6 +825,10 @@ How to read this record:
   integers exactly, and gives each unsupported HCL form an error with a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
+- **HCL IDENTIFIERS (2026-10-05)** The reader accepts identifiers outside ASCII as HCL
+  does (Unicode `XID_Start` and `XID_Continue`, through `unicode-ident`), so
+  `température = 1` reads. A new error for each such identifier lost: a valid HCL file
+  would fail. The person decided on 2026-10-05 ("go with yes"), with low priority, #263.
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -1064,7 +1068,11 @@ How to read this record:
   `entropy::Entropy`: random bytes from the OS, or from the run's seed in simulation.
   `rng::Rng` is concrete (xoshiro256++ seeded from `Entropy`), so simulation replays it.
   `shards::Shards`, held only by `node`: the core count, and one thread per shard with
-  its own executor. `tasks::Tasks`: spawns `!Send` tasks on the current shard.
+  its own executor. A shard's core is an index below the count, never an OS CPU
+  number. `Shards::start` panics past the count: only `node` picks cores, so a bad
+  index is a bug. `os` maps index `i` to the `i`-th CPU of its affinity set, which it
+  reads once, so the count never changes (#116).
+  `tasks::Tasks`: spawns `!Send` tasks on the current shard.
   `threads::Threads`: dedicated threads for blocking code. Each runs one future, and it
   waits for an event only by awaiting a future, so simulation controls every wait. A
   lint denies the std blocking waits (`park`, `Condvar`, `Barrier`, `mpsc` receive).
@@ -1839,7 +1847,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | Layer | Crate | Job (one sentence) | Allowed dependencies |
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
-| 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). | none |
+| 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, and holds the one `unsafe impl GlobalAlloc`. A dev-dependency only. | none |
 | 1 | `types` | Defines byte-level values: time, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, randomness, threads, and task spawning. | `types`, `block` |
@@ -1987,7 +1995,10 @@ a bad link:
   connector (a named reader whose hold covers the cut) receives every sample, in seq
   order. With a budget that covers 30 minutes, it receives exactly one gap, whose count
   equals the trimmed samples. `verify` runs both.
-- A time error bound on every sample.
+- A time error bound on every sample. The bound must hold the true offset, and the
+  MVP target is at most 1 s. A tighter target waits for the x86 and Pi 4 run (#260).
+  The person accepted on 2026-10-05 ("as long as you've evaluated the performance
+  costs of your decision against correctness then I'm ok with this").
 - Command authority and audit (D2).
 - The mesh as code: `plan` and `apply` from HCL, operated through the JSON CLI and MCP.
 - Robust means: simulation-tested, fuzzed, and chaos-tested on real AWS links.

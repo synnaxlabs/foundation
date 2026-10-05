@@ -58,6 +58,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - `clippy.toml` also forbids the rustls calls that read the OS clock, a key log file,
   or the process-wide provider. Only `transport::tls` builds rustls configs, with
   `builder_with_details`, its own provider, and a fixed time.
+- `clippy.toml` also forbids the noq-proto constructors and types that draw OS
+  randomness or read the OS clock. Only `transport::quic::settings` builds noq-proto
+  configs and endpoints. It sets every random value from `Entropy`.
 - A crate's `[lints]` table cannot add to the workspace set, so stricter lints go at
   the top of `lib.rs` as `#![deny(...)]` (r16 63):
   - Decoders of outside input (`codec`, `wire`, `document`, `config-hcl`, and each
