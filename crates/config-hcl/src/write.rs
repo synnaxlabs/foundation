@@ -800,37 +800,99 @@ mod tests {
         assert_eq!(write(&document), refused(on(3, 4)));
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum Level {
+        Block,
+        List,
+        Map,
+        Call,
+    }
+
+    /// Nests `levels` levels of `level` as one block or under the attribute `a`, with
+    /// level `i` from the outside at `on(i, i + 1)`.
+    fn nested(level: Level, levels: u32) -> Document {
+        let mut document = Document::default();
+        let mut inner = None;
+        for i in (0..levels).rev() {
+            let span = Some(on(i, i.checked_add(1).unwrap()));
+            let items = Option::take(&mut inner).into_iter();
+            let kind = match level {
+                Level::Block => {
+                    let block = Block {
+                        span,
+                        ..block("b", &[], document)
+                    };
+                    document = Document {
+                        attributes: Map::default(),
+                        blocks: vec![block],
+                    };
+                    continue;
+                }
+                Level::List => Kind::List(items.collect()),
+                Level::Map => Kind::Map(
+                    Map::new(
+                        items
+                            .map(|value| Attribute {
+                                key: "a".into(),
+                                key_span: None,
+                                value,
+                            })
+                            .collect(),
+                    )
+                    .unwrap(),
+                ),
+                Level::Call => Kind::Call(Call {
+                    function: "f".into(),
+                    function_span: None,
+                    arguments: items.collect(),
+                }),
+            };
+            inner = Some(Value { kind, span });
+        }
+        if let Some(value) = inner {
+            document.attributes = Map::new(vec![Attribute {
+                key: "a".into(),
+                key_span: None,
+                value,
+            }])
+            .unwrap();
+        }
+        document
+    }
+
     #[test]
     fn gives_only_the_depth_error_past_the_limit() {
-        let mut lists = Value {
-            kind: list(Vec::new()),
-            span: Some(on(1, 2)),
-        };
-        for _ in 0..64 {
-            lists = value(Kind::List(vec![lists]));
-        }
         let document = Document {
-            attributes: Map::new(vec![
-                Attribute {
-                    key: "a".into(),
-                    key_span: None,
-                    value: lists,
-                },
-                Attribute {
-                    key: "my key".into(),
-                    key_span: Some(on(3, 4)),
-                    value: value(Kind::Integer(1)),
-                },
-            ])
-            .unwrap(),
-            blocks: Vec::new(),
+            blocks: vec![block("my block", &[], Document::default())],
+            ..nested(Level::List, 65)
         };
         assert_eq!(
             write(&document),
             Err(vec![Error::Unwritable {
-                span: Some(on(1, 2)),
+                span: Some(on(64, 65)),
                 part: Unwritable::Depth,
             }])
         );
+    }
+
+    #[test]
+    fn checks_the_depth_before_it_recurses() {
+        for level in [Level::Block, Level::List, Level::Map, Level::Call] {
+            let document = nested(level, 100_000);
+            let written = write(&document);
+            #[expect(
+                clippy::mem_forget,
+                reason = "a plain drop recurses once per level"
+            )]
+            std::mem::forget(document);
+            assert_eq!(
+                written,
+                Err(vec![Error::Unwritable {
+                    span: Some(on(64, 65)),
+                    part: Unwritable::Depth,
+                }]),
+                "{level:?}"
+            );
+        }
     }
 }
