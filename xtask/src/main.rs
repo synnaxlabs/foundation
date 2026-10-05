@@ -24,20 +24,7 @@ fn main() -> ExitCode {
         .expect("invariant: xtask is a directory of the workspace root");
     #[expect(clippy::disallowed_methods, reason = "a dev tool reads its arguments")]
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.split_first() {
-        Some((task, rest)) if task == "globals" => {
-            packages(rest).and_then(|names| globals::check(root, &names))
-        }
-        Some((task, _)) => match task.as_str() {
-            "layers" => layers(root),
-            "oracles" => oracles::check(root),
-            name @ ("loom" | "shuttle") => cfg::test(root, name),
-            "miri" => miri::run(root),
-            _ => Err(vec![USAGE.to_string()]),
-        },
-        None => Err(vec![USAGE.to_string()]),
-    };
-    match result {
+    match run(root, &args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(problems) => {
             for problem in problems {
@@ -50,6 +37,24 @@ fn main() -> ExitCode {
 
 const USAGE: &str =
     "usage: cargo xtask <layers|globals [-p <crate>]...|oracles|loom|shuttle|miri>";
+
+/// Runs the task that `args` names on the workspace at `root`. Only `globals` takes
+/// arguments.
+fn run(root: &Path, args: &[String]) -> Result<(), Vec<String>> {
+    match args.split_first() {
+        Some((task, rest)) if task == "globals" => {
+            packages(rest).and_then(|names| globals::check(root, &names))
+        }
+        Some((task, [])) => match task.as_str() {
+            "layers" => layers(root),
+            "oracles" => oracles::check(root),
+            name @ ("loom" | "shuttle") => cfg::test(root, name),
+            "miri" => miri::run(root),
+            _ => Err(vec![USAGE.to_string()]),
+        },
+        _ => Err(vec![USAGE.to_string()]),
+    }
+}
 
 /// The package names in `args`, each given as `-p <name>`.
 fn packages(args: &[String]) -> Result<Vec<String>, Vec<String>> {
@@ -173,6 +178,16 @@ mod tests {
             layers(&fixture()),
             Err(vec![missing("a"), missing("globals"), missing("model")])
         );
+    }
+
+    #[test]
+    fn run_refuses_an_unknown_task_and_arguments_to_a_task_without_any() {
+        let args = |args: &[&str]| -> Vec<String> {
+            args.iter().map(ToString::to_string).collect()
+        };
+        for wrong in [&[][..], &["nope"], &["layers", "-p", "a"], &["miri", "x"]] {
+            assert_eq!(run(&fixture(), &args(wrong)), Err(vec![USAGE.to_string()]));
+        }
     }
 
     #[test]
