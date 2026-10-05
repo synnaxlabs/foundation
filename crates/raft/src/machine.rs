@@ -396,7 +396,7 @@ impl Raft {
             .at(next - 1)
             .expect("invariant: a follower's next entry follows the leader's log");
         let entries = self.log.from(next, BATCH);
-        let last = prev.index + u64::try_from(entries.len()).unwrap_or(u64::MAX);
+        let last = entries.last().map_or(prev.index, |entry| entry.at.index);
         self.progress[voter].sent(last);
         let commit = self.log.committed();
         self.send(

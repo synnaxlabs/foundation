@@ -109,7 +109,7 @@ impl Log {
         if self.at(prev.index) != Some(prev) {
             return Err(prev.index.saturating_sub(1).min(self.last().index));
         }
-        let last = prev.index + u64::try_from(entries.len()).unwrap_or(u64::MAX);
+        let last = entries.last().map_or(prev.index, |entry| entry.at.index);
         let Some(first) = entries
             .iter()
             .position(|entry| self.at(entry.at.index) != Some(entry.at))
