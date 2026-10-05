@@ -7,5 +7,16 @@ publish.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+counting = { path = "../counting" }
+env = { path = "../env" }
+proptest = { workspace = true }
+sim = { path = "../sim" }
+types = { path = "../types" }
+
+[[test]]
+name = "alloc"
+harness = false
+
 [lints]
 workspace = true
