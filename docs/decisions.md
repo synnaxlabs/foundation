@@ -363,6 +363,16 @@ How to read this record:
   core. The diode carrier is UDP, Noise K, RaptorQ, seq, and codec keyframes: best
   effort with recorded gaps; commands, Raft, and clock exchange cannot cross it.
 - **A4 (wire part)** Each connection swaps keys for short numbers.
+- **PROTOCOL HEADER (#75)** The header of STREAM DISPATCH is 3 bytes: the wire
+  version (`u16`, little-endian), then the protocol number (`u8`): clock 1, mesh 2,
+  replica 3, blob 4, hub 5. It starts the first message of each stream and each
+  datagram. The version comes first and is checked first, so a later version can
+  change what follows it. A node reads only `wire::VERSION` until version 2 exists;
+  then it also reads the version before it (C9d). A header that is not valid resets
+  the stream with code 1 (`wire::protocol::REJECTED`). Reset codes 1 to 15 belong to
+  the header; each protocol numbers its own codes from 16. Rejected: the version once
+  per session (the diode carrier cannot negotiate, and each stream must decode by
+  itself) and a session per protocol (`transport` stays blind to protocols).
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
 

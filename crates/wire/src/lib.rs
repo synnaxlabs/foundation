@@ -7,3 +7,8 @@
     clippy::as_conversions,
     clippy::string_slice
 )]
+
+pub mod protocol;
+
+/// The wire format version this node writes and reads.
+pub const VERSION: u16 = 1;
