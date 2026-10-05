@@ -53,6 +53,8 @@ struct Mark {
 struct Edit {
     range: Range<usize>,
     text: String,
+    /// Whether an insert goes before the item below it, after the other inserts there.
+    below: bool,
 }
 
 /// Where the items of a body are.
@@ -69,23 +71,12 @@ struct Body {
 /// New items that wait for a place in a body.
 #[derive(Default)]
 struct Pending<'d> {
-    /// The end of the lines of the last kept item.
+    /// The end of the lines of the kept item that new items go after.
     anchor: Option<usize>,
+    /// The ends of the lines of the kept items.
+    ends: Vec<usize>,
     attributes: Vec<&'d Attribute>,
     blocks: Vec<&'d Block>,
-}
-
-impl Pending<'_> {
-    /// A writer that took the waiting items, or `None` when none wait.
-    fn writer<'b>(&mut self, body: &'b Body) -> Option<Writer<'b>> {
-        if self.attributes.is_empty() && self.blocks.is_empty() {
-            return None;
-        }
-        let mut writer = Writer::new(&body.margin, 0);
-        let (attributes, blocks) = (self.attributes.drain(..), self.blocks.drain(..));
-        writer.body(attributes, blocks, 0, self.anchor.is_some());
-        Some(writer)
-    }
 }
 
 /// A text that `read` takes, with its tokens. Between two tokens there are only
@@ -240,9 +231,10 @@ impl<'a> File<'a> {
             .expect("invariant: the last token is the end")
     }
 
-    /// The edit that puts the text of `writer` at `at`. At the end of a text with no
-    /// final new line, the text starts a new line, so the end takes no other insert.
-    fn insert(&self, at: usize, writer: Writer<'_>) -> Edit {
+    /// The edit that puts the text of `writer` at `at`, before the item below when
+    /// `below`. At the end of a text with no final new line, the text starts a new
+    /// line, so no other insert may go there.
+    fn insert(&self, at: usize, writer: Writer<'_>, below: bool) -> Edit {
         let mut text = written(writer);
         let open =
             at == self.text.len() && at > self.floor && !self.text.ends_with('\n');
@@ -252,16 +244,18 @@ impl<'a> File<'a> {
         Edit {
             range: at..at,
             text,
+            below,
         }
     }
 
     /// Applies `edits`, which do not overlap, to the text.
     fn apply(&self, mut edits: Vec<Edit>) -> String {
-        // An insert comes before a cut at its place, and inserts keep their order.
-        edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
+        // At one place, inserts after the item above come first, then inserts before
+        // the item below, each in the order made, then a cut.
+        edits.sort_by_key(|edit| (edit.range.start, edit.range.end, edit.below));
         let mut out = String::with_capacity(self.text.len());
         let mut at = 0;
-        for Edit { range, text } in edits {
+        for Edit { range, text, .. } in edits {
             let kept = self.text.get(at..range.start);
             out.push_str(kept.expect("invariant: edits do not overlap"));
             out.push_str(&text.replace('\n', self.line_end));
@@ -284,10 +278,11 @@ struct Diff<'f, 'a> {
 
 impl Diff<'_, '_> {
     /// Adds the edits that change a body from `old` to `new`. Walks the attributes in
-    /// key order, then the blocks in order, and puts each new item after the kept
-    /// item before it, or else before the first kept item, or else at the end of the
-    /// body. When a block is kept, a new block takes its place from the kept blocks
-    /// only, as block order is part of the Document.
+    /// key order, then the blocks in order. A new item goes after the kept item of its
+    /// kind before it, or else before the kept item of its kind after it. With no kept
+    /// item of its kind, a new attribute goes before the first kept block, and a new
+    /// block after the last kept attribute in key order, or else at the end of the
+    /// body.
     fn body(&mut self, old: &Document, new: &Document, body: &Body) {
         let file = self.file;
         let mut cuts = Vec::new();
@@ -312,9 +307,7 @@ impl Diff<'_, '_> {
         if !pairs.is_empty()
             && let Some(at) = pending.anchor
         {
-            if let Some(writer) = pending.writer(body) {
-                self.edits.push(file.insert(at, writer));
-            }
+            self.place(body, &mut pending, at, false);
             pending.anchor = None;
         }
         let mut kept = pairs.iter().map(|&(o, _)| o).peekable();
@@ -338,15 +331,14 @@ impl Diff<'_, '_> {
                 self.block(was, block);
             }
         }
-        if let Some(writer) = pending.writer(body) {
-            let at = pending.anchor.unwrap_or(body.end);
-            self.edits.push(file.insert(at, writer));
-        }
+        let at = pending.anchor.unwrap_or(body.end);
+        self.place(body, &mut pending, at, false);
         self.cut(cuts, body);
     }
 
-    /// Puts the waiting items after the kept item before them, or else before the
-    /// kept item at `lines`, with a blank line between them and a kept block.
+    /// Puts the waiting items after the anchor, or else before the kept item at
+    /// `lines`, with a blank line between them and a kept block. Then that item is
+    /// the anchor.
     fn keep(
         &mut self,
         body: &Body,
@@ -354,18 +346,28 @@ impl Diff<'_, '_> {
         lines: Range<usize>,
         block: bool,
     ) {
-        if let Some(mut writer) = pending.writer(body) {
-            let at = if let Some(at) = pending.anchor {
-                at
-            } else {
-                if block {
-                    writer.gap();
-                }
-                lines.start
-            };
-            self.edits.push(self.file.insert(at, writer));
-        }
+        let at = pending.anchor.unwrap_or(lines.start);
+        self.place(body, pending, at, block && pending.anchor.is_none());
         pending.anchor = Some(lines.end);
+        pending.ends.push(lines.end);
+    }
+
+    /// Inserts the waiting items at `at`, the anchor or the start of the lines of the
+    /// kept item below. A blank line goes before the first block when a kept item
+    /// ends at `at`, and after the items when `gap`.
+    fn place(&mut self, body: &Body, pending: &mut Pending<'_>, at: usize, gap: bool) {
+        if pending.attributes.is_empty() && pending.blocks.is_empty() {
+            return;
+        }
+        let mut writer = Writer::new(&body.margin, 0);
+        let (attributes, blocks) =
+            (pending.attributes.drain(..), pending.blocks.drain(..));
+        writer.body(attributes, blocks, 0, pending.ends.contains(&at));
+        if gap {
+            writer.gap();
+        }
+        let below = pending.anchor != Some(at);
+        self.edits.push(self.file.insert(at, writer, below));
     }
 
     /// Cuts the lines of removed items, as runs that merge across blank lines.
@@ -382,6 +384,7 @@ impl Diff<'_, '_> {
         self.edits.extend(runs.into_iter().map(|run| Edit {
             range: file.widen(run, body),
             text: String::new(),
+            below: false,
         }));
     }
 
@@ -402,6 +405,7 @@ impl Diff<'_, '_> {
         self.edits.push(Edit {
             range: start..end,
             text: written(writer),
+            below: false,
         });
     }
 
@@ -442,6 +446,7 @@ impl Diff<'_, '_> {
             self.edits.push(Edit {
                 range: start..end,
                 text: written(writer),
+                below: false,
             });
         }
     }
@@ -570,20 +575,33 @@ mod tests {
         }
     }
 
-    /// The text of `document` from `write`, or with its attributes after its blocks.
+    /// The text of `document` from `write`, or with the attributes of each body after
+    /// its blocks.
     fn text_of(document: &Document, attributes_last: bool) -> String {
         if !attributes_last {
             return write(document).unwrap();
         }
-        let blocks = Document {
-            attributes: Map::default(),
-            blocks: document.blocks.clone(),
-        };
+        let mut text = String::new();
+        for block in &document.blocks {
+            let empty = Block {
+                body: Document::default(),
+                ..block.clone()
+            };
+            let head = write(&Document {
+                attributes: Map::default(),
+                blocks: vec![empty],
+            })
+            .unwrap();
+            text.push_str(head.strip_suffix("{}\n").unwrap());
+            text.push_str("{\n");
+            text.push_str(&text_of(&block.body, true));
+            text.push_str("}\n");
+        }
         let attributes = Document {
             attributes: document.attributes.clone(),
             blocks: Vec::new(),
         };
-        write(&blocks).unwrap() + &write(&attributes).unwrap()
+        text + &write(&attributes).unwrap()
     }
 
     /// Adds blank lines and comments to `text`, which `write` gave, and maybe a byte
@@ -710,7 +728,8 @@ mod tests {
             picks in prop::collection::vec(any::<u8>(), 0..64),
             attributes_last in any::<bool>(),
         ) {
-            let text = annotate(&text_of(&a, attributes_last), &mut Picks(picks.into_iter()));
+            let mut picks = Picks(picks.into_iter());
+            let text = annotate(&text_of(&a, attributes_last), &mut picks);
             prop_assert_eq!(read(Source(0), &text), Ok(a.clone()), "{}", text);
             prop_assert_eq!(update(Source(0), &text, &a), Ok(text));
         }
@@ -742,7 +761,8 @@ mod tests {
             picks in prop::collection::vec(any::<u8>(), 0..64),
             attributes_last in any::<bool>(),
         ) {
-            let text = annotate(&text_of(&a, attributes_last), &mut Picks(picks.into_iter()));
+            let mut picks = Picks(picks.into_iter());
+            let text = annotate(&text_of(&a, attributes_last), &mut picks);
             let mut document = read(Source(0), &text).unwrap();
             let Some(mut k) = k.checked_rem(count(&document)) else {
                 return Ok(());
@@ -841,7 +861,24 @@ mod tests {
         // `c` goes after `b`, and `e` before `d`, at one place.
         assert_eq!(
             updated("b=1\nd{}\n", "e{}\nd{}\nb=1\nc=2\n"),
-            "b=1\nc = 2\ne {}\n\nd{}\n"
+            "b=1\nc = 2\n\ne {}\n\nd{}\n"
+        );
+        // `x` goes after `d`, and `a` before `b`, at one place.
+        assert_eq!(
+            updated("d{}\nb=1\n", "a=0\nb=1\nd{}\nx{}\n"),
+            "d{}\n\nx {}\na = 0\nb=1\n"
+        );
+        // The same in a block body.
+        assert_eq!(
+            updated("x {\n  d {}\n  b = 1\n}\n", "x {\ne {}\nd {}\nb = 2\n}"),
+            "x {\n  e {}\n\n  d {}\n  b = 2\n}\n"
+        );
+        assert_eq!(
+            updated(
+                "c{\nSned{}\nS=z()\nd{a=[[]]}\n}",
+                "c{\nd{}\nSned{}\nS=z()\nd{a=[]}\n}"
+            ),
+            "c{\nd {}\n\nSned{}\n\nd {\n  a = []\n}\nS=z()\n}"
         );
     }
 
