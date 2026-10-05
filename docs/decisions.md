@@ -503,10 +503,13 @@ How to read this record:
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
   agent, and every adversarial reviewer.
-- **C2 (working assumption)** One shard per core owns its indexes with no locks. Each
-  shard runs one Tokio `LocalRuntime`. Vendor libraries run on dedicated threads. A
-  connector's shard is chosen by its index (R12-8). The `memory` builder measures the
-  handoff on Linux before this locks.
+- **C2 (2026-10-05)** One shard per core owns its indexes with no locks. Each shard
+  runs one Tokio `LocalRuntime`. Vendor libraries run on dedicated threads. A
+  connector's shard is chosen by its index (R12-8). Network data and vendor-thread
+  frames reach the owning shard as one batch with one wake per batch. On Linux the
+  parked wake adds 4 to 9 us per batch with no millisecond tail (#9, r1). The spin
+  window stays a per-node setting with a default of 0; the sweep in 5.3 sets it. The
+  person locked it on 2026-10-05 ("Ok I approve lcoking C2").
 
 ### 1.6 Time
 
@@ -2255,24 +2258,22 @@ Shapes that need the person:
 
 Measured before they lock:
 
-2. **C2, thread model.** The working assumption is in 1.5. The `memory` builder
-   measures the handoff on Linux first (#9).
-3. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
+2. **OPC UA crypto plugin.** Our own plugin on aws-lc, or compiled-in mbedTLS.
 
 Parameters and later choices, recorded and not asked:
 
-4. Struct template storage: whether the spec stores templates and instance records for
+3. Struct template storage: whether the spec stores templates and instance records for
    SDK code generation and `export`.
-5. The transmission policy target: links, indexes, or both (B6).
-6. Upgrades across regions: which region holds the desired version and the format
+4. The transmission policy target: links, indexes, or both (B6).
+5. Upgrades across regions: which region holds the desired version and the format
    flag, and how finalization waits for every region (BQ18, C9d).
-7. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
+6. R12-4: a spec change restarts `run` in v1; commandable parameters are the runtime
    path.
-8. A20: whether a channel may carry a default max age.
-9. A3: partial-segment wildcards.
-10. A13: bounded lists.
-11. D3: license, free tier, monetization.
-12. D5: a plugin system.
+7. A20: whether a channel may carry a default max age.
+8. A3: partial-segment wildcards.
+9. A13: bounded lists.
+10. D3: license, free tier, monetization.
+11. D5: a plugin system.
 
 ### 5.2 Settled under a delegation
 
