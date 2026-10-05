@@ -379,7 +379,19 @@ impl Network {
                 self.nodes[at] = self.build(at);
                 continue;
             }
+            // A node sends nothing of a term before its hard state of that term is
+            // durable. A prevote is the exception: it takes no term.
+            let stored = self.disks[at].hard.term;
             for message in ready.messages {
+                let durable = match message.body {
+                    Body::PreVote { .. } | Body::PreVoteReply { granted: true } => true,
+                    _ => message.term <= stored,
+                };
+                assert!(
+                    durable,
+                    "node {at} sends {:?} at {:?} above its stored {stored:?}",
+                    message.body, message.term
+                );
                 self.note(at, &message);
                 self.flight.push(message);
             }

@@ -1125,6 +1125,21 @@ mod tests {
             );
             assert_eq!(raft.ready(), Ready::default());
         }
+
+        #[test]
+        fn keeps_its_vote_and_gives_no_hard_when_the_log_ends_in_the_hard_term() {
+            let hard = Hard {
+                term: Term(1),
+                vote: Some(key(2)),
+            };
+            let start = Start {
+                entries: entries(&[(1, 1)]),
+                ..start(&[1, 2, 3], hard)
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            assert_eq!(raft.hard(), hard);
+            assert_eq!(raft.ready(), Ready::default());
+        }
     }
 
     mod tick {
