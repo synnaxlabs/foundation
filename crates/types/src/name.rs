@@ -142,6 +142,16 @@ impl Pattern {
         specificity
     }
 
+    /// Reports whether every name the pattern matches starts with `prefix`: the
+    /// pattern starts with the segments of `prefix`, as literals.
+    fn within(&self, prefix: &Name) -> bool {
+        let mut segments = self.segments.iter();
+        prefix.segments().all(|want| match segments.next() {
+            Some(Segment::Literal(literal)) => **literal == *want,
+            _ => false,
+        })
+    }
+
     /// Reads `body`, reporting errors against `input`, the text the user wrote.
     ///
     /// Each run of wildcards becomes its `*`s and then at most one `**`, so patterns
@@ -196,7 +206,8 @@ pub struct Specificity {
 /// exclusion does. An exclusion is a pattern written with a leading `!`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Selector {
-    include: Vec<Pattern>,
+    /// Each include pattern, with its position in the list given to `new`.
+    include: Vec<(usize, Pattern)>,
     exclude: Vec<Pattern>,
 }
 
@@ -210,7 +221,7 @@ impl Selector {
     pub fn new<'a>(patterns: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
         let mut include = Vec::new();
         let mut exclude = Vec::new();
-        for text in patterns {
+        for (position, text) in patterns.into_iter().enumerate() {
             match text.strip_prefix('!') {
                 Some("") => {
                     return Err(Error::Segment {
@@ -219,7 +230,7 @@ impl Selector {
                     });
                 }
                 Some(body) => exclude.push(Pattern::read(text, body)?),
-                None => include.push(Pattern::read(text, text)?),
+                None => include.push((position, Pattern::read(text, text)?)),
             }
         }
         if include.is_empty() {
@@ -237,9 +248,21 @@ impl Selector {
         }
         self.include
             .iter()
-            .filter(|p| p.matches(name))
-            .map(Pattern::specificity)
+            .filter(|(_, p)| p.matches(name))
+            .map(|(_, p)| p.specificity())
             .max()
+    }
+
+    /// The positions, in the list given to [`Selector::new`], of the include patterns
+    /// that can match a name that does not start with `prefix`, by whole segments, as
+    /// [`Name::starts_with`] reads it. The selector stays within `prefix` when this
+    /// gives no position. Exclusions are not read, so an include that only its
+    /// exclusions keep inside `prefix` still gives its position.
+    pub fn outside(&self, prefix: &Name) -> impl Iterator<Item = usize> {
+        self.include
+            .iter()
+            .filter(|(_, p)| !p.within(prefix))
+            .map(|(position, _)| *position)
     }
 }
 
@@ -657,6 +680,113 @@ mod tests {
             );
             assert_eq!(Selector::new(["a", "!b*"]), Err(wildcard_error("!b*")));
             assert_eq!(Selector::new(["a", "!"]), Err(segment_error("!", "")));
+        }
+
+        mod outside {
+            use super::*;
+
+            fn selector(patterns: &[&str]) -> Selector {
+                Selector::new(patterns.iter().copied()).unwrap()
+            }
+
+            fn outside(patterns: &[&str], prefix: &str) -> Vec<usize> {
+                selector(patterns).outside(&name(prefix)).collect()
+            }
+
+            #[test]
+            fn holds_patterns_that_start_with_the_prefix() {
+                for pattern in
+                    ["site_a", "site_a.*", "site_a.**", "site_a.**.*", "site_a.b"]
+                {
+                    assert_eq!(outside(&[pattern], "site_a"), [], "{pattern}");
+                }
+            }
+
+            #[test]
+            fn refuses_patterns_that_reach_past_the_prefix() {
+                for (pattern, prefix) in [
+                    ("**", "site_a"),
+                    ("*.gw", "site_a"),
+                    ("site_a_b.*", "site_a"),
+                    ("site.*", "site_a"),
+                    ("**.site_a", "site_a"),
+                    ("site_a", "site_a.b"),
+                    ("site_a.**", "site_a.b"),
+                ] {
+                    assert_eq!(outside(&[pattern], prefix), [0], "{pattern} {prefix}");
+                }
+            }
+
+            #[test]
+            fn gives_each_include_that_reaches_out_by_its_position() {
+                let patterns = ["a.b", "!b.**", "b", "a.**", "*.c", "!a"];
+                assert_eq!(outside(&patterns, "a"), [2, 4]);
+                assert_eq!(outside(&["b", "a.b"], "a"), [0]);
+            }
+
+            #[test]
+            fn reads_no_exclusion() {
+                assert_eq!(outside(&["a.**", "!b.**"], "a"), []);
+                assert_eq!(outside(&["**", "!b.**"], "a"), [0]);
+            }
+
+            proptest! {
+                #[test]
+                fn every_match_starts_with_the_prefix(
+                    p in patterns(),
+                    prefix in prefixes(),
+                    fill in fills(),
+                ) {
+                    let segments: Vec<&str> = p
+                        .iter()
+                        .zip(&fill)
+                        .flat_map(|(segment, fill)| match *segment {
+                            "*" => &fill[..1],
+                            "**" => &fill[1..],
+                            _ => std::slice::from_ref(segment),
+                        })
+                        .copied()
+                        .collect();
+                    prop_assume!(!segments.is_empty());
+                    let selector = selector(&[&p.join(".")]);
+                    let n = name(&segments.join("."));
+                    let prefix = name(&prefix.join("."));
+                    prop_assert!(selector.matches(&n).is_some());
+                    if selector.outside(&prefix).next().is_none() {
+                        prop_assert!(n.starts_with(&prefix), "{n} outside {prefix}");
+                    }
+                }
+
+                #[test]
+                fn a_pattern_outside_matches_a_name_outside(
+                    p in patterns(),
+                    prefix in prefixes(),
+                ) {
+                    let selector = selector(&[&p.join(".")]);
+                    let prefix = name(&prefix.join("."));
+                    // `c` is never a segment of `prefix`.
+                    let outside: Vec<_> = p
+                        .iter()
+                        .map(|s| if s.starts_with('*') { "c" } else { s })
+                        .collect();
+                    let outside = name(&outside.join("."));
+                    if selector.outside(&prefix).next().is_some() {
+                        prop_assert!(selector.matches(&outside).is_some());
+                        prop_assert!(!outside.starts_with(&prefix), "{outside}");
+                    }
+                }
+            }
+
+            fn prefixes() -> impl Strategy<Value = Vec<&'static str>> {
+                prop::collection::vec(prop::sample::select(vec!["a", "b"]), 1..4)
+            }
+
+            /// For each pattern segment, the one segment a `*` takes and then the
+            /// segments a `**` takes.
+            fn fills() -> impl Strategy<Value = Vec<Vec<&'static str>>> {
+                let segment = prop::sample::select(vec!["a", "b", "c"]);
+                prop::collection::vec(prop::collection::vec(segment, 1..4), 7)
+            }
         }
     }
 
