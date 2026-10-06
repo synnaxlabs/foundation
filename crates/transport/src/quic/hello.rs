@@ -153,7 +153,9 @@ impl Peer {
                 inner.set_max_concurrent_streams(Dir::Uni, limit);
                 id
             }
-            (Some(id), &StreamEvent::Readable { id: other }) if other == id => id,
+            // Another stream's `Readable` finds no hello bytes that the hello
+            // stream's own `Readable` would not.
+            (Some(id), &StreamEvent::Readable { .. }) => id,
             _ => return Ok(None),
         };
         let mut recv = inner.recv_stream(id);
@@ -161,7 +163,7 @@ impl Peer {
             .read(true)
             .expect("invariant: the hello stream is open");
         while bytes.len() <= BYTES_MAX {
-            match chunks.next(BYTES_MAX + 1 - bytes.len()) {
+            match chunks.next(BYTES_MAX) {
                 Ok(Some(chunk)) => bytes.extend_from_slice(&chunk.bytes),
                 Ok(None) => break,
                 Err(ReadError::Blocked) => return Ok(None),
