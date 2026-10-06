@@ -10,6 +10,7 @@
 //! connector     := kind:text node:text length:u64 document                  tag 2
 //! region        := epoch:u64 count:u64 text*                                tag 3
 //! node_settings := select:patterns disk:u64 pool:u64                       tag 4
+//! compression   := select:patterns mode:u8                                  tag 5
 //! patterns      := count:u64 pattern*
 //! pattern       := excluded:u8 length:u64 UTF-8 bytes
 //! text          := length:u64 UTF-8 bytes
@@ -28,6 +29,8 @@
 //!
 //! A node settings budget of 0 bytes is no budget, because a policy cannot hold zero.
 //! A policy sets at least one budget.
+//!
+//! A compression `mode` is 0 auto, 1 raw, or 2 max.
 
 #![deny(
     clippy::indexing_slicing,
@@ -44,6 +47,7 @@ use types::byte;
 use types::name::{self, Name, Selector, Written};
 
 use crate::access::{Action, Actions, Policy};
+use crate::compression::{self, Mode};
 use crate::connector::Connector;
 use crate::node_settings;
 use crate::region::{Delegation, NoVoters};
@@ -53,6 +57,7 @@ const ACCESS: u8 = 1;
 const CONNECTOR: u8 = 2;
 const REGION: u8 = 3;
 const NODE_SETTINGS: u8 = 4;
+const COMPRESSION: u8 = 5;
 /// The fewest bytes a text takes: its length.
 const TEXT_MIN: usize = 8;
 /// The fewest bytes a pattern takes: its flag and its length.
@@ -70,6 +75,8 @@ pub enum Definition {
     Region(Delegation),
     /// A node settings policy.
     NodeSettings(node_settings::Policy),
+    /// A compression policy.
+    Compression(compression::Policy),
 }
 
 impl Definition {
@@ -114,6 +121,11 @@ impl Definition {
                     out.extend_from_slice(&bytes.to_le_bytes());
                 }
             }
+            Self::Compression(policy) => {
+                out.push(COMPRESSION);
+                patterns(&mut out, &policy.select);
+                out.push(mode_byte(policy.mode));
+            }
         }
         out
     }
@@ -141,12 +153,25 @@ impl Definition {
             CONNECTOR => Self::Connector(reader.connector()?),
             REGION => Self::Region(reader.region()?),
             NODE_SETTINGS => Self::NodeSettings(reader.node_settings()?),
+            COMPRESSION => Self::Compression(reader.compression()?),
             tag => return Err(Error::Kind { at, tag }),
         };
         if !reader.rest.is_empty() {
             return Err(Error::TrailingBytes { at: reader.at() });
         }
         Ok(definition)
+    }
+}
+
+/// Every compression mode, for decoding by [`mode_byte`].
+const MODES: [Mode; 3] = [Mode::Auto, Mode::Raw, Mode::Max];
+
+/// The byte that encodes `mode`.
+const fn mode_byte(mode: Mode) -> u8 {
+    match mode {
+        Mode::Auto => 0,
+        Mode::Raw => 1,
+        Mode::Max => 2,
     }
 }
 
@@ -306,6 +331,17 @@ impl<'a> Reader<'a> {
             .map_err(|error| Error::Budget { at, error })
     }
 
+    fn compression(&mut self) -> Result<compression::Policy, Error> {
+        let select = self.patterns()?;
+        let at = self.at();
+        let found = self.byte()?;
+        let mode = MODES
+            .into_iter()
+            .find(|mode| mode_byte(*mode) == found)
+            .ok_or(Error::Mode { at, found })?;
+        Ok(compression::Policy { select, mode })
+    }
+
     fn access(&mut self) -> Result<Policy, Error> {
         let subjects = self.patterns()?;
         let select = self.patterns()?;
@@ -408,6 +444,13 @@ pub enum Error {
         /// Where the count of voters is.
         at: usize,
     },
+    /// A compression mode byte names no mode.
+    Mode {
+        /// Where the mode is.
+        at: usize,
+        /// The mode byte.
+        found: u8,
+    },
     /// An access policy that does not allow `write` has an authority.
     Authority {
         /// Where the authority is.
@@ -476,6 +519,12 @@ impl fmt::Display for Error {
             ),
             Self::Budget { at, error } => {
                 write!(f, "the budgets at byte {at}: {error}")
+            }
+            Self::Mode { at, found } => {
+                write!(
+                    f,
+                    "compression mode {found} at byte {at} is not a known mode"
+                )
             }
         }
     }

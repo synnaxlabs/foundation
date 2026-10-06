@@ -18,7 +18,7 @@ use types::node::PublicKey;
 use types::time::Monotonic;
 
 use super::{Endpoint, Event, connection};
-use crate::{Code, Config, Error, PAYLOAD_IPV4, Peer};
+use crate::{Code, Config, Error, PAYLOAD_IPV4, Peer, port};
 
 /// The most batches one poll of the task takes, so a busy socket does not starve the
 /// shard's other tasks.
@@ -31,29 +31,31 @@ const BATCHES: usize = 8;
 pub(crate) struct Carrier(Rc<RefCell<State>>);
 
 impl Carrier {
-    /// Starts an endpoint for `config` whose connection IDs start with `shard`, on
-    /// the socket of `sender` and `receiver`, and spawns its task on `config.tasks`.
+    /// Starts an endpoint for `config` on `port`, and spawns its task on
+    /// `config.tasks`.
     ///
     /// # Panics
     ///
     /// When [`Transport::new`](crate::Transport::new) refuses `config`, with its error.
-    pub(crate) fn new(
-        config: &Config,
-        shard: u8,
-        sender: udp::Sender,
-        receiver: udp::Receiver,
-    ) -> Self {
+    pub(crate) fn new(config: Config, part: port::Part) -> Self {
+        let port::Part {
+            index,
+            sender,
+            receiver,
+        } = part;
+        let endpoint = Endpoint::new(&config, index, sender.batch_max());
+        let Config { clock, tasks, .. } = config;
         let state = Rc::new(RefCell::new(State {
-            endpoint: Endpoint::new(config, shard, sender.batch_max()),
-            clock: config.clock.clone(),
+            endpoint,
+            clock: clock.clone(),
             task: None,
             sessions: BTreeMap::new(),
             accepted: Some(VecDeque::new()),
             accepting: Vec::new(),
             failed: None,
         }));
-        let task = Task::new(Rc::clone(&state), &config.clock, sender, receiver);
-        config.tasks.spawn(task.run());
+        let task = Task::new(Rc::clone(&state), &clock, sender, receiver);
+        tasks.spawn(task.run());
         Self(state)
     }
 
@@ -507,29 +509,12 @@ mod tests {
 
     use super::{BATCHES, Carrier, Socket, register};
     use crate::quic::Endpoint;
-    use crate::testing::Shard;
+    use crate::testing::{self, IDLE, PORT, address, nodes, shard};
     use crate::tls::public;
-    use crate::{Code, Config, Error, Peer};
+    use crate::{Code, Error, Peer};
 
-    const PORT: u16 = 4433;
-    const IDLE: Span = Span::SECOND;
     const CLIENT: PrivateKey = PrivateKey([1; 32]);
     const SERVER: PrivateKey = PrivateKey([2; 32]);
-
-    /// A run from `value` with a client node and a server node.
-    fn nodes(value: u64) -> (Sim, Node, Node) {
-        let mut sim = Sim::new(sim::Config {
-            seed: value,
-            ..sim::Config::default()
-        });
-        let client = sim.node(sim::node::Config::default());
-        let server = sim.node(sim::node::Config::default());
-        (sim, client, server)
-    }
-
-    fn address(node: &Node) -> SocketAddr {
-        SocketAddr::new(node.addresses()[0], PORT)
-    }
 
     fn socket(node: &Node) -> Result<(udp::Sender, udp::Receiver), env::net::Error> {
         node.net().udp(&udp::Config {
@@ -543,48 +528,18 @@ mod tests {
         Span::from_nanos(span.nanos() * n)
     }
 
-    /// Starts a shard on `node` that runs `main` with a config for `key`.
-    fn shard<F: Future<Output = ()> + 'static>(
-        node: &Node,
-        key: PrivateKey,
-        main: impl FnOnce(Config, Node) -> F + Send + 'static,
-    ) {
-        let own = node.clone();
-        let config = env::shards::Config {
-            name: "carrier".into(),
-            core: None,
-        };
-        let started = node.shards().start(config, move |tasks| async move {
-            main(Shard::new(&own, tasks).config(key, IDLE), own).await;
-        });
-        drop(started.expect("a shard"));
-    }
-
-    /// Starts a shard on `node` that runs `body` with a carrier for `key` at
-    /// [`address`].
-    fn start<F: Future<Output = ()> + 'static>(
-        node: &Node,
-        key: PrivateKey,
-        body: impl FnOnce(Carrier, Node) -> F + Send + 'static,
-    ) {
-        shard(node, key, |config, node| async move {
-            let (sender, receiver) = socket(&node).expect("a socket");
-            body(Carrier::new(&config, 0, sender, receiver), node).await;
-        });
-    }
-
     /// Runs a dial from `value` that the client closes with code 5, and gives the
     /// digest of the run.
     fn dial(value: u64) -> u64 {
         let (mut sim, client, server) = nodes(value);
         let at = address(&server);
-        start(&server, SERVER, |carrier, _| async move {
+        testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
             assert_eq!(session.peer(), Peer::Node(public(&CLIENT)));
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, _| async move {
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             assert_eq!(session.peer(), Peer::Node(public(&SERVER)));
@@ -609,12 +564,12 @@ mod tests {
     fn a_quiet_session_outlives_the_idle_timeout() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        start(&server, SERVER, |carrier, _| async move {
+        testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(IDLE, 3)).await;
@@ -628,11 +583,11 @@ mod tests {
     fn a_cut_link_times_out_each_side() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        start(&server, SERVER, |carrier, _| async move {
+        testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
             assert_eq!(session.closed().await, Error::TimedOut);
         });
-        start(&client, CLIENT, move |carrier, _| async move {
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             assert_eq!(session.closed().await, Error::TimedOut);
@@ -646,7 +601,7 @@ mod tests {
     fn a_dial_to_no_socket_times_out() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        start(&client, CLIENT, move |carrier, _| async move {
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             assert_eq!(dialed.err(), Some(Error::TimedOut));
         });
@@ -657,14 +612,14 @@ mod tests {
     fn accept_gives_a_session_that_ended_before_it() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        start(&server, SERVER, |carrier, node| async move {
+        testing::carrier(&server, SERVER, |carrier, node| async move {
             node.clock().sleep(IDLE).await;
             let session = carrier.accept().await.expect("a session");
             assert_eq!(session.peer(), Peer::Node(public(&CLIENT)));
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, _| async move {
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             session.close(Code(5));
@@ -677,12 +632,12 @@ mod tests {
     fn a_dropped_session_closes_with_code_0_and_frees_its_slot() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        start(&server, SERVER, |carrier, _| async move {
+        testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             drop(dialed.expect("a session"));
             node.clock().sleep(Span::MILLISECOND).await;
@@ -695,7 +650,7 @@ mod tests {
     fn a_dropped_dial_frees_its_slot() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             {
                 let mut dial = pin!(carrier.connect(public(&SERVER), at));
                 poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending())).await;
@@ -711,12 +666,12 @@ mod tests {
     fn a_session_dropped_with_the_last_carrier_closes_with_code_0() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        start(&server, SERVER, |carrier, _| async move {
+        testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             drop(dialed.expect("a session"));
             drop(carrier);
@@ -752,12 +707,12 @@ mod tests {
         let (mut sim, client, server) = nodes(0);
         link(&mut sim, &client, &server, slow());
         let at = address(&server);
-        start(&server, SERVER, |carrier, _| async move {
+        testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             drop(dialed.expect("a session"));
             drop(carrier);
@@ -773,18 +728,18 @@ mod tests {
         // The server's close to `client` drains for hundreds of milliseconds.
         link(&mut sim, &client, &server, slow());
         let at = address(&server);
-        start(&server, SERVER, |carrier, node| async move {
+        testing::carrier(&server, SERVER, |carrier, node| async move {
             drop(carrier.accept().await.expect("a session"));
             drop(carrier);
             node.clock().sleep(spans(IDLE, 3)).await;
         });
-        start(&client, CLIENT, move |carrier, _| async move {
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&late, CLIENT, move |carrier, node| async move {
+        testing::carrier(&late, CLIENT, move |carrier, node| async move {
             node.clock().sleep(spans(Span::MILLISECOND, 300)).await;
             let dialed = carrier.connect(public(&SERVER), at).await;
             let reason =
@@ -800,20 +755,20 @@ mod tests {
         let (mut sim, client, server) = nodes(0);
         let late = sim.node(sim::node::Config::default());
         let at = address(&server);
-        start(&server, SERVER, |carrier, _| async move {
+        testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
             drop(carrier);
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(IDLE, 3)).await;
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
-        start(&late, CLIENT, move |carrier, node| async move {
+        testing::carrier(&late, CLIENT, move |carrier, node| async move {
             node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
             let dialed = carrier.connect(public(&SERVER), at).await;
             let reason =
@@ -830,7 +785,7 @@ mod tests {
         let late = sim.node(sim::node::Config::default());
         link(&mut sim, &late, &server, slow());
         let at = address(&server);
-        start(&server, SERVER, |carrier, node| async move {
+        testing::carrier(&server, SERVER, |carrier, node| async move {
             let session = carrier.accept().await.expect("a session");
             // The handshake of `late` starts at 150 ms and finishes at 250 ms.
             node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
@@ -838,14 +793,14 @@ mod tests {
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(IDLE, 3)).await;
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
-        start(&late, CLIENT, move |carrier, node| async move {
+        testing::carrier(&late, CLIENT, move |carrier, node| async move {
             node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
             let before = node.clock().now();
             let dialed = carrier.connect(public(&SERVER), at).await;
@@ -861,11 +816,11 @@ mod tests {
     fn a_timer_due_in_a_pause_runs_when_it_ends() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        start(&server, SERVER, |carrier, _| async move {
+        testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
             assert_eq!(session.closed().await, Error::TimedOut);
         });
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
@@ -905,7 +860,7 @@ mod tests {
         let (mut sim, client, server) = nodes(0);
         let held = sim.node(sim::node::Config::default());
         let at = address(&server);
-        start(&server, SERVER, |carrier, node| async move {
+        testing::carrier(&server, SERVER, |carrier, node| async move {
             let session = carrier.accept().await.expect("a session");
             node.clock().sleep(spans(Span::MILLISECOND, 5)).await;
             drop(carrier);
@@ -913,14 +868,14 @@ mod tests {
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&held, CLIENT, move |carrier, node| async move {
+        testing::carrier(&held, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             node.clock().sleep(spans(Span::MILLISECOND, 2)).await;
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
@@ -982,16 +937,16 @@ mod tests {
     fn a_dial_behind_more_batches_than_one_poll_takes_connects_at_once() {
         let (mut sim, client, server) = nodes(0);
         let (at, to) = (address(&server), address(&client));
-        start(&server, SERVER, move |carrier, node| async move {
+        testing::carrier(&server, SERVER, move |carrier, node| async move {
             junk(&node, to, BATCHES).await;
             let session = carrier.accept().await.expect("a session");
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
         shard(&client, CLIENT, move |config, node| async move {
-            let (sender, receiver) = socket(&node).expect("a socket");
+            let part = testing::part(&node.net(), address(&node));
             node.clock().sleep(Span::MILLISECOND).await;
-            let carrier = Carrier::new(&config, 0, sender, receiver);
+            let carrier = Carrier::new(config, part);
             let before = node.clock().now();
             let dialed = carrier.connect(public(&SERVER), at).await;
             // A lost first datagram goes again only after hundreds of milliseconds.
@@ -1006,7 +961,7 @@ mod tests {
     #[test]
     fn the_last_drop_frees_the_socket() {
         let (mut sim, client, _) = nodes(0);
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let local = address(&node);
             assert_eq!(
                 socket(&node).err(),
@@ -1025,11 +980,11 @@ mod tests {
     fn a_broken_socket_ends_each_session_and_refuses_new_ones() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
-        start(&server, SERVER, |carrier, _| async move {
+        testing::carrier(&server, SERVER, |carrier, _| async move {
             let session = carrier.accept().await.expect("a session");
             assert_eq!(session.closed().await, Error::TimedOut);
         });
-        start(&client, CLIENT, move |carrier, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             node.fail_udp(address(&node));
