@@ -41,8 +41,7 @@ pub(crate) fn take_position(bytes: &mut &[u8]) -> Option<Position> {
 
 /// Adds a count as 8 little-endian bytes, then the keys in rising order.
 pub(crate) fn put_keys(keys: &BTreeSet<node::Key>, out: &mut Vec<u8>) {
-    let count = u64::try_from(keys.len()).expect("invariant: a count fits in 64 bits");
-    out.extend(count.to_le_bytes());
+    put_count(keys.len(), out);
     for &key in keys {
         put_key(key, out);
     }
@@ -50,16 +49,37 @@ pub(crate) fn put_keys(keys: &BTreeSet<node::Key>, out: &mut Vec<u8>) {
 
 /// Takes what [`put_keys`] gives. `None` when the keys are not in rising order.
 pub(crate) fn take_keys(bytes: &mut &[u8]) -> Option<BTreeSet<node::Key>> {
-    let count = u64::from_le_bytes(take(bytes)?);
     let mut keys = BTreeSet::new();
+    take_rising(bytes, |key, _| {
+        keys.insert(key);
+        Some(())
+    })?;
+    Some(keys)
+}
+
+fn put_count(count: usize, out: &mut Vec<u8>) {
+    let count = u64::try_from(count).expect("invariant: a count fits in 64 bits");
+    out.extend(count.to_le_bytes());
+}
+
+// Takes a count, then that many keys in rising order. After each key, `each` takes
+// what follows it. `None` when the keys are not in rising order or `each` gives
+// `None`.
+fn take_rising(
+    bytes: &mut &[u8],
+    mut each: impl FnMut(node::Key, &mut &[u8]) -> Option<()>,
+) -> Option<()> {
+    let count = u64::from_le_bytes(take(bytes)?);
+    let mut last = None;
     for _ in 0..count {
         let key = take_key(bytes)?;
-        if keys.last().is_some_and(|last| *last >= key) {
+        if last.is_some_and(|last| last >= key) {
             return None;
         }
-        keys.insert(key);
+        last = Some(key);
+        each(key, bytes)?;
     }
-    Some(keys)
+    Some(())
 }
 
 pub(crate) const ABSENT: u8 = 0;
@@ -111,9 +131,7 @@ pub(crate) fn put_optional_proof(proof: Option<&Proof>, out: &mut Vec<u8>) {
                 Grant::Vote => VOTE,
             });
             put_key(proof.candidate, out);
-            let count = u64::try_from(proof.voters.len())
-                .expect("invariant: a count fits in 64 bits");
-            out.extend(count.to_le_bytes());
+            put_count(proof.voters.len(), out);
             for (&voter, &signature) in &proof.voters {
                 put_key(voter, out);
                 put_signature(signature, out);
@@ -140,18 +158,11 @@ pub(crate) fn take_proof(bytes: &mut &[u8]) -> Option<Proof> {
         _ => return None,
     };
     let candidate = take_key(bytes)?;
-    let count = u64::from_le_bytes(take(bytes)?);
     let mut voters = BTreeMap::new();
-    for _ in 0..count {
-        let voter = take_key(bytes)?;
-        if voters
-            .last_key_value()
-            .is_some_and(|(last, _)| *last >= voter)
-        {
-            return None;
-        }
+    take_rising(bytes, |voter, bytes| {
         voters.insert(voter, Some(take_signature(bytes)?));
-    }
+        Some(())
+    })?;
     Some(Proof {
         grant,
         candidate,

@@ -8,8 +8,8 @@ use crate::log::{Held, Log, Run};
 use crate::progress::Progress;
 use crate::voters::Tally;
 use crate::{
-    Answer, Body, Config, Data, Entry, Error, Grant, Hard, Message, Position, Proof,
-    Signature, Start, Term, Voters,
+    Answer, Body, Claim, Config, Data, Entry, Error, Grant, Hard, Message, Position,
+    Proof, Signature, Start, Term, Voters,
 };
 
 /// What a node is doing in its term.
@@ -62,10 +62,10 @@ enum Checked {
     AppendReject { hint: Held },
 }
 
-/// What the caller must do after an input, in this order: write `hard` and `entries`
-/// to disk and sync them, send `messages`, then apply `committed`. Write `hard` and
-/// `entries` in any order: a crash between the two is safe. `raft` is safe only when
-/// the disk keeps what it synced.
+/// What the caller must do after an input, in this order: [`sign`](Self::sign) this
+/// node's grants, write `hard` and `entries` to disk and sync them, send `messages`,
+/// then apply `committed`. Write `hard` and `entries` in any order: a crash between
+/// the two is safe. `raft` is safe only when the disk keeps what it synced.
 #[must_use = "a dropped Ready loses its messages and its hard state"]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ready {
@@ -77,6 +77,22 @@ pub struct Ready {
     pub committed: Vec<Entry>,
     /// Messages to send after the write, in the order the node made them.
     pub messages: Vec<Message>,
+}
+
+impl Ready {
+    /// Gives each grant with no signature the signature that `sign` makes for its
+    /// claim: this node's entry in the hard proof and in each message's proof, and
+    /// each grant it sends. A `Raft` leaves only this node's grants with no signature.
+    pub fn sign(&mut self, mut sign: impl FnMut(&Claim) -> Signature) {
+        if let Some(hard) = &mut self.hard
+            && let Some(proof) = &mut hard.proof
+        {
+            proof.sign(hard.term, &mut sign);
+        }
+        for message in &mut self.messages {
+            message.sign(&mut sign);
+        }
+    }
 }
 
 /// One node's state machine. PreVote and CheckQuorum are always on.
@@ -4074,6 +4090,28 @@ mod tests {
                 assert_eq!(raft.role(), Role::Leader);
                 assert_eq!(past, Vec::<u64>::new(), "answers: {answers}");
             }
+        }
+
+        // Node 5's vote arrives after the change that removes it is in force. Node 5
+        // is still a peer, but its vote does not join the votes that the leader
+        // carries to node 4, which has not answered.
+        #[test]
+        fn a_late_vote_of_a_removed_node_does_not_join_the_votes() {
+            let mut raft = raft(&[1, 2, 3, 4, 5], Hard::default());
+            elect(&mut raft, &[2, 3]);
+            accept(&mut raft, &[2, 3], 1);
+            raft.propose_voters(set(&[1, 2, 3, 4])).unwrap();
+            accept(&mut raft, &[2, 3], 2);
+            accept(&mut raft, &[2, 3], 3);
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3, 4], &[]));
+            raft.step(message(5, 1, Body::VoteReply { answer: GRANTED }))
+                .unwrap();
+            sent(&mut raft);
+            raft.tick(0);
+            let to_4 = sent(&mut raft).into_iter().find(|m| m.to == key(4));
+            let voters = to_4.unwrap().proof.unwrap().voters;
+            let expected = [key(1), key(2), key(3)];
+            assert_eq!(voters.into_keys().collect::<Vec<_>>(), expected);
         }
 
         // Node 3 lags and answers each heartbeat, so it is still a peer when the

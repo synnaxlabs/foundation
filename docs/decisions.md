@@ -1105,9 +1105,15 @@ How to read this record:
   `Signature`, the candidate included. It proves the term of the message or hard state
   that holds it. A granted `PreVoteReply` or `VoteReply` carries the voter's signature
   in its `Answer`, and the candidate copies it into its proof. `raft` counts the keys
-  and carries the signatures as opaque bytes: it does no crypto. `raft` gives this
-  node's own entries and grants with no signature (`None`); the caller signs them in
-  each `Ready` before it writes or sends, and checks every signature before `step`.
+  and carries the signatures as opaque bytes: it does no crypto. A signature attests
+  a `Claim`: the voter, the grant, the term, and the candidate. `raft` owns the rule
+  that gives each signature its claim: a proof entry claims the proof's grant to its
+  candidate in the term of the message or hard state, and a granted reply claims its
+  grant from the sender to the receiver in the message's term. `raft` gives this
+  node's own entries and grants with no signature (`None`). `Ready::sign` gives each
+  `None` the signature that the caller's closure makes for its claim, before the
+  write and the sends. The caller checks each pair that `Message::claims` gives
+  before `step`.
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;

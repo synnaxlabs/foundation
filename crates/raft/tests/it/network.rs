@@ -8,7 +8,7 @@ use proptest::prelude::*;
 use proptest::sample::Index;
 use proptest::strategy::Union;
 use raft::{
-    Answer, Body, Config, Data, Entry, Error, Grant, Hard, Message, Position, Proof,
+    Answer, Body, Claim, Config, Data, Entry, Error, Grant, Hard, Message, Position,
     Raft, Ready, Role, Signature, Start, Term, Voters,
 };
 use types::node;
@@ -151,42 +151,13 @@ impl Disk {
     }
 }
 
-// Signs as the caller of `raft` does: each entry of `key` left with no signature, in
-// the hard proof, the proofs of messages, and the granted replies. `raft` never
-// leaves an entry of another node unsigned.
+// Signs as the caller of `raft` does, and checks that `raft` leaves only this node's
+// grants with no signature.
 fn sign(key: node::Key, ready: &mut Ready) {
-    let fill = |proof: &mut Proof, term: Term| {
-        for (&voter, signature) in &mut proof.voters {
-            if signature.is_none() {
-                assert_eq!(voter, key, "{key:?} leaves {voter:?} unsigned");
-                *signature = Some(Network::signature(
-                    voter,
-                    proof.grant,
-                    term,
-                    proof.candidate,
-                ));
-            }
-        }
-    };
-    if let Some(hard) = &mut ready.hard
-        && let Some(proof) = &mut hard.proof
-    {
-        fill(proof, hard.term);
-    }
-    for message in &mut ready.messages {
-        if let Some(proof) = &mut message.proof {
-            fill(proof, message.term);
-        }
-        let (grant, answer) = match &mut message.body {
-            Body::PreVoteReply { answer } => (Grant::PreVote, answer),
-            Body::VoteReply { answer } => (Grant::Vote, answer),
-            _ => continue,
-        };
-        if *answer == Answer::Granted(None) {
-            let signature = Network::signature(key, grant, message.term, message.to);
-            *answer = Answer::Granted(Some(signature));
-        }
-    }
+    ready.sign(|claim| {
+        assert_eq!(claim.voter, key, "{key:?} leaves {claim:?} unsigned");
+        Network::signature(claim)
+    });
 }
 
 pub(crate) struct Network {
@@ -273,22 +244,17 @@ impl Network {
         node::Key::from_u128(node as u128 + 1)
     }
 
-    /// The stand-in signature of `voter` for `grant` to `candidate` in `term`: the
-    /// signed fields themselves, so a check can rebuild it.
-    pub(crate) fn signature(
-        voter: node::Key,
-        grant: Grant,
-        term: Term,
-        candidate: node::Key,
-    ) -> Signature {
+    /// The stand-in signature of `claim`: its fields themselves, so a check can
+    /// rebuild it.
+    pub(crate) fn signature(claim: &Claim) -> Signature {
         let mut bytes = [0; 64];
-        bytes[0] = match grant {
+        bytes[0] = match claim.grant {
             Grant::PreVote => 1,
             Grant::Vote => 2,
         };
-        bytes[1..9].copy_from_slice(&term.0.to_le_bytes());
-        bytes[9..25].copy_from_slice(&candidate.as_u128().to_le_bytes());
-        bytes[25..41].copy_from_slice(&voter.as_u128().to_le_bytes());
+        bytes[1..9].copy_from_slice(&claim.term.0.to_le_bytes());
+        bytes[9..25].copy_from_slice(&claim.candidate.as_u128().to_le_bytes());
+        bytes[25..41].copy_from_slice(&claim.voter.as_u128().to_le_bytes());
         Signature(bytes)
     }
 
@@ -687,32 +653,17 @@ impl Network {
         }
     }
 
-    // Each signature a node sends is its voter's, of a grant in the message's term:
-    // a proof entry of the proof's grant to its candidate, and a granted reply of the
-    // reply's grant to the receiver.
+    // Each signature a node sends is the one its claim's voter made: a signature
+    // moved to another term, grant, candidate, or voter fails.
     fn check_signatures(at: usize, message: &Message) {
-        if let Some(proof) = &message.proof {
-            for (&voter, &signature) in &proof.voters {
-                let own =
-                    Self::signature(voter, proof.grant, message.term, proof.candidate);
-                assert_eq!(signature, Some(own), "node {at} carries a wrong signature");
-            }
+        for (claim, signature) in message.claims() {
+            let own = Self::signature(&claim);
+            assert_eq!(
+                signature,
+                Some(own),
+                "node {at} carries a wrong signature of {claim:?}"
+            );
         }
-        let (grant, signature) = match message.body {
-            Body::PreVoteReply {
-                answer: Answer::Granted(signature),
-            } => (Grant::PreVote, signature),
-            Body::VoteReply {
-                answer: Answer::Granted(signature),
-            } => (Grant::Vote, signature),
-            _ => return,
-        };
-        let own = Self::signature(message.from, grant, message.term, message.to);
-        assert_eq!(
-            signature,
-            Some(own),
-            "node {at} grants with a wrong signature"
-        );
     }
 
     // A vote goes only to a candidate whose log is at least as new as the voter's.

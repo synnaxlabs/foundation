@@ -33,34 +33,114 @@ pub enum Grant {
     Vote,
 }
 
-/// A voter's signature of its grant. A `Raft` carries it and never reads it.
+/// A voter's signature of its [`Claim`]. A `Raft` carries it and never reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Signature(pub [u8; 64]);
+
+/// What a voter's signature attests: `voter` grants `grant` to `candidate` in
+/// `term`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Claim {
+    /// The voter that signs.
+    pub voter: node::Key,
+    /// What it grants.
+    pub grant: Grant,
+    /// The term of the grant.
+    pub term: Term,
+    /// The node it grants it to.
+    pub candidate: node::Key,
+}
 
 /// A voter's answer to a [`Body::PreVote`] or a [`Body::Vote`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
     /// The voter does not grant it.
     Refused,
-    /// The voter grants it, with its signature. `None` only when this node sends the
-    /// grant: the caller signs it.
+    /// The voter grants it, with its signature. A `Raft` gives its own grant with
+    /// `None`, for the caller to sign.
     Granted(Option<Signature>),
 }
 
 /// A quorum of signed pre-votes or votes for one candidate in one term: the term of
 /// the message or hard state that holds it. A `Raft` counts the keys against its
-/// own configuration and carries the signatures. The caller signs this node's
-/// entries before it writes or sends them, and checks every signature before it
-/// steps a message.
+/// own configuration and carries the signatures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof {
     /// What the voters granted.
     pub grant: Grant,
     /// The node they granted it to.
     pub candidate: node::Key,
-    /// The voters, the candidate included, each with its signature. `None` only for
-    /// this node's own entry in a proof this node made: the caller signs it.
+    /// The voters, the candidate included, each with its signature. A `Raft` gives
+    /// its own entry with `None`, for the caller to sign.
     pub voters: BTreeMap<node::Key, Option<Signature>>,
+}
+
+impl Proof {
+    // Gives each entry with no signature the signature `sign` makes for its claim.
+    pub(crate) fn sign(
+        &mut self,
+        term: Term,
+        sign: &mut impl FnMut(&Claim) -> Signature,
+    ) {
+        for (&voter, signature) in &mut self.voters {
+            if signature.is_none() {
+                *signature = Some(sign(&Claim {
+                    voter,
+                    grant: self.grant,
+                    term,
+                    candidate: self.candidate,
+                }));
+            }
+        }
+    }
+}
+
+impl Message {
+    /// Each grant the message carries, with its signature: the entries of its proof
+    /// in rising key order, then the sender's grant when the body grants. The caller
+    /// checks each signature against its voter's key before `step`.
+    pub fn claims(&self) -> impl Iterator<Item = (Claim, Option<Signature>)> + '_ {
+        let proof = self.proof.iter().flat_map(|proof| {
+            proof.voters.iter().map(|(&voter, &signature)| {
+                let claim = Claim {
+                    voter,
+                    grant: proof.grant,
+                    term: self.term,
+                    candidate: proof.candidate,
+                };
+                (claim, signature)
+            })
+        });
+        let granted = self
+            .body
+            .granted()
+            .map(|(grant, signature)| (self.claim(grant), signature));
+        proof.chain(granted)
+    }
+
+    // Gives each grant with no signature the signature `sign` makes for its claim.
+    pub(crate) fn sign(&mut self, sign: &mut impl FnMut(&Claim) -> Signature) {
+        if let Some(proof) = &mut self.proof {
+            proof.sign(self.term, sign);
+        }
+        if let Some((grant, None)) = self.body.granted() {
+            let answer = Answer::Granted(Some(sign(&self.claim(grant))));
+            self.body = match grant {
+                Grant::PreVote => Body::PreVoteReply { answer },
+                Grant::Vote => Body::VoteReply { answer },
+            };
+        }
+    }
+
+    // The sender's claim of a grant to the receiver.
+    fn claim(&self, grant: Grant) -> Claim {
+        Claim {
+            voter: self.from,
+            grant,
+            term: self.term,
+            candidate: self.to,
+        }
+    }
 }
 
 /// What a [`Message`] says.
@@ -121,6 +201,31 @@ impl Body {
     /// Whether only a leader sends this body.
     pub(crate) fn leads(&self) -> bool {
         matches!(self, Self::Heartbeat { .. } | Self::Append { .. })
+    }
+
+    /// What this body grants, with its signature: `None` unless it grants.
+    pub(crate) fn granted(&self) -> Option<(Grant, Option<Signature>)> {
+        match *self {
+            Self::PreVoteReply {
+                answer: Answer::Granted(signature),
+            } => Some((Grant::PreVote, signature)),
+            Self::VoteReply {
+                answer: Answer::Granted(signature),
+            } => Some((Grant::Vote, signature)),
+            Self::PreVoteReply {
+                answer: Answer::Refused,
+            }
+            | Self::VoteReply {
+                answer: Answer::Refused,
+            }
+            | Self::PreVote { .. }
+            | Self::Vote { .. }
+            | Self::Heartbeat { .. }
+            | Self::HeartbeatReply
+            | Self::Append { .. }
+            | Self::AppendReply { .. }
+            | Self::AppendReject { .. } => None,
+        }
     }
 
     /// Whether this body answers a request.

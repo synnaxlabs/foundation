@@ -3,15 +3,19 @@
 
 use proptest::prelude::*;
 use proptest::sample::Index;
-use raft::{Answer, Body, Grant, Message, Position, Proof, Role, Term};
+use raft::{Answer, Body, Claim, Grant, Message, Position, Proof, Role, Term};
 use types::node;
 
 use crate::network::{Action, ELECTION, Network, run, run_of_many};
 
 // The signed pre-vote that node `voter` grants to node `candidate` in `term`.
 fn grant(voter: usize, candidate: usize, term: Term) -> Body {
-    let (voter, candidate) = (Network::key(voter), Network::key(candidate));
-    let signature = Network::signature(voter, Grant::PreVote, term, candidate);
+    let signature = Network::signature(&Claim {
+        voter: Network::key(voter),
+        grant: Grant::PreVote,
+        term,
+        candidate: Network::key(candidate),
+    });
     Body::PreVoteReply {
         answer: Answer::Granted(Some(signature)),
     }
@@ -150,8 +154,12 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
             voters: (0..3)
                 .map(Network::key)
                 .map(|voter| {
-                    let signature =
-                        Network::signature(voter, Grant::Vote, Term(u64::MAX), from);
+                    let signature = Network::signature(&Claim {
+                        voter,
+                        grant: Grant::Vote,
+                        term: Term(u64::MAX),
+                        candidate: from,
+                    });
                     (voter, Some(signature))
                 })
                 .collect(),

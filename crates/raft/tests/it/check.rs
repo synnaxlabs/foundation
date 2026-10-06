@@ -36,7 +36,7 @@ fn entry() -> impl Strategy<Value = Entry> {
     (position(), data).prop_map(|(at, data)| Entry { at, data })
 }
 
-fn body() -> impl Strategy<Value = Body> {
+pub(crate) fn body() -> impl Strategy<Value = Body> {
     prop_oneof![
         position().prop_map(|last| Body::PreVote { last }),
         position().prop_map(|last| Body::Vote { last }),
@@ -70,7 +70,7 @@ fn answer() -> impl Strategy<Value = Answer> {
 
 // A proof of a random grant for a random candidate by a random set of nodes, one
 // past the nodes included. `nodes` is the group size.
-fn proof(nodes: usize) -> impl Strategy<Value = Proof> {
+pub(crate) fn proof(nodes: usize) -> impl Strategy<Value = Proof> {
     let candidate = any::<Index>().prop_map(move |pick| pick.index(nodes + 1));
     let voter = (any::<bool>(), prop::option::of(signature()));
     let voters = prop::collection::vec(voter, nodes + 1);
