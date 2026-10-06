@@ -386,7 +386,15 @@ impl Raft {
                 self.send(from, self.term, Body::VoteReply { granted });
             }
             Checked::PreVoteReply { granted } => {
-                if self.role == Role::PreCandidate {
+                // The PreVote arm sends a grant with the term asked for and a
+                // refusal with its own term. A grant of another term answers a
+                // pre-campaign of an earlier term, or comes from a faulty node.
+                let asked = if granted {
+                    self.term.next()
+                } else {
+                    Some(self.term)
+                };
+                if self.role == Role::PreCandidate && asked == Some(term) {
                     self.poll(from, granted);
                 }
             }
@@ -1414,7 +1422,7 @@ mod tests {
             );
         }
 
-        // The restart dropped the leader of the term: a known gap of #391.
+        // The restart dropped the leader of the term: a known gap until #750.
         #[test]
         fn follows_the_first_leader_of_a_term_it_is_in() {
             let mut raft = raft(&[1, 2, 3], at_term(1));
@@ -1423,7 +1431,7 @@ mod tests {
             assert_eq!((raft.role(), raft.leader()), (Role::Follower, Some(key(3))));
         }
 
-        // A vote names a candidate, not the leader: a known gap of #391.
+        // A vote names a candidate, not the leader: a known gap until #750.
         #[test]
         fn follows_the_first_leader_of_a_term_it_voted_in() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
@@ -1843,6 +1851,19 @@ mod tests {
             assert!(raft.answers.is_empty());
             raft.step(message(2, 1, granted)).unwrap();
             assert_eq!(raft.role(), Role::Candidate);
+        }
+
+        // A grant of term 1 answers a pre-campaign from term 0. No node asks for 3.
+        #[test]
+        fn counts_a_grant_only_for_the_term_it_asks_for() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            raft.campaign();
+            let granted = Body::PreVoteReply { granted: true };
+            raft.step(message(2, 1, granted.clone())).unwrap();
+            raft.step(message(2, 3, granted.clone())).unwrap();
+            assert_eq!((raft.role(), raft.term()), (Role::PreCandidate, Term(1)));
+            raft.step(message(3, 2, granted)).unwrap();
+            assert_eq!((raft.role(), raft.term()), (Role::Candidate, Term(2)));
         }
 
         #[test]
