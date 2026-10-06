@@ -499,7 +499,12 @@ How to read this record:
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
-  home routes by key set.
+  home routes by key set. A mask holds the index of each channel it holds, so the
+  series of a view make a frame, and `View::charge` is its charge (CREDIT RULES). A
+  mask is a sorted list, or no list when it holds every entry, so a view's cost grows
+  with the smaller of its frame's series and its mask's entries (rule 11). A view
+  borrows its frame and mask, so making one takes no reference count. Approved by the
+  coordinator (#157).
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
@@ -873,28 +878,48 @@ How to read this record:
   `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
   first message. A stream that ends or resets before its class byte drops: the peer
   never accepts it, and resets the reply half of a two-way stream with code 0. Each
-  message is a QUIC varint length, then that many bytes, at most `message_bytes_max`. A
-  node accepts the waiting streams highest class first. A node resets a stream with the
-  stop's code when the stop arrives. A peer breaks the protocol when it sends another
-  class byte, ends a stream inside a message, sends a message over the limit, or resets
-  or stops a stream with a code over 32 bits. The node then closes the connection with
-  application code 2^32 and the reason as text, and the caller gets `Error::Broken`.
-  Each connection keeps two budgets, which count the length of each message. A sender
-  starts a message only when the messages it started and the streams have not taken in
-  full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
-  message starts only when it fits and no stream of its class or a higher class waits
-  for room. Room that frees goes to the waiting streams highest class first, then oldest
-  first, until the next one does not fit, and only those streams wake (#611). A send
-  that does not wait (`try_send`) starts a message only by the same rule and when, after
-  a flush, the stream holds no part of an earlier one; else it gives the message back
-  with no byte of it sent, and the stream does not wait for room (#597). A receiver
-  takes a block by the same rule, within `window_bytes` plus `message_bytes_max`; else
-  the read waits for `Readable` (#611). So bytes that wait for a block never use up the
-  credit that a started message needs, and a peer that breaks the send rule holds at
-  most the receive budget and stops only its own connection. Until the hello carries the
-  peer's window, a sender uses its own. Proposed by `network` in #55; approved by the
-  coordinator on PR #407. The budgets: proposed by `network` in #228. The room order:
-  approved by the advisor on #611.
+  message is a QUIC varint length, then that many bytes, at most the receiver's
+  `message_bytes_max`. A node accepts the waiting streams highest class first. A node
+  resets a stream with the stop's code when the stop arrives. A peer breaks the protocol
+  when it sends another class byte, ends a stream inside a message, sends a message over
+  the limit, or resets or stops a stream with a code over 32 bits. The node then closes
+  the connection with application code 2^32 and the reason as text, and the caller gets
+  `Error::Broken`. Each connection keeps two budgets, which count the length of each
+  message. A sender starts a message only when the messages it started and the streams
+  have not taken in full stay within the peer's `window_bytes`; else the write waits for
+  `Writable`. A message starts only when it fits and no stream of its class or a higher
+  class waits for room. Room that frees goes to the waiting streams highest class first,
+  then oldest first, until the next one does not fit, and only those streams wake
+  (#611). A send that does not wait (`try_send`) starts a message only by the same rule
+  and when, after a flush, the stream holds no part of an earlier one; else it gives the
+  message back with no byte of it sent, and the stream does not wait for room (#597). A
+  receiver takes a block by the same rule, within `window_bytes` plus
+  `message_bytes_max`; else the read waits for `Readable` (#611). So bytes that wait for
+  a block never use up the credit that a started message needs, and a peer that breaks
+  the send rule holds at most the receive budget and stops only its own connection. Each
+  node's first one-way stream is its hello, with no class byte: (id, value) pairs, both
+  QUIC varints, ids strictly increasing, then the stream end. Id 0 is `window_bytes` and
+  id 1 is `message_bytes_max`; both are required. A node ignores an id it does not know,
+  so an advisory field needs no new ALPN; a field that the peer must understand needs
+  one. The acceptor sends its hello in its first flight and the dialer at its
+  `Connected`, so the hello adds no round trip. Until the peer's hello arrives, a node
+  opens and accepts no stream. A sender obeys only the peer's values: each message is at
+  most the peer's `message_bytes_max`, and the send budget is the peer's `window_bytes`.
+  A value over what the node can count counts as the largest it can count. A peer breaks
+  the protocol when its hello ends inside a pair, misses a required id, has an id out of
+  order, is over 256 bytes, has a `message_bytes_max` of 0 or a `window_bytes` below it,
+  or resets. A peer whose QUIC transport parameters cannot take this node's hello at
+  once (no one-way stream, or a stream window under the hello) also breaks it, with the
+  reason `a peer with no room for the hello`. `Transport::new` refuses a config that
+  gives a peer no one-way stream or a stream window under 256 bytes, so only a foreign
+  peer gets this. Lost: send the hello later when credit comes, because `open` then
+  needs a second gate and a state that only a foreign peer reaches. `Endpoint::write`
+  gives `Error::TooLarge` for a message over the peer's limit; a caller that forwards a
+  writer's frame gives the writer `Large`, and the writer splits the frame (LARGE
+  FRAME). Proposed by `network` in #55; approved by the coordinator on PR #407. The
+  budgets: proposed by `network` in #228. The room order: approved by the advisor on
+  #611. The hello: proposed by `network` in #55; settled by the advisor and the
+  coordinator under the person's delegation (#55).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
@@ -2045,7 +2070,7 @@ Storage classes used in the table:
 | Current value | Memory: the index's newest live frame, one pinned pool block per index (B4, MEMORY BOUNDS) | `delivery` | A new latest reader | `delivery` |
 | Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; `delivery` spends when the home releases a frame | `delivery` | `delivery`, `wire` |
 | Live frames for complete readers | Memory: the index's live frames not yet on disk, and the frames released to each complete session and not taken, as refcount clones (B1, CREDIT RULES, MEMORY BOUNDS) | `delivery`: the home queues each stored live frame and releases them after a commit | The reader session | `delivery` |
-| Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `delivery` |
+| Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `types` (mask), `delivery` |
 | Death records | Quality channel samples (X19) | `home` | Sinks | `home` |
 | Read copy data | The copy node's index log | `replica` | The copy's readers, served by `home` in copy mode (X43) | `replica`, `home` |
 
@@ -2056,7 +2081,7 @@ Storage classes used in the table:
 | Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder; `home` (INDEX FRAMES) | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
-| View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |
+| View | Memory: none; borrows a frame and a mask | `delivery` | The reader session | `types` (value), `delivery` |
 | Reader session | Memory: `hub` session (selector expansion, max-age check); per-index state in `delivery` at the home or copy | The reader (SDK, CLI, connector) | `hub`, `delivery` | `hub`, `delivery` |
 | Writer session | Memory: `hub` session (key set, routing, confirmation); gate in `control`; seq and dedup in `home` | The writer | `hub`, `control`, `home` | `hub`, `control`, `home` |
 | Subscription | The selector of a reader session, kept live in `hub` against `mesh` watches | The reader | `hub` | `hub` |
@@ -2630,7 +2655,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
@@ -2696,6 +2721,10 @@ Parameters and later choices, recorded and not asked:
 
 ### 5.2 Settled under a delegation
 
+On 2026-10-05 the person gave every open decision to the advisor and the
+coordinator: "Don't block any decisiosn on me. consult with the advisor and come toa
+conclusion together". Each one is listed below.
+
 - Quality: X10 (ack quality on the ack's index), X19 (death record scope), R16-1 and
   R16-3 to R16-9 (r16 Rust guides).
 - Memory and performance: X8 (seq per index group), X30 (merge rule), X42 (interner),
@@ -2710,7 +2739,8 @@ Parameters and later choices, recorded and not asked:
   tree key `<label>.@<kind>` of a policy (#729), `frame::split`, which cuts a frame
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
   and generated names as strings (#701).
-- Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611).
+- Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
+  the STREAM WIRE hello (#55).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
