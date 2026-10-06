@@ -416,13 +416,15 @@ impl Buffer {
     }
 
     /// The durable entries of `path` of the index at `slot` from `from`, in
-    /// order, until an entry would pass `budget` bytes of entry bytes in all, a
-    /// skip ahead starts, or the pool has no block for the next entry. An entry
-    /// that holds `from` comes whole. A read from a mark at or in the seqs a skip
-    /// ahead left out reports them as `gap` and goes on after them. The first read
-    /// starts at `Mark::at(0)`; each read continues at `next`, which a read that
-    /// gives nothing does not move. A read makes one file read per record it
-    /// visits and one per entry with bytes.
+    /// order, until their blocks take `budget` pool bytes, by
+    /// [`block::footprint`] of each, a skip ahead starts, or the pool has no block
+    /// for the next entry. The last entry may pass the budget. An entry that holds
+    /// `from` comes whole. A read from a mark at or in the seqs a skip ahead left
+    /// out reports them as `gap` and goes on after them. The first read starts at
+    /// `Mark::at(0)`; each read continues at `next`, which a read that gives
+    /// nothing does not move. A read makes one file read for the table of each
+    /// record it visits, two when the record header and table pass 4 KiB, and one
+    /// per entry with bytes.
     ///
     /// # Errors
     ///
@@ -484,7 +486,8 @@ impl Buffer {
     /// # Panics
     ///
     /// When a `first` is below the tail of its path, with the index, the path,
-    /// `first`, and the tail, or when `first + len` passes `u64::MAX`.
+    /// `first`, and the tail, when `first + len` passes `u64::MAX`, or when an
+    /// entry's slot held another index before.
     pub fn append(
         &self,
         entries: impl IntoIterator<Item = Entry>,

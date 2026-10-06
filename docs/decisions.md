@@ -409,9 +409,11 @@ How to read this record:
   already given, so a read resumes between two such entries. The recovery walk
   and each sync feed the runs in ring order; a read starts from them. A read does
   not check the record CRC: the open's walk checked each record, and a record
-  this process wrote is read as written. A read holds no record while it waits
-  for a file read, so a change that frees ring space must first hold the records
-  of each read in progress (#510).
+  this process wrote is read as written. A read's budget counts the pool bytes
+  that its entries' blocks take (`block::footprint`), so an entry with no bytes
+  still costs its block. A read holds no record while it waits for a file read,
+  so a change that frees ring space must first hold the records of each read in
+  progress (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose

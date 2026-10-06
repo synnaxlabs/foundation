@@ -290,6 +290,10 @@ impl Logs {
 
     /// Applies `change` to the log of the header's path, which starts empty when
     /// the path is new. A change that fails on a new path adds nothing.
+    ///
+    /// # Panics
+    ///
+    /// When the log of `slot` holds another index than the header's.
     fn change(
         &mut self,
         slot: Slot,
@@ -298,6 +302,13 @@ impl Logs {
     ) -> Result<(), Invalid> {
         let key = (slot, header.path);
         if let Some(log) = self.0.get_mut(&key) {
+            assert!(
+                log.index == header.index,
+                "invariant: slot {} holds index {} and index {}",
+                slot.get(),
+                log.index,
+                header.index,
+            );
             return change(log);
         }
         let mut log = Log::new(header.index);
@@ -660,6 +671,18 @@ mod tests {
         logs.sync(slot(1), &header(1, Path::Live, 0, 3, None), 8192)
             .expect("syncs");
         logs.sync(slot(1), &header(1, Path::Live, 3, 1, None), 4096)
+            .expect("the invariant panics first");
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: slot 1 holds index \
+        00000000-0000-0000-0000-000000000001 and index \
+        00000000-0000-0000-0000-000000000002")]
+    fn a_slot_with_a_second_index_is_a_broken_invariant() {
+        let mut logs = Logs::default();
+        logs.append(slot(1), &header(1, Path::Live, 0, 3, None))
+            .expect("appends");
+        logs.append(slot(1), &header(2, Path::Live, 3, 2, None))
             .expect("the invariant panics first");
     }
 

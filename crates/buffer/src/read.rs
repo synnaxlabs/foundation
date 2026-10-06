@@ -67,14 +67,14 @@ pub(crate) struct Reading<'a> {
     layout: Layout,
     path: Path,
     budget: usize,
-    /// Bytes of the entries given so far.
+    /// Pool bytes that the blocks of the entries given take.
     spent: usize,
     read: Read,
 }
 
 impl<'a> Reading<'a> {
-    /// A read of `path` in the ring `file` from `from`, until an entry would pass
-    /// `budget` bytes of entries in all.
+    /// A read of `path` in the ring `file` from `from`, until the blocks of the
+    /// entries given take `budget` pool bytes.
     pub(crate) fn new(
         file: &'a File,
         pool: &'a Pool,
@@ -158,7 +158,7 @@ impl<'a> Reading<'a> {
                 self.read.gap = Some(self.read.next.seq..header.first);
             }
             let bytes = self.bytes(place, offset, header.bytes).await?;
-            self.spent += bytes.len();
+            self.spent += block::footprint(bytes.len());
             self.read.entries.push(Stored {
                 first: header.first,
                 len: header.len,

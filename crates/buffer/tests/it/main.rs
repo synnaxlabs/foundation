@@ -223,7 +223,7 @@ async fn read_all(
         let mut given = 0;
         for (number, entry) in read.entries.iter().enumerate() {
             assert!(given < budget, "entry {number} came past the budget");
-            given += entry.bytes.len();
+            given += block::footprint(entry.bytes.len());
             if number == 0 {
                 let gap = (entry.first > at).then_some(at..entry.first);
                 assert_eq!(read.gap, gap, "the gap before the first entry");
@@ -2864,9 +2864,10 @@ fn a_read_gives_the_entries_of_one_path_in_order() {
     });
 }
 
-/// A budget splits the log over reads, each passing the budget by less than one
-/// entry. Reads that follow `next` give each entry once, zero-length entries
-/// included, and the last read gives nothing.
+/// A budget of pool bytes splits the log over reads, each passing the budget by
+/// less than one entry's block. An entry with no bytes costs its block. Reads that
+/// follow `next` give each entry once, zero-length entries included, and the last
+/// read gives nothing.
 #[test]
 fn a_budget_splits_the_log_over_reads_that_follow_next() {
     run(145, Memory::default(), |shard| async move {
@@ -2904,18 +2905,20 @@ fn a_budget_splits_the_log_over_reads_that_follow_next() {
         let reads = read_all(&buffer, a, Path::Live, Mark::at(0), 1).await;
         let expected = vec![
             whole(all[..1].to_vec(), mark(3, 0)),
-            whole(all[1..3].to_vec(), mark(5, 0)),
+            whole(all[1..2].to_vec(), mark(3, 1)),
+            whole(all[2..3].to_vec(), mark(5, 0)),
             whole(all[3..].to_vec(), mark(5, 1)),
             whole(Vec::new(), mark(5, 1)),
         ];
         assert_eq!(reads, expected, "a budget of one byte");
-        let reads = read_all(&buffer, a, Path::Live, Mark::at(0), 101).await;
+        let budget = block::footprint(100) + block::footprint(0);
+        let reads = read_all(&buffer, a, Path::Live, Mark::at(0), budget).await;
         let expected = vec![
-            whole(all[..3].to_vec(), mark(5, 0)),
-            whole(all[3..].to_vec(), mark(5, 1)),
+            whole(all[..2].to_vec(), mark(3, 1)),
+            whole(all[2..].to_vec(), mark(5, 1)),
             whole(Vec::new(), mark(5, 1)),
         ];
-        assert_eq!(reads, expected, "a budget of 101 bytes");
+        assert_eq!(reads, expected, "a budget of the first two blocks");
         let reads = read_all(&buffer, a, Path::Live, Mark::at(0), usize::MAX).await;
         let expected = vec![whole(all, mark(5, 1)), whole(Vec::new(), mark(5, 1))];
         assert_eq!(reads, expected, "no budget");
@@ -3280,6 +3283,30 @@ fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
             .expect("the next read passes");
         let expected = vec![stored(3, 2, Some(50), shard.block(12))];
         assert_eq!(read, whole(expected, mark(5, 0)));
+    });
+}
+
+/// A record whose header and entry table pass one 4 KiB block is read whole.
+#[test]
+fn a_record_with_a_table_over_one_block_is_read() {
+    run(154, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX * 4), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let batch: Vec<_> = (0..100)
+            .map(|first| entry(1, a, Path::Live, first, 1, None, shard.block(3).into()))
+            .collect();
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = (0..100).map(|first| stored(first, 1, None, shard.block(3)));
+        assert_eq!(read, whole(expected.collect(), mark(100, 0)));
     });
 }
 
