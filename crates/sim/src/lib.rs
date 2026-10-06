@@ -200,10 +200,10 @@ impl Sim {
     /// of it polls again, its futures and its threads that have not run drop, so its
     /// sockets and ports close and its timers stop, and [`env::thread::Handle::join`]
     /// on one of them panics. A thread that one of these drops starts on the node also
-    /// ends in the crash and never runs. Each file call of the node ends and each file
-    /// handle closes, leaked ones too, and the blocks of the calls go back to their
-    /// pools. The node keeps its disk and its addresses: start new threads on it to
-    /// restart it.
+    /// ends in the crash and never runs. Each file call of the node ends, and each file
+    /// handle and serial port closes, leaked ones too. The blocks of the calls go back
+    /// to their pools. The node keeps its disk and its addresses: start new threads on
+    /// it to restart it.
     ///
     /// # Panics
     ///
@@ -214,8 +214,8 @@ impl Sim {
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
         let panics = self.stop(|key| key == node);
-        let orphans = lock(&self.shared).crash(node, crash);
-        drop(orphans);
+        let ended = lock(&self.shared).crash(node, crash);
+        drop(ended);
         assert!(panics.is_empty(), "{}", panics.join(THEN));
     }
 
