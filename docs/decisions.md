@@ -882,8 +882,18 @@ How to read this record:
   first message. A stream that ends or resets before its class byte drops: the peer
   never accepts it, and resets the reply half of a two-way stream with code 0. Each
   message is a QUIC varint length, then that many bytes, at most the receiver's
-  `message_bytes_max`. A node accepts the waiting streams highest class first. A node
-  resets a stream with the stop's code when the stop arrives. A peer breaks the protocol
+  `message_bytes_max`. A node accepts the waiting streams highest class first. Each
+  stream sends at the QUIC priority of its class, `Command` first, and streams of one
+  class share in turn. The priority is strict: a class sends nothing, resends too, while
+  a higher class has bytes to send, so a steady higher class starves the lower ones. It
+  orders only the bytes that QUIC holds. All classes share one QUIC send window, so a
+  message can wait for bytes of a lower class to be acknowledged (#797). `Complete` gets
+  a guaranteed minimum share in the class-ordered send budget, not in QUIC (#819, before
+  the alpha). The budget bounds what QUIC holds to `window_bytes`, so QUIC's strict
+  order acts only inside that bound. Lost: a connection per class, because four
+  handshakes and four congestion controllers compete on one path (#55). Settled by the
+  advisor and the coordinator under the person's delegation (#789). A node resets a
+  stream with the stop's code when the stop arrives. A peer breaks the protocol
   when it sends another class byte, ends a stream inside a message, sends a message over
   the limit, or resets or stops a stream with a code over 32 bits. The node then closes
   the connection with application code 2^32 and the reason as text, and the caller gets
@@ -1786,14 +1796,15 @@ How to read this record:
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
   restart finds no file held (#392), not even by a leaked handle (#535). The blocks of
   each file call of the node go back to their pools, those of a leaked call too (#763).
-  A `Power` crash keeps, for each 512-byte sector, its durable bytes or the bytes of any
-  one write since then, a write in flight too. A `sync` makes durable the writes that
-  ended before it started. A failed `sync` makes each sector keep its durable bytes or
-  those of one such write, at random. A `sync_dir` makes durable the entries at its end.
-  A removed file takes space until the removal is durable. The monotonic clock starts
-  again and the wall runs on. `join` on a thread that a crash ended panics, because no
-  process joins its own threads after it dies. Built by `simulation` in #114, #535, and
-  #763.
+  A crash of either kind closes each serial port of the node, a leaked one too, and a
+  socket or serial port from before the crash panics when it polls. A `Power` crash
+  keeps, for each 512-byte sector, its durable bytes or the bytes of any one write since
+  then, a write in flight too. A `sync` makes durable the writes that ended before it
+  started. A failed `sync` makes each sector keep its durable bytes or those of one such
+  write, at random. A `sync_dir` makes durable the entries at its end. A removed file
+  takes space until the removal is durable. The monotonic clock starts again and the
+  wall runs on. `join` on a thread that a crash ended panics, because no process joins
+  its own threads after it dies. Built by `simulation` in #114, #535, and #763.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
