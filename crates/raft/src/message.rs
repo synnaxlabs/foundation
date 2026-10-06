@@ -18,8 +18,9 @@ pub struct Message {
     pub body: Body,
     /// The proof of `term` the message carries, if any. A [`Body::Vote`] carries the
     /// sender's pre-votes. A leader's [`Body::Heartbeat`] or [`Body::Append`] carries
-    /// its votes until the receiver answers once in the term. An answer to a message
-    /// of a lower term carries the proof of the sender's term.
+    /// its votes until the receiver answers an append, and again after the receiver
+    /// is silent through a quorum check. An answer to a message of a lower term
+    /// carries the proof of the sender's term.
     pub proof: Option<Proof>,
 }
 
@@ -98,4 +99,26 @@ pub enum Body {
         /// share with the leader's.
         hint: u64,
     },
+}
+
+impl Body {
+    /// Whether only a leader sends this body.
+    pub(crate) fn leads(&self) -> bool {
+        matches!(self, Self::Heartbeat { .. } | Self::Append { .. })
+    }
+
+    /// Whether this body answers a request.
+    pub(crate) fn answers(&self) -> bool {
+        match self {
+            Self::PreVote { .. }
+            | Self::Vote { .. }
+            | Self::Heartbeat { .. }
+            | Self::Append { .. } => false,
+            Self::PreVoteReply { .. }
+            | Self::VoteReply { .. }
+            | Self::HeartbeatReply
+            | Self::AppendReply { .. }
+            | Self::AppendReject { .. } => true,
+        }
+    }
 }

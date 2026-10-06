@@ -2248,6 +2248,9 @@ fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
     });
 }
 
+/// A record under `body_max` but over the largest block of the pool is recovered:
+/// the walk reads it in pieces of one block. The walk reads the first thirteen
+/// blocks of a record on their own, so the rest is over the largest block too.
 #[test]
 fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
     run(101, Memory::default(), |mut shard| async move {
@@ -2256,11 +2259,11 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 80 << 10);
-        let ring = layout(64 * BLOCK, 100_000);
+        let ring = layout(128 * BLOCK, 150_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
-        let mut part = parts_pool.alloc(30_000).expect("the pool has a block");
+        let mut part = parts_pool.alloc(48_000).expect("the pool has a block");
         part.fill(7);
         let parts = Parts::from(part.freeze());
         buffer
@@ -2277,6 +2280,42 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         let opened = shard.open(ring, &mut slots).await;
         let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
         assert_eq!(tails, Ok(tail(3, Some(3))));
+    });
+}
+
+/// The walk reads a long record in pieces of the pool's largest block. An open
+/// with no such block free fails with [`Error::Pool`] and leaves the ring as it
+/// is; the next open recovers the record.
+#[test]
+fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
+    run(143, Memory::default(), |mut shard| async move {
+        let config = block::Config { budget: 640 << 10 };
+        shard.pool =
+            Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+        assert_eq!(shard.pool.largest(), 512 << 10);
+        let ring = layout(320 * BLOCK, 600_000);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let parts = Parts::from([shard.block(512 << 10), shard.block(60_000)]);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), parts)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        drop(buffer);
+        let held = shard.pool.alloc(150_000).expect("the pool has a block");
+        let opened = shard.open(ring, &mut Slots::new()).await;
+        let exhausted = block::Error::Exhausted {
+            requested: 512 << 10,
+            available: 306_688,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Pool(exhausted)));
+        drop(held);
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(1, Some(1))));
     });
 }
 

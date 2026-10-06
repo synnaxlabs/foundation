@@ -4,7 +4,9 @@
 
 use proptest::prelude::*;
 use proptest::sample::Index;
-use raft::{Body, Data, Entry, Message, Position, Raft, Ready, Term, Voters};
+use raft::{
+    Body, Data, Entry, Grant, Message, Position, Proof, Raft, Ready, Term, Voters,
+};
 
 use types::node;
 
@@ -53,6 +55,21 @@ fn body() -> impl Strategy<Value = Body> {
     ]
 }
 
+// A proof of a random grant for a random candidate by a random set of nodes, one
+// past the nodes included. `nodes` is the group size.
+fn proof(nodes: usize) -> impl Strategy<Value = Proof> {
+    let candidate = any::<Index>().prop_map(move |pick| pick.index(nodes + 1));
+    let voters = prop::collection::vec(any::<bool>(), nodes + 1);
+    (any::<bool>(), candidate, voters).prop_map(|(vote, candidate, voters)| Proof {
+        grant: if vote { Grant::Vote } else { Grant::PreVote },
+        candidate: Network::key(candidate),
+        voters: (0..voters.len())
+            .filter(|&node| voters[node])
+            .map(Network::key)
+            .collect(),
+    })
+}
+
 // The node at `to` after `run`, its last log position, and the key of `from`,
 // which ranges one past the nodes, so a stranger sends too.
 fn receiver(
@@ -87,6 +104,7 @@ proptest! {
         from in any::<Index>(),
         term in edge(),
         body in body(),
+        proof in prop::option::of(proof(5)),
     ) {
         let (mut raft, _, from) = receiver(&run, to, from)?;
         let (hard, role, leader) = (raft.hard(), raft.role(), raft.leader());
@@ -95,7 +113,7 @@ proptest! {
             to: raft.key(),
             term: Term(term),
             body,
-            proof: None,
+            proof,
         };
         if raft.step(message).is_err() {
             let after = (raft.hard(), raft.role(), raft.leader());

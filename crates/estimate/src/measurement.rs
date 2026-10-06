@@ -113,26 +113,6 @@ impl Measurement {
         }
     }
 
-    /// As [`Measurement::between`], for a source that makes a measurement: an error
-    /// over 36500 days fails.
-    ///
-    /// # Errors
-    ///
-    /// The error, saturated to a span, when it is over 36500 days.
-    ///
-    /// # Panics
-    ///
-    /// When `low` is above `high`.
-    pub(crate) fn checked_between(
-        at: Monotonic,
-        low: i128,
-        high: i128,
-    ) -> Result<Self, Span> {
-        let (offset, error) = center(low, high);
-        let error = saturated(error);
-        Self::new(at, offset, error).ok_or(error)
-    }
-
     /// Whether the measurement between `low` and `high` has an error of at most 36500
     /// days.
     ///
@@ -288,27 +268,17 @@ mod tests {
         }
 
         #[test]
-        fn fails_past_36500_days_when_checked() {
-            let widest = i128::from(MAX_ERROR.nanos());
-            let m = Measurement::checked_between(Monotonic(3), -widest, widest);
-            let m = m.expect("36500 days");
-            assert_eq!((m.offset(), m.error()), (Span::ZERO, MAX_ERROR));
-            let err =
-                Measurement::checked_between(Monotonic(3), -widest - 1, widest + 1);
-            assert_eq!(err, Err(Span::from_nanos(MAX_ERROR.nanos() + 1)));
-        }
-
-        #[test]
-        fn fails_when_checked_and_the_center_is_past_a_span() {
-            let low = i128::from(i64::MIN) - i128::from(MAX_ERROR.nanos());
-            let m = Measurement::checked_between(Monotonic(0), low, low);
-            let m = m.expect("36500 days from the lowest span");
+        fn covers_a_center_past_a_span_with_the_error() {
+            let low = i128::from(i64::MIN) - 5;
+            let m = Measurement::between(Monotonic(0), low, low);
+            let five = Span::from_nanos(5);
+            assert_eq!((m.offset(), m.error()), (Span::from_nanos(i64::MIN), five));
+            let low = i128::from(i64::MIN) - i128::from(MAX_ERROR.nanos()) - 1;
+            let m = Measurement::between(Monotonic(0), low, low);
             assert_eq!(
-                (m.offset(), m.error()),
-                (Span::from_nanos(i64::MIN), MAX_ERROR)
+                m,
+                Measurement::unknown(Monotonic(0), Span::from_nanos(i64::MIN))
             );
-            let err = Measurement::checked_between(Monotonic(0), low - 1, low - 1);
-            assert_eq!(err, Err(Span::from_nanos(MAX_ERROR.nanos() + 1)));
         }
 
         #[test]
