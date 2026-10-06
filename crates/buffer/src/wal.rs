@@ -466,7 +466,7 @@ pub(crate) enum Step<'a> {
 /// A record that follows the chain but that this version cannot read: a kind it
 /// does not know, a wrap or restart record of the wrong shape, or a record that
 /// ends past the end of the offsets. The ring is from another version or a defect
-/// wrote it, so it must not be written to.
+/// wrote it, so the open fails before it writes a record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Invalid {
     pub(crate) offset: u64,

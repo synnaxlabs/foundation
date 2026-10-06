@@ -1578,11 +1578,11 @@ fn long_config(node: &sim::node::Node, tasks: Tasks) -> Config {
     }
 }
 
-/// Commits one entry of `len` bytes on a new ring on a node with `seed` while the
-/// commit's sync fails. The process dies, a new one opens the ring and reports what
-/// is durable, the power is cut, and a last open recovers. Returns what the second
-/// open reported and what the last one recovered.
-fn fail_a_sync_and_cut(seed: u64, len: usize) -> (Tail, Tail) {
+/// Commits one entry of `len` bytes, zero except at `marked`, on a new ring on a
+/// node with `seed` while the commit's sync fails. The process dies, a new one opens
+/// the ring and reports what is durable, the power is cut, and a last open recovers.
+/// Returns what the second open reported and what the last one recovered.
+fn fail_a_sync_and_cut(seed: u64, len: usize, marked: Range<usize>) -> (Tail, Tail) {
     let (mut sim, node) = one_node(seed);
     let failed = sim.run_on(&node, move |node, tasks| async move {
         let config = long_config(&node, tasks);
@@ -1591,7 +1591,9 @@ fn fail_a_sync_and_cut(seed: u64, len: usize) -> (Tail, Tail) {
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
         node.fail_file(FilePath::new(RING), Operation::Sync);
-        let bytes = pool.alloc(len).expect("a block").freeze();
+        let mut bytes = pool.alloc(len).expect("a block");
+        bytes[marked].fill(0xab);
+        let bytes = bytes.freeze();
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::from(bytes))])
             .expect("queues");
@@ -1630,19 +1632,51 @@ fn fail_a_sync_and_cut(seed: u64, len: usize) -> (Tail, Tail) {
 #[test]
 fn an_open_after_a_failed_sync_in_the_same_boot_reports_only_disk_records_durable() {
     for seed in 0..32 {
-        let (reported, recovered) = fail_a_sync_and_cut(seed, 0);
+        let (reported, recovered) = fail_a_sync_and_cut(seed, 0, 0..0);
         assert_eq!(recovered, reported, "seed {seed}");
     }
 }
 
-/// As above, for a record over one block, which the walk reads in pieces and then
-/// reads its start again.
+/// As above, for a record of three blocks, which the walk reads in pieces and then
+/// reads its start again. Only the entry's bytes in the third block are not zero:
+/// a lost sector that reads as zeros on a new ring loses nothing, and many lost
+/// sectors rarely all stay in the cache.
 #[test]
 fn an_open_after_a_failed_sync_of_a_long_record_reports_only_disk_records_durable() {
     for seed in 0..32 {
-        let (reported, recovered) = fail_a_sync_and_cut(seed, 20_000);
+        let (reported, recovered) = fail_a_sync_and_cut(seed, 8_300, 8_128..8_300);
         assert_eq!(recovered, reported, "seed {seed}");
     }
+}
+
+/// A failed write of the bytes an open read fails the open with the write's error.
+#[test]
+fn a_failed_write_of_the_read_bytes_fails_the_open() {
+    let (mut sim, node) = one_node(7);
+    let first = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await
+    });
+    assert_eq!(first, Ok(Ok(())));
+    sim.crash(&node, sim::Crash::Process);
+    let opened = sim.run_on(&node, |node, tasks| async move {
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        let config = node_config(&node, tasks, DIR);
+        Buffer::open(config, &mut Slots::new()).await.map(drop)
+    });
+    let failed = FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::WriteAt,
+        code: 5,
+    };
+    assert_eq!(opened, Ok(Err(Error::Files(failed))));
 }
 
 /// A process that opens a new ring whose first header sync failed, in the same
