@@ -947,8 +947,11 @@ impl Raft {
     // first proof did not cover may take the larger one.
     fn join_pre_vote(&mut self, from: node::Key) {
         let proof = self.proof.as_mut();
-        let proof = proof.expect("invariant: a candidate has its pre-votes");
-        if !proof.voters.insert(from) {
+        let joined = proof
+            .expect("invariant: a candidate has its pre-votes")
+            .voters
+            .insert(from);
+        if !joined {
             return;
         }
         let proof = self.proof.clone();
