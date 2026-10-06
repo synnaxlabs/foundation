@@ -14,13 +14,13 @@ fn drain(raft: &mut Raft) -> Vec<Message> {
 fn leader_election() {
     let fresh = Hard::default();
     let cases = [
-        (Network::of(3, &[1, 2, 3], fresh), Role::Leader, 1),
-        (Network::of(3, &[1, 2], fresh), Role::Leader, 1),
+        (Network::of(3, &[1, 2, 3], &fresh), Role::Leader, 1),
+        (Network::of(3, &[1, 2], &fresh), Role::Leader, 1),
         // An election that cannot complete leaves the node a pre-candidate and does
         // not advance the term.
-        (Network::of(3, &[1], fresh), Role::PreCandidate, 0),
-        (Network::of(4, &[1, 4], fresh), Role::PreCandidate, 0),
-        (Network::of(5, &[1, 4, 5], fresh), Role::Leader, 1),
+        (Network::of(3, &[1], &fresh), Role::PreCandidate, 0),
+        (Network::of(4, &[1, 4], &fresh), Role::PreCandidate, 0),
+        (Network::of(5, &[1, 4, 5], &fresh), Role::Leader, 1),
     ];
     for (i, (mut network, role, term)) in cases.into_iter().enumerate() {
         network.campaign(&[1]);
@@ -51,7 +51,7 @@ fn leader_election_with_logs_ahead() {
 
 #[test]
 fn single_node() {
-    let mut network = Network::of(1, &[1], Hard::default());
+    let mut network = Network::of(1, &[1], &Hard::default());
     network.campaign(&[1]);
     network.check(1, Role::Leader, 1);
 }
@@ -65,6 +65,7 @@ fn in_role(role: Role) -> Raft {
         to: key(1),
         term: Term(2),
         body,
+        proof: None,
     };
     if role != Role::Follower {
         raft.campaign();
@@ -105,6 +106,7 @@ fn vote_from_any_state() {
             to: key(1),
             term: new,
             body: Body::Vote { last },
+            proof: None,
         })
         .unwrap();
         let replies = drain(&mut raft);
@@ -118,12 +120,15 @@ fn vote_from_any_state() {
             to: key(2),
             term: new,
             body: Body::VoteReply { granted: true },
+            proof: None,
         };
         assert_eq!(replies, [reply], "{role:?}");
         assert_eq!(raft.role(), Role::Follower, "{role:?}");
         let hard = Hard {
             term: new,
             vote: Some(key(2)),
+            leader: None,
+            proof: None,
         };
         assert_eq!(raft.hard(), hard, "{role:?}");
     }
@@ -146,6 +151,7 @@ fn prevote_from_any_state() {
             to: key(1),
             term: new,
             body: Body::PreVote { last },
+            proof: None,
         })
         .unwrap();
         let replies = drain(&mut raft);
@@ -157,6 +163,7 @@ fn prevote_from_any_state() {
                 to: key(2),
                 term: new,
                 body: Body::PreVoteReply { granted: true },
+                proof: None,
             };
             assert_eq!(replies, [reply], "{role:?}");
         }
@@ -200,6 +207,8 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
             let hard = Hard {
                 term,
                 vote: vote.map(key),
+                leader: None,
+                proof: None,
             };
             let (mut raft, _) = build(1, &[1], ELECTION, hard, own);
             let last = Position {
@@ -211,6 +220,7 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
                 to: key(1),
                 term,
                 body: request(last),
+                proof: None,
             })
             .unwrap();
             let [reply] = &drain(&mut raft)[..] else {
@@ -255,7 +265,7 @@ fn recv_prevote() {
 /// disturb the leader or the term.
 #[test]
 fn dueling_pre_candidates() {
-    let mut network = Network::of(3, &[1, 2, 3], Hard::default());
+    let mut network = Network::of(3, &[1, 2, 3], &Hard::default());
     network.cut(1, 3);
 
     network.campaign(&[1]);
@@ -275,7 +285,7 @@ fn dueling_pre_candidates() {
 /// campaign. With CheckQuorum, node 1 first loses its quorum and steps down.
 #[test]
 fn node_with_smaller_term_can_complete_election() {
-    let mut network = Network::of(3, &[1, 2, 3], at_term(1));
+    let mut network = Network::of(3, &[1, 2, 3], &at_term(1));
     network.cut(1, 3);
     network.cut(2, 3);
 
@@ -315,7 +325,7 @@ fn node_with_smaller_term_can_complete_election() {
 /// After a split vote, the group completes an election in the next round.
 #[test]
 fn prevote_with_split_vote() {
-    let mut network = Network::of(3, &[1, 2, 3], at_term(1));
+    let mut network = Network::of(3, &[1, 2, 3], &at_term(1));
     network.campaign(&[1]);
 
     // The leader goes down, and both followers campaign at once.
@@ -332,7 +342,7 @@ fn prevote_with_split_vote() {
 
 #[test]
 fn prevote_with_check_quorum() {
-    let mut network = Network::of(3, &[1, 2, 3], at_term(1));
+    let mut network = Network::of(3, &[1, 2, 3], &at_term(1));
     network.campaign(&[1]);
 
     // Nodes 2 and 3 know the leader, and then lose it.
@@ -353,7 +363,7 @@ fn prevote_with_check_quorum() {
 /// quorum of pre-candidates, can still elect a leader.
 #[test]
 fn prevote_checkquorum() {
-    let mut network = Network::of(3, &[1, 2, 3], Hard::default());
+    let mut network = Network::of(3, &[1, 2, 3], &Hard::default());
     network.campaign(&[1]);
     network.check(1, Role::Leader, 1);
 
@@ -399,6 +409,7 @@ fn leader_of_three() -> Raft {
             to: key(1),
             term: Term(1),
             body,
+            proof: None,
         })
         .unwrap();
     }
@@ -415,6 +426,7 @@ fn leader_stepdown_when_quorum_active() {
             to: key(1),
             term: Term(1),
             body: Body::HeartbeatReply,
+            proof: None,
         })
         .unwrap();
         raft.tick(0);
@@ -436,7 +448,7 @@ fn leader_stepdown_when_quorum_lost() {
 /// PreVote, node 3 stays a pre-candidate until node 2's lease ends.
 #[test]
 fn leader_superseding_with_check_quorum() {
-    let mut network = Network::of(3, &[1, 2, 3], Hard::default());
+    let mut network = Network::of(3, &[1, 2, 3], &Hard::default());
     network.tick(2, 1, ELECTION);
     network.campaign(&[1]);
     network.check(1, Role::Leader, 1);
@@ -466,6 +478,8 @@ fn free_stuck_candidate_with_check_quorum() {
     let stuck = Hard {
         term: Term(3),
         vote: Some(key(3)),
+        leader: None,
+        proof: None,
     };
     let first = Position {
         term: Term(1),
@@ -493,7 +507,7 @@ fn free_stuck_candidate_with_check_quorum() {
 fn non_promotable_voter_with_check_quorum() {
     let fresh = Hard::default();
     let mut network = Network::new([
-        build(1, &[1, 2], ELECTION, fresh, Position::default()),
+        build(1, &[1, 2], ELECTION, fresh.clone(), Position::default()),
         // Node 2 is not in its own voter list.
         build(2, &[1], ELECTION, fresh, Position::default()),
     ]);
@@ -512,7 +526,7 @@ fn non_promotable_voter_with_check_quorum() {
 /// and ignore its PreVote.
 #[test]
 fn disruptive_follower_prevote() {
-    let mut network = Network::of(3, &[1, 2, 3], at_term(1));
+    let mut network = Network::of(3, &[1, 2, 3], &at_term(1));
     network.campaign(&[1]);
     network.check(1, Role::Leader, 2);
     network.check(2, Role::Follower, 2);

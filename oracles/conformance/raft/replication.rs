@@ -73,6 +73,7 @@ fn leader_start_replication() {
                 entries: vec![entry(1, li + 1, b"some data")],
                 commit: li,
             },
+            proof: None,
         })
         .to_vec();
     assert_eq!(messages, expected);
@@ -198,6 +199,7 @@ fn follower_check_msg_app() {
             to: key(2),
             term: Term(2),
             body,
+            proof: None,
         };
         assert_eq!(disk.store(raft.ready()), [expected], "#{i}");
     }
@@ -239,6 +241,7 @@ fn follower_append_entries() {
             to: key(2),
             term: Term(term),
             body: Body::AppendReply { last },
+            proof: None,
         };
         assert_eq!(disk.store(ready), [answer], "#{i}");
         assert_eq!(disk.hard.term, Term(term), "#{i}");
@@ -288,6 +291,7 @@ fn leader_sync_follower_log() {
             to: key(1),
             term: Term(term + 1),
             body,
+            proof: None,
         };
         network.send(from_3(Body::PreVoteReply { granted: true }));
         network.send(from_3(Body::VoteReply { granted: true }));
@@ -420,7 +424,7 @@ fn log_replication() {
     for (i, (second_leader, committed)) in
         [(false, 2), (true, 4)].into_iter().enumerate()
     {
-        let mut network = Network::of(3, &[1, 2, 3], Hard::default());
+        let mut network = Network::of(3, &[1, 2, 3], &Hard::default());
         network.campaign(&[1]);
         network.propose(1, b"somedata");
         let mut proposed = vec![b"somedata".to_vec()];
