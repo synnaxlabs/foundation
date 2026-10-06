@@ -206,7 +206,8 @@ pub struct Specificity {
 /// exclusion does. An exclusion is a pattern written with a leading `!`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Selector {
-    include: Vec<Pattern>,
+    /// Each include pattern, with its position in the list given to `new`.
+    include: Vec<(usize, Pattern)>,
     exclude: Vec<Pattern>,
 }
 
@@ -220,7 +221,7 @@ impl Selector {
     pub fn new<'a>(patterns: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
         let mut include = Vec::new();
         let mut exclude = Vec::new();
-        for text in patterns {
+        for (position, text) in patterns.into_iter().enumerate() {
             match text.strip_prefix('!') {
                 Some("") => {
                     return Err(Error::Segment {
@@ -229,7 +230,7 @@ impl Selector {
                     });
                 }
                 Some(body) => exclude.push(Pattern::read(text, body)?),
-                None => include.push(Pattern::read(text, text)?),
+                None => include.push((position, Pattern::read(text, text)?)),
             }
         }
         if include.is_empty() {
@@ -247,17 +248,21 @@ impl Selector {
         }
         self.include
             .iter()
-            .filter(|p| p.matches(name))
-            .map(Pattern::specificity)
+            .filter(|(_, p)| p.matches(name))
+            .map(|(_, p)| p.specificity())
             .max()
     }
 
-    /// Reports whether every name that an include pattern matches starts with
-    /// `prefix`, by whole segments, as [`Name::starts_with`] reads it. Exclusions are
-    /// not read.
-    #[must_use]
-    pub fn within(&self, prefix: &Name) -> bool {
-        self.include.iter().all(|p| p.within(prefix))
+    /// The positions, in the list given to [`Selector::new`], of the include patterns
+    /// that can match a name that does not start with `prefix`, by whole segments, as
+    /// [`Name::starts_with`] reads it. The selector stays within `prefix` when this
+    /// gives no position. Exclusions are not read, so an include that only its
+    /// exclusions keep inside `prefix` still gives its position.
+    pub fn outside(&self, prefix: &Name) -> impl Iterator<Item = usize> {
+        self.include
+            .iter()
+            .filter(|(_, p)| !p.within(prefix))
+            .map(|(position, _)| *position)
     }
 }
 
@@ -677,20 +682,23 @@ mod tests {
             assert_eq!(Selector::new(["a", "!"]), Err(segment_error("!", "")));
         }
 
-        mod within {
+        mod outside {
             use super::*;
 
             fn selector(patterns: &[&str]) -> Selector {
                 Selector::new(patterns.iter().copied()).unwrap()
             }
 
+            fn outside(patterns: &[&str], prefix: &str) -> Vec<usize> {
+                selector(patterns).outside(&name(prefix)).collect()
+            }
+
             #[test]
             fn holds_patterns_that_start_with_the_prefix() {
-                let prefix = name("site_a");
                 for pattern in
                     ["site_a", "site_a.*", "site_a.**", "site_a.**.*", "site_a.b"]
                 {
-                    assert!(selector(&[pattern]).within(&prefix), "{pattern}");
+                    assert_eq!(outside(&[pattern], "site_a"), [], "{pattern}");
                 }
             }
 
@@ -700,22 +708,26 @@ mod tests {
                     ("**", "site_a"),
                     ("*.gw", "site_a"),
                     ("site_a_b.*", "site_a"),
+                    ("site.*", "site_a"),
                     ("**.site_a", "site_a"),
                     ("site_a", "site_a.b"),
                     ("site_a.**", "site_a.b"),
                 ] {
-                    let within = selector(&[pattern]).within(&name(prefix));
-                    assert!(!within, "{pattern} within {prefix}");
+                    assert_eq!(outside(&[pattern], prefix), [0], "{pattern} {prefix}");
                 }
             }
 
             #[test]
-            fn needs_every_include_and_reads_no_exclusion() {
-                let prefix = name("a");
-                assert!(selector(&["a.b", "a.c.**"]).within(&prefix));
-                assert!(!selector(&["a.b", "b"]).within(&prefix));
-                assert!(selector(&["a.**", "!a.b"]).within(&prefix));
-                assert!(!selector(&["**", "!b.**"]).within(&prefix));
+            fn gives_each_include_that_reaches_out_by_its_position() {
+                let patterns = ["a.b", "!b.**", "b", "a.**", "*.c", "!a"];
+                assert_eq!(outside(&patterns, "a"), [2, 4]);
+                assert_eq!(outside(&["b", "a.b"], "a"), [0]);
+            }
+
+            #[test]
+            fn reads_no_exclusion() {
+                assert_eq!(outside(&["a.**", "!b.**"], "a"), []);
+                assert_eq!(outside(&["**", "!b.**"], "a"), [0]);
             }
 
             proptest! {
@@ -740,13 +752,13 @@ mod tests {
                     let n = name(&segments.join("."));
                     let prefix = name(&prefix.join("."));
                     prop_assert!(selector.matches(&n).is_some());
-                    if selector.within(&prefix) {
+                    if selector.outside(&prefix).next().is_none() {
                         prop_assert!(n.starts_with(&prefix), "{n} outside {prefix}");
                     }
                 }
 
                 #[test]
-                fn a_pattern_not_within_matches_a_name_outside(
+                fn a_pattern_outside_matches_a_name_outside(
                     p in patterns(),
                     prefix in prefixes(),
                 ) {
@@ -758,7 +770,7 @@ mod tests {
                         .map(|s| if s.starts_with('*') { "c" } else { s })
                         .collect();
                     let outside = name(&outside.join("."));
-                    if !selector.within(&prefix) {
+                    if selector.outside(&prefix).next().is_some() {
                         prop_assert!(selector.matches(&outside).is_some());
                         prop_assert!(!outside.starts_with(&prefix), "{outside}");
                     }
