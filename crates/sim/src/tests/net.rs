@@ -337,6 +337,25 @@ fn a_link_whose_rate_changes_sends_at_the_new_rate_after_the_packets_before() {
 }
 
 #[test]
+fn a_datagram_sent_as_its_link_becomes_free_takes_a_transmit_of_its_own() {
+    // Each datagram takes 1,000 bytes of the link: 333,333.3 ns, which rounds up.
+    let link = link::Config {
+        rate: NonZeroU64::new(3_000_000),
+        ..link::Config::default()
+    };
+    let (mut sim, a, b) = pair(0, link);
+    let log = Log::default();
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let (contents, gap) = (vec![vec![1; 972]; 2], Span::from_nanos(333_334));
+    let _send = send_spaced(&a, sender, at(&b, 4433), contents, gap);
+    sim.run_for(Span::SECOND).unwrap();
+    let left = |nanos| after(delay()) + Span::from_nanos(nanos);
+    assert_eq!(times(&log), [left(333_334), left(666_668)]);
+}
+
+#[test]
 fn a_power_cut_drops_the_datagrams_that_have_not_left_the_node() {
     let (mut sim, a, b) = pair(0, rated());
     let log = Log::default();
