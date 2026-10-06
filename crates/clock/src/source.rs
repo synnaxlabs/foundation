@@ -201,7 +201,8 @@ mod tests {
     fn is_unknown_when_an_edge_of_the_os_bound_passes_the_stamps() {
         let monotonic = i64::try_from(at().0).expect("one hour fits");
         for wall in [i64::MAX - Span::DAY.nanos(), i64::MIN + Span::DAY.nanos()] {
-            let m = measure_at(Stamp::from_nanos(wall), Some(days(2)));
+            let past = Span::from_nanos(Span::DAY.nanos() + 1);
+            let m = measure_at(Stamp::from_nanos(wall), Some(past));
             let offset = Span::from_nanos(wall - monotonic);
             assert_eq!(m, Measurement::unknown(at(), offset));
         }
