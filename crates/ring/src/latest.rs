@@ -110,6 +110,10 @@ impl<const N: usize> Reader<N> {
     /// the update that replaced it took one in its `f`, when `f` orders its clock read
     /// against the loads around it. A counter read is not a memory operation, so only
     /// the clock adapter can order it.
+    ///
+    /// A read that returns the new value comes after the whole update: it sees each
+    /// write that the writer's thread made before the update ended, in the update's
+    /// closure or before it.
     pub fn read<R>(&self, mut f: impl FnMut([u64; N]) -> R) -> R {
         loop {
             let mut before = self.shared.seq.load(Acquire);
@@ -316,6 +320,28 @@ mod model {
             let value = reads.join().unwrap();
             assert!(matches!(value, [0 | 1, 0] | [1, 1]), "torn: {value:?}");
             assert_eq!(reader.read(|value| value), [1, 1]);
+        });
+    }
+
+    /// The writer updates B in the closure of an update of A.
+    #[test]
+    fn a_read_of_the_new_value_sees_the_whole_update() {
+        bounded(|| {
+            let (mut a, a_reader) = new([0]);
+            let (mut b, b_reader) = new([0]);
+            let reads = thread::spawn(move || {
+                let [first] = a_reader.read(|value| value);
+                let [second] = b_reader.read(|value| value);
+                (first, second)
+            });
+            a.update(|_| {
+                b.update(|_| [1]);
+                [1]
+            });
+            let (first, second) = reads.join().unwrap();
+            if first == 1 {
+                assert_eq!(second, 1, "the new value of A without the new value of B");
+            }
         });
     }
 
