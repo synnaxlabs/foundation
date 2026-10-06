@@ -1136,9 +1136,9 @@ How to read this record:
   its voter got a lease back still counts, and costs one needless election; safety
   holds. etcd/raft counts such a grant too. Lost: a round number in `PreVote`, which
   changes the message format and closes only the case of two pre-campaigns. Decided by
-  the advisor under the failover delegation on 2026-10-05 (#719). A node that is not in
-  its own voter list votes and follows, but never campaigns while that configuration
-  is committed. `step` does not check that a sender is a voter (a voter can learn late
+  the advisor under the failover delegation on 2026-10-05 (#719). A node that may not
+  campaign (RAFT VOTERS) still votes and follows.
+  `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
   may send. `step` drops a reply with no check when its sender is not in `voters()`,
   unless the configuration in force removed the sender and the node still sends to it:
@@ -1245,9 +1245,22 @@ How to read this record:
   decided on 2026-10-05 ("(a)"), #482. Readmit in
   `raft` (#414) lost: it sent the log to a sender that `raft` cannot check. The person
   decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set
-  sends the commit and steps down. A node outside an uncommitted configuration still
-  campaigns: the entry may be truncated, and a removed leader that lost its lead before
-  the leave reached a peer is the only node that can win the election that commits it.
+  sends the commit and steps down. A node may campaign when it is a voter, incoming or
+  outgoing, of the configuration in force, or, while that configuration is not
+  committed, of the configuration before it. No other node campaigns. The rule is
+  exact: a leader appends a configuration entry only after the last one commits, so
+  by Log Matching only the last configuration entry in a log can be truncated, and
+  the one before it is committed. The fallback keeps two cases: a truncation gives
+  the configuration before back, and a removed leader that lost its lead before the
+  leave reached a peer is the only node that can win the election that commits it. A
+  follower whose commit index lags lets the configuration before campaign for
+  longer, which costs liveness, never safety. The `mesh` admission check stays
+  beside this rule: `promotable` decides whether an honest node campaigns, and `mesh`
+  checks a sender that may lie, because `raft` never checks senders (RAFT SURFACE).
+  Neither is a second guard for the other. Decided by the coordinator and the
+  advisor on 2026-10-06 (#659). After compaction a snapshot carries the
+  configuration in force at its index, so the configuration before the last entry
+  stays known (#253).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
   files `log-0`, `log-1`, and so on of one directory; any other file there is
   `Error::Stray`. One write of `raft` is one record: a header, then the body. The header
@@ -1434,6 +1447,15 @@ How to read this record:
   runtime-loaded bindings, NI functions declared by hand. Codecs: built. Crypto: rustls
   with aws-lc-rs and blake3. Tooling: clap, schemars, toml_edit, tracing. Our own thin
   MCP server, Prometheus text output, and InfluxDB line protocol. FIPS build later.
+  HTTP: one client for all connectors, on `hyper` (HTTP/1.1 and HTTP/2) over the `env`
+  network seam with `rustls`, in the connector component library. InfluxDB, a general
+  HTTP connector, alarms, webhooks, and remote write use it. No HTTP parser of our own.
+  Every clock read and name lookup of the client goes through `env`, and no Tokio
+  feature of `hyper` or `hyper-util` is on. TLS takes a configured CA, and no setting
+  turns verification off. Lost: a sans-I/O HTTP/1.1 module in `connector-influx`. The
+  person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
+  binary larger is fine." "we should be careful about writing raw HTTP transports.",
+  relayed by `advisor`; "Yes I approve", to the coordinator) (#341).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -1966,7 +1988,9 @@ How to read this record:
 - **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
   segment is never lost or duplicated. It arrives after the delay and a jitter draw of
   its link, and never before an earlier segment in its direction, so each direction
-  keeps its order. A connect is ready after one round trip and its accept after one
+  keeps its order. Each segment carries the key of its stream, and only the end of
+  that stream takes it, so a late segment of an older stream on the same pair meets a
+  closed port. A connect is ready after one round trip and its accept after one
   and a half. The receive buffer sets the window, the send buffer holds the bytes that
   the peer has not received, and a write waits while `unsent_bytes_max` bytes are not
   sent. A drop before close, or with bytes unread, sends an RST; a drop after close
@@ -1976,7 +2000,8 @@ How to read this record:
   sends, a connect to an address with no node, a full backlog, and a SYN to a live
   stream. Rejected: retransmission over a lossy link (a full TCP state machine to
   test before a carrier needs it), and a pipe of bytes with no segments (no window,
-  so no test of a writer that a slow reader stops). Built by `simulation` in #113.
+  so no test of a writer that a slow reader stops). Built by `simulation` in #113
+  and #944.
 - **SIM DROP (2026-10-06)** The drop of a `Sim` drops each live future in its own
   `catch_unwind`. If any panicked, it then panics once with every message, the first
   one first, but only when the thread is not already panicking. This is the one
