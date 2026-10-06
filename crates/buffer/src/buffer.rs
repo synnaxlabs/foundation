@@ -564,10 +564,10 @@ fn small_record(
 }
 
 /// The commit task. It parks while the state idles; a push that takes an entry, a
-/// `Commit` poll, or the drop wakes it. Each deadline takes the closed groups and the open one,
-/// seals them in order from `chain`, the value of the restart record, writes
-/// them, syncs once, and wakes the waiters. A failed file call or the drop ends
-/// the task.
+/// `Commit` poll, or the drop wakes it. Each deadline takes the closed groups and
+/// the open one, seals them in order from `chain`, the value of the restart record,
+/// writes them, syncs once, and wakes the waiters. A failed file call or the drop
+/// ends the task.
 async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
     let mut chain = chain;
     let mut taken: Vec<Closed> = Vec::new();
