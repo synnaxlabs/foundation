@@ -657,15 +657,15 @@ How to read this record:
   It cuts no known bound, because an unknown bound votes only when no bound is known. An
   unknown reading (`exchange::Reading::Unknown`) gives an unknown measurement, because
   two unknown readings sent as intervals whose centers move apart by more than the round
-  trip give a known bound (#930). An overlap whose readings allow an error over 36500
-  days before drift gives `None`, as an overlap with no edge does, because no caller
-  needs an unknown device measurement yet. A device source can ask for one when it calls
-  `Overlap::at`. Decided by the `time` builder (#258), and for the exchange approved by
-  the coordinator (#903). Each function returns only the errors it can give: one `Error`
-  per module (`overlap`, `combine`), and `Option` where a caller does the same for each
-  cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the
-  coordinator (#272). `Exchange::measure` has one cause left, so it gives `Option`
-  (#903).
+  trip, or one interval clamped at the end of the stamp range, can give a known bound
+  (#930). An overlap whose readings allow an error over 36500 days before drift gives
+  `None`, as an overlap with no edge does, because no caller needs an unknown device
+  measurement yet. A device source can ask for one when it calls `Overlap::at`. Decided
+  by the `time` builder (#258), and for the exchange approved by the coordinator (#903).
+  Each function returns only the errors it can give: one `Error` per module (`overlap`,
+  `combine`), and `Option` where a caller does the same for each cause
+  (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the coordinator
+  (#272). `Exchange::measure` has one cause left, so it gives `Option` (#903).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -865,18 +865,18 @@ How to read this record:
   message: a kind byte, then little-endian fields of 8 bytes. A request (kind 1)
   carries `sent`, the monotonic reading of the node that asks. An answer echoes `sent`,
   so the node that asks keeps no open requests, and carries the peer's time (CLOCK
-  PEER ANSWER). Kind 2 is a known bound, with the interval when the request arrived
-  and the interval when the peer answered. Kind 3 is an unknown bound, with the
-  peer's best guess of the time when it answered. The offset of CLOCK PEER ANSWER is
-  this stamp less the asking node's own time, because the peer's offset has no
-  meaning without the peer's monotonic clock. A message has 9, 41, or 17 bytes, and
-  `decode` refuses each other length. `decode` does not check the order of an
-  interval, because `estimate::exchange::Exchange::measure` refuses a crossed one.
+  PEER ANSWER). Kind 2 is a known bound, with an interval read after the request
+  arrived and one read before the answer left. Kind 3 is an unknown bound, with the
+  peer's best guess, read after the request arrived and before the answer left. The
+  offset of CLOCK PEER ANSWER is this stamp less the asking node's own time, because the
+  peer's offset has no meaning without the peer's monotonic clock. A message has 9, 41,
+  or 17 bytes, and `decode` refuses each other length. `decode` does not check the order
+  of an interval, because `estimate::exchange::Exchange::measure` refuses a crossed one.
   Lost: a request number, because the node that asks must then keep and remove open
-  requests and still needs the send time of a late answer; each message 41 bytes, as
-  the header has one length (a request then sends 32 zero bytes); `encode` into a
-  `&mut [u8]` that returns a length (a short buffer then needs an error); a second
-  byte for the kind of time (two checks where one kind byte does the work).
+  requests and still needs the send time of a late answer; each message 41 bytes, as the
+  header has one length (a request then sends 32 zero bytes); `encode` into a
+  `&mut [u8]` that returns a length (a short buffer then needs an error); a second byte
+  for the kind of time (two checks where one kind byte does the work).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
   however many shards it runs, so each site's firewall needs one known port per
   conduit. Each QUIC connection belongs to one shard, and every connection ID a node

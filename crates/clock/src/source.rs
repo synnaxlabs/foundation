@@ -73,17 +73,17 @@ impl Wall {
     pub fn measure(&self) -> Measurement {
         let sent = self.monotonic.now();
         #[expect(clippy::disallowed_methods, reason = "clock reads the OS clock")]
-        let reading = self.os.now();
+        let os = self.os.now();
         let returned = self.monotonic.now();
-        let bound = reading.error.inspect(|&bound| {
+        let bound = os.error.inspect(|&bound| {
             assert!(
                 bound >= Span::ZERO,
                 "invariant: the OS error bound {bound} is negative"
             );
         });
         let instant = Interval {
-            earliest: reading.time,
-            latest: reading.time,
+            earliest: os.time,
+            latest: os.time,
         };
         let exchange = Exchange {
             sent,
@@ -92,7 +92,7 @@ impl Wall {
                     received: instant,
                     answered: instant,
                 },
-                None => Reading::Unknown(reading.time),
+                None => Reading::Unknown(os.time),
             },
             returned,
         };

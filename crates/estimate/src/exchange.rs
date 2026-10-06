@@ -4,8 +4,8 @@ use types::time::{Interval, Monotonic, Stamp};
 
 use crate::{Drift, Measurement};
 
-/// One reading of another clock's mesh time, taken between two readings of the local
-/// monotonic clock.
+/// One round trip to another clock, between two readings of the local monotonic
+/// clock.
 ///
 /// ```
 /// use estimate::Drift;
@@ -49,9 +49,9 @@ pub enum Reading {
         answered: Interval,
     },
     /// An unknown bound: the other clock's best guess, read after the request arrived
-    /// and before the answer left. Never send one as a known interval: two such
-    /// readings whose guesses move apart by more than the round trip give a known
-    /// bound.
+    /// and before the answer left. Never give one as `Known`: two unknown readings as
+    /// intervals whose guesses move apart by more than the round trip, or one interval
+    /// clamped at the end of the stamp range, can give a known bound.
     Unknown(Stamp),
 }
 
@@ -66,16 +66,29 @@ impl Exchange {
     /// bound, or `sent` is after `returned`.
     #[must_use]
     pub fn measure(self, drift: Drift) -> Option<Measurement> {
-        let (received, answered) = match self.reading {
-            Reading::Known { received, answered } => (received, answered),
+        match self.reading {
+            Reading::Known { received, answered } => {
+                self.bound(received, answered, drift)
+            }
             Reading::Unknown(guess) => {
                 let instant = Interval {
                     earliest: guess,
                     latest: guess,
                 };
-                (instant, instant)
+                // As one instant, a guess gives a narrow bound that is not true.
+                let m = self.bound(instant, instant, drift)?;
+                Some(Measurement::unknown(m.at(), m.offset()))
             }
-        };
+        }
+    }
+
+    /// The measurement when `received` and `answered` hold the other clock's mesh time.
+    fn bound(
+        self,
+        received: Interval,
+        answered: Interval,
+        drift: Drift,
+    ) -> Option<Measurement> {
         let inverted = |i: Interval| i.earliest > i.latest;
         let back = received.earliest > answered.latest;
         if inverted(received) || inverted(answered) || back {
@@ -88,15 +101,7 @@ impl Exchange {
         let low = offset(earliest.nanos(), self.returned.0);
         let high =
             offset(latest.nanos(), self.sent.0) + i128::from(drift.over(round_trip));
-        if low > high {
-            return None;
-        }
-        let m = Measurement::between(self.returned, low, high);
-        // As one instant, a guess gives a narrow bound that is not true.
-        Some(match self.reading {
-            Reading::Known { .. } => m,
-            Reading::Unknown(_) => Measurement::unknown(m.at(), m.offset()),
-        })
+        (low <= high).then(|| Measurement::between(self.returned, low, high))
     }
 }
 
@@ -122,7 +127,22 @@ mod tests {
         Drift::from_ppb(ppb).expect("valid")
     }
 
-    /// The exchange as `(offset, error)`, with `ppb` of drift.
+    /// The measurement of `reading`, with `ppb` of drift.
+    fn measure(
+        ppb: u32,
+        sent: u64,
+        reading: Reading,
+        returned: u64,
+    ) -> Option<Measurement> {
+        let exchange = Exchange {
+            sent: Monotonic(sent),
+            reading,
+            returned: Monotonic(returned),
+        };
+        exchange.measure(drift(ppb))
+    }
+
+    /// The known reading as `(offset, error)`, with `ppb` of drift.
     fn check(
         ppb: u32,
         sent: u64,
@@ -130,23 +150,18 @@ mod tests {
         answered: Interval,
         returned: u64,
     ) -> Option<(i64, i64)> {
-        let exchange = Exchange {
-            sent: Monotonic(sent),
-            reading: Reading::Known { received, answered },
-            returned: Monotonic(returned),
-        };
-        let m = exchange.measure(drift(ppb));
+        let m = measure(ppb, sent, Reading::Known { received, answered }, returned);
         m.map(|m| (m.offset().nanos(), m.error().nanos()))
     }
 
     /// The measurement of a guess at `guess`, with `ppb` of drift.
     fn guess(ppb: u32, sent: u64, guess: i64, returned: u64) -> Option<Measurement> {
-        let exchange = Exchange {
-            sent: Monotonic(sent),
-            reading: Reading::Unknown(Stamp::from_nanos(guess)),
-            returned: Monotonic(returned),
-        };
-        exchange.measure(drift(ppb))
+        measure(
+            ppb,
+            sent,
+            Reading::Unknown(Stamp::from_nanos(guess)),
+            returned,
+        )
     }
 
     mod known_exchanges {
@@ -248,9 +263,9 @@ mod tests {
             assert_eq!(drifted, Some(unknown(2 * SECOND_NS, -1_499_999_500)));
         }
 
-        /// Two readings of an unknown estimate, sent as known intervals whose centers
-        /// move apart by more than the round trip, give a known bound. The same guess
-        /// as an unknown reading does not.
+        /// Two readings of an unknown estimate, given as known intervals whose centers
+        /// move apart by more than the round trip, can give a known bound. The same
+        /// guess as an unknown reading does not.
         #[test]
         fn stay_unknown_where_two_known_intervals_do_not() {
             let estimate =
@@ -268,10 +283,36 @@ mod tests {
             assert_eq!(m.error(), MAX_ERROR);
         }
 
+        /// One interval of an unknown estimate inside the stamp range, given as both
+        /// ends, gives no known bound.
+        #[test]
+        fn stay_unknown_as_one_interval_at_both_ends() {
+            let estimate =
+                Measurement::unknown(Monotonic(0), Span::from_nanos(500_000_000));
+            let m = check(0, 0, estimate.interval(), estimate.interval(), 10);
+            assert_eq!(m, Some((499_999_995, MAX_ERROR.nanos())));
+        }
+
+        /// The interval of an unknown estimate after 2162 is clamped at the last stamp,
+        /// so as both ends it gives a known bound. The same guess as an unknown reading
+        /// does not.
+        #[test]
+        fn stay_unknown_where_a_clamped_interval_does_not() {
+            let late = i64::MAX - Span::DAY.nanos();
+            let estimate = Measurement::unknown(Monotonic(0), Span::from_nanos(late));
+            let (interval, round_trip) = (estimate.interval(), 1_000_000);
+            let known = check(0, 0, interval, interval, round_trip);
+            assert!(known.is_some_and(|(_, error)| error < MAX_ERROR.nanos()));
+            let m = guess(0, 0, late, round_trip).expect("an offset");
+            assert_eq!(m.error(), MAX_ERROR);
+        }
+
         #[test]
         fn fail_only_when_sent_is_after_returned() {
             assert_eq!(guess(0, 1_001, 0, 1_000), None);
-            assert!(guess(0, 1_000, i64::MIN, 1_000).is_some());
+            let early =
+                Measurement::unknown(Monotonic(1_000), Span::from_nanos(i64::MIN));
+            assert_eq!(guess(0, 1_000, i64::MIN, 1_000), Some(early));
         }
     }
 
@@ -407,6 +448,12 @@ mod tests {
                 if let Some(m) = m {
                     prop_assert_eq!(m.at(), Monotonic(local[1]));
                     prop_assert_eq!(m.error(), MAX_ERROR);
+                    let span = |ns: i128| ns.clamp(i64::MIN.into(), i64::MAX.into());
+                    let over = i128::from(drift(ppb).over(local[1] - local[0]));
+                    let offset = |local: u64| i128::from(mesh) - i128::from(local);
+                    let (low, high) = (offset(local[1]), offset(local[0]) + over);
+                    let offset = i128::from(m.offset().nanos());
+                    prop_assert!(span(low) <= offset && offset <= span(high));
                 }
             }
 
@@ -416,15 +463,11 @@ mod tests {
                 mesh in any::<[i64; 4]>(),
                 ppb in 0..=100_000_000_u32,
             ) {
-                let exchange = Exchange {
-                    sent: Monotonic(local[0]),
-                    reading: Reading::Known {
-                        received: peer(mesh[0], mesh[1]),
-                        answered: peer(mesh[2], mesh[3]),
-                    },
-                    returned: Monotonic(local[1]),
+                let reading = Reading::Known {
+                    received: peer(mesh[0], mesh[1]),
+                    answered: peer(mesh[2], mesh[3]),
                 };
-                if let Some(m) = exchange.measure(drift(ppb)) {
+                if let Some(m) = measure(ppb, local[0], reading, local[1]) {
                     prop_assert_eq!(m.at(), Monotonic(local[1]));
                     prop_assert!(m.error() <= MAX_ERROR);
                 }
