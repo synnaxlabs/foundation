@@ -2,7 +2,8 @@
 //! complete readers, which runs per frame, and of one floor, which the home reads when
 //! `buffer` trims.
 
-use delivery::{Key, Position, Reader, Readers, Start};
+use delivery::complete::Key;
+use delivery::{Position, Reader, Readers, Start};
 use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner};

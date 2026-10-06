@@ -1,7 +1,8 @@
 //! The cost of one live frame to the latest readers of its index, which the home pays
 //! for each frame on the write path.
 
-use delivery::{Key, Readers};
+use delivery::Readers;
+use delivery::latest::Key;
 use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner};
