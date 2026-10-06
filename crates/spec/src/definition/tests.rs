@@ -180,11 +180,36 @@ fn refuses_an_included_pattern_that_starts_with_a_bang() {
     bytes.push(0);
     bytes.extend_from_slice(&2_u64.to_le_bytes());
     bytes.extend_from_slice(b"!a");
-    let error = Error::Include { at: 19 };
+    let error = Error::Pattern {
+        at: 2,
+        error: name::Error::Segment {
+            input: "!a".into(),
+            segment: "!a".into(),
+        },
+    };
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        "the included pattern at byte 19 starts with `!`"
+        "the patterns at byte 2 do not read: \"!a\" has a segment that is not valid: \
+         \"!a\""
+    );
+}
+
+#[test]
+fn refuses_an_excluded_pattern_that_starts_with_a_bang() {
+    let bytes = access(&[b"a"], &[b"b", b"!!c"], 1, 0);
+    let error = Error::Pattern {
+        at: 20,
+        error: name::Error::Segment {
+            input: "!!c".into(),
+            segment: "!c".into(),
+        },
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the patterns at byte 20 do not read: \"!!c\" has a segment that is not valid: \
+         \"!c\""
     );
 }
 
