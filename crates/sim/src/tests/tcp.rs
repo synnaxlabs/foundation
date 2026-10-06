@@ -751,6 +751,64 @@ fn a_finished_stream_frees_its_port_for_a_connect_after_the_ports_wrap() {
     assert_eq!(take(&server), at(&a, 49_152));
 }
 
+#[test]
+fn a_late_syn_ack_of_an_old_stream_opens_no_newer_connect() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let half = Span::from_nanos(delay().nanos() / 2);
+        node.clock().sleep_until(legs(1) + half).await;
+        drop(listener);
+        let mut listener = listen(&node, 4433);
+        let mut tcp = accept(&mut listener).await;
+        write_all(&mut tcp, b"y").await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        tcp.peer()
+    });
+    let (remote, closed) = (at(&b, 4433), at(&b, 9));
+    let client = start(&a, "client", move |node| async move {
+        assert!(poll_once(connect(&node, remote, options())).await.is_none());
+        node.clock().sleep_until(legs(1)).await;
+        wrap(&node, closed).await;
+        let mut tcp = connect(&node, remote, options()).await?;
+        let ready = node.clock().now();
+        Ok::<_, Net>((ready, read(&mut tcp, 1).await))
+    });
+    let ran = sim.run();
+    assert_eq!(take(&client), Ok((legs(3), Ok(b"y".to_vec()))));
+    ran.unwrap();
+    assert_eq!(take(&server), at(&a, 49_152));
+}
+
+#[test]
+fn a_late_segment_of_an_old_stream_reaches_no_newer_stream_on_its_pair() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let mut old = accept(&mut listener).await;
+        node.clock().sleep_until(after(millis(10))).await;
+        write_all(&mut old, b"x").await.unwrap();
+        drop(old);
+        let mut new = accept(&mut listener).await;
+        write_all(&mut new, b"y").await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        new.peer()
+    });
+    let (remote, closed) = (at(&b, 4433), at(&b, 9));
+    let client = start(&a, "client", move |node| async move {
+        let tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep_until(after(millis(10))).await;
+        drop(tcp);
+        wrap(&node, closed).await;
+        let mut tcp = connect(&node, remote, options()).await?;
+        read(&mut tcp, 1).await
+    });
+    let ran = sim.run();
+    assert_eq!(take(&client), Ok(b"y".to_vec()));
+    ran.unwrap();
+    assert_eq!(take(&server), at(&a, 49_152));
+}
+
 /// Crashes `a` by `crash` 10 ms into a stream to `b`. Gives what `b` then got: a
 /// read polled once at 20 ms, a write of one byte, and a read 10 ms later. Also
 /// gives the address of `a`'s end.
@@ -1323,4 +1381,28 @@ fn a_syn_to_a_live_stream_panics() {
         drop(connect(&node, remote, options()).await);
     });
     drop(sim.run_for(millis(10)));
+}
+
+#[test]
+fn a_late_ack_from_a_reset_stream_resets_no_newer_stream_on_its_pair() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    start(&b, "server", move |node| async move {
+        let _old = accept(&mut listener).await;
+        let mut new = accept(&mut listener).await;
+        write_all(&mut new, b"y").await.unwrap();
+        node.clock().sleep(millis(10)).await;
+    });
+    let (remote, closed) = (at(&b, 4433), at(&b, 9));
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        write_all(&mut tcp, b"x").await.unwrap();
+        drop(tcp);
+        wrap(&node, closed).await;
+        let mut tcp = connect(&node, remote, options()).await?;
+        read(&mut tcp, 1).await
+    });
+    let ran = sim.run();
+    assert_eq!(take(&client), Ok(b"y".to_vec()));
+    ran.unwrap();
 }
