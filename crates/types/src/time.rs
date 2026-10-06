@@ -413,8 +413,9 @@ impl fmt::Display for Range {
 impl FromStr for Range {
     type Err = Error;
 
-    /// Reads `<start>/<end>`, each in the [`Stamp`] grammar. An `end` before `start`
-    /// is an error; a stamp that does not read returns that stamp's error.
+    /// Reads `<start>/<end>`, each in the [`Stamp`] grammar. It gives [`Error::Range`]
+    /// with no `/`, [`Error::Reversed`] for an `end` before `start`, and the error of a
+    /// stamp that does not read.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (start, end) = s.split_once('/').ok_or(Error::Range)?;
         Self::new(start.parse()?, end.parse()?).ok_or(Error::Reversed)
@@ -518,8 +519,9 @@ impl Rate {
     ///
     /// # Errors
     ///
-    /// When `num` or `den` is zero, or when one sample period is under 1 ns or does not
-    /// fit in a [`Span`]. Under 1 ns, two samples would share a [`Stamp`].
+    /// [`Error::Zero`] when `num` or `den` is zero. [`Error::Period`] when one sample
+    /// period is under 1 ns or does not fit in a [`Span`]. Under 1 ns, two samples
+    /// would share a [`Stamp`].
     pub fn new(num: u64, den: u64) -> Result<Self, Error> {
         if num == 0 || den == 0 {
             return Err(Error::Zero);
