@@ -544,7 +544,7 @@ fn record(
                 panic!("invariant: the pool of the ring holds a handoff: {error}")
             }
         };
-        if let Err(buffer::Error::Large(limit)) = appended {
+        if let Err(buffer::Rejected::Large(limit)) = appended {
             panic!("invariant: a record holds one handoff: {limit}");
         }
         if room(appended)? {
@@ -609,25 +609,12 @@ fn range(accepted: &Accepted) -> frame::Range {
 ///
 /// [`Error::Large`] when no record holds the batch, and [`Error::Disk`] after a
 /// failed commit.
-///
-/// # Panics
-///
-/// If the append failed as only an open fails.
-fn room(appended: Result<(), buffer::Error>) -> Result<bool, Error> {
-    use buffer::Error::{Damaged, Invalid, Length, Missing, Unfit, Version};
+fn room(appended: Result<(), buffer::Rejected>) -> Result<bool, Error> {
     match appended {
         Ok(()) => Ok(true),
-        Err(buffer::Error::Full { .. } | buffer::Error::Pool(_)) => Ok(false),
-        Err(buffer::Error::Large(_)) => Err(Error::Large),
-        Err(buffer::Error::Files(error)) => Err(Error::Disk(error)),
-        Err(
-            error @ (Length { .. }
-            | Missing
-            | Damaged
-            | Version(_)
-            | Unfit(_)
-            | Invalid { .. }),
-        ) => panic!("invariant: an append never fails as an open: {error}"),
+        Err(buffer::Rejected::Full { .. } | buffer::Rejected::Pool(_)) => Ok(false),
+        Err(buffer::Rejected::Large(_)) => Err(Error::Large),
+        Err(buffer::Rejected::Files(error)) => Err(Error::Disk(error)),
     }
 }
 
@@ -1646,10 +1633,7 @@ mod tests {
                 operation: Operation::Sync,
                 code: 5,
             };
-            assert_eq!(
-                shard.committed().await,
-                Err(buffer::Error::Files(failed.clone()))
-            );
+            assert_eq!(shard.committed().await, Err(failed.clone()));
             let disk = Error::Disk(failed);
             assert_eq!(
                 disk.to_string(),
