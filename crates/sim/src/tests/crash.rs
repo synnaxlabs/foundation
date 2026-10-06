@@ -780,3 +780,64 @@ fn a_crash_drops_the_waker_of_a_leaked_close() {
         assert_eq!(Arc::strong_count(&idle), 1, "{crash:?}");
     }
 }
+
+/// A run with two nodes, each with a disk of 1 MiB.
+fn disks(seed: u64) -> (Sim, node::Node, node::Node) {
+    let mut sim = sim(seed);
+    let config = node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    };
+    let a = sim.node(config);
+    let b = sim.node(config);
+    (sim, a, b)
+}
+
+#[test]
+fn a_crash_keeps_the_ended_call_of_another_node() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, a, b) = disks(0);
+        let own = b.clone();
+        let other = b.shards().start(shard("b"), move |_| async move {
+            let (file, pool) = (create_synced(&own).await, pool());
+            let mut read = Box::pin(file.read_at(0, pool.alloc(1_024).unwrap()));
+            poll_fn(|cx| {
+                assert!(read.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            // The read ends before the crash of `a`, and its result waits past it.
+            until_crash(&own).await;
+            own.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(&read.await.unwrap()[..], &[1; 1_024][..]);
+        });
+        crash_after(&mut sim, &a, crash, |_| async {});
+        sim.run().unwrap();
+        other.unwrap().join().unwrap();
+    }
+}
+
+#[test]
+fn a_crash_keeps_the_close_of_another_node_waiting() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, a, b) = disks(0);
+        let own = b.clone();
+        let other = b.shards().start(shard("b"), move |_| async move {
+            let (file, pool) = (create_synced(&own).await, pool());
+            until_crash(&own).await;
+            let parts = [block(&pool, &[9; 1_024])];
+            let mut write = Box::pin(file.write_at(0, &parts));
+            poll_fn(|cx| {
+                assert!(write.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(write);
+            // The close waits for the write, which is in flight at the crash of `a`.
+            file.close().await;
+        });
+        crash_after(&mut sim, &a, crash, |_| async {});
+        sim.run().unwrap();
+        other.unwrap().join().unwrap();
+    }
+}
