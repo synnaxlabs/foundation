@@ -2166,7 +2166,7 @@ Storage classes used in the table:
 | Effective settings | Memory: a per-node cache of `spec::resolve` results | `mesh` | `home`, `transport`, `clock`, supervisor | `mesh` |
 | Document | Memory: made by a front end from files, or by SDK code | Front ends | `config`, kinds | `document` (X21) |
 | Diagnostic | Memory: made from a producer's error | Front ends, kinds, `document` | `config`, `ops` (text, `--json`, MCP) | `document` (DIAGNOSTICS) |
-| Selector | A value inside policies, readers, connectors, and access | Files, sessions | Every matcher | `types` (one matcher) |
+| Selector | A value inside policies, readers, connectors, and access, kept as written. Equality compares the texts in order, so equal selectors encode to equal bytes (#836) | Files, sessions | Every matcher | `types` (one matcher) |
 | Plan | A JSON artifact with stable change kinds | `ops plan` | `ops apply` (commits exactly it) | `config`, `ops` |
 
 ### 2.5 Connectors, time, status, and node-local state

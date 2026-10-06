@@ -49,8 +49,8 @@ impl Rules {
         }
         for (region, policy) in &self.policies {
             let reached = region.as_ref().is_none_or(|r| name.starts_with(r))
-                && policy.subjects().selector().matches(subject).is_some()
-                && policy.select().selector().matches(name).is_some();
+                && policy.subjects().matches(subject).is_some()
+                && policy.select().matches(name).is_some();
             if reached {
                 grant = grant.add(policy.allow(), policy.authority());
             }

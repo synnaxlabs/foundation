@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use spec::patterns::Patterns;
+use types::name::Selector;
 
 use super::*;
 
@@ -9,8 +9,8 @@ fn name(s: &str) -> Name {
 
 fn policy(subjects: &str, select: &str, allow: &[Action], authority: u8) -> Policy {
     Policy::new(
-        Patterns::new([subjects]).unwrap(),
-        Patterns::new([select]).unwrap(),
+        Selector::new([subjects]).unwrap(),
+        Selector::new([select]).unwrap(),
         allow.iter().copied().collect(),
         Authority(authority),
     )
