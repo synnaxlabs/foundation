@@ -23,6 +23,10 @@ use crate::record::{
 /// The body of a restart record: one chain value.
 const RESTART_LEN: usize = 4;
 
+/// Bytes of the whole blocks that hold a restart record: one block.
+const RESTART: usize = ALIGN;
+const _: () = assert!(HEADER_LEN + RESTART_LEN <= RESTART, "a restart record fits");
+
 /// The smallest body a layout allows: the table of one entry.
 const BODY_MIN: usize = entry::table_len(1);
 
@@ -95,9 +99,10 @@ impl Layout {
     ///
     /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
     /// under the table of one entry or over `u32::MAX`, when `area` is less than
-    /// twice the largest record less one block, or when the ring file (two header
-    /// blocks and the area) does not fit in a `u64`. An empty ring of that length
-    /// takes any record, wherever its head is.
+    /// twice the largest record (a 9-byte header and `body_max`, in whole 4096-byte
+    /// blocks), or when the ring file (two header blocks and the area) does not fit
+    /// in a `u64`. A ring of that length that holds only its restart record takes
+    /// any record, wherever the restart record is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         let window = HEADER_LEN
             .checked_add(body_max)
@@ -109,7 +114,9 @@ impl Layout {
                 if body.contains(&body_max)
                     && area.is_multiple_of(BLOCK)
                     && area <= u64::MAX - AREA_START
-                    && window.saturating_mul(2) - BLOCK <= area =>
+                    // The restart record, the skip of less than a record before
+                    // the end of the area, then the record.
+                    && to_u64(RESTART) + (window - BLOCK) + window <= area =>
             {
                 Ok(Self {
                     area,
@@ -901,7 +908,9 @@ mod tests {
                     8 * block,
                     entry::table_len(1) - 1,
                 ),
-                ("an area under two records less a block", 2 * block, 4088),
+                ("an area of one record of two blocks", 2 * block, 4088),
+                ("an area of one record of one block", block, 4087),
+                ("an area of two records less a block", 3 * block, 4088),
                 ("a body over u32::MAX", u64::MAX - 4095, usize::MAX),
                 ("a record size over u64", u64::MAX - 4095, usize::MAX - 8),
                 ("a file over u64", u64::MAX - 4095, 4087),
@@ -924,34 +933,39 @@ mod tests {
 
         #[test]
         fn takes_a_body_of_one_entry_table() {
-            let window = Layout::new(4096, entry::table_len(1)).map(|l| l.window);
+            let window = Layout::new(2 * 4096, entry::table_len(1)).map(|l| l.window);
             assert_eq!(window, Ok(4096));
         }
 
         #[test]
-        fn takes_an_area_of_two_records_less_a_block() {
+        fn takes_an_area_of_two_records() {
             assert_eq!(
-                Layout::new(4096, 4087).map(|layout| layout.window),
+                Layout::new(2 * 4096, 4087).map(|layout| layout.window),
                 Ok(4096)
             );
-            assert_eq!(Layout::new(3 * 4096, 4088).map(|l| l.window), Ok(8192));
+            assert_eq!(Layout::new(4 * 4096, 4088).map(|l| l.window), Ok(8192));
         }
 
         proptest! {
+            /// The smallest area is twice the largest record. A ring of that area
+            /// that holds only its restart record takes its largest record,
+            /// wherever the restart record is.
             #[test]
-            fn lets_an_empty_ring_take_the_largest_record_at_any_head(
-                blocks in 1..4u64,
-                head in 0..64u64,
+            fn takes_the_largest_record_after_the_restart_record_at_any_tail(
+                body_max in entry::table_len(1)..=3 * ALIGN - HEADER_LEN,
+                tail in 0..64u64,
             ) {
-                let body_max = index(blocks * 4096) - HEADER_LEN;
-                let area = (2 * blocks - 1) * 4096;
-                let layout = Layout::new(area, body_max).expect("the smallest area");
-                let mut cursor = Cursor::new(layout, at(head, 0), PIECE);
+                let record = to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN));
+                let under = 2 * record - 4096;
+                let unfit = Unfit { area: under, body_max };
+                prop_assert_eq!(Layout::new(under, body_max), Err(unfit));
+                let layout =
+                    Layout::new(2 * record, body_max).expect("the smallest area");
+                let mut cursor = Cursor::new(layout, at(tail, 0), PIECE);
                 let zeros = vec![0; cursor.window().len];
                 prop_assert_eq!(cursor.next(&zeros), Ok(Step::End));
                 let (mut writer, _) =
-                    cursor.writer(head * 4096, 1).expect("the ring is empty");
-                writer.release(writer.head());
+                    cursor.writer(tail * 4096, 1).expect("the ring is empty");
                 prop_assert_eq!(writer.append(body_max).map(drop), Ok(()));
             }
         }
@@ -1104,7 +1118,7 @@ mod tests {
 
         #[test]
         fn is_full_when_the_wrap_passes_the_end_of_the_offsets() {
-            let small = Layout::new(3 * 4096, 4088).expect("the sizes make a ring");
+            let small = Layout::new(5 * 4096, 4088).expect("the sizes make a ring");
             let mut writer = opened(small, u64::MAX - 12287);
             let full = Full {
                 needed: 3 * 4096,
@@ -1168,13 +1182,13 @@ mod tests {
 
         /// A ring that holds the long record and its restart record.
         fn long_layout() -> Layout {
-            let area = to_u64(2 * LONG - ALIGN);
-            Layout::new(area, LONG - HEADER_LEN).expect("the long sizes make a ring")
+            Layout::new(to_u64(2 * LONG), LONG - HEADER_LEN)
+                .expect("the long sizes make a ring")
         }
 
         /// The area of [`long_layout`] with one long data record at its start.
         fn long_area() -> Vec<u8> {
-            let mut area = vec![0; 2 * LONG - ALIGN];
+            let mut area = vec![0; 2 * LONG];
             let body = vec![7; LONG - HEADER_LEN];
             put(&mut area, 0, START.chain, Kind::Data.byte(), &body);
             area
