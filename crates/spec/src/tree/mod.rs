@@ -90,16 +90,17 @@ impl Chunks {
     }
 
     // Reads the child that entry `index` of `parent` names, and checks that it fits
-    // there: one level down, with keys above the entry before and up to the entry.
-    fn child(&self, parent: &Node<'_>, index: usize) -> Result<Node<'_>, Error> {
+    // there: one level down, with keys above its floor and up to the entry.
+    fn child<'a>(&'a self, parent: &Node<'a>, index: usize) -> Result<Node<'a>, Error> {
         let entry = parent
             .entries
             .get(index)
             .ok_or(Error::Corrupt(parent.digest))?;
         let before = index.checked_sub(1).and_then(|at| parent.entries.get(at));
-        let child = self.node(entry.child())?;
+        let mut child = self.node(entry.child())?;
+        child.floor = before.map(|before| before.key).or(parent.floor);
         let above =
-            |first: &Entry<'_>| before.is_none_or(|before| before.key < first.key);
+            |first: &Entry<'_>| child.floor.is_none_or(|floor| floor < first.key);
         let fits = parent.level.checked_sub(1) == Some(child.level)
             && child.last_key() == Some(entry.key)
             && child.entries.first().is_some_and(above);
