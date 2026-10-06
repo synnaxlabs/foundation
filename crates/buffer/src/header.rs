@@ -231,7 +231,6 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    use crate::entry::table_len;
     use crate::record::AREA_START;
 
     fn layout(area: u64, body_max: usize) -> Layout {
@@ -260,7 +259,7 @@ mod tests {
         (1..64u64, 0..64u64, any::<u32>(), any::<u64>()).prop_flat_map(
             |(blocks, tail, chain, seq)| {
                 let most = usize::try_from(blocks * 4096).expect("a small size") - 9;
-                (table_len(1)..=most).prop_map(move |body_max| {
+                (4087..=most).prop_map(move |body_max| {
                     header(2 * blocks * 4096, body_max, tail * 4096, chain, seq)
                 })
             },
@@ -364,12 +363,12 @@ mod tests {
         let unaligned = Error::Unaligned(Unaligned { offset: 4097 });
         let part = (8 * 4096u64 + 1).to_le_bytes();
         let off = 4097u64.to_le_bytes();
-        let small = u32::try_from(table_len(1) - 1).expect("a small size");
+        let small = 4086u32;
         let cases: [(&str, Patch<'_>, Error); 4] = [
             (
-                "a body under one entry table",
+                "a body under one block less the header",
                 &[(18, &small.to_le_bytes())],
-                unfit(8 * 4096, table_len(1) - 1),
+                unfit(8 * 4096, 4086),
             ),
             (
                 "an area of a part block",

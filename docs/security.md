@@ -28,7 +28,7 @@ attacker can use is a GitHub issue with the `security` label and a failing test.
 | Subject | Sign hellos and session opens with a key in the spec | Go past its `access` allows |
 | Member node | Act as itself and as the connectors placed on it; read and change the traffic of subjects connected through it; use their open sessions until the hello expires; drop or delay what it forwards | Hold another node's key; change the spec |
 | Home of an index | Write any data into the index, run its gate, lie to its readers | Act outside its placement |
-| Voter | Vote and stall its region | Forge a spec change or move a home outside placement |
+| Voter | Vote and stall its region; break `raft` safety (Node to node) | Forge a spec change or move a home outside placement |
 | Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
 | Local user | Read and write the node's files, and so hold its keys and cached secrets and become that member node | Read memory of the process |
@@ -142,7 +142,15 @@ state on `main`.
   campaign. Only a voter can: `mesh` admits a `raft` message only from a voter of the
   newest configuration (RAFT VOTERS, #654). Not built (`mesh`). A voter that lies can
   also break safety, because a false `AppendReply` counts as held, so `raft` trusts
-  its voters. No change in `raft` (RAFT SURFACE, #352 item 2).
+  its voters. No change in `raft` for that (RAFT SURFACE, #352 item 2). Proof of
+  election closes the `u64::MAX` case (#750).
+- A voter that does not lead can make a node commit a voter set alone. It sends a
+  heartbeat or an `Append` of a higher term, or a reply of a higher term and then
+  either, or an `Append` in the node's term before the node hears that term's
+  leader. The node follows the voter and writes and commits what it sends. So two
+  nodes can apply different entries at one index, and a forged voter set can take
+  the group over (RAFT LOG). Open by decision; `raft/tests/it/hostile.rs` pins it.
+  The long-term fix is a proof of election (#750).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.

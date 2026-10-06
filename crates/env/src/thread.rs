@@ -59,8 +59,9 @@ impl fmt::Debug for Handle {
 /// Why a thread could not start.
 ///
 /// ```
-/// let e = env::thread::Error::Pin { name: "shard-0".into(), core: 0 };
-/// assert_eq!(e.to_string(), "cannot pin thread shard-0 to core 0");
+/// let name = "shard-0".into();
+/// let e = env::thread::Error::Pin { name, core: 0, reason: "CPU offline".into() };
+/// assert_eq!(e.to_string(), "cannot pin thread shard-0 to core 0: CPU offline");
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -77,6 +78,8 @@ pub enum Error {
         name: String,
         /// The core it asked for.
         core: usize,
+        /// What the OS or the simulation reported.
+        reason: String,
     },
 }
 
@@ -86,8 +89,8 @@ impl fmt::Display for Error {
             Self::Start { name, reason } => {
                 write!(f, "cannot start thread {name}: {reason}")
             }
-            Self::Pin { name, core } => {
-                write!(f, "cannot pin thread {name} to core {core}")
+            Self::Pin { name, core, reason } => {
+                write!(f, "cannot pin thread {name} to core {core}: {reason}")
             }
         }
     }
@@ -152,12 +155,14 @@ mod tests {
         }
 
         #[test]
-        fn names_the_thread_and_the_core_when_it_cannot_pin() {
+        fn names_the_thread_the_core_and_the_reason_when_it_cannot_pin() {
             let e = Error::Pin {
                 name: "shard-3".into(),
                 core: 3,
+                reason: "CPU offline".into(),
             };
-            assert_eq!(e.to_string(), "cannot pin thread shard-3 to core 3");
+            let message = "cannot pin thread shard-3 to core 3: CPU offline";
+            assert_eq!(e.to_string(), message);
         }
     }
 
