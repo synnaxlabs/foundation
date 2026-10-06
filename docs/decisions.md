@@ -1698,6 +1698,18 @@ How to read this record:
   differently on `os` and `sim`. A socket, listener, or port may move to another thread
   before its first poll. The first poll binds it to its thread, and a poll on another
   thread panics.
+- **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
+  to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
+  node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
+  once at start. `Shards::start` panics on a core then, as on a core past the count:
+  the answer never changes, so a core there is a bug in `node`. `Error::Pin` means
+  only a real fault, such as a CPU that went offline after the read, and carries the
+  cause as a `reason`. This is the advisor's choice A, narrowed from the set of cores
+  that can pin to a bool: the index map of ENV SEAMS makes that set always
+  `0..cores()` or empty. Lost: `Error::Pin` for a core on a node that cannot pin, which
+  gives two contracts for the same kind of bug, and a caller tells the bug from a
+  fault only by its `reason` text; each driver checks the core itself, which puts one
+  rule in each driver. Windows pinning waits for the person (#477). Amends ENV SEAMS.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -2651,7 +2663,7 @@ Parameters and later choices, recorded and not asked:
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
-  connector.
+  connector; SHARD PIN (#718), the advisor's choice A narrowed to a bool.
 
 ### 5.3 Parameters for experiment
 
