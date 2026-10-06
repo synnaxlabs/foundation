@@ -10,13 +10,15 @@ use env::files::{Error, File, Files, Mode, Operation};
 
 const KIB: u64 = 1 << 10;
 
-/// A directory of its own for one test, removed when it drops.
+/// A directory of its own for the test on this thread, removed when it drops.
 struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new(name: &str) -> Self {
-        let name = format!("foundation-os-files-{}-{name}", std::process::id());
-        let dir = std::env::temp_dir().join(name);
+    fn new() -> Self {
+        let thread = std::thread::current();
+        let test = thread.name().expect("invariant: libtest names the thread");
+        let name = format!("foundation-os-{}-{test}", std::process::id());
+        let dir = std::env::temp_dir().join(name.replace("::", "-"));
         std::fs::create_dir(&dir).unwrap();
         Self(dir)
     }
@@ -38,8 +40,8 @@ fn files(dir: &Path, name: &str) -> (Files, env::thread::Handle) {
 
 /// Runs `body` with the files of a scratch directory of its own and the path of
 /// their data directory.
-fn run<F: Future<Output = ()>>(name: &str, body: impl FnOnce(Files, PathBuf) -> F) {
-    let scratch = Scratch::new(name);
+fn run<F: Future<Output = ()>>(body: impl FnOnce(Files, PathBuf) -> F) {
+    let scratch = Scratch::new();
     let (files, thread) = files(&scratch.0, "files");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -81,7 +83,7 @@ fn io(path: &str, operation: Operation, code: i32) -> Error {
 
 #[test]
 fn a_read_sees_the_parts_of_a_write_back_to_back() {
-    run("write", |files, _| async move {
+    run(|files, _| async move {
         let pool = pool();
         let file = create(&files, "a", 4 * KIB).await;
         let parts = [block(&pool, b"abc"), block(&pool, b"defgh")];
@@ -92,7 +94,7 @@ fn a_read_sees_the_parts_of_a_write_back_to_back() {
 
 #[test]
 fn a_write_of_more_parts_than_one_call_takes_keeps_their_order() {
-    run("parts", |files, _| async move {
+    run(|files, _| async move {
         let pool = pool();
         let file = create(&files, "a", 8 * KIB).await;
         let bytes: Vec<[u8; 4]> = (0..1_500_u32).map(u32::to_le_bytes).collect();
@@ -104,7 +106,7 @@ fn a_write_of_more_parts_than_one_call_takes_keeps_their_order() {
 
 #[test]
 fn a_dropped_write_ends_before_a_later_read() {
-    run("dropped", |files, _| async move {
+    run(|files, _| async move {
         let pool = pool();
         let file = create(&files, "a", 4 * KIB).await;
         {
@@ -124,7 +126,7 @@ fn a_dropped_write_ends_before_a_later_read() {
 
 #[test]
 fn create_makes_a_zeroed_file_of_its_length_in_the_data_directory() {
-    run("create", |files, data| async move {
+    run(|files, data| async move {
         let pool = pool();
         files.create_dir(Path::new("ring")).await.unwrap();
         let file = create(&files, "ring/0", 12 * KIB).await;
@@ -137,7 +139,7 @@ fn create_makes_a_zeroed_file_of_its_length_in_the_data_directory() {
 
 #[test]
 fn create_keeps_the_bytes_of_a_file_that_is_there() {
-    run("reopen", |files, _| async move {
+    run(|files, _| async move {
         let pool = pool();
         let file = create(&files, "a", 4 * KIB).await;
         file.write_at(0, &[block(&pool, b"old")]).await.unwrap();
@@ -149,7 +151,7 @@ fn create_keeps_the_bytes_of_a_file_that_is_there() {
 
 #[test]
 fn create_allocates_an_empty_file_that_is_there() {
-    run("empty", |files, data| async move {
+    run(|files, data| async move {
         std::fs::write(data.join("a"), b"").unwrap();
         let file = create(&files, "a", 4 * KIB).await;
         assert_eq!(file.len(), 4 * KIB);
@@ -158,7 +160,7 @@ fn create_allocates_an_empty_file_that_is_there() {
 
 #[test]
 fn create_of_no_bytes_makes_an_empty_file() {
-    run("zero", |files, data| async move {
+    run(|files, data| async move {
         let file = create(&files, "a", 0).await;
         assert_eq!(file.len(), 0);
         assert_eq!(std::fs::metadata(data.join("a")).unwrap().len(), 0);
@@ -167,7 +169,7 @@ fn create_of_no_bytes_makes_an_empty_file() {
 
 #[test]
 fn create_of_another_length_gives_length() {
-    run("length", |files, _| async move {
+    run(|files, _| async move {
         create(&files, "a", 4 * KIB).await.close().await;
         let mode = Mode::Create { len: 8 * KIB };
         let found = files.open(Path::new("a"), mode).await.unwrap_err();
@@ -182,7 +184,7 @@ fn create_of_another_length_gives_length() {
 
 #[test]
 fn an_open_of_a_missing_file_gives_not_found() {
-    run("missing", |files, _| async move {
+    run(|files, _| async move {
         for mode in [Mode::Read, Mode::Write] {
             let found = files.open(Path::new("a"), mode).await.unwrap_err();
             assert_eq!(found, Error::NotFound { path: "a".into() });
@@ -195,7 +197,7 @@ fn an_open_of_a_missing_file_gives_not_found() {
 
 #[test]
 fn a_write_open_of_a_held_file_gives_busy_and_a_read_open_does_not() {
-    run("busy", |files, data| async move {
+    run(|files, data| async move {
         let held = create(&files, "a", 4 * KIB).await;
         let (other, thread) = self::files(data.parent().unwrap(), "other");
         for files in [&files, &other] {
@@ -212,7 +214,7 @@ fn a_write_open_of_a_held_file_gives_busy_and_a_read_open_does_not() {
 
 #[test]
 fn a_write_open_after_a_close_or_a_drop_of_the_holder_succeeds() {
-    run("release", |files, _| async move {
+    run(|files, _| async move {
         create(&files, "a", 4 * KIB).await.close().await;
         let file = files.open(Path::new("a"), Mode::Write).await.unwrap();
         drop(file);
@@ -222,7 +224,7 @@ fn a_write_open_after_a_close_or_a_drop_of_the_holder_succeeds() {
 
 #[test]
 fn a_read_past_the_end_of_a_file_cut_short_gives_eio() {
-    run("short", |files, data| async move {
+    run(|files, data| async move {
         let pool = pool();
         let file = create(&files, "a", 4 * KIB).await;
         std::fs::write(data.join("a"), [7; 3_000]).unwrap();
@@ -233,7 +235,7 @@ fn a_read_past_the_end_of_a_file_cut_short_gives_eio() {
 
 #[test]
 fn an_open_of_a_directory_gives_eisdir() {
-    run("directory", |files, _| async move {
+    run(|files, _| async move {
         files.create_dir(Path::new("d")).await.unwrap();
         for mode in [Mode::Read, Mode::Write, Mode::Create { len: KIB }] {
             let found = files.open(Path::new("d"), mode).await.unwrap_err();
@@ -244,7 +246,7 @@ fn an_open_of_a_directory_gives_eisdir() {
 
 #[test]
 fn list_gives_the_names_in_a_directory() {
-    run("list", |files, _| async move {
+    run(|files, _| async move {
         files.create_dir(Path::new("d")).await.unwrap();
         create(&files, "d/b", KIB).await;
         create(&files, "d/a", KIB).await;
@@ -263,7 +265,7 @@ fn list_gives_the_names_in_a_directory() {
 
 #[test]
 fn create_dir_of_a_directory_that_is_there_succeeds() {
-    run("dir", |files, _| async move {
+    run(|files, _| async move {
         files.create_dir(Path::new("d")).await.unwrap();
         files.create_dir(Path::new("d")).await.unwrap();
         assert_eq!(
@@ -275,7 +277,7 @@ fn create_dir_of_a_directory_that_is_there_succeeds() {
 
 #[test]
 fn create_dir_over_a_file_or_in_a_missing_parent_fails() {
-    run("dir-fails", |files, _| async move {
+    run(|files, _| async move {
         create(&files, "a", KIB).await;
         let found = files.create_dir(Path::new("a")).await.unwrap_err();
         assert_eq!(found, io("a", Operation::CreateDir, 17));
@@ -286,7 +288,7 @@ fn create_dir_over_a_file_or_in_a_missing_parent_fails() {
 
 #[test]
 fn remove_removes_a_file() {
-    run("remove", |files, _| async move {
+    run(|files, _| async move {
         create(&files, "a", KIB).await.close().await;
         files.remove(Path::new("a")).await.unwrap();
         assert!(files.list(Path::new("")).await.unwrap().is_empty());
@@ -296,7 +298,7 @@ fn remove_removes_a_file() {
 
 #[test]
 fn sync_dir_syncs_a_directory_that_is_there() {
-    run("sync-dir", |files, _| async move {
+    run(|files, _| async move {
         files.create_dir(Path::new("d")).await.unwrap();
         files.sync_dir(Path::new("d")).await.unwrap();
         files.sync_dir(Path::new("")).await.unwrap();
@@ -307,7 +309,7 @@ fn sync_dir_syncs_a_directory_that_is_there() {
 
 #[test]
 fn a_sync_after_a_write_succeeds() {
-    run("sync", |files, _| async move {
+    run(|files, _| async move {
         let pool = pool();
         let file = create(&files, "a", 4 * KIB).await;
         file.write_at(0, &[block(&pool, b"x")]).await.unwrap();
@@ -318,7 +320,7 @@ fn a_sync_after_a_write_succeeds() {
 #[test]
 fn free_drops_by_the_bytes_of_a_synced_write() {
     const LEN: u64 = 64 << 20;
-    run("free", |files, _| async move {
+    run(|files, _| async move {
         let pool = pool();
         let part = block(&pool, &vec![1; 512 << 10]);
         let before = files.free().await.unwrap();
@@ -331,13 +333,23 @@ fn free_drops_by_the_bytes_of_a_synced_write() {
 }
 
 /// The error of `os::files` on `dir`.
+#[test]
+fn a_disk_shows_as_disk() {
+    let scratch = Scratch::new();
+    let (disk, thread) =
+        os::files(&scratch.0, &os::threads().unwrap(), "files").unwrap();
+    assert_eq!(format!("{disk:?}"), "Disk { .. }");
+    drop(disk);
+    thread.join().unwrap();
+}
+
 fn dir_error(dir: &Path) -> os::Error {
     os::files(dir, &os::threads().unwrap(), "files").unwrap_err()
 }
 
 #[test]
 fn files_of_a_missing_dir_gives_dir_and_makes_nothing() {
-    let scratch = Scratch::new("missing");
+    let scratch = Scratch::new();
     let found = dir_error(&scratch.0.join("a"));
     assert_eq!(
         found.to_string(),
@@ -349,7 +361,7 @@ fn files_of_a_missing_dir_gives_dir_and_makes_nothing() {
 
 #[test]
 fn files_in_a_directory_under_a_file_gives_dir() {
-    let scratch = Scratch::new("not-dir");
+    let scratch = Scratch::new();
     std::fs::write(scratch.0.join("a"), b"").unwrap();
     let found = dir_error(&scratch.0.join("a"));
     assert_eq!(
