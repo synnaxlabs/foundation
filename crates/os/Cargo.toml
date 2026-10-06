@@ -9,7 +9,7 @@ publish.workspace = true
 block = { path = "../block" }
 env = { path = "../env" }
 rustix = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["thread"] }

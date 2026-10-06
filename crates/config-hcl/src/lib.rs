@@ -23,7 +23,7 @@ use std::fmt;
 use document::Span;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::encoding::TooDeep;
-use types::name::{self, Name};
+use types::name;
 
 pub use parse::read;
 pub use unwritable::Unwritable;
@@ -123,16 +123,9 @@ impl From<&Error> for Diagnostic {
             Error::Syntax { span, expected } => syntax(*span, expected),
             Error::Unclosed { span, opener, part } => part.diagnostic(*span, *opener),
             Error::Form { span, form } => form.diagnostic(*span),
-            Error::Name { span, .. } => Self::new(
-                NAME,
-                Some(*span),
-                "the reference is not a valid name".into(),
-                format!(
-                    "Use segments of ASCII letters, digits, `_`, and `-`, split by \
-                     dots, with at most {} bytes in all",
-                    Name::MAX_BYTES
-                ),
-            ),
+            Error::Name { span, error } => {
+                Self::new(NAME, Some(*span), error.to_string(), error.fix().into())
+            }
             Error::Number { span, problem } => problem.diagnostic(*span),
             Error::Escape { span } => Self::new(
                 ESCAPE,
@@ -633,12 +626,12 @@ mod tests {
             (
                 Error::Name {
                     span: span(7),
-                    error: "a.@".parse::<Name>().unwrap_err(),
+                    error: "a.@".parse::<name::Name>().unwrap_err(),
                 },
                 "hcl.name",
-                "the reference is not a valid name",
-                "Use segments of ASCII letters, digits, `_`, and `-`, split by dots, \
-                 with at most 255 bytes in all",
+                "\"a.@\" has a segment that is not valid: \"@\"",
+                "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
+                 and no other character",
             ),
             (
                 Error::Number {
@@ -734,7 +727,7 @@ mod tests {
         let mut every = vec![
             Error::Name {
                 span: span(7),
-                error: "a.@".parse::<Name>().unwrap_err(),
+                error: "a.@".parse::<name::Name>().unwrap_err(),
             },
             Error::Number {
                 span: span(7),

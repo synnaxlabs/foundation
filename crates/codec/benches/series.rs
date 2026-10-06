@@ -1,11 +1,12 @@
 //! The time to encode, validate, and decode series shaped like sensor data, and
-//! series that FFOR and delta pack at chosen bit widths. Before it times anything, it
-//! checks that each full series compresses at least as well as its floor.
+//! series that FFOR and delta pack at chosen bit widths. `decoder` decodes one vector
+//! at a time. Before it times anything, it checks that each full series compresses at
+//! least as well as its floor.
 
 use std::f64::consts::TAU;
 use std::fmt;
 
-use codec::{Encoder, VECTOR_LEN, max_len};
+use codec::{Decoder, Encoder, VECTOR_LEN, max_len};
 use divan::Bencher;
 use divan::counter::ItemsCount;
 use types::sample::{Scalar, Type};
@@ -190,6 +191,11 @@ fn cases() -> impl Iterator<Item = Case> {
         .flat_map(|shape| shape.lens.iter().map(move |&len| Case { shape, len }))
 }
 
+/// The cases of a scalar type, which a [`Decoder`] reads.
+fn scalar_cases() -> impl Iterator<Item = Case> {
+    cases().filter(|case| matches!(case.shape.data_type, Type::Scalar(_)))
+}
+
 /// A splitmix64 generator.
 struct Random(u64);
 
@@ -360,5 +366,21 @@ fn decode(bencher: Bencher<'_, '_>, case: Case) {
             divan::black_box(&bytes),
             divan::black_box(&mut out),
         )
+    });
+}
+
+#[divan::bench(args = scalar_cases(), sample_count = 1000)]
+fn decoder(bencher: Bencher<'_, '_>, case: Case) {
+    let bytes = case.shape.encoded(case.len);
+    let Type::Scalar(scalar) = case.shape.data_type else {
+        panic!("invariant: a decoder case is a scalar");
+    };
+    let mut out = vec![0; VECTOR_LEN * scalar.width()];
+    bencher.counter(ItemsCount::new(case.len)).bench_local(|| {
+        let len = divan::black_box(case.len);
+        let mut decoder = Decoder::new(scalar, len, divan::black_box(&bytes));
+        while let Some(vector) = decoder.next(divan::black_box(&mut out)) {
+            divan::black_box_drop(vector);
+        }
     });
 }

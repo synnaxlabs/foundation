@@ -1810,15 +1810,20 @@ c = "°C # not a comment"
         const ESCAPE: &str = "the string has an escape that HCL does not have. \
                               Use `\\n`, `\\r`, `\\t`, `\\\"`, `\\\\`, `\\uNNNN`, or \
                               `\\UNNNNNNNN`";
-        const NAME: &str = "the reference is not a valid name. Use segments of ASCII \
-                            letters, digits, `_`, and `-`, split by dots, with at \
-                            most 255 bytes in all";
         const NUMBER: &str = "the number is out of range. Use an integer that fits \
                               in 128 bits, or a float that fits in 64 bits";
         const MALFORMED: &str = "the number is not valid. Write a number such as \
                                  `1.5e3`, or put the text in quotes to make a string";
         const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
                               give it a different key";
+
+        /// The text of a bad segment error: `message`, then its fix.
+        fn bad_segment(message: &str) -> String {
+            format!(
+                "{message}. Use one or more ASCII letters, digits, `_`, and `-` in \
+                 that segment, and no other character"
+            )
+        }
 
         #[test]
         fn refuses_an_escape_that_hcl_does_not_have() {
@@ -2300,37 +2305,61 @@ c = "°C # not a comment"
                 span: on(4, 260),
                 error,
             };
-            check(&format!("r = {long}"), &[(name, NAME)]);
+            let message = "a name or pattern is 256 bytes long, more than the limit of \
+                           255 bytes. Use fewer or shorter segments";
+            check(&format!("r = {long}"), &[(name, message)]);
         }
 
         #[test]
         fn refuses_each_reference_outside_ascii() {
-            let name = |text: &str, span| {
-                let error = text.parse::<Name>().unwrap_err();
-                (Error::Name { span, error }, NAME)
+            let name = |text: &str, span| Error::Name {
+                span,
+                error: text.parse::<Name>().unwrap_err(),
             };
             check(
                 "a = x.température\nb = [é]\nc = f(x.é)\n",
                 &[
-                    name("x.température", span(at(4, 0, 4), at(18, 0, 17))),
-                    name("é", span(at(24, 1, 5), at(26, 1, 6))),
-                    name("x.é", span(at(34, 2, 6), at(38, 2, 9))),
+                    (
+                        name("x.température", span(at(4, 0, 4), at(18, 0, 17))),
+                        &bad_segment(
+                            "\"x.température\" has a segment that is not valid: \
+                             \"température\"",
+                        ),
+                    ),
+                    (
+                        name("é", span(at(24, 1, 5), at(26, 1, 6))),
+                        &bad_segment(r#""é" has a segment that is not valid: "é""#),
+                    ),
+                    (
+                        name("x.é", span(at(34, 2, 6), at(38, 2, 9))),
+                        &bad_segment(r#""x.é" has a segment that is not valid: "é""#),
+                    ),
                 ],
             );
         }
 
         #[test]
         fn refuses_a_string_index_that_is_not_a_segment() {
-            let name = |text: &str, span| {
-                let error = text.parse::<Name>().unwrap_err();
-                (Error::Name { span, error }, NAME)
+            let name = |text: &str, span| Error::Name {
+                span,
+                error: text.parse::<Name>().unwrap_err(),
             };
+            let wildcard = "\"plc.*\" uses a wildcard where it cannot. Use `*` and \
+                            `**` only as whole segments of a pattern, never in a name";
             check(
                 "a = plc[\"\"]\nb = plc[\"*\"]\nc = plc[<<EOT\nx\nEOT\n]\n",
                 &[
-                    name("plc.", on(4, 11)),
-                    name("plc.*", span(at(16, 1, 4), at(24, 1, 12))),
-                    name("plc.x\n", span(at(29, 2, 4), at(46, 5, 1))),
+                    (
+                        name("plc.", on(4, 11)),
+                        &bad_segment(r#""plc." has a segment that is not valid: """#),
+                    ),
+                    (name("plc.*", span(at(16, 1, 4), at(24, 1, 12))), wildcard),
+                    (
+                        name("plc.x\n", span(at(29, 2, 4), at(46, 5, 1))),
+                        &bad_segment(
+                            r#""plc.x\n" has a segment that is not valid: "x\n""#,
+                        ),
+                    ),
                 ],
             );
             let index = Error::Form {
@@ -2554,7 +2583,10 @@ c = "°C # not a comment"
                 &[
                     (Error::Document(repeat), REPEAT),
                     (null, NULL),
-                    (name, NAME),
+                    (
+                        name,
+                        &bad_segment(r#""é" has a segment that is not valid: "é""#),
+                    ),
                     (value, &needs("a value")),
                 ],
             );
