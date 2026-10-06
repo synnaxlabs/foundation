@@ -438,8 +438,10 @@ How to read this record:
   records. An open of a header with a smaller `body_max` fails with `Unfit` (#627).
   `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
   one entry, at least `Layout::ENTRY_MAX_MIN` (4032); a batch of more entries holds
-  less. An entry has no part, one, or two; `append` takes them owned and drops them
-  when it fails (#582).
+  less. `Layout::check` gives the `Limit` that `append` would refuse a batch with,
+  from its counts of entries, parts, and bytes, so the home checks a frame before it
+  takes the blocks of its entries (#795). An entry has no part, one, or two; `append`
+  takes them owned and drops them when it fails (#582).
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
