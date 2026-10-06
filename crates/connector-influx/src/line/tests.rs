@@ -47,7 +47,7 @@ fn value(text: &str) -> Value {
         _ if text.ends_with('u') => {
             Value::Unsigned(text.trim_end_matches('u').parse().unwrap())
         }
-        _ => Value::Float(text.parse().unwrap()),
+        _ => Value::Float(float(text.parse().unwrap())),
     }
 }
 
@@ -74,8 +74,8 @@ fn parse(line: &str) -> Parsed {
     )
 }
 
-fn key(key: &str) -> Key {
-    Key::new(key).unwrap()
+fn float(value: f64) -> Float {
+    Float::new(value).unwrap()
 }
 
 fn text(out: &[u8]) -> &str {
@@ -84,18 +84,20 @@ fn text(out: &[u8]) -> &str {
 
 #[test]
 fn writes_one_known_line() {
-    let measurement =
-        Measurement::new("plant", &[("site", "west"), ("line", "a b")]).unwrap();
-    let (temp, count, total, open) = (key("temp"), key("n"), key("total"), key("open"));
+    let measurement = Measurement::new(
+        "plant",
+        &[("site", "west"), ("line", "a b")],
+        &["temp", "n", "total", "open"],
+    )
+    .unwrap();
     let mut out = b"before\n".to_vec();
-    let fields = [
-        (&temp, Value::Float(21.5)),
-        (&count, Value::Integer(-3)),
-        (&total, Value::Unsigned(7)),
-        (&open, Value::Boolean(true)),
+    let values = [
+        Some(Value::Float(float(21.5))),
+        Some(Value::Integer(-3)),
+        Some(Value::Unsigned(7)),
+        Some(Value::Boolean(true)),
     ];
-    let written = measurement.line(&mut out, fields, Stamp::from_nanos(1_000));
-    assert_eq!(written, 4);
+    measurement.line(&mut out, &values, Stamp::from_nanos(1_000));
     assert_eq!(
         text(&out),
         "before\nplant,line=a\\ b,site=west temp=2.15e1,n=-3i,total=7u,open=t 1000\n"
@@ -103,11 +105,24 @@ fn writes_one_known_line() {
 }
 
 #[test]
-fn escapes_what_line_protocol_reads_as_syntax() {
-    let measurement = Measurement::new("a,b c=d", &[("k,=  ", "v,= ")]).unwrap();
-    let field = key("f,= ");
+fn escapes_as_the_specification_example() {
+    let measurement =
+        Measurement::new("my Measurement", &[("tag Key1", "tag Value1")], &["f"])
+            .unwrap();
     let mut out = Vec::new();
-    measurement.line(&mut out, [(&field, Value::Boolean(false))], Stamp::EPOCH);
+    measurement.line(&mut out, &[Some(Value::Integer(1))], Stamp::EPOCH);
+    assert_eq!(
+        text(&out),
+        "my\\ Measurement,tag\\ Key1=tag\\ Value1 f=1i 0\n"
+    );
+}
+
+#[test]
+fn escapes_what_line_protocol_reads_as_syntax() {
+    let measurement =
+        Measurement::new("a,b c=d", &[("k,=  ", "v,= ")], &["f,= "]).unwrap();
+    let mut out = Vec::new();
+    measurement.line(&mut out, &[Some(Value::Boolean(false))], Stamp::EPOCH);
     assert_eq!(
         text(&out),
         "a\\,b\\ c=d,k\\,\\=\\ \\ =v\\,\\=\\  f\\,\\=\\ =f 0\n"
@@ -115,33 +130,62 @@ fn escapes_what_line_protocol_reads_as_syntax() {
 }
 
 #[test]
-fn leaves_out_a_float_that_is_not_finite() {
-    let measurement = Measurement::new("m", &[]).unwrap();
-    let (a, b) = (key("a"), key("b"));
+fn leaves_out_a_field_with_no_value() {
+    let measurement = Measurement::new("m", &[], &["a", "b"]).unwrap();
     let mut out = b"x".to_vec();
-    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        let fields = [(&a, Value::Float(bad)), (&b, Value::Float(bad))];
-        assert_eq!(measurement.line(&mut out, fields, Stamp::EPOCH), 0);
-        assert_eq!(out, b"x", "no field left, so nothing is written");
-        let fields = [(&a, Value::Float(bad)), (&b, Value::Integer(1))];
-        assert_eq!(measurement.line(&mut out, fields, Stamp::EPOCH), 1);
-        assert_eq!(text(&out), "xm b=1i 0\n");
-        out.truncate(1);
-    }
-    assert_eq!(measurement.line(&mut out, [], Stamp::EPOCH), 0);
-    assert_eq!(out, b"x");
+    measurement.line(&mut out, &[None, None], Stamp::EPOCH);
+    assert_eq!(out, b"x", "no value, so nothing is written");
+    measurement.line(&mut out, &[None, Some(Value::Integer(1))], Stamp::EPOCH);
+    assert_eq!(text(&out), "xm b=1i 0\n");
 }
 
 #[test]
-fn refuses_a_name_line_protocol_cannot_carry() {
-    let cases = [
+#[should_panic(expected = "one value for each field")]
+fn panics_on_a_value_count_that_is_not_the_field_count() {
+    let measurement = Measurement::new("m", &[], &["a"]).unwrap();
+    measurement.line(&mut Vec::new(), &[], Stamp::EPOCH);
+}
+
+#[test]
+fn refuses_a_float_that_is_not_finite() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(Float::new(bad), None);
+    }
+    assert_eq!(Float::new(-0.5).map(Float::get), Some(-0.5));
+}
+
+fn refuses(cases: &[(Result<Measurement, Error>, Error, &str)]) {
+    for (got, error, message) in cases {
+        assert_eq!(got, &Err(error.clone()));
+        assert_eq!(error.to_string(), *message);
+    }
+}
+
+#[test]
+fn refuses_a_measurement_line_protocol_cannot_carry() {
+    refuses(&[
         (
-            Measurement::new("", &[]).err(),
-            Error::Empty,
-            "a name is empty",
+            Measurement::new("", &[], &["f"]),
+            Error::Empty(Part::Measurement),
+            "the measurement name is empty",
         ),
         (
-            Measurement::new("a\\b", &[]).err(),
+            Measurement::new("m", &[("", "v")], &["f"]),
+            Error::Empty(Part::TagKey),
+            "a tag key is empty",
+        ),
+        (
+            Measurement::new("m", &[("k", "")], &["f"]),
+            Error::Empty(Part::TagValue("k".into())),
+            "the value of the tag \"k\" is empty",
+        ),
+        (
+            Measurement::new("m", &[], &[""]),
+            Error::Empty(Part::FieldKey),
+            "a field key is empty",
+        ),
+        (
+            Measurement::new("a\\b", &[], &["f"]),
             Error::Character {
                 name: "a\\b".into(),
                 character: '\\',
@@ -149,7 +193,7 @@ fn refuses_a_name_line_protocol_cannot_carry() {
             "the name \"a\\\\b\" holds '\\\\', which line protocol cannot carry",
         ),
         (
-            Measurement::new("m", &[("k", "a\nb")]).err(),
+            Measurement::new("m", &[("k", "a\nb")], &["f"]),
             Error::Character {
                 name: "a\nb".into(),
                 character: '\n',
@@ -157,69 +201,89 @@ fn refuses_a_name_line_protocol_cannot_carry() {
             "the name \"a\\nb\" holds '\\n', which line protocol cannot carry",
         ),
         (
-            Measurement::new("m", &[("k\r", "v")]).err(),
+            Measurement::new("m", &[], &["f\r"]),
             Error::Character {
-                name: "k\r".into(),
+                name: "f\r".into(),
                 character: '\r',
             },
-            "the name \"k\\r\" holds '\\r', which line protocol cannot carry",
+            "the name \"f\\r\" holds '\\r', which line protocol cannot carry",
         ),
-        (
-            Measurement::new("m", &[("k", "")]).err(),
-            Error::Empty,
-            "a name is empty",
-        ),
-        (
-            Measurement::new("_m", &[]).err(),
-            Error::Reserved("_m".into()),
-            "the name \"_m\" starts with '_', which InfluxDB keeps for itself",
-        ),
-        (
-            Measurement::new("m", &[("_k", "v")]).err(),
-            Error::Reserved("_k".into()),
-            "the name \"_k\" starts with '_', which InfluxDB keeps for itself",
-        ),
-        (
-            Measurement::new("m", &[("k", "a"), ("k", "b")]).err(),
-            Error::Duplicate("k".into()),
-            "the tag key \"k\" comes more than once",
-        ),
-    ];
-    for (got, error, message) in cases {
-        assert_eq!(got, Some(error.clone()));
-        assert_eq!(error.to_string(), message);
-    }
+    ]);
 }
 
 #[test]
-fn checks_a_field_key_as_a_tag_key() {
-    assert_eq!(Key::new("").err(), Some(Error::Empty));
-    assert_eq!(Key::new("_f").err(), Some(Error::Reserved("_f".into())));
-    assert_eq!(
-        Key::new("f\\").err(),
-        Some(Error::Character {
-            name: "f\\".into(),
-            character: '\\'
-        })
-    );
-    let tag = Measurement::new("m", &[("k", "_v")]).unwrap();
+fn refuses_a_name_influxdb_keeps_or_repeats() {
+    refuses(&[
+        (
+            Measurement::new("_m", &[], &["f"]),
+            Error::Reserved("_m".into()),
+            "InfluxDB keeps the name \"_m\" for itself",
+        ),
+        (
+            Measurement::new("m", &[("_k", "v")], &["f"]),
+            Error::Reserved("_k".into()),
+            "InfluxDB keeps the name \"_k\" for itself",
+        ),
+        (
+            Measurement::new("m", &[], &["_f"]),
+            Error::Reserved("_f".into()),
+            "InfluxDB keeps the name \"_f\" for itself",
+        ),
+        (
+            Measurement::new("m", &[("time", "v")], &["f"]),
+            Error::Reserved("time".into()),
+            "InfluxDB keeps the name \"time\" for itself",
+        ),
+        (
+            Measurement::new("m", &[], &["time"]),
+            Error::Reserved("time".into()),
+            "InfluxDB keeps the name \"time\" for itself",
+        ),
+        (
+            Measurement::new("#m", &[], &["f"]),
+            Error::Comment("#m".into()),
+            "the name \"#m\" starts with '#', which makes each line a comment",
+        ),
+        (
+            Measurement::new("m", &[("k", "a"), ("k", "b")], &["f"]),
+            Error::Duplicate("k".into()),
+            "the key \"k\" comes more than once",
+        ),
+        (
+            Measurement::new("m", &[("k", "a")], &["f", "k"]),
+            Error::Duplicate("k".into()),
+            "the key \"k\" comes more than once",
+        ),
+        (
+            Measurement::new("m", &[], &["f", "f"]),
+            Error::Duplicate("f".into()),
+            "the key \"f\" comes more than once",
+        ),
+        (
+            Measurement::new("m", &[], &[]),
+            Error::NoField,
+            "a measurement needs at least one field",
+        ),
+    ]);
+}
+
+#[test]
+fn allows_what_is_reserved_only_elsewhere() {
+    let measurement =
+        Measurement::new("time", &[("k", "_v"), ("t", "#")], &["#f"]).unwrap();
     let mut out = Vec::new();
-    tag.line(&mut out, [(&key("f"), Value::Integer(0))], Stamp::EPOCH);
-    assert_eq!(
-        text(&out),
-        "m,k=_v f=0i 0\n",
-        "a tag value may start with '_'"
-    );
+    measurement.line(&mut out, &[Some(Value::Integer(0))], Stamp::EPOCH);
+    assert_eq!(text(&out), "time,k=_v,t=# #f=0i 0\n");
 }
 
 fn name() -> impl Strategy<Value = String> {
-    "[^_\\\\\n\r][^\\\\\n\r]{0,8}"
+    "[^_#\\\\\n\r][^\\\\\n\r]{0,8}".prop_filter("not time", |name| name != "time")
 }
 
 fn field_value() -> impl Strategy<Value = Value> {
     prop_oneof![
         any::<f64>()
-            .prop_filter("finite", |f| f.is_finite())
+            .prop_filter_map("finite", Float::new)
             .prop_map(Value::Float),
         any::<i64>().prop_map(Value::Integer),
         any::<u64>().prop_map(Value::Unsigned),
@@ -231,19 +295,29 @@ proptest! {
     #[test]
     fn each_line_parses_back(
         measurement in name(),
-        tags in proptest::collection::btree_map(name(), name(), 0..4),
-        fields in proptest::collection::vec((name(), field_value()), 1..5),
+        keys in proptest::collection::btree_map(
+            name(),
+            (any::<bool>(), name(), field_value()),
+            1..8,
+        ),
         time in any::<i64>(),
     ) {
-        let tags: Vec<(String, String)> = tags.into_iter().collect();
+        let (mut tags, mut fields, mut keys_of_fields) = (Vec::new(), Vec::new(), Vec::new());
+        for (key, (tag, value, field)) in &keys {
+            if *tag {
+                tags.push((key.clone(), value.clone()));
+            } else {
+                keys_of_fields.push(key.as_str());
+                fields.push((key.clone(), *field));
+            }
+        }
+        prop_assume!(!fields.is_empty());
         let borrowed: Vec<(&str, &str)> =
             tags.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let line = Measurement::new(&measurement, &borrowed).unwrap();
-        let keys: Vec<Key> = fields.iter().map(|(k, _)| key(k)).collect();
+        let line = Measurement::new(&measurement, &borrowed, &keys_of_fields).unwrap();
+        let values: Vec<Option<Value>> = fields.iter().map(|&(_, v)| Some(v)).collect();
         let mut out = Vec::new();
-        let pairs = keys.iter().zip(fields.iter().map(|&(_, v)| v));
-        let written = line.line(&mut out, pairs, Stamp::from_nanos(time));
-        prop_assert_eq!(written, fields.len());
+        line.line(&mut out, &values, Stamp::from_nanos(time));
         prop_assert_eq!(parse(text(&out)), (measurement, tags, fields, time));
     }
 }
