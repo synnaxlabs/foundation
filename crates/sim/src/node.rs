@@ -1,7 +1,7 @@
 //! One simulated node and its settings.
 
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::task::Waker;
@@ -110,6 +110,24 @@ impl Node {
     #[must_use]
     pub fn net(&self) -> env::net::Net {
         env::net::Net::new(self.0.clone())
+    }
+
+    /// Makes the UDP socket of the node at `local` fail, as when the OS breaks it:
+    /// each receive of it then gives `Error::Io` with code 5 (`EIO`), also one that
+    /// waits. The datagrams in its receive queue and the datagrams that arrive at it
+    /// are lost. A send of it still works. A socket bound at `local` after it drops
+    /// works. A fault on a socket that already failed does nothing.
+    ///
+    /// # Panics
+    ///
+    /// When no UDP socket of the node is bound at `local`.
+    pub fn fail_udp(&self, local: SocketAddr) {
+        let node = self.0.node;
+        let waker = lock(&self.0.shared).net().udp().fail(node, local);
+        let Some(waker) = waker else {
+            panic!("no UDP socket of node {node} is bound at {local}");
+        };
+        waker.wake();
     }
 
     /// The node's serial ports: one at each end of a line that
