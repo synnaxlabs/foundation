@@ -1982,6 +1982,29 @@ mod tests {
         }
 
         #[test]
+        fn lists_an_index_only_while_a_live_frame_is_not_on_disk() {
+            run(42, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                test.clock.sleep(SYNC).await;
+                write(&test, &mut shard, a, &[20]);
+                while shard.stored(Slot::new(0), Path::Live) == 0 {
+                    test.clock.sleep(Span::from_nanos(1_000)).await;
+                }
+                let place = shard.place(Slot::new(0));
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(shard.wake.pending, [(Slot::new(0), place)]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(shard.wake.pending, Vec::new());
+            });
+        }
+
+        #[test]
         fn gives_a_complete_reader_a_frame_on_disk_with_no_commit_future() {
             run(39, |test| async move {
                 let set = two_indexes();
