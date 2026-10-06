@@ -13,7 +13,7 @@ use crate::device::Device;
 use crate::pdu::{Exception, Reply, Request, Table};
 use crate::rtu::{self, Client, Failure};
 use env::clock::Clock;
-use env::serial::{Config, Parity, Port, Settings, StopBits};
+use env::serial::{self, Config, Parity, Port, Settings, StopBits};
 use env::thread::Handle;
 use sim::{Sim, line, node};
 use types::time::{Monotonic, Span};
@@ -764,4 +764,26 @@ fn drops_a_cut_frame_once_the_line_is_quiet() {
         listen(&mut port, &clock, ms(100)).await
     });
     assert_eq!(heard, framed(&[17, 0x03, 0x02, 0x00, 0x03]));
+}
+
+#[test]
+fn fails_on_a_port_that_failed() {
+    let mut bus = Bus::new(14, settings(9_600, None), line::Config::default());
+    bus.serve(UNIT, &device());
+    bus.client.fail_serial(Path::new(CLIENT));
+    let got = bus.client(|mut client, _| async move {
+        let request = read(Table::Coils, 0, 1);
+        let first = said(client.exchange(UNIT, &request).await);
+        let again = said(client.exchange(UNIT, &request).await);
+        (first, again)
+    });
+    let error = Failure::Serial(serial::Error::Io {
+        path: CLIENT.into(),
+        code: 5,
+    });
+    assert_eq!(got, (Err(error.clone()), Err(error.clone())));
+    assert_eq!(
+        error.to_string(),
+        "serial port /dev/ttyUSB0 failed with OS error 5"
+    );
 }

@@ -82,7 +82,8 @@ impl Client {
         let read = self.ask(request, stale, deadline).await;
         self.stale = None;
         read?;
-        let frame = super::decode_reply(request, &self.bytes)?
+        let frame = super::decode_reply(request, &self.bytes)
+            .map_err(Failure::Frame)?
             .expect("invariant: the loop ends at a whole frame");
         if frame.unit != unit.get() {
             return Err(Failure::Unit {
@@ -90,7 +91,7 @@ impl Client {
                 got: frame.unit,
             });
         }
-        Ok(request.decode_reply(frame.pdu)?)
+        request.decode_reply(frame.pdu).map_err(Failure::Frame)
     }
 
     /// Sends the frame in `bytes` after the quiet, and reads into `bytes` until it
@@ -107,7 +108,10 @@ impl Client {
             return Err(Failure::Timeout);
         }
         self.bytes.clear();
-        while super::decode_reply(request, &self.bytes)?.is_none() {
+        while super::decode_reply(request, &self.bytes)
+            .map_err(Failure::Frame)?
+            .is_none()
+        {
             if !self.line.read(&mut self.bytes, deadline).await? {
                 return Err(Failure::Timeout);
             }
@@ -139,12 +143,6 @@ pub enum Failure {
 impl From<serial::Error> for Failure {
     fn from(error: serial::Error) -> Self {
         Self::Serial(error)
-    }
-}
-
-impl From<Error> for Failure {
-    fn from(error: Error) -> Self {
-        Self::Frame(error)
     }
 }
 
