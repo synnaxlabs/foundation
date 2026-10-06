@@ -243,7 +243,9 @@ How to read this record:
   accepted as is; the `buffer` read reports any gap (B2). Named readers write a position
   record at once when they open, close, or are taken over, and on the home's interval
   when the position changed. A session open at a crash restores as closed at the
-  restore. Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+  restore. Complete and latest sessions have separate key types, so a call in the
+  wrong mode does not compile (#725). Supersedes the B3 single position. Basis: A6,
+  A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -2805,7 +2807,7 @@ conclusion together". Each one is listed below.
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
   and generated names as strings (#701).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
-  the STREAM WIRE hello (#55).
+  the STREAM WIRE hello (#55), a reader session key type per mode (#725).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per

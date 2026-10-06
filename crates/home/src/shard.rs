@@ -14,7 +14,7 @@ use types::time::{Interval, Monotonic, Stamp};
 
 use crate::Refusal;
 use crate::index::{Accepted, Index};
-use crate::reader::{self, Mode};
+use crate::reader;
 use crate::split::Split;
 use crate::writer::{self, Writer};
 use crate::{handoff, order, split, stored};
@@ -337,71 +337,89 @@ impl Shard {
         self.buffer.durable(slot, path).seq
     }
 
-    /// Opens an unnamed reader on the index at `slot`, at mesh time `mesh`. A complete
-    /// reader starts at the index's live tail.
+    /// Opens an unnamed complete reader on the index at `slot`, with a credit of
+    /// `limit_bytes`. From the index's live tail on, it gets each live frame after
+    /// the commit that holds it, while it has credit for the frame.
     ///
     /// # Panics
     ///
     /// If the shard does not carry `slot`.
-    pub(crate) fn open_reader(
+    pub(crate) fn open_complete(
         &mut self,
         slot: Slot,
-        mode: Mode,
+        limit_bytes: u64,
+    ) -> delivery::complete::Key {
+        self.index(slot).open_complete(limit_bytes)
+    }
+
+    /// Opens an unnamed latest reader on the index at `slot`, at mesh time `mesh`. It
+    /// gets the index's newest live frame, before its commit.
+    ///
+    /// # Panics
+    ///
+    /// If the shard does not carry `slot`.
+    pub(crate) fn open_latest(
+        &mut self,
+        slot: Slot,
         mesh: Interval,
-    ) -> reader::Key {
-        let place = self.place(slot);
-        let index = &mut self.indexes[place];
-        let (session, woken) = match mode {
-            Mode::Complete { limit_bytes } => (index.open_complete(limit_bytes), false),
-            Mode::Latest => {
-                let latest = index.readers.open_latest(None, mesh.latest);
-                (latest.key, latest.woken)
-            }
-        };
-        let key = reader::Key { slot, session };
-        if woken {
-            self.wake.keys.push(key);
+    ) -> delivery::latest::Key {
+        let opened = self.index(slot).readers.open_latest(None, mesh.latest);
+        if opened.woken {
+            self.wake.add(slot, &[opened.key]);
         }
-        key
+        opened.key
     }
 
-    /// Raises the credit of a complete reader to `limit_bytes` since it opened. A
-    /// limit that is not higher changes nothing, and so does a grant to a reader that
-    /// is not open: a grant can arrive after its reader closes.
+    /// Raises the credit of the complete reader `session` on the index at `slot` to
+    /// `limit_bytes` since it opened. A limit that is not higher changes nothing, and
+    /// so does a grant to a reader that is not open: a grant can arrive after its
+    /// reader closes.
     ///
     /// # Panics
     ///
-    /// If the shard does not carry the reader's index, or its readers never gave the
-    /// reader's session.
-    pub(crate) fn grant(&mut self, key: reader::Key, limit_bytes: u64) {
-        self.index(key).readers.grant(key.session, limit_bytes);
+    /// If the shard does not carry `slot`, or its readers never gave `session`.
+    pub(crate) fn grant(
+        &mut self,
+        slot: Slot,
+        session: delivery::complete::Key,
+        limit_bytes: u64,
+    ) {
+        self.index(slot).readers.grant(session, limit_bytes);
     }
 
-    /// Takes the reader's next frame, or `None` when none waits.
-    ///
-    /// # Panics
-    ///
-    /// If the reader is not open.
-    pub(crate) fn take(&mut self, key: reader::Key) -> Option<Frame> {
-        self.index(key).readers.take(key.session)
-    }
-
-    /// Closes the reader at mesh time `mesh`. Its waiting frames do not go out, and
-    /// [`woken`](Self::woken) does not name it.
+    /// Takes the next frame of the reader `session` on the index at `slot`, or `None`
+    /// when none waits.
     ///
     /// # Panics
     ///
     /// If the reader is not open.
-    pub(crate) fn close_reader(&mut self, key: reader::Key, mesh: Interval) {
-        self.index(key).readers.close(key.session, mesh.latest);
+    pub(crate) fn take(&mut self, slot: Slot, session: delivery::Key) -> Option<Frame> {
+        self.index(slot).readers.take(session)
+    }
+
+    /// Closes the reader `session` on the index at `slot` at mesh time `mesh`. Its
+    /// waiting frames do not go out, and [`woken`](Self::woken) does not name it.
+    ///
+    /// # Panics
+    ///
+    /// If the reader is not open.
+    pub(crate) fn close_reader(
+        &mut self,
+        slot: Slot,
+        session: delivery::Key,
+        mesh: Interval,
+    ) {
+        self.index(slot).readers.close(session, mesh.latest);
+        let key = reader::Key { slot, session };
         self.wake.keys.retain(|&woken| woken != key);
     }
 
-    /// Replaces `keys` with the readers to wake since the last call, sorted, each
-    /// once. Complete readers first get the live frames now on disk. A key is a hint:
-    /// take from each until [`take`](Self::take) gives `None`. Call it after each
-    /// write and each commit. When a commit ended since the last call, it reads each
-    /// index with live frames queued for complete readers; else it reads none.
+    /// Replaces `keys` with the readers to wake since the last call, each once, in slot
+    /// order and with the latest readers of an index first. Complete readers first get
+    /// the live frames now on disk. A key is a hint: take from each until
+    /// [`take`](Self::take) gives `None`. Call it after each write and each commit.
+    /// When a commit ended since the last call, it reads each index with live frames
+    /// queued for complete readers; else it reads none.
     pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.wake.settle(&self.buffer, &mut self.indexes);
         keys.clear();
@@ -410,8 +428,8 @@ impl Shard {
         keys.dedup();
     }
 
-    fn index(&mut self, key: reader::Key) -> &mut Index {
-        let place = self.place(key.slot);
+    fn index(&mut self, slot: Slot) -> &mut Index {
+        let place = self.place(slot);
         &mut self.indexes[place]
     }
 
@@ -446,13 +464,14 @@ impl Shard {
 
 impl Wake {
     /// Adds the `sessions` of the index at `slot` to wake.
-    fn add(&mut self, slot: Slot, sessions: &[delivery::Key]) {
+    fn add<K: Copy + Into<delivery::Key>>(&mut self, slot: Slot, sessions: &[K]) {
         if sessions.is_empty() {
             return;
         }
-        let keys = sessions
-            .iter()
-            .map(|&session| reader::Key { slot, session });
+        let keys = sessions.iter().map(|&session| reader::Key {
+            slot,
+            session: session.into(),
+        });
         self.keys.extend(keys);
     }
 
@@ -1832,12 +1851,7 @@ mod tests {
 
     mod read {
         use super::*;
-        use crate::reader::Mode;
-
         const CREDIT: u64 = 1 << 20;
-        const COMPLETE: Mode = Mode::Complete {
-            limit_bytes: CREDIT,
-        };
 
         fn woken(shard: &mut Shard) -> Vec<reader::Key> {
             let mut keys = Vec::new();
@@ -1845,11 +1859,31 @@ mod tests {
             keys
         }
 
+        fn key(slot: Slot, session: impl Into<delivery::Key>) -> reader::Key {
+            reader::Key {
+                slot,
+                session: session.into(),
+            }
+        }
+
+        /// Opens a complete reader on the index at `slot`, with a credit of `CREDIT`.
+        fn complete(shard: &mut Shard, slot: Slot) -> reader::Key {
+            key(slot, shard.open_complete(slot, CREDIT))
+        }
+
+        fn latest(shard: &mut Shard, slot: Slot) -> reader::Key {
+            key(slot, shard.open_latest(slot, MESH))
+        }
+
         /// The seq of the index group `group` of each frame `reader` takes now.
         fn taken(shard: &mut Shard, reader: reader::Key, group: u32) -> Vec<Range> {
-            iter::from_fn(|| shard.take(reader))
+            iter::from_fn(|| shard.take(reader.slot, reader.session))
                 .map(|frame| frame.range(group).expect("the index is present"))
                 .collect()
+        }
+
+        fn close(shard: &mut Shard, reader: reader::Key) {
+            shard.close_reader(reader.slot, reader.session, MESH);
         }
 
         /// Writes a live frame of the index at slot 0 with `stamps`.
@@ -1873,7 +1907,7 @@ mod tests {
             run(33, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let reader = shard.open_reader(Slot::new(0), Mode::Latest, MESH);
+                let reader = latest(&mut shard, Slot::new(0));
                 assert_eq!(woken(&mut shard), []);
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10, 20]);
@@ -1881,7 +1915,7 @@ mod tests {
                 assert_eq!(shard.stored(Slot::new(0), Path::Live), 0);
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(2, 1)]);
-                let late = shard.open_reader(Slot::new(0), Mode::Latest, MESH);
+                let late = latest(&mut shard, Slot::new(0));
                 assert_eq!(woken(&mut shard), [late]);
                 assert_eq!(taken(&mut shard, late, 0), [seq(2, 1)]);
             });
@@ -1892,7 +1926,7 @@ mod tests {
             run(34, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10, 20]);
                 write(&test, &mut shard, a, &[30]);
@@ -1914,8 +1948,8 @@ mod tests {
             run(32, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let latest = shard.open_reader(Slot::new(0), Mode::Latest, MESH);
-                let complete = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let latest = latest(&mut shard, Slot::new(0));
+                let complete = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 test.clock.sleep(SYNC).await;
@@ -1935,7 +1969,7 @@ mod tests {
             run(35, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 let lost = frame(&test.pool, &set, &[(0, &[20, 30]), (1, &[2, 3])]);
@@ -1957,7 +1991,7 @@ mod tests {
             run(36, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(1 << 16).await;
-                let reader = shard.open_reader(Slot::new(2), Mode::Latest, MESH);
+                let reader = latest(&mut shard, Slot::new(2));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 let mut next = 0;
                 loop {
@@ -1980,15 +2014,15 @@ mod tests {
             run(37, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let one = Mode::Complete { limit_bytes: 1 };
-                let reader = shard.open_reader(Slot::new(0), one, MESH);
+                let session = shard.open_complete(Slot::new(0), 1);
+                let reader = key(Slot::new(0), session);
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 write(&test, &mut shard, a, &[20]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
-                shard.grant(reader, CREDIT);
+                shard.grant(Slot::new(0), session, CREDIT);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
@@ -2001,14 +2035,14 @@ mod tests {
             run(25, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let one = Mode::Complete { limit_bytes: 1 };
-                let reader = shard.open_reader(Slot::new(0), one, MESH);
+                let session = shard.open_complete(Slot::new(0), 1);
+                let reader = key(Slot::new(0), session);
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
-                shard.grant(reader, CREDIT);
+                shard.grant(Slot::new(0), session, CREDIT);
                 write(&test, &mut shard, a, &[20]);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
@@ -2021,12 +2055,11 @@ mod tests {
         fn ignores_a_grant_to_a_closed_complete_reader() {
             run(46, |test| async move {
                 let mut shard = test.shard(AREA).await;
-                let one = Mode::Complete { limit_bytes: 1 };
-                let reader = shard.open_reader(Slot::new(0), one, MESH);
-                shard.close_reader(reader, MESH);
-                shard.grant(reader, CREDIT);
-                let after = shard.open_reader(Slot::new(0), one, MESH);
-                assert_ne!(after, reader);
+                let session = shard.open_complete(Slot::new(0), 1);
+                close(&mut shard, key(Slot::new(0), session));
+                shard.grant(Slot::new(0), session, CREDIT);
+                let after = shard.open_complete(Slot::new(0), 1);
+                assert_ne!(after, session);
             });
         }
 
@@ -2039,7 +2072,7 @@ mod tests {
                 write(&test, &mut shard, a, &[10]);
                 shard.committed().await.expect("the commit ends");
                 write(&test, &mut shard, a, &[20, 30]);
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 write(&test, &mut shard, a, &[40]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
@@ -2052,9 +2085,9 @@ mod tests {
             run(27, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let first = shard.open_reader(Slot::new(0), COMPLETE, MESH);
-                let second = shard.open_reader(Slot::new(0), COMPLETE, MESH);
-                let other = shard.open_reader(Slot::new(2), COMPLETE, MESH);
+                let first = complete(&mut shard, Slot::new(0));
+                let second = complete(&mut shard, Slot::new(0));
+                let other = complete(&mut shard, Slot::new(2));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10, 20]);
                 let both = frame(&test.pool, &set, &[(0, &[30]), (1, &[3]), (2, &[5])]);
@@ -2074,15 +2107,15 @@ mod tests {
             run(28, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let latest = shard.open_reader(Slot::new(0), Mode::Latest, MESH);
-                let complete = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let latest = latest(&mut shard, Slot::new(0));
+                let complete = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
-                shard.close_reader(latest, MESH);
+                close(&mut shard, latest);
                 assert_eq!(woken(&mut shard), []);
                 write(&test, &mut shard, a, &[20]);
                 shard.committed().await.expect("the commit ends");
-                shard.close_reader(complete, MESH);
+                close(&mut shard, complete);
                 assert_eq!(woken(&mut shard), []);
             });
         }
@@ -2092,8 +2125,8 @@ mod tests {
             run(30, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let latest = shard.open_reader(Slot::new(0), Mode::Latest, MESH);
-                let complete = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let latest = latest(&mut shard, Slot::new(0));
+                let complete = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 let backfill = frame(&test.pool, &set, &[(0, &[1, 2]), (1, &[1, 2])]);
                 assert_eq!(
@@ -2112,7 +2145,7 @@ mod tests {
             run(38, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 test.clock.sleep(SYNC).await;
@@ -2135,7 +2168,7 @@ mod tests {
             run(42, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 test.clock.sleep(SYNC).await;
@@ -2158,7 +2191,7 @@ mod tests {
             run(50, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 assert_eq!(woken(&mut shard), []);
@@ -2179,7 +2212,7 @@ mod tests {
             run(51, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 shard.committed().await.expect("the commit ends");
@@ -2202,7 +2235,7 @@ mod tests {
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 assert_eq!(shard.wake.pending, Vec::new());
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 write(&test, &mut shard, a, &[20]);
                 let place = shard.place(Slot::new(0));
                 assert_eq!(shard.wake.pending, [(Slot::new(0), place)]);
@@ -2218,12 +2251,12 @@ mod tests {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 write(&test, &mut shard, a, &[10]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 write(&test, &mut shard, a, &[20]);
-                shard.close_reader(reader, MESH);
+                close(&mut shard, reader);
                 write(&test, &mut shard, a, &[30]);
                 let place = shard.place(Slot::new(0));
                 assert_eq!(woken(&mut shard), []);
@@ -2240,7 +2273,7 @@ mod tests {
             run(39, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 test.clock.sleep(Span::from_nanos(100_000_000)).await;
@@ -2255,7 +2288,7 @@ mod tests {
             run(40, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
                 shard.committed().await.expect("the commit ends");
@@ -2270,8 +2303,8 @@ mod tests {
             run(41, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                let first = shard.open_reader(Slot::new(0), Mode::Latest, MESH);
-                let second = shard.open_reader(Slot::new(2), Mode::Latest, MESH);
+                let first = latest(&mut shard, Slot::new(0));
+                let second = latest(&mut shard, Slot::new(2));
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 let later = frame(&test.pool, &set, &[(2, &[10])]);
                 shard.write(a, LIVE, later, NOW, MESH).expect("written");
@@ -2283,10 +2316,24 @@ mod tests {
         }
 
         #[test]
+        fn names_the_latest_readers_of_an_index_before_its_complete_readers() {
+            run(53, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let complete = complete(&mut shard, Slot::new(0));
+                let latest = latest(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [latest, complete]);
+            });
+        }
+
+        #[test]
         fn panics_at_the_open_of_a_reader_of_an_index_it_does_not_carry() {
             let (mut sim, _handle) = start(29, |test| async move {
                 let mut shard = test.shard(AREA).await;
-                shard.open_reader(Slot::new(3), Mode::Latest, MESH);
+                latest(&mut shard, Slot::new(3));
             });
             assert_eq!(
                 sim.run(),

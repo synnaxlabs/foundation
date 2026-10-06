@@ -2,7 +2,8 @@
 //! complete readers, which runs per frame, and of one floor, which the home reads when
 //! `buffer` trims.
 
-use delivery::{Key, Position, Reader, Readers, Start};
+use delivery::complete::Key;
+use delivery::{Position, Reader, Readers, Start};
 use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner};
@@ -66,7 +67,7 @@ fn release(bencher: Bencher<'_, '_>, sessions: usize) {
         seq += 1;
         divan::black_box(readers.release(seq));
         for &key in &keys {
-            divan::black_box(readers.take(key));
+            divan::black_box(readers.take(key.into()));
         }
     });
 }
