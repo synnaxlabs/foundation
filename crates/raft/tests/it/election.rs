@@ -128,5 +128,30 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
     assert_eq!(states, [(Role::Follower, Term(u64::MAX)); 3]);
 }
 
+// A grant carries the term that its pre-campaign asks for. A grant of the current
+// term is a late answer to a pre-campaign from the term before.
+#[test]
+fn a_prevote_grant_from_an_earlier_term_does_not_depose_the_leader() {
+    let mut network = Network::new(&[Position::default(); 3], 0);
+    let agreed = network.settle(&[]).unwrap();
+    let (cut, other) = ((agreed.0 + 1) % 3, (agreed.0 + 2) % 3);
+    network.cut[cut] = true;
+    while network.nodes[cut].role() != Role::PreCandidate {
+        network.round();
+    }
+    network.cut[cut] = false;
+    network.deliver(Message {
+        from: Network::key(other),
+        to: Network::key(cut),
+        term: agreed.1,
+        body: Body::PreVoteReply { granted: true },
+    });
+    assert_eq!(network.nodes[cut].role(), Role::PreCandidate);
+    for _ in 0..4 * ELECTION {
+        network.round();
+    }
+    assert_eq!(network.agreed(), Some(agreed));
+}
+
 // Enough cases that each election-safety change tried in review fails a run.
 const CASES: u32 = 2000;
