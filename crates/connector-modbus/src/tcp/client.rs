@@ -45,7 +45,7 @@ impl Client {
         Ok(Self {
             stream,
             clock,
-            timeout,
+            timeout: timeout.max(Span::ZERO),
             transaction: 0,
             unsent: Vec::new(),
             owed: 0,
