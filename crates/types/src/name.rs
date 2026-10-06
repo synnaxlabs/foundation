@@ -440,11 +440,10 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Text in double quotes. Printable ASCII shows as written, with a `\` before each `"`
-/// and `\`. Each other character shows as `\u` and four hex digits, or above U+FFFF as
-/// `\U` and eight: the escapes of HCL, TOML, and YAML. No control character and no
-/// character that looks like an ASCII one reaches the reader, and no two texts show
-/// the same.
+/// Text in double quotes, as HCL, TOML, and YAML read it. Printable ASCII shows as
+/// written, with a `\` before each `"` and `\`. Each other character shows as `\u` and
+/// four hex digits, or `\U` and eight above U+FFFF, so no control or look-alike
+/// character reaches the reader, and no two texts show the same.
 struct Quoted<'a>(&'a str);
 
 impl fmt::Display for Quoted<'_> {
@@ -1078,10 +1077,7 @@ mod tests {
                 Selector::new([text.as_str()]).err(),
             ];
             for error in errors.into_iter().flatten() {
-                let (message, fix) = (error.to_string(), error.fix());
-                prop_assert!(!message.starts_with(char::is_uppercase), "{message}");
-                prop_assert!(fix.starts_with(char::is_uppercase), "{fix}");
-                prop_assert!(!message.ends_with('.') && !fix.ends_with('.'));
+                crate::common::assert_stated(&error.to_string(), error.fix());
             }
         }
     }
