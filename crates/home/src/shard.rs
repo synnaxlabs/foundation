@@ -453,9 +453,9 @@ impl Session {
     }
 }
 
-/// Freezes the index frame from `split` of each accepted group of `checks` into its
-/// check, and pushes its stored entry onto `entries`, in group order, at mesh time
-/// `stored_at`.
+/// Freezes the index frame from `split` of each accepted group of `checks` with
+/// samples into its check, and pushes its stored entry onto `entries`, in group order,
+/// at mesh time `stored_at`. A group with no samples gets no frame and no entry.
 ///
 /// # Errors
 ///
@@ -469,7 +469,9 @@ fn freeze(
     stored_at: Stamp,
 ) -> Result<(), block::Error> {
     for (group, checked, frozen) in checks {
-        if let Ok(accepted) = checked {
+        if let Ok(accepted) = checked
+            && !accepted.seq().is_empty()
+        {
             let draft = split.frame(pool, *group)?;
             let frame = frozen.insert(accepted.freeze(draft, *group));
             let last = accepted.last();
@@ -525,8 +527,8 @@ fn record(
 }
 
 /// Spends the seq of each accepted group of `checks`, and makes the outcome of each
-/// present group into `out`: applied when the append found `room`, else lost. Each
-/// frame goes to `readers`.
+/// present group into `out`: applied when the append found `room` or the group has no
+/// samples, else lost. Each frame goes to `readers`.
 fn spend<'a>(
     checks: &mut Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
     indexes: &mut [Index],
@@ -541,12 +543,15 @@ fn spend<'a>(
         let slot = entry.slot;
         let index = &mut indexes[claim.place];
         out.push(match checked {
-            Ok(accepted) if room => {
+            // A group with no samples stores nothing, so it needs no room.
+            Ok(accepted) if room || accepted.seq().is_empty() => {
                 let seq = accepted.seq();
                 let range = range(&seq);
                 index.spend(accepted);
-                let frame = frozen.expect("invariant: a stored frame was frozen");
-                readers.applied(claim.place, frame, seq);
+                if !seq.is_empty() {
+                    let frame = frozen.expect("invariant: a stored frame was frozen");
+                    readers.applied(claim.place, frame, seq);
+                }
                 Outcome::Applied { slot, range }
             }
             Ok(accepted) => {
@@ -1722,6 +1727,8 @@ mod tests {
             assert_eq!(shard.write(a, LIVE, write, NOW, MESH), Err(disk.clone()));
             let refused = frame(&test.pool, &set, &[(2, &[20])]);
             assert_eq!(shard.write(b, LIVE, refused, NOW, MESH), Err(disk.clone()));
+            let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+            assert_eq!(shard.write(a, LIVE, empty, NOW, MESH), Err(disk.clone()));
             let live = frame(&test.pool, &set, &[(0, &[30]), (1, &[3])]);
             let backfill = frame(&test.pool, &set, &[(0, &[1]), (1, &[1])]);
             let blocks = test.fill();
@@ -1832,6 +1839,26 @@ mod tests {
             assert_eq!(
                 headers(&test.ring().await, MARKED.latest),
                 [(two, 0, 0, 0, 1), (two, 0, 0, 2, 0)]
+            );
+        });
+    }
+
+    #[test]
+    fn stores_no_entry_for_a_group_with_no_samples() {
+        run(57, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let write = frame(&test.pool, &set, &[(0, &[]), (1, &[]), (2, &[20])]);
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MARKED),
+                Ok(&[applied(0, 0, 0), applied(2, 0, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let two = key(Slot::new(2)).as_u128();
+            assert_eq!(
+                headers(&test.ring().await, MARKED.latest),
+                [(two, 0, 0, 1, 0)]
             );
         });
     }
@@ -2057,17 +2084,17 @@ mod tests {
         }
 
         #[test]
-        fn keeps_the_newest_frame_with_samples_after_an_empty_live_write_is_lost() {
+        fn applies_an_empty_group_of_a_live_write_whose_other_group_is_lost() {
             run(55, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
-                let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+                let mixed = frame(&test.pool, &set, &[(0, &[]), (1, &[]), (2, &[20])]);
                 let blocks = test.fill();
                 assert_eq!(
-                    shard.write(a, LIVE, empty, NOW, MESH),
-                    Ok(&[super::lost(0, 1, 0)][..])
+                    shard.write(a, LIVE, mixed, NOW, MESH),
+                    Ok(&[applied(0, 1, 0), super::lost(2, 0, 1)][..])
                 );
                 drop(blocks);
                 let reader = latest(&mut shard, Slot::new(0));

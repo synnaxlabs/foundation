@@ -134,8 +134,7 @@ impl Set {
 
     /// Gives `frame`, stored in the buffer at `seq`, to the readers of the index at
     /// `place`. A live frame is the newest frame at once, and goes to complete readers
-    /// after the commit that holds it. A backfill frame, or a frame with no samples,
-    /// goes to no reader.
+    /// after the commit that holds it. A backfill frame goes to no reader.
     pub(crate) fn applied(&mut self, place: usize, frame: Frame, seq: Range<u64>) {
         if frame.path() == Path::Backfill {
             return;
@@ -149,8 +148,7 @@ impl Set {
     }
 
     /// Makes `frame`, a live frame that found no room in the buffer, the newest frame
-    /// of the index at `place`, unless it has no samples. Complete readers never get
-    /// it.
+    /// of the index at `place`. Complete readers never get it.
     ///
     /// # Panics
     ///
