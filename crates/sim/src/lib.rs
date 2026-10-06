@@ -192,8 +192,8 @@ impl Sim {
     /// so its sockets and ports close and its timers stop, and
     /// [`env::thread::Handle::join`] on one of them panics. A thread that one of
     /// these drops starts on the node also ends in the crash and never runs. Each
-    /// file handle of the node closes, a leaked one too. The node keeps its disk and
-    /// its addresses: start new threads on it to restart it.
+    /// file handle and serial port of the node closes, a leaked one too. The node
+    /// keeps its disk and its addresses: start new threads on it to restart it.
     ///
     /// # Panics
     ///
@@ -206,8 +206,8 @@ impl Sim {
         let (tasks, starts) = lock(&self.shared).stop(node);
         let mut panics = self.drop_futures(&tasks);
         panics.extend(drop_each(starts));
-        let orphans = lock(&self.shared).crash(node, crash);
-        drop(orphans);
+        let ended = lock(&self.shared).crash(node, crash);
+        drop(ended);
         assert!(panics.is_empty(), "{}", panics.join(THEN));
     }
 

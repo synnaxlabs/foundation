@@ -75,6 +75,8 @@ struct Node {
     /// Set from the stop of a crash to the cut, while the sim drops what the crash
     /// ended.
     crashing: bool,
+    /// The crashes of the node so far.
+    life: u64,
 }
 
 impl Node {
@@ -177,6 +179,7 @@ impl State {
             shards: shard::Starts::default(),
             boot: config.monotonic,
             crashing: false,
+            life: 0,
         };
         self.nodes.push(node);
         self.files.add(config.disk_bytes);
@@ -197,6 +200,11 @@ impl State {
     /// True time since the base of `node`.
     fn since(&self, node: usize) -> u64 {
         self.now.0 - self.nodes[node].base.0
+    }
+
+    /// The life of `node`: its crashes so far.
+    pub(crate) fn life(&self, node: usize) -> u64 {
+        self.nodes[node].life
     }
 
     pub(crate) fn monotonic(&self, node: usize) -> Monotonic {
@@ -496,19 +504,26 @@ impl State {
         (tasks, starts)
     }
 
-    /// Ends the crash of `node` that [`State::stop`] began, and the file calls in
-    /// flight of the node. After a `Power` crash, its monotonic clock reads its boot
-    /// value again, and its disk keeps what is durable. Returns the blocks of the
-    /// calls, for the caller to drop after it releases the lock.
-    pub(crate) fn crash(&mut self, node: usize, crash: Crash) -> Vec<Held> {
+    /// Ends the crash of `node` that [`State::stop`] began, the file calls in flight
+    /// of the node, and the life of its open ports. After a `Power` crash, its
+    /// monotonic clock reads its boot value again, and its disk keeps what is
+    /// durable. Returns the wakers of the ports and the blocks of the calls, for the
+    /// caller to drop after it releases the lock.
+    pub(crate) fn crash(
+        &mut self,
+        node: usize,
+        crash: Crash,
+    ) -> (Vec<Waker>, Vec<Held>) {
         self.nodes[node].crashing = false;
+        self.nodes[node].life += 1;
+        let wakers = self.serial.crash(node);
         let now = self.now;
         if crash == Crash::Power {
             let wall = self.wall(node).time;
             let booted = &mut self.nodes[node];
             (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
         }
-        self.files.crash(node, now, crash)
+        (wakers, self.files.crash(node, now, crash))
     }
 
     /// Removes the starts of the threads that have not run.

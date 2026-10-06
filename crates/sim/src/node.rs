@@ -111,7 +111,8 @@ impl Node {
     ///   most 4 KiB of bytes not read, and loses the bytes past that.
     /// - A byte that arrives at an end that is not open is lost, and so are the
     ///   bytes in flight from a port that drops.
-    /// - A port panics when it polls outside the node's threads.
+    /// - A port panics when it polls outside the node's threads or after a crash of
+    ///   the node.
     #[must_use]
     pub fn serial(&self) -> env::serial::Serial {
         env::serial::Serial::new(self.0.clone())

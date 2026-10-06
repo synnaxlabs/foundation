@@ -1745,7 +1745,8 @@ How to read this record:
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
-  restart finds no file held (#392), not even by a leaked handle (#535). A `Power` crash
+  restart finds no file held (#392) and no serial port open, not even by a leaked handle
+  (#535). A serial port from before the crash panics when it polls. A `Power` crash
   keeps, for each 512-byte sector, its durable bytes or the bytes of any one write since
   then, a write in flight too. A `sync` makes durable the writes that ended before it
   started. A failed `sync` makes each sector keep its durable bytes or those of one such
