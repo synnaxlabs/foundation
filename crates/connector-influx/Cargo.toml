@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+httparse.workspace = true
 types = { path = "../types" }
 
 [dev-dependencies]
