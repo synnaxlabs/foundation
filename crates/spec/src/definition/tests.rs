@@ -621,6 +621,17 @@ fn refuses_a_presence_flag_that_is_not_0_or_1() {
 }
 
 #[test]
+fn refuses_a_time_presence_flag_that_is_not_0_or_1() {
+    let mut bytes = time_bytes(Some(&[b"n_1"]));
+    let at = select_bytes(TIME, &[]).len();
+    bytes[at] = 2;
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::Flag { at, found: 2 })
+    );
+}
+
+#[test]
 fn refuses_copies_out_of_order_or_repeated() {
     let at = select_bytes(PLACEMENT, &[]).len() + 1 + 8 + 11;
     for copies in [[b"n_3", b"n_2"], [b"n_2", b"n_2"]] {
@@ -674,7 +685,9 @@ fn time_bytes(peers: Option<&[&[u8]]>) -> Vec<u8> {
 }
 
 fn time_policy(peers: Option<&[&str]>) -> Definition {
-    let peers = peers.map(|p| p.iter().map(|p| name(p)).collect::<Vec<_>>());
+    let peers = peers.map_or(time::Peers::Voters, |p| {
+        time::Peers::Listed(p.iter().map(|p| name(p)).collect())
+    });
     Definition::Time(time::Policy::new(select(), peers))
 }
 
@@ -791,7 +804,8 @@ fn placement_strategy() -> impl Strategy<Value = Definition> {
 }
 
 fn time_strategy() -> impl Strategy<Value = Definition> {
-    let peers = prop::option::of(prop::collection::vec(name_strategy(), 0..4));
+    let peers = prop::option::of(prop::collection::vec(name_strategy(), 0..4))
+        .prop_map(|peers| peers.map_or(time::Peers::Voters, time::Peers::Listed));
     (selectors(), peers)
         .prop_map(|(select, peers)| Definition::Time(time::Policy::new(select, peers)))
 }

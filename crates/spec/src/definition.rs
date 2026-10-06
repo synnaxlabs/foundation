@@ -11,7 +11,7 @@
 //! region        := epoch:u64 count:u64 text*                                tag 3
 //! node_settings := select:patterns disk:u64 pool:u64                       tag 4
 //! compression   := select:patterns mode:u8                                  tag 5
-//! placement     := select:patterns standby:optional names                   tag 6
+//! placement     := select:patterns standby:optional copies:names            tag 6
 //! time          := select:patterns peers:optional_names                     tag 7
 //! patterns      := count:u64 pattern*
 //! pattern       := excluded:u8 length:u64 UTF-8 bytes
@@ -152,8 +152,8 @@ impl Definition {
                 out.push(TIME);
                 patterns(&mut out, policy.select());
                 match policy.peers() {
-                    None => out.push(0),
-                    Some(peers) => {
+                    time::Peers::Voters => out.push(0),
+                    time::Peers::Listed(peers) => {
                         out.push(1);
                         names(&mut out, peers);
                     }
@@ -410,9 +410,9 @@ impl<'a> Reader<'a> {
     fn time(&mut self) -> Result<time::Policy, Error> {
         let select = self.patterns()?;
         let peers = if self.flag()? {
-            Some(self.names()?)
+            time::Peers::Listed(self.names()?)
         } else {
-            None
+            time::Peers::Voters
         };
         Ok(time::Policy::new(select, peers))
     }

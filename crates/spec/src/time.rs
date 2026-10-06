@@ -7,23 +7,27 @@ use types::name::{Name, Selector};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
     select: Selector,
-    peers: Option<Vec<Name>>,
+    peers: Peers,
+}
+
+/// The peers of a time policy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Peers {
+    /// The voters of the node's region.
+    #[default]
+    Voters,
+    /// These nodes. An empty list is no peer.
+    Listed(Vec<Name>),
 }
 
 impl Policy {
-    /// Makes a policy. `None` means the voters of the node's region, and an empty list
-    /// means no peer. The order and repeats of `peers` do not count.
+    /// Makes a policy. The order and repeats of listed peers do not count.
     #[must_use]
-    pub fn new(
-        select: Selector,
-        peers: Option<impl IntoIterator<Item = Name>>,
-    ) -> Self {
-        let peers = peers.map(|peers| {
-            let mut peers = peers.into_iter().collect::<Vec<_>>();
-            peers.sort();
-            peers.dedup();
-            peers
-        });
+    pub fn new(select: Selector, mut peers: Peers) -> Self {
+        if let Peers::Listed(names) = &mut peers {
+            names.sort();
+            names.dedup();
+        }
         Self { select, peers }
     }
 
@@ -33,11 +37,10 @@ impl Policy {
         &self.select
     }
 
-    /// The peers in name order with no repeat, or `None` for the voters of the node's
-    /// region.
+    /// The peers. Listed peers are in name order with no repeat.
     #[must_use]
-    pub fn peers(&self) -> Option<&[Name]> {
-        self.peers.as_deref()
+    pub const fn peers(&self) -> &Peers {
+        &self.peers
     }
 }
 
@@ -55,17 +58,20 @@ mod tests {
 
     #[test]
     fn keeps_the_peers_in_name_order_with_no_repeat() {
-        let peers = [name("n_3"), name("n_1"), name("n_3")];
-        let policy = Policy::new(select(), Some(peers));
-        assert_eq!(policy.peers(), Some(&[name("n_1"), name("n_3")][..]));
+        let peers = vec![name("n_3"), name("n_1"), name("n_3")];
+        let policy = Policy::new(select(), Peers::Listed(peers));
+        assert_eq!(
+            policy.peers(),
+            &Peers::Listed(vec![name("n_1"), name("n_3")])
+        );
         assert_eq!(policy.select(), &select());
     }
 
     #[test]
     fn tells_no_peer_from_the_region_voters() {
-        let none = Policy::new(select(), Some(Vec::<Name>::new()));
-        assert_eq!(none.peers(), Some(&[][..]));
-        let voters = Policy::new(select(), None::<[Name; 0]>);
-        assert_eq!(voters.peers(), None);
+        let none = Policy::new(select(), Peers::Listed(Vec::new()));
+        assert_eq!(none.peers(), &Peers::Listed(Vec::new()));
+        let voters = Policy::new(select(), Peers::Voters);
+        assert_eq!(voters.peers(), &Peers::Voters);
     }
 }
