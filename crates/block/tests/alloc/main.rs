@@ -5,15 +5,18 @@
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 
-use block::{Config, Heap, Pool};
+use block::{ALIGN, Config, Heap, Pool};
 
-/// Counts the allocations and the frees of the process.
+/// Counts the allocations and the frees of the process, and keeps the layout of
+/// the last zeroed allocation.
 struct Counting {
     count: AtomicU64,
     freed: AtomicU64,
+    zeroed_size: AtomicUsize,
+    zeroed_align: AtomicUsize,
 }
 
 // SAFETY: every call goes to `System` unchanged.
@@ -22,6 +25,14 @@ unsafe impl GlobalAlloc for Counting {
         self.count.fetch_add(1, Relaxed);
         // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc`.
         unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        self.count.fetch_add(1, Relaxed);
+        self.zeroed_size.store(layout.size(), Relaxed);
+        self.zeroed_align.store(layout.align(), Relaxed);
+        // SAFETY: the caller keeps the contract of `GlobalAlloc::alloc_zeroed`.
+        unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -35,6 +46,8 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting {
     count: AtomicU64::new(0),
     freed: AtomicU64::new(0),
+    zeroed_size: AtomicUsize::new(0),
+    zeroed_align: AtomicUsize::new(0),
 };
 
 /// Allocations the process makes while `f` runs.
@@ -52,6 +65,17 @@ fn main() {
         ALLOCATOR.freed.load(Relaxed) - freed,
         1,
         "a heap frees its bytes"
+    );
+    // At any larger alignment std writes zero over every page instead of `calloc`.
+    assert_eq!(
+        ALLOCATOR.zeroed_align.load(Relaxed),
+        1,
+        "a heap asks for calloc"
+    );
+    assert_eq!(
+        ALLOCATOR.zeroed_size.load(Relaxed),
+        64 + ALIGN,
+        "a heap pads"
     );
 
     let config = Config { budget: 1 << 16 };
