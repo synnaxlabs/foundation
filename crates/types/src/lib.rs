@@ -17,27 +17,19 @@ pub mod quality;
 mod quantity;
 pub mod sample;
 pub mod time;
-mod uuid;
+pub mod uuid;
 
-use std::fmt;
-
-/// A value that could not be read from text.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ParseError {
-    /// The text that was read.
-    pub input: String,
-    /// What the text should look like.
-    pub expected: &'static str,
-}
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "cannot read {:?}: expected {}",
-            self.input, self.expected
-        )
+#[cfg(test)]
+mod common {
+    /// Asserts that `message` is a lower-case clause and `fix` a sentence, neither with
+    /// a final period, as a diagnostic shows them.
+    pub(crate) fn assert_stated(message: &str, fix: &str) {
+        assert!(
+            message.starts_with(|c: char| c.is_ascii_lowercase()),
+            "{message}"
+        );
+        assert!(fix.starts_with(|c: char| c.is_ascii_uppercase()), "{fix}");
+        assert!(!message.ends_with('.'), "{message}");
+        assert!(!fix.ends_with('.'), "{fix}");
     }
 }
-
-impl std::error::Error for ParseError {}

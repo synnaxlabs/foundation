@@ -40,7 +40,7 @@ fn problems(root: &Path, name: &str) -> Result<Vec<String>, String> {
         ])
         .env("CARGO_ENCODED_RUSTFLAGS", format!("--cfg\u{1f}{name}"));
     for package in &packages {
-        cargo.args(["-p", package]);
+        cargo.args(["-p", &package.id]);
     }
     let mut problems = Vec::new();
     for exe in build::executables(&mut cargo)? {
