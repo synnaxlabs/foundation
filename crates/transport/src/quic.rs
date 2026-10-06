@@ -4,6 +4,7 @@ mod cid;
 pub(crate) mod connection;
 mod datagram;
 mod settings;
+mod stateless;
 pub(crate) mod stream;
 #[cfg(test)]
 mod testing;
@@ -62,6 +63,8 @@ pub(crate) struct Endpoint {
     /// stateless reset. At most one for each datagram of a batch, because the caller
     /// takes them all with [`Endpoint::transmit`] after each [`Endpoint::receive`].
     responses: VecDeque<(noq_proto::Transmit, Vec<u8>)>,
+    /// The limit on stateless resets to each address.
+    resets: stateless::Limit,
     /// The buffer that each received batch is copied into and split from. noq-proto
     /// decrypts in place and keeps parts of it.
     received: BytesMut,
@@ -128,6 +131,7 @@ impl Endpoint {
             ready: VecDeque::new(),
             events: VecDeque::new(),
             responses: VecDeque::new(),
+            resets: stateless::Limit::new(&config.entropy),
             received: BytesMut::new(),
         }
     }
@@ -556,6 +560,8 @@ impl Endpoint {
         if dropped(&datagram) {
             return;
         }
+        // noq-proto answers a short header only with a stateless reset.
+        let short = datagram.first().is_some_and(|form| form & 0x80 == 0);
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -580,7 +586,11 @@ impl Endpoint {
                     Err(error) => error.response,
                 }
             }
-            Some(DatagramEvent::Response(response)) => Some(response),
+            Some(DatagramEvent::Response(response)) => {
+                let admitted =
+                    !short || self.resets.admit(now, response.destination.ip());
+                admitted.then_some(response)
+            }
         };
         if let Some(response) = response {
             self.responses.push_back((response, reply));

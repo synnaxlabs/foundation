@@ -6,9 +6,13 @@ use std::str;
 use block::Block;
 use control::{Handoff, Writer};
 use types::authority::Authority;
+use types::name::Name;
 
 /// The buffer tag of a handoff entry.
 pub(crate) const TAG: u8 = 1;
+
+/// The most bytes in the body of a handoff: the authority and the longest subject.
+pub(crate) const MAX_BYTES: usize = 1 + Name::MAX_BYTES;
 
 /// The parts of the buffer entry that records `handoff`: a block from `pool`, or `None`
 /// when no writer holds control.
@@ -76,6 +80,17 @@ mod tests {
                 .expect("a holder");
 
             assert_eq!(&body[..], b"\x07plant.pump-1");
+        }
+
+        #[test]
+        fn writes_the_largest_body_for_the_longest_subject() {
+            let holder = writer(&"b".repeat(Name::MAX_BYTES), 7);
+
+            let body = body(&pool(4096), Handoff { to: Some(&holder) })
+                .expect("room")
+                .expect("a holder");
+
+            assert_eq!(body.len(), MAX_BYTES);
         }
 
         #[test]
@@ -161,7 +176,8 @@ mod tests {
         #[test]
         fn reads_back_each_handoff(
             holder in proptest::option::of((
-                "@?[A-Za-z0-9_-]{1,40}(\\.@?[A-Za-z0-9_-]{1,40}){0,5}",
+                "@?[A-Za-z0-9_-]{1,63}(\\.@?[A-Za-z0-9_-]{1,63}){0,3}"
+                    .prop_filter("a name", |subject| subject.len() <= Name::MAX_BYTES),
                 any::<u8>(),
             ))
         ) {
@@ -169,8 +185,10 @@ mod tests {
             let pool = pool(4096);
 
             let body = body(&pool, Handoff { to: holder.as_ref() }).expect("room");
+            let bytes = body.as_deref().unwrap_or_default();
 
-            prop_assert_eq!(read(body.as_deref().unwrap_or_default()), holder);
+            prop_assert!(bytes.len() <= MAX_BYTES);
+            prop_assert_eq!(read(bytes), holder);
         }
     }
 }

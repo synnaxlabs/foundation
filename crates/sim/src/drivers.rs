@@ -33,7 +33,9 @@ pub(crate) struct Node {
 impl Node {
     /// Adds a thread that runs when the scheduler picks its first task.
     fn thread(&self, name: String, start: Start) -> Handle {
-        let thread = lock(&self.shared).start(self.node, name, start);
+        let (thread, crashed) = lock(&self.shared).start(self.node, name, start);
+        // After the lock: the drop may start a thread.
+        drop(crashed);
         let (shared, node) = (Arc::clone(&self.shared), self.node);
         Handle::new(move || {
             let state = lock(&shared);
@@ -151,7 +153,10 @@ impl env::shards::Driver for Node {
                 let reason = "injected".into();
                 return Err(Error::Start { name, reason });
             }
-            Some((core, Fault::Pin)) => return Err(Error::Pin { name, core }),
+            Some((core, Fault::Pin)) => {
+                let reason = "injected".into();
+                return Err(Error::Pin { name, core, reason });
+            }
             Some((_, Fault::Panic)) => Box::new(|tasks: env::tasks::Tasks| -> Task {
                 tasks.spawn(async { panic!("injected") });
                 let main = main(tasks);

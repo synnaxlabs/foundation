@@ -190,19 +190,21 @@ impl Sim {
     /// Crashes `node` now, between runs. Each thread of the node ends at once: no
     /// task of it polls again, its futures and its threads that have not run drop,
     /// so its sockets and ports close and its timers stop, and
-    /// [`env::thread::Handle::join`] on one of them panics. The node keeps its disk
-    /// and its addresses: start new threads on it to restart it.
+    /// [`env::thread::Handle::join`] on one of them panics. A thread that one of
+    /// these drops starts on the node also ends in the crash and never runs. The
+    /// node keeps its disk and its addresses: start new threads on it to restart it.
     ///
     /// # Panics
     ///
     /// - When `node` belongs to another run.
-    /// - When the drop of a future panics. The crash still ends, and the panic gives
-    ///   each message as [`Error::Panicked`] does.
+    /// - When the drop of a future or of a thread that has not run panics. The crash
+    ///   still ends, and the panic gives each message as [`Error::Panicked`] does:
+    ///   those of the futures first, then those of the threads, each in start order.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
         let (tasks, starts) = lock(&self.shared).stop(node);
-        let panics = self.drop_futures(&tasks);
-        drop(starts);
+        let mut panics = self.drop_futures(&tasks);
+        panics.extend(drop_each(starts));
         let orphans = lock(&self.shared).crash(node, crash);
         drop(orphans);
         assert!(panics.is_empty(), "{}", panics.join(THEN));
@@ -412,20 +414,23 @@ impl Sim {
     }
 
     /// Drops the futures of `tasks`, outside the borrow, since a drop may spawn.
-    /// Returns the message of each drop that panicked, in order. Each future drops on
-    /// its own, as a second panic in one unwind aborts the process.
+    /// Returns the message of each drop that panicked, in order.
     fn drop_futures(&self, tasks: &[u64]) -> Vec<String> {
         let futures = self.futures.borrow_mut().remove(tasks);
-        (futures.into_iter())
-            .filter_map(|future| {
-                panic::catch_unwind(AssertUnwindSafe(|| drop(future))).err()
-            })
-            .map(|payload| message(&*payload))
-            .collect()
+        drop_each(futures)
     }
 }
 
-/// What joins the messages of two panics of one thread.
+/// Drops each item on its own, as a second panic in one unwind aborts the process.
+/// Returns the message of each drop that panicked, in order.
+fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
+    (items.into_iter())
+        .filter_map(|item| panic::catch_unwind(AssertUnwindSafe(|| drop(item))).err())
+        .map(|payload| message(&*payload))
+        .collect()
+}
+
+/// What joins the messages of two panics.
 const THEN: &str = ", then a drop panicked: ";
 
 /// The message of a panic payload.
