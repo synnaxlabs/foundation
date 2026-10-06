@@ -5,6 +5,7 @@
 pub mod access;
 pub mod connector;
 pub mod definition;
+pub mod kind;
 pub mod node_settings;
 pub mod region;
 pub mod tree;

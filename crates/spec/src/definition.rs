@@ -45,6 +45,7 @@ use types::name::{self, Name, Selector, Written};
 
 use crate::access::{Action, Actions, Policy};
 use crate::connector::Connector;
+use crate::kind::Kind;
 use crate::node_settings;
 use crate::region::{Delegation, NoVoters};
 
@@ -73,6 +74,17 @@ pub enum Definition {
 }
 
 impl Definition {
+    /// The kind of the definition.
+    #[must_use]
+    pub const fn kind(&self) -> Kind {
+        match self {
+            Self::Access(_) => Kind::Access,
+            Self::Connector(_) => Kind::Connector,
+            Self::Region(_) => Kind::Region,
+            Self::NodeSettings(_) => Kind::NodeSettings,
+        }
+    }
+
     /// Writes the canonical bytes of the definition.
     #[must_use]
     #[expect(
