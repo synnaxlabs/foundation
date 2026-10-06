@@ -653,19 +653,19 @@ How to read this record:
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
   (#144). An exchange with an error over 36500 days gives an unknown measurement,
-  centered between its edges or at the nearest span, so no caller maps a failure to
-  one. It cuts no known bound, because an unknown bound votes only when no bound is
-  known. An exchange can still give a known bound from two unknown readings whose
-  centers move apart by more than the round trip, so the node that asks makes an
-  unknown answer unknown itself (CLOCK PEER ANSWER). An overlap whose readings allow
-  an error over 36500 days before drift gives `None`, as an overlap with no edge
-  does, because no caller needs an unknown device measurement yet. A device source
-  can ask for one when it calls `Overlap::at`. Decided by the `time` builder (#258),
-  and for the exchange approved by the coordinator (#903). Each function returns only
-  the errors it can give: one `Error` per module (`overlap`, `combine`), and `Option`
-  where a caller does the same for each cause (`Drift::from_ppb`, `Measurement::new`,
-  `Overlap::at`). Decided by the coordinator (#272). `Exchange::measure` has one cause
-  left, so it gives `Option` (#903).
+  centered between its edges or at the nearest span, so no caller maps a failure to one.
+  It cuts no known bound, because an unknown bound votes only when no bound is known. An
+  unknown reading (`exchange::Reading::Unknown`) gives an unknown measurement, because
+  two unknown readings sent as intervals whose centers move apart by more than the round
+  trip give a known bound (#930). An overlap whose readings allow an error over 36500
+  days before drift gives `None`, as an overlap with no edge does, because no caller
+  needs an unknown device measurement yet. A device source can ask for one when it calls
+  `Overlap::at`. Decided by the `time` builder (#258), and for the exchange approved by
+  the coordinator (#903). Each function returns only the errors it can give: one `Error`
+  per module (`overlap`, `combine`), and `Option` where a caller does the same for each
+  cause (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the
+  coordinator (#272). `Exchange::measure` has one cause left, so it gives `Option`
+  (#903).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -774,20 +774,20 @@ How to read this record:
   OS reading and its OS bound. Cold nodes then vote with each other's OS clocks, and
   each waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown
   bound (an unknown estimate, or an OS clock with no bound) says "unknown" and carries
-  its offset. The asking node pushes a `Measurement::unknown` that it builds itself,
-  so the answer cannot narrow into a known bound. A peer that never answers counts
-  against a majority, and `node` removes no source. Lost: a node with no time does
-  not answer, because then a mesh that starts cold never syncs; an answer of "no
-  time" that takes the source out of the vote, because a node with a bad OS clock then
-  syncs on itself; `node` removes a silent source after a timeout, a patch that puts
-  time policy in layer 4. The person decided on 2026-10-05 ("Yeah that's fine"), #145.
-  So a node that starts while no peer answers stays unsynced, even with a good OS
-  bound. Its samples keep their local monotonic reading, and the node stamps them in
-  mesh time when the first estimate comes, with the error of that estimate at each
-  reading (200 ppm: 0.72 s after 1 h). The buffer holds the samples until then, and a
-  node that never syncs fills it. Lost: drop the samples, a patch that loses data;
-  stamp them with OS time at once, a patch that writes a time the clock refused and
-  cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
+  its offset. The asking node measures it as `exchange::Reading::Unknown`, so the answer
+  cannot narrow into a known bound (#930). A peer that never answers counts against a
+  majority, and `node` removes no source. Lost: a node with no time does not answer,
+  because then a mesh that starts cold never syncs; an answer of "no time" that takes
+  the source out of the vote, because a node with a bad OS clock then syncs on itself;
+  `node` removes a silent source after a timeout, a patch that puts time policy in
+  layer 4. The person decided on 2026-10-05 ("Yeah that's fine"), #145. So a node that
+  starts while no peer answers stays unsynced, even with a good OS bound. Its samples
+  keep their local monotonic reading, and the node stamps them in mesh time when the
+  first estimate comes, with the error of that estimate at each reading (200 ppm: 0.72 s
+  after 1 h). The buffer holds the samples until then, and a node that never syncs fills
+  it. Lost: drop the samples, a patch that loses data; stamp them with OS time at once,
+  a patch that writes a time the clock refused and cannot correct later. The person
+  decided on 2026-10-05 ("(b)"), #145.
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in

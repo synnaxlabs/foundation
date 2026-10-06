@@ -413,7 +413,7 @@ mod tests {
 
     mod when_a_bound_is_unknown {
         use super::*;
-        use crate::exchange::Exchange;
+        use crate::exchange::{Exchange, Reading};
 
         fn unknown(offset: i64) -> Measurement {
             Measurement::unknown(Monotonic(0), Span::from_nanos(offset))
@@ -575,8 +575,10 @@ mod tests {
             let m = combine(Monotonic(0), drift(0), &sources).expect("bounds meet");
             let exchange = Exchange {
                 sent: Monotonic(0),
-                received: m.interval(),
-                answered: m.interval(),
+                reading: Reading::Known {
+                    received: m.interval(),
+                    answered: m.interval(),
+                },
                 returned: Monotonic(10),
             };
             let unknown =

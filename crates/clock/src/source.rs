@@ -2,7 +2,7 @@
 //! measure the node's monotonic clock against a time source.
 
 use estimate::Measurement;
-use estimate::exchange::Exchange;
+use estimate::exchange::{Exchange, Reading};
 use types::time::{Interval, Monotonic, Span};
 
 use crate::DRIFT;
@@ -87,8 +87,13 @@ impl Wall {
         };
         let exchange = Exchange {
             sent,
-            received: instant,
-            answered: instant,
+            reading: match bound {
+                Some(_) => Reading::Known {
+                    received: instant,
+                    answered: instant,
+                },
+                None => Reading::Unknown(reading.time),
+            },
             returned,
         };
         // The OS reading is one instant, so only a clock that goes back allows no
@@ -96,13 +101,13 @@ impl Wall {
         let Some(read) = exchange.measure(DRIFT) else {
             panic!("invariant: the monotonic clock went from {sent:?} to {returned:?}")
         };
-        let unknown = Measurement::unknown(read.at(), read.offset());
         let Some(bound) = bound else {
-            return unknown;
+            return read;
         };
         let error =
             Span::from_nanos(read.error().nanos().saturating_add(bound.nanos()));
-        Measurement::new(read.at(), read.offset(), error).unwrap_or(unknown)
+        Measurement::new(read.at(), read.offset(), error)
+            .unwrap_or(Measurement::unknown(read.at(), read.offset()))
     }
 }
 
