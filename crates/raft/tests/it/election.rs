@@ -74,6 +74,32 @@ proptest! {
         let elected: Vec<usize> = elected.map(|(at, _)| at).collect();
         prop_assert!(elected.len() == 1 && elected[0] != leader, "{elected:?}");
     }
+
+    // An accepted gap (#719): a node counts a PreVote grant that its voter sent with
+    // no lease, after the voter got its lease back.
+    #[test]
+    fn a_late_prevote_grant_costs_one_election(random in any::<u64>()) {
+        let mut network = Network::new(&[Position::default(); 3], random);
+        let (leader, term) = network.settle(&[])?;
+        let (cut, other) = ((leader + 1) % 3, (leader + 2) % 3);
+        network.cut[cut] = true;
+        while network.nodes[cut].role() != Role::PreCandidate {
+            network.round();
+        }
+        network.cut[cut] = false;
+        network.deliver(Message {
+            from: Network::key(other),
+            to: Network::key(cut),
+            term: Term(term.0 + 1),
+            body: Body::PreVoteReply { granted: true },
+        });
+        prop_assert_eq!(network.nodes[cut].role(), Role::Candidate);
+        for _ in 0..4 * ELECTION {
+            network.round();
+        }
+        let agreed = network.agreed();
+        prop_assert!(agreed.is_some_and(|(_, now)| now > term), "{agreed:?}");
+    }
 }
 
 // An accepted gap (#352 item 2).

@@ -135,6 +135,7 @@ pub(crate) const CRATES: &[Crate] = &[
         deps: Deps::Only(&[
             "env",
             "types",
+            "block",
             "raft",
             "spec",
             "access",
