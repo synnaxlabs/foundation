@@ -801,6 +801,36 @@ fn a_power_cut_leaves_the_listeners_of_other_nodes() {
     assert_eq!(take(&server), at(&c, 49_152));
 }
 
+#[test]
+fn a_listener_or_stream_from_before_a_crash_panics_when_it_polls() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, a, b) = pair(0, link::Config::default());
+        let mut listener = listen(&a, 4433);
+        let server = start(&a, "server", move |_| async move {
+            let tcp = accept(&mut listener).await;
+            (listener, tcp)
+        });
+        let remote = at(&a, 4433);
+        start(&b, "client", move |node| async move {
+            let _tcp = connect(&node, remote, options()).await.unwrap();
+            pending::<()>().await;
+        });
+        sim.run_for(millis(5)).unwrap();
+        let (mut listener, mut tcp) = take(&server);
+        sim.crash(&a, crash);
+        start(&a, "listener", move |_| async move {
+            drop(poll_once(accept(&mut listener)).await);
+        });
+        let message = "a TCP listener of node 0 polls after a crash of the node";
+        assert_eq!(sim.run_for(millis(1)), Err(panicked("listener", message)));
+        start(&a, "stream", move |_| async move {
+            drop(poll_once(read(&mut tcp, 1)).await);
+        });
+        let message = "a TCP stream of node 0 polls after a crash of the node";
+        assert_eq!(sim.run_for(millis(1)), Err(panicked("stream", message)));
+    }
+}
+
 /// The error of a run in which a shard of `a` calls `call` on a link of `link`.
 fn yet<F: Future + 'static>(
     link: link::Config,
