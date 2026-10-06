@@ -158,7 +158,7 @@ fn stamps_an_earlier_reading_before_mesh_time_from_1777_to_2162() {
                 clock.push(new, measure(&node, offset, after));
                 centers.push(center(reader.now().expect("synced")));
                 let first = center(reader.first(reading).expect("synced"));
-                assert!(first <= centers[0], "{first} {centers:?}");
+                assert!(centers.iter().all(|&c| first <= c), "{first} {centers:?}");
                 assert!(centers.is_sorted(), "{centers:?}");
             }
         }

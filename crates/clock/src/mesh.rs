@@ -112,18 +112,17 @@ impl Clock {
         let Some(change) = self.discipline.next(estimate, DRIFT) else {
             return;
         };
+        let unsynced = self.discipline.slew().is_none();
         // A slew keeps mesh time from going back only against reads before its `now`,
         // so the clock reads inside the update.
         self.cell.update(|_| {
-            let old = self.discipline;
             self.discipline = change.at(self.monotonic.now(), DRIFT);
-            let words = encode(self.discipline);
             // Inside this update, so a read of `cell` that shows the first slew comes
             // after it.
-            if let (None, Some(slew)) = (old.slew(), self.discipline.slew()) {
+            if unsynced && let Some(slew) = self.discipline.slew() {
                 self.first.update(|_| encode_first(Some(slew)));
             }
-            words
+            encode(self.discipline)
         });
     }
 }
