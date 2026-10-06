@@ -988,6 +988,18 @@ How to read this record:
   written. Batch size (64 entries) and the number of appends in flight per follower
   (8) are constants, not `Config` fields: nothing measured asks for a knob. `Message`
   and `Body` are `Clone`, not `Copy`, because an append carries entries.
+- **RAFT DURABILITY (#352)** `raft` is safe only when a disk keeps what it synced. The
+  disk owns that (`env::files`); `mesh` writes each `Ready` there. `raft` does not
+  find a loss. When a follower's disk lost synced entries, and what it applied of
+  them, the leader still counts them. While the leader's commit is below the
+  follower's last entry, the follower follows, and the leader can commit an entry
+  that fewer than a quorum hold. Once the commit passes that entry, each heartbeat
+  gives the follower `Error::IndexPastLog`; an append to it fails with no error. A
+  loss that keeps `applied` fails at `Raft::new` with `Error::AppliedPastLog`. `node`
+  shows the error in its status (#648). Lost: the leader sends again from below what
+  it counted, which lowers its count under a commit that a quorum may no longer
+  hold. Decided on 2026-10-05 (#352 item 3). Later, at low priority: the leader
+  learns the follower's real last index and stops counting lost entries (#663).
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's

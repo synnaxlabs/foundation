@@ -48,8 +48,9 @@ impl Peer {
 }
 
 /// What the caller must do after an input, in this order: write `hard` and `entries`
-/// to disk, send `messages`, then apply `committed`. Write `hard` and `entries` in
-/// any order: a crash between the two is safe.
+/// to disk and sync them, send `messages`, then apply `committed`. Write `hard` and
+/// `entries` in any order: a crash between the two is safe. `raft` is safe only when
+/// the disk keeps what it synced.
 #[must_use = "a dropped Ready loses its messages and its hard state"]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ready {
