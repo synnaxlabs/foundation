@@ -1,5 +1,7 @@
 //! The links between nodes: one direction of a path, with its delay and faults.
 
+use std::num::NonZeroU64;
+
 use types::time::Span;
 
 use crate::chance;
@@ -26,10 +28,16 @@ pub struct Config {
     /// headers: 28 bytes on IPv4, 48 on IPv6. A TCP segment carries at most the MTU
     /// less 40 bytes on IPv4, 60 on IPv6.
     pub mtu: usize,
+    /// The most bytes per second that the link sends, counted as IP packets with
+    /// the headers that [`mtu`](Self::mtu) gives. The link sends one packet at a
+    /// time, in the order they were sent, and each then takes the delay and the
+    /// jitter. `None` has no limit.
+    pub rate: Option<NonZeroU64>,
 }
 
 impl Default for Config {
-    /// 250 us of delay, no jitter, loss, or duplication, and an MTU of 1,500 bytes.
+    /// 250 us of delay, no jitter, loss, or duplication, an MTU of 1,500 bytes, and
+    /// no rate.
     fn default() -> Self {
         Self {
             delay: Span::from_nanos(250 * Span::MICROSECOND.nanos()),
@@ -37,6 +45,7 @@ impl Default for Config {
             loss: 0.0,
             duplication: 0.0,
             mtu: 1_500,
+            rate: None,
         }
     }
 }

@@ -917,6 +917,35 @@ mod tests {
         out
     }
 
+    /// An encoded frame of `set` with each series of `series`, an entry and its bytes,
+    /// and each count of `counts`, a group and its count.
+    fn encoded_frame(
+        pool: &Pool,
+        set: &KeySet,
+        series: &[(usize, &[u8])],
+        counts: &[(u32, u32)],
+    ) -> Draft {
+        let lens: Vec<_> = series
+            .iter()
+            .map(|&(entry, bytes)| (entry, bytes.len()))
+            .collect();
+        let mut draft = Draft::new(pool, set, Form::Encoded, &lens).expect("a frame");
+        for &(entry, bytes) in series {
+            let out = draft.series_mut(entry).expect("the series is present");
+            out.copy_from_slice(bytes);
+        }
+        for &(group, count) in counts {
+            draft.set_count(group, count);
+        }
+        draft
+    }
+
+    /// `bytes` with the tag of its first vector made 9, which is no tag.
+    fn untagged(mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes[0] = 9;
+        bytes
+    }
+
     fn applied(slot: u32, seq: u64, count: u32) -> Outcome {
         Outcome::Applied {
             slot: Slot::new(slot),
@@ -1200,6 +1229,88 @@ mod tests {
                 shard.write(a, LIVE, write),
                 Ok(&[refused(0, refusal), applied(2, 0, 1)][..])
             );
+        });
+    }
+
+    #[test]
+    fn refuses_an_encoded_index_cut_short_after_a_stamp_that_goes_back() {
+        run(70, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let mut stamps: Vec<i64> = (10..2510).collect();
+            stamps[5] = 1;
+            let mut index = encoded(&stamps);
+            index.truncate(encoded(&stamps[..1024]).len() + 1);
+            let write = encoded_frame(&test.pool, &set, &[(0, &index)], &[(0, 2500)]);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Truncated {
+                    vector: 1,
+                    needed: 2,
+                    available: 1,
+                },
+            });
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[refused(0, refusal)][..]));
+        });
+    }
+
+    #[test]
+    fn refuses_an_encoded_index_with_bytes_after_its_last_vector() {
+        run(71, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let mut index = encoded(&[10, 20]);
+            index.push(0);
+            let write = encoded_frame(&test.pool, &set, &[(0, &index)], &[(0, 2)]);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Trailing { extra: 1 },
+            });
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[refused(0, refusal)][..]));
+            let write = frame(&test.pool, &set, &[(0, &[10, 20])]);
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(0, 0, 2)][..]));
+        });
+    }
+
+    #[test]
+    fn refuses_a_group_with_the_error_of_its_index_before_a_data_series_after_it() {
+        run(72, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let index = untagged(encoded(&[10, 20]));
+            let data = untagged(encoded(&[1, 2]));
+            let series = [(0, &index[..]), (1, &data[..])];
+            let write = encoded_frame(&test.pool, &set, &series, &[(0, 2)]);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Tag { vector: 0, tag: 9 },
+            });
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[refused(0, refusal)][..]));
+        });
+    }
+
+    #[test]
+    fn refuses_a_group_with_the_error_of_a_data_series_before_its_index() {
+        run(73, |test| async move {
+            let mut shard = test.open(AREA, 2).await;
+            shard.carry(Slot::new(1));
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(1)),
+                data: &[(key(Slot::new(0)), Type::Scalar(Scalar::I64))],
+            }]);
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let data = untagged(encoded(&[1, 2]));
+            let index = untagged(encoded(&[10, 20]));
+            let series = [(0, &data[..]), (1, &index[..])];
+            let write = encoded_frame(&test.pool, &set, &series, &[(0, 2)]);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Tag { vector: 0, tag: 9 },
+            });
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[refused(1, refusal)][..]));
         });
     }
 

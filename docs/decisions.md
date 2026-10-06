@@ -424,12 +424,18 @@ How to read this record:
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
   `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
-  durable: a killed process may have written records that it never synced (#657). The
-  restart record needs one free block: an open of a full ring first moves records at
-  the tail to a segment. The walk holds one pool block at a time and reads a longer
-  record in pieces of the pool's largest block, so the pool puts no bound on
-  `body_max`. An open with no such block free fails with `Pool`, and the next open
-  recovers the record (#440, #572).
+  durable: a killed process may have written records that it never synced (#657). Before
+  that sync, the open writes again, as read, the two header blocks and each window the
+  walk reads before the one that ends the chain. A read can see, from the cache, writes
+  that a failed sync of an earlier process in the same boot lost, and the cache can drop
+  them between two reads. So an open writes again the header, 8 KiB, and the bytes it
+  walks, at most the area, and the first 52 KiB of each record over one block twice
+  (#698). Lost: a walk with direct I/O, which needs a new `env::files` read mode in each
+  driver and in `sim`. The restart record needs one free block: an open of a full ring
+  first moves records at the tail to a segment. The walk holds one pool
+  block at a time and reads a longer record in pieces of the pool's largest block, so
+  the pool puts no bound on `body_max`. An open with no such block free fails with
+  `Pool`, and the next open recovers the record (#440, #572).
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and
@@ -843,6 +849,9 @@ How to read this record:
   a node that never syncs fills it. Lost: drop the samples, a patch that loses data;
   stamp them with OS time at once, a patch that writes a time the clock refused and
   cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
+  `clock::Reader::first` gives that stamp: the first estimate at a reading. Later
+  estimates never change it, so the stamps keep the order of their readings and are
+  never after mesh time (#523).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
@@ -940,19 +949,23 @@ How to read this record:
   header has one length (a request then sends 32 zero bytes); `encode` into a
   `&mut [u8]` that returns a length (a short buffer then needs an error); a second byte
   for the kind of time (two checks where one kind byte does the work).
-- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
-  however many shards it runs, so each site's firewall needs one known port per
-  conduit. Each QUIC connection belongs to one shard, and every connection ID a node
-  issues encodes that shard. A receive loop on one shard reads the UDP socket in
-  batches and hands each batch to the owning shard over the C2 ring; every shard
-  sends on the same socket. The TCP listener accepts and moves each stream to its
-  shard. `env::net` therefore splits a UDP socket into a receive half with one owner
-  and a send half that any shard may use, and `sim` models the split. Rejected: a
-  port per shard (a port range in every firewall), kernel reuse-port hashing (routes
-  by address, breaks on NAT rebinding), and one shard doing all network work. If the
-  receive loop saturates on Linux, add a reuse-port group steered by the same
-  connection ID. Decided by the design session under the architecture delegation
-  (#53).
+- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
+  the same port number, however many shards it runs, so each site's firewall needs one
+  known port per conduit. Each QUIC connection belongs to one shard, and every
+  connection ID a node issues encodes that shard. A receive loop on one shard reads the
+  UDP socket in batches and hands each batch to the owning shard over the C2 ring; every
+  shard sends on the same socket. The TCP listener accepts and moves each stream to its
+  shard. `env::net` therefore splits a UDP socket into a receive half with one owner and
+  a send half that any shard may use, and `sim` models the split. Rejected: a port per
+  shard (a port range in every firewall), kernel reuse-port hashing (routes by address,
+  breaks on NAT rebinding), and one shard doing all network work. If the receive loop
+  saturates on Linux, add a reuse-port group steered by the same connection ID. Decided
+  by the design session under the architecture delegation (#53). The same port number
+  (2026-10-06): with port 0, UDP takes a free port and TCP binds the same one. When TCP
+  finds it in use, the node closes the UDP socket and tries a new port, up to 8 tries,
+  then gives the last error: TCP and UDP have separate port spaces, and no OS call gives
+  a port free in both. A fixed port that fails gives its error at once. Approved by the
+  coordinator on #990.
 - **TLS RANDOMNESS (2026-10-04)** All randomness inside TLS (key shares, client
   random, nonces) comes from aws-lc, not from `env`. rustls holds its random source
   as a `&'static` value, and aws-lc makes X25519 key shares with its own randomness,
@@ -964,7 +977,8 @@ How to read this record:
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
 - **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and accepts;
-  the node's sockets and relays sit in one node-level part (ONE PORT PER NODE). A
+  the node's sockets and relays sit in one node-level part, `transport::Port` (ONE
+  PORT PER NODE), which `node` binds once and splits into one part for each shard. A
   `Session` goes to one peer over one path, direct or relayed, fixed for its life, and
   runs every class on one carrier. A second carrier for some classes waits for the
   measurement in TRANSPORT SHAPE LOCKED, which must show that `Latest` p99 holds while
@@ -1176,7 +1190,7 @@ How to read this record:
   down through a change holds the old configuration and refuses a leader whose votes
   are no quorum of it until an election whose grants are. When a second node fails
   first, the group waits for an operator, who wipes the voter and starts it with no
-  configuration (a node with no voters proves anything). The chain of proofs over
+  configuration (a node with no configuration proves anything). The chain of proofs over
   configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
   pins both, and the random runs skip exactly such a voter until #881. The advisor
   required a proof on every message and on each refusal, signatures only, and the
@@ -1271,9 +1285,21 @@ How to read this record:
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
   its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. A `Voters` entry with an empty `incoming` set, in `Start.entries`
-  or in an `Append`, is `Error::NoVoters`: a group with no voter can never commit or
-  elect. A leader changes the voters with `Raft::propose_voters(set)`: it writes the
+  `Start.entries`. An empty `Start.voters` is a node that joins, or a voter that an
+  operator wiped. It takes any proof until it holds a `Voters` entry (#1004). Then its
+  first `Voters` entry shows the configuration before the entries: a joint entry's
+  outgoing set, or for a leave its own set (#928, coordinator, 2026-10-06). A log
+  starts at index 1, so that entry is the joint entry of the group's first change, and
+  the node checks proofs as a founder with the same log does, gaps included (#881,
+  #1005). Lost: an empty committed set proves nothing (the new node then refuses a
+  leader that the outgoing set elects when the old leader fails before the joint entry
+  commits); a joining node starts with the group's configuration (the caller must know
+  it, and it removes the operator's recovery of a wiped voter); the founding
+  configuration as entry 1, as in etcd (a wider change that alone leaves the node open
+  until it holds that entry). A `Voters` entry with an empty `incoming` set, in
+  `Start.entries` or in an `Append`, is `Error::NoVoters`: a group with no voter can
+  never commit or elect.
+  A leader changes the voters with `Raft::propose_voters(set)`: it writes the
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.
@@ -1518,7 +1544,10 @@ How to read this record:
   binary larger is fine." "we should be careful about writing raw HTTP transports.",
   relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an
   `httparse` reader) closed: the person told `connector` to use the `hyper` client on
-  2026-10-06. `httparse` comes in only as a dependency of `hyper`.
+  2026-10-06. `httparse` comes in only as a dependency of `hyper`. The client is
+  HTTP/1.1 only for now: `h2` 0.4 reads the OS clock to expire a reset stream, so
+  HTTP/2 turns on only when `h2` takes its clock through `env`, by an upstream change.
+  Decided by the coordinator with `advisor` on 2026-10-06 (#341).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -1726,16 +1755,28 @@ How to read this record:
   settings (NODE SETTINGS). Targets and combination rules: X25, X26. Specificity:
   SPECIFICITY (#3).
 - **NODE SETTINGS (2026-10-05)** A node's disk budget and pool budget are a policy
-  that selects node names: `node_settings { select = "site-a/*" disk = "200GiB" }`.
+  that selects node names: `node_settings "<name>" { select, disk, pool }`, such as
+  `select = "site_a.*"` and `disk = "200GiB"`. Each budget is optional and above zero.
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
   default. A policy that sets no budget is a user mistake, refused as normal
-  validation with the fix in the message (#869). The data directory is node-local:
+  validation with a fix (DIAGNOSTICS, #869, #1000). The data directory is node-local:
   a start argument of `foundation`, with a default, because the spec is stored in it.
   Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
   change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
-  #342.
+  #342. The `config` builder added the label and the bound above zero (#474).
+- **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
+  policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
+  at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
+  channel name. A policy belongs to the region that governs its name (X2: the longest
+  region prefix that contains it), and it may select only names in that region and its
+  descendants (X26). When a `region` block is added or removed, `plan` checks X26 again
+  for each policy whose region changes, lists each policy that moves to other voters,
+  and refuses one whose reach fails. Lost: the region from the selector (a wider pattern
+  would move the policy to other voters silently, and X26 could never fail), and the
+  region from the directory (K2 makes the layout a default only; r3 rejected a
+  `region =` attribute). The advisor approved it on 2026-10-05, #474.
 
 ### 1.12 Access, identity, and secrets
 
@@ -2007,7 +2048,16 @@ How to read this record:
   session under the architecture delegation. `Node::fail_udp` makes a UDP socket fail
   as when the OS breaks it, until the socket drops: each receive gives `EIO`, the
   datagrams that arrive at it are lost, and a send still works. Approved by the
-  coordinator on #907. Built by `simulation` in #926.
+  coordinator on #907. Built by `simulation` in #926. Amended (2026-10-06, #943):
+  `link::Config::rate` limits a link to that many bytes per second, counted as IP
+  packets with their IP and UDP or TCP headers. Each direction of a link sends one
+  packet at a time: a packet starts when it is sent or when the packet before it has
+  left, whichever is later, and leaves after its bytes at the rate. Packets sent back
+  to back at one rate leave at the rate of their total bytes, so the rounding of each
+  to a nanosecond does not add up. A packet sent after the rate is removed still waits
+  for the packets before it. Then it takes the delay and the jitter. A power cut drops
+  the packets of the node that wait to leave. With no rate, a link adds no events and
+  no draws, so the digest of a run does not change. Approved by the coordinator.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
@@ -2288,7 +2338,7 @@ Storage classes used in the table:
 | Control channel | Spec: `Index.control` pointer, placed with its index | Values: only the home, one sample per handoff (a published copy) | People, agents, auditors, new subscribers | `spec`; values through `home` |
 | Region | Files: `region "<prefix>" { voters }`. The parent's spec holds the delegation record `{ prefix, epoch, initial voters }`; the region's own Raft config holds current voters (X3) | Parent voters create, remove, or force takeover; the region changes its own voters | `mesh`, `plan`, every node | `spec` (definition), `mesh` (groups) |
 | Voters | Desired: the region block. Actual: Raft membership of the region's group | The region's own commits (joint consensus) | `raft`, `mesh` | `mesh`, `raft` |
-| Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `access` |
+| Policies (all kinds) | Files, then Spec | People, agents | `spec::resolve` (settings) or `access` (access) | `spec`, `config` (check), `access` |
 | Retention policy | Spec; selects indexes | Files | `delivery` (floor), `buffer` (trim through `set_floor`) | `spec` |
 | Placement policy | Spec; selects connectors and indexes: `{ select, standby, copies }` | Files | `mesh`, supervisor, `replica`, `plan` | `spec` |
 | Transmission policy | Spec; selects indexes (link side open, 5.1) | Files | `transport`, `hub` | `spec` |
@@ -3013,7 +3063,7 @@ conclusion together". Each one is listed below.
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
   tree key `<label>.@<kind>` of a policy (#729), `frame::split`, which cuts a frame
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
-  and generated names as strings (#701).
+  generated names as strings (#701), and POLICY NAMES (#474).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
   the STREAM WIRE hello (#55), a reader session key type per mode (#725).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
