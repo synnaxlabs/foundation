@@ -7,10 +7,13 @@ publish.workspace = true
 
 [dependencies]
 block = { path = "../block" }
+env = { path = "../env" }
 rustix = { workspace = true }
+types = { path = "../types" }
 
 [dev-dependencies]
 rustix = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["rt", "time"] }
 
 [lints]
 workspace = true
