@@ -270,6 +270,18 @@ impl Disk {
         self.collect(handle.inode);
     }
 
+    /// Drops every hold, as the death of the process that held the files does, and
+    /// frees each file that only a hold kept.
+    pub(crate) fn release_all(&mut self) {
+        let inodes: Vec<u64> = self.inodes.keys().copied().collect();
+        for inode in inodes {
+            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
+                (file.holds, file.writers) = (0, 0);
+                self.collect(inode);
+            }
+        }
+    }
+
     /// Frees file `inode` when no entry, no durable entry, and no hold keeps it.
     fn collect(&mut self, inode: u64) {
         let file = self.file(inode);

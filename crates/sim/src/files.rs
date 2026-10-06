@@ -355,7 +355,8 @@ impl Files {
     /// Crashes `node` by `crash` at true time `at`, whose calls in flight have all
     /// dropped. Each call ends now, in the order of its end time: after a `Process`
     /// crash each takes effect, and after a `Power` crash only each write does, and
-    /// the disk keeps what is durable. Returns the blocks of the calls, for the
+    /// the disk keeps what is durable. Then each file of the node loses its holds,
+    /// those of leaked descriptors too. Returns the blocks of the calls, for the
     /// caller to drop after it releases the lock.
     pub(crate) fn crash(
         &mut self,
@@ -377,16 +378,14 @@ impl Files {
                 crash == Crash::Process || matches!(flight.call, Call::Write { .. });
             let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
-                (ended.result.is_ok(), self.discard(node, ended))
+                (ended.result.is_ok(), ended.held)
             } else {
-                if let Some(handle) = flight.call.handle() {
-                    self.disks[node].release(handle);
-                }
                 (false, flight.held)
             };
             (at, key, kind, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
+        self.disks[node].release_all();
         if crash == Crash::Power {
             self.disks[node].cut_power(&mut self.rng);
         }
