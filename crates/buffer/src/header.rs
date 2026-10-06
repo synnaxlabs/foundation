@@ -260,7 +260,7 @@ mod tests {
             |(blocks, tail, chain, seq)| {
                 let most = usize::try_from(blocks * 4096).expect("a small size") - 9;
                 (4087..=most).prop_map(move |body_max| {
-                    header((2 * blocks - 1) * 4096, body_max, tail * 4096, chain, seq)
+                    header(2 * blocks * 4096, body_max, tail * 4096, chain, seq)
                 })
             },
         )

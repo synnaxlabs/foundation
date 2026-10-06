@@ -109,11 +109,11 @@ fn midpoint(reader: &Reader) -> i64 {
 #[test]
 fn a_read_before_a_late_update_never_goes_back() {
     let (paused, mut clock, reader, source) = clock();
-    let _ = clock.push(source, exact(SECOND, 0));
-    let _ = clock.push(source, exact(SECOND, 400));
+    clock.push(source, exact(SECOND, 0));
+    clock.push(source, exact(SECOND, 400));
     let pushed = SECOND + 400 * MILLISECOND;
     paused.time.store(pushed, SeqCst);
-    let (_, before) = overlap(
+    let ((), before) = overlap(
         &paused,
         || clock.push(source, exact(pushed, 0)),
         || {
@@ -130,17 +130,17 @@ fn a_read_before_a_late_update_never_goes_back() {
 #[test]
 fn a_read_across_an_update_never_goes_back() {
     let (paused, mut clock, reader, source) = clock();
-    let _ = clock.push(source, exact(SECOND, 0));
-    let _ = clock.push(source, exact(SECOND, -1_000));
+    clock.push(source, exact(SECOND, 0));
+    clock.push(source, exact(SECOND, -1_000));
     paused.time.store(SECOND + 400 * MILLISECOND, SeqCst);
     let first = midpoint(&reader);
-    let (second, _) = overlap(
+    let (second, ()) = overlap(
         &paused,
         || midpoint(&reader),
         || {
             let pushed = SECOND + 800 * MILLISECOND;
             paused.time.store(pushed, SeqCst);
-            clock.push(source, exact(pushed, -1_000))
+            clock.push(source, exact(pushed, -1_000));
         },
     );
     assert!(first <= second, "mesh time went back {} ns", first - second);

@@ -42,13 +42,7 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
                 byte::Size::from_bytes(u64::MAX)
             )
         };
-        bad(
-            format!(
-                "cannot read the byte size {text:?}: expected {}",
-                error.expected
-            ),
-            fix,
-        )
+        bad(format!("cannot read the byte size {text:?}: {error}"), fix)
     })
 }
 
@@ -176,10 +170,15 @@ mod tests {
 
     #[test]
     fn refuses_a_text_that_byte_size_refuses() {
-        for text in ["200GB", "200 GB", "", "1 5GiB", "1 024B"] {
+        for text in ["200 GB", "", "1 5GiB", "1 024B"] {
             assert_eq!(size(&string(text)), refused(&syntax(text), FIX), "{text:?}");
         }
         assert_refused(&[
+            (
+                "200GB",
+                "cannot read the byte size \"200GB\": expected the unit GiB",
+                FIX,
+            ),
             (
                 "0.3B",
                 "cannot read the byte size \"0.3B\": expected a whole number of bytes",
@@ -187,8 +186,8 @@ mod tests {
             ),
             (
                 "16777216TiB",
-                "cannot read the byte size \"16777216TiB\": expected a size that fits \
-                 in a 64-bit count of bytes",
+                "cannot read the byte size \"16777216TiB\": expected a size of at most \
+                 16777215TiB",
                 FIX,
             ),
         ]);
@@ -235,10 +234,7 @@ mod tests {
                     prop_assert_eq!(diagnostic.span, Some(span()));
                     prop_assert_eq!(
                         diagnostic.message,
-                        format!(
-                            "cannot read the byte size {text:?}: expected {}",
-                            error.expected
-                        )
+                        format!("cannot read the byte size {text:?}: {error}")
                     );
                     let written = diagnostic
                         .fix
