@@ -371,7 +371,10 @@ impl Raft {
                 self.send(from, self.term, Body::VoteReply { granted });
             }
             Body::PreVoteReply { granted } => {
-                if self.role == Role::PreCandidate {
+                // A grant carries the term that its pre-campaign asks for, so one of
+                // another term answers an earlier pre-campaign.
+                let current = !granted || self.term.next() == Some(term);
+                if self.role == Role::PreCandidate && current {
                     self.poll(from, granted);
                 }
             }
@@ -1817,6 +1820,19 @@ mod tests {
             let granted = Body::VoteReply { granted: true };
             raft.step(message(2, 1, granted.clone())).unwrap();
             assert_eq!((raft.role(), raft.term()), (Role::PreCandidate, Term(1)));
+        }
+
+        // A grant of term 1 answers a pre-campaign from term 0.
+        #[test]
+        fn counts_a_grant_only_for_the_term_it_asks_for() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            raft.campaign();
+            let granted = Body::PreVoteReply { granted: true };
+            raft.step(message(2, 1, granted.clone())).unwrap();
+            raft.step(message(2, 3, granted.clone())).unwrap();
+            assert_eq!((raft.role(), raft.term()), (Role::PreCandidate, Term(1)));
+            raft.step(message(3, 2, granted)).unwrap();
+            assert_eq!((raft.role(), raft.term()), (Role::Candidate, Term(2)));
         }
 
         #[test]
