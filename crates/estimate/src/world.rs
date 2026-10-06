@@ -4,11 +4,15 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 use types::time::{Monotonic, Span};
 
-use crate::{Drift, Measurement};
+use crate::{Drift, Measurement, Slew};
 
 pub(crate) const TIME_NS: u64 = 1 << 40;
 pub(crate) const ERROR_NS: i64 = 1 << 30;
 const OFFSET_NS: i64 = 1 << 60;
+
+/// The widest offset of [`target`] and [`slew`], small enough that every estimate from
+/// them is valid.
+pub(crate) const SLEW_OFFSET_NS: i64 = 1 << 50;
 
 /// A true offset that starts at `start` at local time zero and moves at `rate` parts
 /// per billion, never faster than `drift`.
@@ -78,4 +82,23 @@ pub(crate) fn any_measurements(
             Measurement::new(Monotonic(at), offset, error).expect("valid")
         });
     vec(one, 1..10)
+}
+
+/// A target for a slew.
+pub(crate) fn target() -> impl Strategy<Value = Measurement> {
+    let parts = (0..TIME_NS, -SLEW_OFFSET_NS..SLEW_OFFSET_NS, 0..ERROR_NS);
+    parts.prop_map(|(at, offset, error)| {
+        let (offset, error) = (Span::from_nanos(offset), Span::from_nanos(error));
+        Measurement::new(Monotonic(at), offset, error).expect("valid")
+    })
+}
+
+pub(crate) fn slew() -> impl Strategy<Value = Slew> {
+    (0..TIME_NS, -SLEW_OFFSET_NS..SLEW_OFFSET_NS, target()).prop_map(
+        |(start, from, target)| Slew {
+            start: Monotonic(start),
+            from: Span::from_nanos(from),
+            target,
+        },
+    )
 }
