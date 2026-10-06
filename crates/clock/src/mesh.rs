@@ -156,7 +156,8 @@ impl State {
     }
 }
 
-/// What a clock follows after a change to its sources.
+/// What a clock follows after its last [`Clock::add`], [`Clock::remove`], or
+/// [`Clock::push`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     /// No majority of the sources has agreed yet, so readers have no time. A source
@@ -192,9 +193,9 @@ impl Reader {
         })
     }
 
-    /// What the clock follows now: the status after its last change of sources, with
-    /// mesh time at the call. [`Status::Unsynced`] until a majority of the sources
-    /// first agree.
+    /// What the clock follows now, with mesh time at the call. It holds the result of
+    /// the last [`Clock::add`], [`Clock::remove`], or [`Clock::push`] to return.
+    /// [`Status::Unsynced`] until a majority of the sources first agree.
     #[must_use]
     pub fn status(&self) -> Status {
         self.status
