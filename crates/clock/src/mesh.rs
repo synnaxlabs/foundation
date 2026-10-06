@@ -66,10 +66,10 @@ impl Clock {
     /// # Panics
     ///
     /// When `source` was removed already.
-    pub fn remove(&mut self, source: source::Key) -> Status {
+    pub fn remove(&mut self, source: source::Key) {
         let removed = self.sources.remove(&source);
         assert!(removed.is_some(), "{source:?} was removed");
-        self.steer()
+        self.steer();
     }
 
     /// Records a measurement of the monotonic clock from `source`, then moves mesh
@@ -78,12 +78,12 @@ impl Clock {
     /// # Panics
     ///
     /// When `source` was removed.
-    pub fn push(&mut self, source: source::Key, measurement: Measurement) -> Status {
+    pub fn push(&mut self, source: source::Key, measurement: Measurement) {
         let Some(filter) = self.sources.get_mut(&source) else {
             panic!("{source:?} was removed");
         };
         filter.push(measurement);
-        self.steer()
+        self.steer();
     }
 
     /// Feeds the clock from the node's time sources, today the OS clock `wall`. Each
@@ -105,7 +105,7 @@ impl Clock {
         }
     }
 
-    fn steer(&mut self) -> Status {
+    fn steer(&mut self) {
         let estimate = combine(self.monotonic.now(), DRIFT, self.sources.values());
         let state = match (self.state.slew(), estimate) {
             (None, Err(e)) => State::Unsynced(e),
@@ -128,7 +128,6 @@ impl Clock {
             self.status.update(|_| encode(state));
             self.state = state;
         }
-        state.at(self.monotonic.now())
     }
 }
 
