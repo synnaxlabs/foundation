@@ -51,7 +51,7 @@ jobs:
               - 'crates/counting/**'
               - 'crates/node/**'
               - 'crates/connector-ni/**'
-              - 'crates/connector-ni-stub/**'
+              - 'crates/daqmx-stub/**'
               - 'xtask/**'
               - 'Cargo.lock'
               - '.cargo/**'
