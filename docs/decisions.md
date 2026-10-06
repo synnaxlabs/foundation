@@ -1113,7 +1113,8 @@ How to read this record:
   node's own entries and grants with no signature (`None`). `Ready::sign` gives each
   `None` the signature that the caller's closure makes for its claim, before the
   write and the sends. The caller checks each pair that `Message::claims` gives
-  before `step`.
+  before `step` and refuses a `None`: `step` keeps each signature as it came, so an
+  unchecked `None` of another voter reaches `Ready::sign`.
   `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
   `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
   again after the receiver is silent through a quorum check;

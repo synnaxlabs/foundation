@@ -82,7 +82,8 @@ pub struct Ready {
 impl Ready {
     /// Gives each grant with no signature the signature that `sign` makes for its
     /// claim: this node's entry in the hard proof and in each message's proof, and
-    /// each grant it sends. A `Raft` leaves only this node's grants with no signature.
+    /// each grant it sends. Another node's grant keeps the signature it came with, so
+    /// it has one when the caller checked its message (see [`Message::claims`]).
     pub fn sign(&mut self, mut sign: impl FnMut(&Claim) -> Signature) {
         if let Some(hard) = &mut self.hard
             && let Some(proof) = &mut hard.proof

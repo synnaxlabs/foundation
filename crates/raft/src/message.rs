@@ -98,7 +98,8 @@ impl Proof {
 impl Message {
     /// Each grant the message carries, with its signature: the entries of its proof
     /// in rising key order, then the sender's grant when the body grants. The caller
-    /// checks each signature against its voter's key before `step`.
+    /// checks each signature against its voter's key before `step`, and refuses a
+    /// `None`: `step` keeps each signature as it came.
     pub fn claims(&self) -> impl Iterator<Item = (Claim, Option<Signature>)> + '_ {
         let proof = self.proof.iter().flat_map(|proof| {
             proof.voters.iter().map(|(&voter, &signature)| {
