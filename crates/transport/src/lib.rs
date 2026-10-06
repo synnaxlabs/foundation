@@ -53,6 +53,11 @@ mod testing;
     expect(dead_code, reason = "the TCP and QUIC carriers are the first users")
 )]
 mod tls;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the QUIC carrier is the first user")
+)]
+mod varint;
 
 use std::marker::PhantomData;
 use std::num::{NonZeroU32, NonZeroUsize};
