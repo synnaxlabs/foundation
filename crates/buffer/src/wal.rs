@@ -23,6 +23,9 @@ use crate::record::{
 /// The body of a restart record: one chain value.
 const RESTART_LEN: usize = 4;
 
+/// The smallest body a layout allows: the table of one entry.
+const BODY_MIN: usize = entry::table_len(1);
+
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
 
@@ -100,8 +103,7 @@ impl Layout {
             .checked_add(body_max)
             .and_then(|len| len.checked_next_multiple_of(ALIGN))
             .map(to_u64);
-        let body =
-            entry::table_len(1)..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+        let body = BODY_MIN..=usize::try_from(u32::MAX).unwrap_or(usize::MAX);
         match window {
             Some(window)
                 if body.contains(&body_max)
@@ -129,6 +131,16 @@ impl Layout {
     #[must_use]
     pub fn body_max(self) -> usize {
         self.body_max
+    }
+
+    /// The most bytes of parts in a batch of one entry that
+    /// [`Buffer::append`](crate::Buffer::append) takes: one byte more gives
+    /// [`Error::Large`](crate::Error::Large) with [`Limit::Body`](crate::Limit::Body).
+    /// Each entry of a larger batch adds to the record's table, so its entries hold
+    /// less in all.
+    #[must_use]
+    pub fn entry_max(self) -> usize {
+        self.body_max - BODY_MIN
     }
 
     /// The length of the ring file: the two header blocks and the area.
@@ -164,6 +176,8 @@ pub(crate) struct Plan {
     pub(crate) wrap: Option<u64>,
     /// The place of the record.
     pub(crate) place: u64,
+    /// The offset of the record.
+    pub(crate) offset: u64,
     /// The offset after the record.
     pub(crate) next: u64,
     /// The length of the body the record was placed for.
@@ -256,6 +270,7 @@ impl Writer {
         Ok(Plan {
             wrap,
             place: start % area,
+            offset: start,
             next: self.head,
             len,
         })
@@ -774,6 +789,11 @@ mod tests {
 
         fn append(&mut self, body: &[u8]) -> Result<Plan, Full> {
             let plan = self.writer.append(body.len())?;
+            assert_eq!(plan.offset % AREA, plan.place, "the offset is at the place");
+            assert!(
+                plan.offset >= self.head.offset,
+                "the offset is at or past the head"
+            );
             let (sealed, chain) = plan.seal(self.head.chain, [body]);
             self.apply(&sealed, body, true);
             self.head = Position {
@@ -974,14 +994,15 @@ mod tests {
             let mut writer = writer(0, 1);
             let first = writer.append(1).expect("the ring has room");
             let second = writer.append(ALIGN).expect("the ring has room");
-            let plan = |wrap, place, next, len| Plan {
+            let plan = |wrap, place, offset, next, len| Plan {
                 wrap,
                 place,
+                offset,
                 next,
                 len,
             };
-            assert_eq!(first, plan(None, 4096, 2 * 4096, 1));
-            assert_eq!(second, plan(None, 2 * 4096, 4 * 4096, ALIGN));
+            assert_eq!(first, plan(None, 4096, 4096, 2 * 4096, 1));
+            assert_eq!(second, plan(None, 2 * 4096, 2 * 4096, 4 * 4096, ALIGN));
             assert_eq!(writer.head(), second.next);
         }
 

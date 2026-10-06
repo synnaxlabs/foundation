@@ -870,7 +870,7 @@ mod tests {
             .collect();
         let mut draft = Draft::new(pool, set, Form::Raw, &lens).expect("a frame");
         for &(entry, values) in series {
-            let bytes = draft.series(entry).expect("the series is present");
+            let bytes = draft.series_mut(entry).expect("the series is present");
             for (bytes, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(values) {
                 *bytes = value.to_le_bytes();
             }
