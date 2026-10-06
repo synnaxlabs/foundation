@@ -48,6 +48,7 @@ for-namespace refused
 for-nested refused
 for-object accepted hcl.for
 for-quoted-key accepted
+heredoc-closer-at-end refused
 heredoc-indented-written accepted
 heredoc-indented accepted
 heredoc accepted
@@ -79,6 +80,8 @@ number-dot-exponent accepted
 number-dots refused
 number-expansion accepted hcl.expansion
 number-exponent-i64 accepted
+number-exponent-long-written accepted
+number-exponent-long accepted
 number-exponent-past-i64 refused
 number-exponent-twice refused
 number-key-binary-exponent-past-i32 refused

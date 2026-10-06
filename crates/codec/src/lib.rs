@@ -827,7 +827,7 @@ mod tests {
         let mut draft = Draft::new(&pool, &set, form, &[(0, bytes.len())])
             .expect("the pool holds the frame");
         draft
-            .series(0)
+            .series_mut(0)
             .expect("entry 0 is present")
             .copy_from_slice(bytes);
         let frame = draft.freeze(Path::Live);

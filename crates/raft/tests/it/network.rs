@@ -242,7 +242,7 @@ impl Network {
         Raft::new(config, start).unwrap()
     }
 
-    fn deliver(&mut self, message: Message) {
+    pub(crate) fn deliver(&mut self, message: Message) {
         let (from, to) = (self.at(message.from), self.at(message.to));
         if self.cut[from] == self.cut[to] {
             self.nodes[to].step(message).unwrap();
