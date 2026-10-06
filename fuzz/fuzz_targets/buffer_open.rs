@@ -43,6 +43,8 @@ const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const COMMIT: Span = Span::from_nanos(10_000_000);
 const INDEXES: usize = 3;
+/// Bytes of each entry the check commits. Six of them and their table fit `BODY_MAX`.
+const CHECK_PART: usize = 512;
 const PATHS: [frame::Path; 2] = [frame::Path::Live, frame::Path::Backfill];
 
 /// One entry the build phase appends.
@@ -275,9 +277,9 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
 /// Opens the changed ring. With no edits, it must give the tails the build left.
 /// When it opens, one commit on it must survive a reopen.
 ///
-/// The commit is one empty entry at each tail. A header edit can shrink `body_max`
-/// under that batch, and a record edit can put a tail at `u64::MAX`; both are
-/// preconditions of `append`, so such a ring is not checked.
+/// The commit is one entry of `CHECK_PART` bytes at each tail. A header edit can
+/// shrink `body_max` under that batch, and a record edit can put a tail at
+/// `u64::MAX`; both are preconditions of `append`, so such a ring is not checked.
 async fn check(
     node: &sim::node::Node,
     tasks: &Tasks,
@@ -310,6 +312,8 @@ async fn check(
             if tail.seq == u64::MAX {
                 return;
             }
+            let mut part = pool.alloc(CHECK_PART).expect("the pool has a block");
+            part.fill(0xa5);
             entries.push(Entry {
                 index: key(index),
                 slot: *slot,
@@ -319,7 +323,7 @@ async fn check(
                 stored_at: Stamp::from_nanos(7),
                 last: Some(Stamp::from_nanos(9)),
                 tag: 0,
-                parts: Parts::default(),
+                parts: Parts::from(part.freeze()),
             });
         }
     }
