@@ -155,7 +155,7 @@ impl Layout {
     /// [`Rejected::Large`](crate::Rejected::Large) with
     /// [`Limit::Body`](crate::Limit::Body). Each entry of a larger batch adds to the
     /// record's table, so its entries hold less in all. A shard's pool can bound an
-    /// entry lower, with [`Limit::Entry`](crate::Limit::Entry).
+    /// entry lower, with [`Limit::Block`](crate::Limit::Block).
     #[must_use]
     pub fn entry_max(self) -> usize {
         self.body_max - entry::table_len(1)
@@ -164,7 +164,7 @@ impl Layout {
     /// Checks a batch of `entries` entries, with `parts` parts and `bytes` bytes of
     /// parts in all, against the limits of one record of this ring, as
     /// [`Buffer::append`](crate::Buffer::append) does before it queues the batch.
-    /// It does not check [`Limit::Entry`](crate::Limit::Entry), which depends on
+    /// It does not check [`Limit::Block`](crate::Limit::Block), which depends on
     /// the pool.
     ///
     /// # Errors
@@ -222,7 +222,7 @@ pub enum Limit {
     },
     /// An entry whose parts, joined, no block of the shard's pool holds. A read
     /// gives each entry in one block.
-    Entry {
+    Block {
         /// Bytes of the entry's parts.
         len: usize,
         /// The pool's largest block payload.
@@ -247,7 +247,7 @@ impl fmt::Display for Limit {
                 "the batch needs a record body of {len} bytes, and a record of this \
                  ring holds at most {max}"
             ),
-            Self::Entry { len, max } => write!(
+            Self::Block { len, max } => write!(
                 f,
                 "an entry has {len} bytes of parts, and a block of the pool holds at \
                  most {max}"

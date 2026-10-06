@@ -439,14 +439,16 @@ How to read this record:
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
   records. It also refuses with `Large` a batch with an entry whose parts, joined,
-  pass the largest block of the shard's pool (`Limit::Entry`), because a read gives
-  each entry in one block (#968). An open of a header with a smaller `body_max` fails
+  pass the largest block of the shard's pool (`Limit::Block`), because a read gives
+  each entry in one block (#968). An open fails with `Pool(TooLarge)` when a
+  recovered entry passes that block, as after a restart with a smaller budget; a
+  larger pool opens the ring. An open of a header with a smaller `body_max` fails
   with `Unfit` (#627).
   `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
   one entry, at least `Layout::ENTRY_MAX_MIN` (4032); a batch of more entries holds
   less. `Layout::check` gives the `Limit` that `append` would refuse a batch with,
   from its counts of entries, parts, and bytes, so the home checks a frame before it
-  takes the blocks of its entries (#795). It does not check `Limit::Entry`, which
+  takes the blocks of its entries (#795). It does not check `Limit::Block`, which
   depends on the pool. An entry has no part, one, or two; `append` takes them owned
   and drops them when it fails (#582).
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0

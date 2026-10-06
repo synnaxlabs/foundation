@@ -2324,41 +2324,87 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
 }
 
 /// `append` refuses an entry whose parts, joined, no block of the shard's pool
-/// holds, with `Limit::Entry`, and takes nothing. An entry of the largest block
-/// commits.
+/// holds, with `Limit::Block` for the first such entry, and takes nothing. An entry
+/// of the largest block commits, and an open recovers it.
 #[test]
 fn an_entry_over_the_largest_pool_block_is_large() {
     run(155, Memory::default(), |mut shard| async move {
-        let config = block::Config { budget: 640 << 10 };
+        let largest = 114_688;
+        let over = Parts::from([shard.block(largest), shard.block(1)]);
+        let more = Parts::from([shard.block(largest), shard.block(2)]);
+        let fits = Parts::from(shard.block(largest));
+        let config = block::Config { budget: 1 << 17 };
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
-        let largest = shard.pool.largest();
-        assert_eq!(largest, 512 << 10);
+        assert_eq!(shard.pool.largest(), largest);
+        let ring = layout(320 * BLOCK, 600_000);
         let mut slots = Slots::new();
-        let buffer = shard
-            .open(layout(320 * BLOCK, 600_000), &mut slots)
-            .await
-            .expect("opens");
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
-        let over = Parts::from([shard.block(largest), shard.block(1)]);
-        let large = buffer.append([entry(1, a, Path::Live, 0, 1, Some(1), over)]);
-        let limit = Limit::Entry {
+        let large = buffer.append([
+            entry(1, a, Path::Live, 0, 1, Some(1), over),
+            entry(1, a, Path::Live, 1, 1, Some(2), more),
+        ]);
+        let limit = Limit::Block {
             len: largest + 1,
             max: largest,
         };
         assert_eq!(large, Err(Rejected::Large(limit)));
         assert_eq!(
             Rejected::Large(limit).to_string(),
-            "an entry has 524289 bytes of parts, and a block of the pool holds at \
-             most 524288"
+            "an entry has 114689 bytes of parts, and a block of the pool holds at \
+             most 114688"
         );
         assert_eq!(buffer.tail(a, Path::Live), tail(0, None));
-        let fits = Parts::from(shard.block(largest));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), fits)])
             .expect("queues");
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        drop(buffer);
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(1, Some(1))), "an open recovers it");
+    });
+}
+
+/// An open fails with `Pool(TooLarge)` when a recovered entry is over the largest
+/// block of its pool, as after a restart with a smaller budget, and leaves the ring
+/// as it is: an open with the larger pool recovers the entry.
+#[test]
+fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
+    run(156, Memory::default(), |mut shard| async move {
+        let ring = layout(320 * BLOCK, 600_000);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let bytes = Parts::from(shard.block(200_000));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), bytes)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let larger = Rc::clone(&shard.pool);
+        let config = block::Config { budget: 1 << 17 };
+        shard.pool =
+            Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+        let opened = shard.open(ring, &mut Slots::new()).await;
+        let large = block::Error::TooLarge {
+            requested: 200_000,
+            largest: 114_688,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Pool(large.clone())));
+        assert_eq!(
+            Error::Pool(large).to_string(),
+            "the pool has no block: block of 200000 bytes is above the largest block \
+             of 114688 bytes"
+        );
+        shard.pool = larger;
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(1, Some(1))));
     });
 }
 

@@ -38,7 +38,9 @@ pub struct Config {
     /// The directory of this shard's ring, relative to the data directory. Its parent
     /// must be there and durable.
     pub dir: PathBuf,
-    /// Blocks for record headers and recovery reads. It needs a class of 64 KiB.
+    /// Blocks for record headers, recovery reads, and the entries a read gives. It
+    /// needs a class of 64 KiB. Its largest block bounds an entry, with
+    /// [`Limit::Block`].
     pub pool: Rc<Pool>,
     /// Deadlines of the group commit.
     pub clock: Clock,
@@ -66,7 +68,8 @@ pub enum Error {
         /// before their end, whichever is less.
         free: u64,
     },
-    /// The pool has no block for a header, a recovery read, or the restart record.
+    /// The pool has no block for a header, a recovery read, the restart record, or
+    /// a recovered entry.
     Pool(block::Error),
     /// A file call failed.
     Files(files::Error),
@@ -329,7 +332,9 @@ impl Buffer {
     /// [`Error::Files`], [`Error::Pool`], [`Error::Length`], [`Error::Missing`],
     /// [`Error::Damaged`], [`Error::Version`], [`Error::Unfit`], and
     /// [`Error::Invalid`] as each says. [`Error::Full`] when the ring has no block
-    /// for its restart record.
+    /// for its restart record. [`Error::Pool`] with `TooLarge` when a recovered
+    /// entry is over the largest block of `pool`, which a read must give it in: a
+    /// larger pool must open the ring.
     ///
     /// # Panics
     ///
@@ -579,7 +584,9 @@ async fn walk(
         let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
         let offset = cursor.offset();
         match cursor.next(&bytes)? {
-            Step::Data(body) => recover(body, offset, slots, &mut logs)?,
+            Step::Data(body) => {
+                recover(body, offset, pool.largest(), slots, &mut logs)?;
+            }
             Step::Moved | Step::More => {}
             Step::End => break,
         }
@@ -588,10 +595,11 @@ async fn walk(
 }
 
 /// Feeds the logs the entries of a record body at `offset`, as appended and
-/// synced.
+/// synced. Fails when an entry is over `largest`, the pool's largest block.
 fn recover(
     body: Body<'_>,
     offset: u64,
+    largest: usize,
     slots: &mut Slots,
     logs: &mut Logs,
 ) -> Result<(), Error> {
@@ -599,6 +607,10 @@ fn recover(
     let misplaced = |_: log::Invalid| Error::Invalid { offset };
     for header in entry::parse(body.start, body.len).map_err(unread)? {
         let header = header.map_err(unread)?;
+        let requested = usize::try_from(header.bytes).unwrap_or(usize::MAX);
+        if requested > largest {
+            return Err(Error::Pool(block::Error::TooLarge { requested, largest }));
+        }
         let slot = slots.assign(header.index);
         logs.append(slot, &header).map_err(misplaced)?;
         logs.sync(slot, &header, offset).map_err(misplaced)?;

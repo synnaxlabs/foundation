@@ -99,7 +99,7 @@ impl Group {
             .map(|entry| entry.parts.bytes())
             .find(|&bytes| bytes > largest);
         if let Some(len) = over {
-            return Err(Rejected::Large(Limit::Entry { len, max: largest }));
+            return Err(Rejected::Large(Limit::Block { len, max: largest }));
         }
         layout
             .check(
@@ -965,13 +965,15 @@ mod tests {
         let half = vec![7; 29_000];
         let fits = parts(&area.pool, &[&half, &half[..28_344]]);
         let over = parts(&area.pool, &[&half, &half[..28_345]]);
+        let big = vec![7; 31_000];
+        let body = parts(&area.pool, &[&big, &big]);
         area.pool = pool(1 << 16);
         assert_eq!(area.pool.largest(), 57_344);
         let batch = [
             entry(header(1, Path::Live, 0), Parts::default()),
             entry(header(2, Path::Live, 0), over),
         ];
-        let limit = Limit::Entry {
+        let limit = Limit::Block {
             len: 57_345,
             max: 57_344,
         };
@@ -981,6 +983,12 @@ mod tests {
             "an entry has 57345 bytes of parts, and a block of the pool holds at most \
              57344"
         );
+        let both = [entry(header(1, Path::Live, 0), body)];
+        let body = Limit::Body {
+            len: table_len(1) + 62_000,
+            max: 60_000,
+        };
+        assert_large(&mut area, &both, body);
         let mut group = Group::default();
         let mut batch = vec![entry(header(1, Path::Live, 0), fits)];
         let pushed = group.push(&area.pool, &area.writer, &mut batch);
