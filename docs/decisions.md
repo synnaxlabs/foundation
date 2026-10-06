@@ -1817,7 +1817,12 @@ How to read this record:
   price cap of 0.20 USD/h, and a hard stop on 2026-10-08 at 03:00 UTC. With it, the
   hosts and the factory host cost at most 99.73 USD a day (#15). The person said:
   "Once you are sure of costs provision and set strict limits on whatever you need
-  please".
+  please". With 51 runs still queued, a fourth host joined with twelve runners
+  (`foundation-arm-m` to `-x`): one 32-vCPU spot machine from a fleet over eight
+  Graviton types and five zones (launch template `foundation-arm-spot-32`). Limits: a
+  spot price cap of 0.60 USD/h, a hard stop with the factory host on 2026-10-07 at
+  07:03 UTC, and a cap of 18 USD (#15). Until that stop, the daily cap is 115 USD; then
+  it is 100 USD again. The person said: "Yes thats fine".
 - **LINUX CI (2026-10-05)** For the alpha, tests run only on Linux (x86-64 and ARM).
   No CI job runs on macOS or Windows. The design stays cross-OS: each C9d target must
   still be a valid build, so OS-specific code goes only in `os`. The person said: "As
