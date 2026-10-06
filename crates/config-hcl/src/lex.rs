@@ -393,7 +393,7 @@ impl<'a> Tokens<'a> {
         let mut line_start = true;
         // Each pass moves past a character or returns.
         for _ in 0..=self.rest.len() {
-            if line_start && self.close(marker) {
+            if line_start && self.close(marker)? {
                 return Ok(if indented { dedent(&text) } else { text }.into());
             }
             let at = self.at;
@@ -430,21 +430,31 @@ impl<'a> Tokens<'a> {
             .expect("invariant: an identifier ends on a character boundary")
     }
 
-    /// Moves past the rest of the line when it holds only `marker`, with whitespace
-    /// around it, and reports whether it did.
-    fn close(&mut self, marker: &str) -> bool {
+    /// Moves past `marker` and the whitespace around it, up to the line end, when the
+    /// line holds only those, and reports whether it did.
+    ///
+    /// # Errors
+    ///
+    /// [`Expected::Newline`] when such a line ends the text with no line end.
+    fn close(&mut self, marker: &str) -> Result<bool, Error> {
         let mut end = self.clone();
         end.eat_while(space);
         if !end.rest.starts_with(marker) {
-            return false;
+            return Ok(false);
         }
         end.skip_bytes(marker.len());
         end.eat_while(space);
-        let closed = end.rest.is_empty() || end.line_end() > 0;
+        if end.rest.is_empty() {
+            return Err(Error::Syntax {
+                span: end.span(end.at),
+                expected: Expected::Newline,
+            });
+        }
+        let closed = end.line_end() > 0;
         if closed {
             *self = end;
         }
-        closed
+        Ok(closed)
     }
 
     /// Returns the length of the line end here: 1 for `\n`, 2 for `\r\n`, else 0.

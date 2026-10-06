@@ -410,7 +410,7 @@ pub enum Expected {
     BlockEnd,
     /// A value.
     Value,
-    /// A new line after an attribute or a block.
+    /// A new line after an attribute, a block, or the marker that ends a heredoc.
     Newline,
     /// `,` or `]` in a list.
     ListEnd,
