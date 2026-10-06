@@ -60,6 +60,23 @@ impl Drop for Relayed {
     }
 }
 
+/// A future that never ends, and panics with a [`Relay`] of its value when it drops.
+pub(crate) struct Stuck(pub(crate) usize);
+
+impl Future for Stuck {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+        Poll::Pending
+    }
+}
+
+impl Drop for Stuck {
+    fn drop(&mut self) {
+        panic::panic_any(Relay(self.0));
+    }
+}
+
 /// The CPUs of the affinity set of the calling thread.
 #[cfg(target_os = "linux")]
 pub(crate) fn affinity() -> Vec<usize> {

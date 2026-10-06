@@ -1,6 +1,6 @@
 //! Dedicated threads on real threads: their body, their blocking, and their panics.
 
-use std::future::{Ready, poll_fn};
+use std::future::{Ready, poll_fn, ready};
 use std::panic::panic_any;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +11,7 @@ use std::time::Duration;
 use env::threads::Threads;
 use tokio::task::yield_now;
 
-use crate::common::{Bomb, Relay, Relayed, assert_joins, panicked};
+use crate::common::{Bomb, Relay, Relayed, Stuck, assert_joins, panicked};
 
 fn threads() -> Threads {
     os::threads().expect("the OS gives the cores of this process")
@@ -248,4 +248,15 @@ fn a_panic_whose_payload_panics_in_its_drop_in_the_poll_of_the_body_gives_panick
 fn a_panic_whose_payload_panics_in_its_drop_in_the_drop_of_the_body_gives_panicked() {
     let handle = threads().start("thread-10", || Relayed).unwrap();
     assert_joins(handle, panicked("thread-10"));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_as_a_tokio_task_drops_gives_panicked() {
+    let body = || {
+        // Tokio catches the first two panics of the chain at the drop of the runtime.
+        drop(tokio::spawn(Stuck(4)));
+        ready(())
+    };
+    let handle = threads().start("thread-11", body).unwrap();
+    assert_joins(handle, panicked("thread-11"));
 }

@@ -78,9 +78,9 @@ fn serve(runtime: LocalRuntime, main: Main) -> bool {
         })
         .await;
     });
-    // The drop of a task may panic.
-    drop(runtime);
-    alarm.raised.get()
+    // The drop of a task may panic, also of one that the shard spawned without `tasks`.
+    let dropped = unwind::catch(|| drop(runtime)).is_some();
+    alarm.raised.get() || !dropped
 }
 
 /// Tells the main loop of a shard that a task panicked.

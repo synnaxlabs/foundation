@@ -12,7 +12,7 @@ use env::shards::{Config, Shards};
 use env::tasks::Tasks;
 use tokio::task::yield_now;
 
-use crate::common::{Bomb, Relay, Relayed, assert_joins, panicked};
+use crate::common::{Bomb, Relay, Relayed, Stuck, assert_joins, panicked};
 
 fn shards() -> Shards {
     os::shards().expect("the OS gives the cores of this process")
@@ -345,4 +345,14 @@ fn a_panic_whose_payload_panics_in_its_drop_in_the_main_future_ends_the_shard() 
     };
     let handle = shards().start(config("shard-11"), main).unwrap();
     assert_joins(handle, panicked("shard-11"));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_as_a_tokio_task_drops_ends_the_shard() {
+    let main = |_: Tasks| async {
+        // Tokio catches the first two panics of the chain at the drop of the runtime.
+        drop(tokio::task::spawn_local(Stuck(4)));
+    };
+    let handle = shards().start(config("shard-12"), main).unwrap();
+    assert_joins(handle, panicked("shard-12"));
 }

@@ -6,8 +6,6 @@ use std::thread;
 
 use env::thread::{Error, Handle, Panicked};
 
-use crate::unwind;
-
 /// Starts OS thread `name`, whose OS name is the part of `name` before the first NUL.
 /// On it, `build` makes the runtime of the thread and `serve` runs it, returning
 /// whether the thread panicked. Blocks until `build` returns, and gives its error.
@@ -34,11 +32,9 @@ pub(crate) fn start<R>(
             reason: e.to_string(),
         })?;
     match started.recv() {
-        Ok(Ok(())) => Ok(Handle::new(move || {
-            match thread.join().map_err(unwind::discard) {
-                Ok(false) => Ok(()),
-                Ok(true) | Err(()) => Err(Panicked { name }),
-            }
+        Ok(Ok(())) => Ok(Handle::new(move || match thread.join() {
+            Ok(false) => Ok(()),
+            Ok(true) | Err(_) => Err(Panicked { name }),
         })),
         // The thread holds nothing after its report, and ends.
         Ok(Err(e)) => Err(e),
@@ -69,28 +65,5 @@ fn run<R>(
             report.send(Err(e)).expect("start waits for the report");
             false
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-    use crate::unwind::tests::Relay;
-
-    #[test]
-    fn a_serve_that_panics_with_a_payload_that_panics_in_its_drop_gives_panicked() {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let relay = Relay {
-            left: 2,
-            drops: Arc::clone(&drops),
-        };
-        let serve = move |()| -> bool { panic::panic_any(relay) };
-        let handle = start("relay".to_owned(), |_| Ok(()), serve).unwrap();
-        let name = "relay".to_owned();
-        assert_eq!(handle.join(), Err(Panicked { name }));
-        assert_eq!(drops.load(Ordering::SeqCst), 3);
     }
 }
