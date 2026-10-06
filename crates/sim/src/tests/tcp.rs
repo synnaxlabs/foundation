@@ -249,6 +249,31 @@ fn a_power_cut_drops_the_segments_that_have_not_left_the_node() {
     assert_eq!(reset, wrote + legs);
 }
 
+#[test]
+fn a_segment_that_left_before_a_power_cut_still_arrives() {
+    let link = link::Config {
+        delay: millis(10),
+        ..link::Config::default()
+    };
+    let (mut sim, a, b) = pair(0, link);
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |_| async move {
+        let mut tcp = accept(&mut listener).await;
+        read(&mut tcp, 1 << 16).await
+    });
+    let remote = at(&b, 4433);
+    let _client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        write_all(&mut tcp, &[7; 100]).await.unwrap();
+        pending::<()>().await;
+    });
+    // The write leaves at 20 ms, when the connect is ready, and arrives at 30 ms.
+    sim.run_for(millis(25)).unwrap();
+    sim.crash(&a, Crash::Power);
+    sim.run().unwrap();
+    assert_eq!(take(&server), Ok(vec![7; 100]));
+}
+
 /// When a connect from `a` to port 4433 of `b` ends, and what it gives. `before` runs
 /// on `b` first, and its listener lives through the run.
 fn refused(
