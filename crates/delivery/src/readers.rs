@@ -13,13 +13,13 @@ use types::time::{Span, Stamp};
 
 use crate::{Error, Position, Reader, Record, Start};
 
-/// A session on one index, in either mode.
+/// A session on one index, in either mode. Latest sessions order first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Key {
-    /// A complete session.
-    Complete(complete::Key),
     /// A latest session.
     Latest(latest::Key),
+    /// A complete session.
+    Complete(complete::Key),
 }
 
 impl From<complete::Key> for Key {
@@ -347,8 +347,8 @@ impl Readers {
     /// # Panics
     ///
     /// If the session is not open.
-    pub fn take(&mut self, key: impl Into<Key>) -> Option<Frame> {
-        match key.into() {
+    pub fn take(&mut self, key: Key) -> Option<Frame> {
+        match key {
             Key::Complete(key) => {
                 let i = self.find(key);
                 self.flows[i].waiting.pop_front()
@@ -363,8 +363,8 @@ impl Readers {
     /// # Panics
     ///
     /// If the session is not open.
-    pub fn close(&mut self, key: impl Into<Key>, now: Stamp) {
-        match key.into() {
+    pub fn close(&mut self, key: Key, now: Stamp) {
+        match key {
             Key::Complete(key) => {
                 let i = self.find(key);
                 self.close_complete(i, now);
@@ -674,7 +674,7 @@ pub(super) mod tests {
     /// Opens `name` at `position`, closes it at `closed`, and drops the records.
     fn left(readers: &mut Readers, name: &str, position: Position, closed: i64) {
         let key = readers.open(named(name, 10), Start::At(position), 0).key;
-        readers.close(key, at(closed));
+        readers.close(key.into(), at(closed));
         drained(readers);
     }
 
@@ -693,7 +693,7 @@ pub(super) mod tests {
         fn gives_each_session_its_own_key() {
             let mut readers = Readers::new(0);
             let first = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
-            readers.close(first, at(0));
+            readers.close(first.into(), at(0));
             let second = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
             assert_ne!(first, second);
         }
@@ -894,7 +894,7 @@ pub(super) mod tests {
         #[should_panic(expected = "complete session 0 is not open")]
         fn panics_on_a_closed_session() {
             let (mut readers, key) = opened(live(0));
-            readers.close(key, at(1));
+            readers.close(key.into(), at(1));
             readers.ack(key, live(1)).expect("panics before");
         }
     }
@@ -915,7 +915,7 @@ pub(super) mod tests {
         fn of_an_unnamed_reader_ends_at_the_close() {
             let mut readers = Readers::new(0);
             let key = readers.open(Reader::Unnamed, Start::At(live(3)), 0).key;
-            readers.close(key, at(1));
+            readers.close(key.into(), at(1));
             assert_eq!(readers.floor(), None);
         }
 
@@ -924,7 +924,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(0)), 0).key;
             readers.ack(key, live(4)).expect("forward");
-            readers.close(key, at(5));
+            readers.close(key.into(), at(5));
             assert_eq!(readers.deadline(), Some(at(15)));
             readers.advance(at(14));
             assert_eq!(readers.floor(), Some(live(4)));
@@ -937,7 +937,7 @@ pub(super) mod tests {
         fn of_zero_ends_at_the_close() {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 0), Start::At(live(0)), 0).key;
-            readers.close(key, at(5));
+            readers.close(key.into(), at(5));
             assert_eq!(readers.floor(), None);
         }
 
@@ -959,7 +959,7 @@ pub(super) mod tests {
         fn ends_at_the_last_stamp() {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(0)), 0).key;
-            readers.close(key, at(i64::MAX - 1));
+            readers.close(key.into(), at(i64::MAX - 1));
             assert_eq!(readers.deadline(), Some(at(i64::MAX)));
         }
 
@@ -1031,7 +1031,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(3)), 0).key;
             readers.ack(key, live(5)).expect("forward");
-            readers.close(key, at(7));
+            readers.close(key.into(), at(7));
             assert_eq!(
                 drained(&mut readers),
                 [
@@ -1046,7 +1046,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = readers.open(named("a", 10), Start::At(live(3)), 0).key;
             drained(&mut readers);
-            readers.close(key, at(7));
+            readers.close(key.into(), at(7));
             assert_eq!(drained(&mut readers), [record("a", live(3), 10, Some(7))]);
         }
 
@@ -1079,7 +1079,7 @@ pub(super) mod tests {
             let key = readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
             readers.ack(key, live(2)).expect("forward");
             readers.flush();
-            readers.close(key, at(1));
+            readers.close(key.into(), at(1));
             assert_eq!(drained(&mut readers), []);
         }
     }
@@ -1253,7 +1253,7 @@ pub(super) mod tests {
             readers.queue(&frames.frame(3), 4..4);
             assert!(!readers.pending());
             readers.queue(&frames.frame(4), 4..6);
-            readers.close(key, at(0));
+            readers.close(key.into(), at(0));
             assert!(!readers.pending());
         }
 
@@ -1498,7 +1498,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let closed = opened(&mut readers, 0, 0);
             let open = opened(&mut readers, 0, 1);
-            readers.close(closed, at(0));
+            readers.close(closed.into(), at(0));
             readers.grant(closed, 10 * CHARGE);
             readers.queue(&frames.frame(1), 0..1);
             readers.queue(&frames.frame(2), 1..2);
@@ -1585,7 +1585,10 @@ pub(super) mod tests {
             let latest = readers.open_latest(None, at(0)).key;
             readers.queue(&frames.frame(1), 0..1);
             assert!(frames.spare());
-            assert_eq!(readers.take(latest).map(|frame| number(&frame)), None);
+            assert_eq!(
+                readers.take(latest.into()).map(|frame| number(&frame)),
+                None
+            );
         }
 
         #[test]
@@ -1595,7 +1598,7 @@ pub(super) mod tests {
             let key = opened(&mut readers, 0, 10);
             readers.queue(&frames.frame(1), 0..1);
             assert_eq!(released(&mut readers, 1), [key]);
-            readers.close(key, at(0));
+            readers.close(key.into(), at(0));
             assert!(frames.spare());
         }
 
@@ -1605,7 +1608,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 10);
             readers.queue(&frames.frame(1), 0..1);
-            readers.close(key, at(0));
+            readers.close(key.into(), at(0));
             assert!(frames.spare());
             let later = opened(&mut readers, 0, 10);
             assert_eq!(released(&mut readers, 1), []);
@@ -1642,7 +1645,7 @@ pub(super) mod tests {
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 10);
             readers.queue(&frames.frame(1), 0..1);
-            assert_eq!(readers.take(key).map(|frame| number(&frame)), None);
+            assert_eq!(readers.take(key.into()).map(|frame| number(&frame)), None);
         }
 
         #[test]
@@ -1694,8 +1697,8 @@ pub(super) mod tests {
         fn take_panics_on_a_closed_session() {
             let mut readers = Readers::new(0);
             let key = opened(&mut readers, 0, 10);
-            readers.close(key, at(0));
-            readers.take(key);
+            readers.close(key.into(), at(0));
+            readers.take(key.into());
         }
     }
 
@@ -1940,7 +1943,7 @@ pub(super) mod tests {
                         .keys()
                         .nth(session % model.open.len())
                         .expect("in range");
-                    readers.close(key, at(now));
+                    readers.close(key.into(), at(now));
                     model.close(key, now);
                 }
                 Input::Flush => readers.flush(),
@@ -1969,7 +1972,7 @@ pub(super) mod tests {
             }
             let mut restored = Readers::restore(records, at(now), 0);
             for key in model.open.keys() {
-                readers.close(*key, at(now));
+                readers.close((*key).into(), at(now));
             }
             for later in [0, 1, 5, 10, 20, 40] {
                 restored.advance(at(now + later));
@@ -2190,7 +2193,7 @@ pub(super) mod tests {
                     }
                     Live::Close(i) => {
                         let Some(key) = model.pick(i) else { continue };
-                        readers.close(key, at(0));
+                        readers.close(key.into(), at(0));
                         model.close(key);
                     }
                     Live::Ack(i, ahead) => {
@@ -2220,7 +2223,8 @@ pub(super) mod tests {
                     }
                     Live::Take(i) => {
                         let Some(key) = model.pick(i) else { continue };
-                        let taken = readers.take(key).map(|frame| number(&frame));
+                        let taken =
+                            readers.take(key.into()).map(|frame| number(&frame));
                         assert_eq!(taken, model.take(key));
                     }
                 }

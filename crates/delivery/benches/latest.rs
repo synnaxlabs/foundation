@@ -38,7 +38,7 @@ fn put_and_take(bencher: Bencher<'_, '_>, sessions: usize) {
     bencher.bench_local(|| {
         divan::black_box(readers.put(frame.clone()));
         for &key in &keys {
-            divan::black_box(readers.take(key));
+            divan::black_box(readers.take(key.into()));
         }
     });
 }

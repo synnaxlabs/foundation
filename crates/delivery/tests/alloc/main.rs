@@ -123,7 +123,7 @@ fn flow(
 ) -> usize {
     let taken: usize = keys
         .iter()
-        .map(|&key| std::iter::from_fn(|| readers.take(key)).count())
+        .map(|&key| std::iter::from_fn(|| readers.take(key.into())).count())
         .sum();
     for _ in 0..2 {
         readers.queue(&frame(), *seq..*seq + 1);
@@ -141,7 +141,7 @@ fn round(
 ) -> usize {
     let taken: usize = keys
         .iter()
-        .map(|&key| usize::from(readers.take(key).is_some()))
+        .map(|&key| usize::from(readers.take(key.into()).is_some()))
         .sum();
     taken + readers.put(frame()).len() + readers.put(frame()).len()
 }

@@ -67,7 +67,7 @@ fn release(bencher: Bencher<'_, '_>, sessions: usize) {
         seq += 1;
         divan::black_box(readers.release(seq));
         for &key in &keys {
-            divan::black_box(readers.take(key));
+            divan::black_box(readers.take(key.into()));
         }
     });
 }
