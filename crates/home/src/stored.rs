@@ -1,14 +1,16 @@
-//! The stored body of a data entry: a header that describes each series of an index
-//! frame by its channel and type, then the frame's series bytes.
+//! The data entry of an index frame. Its body is a header that describes each series by
+//! its channel and type, then the frame's series bytes.
 
 use block::Block;
+use buffer::Entry;
 use types::channel;
 use types::frame::key_set::KeySet;
 use types::frame::{self, Form, Frame};
 use types::sample::{Scalar, Type};
+use types::time::Stamp;
 
 /// The buffer tag of a data entry.
-pub(crate) const TAG: u8 = 0;
+const TAG: u8 = 0;
 
 /// Bytes of the series count that starts a body.
 const COUNT: usize = 4;
@@ -23,9 +25,47 @@ mod at {
     pub(super) const END: usize = 22;
 }
 
-/// The stored body of `frame`, an encoded index frame of `set`, as the two parts of
-/// one buffer entry: a header block from `pool`, then [`Frame::body`]. Copies no
-/// series byte.
+/// The buffer entry that stores `frame`, an encoded index frame of one group of `set`
+/// whose newest stamp is `last`, at mesh time `stored_at`. Its parts are a header
+/// block from `pool`, then [`Frame::body`]. Copies no series byte.
+///
+/// # Errors
+///
+/// [`block::Error`] when `pool` has no block for the header.
+///
+/// # Panics
+///
+/// If `frame` is not encoded, not of `set`, of more than one group, or of no series.
+pub(crate) fn entry(
+    pool: &block::Pool,
+    frame: &Frame,
+    set: &KeySet,
+    last: Option<Stamp>,
+    stored_at: Stamp,
+) -> Result<Entry, block::Error> {
+    let Some((entry, _)) = frame.ends().next() else {
+        panic!("the frame has no series");
+    };
+    let index = &set.entries()[set.index(entry)];
+    let Some(range) = frame.range(index.group) else {
+        unreachable!("invariant: a frame holds the index of each series");
+    };
+    let parts = body(pool, frame, set)?;
+    Ok(Entry {
+        index: index.key,
+        slot: index.slot,
+        path: frame.path(),
+        first: range.seq,
+        len: range.count,
+        stored_at,
+        last,
+        tag: TAG,
+        parts: parts.into(),
+    })
+}
+
+/// The stored body of `frame`, an encoded index frame of `set`, as two parts: a header
+/// block from `pool`, then [`Frame::body`].
 ///
 /// # Errors
 ///
@@ -34,7 +74,7 @@ mod at {
 /// # Panics
 ///
 /// If `frame` is not encoded, not of `set`, or of more than one group.
-pub(crate) fn body(
+fn body(
     pool: &block::Pool,
     frame: &Frame,
     set: &KeySet,
@@ -81,8 +121,8 @@ pub(crate) struct Series<'a> {
     pub(crate) bytes: &'a [u8],
 }
 
-/// Each series of `body`, a stored body that [`body`] made, in entry order. Copies
-/// nothing.
+/// Each series of `body`, the body of an entry that [`entry`] made, in entry order.
+/// Copies nothing.
 ///
 /// # Panics
 ///
@@ -264,6 +304,68 @@ mod tests {
         let pool = pool(4096);
         let frame = frame(&pool, &set, &[(0, &[9; 8])]);
         joined(&body(&pool, &frame, &set).expect("room"))
+    }
+
+    mod entry {
+        use super::*;
+
+        #[test]
+        fn stores_the_body_at_the_range_of_the_frame_index() {
+            // The data channel's slot is below its index's, so the first series of
+            // the frame is not the index.
+            let data = [(key(Slot::new(2)), Type::Scalar(Scalar::U8))];
+            let set = interner().intern(&[
+                Group {
+                    index: key(Slot::new(1)),
+                    data: &[],
+                },
+                Group {
+                    index: key(Slot::new(3)),
+                    data: &data,
+                },
+            ]);
+            let pool = pool(4096);
+            let lens = [(1, 2), (2, 16)];
+            let mut draft =
+                Draft::new(&pool, &set, Form::Encoded, &lens).expect("a valid frame");
+            draft.set_count(1, 2);
+            draft.set_seq(1, 40);
+            let frame = draft.freeze(Path::Backfill);
+            let last = Some(Stamp::from_nanos(7));
+            let stored_at = Stamp::from_nanos(9);
+
+            let entry = entry(&pool, &frame, &set, last, stored_at).expect("room");
+
+            let place = (entry.index, entry.slot, entry.path, entry.first, entry.len);
+            assert_eq!(
+                place,
+                (key(Slot::new(3)), Slot::new(3), Path::Backfill, 40, 2)
+            );
+            assert_eq!(
+                (entry.stored_at, entry.last, entry.tag),
+                (stored_at, last, 0)
+            );
+            let parts: Vec<_> = entry.parts.into_iter().collect();
+            let body = body(&pool, &frame, &set).expect("room");
+            assert_eq!([&parts[0][..], &parts[1][..]], [&body[0][..], &body[1][..]]);
+        }
+
+        #[test]
+        #[should_panic(expected = "the frame has no series")]
+        fn panics_on_a_frame_of_no_series_also_with_a_full_pool() {
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(1)),
+                data: &[],
+            }]);
+            let frames = pool(4096);
+            let frame = frame(&frames, &set, &[]);
+            let heads = pool(4096);
+            let mut held = Vec::new();
+            while let Ok(block) = heads.alloc(COUNT) {
+                held.push(block);
+            }
+            drop(entry(&heads, &frame, &set, None, Stamp::from_nanos(0)));
+        }
     }
 
     mod body {
