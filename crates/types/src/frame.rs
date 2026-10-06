@@ -228,9 +228,14 @@ impl<'a> Layout<'a> {
         let (mut groups, mut bytes, mut last) = (0, 0_usize, None);
         // An index usually comes just before its data. Other data search `series`, once
         // per group while `found` holds its index. In a valid `series`, entry e is at a
-        // position from e - `missing` to e, so a search looks only there. An absent
-        // index waits for the order checks, without which the search means nothing.
+        // position from e - `missing` to e. Below `near`, that window holds at most
+        // `short` series, and a search looks only there. Other searches take all of
+        // `series`: a window whose length changes from one search to the next costs
+        // more than the steps it saves. An absent index waits for the order checks,
+        // without which the search means nothing.
         let missing = entries.saturating_sub(series.len());
+        let short = 1 + series.len() / 1024;
+        let near = if missing < short { entries } else { short };
         let (mut last_index, mut found, mut absent) = (None, [usize::MAX; 16], None);
         for &(entry, len) in series {
             if entry >= entries {
@@ -250,12 +255,15 @@ impl<'a> Layout<'a> {
             } else if last_index != Some(index) && absent.is_none() {
                 let memo = &mut found[group % found.len()];
                 if *memo != index {
-                    let window =
-                        index.saturating_sub(missing)..series.len().min(index + 1);
-                    if series[window]
-                        .binary_search_by_key(&index, |&(entry, _)| entry)
-                        .is_err()
-                    {
+                    let by_entry = |&(entry, _): &(usize, usize)| entry;
+                    let hit = if index < near {
+                        let window =
+                            index.saturating_sub(missing)..series.len().min(index + 1);
+                        series[window].binary_search_by_key(&index, by_entry)
+                    } else {
+                        series.binary_search_by_key(&index, by_entry)
+                    };
+                    if hit.is_err() {
                         absent = Some(Error::IndexAbsent { entry, index });
                     }
                     *memo = index;
@@ -756,6 +764,7 @@ fn to_u32(n: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::error::Error as _;
 
     use super::*;
@@ -1340,30 +1349,35 @@ mod tests {
 
     #[test]
     fn finds_an_index_far_after_its_data() {
-        // Entries 0 to 99 are the data of group 1, whose index is entry 101. Entry 100
-        // is the index of group 0, which has no data.
-        let data: Vec<_> = (1..=100).map(|n| (key(n), F64)).collect();
-        let set = interner().intern(&[
+        // Key n has slot n, so entries 0 to 1099 are the data of group 1, whose index
+        // is entry 1101. Entry 1100 is the index of group 0, which has no data. Past
+        // 1,024 series, a frame that lacks one entry searches only near each index.
+        let mut interner = interner();
+        for n in 1000..1102 {
+            interner.slots().assign(key(n));
+        }
+        let data: Vec<_> = (0..1100).map(|n| (key(n), F64)).collect();
+        let set = interner.intern(&[
             Group {
-                index: key(500),
+                index: key(1100),
                 data: &[],
             },
             Group {
-                index: key(999),
+                index: key(1101),
                 data: &data,
             },
         ]);
         let pool = pool(1 << 20);
-        let data = (0..100).map(|entry| (entry, 1));
-        let series: Vec<_> = data.clone().chain([(101, 1)]).collect();
+        let data = (0..1100).map(|entry| (entry, 1));
+        let series: Vec<_> = data.clone().chain([(1101, 1)]).collect();
         Draft::new(&pool, &set, Form::Raw, &series).unwrap();
-        let series: Vec<_> = data.chain([(100, 1)]).collect();
+        let series: Vec<_> = data.chain([(1100, 1)]).collect();
         let error = Draft::new(&pool, &set, Form::Raw, &series).unwrap_err();
         assert_eq!(
             error,
             Error::IndexAbsent {
                 entry: 0,
-                index: 101
+                index: 1101
             }
         );
     }
@@ -1847,6 +1861,24 @@ mod tests {
             let result = Draft::new(&pool(1 << 20), &set, Form::Raw, &series);
             prop_assert_eq!(result.err(), first_absent(&set, &series));
         }
+
+        /// More than 1,024 series that lack at most one entry, so each search looks
+        /// only near its index.
+        #[test]
+        fn finds_each_index_in_a_frame_that_lacks_one_entry(
+            sizes in vec(32_usize..41, 33..65),
+            keys in Just((0..3000).collect::<Vec<u32>>()).prop_shuffle(),
+            lacked in proptest::option::of(any::<proptest::sample::Index>()),
+        ) {
+            let set = create_key_set(&sizes, keys);
+            let lacked = lacked.map(|lacked| lacked.index(set.entries().len()));
+            let series: Vec<(usize, usize)> = (0..set.entries().len())
+                .filter(|&entry| Some(entry) != lacked)
+                .map(|entry| (entry, 1))
+                .collect();
+            let result = Draft::new(&pool(1 << 20), &set, Form::Raw, &series);
+            prop_assert_eq!(result.err(), first_absent(&set, &series));
+        }
     }
 
     /// A key set with a group of `sizes[g]` data for each `g`, keyed from `keys` in
@@ -1869,11 +1901,11 @@ mod tests {
 
     /// The error for the first entry of `series` whose index is absent from it.
     fn first_absent(set: &KeySet, series: &[(usize, usize)]) -> Option<Error> {
-        let present = |index| series.iter().any(|&(entry, _)| entry == index);
+        let present: BTreeSet<usize> = series.iter().map(|&(entry, _)| entry).collect();
         series
             .iter()
             .map(|&(entry, _)| (entry, set.index(entry)))
-            .find(|&(_, index)| !present(index))
+            .find(|(_, index)| !present.contains(index))
             .map(|(entry, index)| Error::IndexAbsent { entry, index })
     }
 }
