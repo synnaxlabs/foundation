@@ -5,7 +5,11 @@
 use std::fmt;
 use std::path::Path;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[expect(unsafe_code, reason = "the clock is an OS call")]
+mod clock;
 mod cores;
+mod entropy;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod files;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -15,9 +19,48 @@ mod shards;
 mod thread;
 mod threads;
 mod unwind;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[expect(unsafe_code, reason = "the wall clock is an OS call")]
+mod wall;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use files::Disk;
+
+/// The monotonic clock of this node, which counts time while the machine sleeps. Each
+/// call starts a new clock at `Monotonic(0)`. Clones read the same clock. Never
+/// compare readings of clocks from two calls.
+///
+/// A sleep needs a thread with a Tokio runtime, as each thread that `os` starts has.
+/// It completes up to about 1 ms late. A sleep that waits across a suspend completes
+/// late by up to the time asleep.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use]
+pub fn clock() -> env::clock::Clock {
+    env::clock::Clock::new(clock::Driver::new())
+}
+
+/// The OS wall clock and its error bound, read in one call that needs no privilege.
+/// The bound is `None` when the OS says its clock is not in sync, or gives a negative
+/// bound.
+///
+/// # Panics
+///
+/// A read panics when the OS refuses the call.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[must_use]
+pub fn wall() -> env::wall::Wall {
+    env::wall::Wall::new(wall::Driver)
+}
+
+/// The random source of the OS. Its bytes are fit for keys and nonces.
+///
+/// # Panics
+///
+/// A fill panics when the OS gives no random bytes.
+#[must_use]
+pub fn entropy() -> env::entropy::Entropy {
+    env::entropy::Entropy::new(entropy::Driver)
+}
 
 /// Shards on OS threads, each with its own Tokio runtime. The core count is read once
 /// from the thread that calls this. On Linux it is the size of the affinity set, and

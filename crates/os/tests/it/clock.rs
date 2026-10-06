@@ -5,8 +5,11 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use env::clock::Clock;
+use env::shards::Config;
 use tokio::runtime::{Builder, Runtime};
 use types::time::{Monotonic, Span};
+
+use crate::common::assert_joins;
 
 /// The runtime that a thread of `os` runs, with Tokio's timer.
 fn runtime() -> Runtime {
@@ -43,34 +46,73 @@ fn never_goes_backwards_across_threads() {
     });
 }
 
+/// The std monotonic clock, in nanoseconds since `origin`.
+#[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
+fn instant(origin: Instant) -> i64 {
+    i64::try_from(origin.elapsed().as_nanos()).unwrap()
+}
+
 #[test]
 fn starts_near_zero_and_moves_with_instant_while_awake() {
     #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
-    let start = Instant::now();
+    let origin = Instant::now();
     let clock = os::clock();
-    assert!(clock.now() < Monotonic(1_000_000_000), "{:?}", clock.now());
-    let first = clock.now();
+    let (before, first, after) = (instant(origin), clock.now(), instant(origin));
+    assert!(first < Monotonic(1_000_000_000), "{first:?}");
     #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
     std::thread::sleep(std::time::Duration::from_millis(50));
-    #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
-    let awake = start.elapsed();
-    let moved = clock.now() - first;
-    let awake = Span::from_nanos(i64::try_from(awake.as_nanos()).unwrap());
-    let gap = if moved > awake {
-        moved - awake
-    } else {
-        awake - moved
-    };
-    assert!(gap <= Span::MILLISECOND, "moved {moved}, awake {awake}");
+    let (later, second, last) = (instant(origin), clock.now(), instant(origin));
+    let moved = (second - first).nanos();
+    // A time daemon slews `Instant` on Linux by up to 500 ppm.
+    let slew = 50_000;
+    assert!(
+        moved >= later - after - slew && moved <= last - before + slew,
+        "moved {moved} ns, awake {} to {} ns",
+        later - after,
+        last - before
+    );
 }
 
 #[test]
 fn clones_read_the_same_clock() {
     let clock = os::clock();
     let other = clock.clone();
-    let before = clock.now();
-    assert!(other.now() >= before);
-    assert!(clock.now() >= other.now() - millis(1));
+    let (a, b, c) = (clock.now(), other.now(), clock.now());
+    assert!(a <= b && b <= c, "{a:?}, {b:?}, {c:?}");
+}
+
+#[test]
+fn a_sleep_completes_on_a_dedicated_thread() {
+    let clock = os::clock();
+    let threads = os::threads().expect("the OS gives the cores of this process");
+    let (start, sleeper) = (clock.now(), clock.clone());
+    let handle = threads
+        .start(
+            "sleeper",
+            move || async move { sleeper.sleep(millis(5)).await },
+        )
+        .unwrap();
+    assert_joins(handle, Ok(()));
+    assert!(clock.now() >= start + millis(5), "{:?}", clock.now());
+}
+
+#[test]
+fn a_sleep_completes_on_a_shard() {
+    let clock = os::clock();
+    let shards = os::shards().expect("the OS gives the cores of this process");
+    let (start, sleeper) = (clock.now(), clock.clone());
+    let config = Config {
+        name: "sleeper".into(),
+        core: None,
+    };
+    let handle = shards
+        .start(
+            config,
+            move |_| async move { sleeper.sleep(millis(5)).await },
+        )
+        .unwrap();
+    assert_joins(handle, Ok(()));
+    assert!(clock.now() >= start + millis(5), "{:?}", clock.now());
 }
 
 #[test]
@@ -148,6 +190,16 @@ fn a_far_deadline_is_pending() {
     let _guard = runtime.enter();
     let deadline = clock.now() + seconds(3_650 * 86_400);
     let mut sleep = pin!(clock.sleep_until(deadline));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+}
+
+#[test]
+fn a_deadline_at_the_end_of_the_clock_is_pending() {
+    let clock = os::clock();
+    let runtime = runtime();
+    let _guard = runtime.enter();
+    let mut sleep = pin!(clock.sleep_until(Monotonic(u64::MAX)));
     let mut cx = Context::from_waker(Waker::noop());
     assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
 }
