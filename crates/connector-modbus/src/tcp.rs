@@ -1,4 +1,10 @@
-//! Modbus TCP framing: the MBAP header before each PDU.
+//! Modbus TCP: the MBAP header before each PDU, a client, and a device server.
+
+mod client;
+mod serve;
+
+pub use client::{Client, Failure};
+pub use serve::serve;
 
 use crate::Error;
 use crate::pdu::Request;
@@ -88,6 +94,8 @@ pub fn decode(bytes: &[u8]) -> Result<Option<Frame<'_>>, Error> {
 
 #[cfg(test)]
 mod tests {
+    mod network;
+
     use super::*;
     use crate::pdu::Table;
 
