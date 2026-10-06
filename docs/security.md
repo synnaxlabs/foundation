@@ -141,9 +141,11 @@ state on `main`.
 ### Time source to `estimate`
 
 - `estimate` combines one bound per source and does not know what a source is
-  (ESTIMATE COMBINE). The result holds the truth when more than half of the bounds
-  hold it, whatever the others are. So a small bound from a lying minority cannot
-  steer it off the truth (the attack of R6, #344). A lying majority can.
+  (ESTIMATE COMBINE). A known result holds the truth when more than half of the bounds
+  that vote hold it, whatever the others are. So a small bound from a lying minority
+  cannot steer it off the truth (the attack of R6, #344). A lying majority can. So can
+  one known bound beside unknown bounds alone, because an unknown bound does not vote
+  beside a known one.
 
 ### Files to the spec
 
