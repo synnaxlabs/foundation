@@ -901,14 +901,14 @@ How to read this record:
   opens and accepts no stream. A sender obeys only the peer's values: each message is at
   most the peer's `message_bytes_max`, and the send budget is the peer's `window_bytes`.
   A value over what the node can count counts as the largest it can count. A peer breaks
-  the protocol when its hello misses a required id, has an id out of order, is over 256
-  bytes, has a `message_bytes_max` of 0 or a `window_bytes` below it, or resets.
-  `Endpoint::write` gives `Error::TooLarge` for a message over the peer's limit; a
-  caller that forwards a writer's frame gives the writer `Large`, and the writer splits
-  the frame (LARGE FRAME). Proposed by `network` in #55; approved by the coordinator on
-  PR #407. The budgets: proposed by `network` in #228. The room order: approved by the
-  advisor on #611. The hello: proposed by `network` in #55; settled by the advisor and
-  the coordinator under the person's delegation (#55).
+  the protocol when its hello ends inside a pair, misses a required id, has an id out of
+  order, is over 256 bytes, has a `message_bytes_max` of 0 or a `window_bytes` below it,
+  or resets. `Endpoint::write` gives `Error::TooLarge` for a message over the peer's
+  limit; a caller that forwards a writer's frame gives the writer `Large`, and the
+  writer splits the frame (LARGE FRAME). Proposed by `network` in #55; approved by the
+  coordinator on PR #407. The budgets: proposed by `network` in #228. The room order:
+  approved by the advisor on #611. The hello: proposed by `network` in #55; settled by
+  the advisor and the coordinator under the person's delegation (#55).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
