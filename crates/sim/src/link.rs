@@ -28,9 +28,10 @@ pub struct Config {
     /// headers: 28 bytes on IPv4, 48 on IPv6. A TCP segment carries at most the MTU
     /// less 40 bytes on IPv4, 60 on IPv6.
     pub mtu: usize,
-    /// The most bytes per second that the link carries, headers included. A packet
-    /// leaves the link after the packets sent on it before, and then takes the delay
-    /// and the jitter. `None` has no limit.
+    /// The most bytes per second that the link sends, counted as IP packets with
+    /// the headers that [`mtu`](Self::mtu) gives. The link sends one packet at a
+    /// time, in the order they were sent, and each then takes the delay and the
+    /// jitter. `None` has no limit.
     pub rate: Option<NonZeroU64>,
 }
 

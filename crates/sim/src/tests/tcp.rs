@@ -182,6 +182,73 @@ fn a_connect_on_a_link_with_a_rate_waits_for_the_transmit_of_each_leg() {
     assert_eq!(take(&connected), legs(2) + millis(2));
 }
 
+#[test]
+fn a_stream_on_a_link_with_a_rate_carries_its_bytes_and_headers_at_the_rate() {
+    let link = link::Config {
+        rate: NonZeroU64::new(1_000_000),
+        ..link::Config::default()
+    };
+    let (mut sim, a, b) = pair(0, link);
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        let (mut last, mut bytes) = (None, 0);
+        while let read = read(&mut tcp, 1 << 16).await.unwrap()
+            && !read.is_empty()
+        {
+            (last, bytes) = (Some(node.clock().now()), bytes + read.len());
+        }
+        (last, bytes)
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        let began = node.clock().now();
+        write_all(&mut tcp, &[7; 14_600]).await.unwrap();
+        close(&mut tcp).await.unwrap();
+        began
+    });
+    sim.run().unwrap();
+    // The 40-byte ACK of the handshake, then ten segments of 1,500 bytes.
+    let last = take(&client) + Span::from_nanos(15_040_000) + delay();
+    assert_eq!(take(&server), (Some(last), 14_600));
+}
+
+#[test]
+fn a_power_cut_drops_the_segments_that_have_not_left_the_node() {
+    // A segment of 1,500 bytes takes 15 ms.
+    let link = link::Config {
+        rate: NonZeroU64::new(100_000),
+        ..link::Config::default()
+    };
+    let (mut sim, a, b) = pair(0, link);
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        node.clock().sleep(millis(100)).await;
+        let wrote = node.clock().now();
+        write_all(&mut tcp, &[1]).await.unwrap();
+        let (bytes, end) = read_all(&mut tcp).await;
+        (bytes.len(), end, wrote, node.clock().now())
+    });
+    let remote = at(&b, 4433);
+    let _client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        write_all(&mut tcp, &vec![7; 1 << 15]).await.unwrap();
+        pending::<()>().await;
+    });
+    sim.run_for(millis(50)).unwrap();
+    sim.crash(&a, Crash::Power);
+    sim.run().unwrap();
+    // Three segments left by the cut. The write of 41 bytes and the reset of 40 find
+    // the links idle.
+    let (bytes, end, wrote, reset) = take(&server);
+    let remote = at(&a, 49_152);
+    assert_eq!((bytes, end), (4_380, Err(Net::Reset { remote })));
+    let legs = Span::from_nanos(410_000 + 400_000 + 2 * delay().nanos());
+    assert_eq!(reset, wrote + legs);
+}
+
 /// When a connect from `a` to port 4433 of `b` ends, and what it gives. `before` runs
 /// on `b` first, and its listener lives through the run.
 fn refused(

@@ -214,7 +214,11 @@ impl Sim {
     ///   those of the futures first, then those of the threads, each in start order.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
-        let wakers = lock(&self.shared).net().crash(node, crash);
+        let wakers = {
+            let mut state = lock(&self.shared);
+            let now = state.now();
+            state.net().crash(now, node, crash)
+        };
         let panics = self.stop(|key| key == node);
         drop(wakers);
         let ended = lock(&self.shared).crash(node, crash);
@@ -547,6 +551,7 @@ pub enum Crash {
     /// - Other file calls in flight have no effect.
     /// - The monotonic clock reads [`node::Config::monotonic`] again. The wall
     ///   clock runs on.
+    /// - Each packet that waits to be sent on a link from the node is lost.
     /// - Each TCP stream and listener ends with no segment, so a peer gets an RST
     ///   only when it sends.
     Power,
