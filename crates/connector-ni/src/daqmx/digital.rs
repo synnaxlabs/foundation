@@ -183,9 +183,9 @@ impl Output {
     }
 
     /// Writes `values` by scan (each line of the first sample, then each line of the
-    /// next): 0 sets a line low, and any other value sets it high. It waits up to
-    /// `timeout`, cut to whole milliseconds, for room in the driver's buffer. A driver
-    /// warning reads as success.
+    /// next): 0 sets a line low, and 1 sets it high. It waits up to `timeout`, cut to
+    /// whole milliseconds, for room in the driver's buffer. A driver warning reads as
+    /// success.
     ///
     /// # Errors
     ///

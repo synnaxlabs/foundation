@@ -258,7 +258,8 @@ fn writes_each_line() {
     task.add("Dev1/port0/line0:1").unwrap();
     assert_eq!(task.write(&[0, 1], SECOND), Err(refused(stub::STOPPED)));
     task.start().unwrap();
-    task.write(&[0, 1, 255, 0], SECOND).unwrap();
+    task.write(&[0, 1, 1, 0], SECOND).unwrap();
+    assert_eq!(task.write(&[0, 2], SECOND), Err(refused(stub::ARGUMENT)));
 }
 
 #[test]

@@ -15,8 +15,8 @@
 //! - An argument value the stub does not model fails with [`ARGUMENT`]: a terminal
 //!   other than the default, units other than volts, a range with `min >= max`, a
 //!   clock other than continuous on the rising edge with a rate above zero, digital
-//!   lines grouped other than one channel for each line, and a layout other than by
-//!   scan.
+//!   lines grouped other than one channel for each line, a written line value other
+//!   than 0 or 1, and a layout other than by scan.
 //! - A read or write on a task that is not running fails with [`STOPPED`].
 //! - A written value outside its channel's range fails with [`RANGE`].
 //! - A buffer smaller than the request fails with [`SIZE`].
@@ -519,7 +519,11 @@ pub unsafe extern "system" fn DAQmxWriteDigitalLines(
     written: *mut i32,
     _reserved: *mut u32,
 ) -> i32 {
-    let check = |kind, _: &u8| (kind != Kind::DigitalOut).then_some(DIRECTION);
+    let check = |kind, value: &u8| match (kind, *value) {
+        (Kind::DigitalOut, 0 | 1) => None,
+        (Kind::DigitalOut, _) => Some(ARGUMENT),
+        _ => Some(DIRECTION),
+    };
     // SAFETY: the caller's contract.
     unsafe { write(handle, per_channel, layout, values, written, check) }
 }
