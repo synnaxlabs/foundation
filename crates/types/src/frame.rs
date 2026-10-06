@@ -375,14 +375,13 @@ impl Frame {
     /// frame's length takes from its pool. It depends only on that length.
     #[must_use]
     pub fn charge(&self) -> u64 {
-        to_u64(block::footprint(self.0.len()))
+        charge_of(self.0.len())
     }
 
-    /// The series bytes of every present entry, as one view that shares the frame's
-    /// block, from the first series to the end. [`Frame::ends`] gives where each
-    /// series ends in this view. Copies nothing. Until it drops, the
-    /// view keeps the whole block in use: [`Frame::charge`] bytes of the pool, not its
-    /// length.
+    /// The series bytes of every present entry, from the first series to the end, as
+    /// a block that shares the frame's memory. [`Frame::ends`] gives where each series
+    /// ends in it. Copies nothing. Until it drops, it keeps the frame's whole block in
+    /// use: [`Frame::charge`] bytes of the pool, not its length.
     #[must_use]
     pub fn body(&self) -> block::Block {
         let (ranges, series) = counts(&self.0);
@@ -567,11 +566,21 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
                 *memo = index;
             }
         }
-        bytes = bytes
-            .checked_next_multiple_of(SERIES_ALIGN)
-            .map_or(usize::MAX, |start| start.saturating_add(len));
+        bytes = next_end(bytes, len);
     }
     absent.map_or(Ok((groups, bytes)), Err)
+}
+
+/// Where a series of `len` bytes ends when it follows series bytes that end at
+/// `last`. Saturates at `usize::MAX`, which no pool holds.
+fn next_end(last: usize, len: usize) -> usize {
+    last.checked_next_multiple_of(SERIES_ALIGN)
+        .map_or(usize::MAX, |start| start.saturating_add(len))
+}
+
+/// The charge of a frame of `len` bytes (CREDIT RULES).
+fn charge_of(len: usize) -> u64 {
+    to_u64(block::footprint(len))
 }
 
 /// A frame's ranges, its descriptors, and its series bytes.

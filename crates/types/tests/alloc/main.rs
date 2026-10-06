@@ -4,8 +4,6 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use std::sync::Arc;
-
 use types::channel::Key;
 use types::frame::key_set::{Group, Interner, KeySet};
 use types::frame::{self, Draft, Form, Mask, Path, Range, View};
@@ -100,10 +98,9 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
     let frame = Draft::new(pool, set, Form::Raw, &SERIES)
         .expect("the pool holds the frame")
         .freeze(Path::Live);
-    let wanted = set.entries()[2].slot;
-    let mask = Arc::new(Mask::new(set, |slot| slot == wanted));
+    let mask = Mask::new(set, [set.entries()[2].slot]);
     let (read, allocations) = ALLOCATOR.count(|| {
-        let view = View::new(frame.clone(), Arc::clone(&mask));
+        let view = View::new(&frame, &mask);
         let read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
         assert_eq!(view.charge(), 192, "the view charges both series");
         read
