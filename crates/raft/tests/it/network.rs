@@ -156,6 +156,10 @@ pub(crate) struct Network {
     pub(crate) disks: Vec<Disk>,
     // A message between a node that is cut off and one that is not is lost.
     pub(crate) cut: Vec<bool>,
+    // A node whose disk lost entries it synced. Its `IndexPastLog` errors go to
+    // `refused`; any other error fails the run.
+    wiped: Vec<bool>,
+    pub(crate) refused: Vec<Error>,
     crash: Vec<Option<Kept>>,
     flight: Vec<Message>,
     leaders: BTreeMap<Term, node::Key>,
@@ -196,6 +200,8 @@ impl Network {
             nodes: Vec::new(),
             disks,
             cut: vec![false; logs.len()],
+            wiped: vec![false; logs.len()],
+            refused: Vec::new(),
             crash: vec![None; logs.len()],
             flight: Vec::new(),
             leaders: BTreeMap::new(),
@@ -245,9 +251,24 @@ impl Network {
     pub(crate) fn deliver(&mut self, message: Message) {
         let (from, to) = (self.at(message.from), self.at(message.to));
         if self.cut[from] == self.cut[to] {
-            self.nodes[to].step(message).unwrap();
+            match self.nodes[to].step(message) {
+                Err(error @ Error::IndexPastLog { .. }) if self.wiped[to] => {
+                    self.refused.push(error);
+                }
+                result => result.unwrap(),
+            }
             self.collect();
         }
+    }
+
+    /// Restarts `node` from a disk that lost each entry after the first `keep`, and
+    /// what it applied of them.
+    pub(crate) fn wipe(&mut self, node: usize, keep: usize) {
+        let disk = &mut self.disks[node];
+        disk.entries.truncate(keep);
+        disk.applied = disk.applied.min(disk.last().index);
+        self.wiped[node] = true;
+        self.nodes[node] = self.build(node);
     }
 
     pub(crate) fn apply(&mut self, action: &Action) {
