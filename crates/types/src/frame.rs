@@ -117,11 +117,22 @@ impl Range {
     /// The range of `group` in the frame `bytes`, or `None` when it is absent.
     fn find(bytes: &[u8], group: u32) -> Option<Self> {
         let (ranges, ..) = parts(bytes);
-        let range = &ranges[search(ranges, group)?];
-        Some(Self {
-            seq: u64::from_le_bytes(get(range, at::range::SEQ)),
-            count: u32::from_le_bytes(get(range, at::range::COUNT)),
-        })
+        Some(Self::read(&ranges[search(ranges, group)?]))
+    }
+
+    /// Each present group and its range in the frame `bytes`, in group order.
+    fn all(bytes: &[u8]) -> impl Iterator<Item = (u32, Self)> {
+        let (ranges, ..) = parts(bytes);
+        ranges
+            .iter()
+            .map(|record| (lead(record), Self::read(record)))
+    }
+
+    fn read(record: &[u8; RANGE]) -> Self {
+        Self {
+            seq: u64::from_le_bytes(get(record, at::range::SEQ)),
+            count: u32::from_le_bytes(get(record, at::range::COUNT)),
+        }
     }
 }
 
@@ -287,6 +298,12 @@ impl Draft {
         Range::find(&self.0, group)
     }
 
+    /// Each present group and its range, in group order. Time is linear in the
+    /// number of present groups.
+    pub fn ranges(&self) -> impl Iterator<Item = (u32, Range)> {
+        Range::all(&self.0)
+    }
+
     /// Sets how many samples each series of group `group` holds.
     ///
     /// # Panics
@@ -354,6 +371,12 @@ impl Frame {
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
         Range::find(&self.0, group)
+    }
+
+    /// Each present group and its range, in group order. Time is linear in the
+    /// number of present groups.
+    pub fn ranges(&self) -> impl Iterator<Item = (u32, Range)> {
+        Range::all(&self.0)
     }
 
     /// The series bytes of `entry`, or `None` when it is absent. Time is logarithmic
@@ -1267,6 +1290,39 @@ mod tests {
     }
 
     #[test]
+    fn gives_only_the_present_ranges() {
+        let pool = pool(1 << 16);
+        let set = two_groups();
+        let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
+        assert_eq!(empty.ranges().count(), 0);
+        assert_eq!(empty.freeze(Path::Live).ranges().count(), 0);
+        let mut draft = Draft::new(&pool, &set, Form::Raw, &[(2, 1)]).unwrap();
+        draft.set_count(1, 1);
+        draft.set_seq(1, 7);
+        let ranges: Vec<_> = draft.ranges().collect();
+        assert_eq!(ranges, [(1, Range { seq: 7, count: 1 })]);
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.ranges().collect::<Vec<_>>(), ranges);
+    }
+
+    #[test]
+    fn gives_a_present_range_without_samples() {
+        let pool = pool(1 << 16);
+        let series = [(0, 8), (2, 0)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        let ranges: Vec<_> = draft.ranges().collect();
+        assert_eq!(ranges, [(0, Range::default()), (1, Range::default())]);
+        draft.set_seq(1, 5);
+        let ranges: Vec<_> = draft.ranges().collect();
+        assert_eq!(
+            ranges,
+            [(0, Range::default()), (1, Range { seq: 5, count: 0 })]
+        );
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.ranges().collect::<Vec<_>>(), ranges);
+    }
+
+    #[test]
     #[should_panic(expected = "group 1 is absent from the frame")]
     fn refuses_a_count_for_an_absent_group() {
         let pool = pool(1 << 16);
@@ -1410,18 +1466,12 @@ mod tests {
         Ok(())
     }
 
-    /// Writes a frame of `case`, then checks that every read gives back what it wrote.
-    fn round_trip(case: &Case) -> Result<(), TestCaseError> {
-        let (set, series) = shape(case);
-        let entries = set.entries().len();
-        let pool = pool(1 << 20);
-        let before = pool.committed();
-        let mut draft = Draft::new(&pool, &set, case.form, &series)
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        let taken = to_u64(pool.committed() - before);
-        prop_assert_eq!(draft.key_set(), set.key());
-        prop_assert_eq!(draft.form(), case.form);
-        fill(&mut draft, &series, entries, case.in_order)?;
+    /// Sets the range of each present group of `case` and checks the reads. Returns
+    /// each group's range, `None` when the group is absent.
+    fn set_ranges(
+        draft: &mut Draft,
+        case: &Case,
+    ) -> Result<Vec<Option<Range>>, TestCaseError> {
         let mut ranges = Vec::new();
         for ((group, &(seq, count, seq_first)), &present) in
             (0_u32..).zip(&case.ranges).zip(&case.groups)
@@ -1437,6 +1487,27 @@ mod tests {
             prop_assert_eq!(draft.range(group), range);
             ranges.push(range);
         }
+        let present: Vec<(u32, Range)> = (0_u32..)
+            .zip(&ranges)
+            .filter_map(|(group, range)| range.map(|range| (group, range)))
+            .collect();
+        prop_assert_eq!(draft.ranges().collect::<Vec<_>>(), present);
+        Ok(ranges)
+    }
+
+    /// Writes a frame of `case`, then checks that every read gives back what it wrote.
+    fn round_trip(case: &Case) -> Result<(), TestCaseError> {
+        let (set, series) = shape(case);
+        let entries = set.entries().len();
+        let pool = pool(1 << 20);
+        let before = pool.committed();
+        let mut draft = Draft::new(&pool, &set, case.form, &series)
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let taken = to_u64(pool.committed() - before);
+        prop_assert_eq!(draft.key_set(), set.key());
+        prop_assert_eq!(draft.form(), case.form);
+        fill(&mut draft, &series, entries, case.in_order)?;
+        let mut ranges = set_ranges(&mut draft, case)?;
         ranges.push(None);
         let written: Vec<(usize, Vec<u8>)> = series
             .iter()
@@ -1449,12 +1520,14 @@ mod tests {
             drafted.push((entry, bytes.to_vec()));
         }
         prop_assert_eq!(&drafted, &written);
+        let present: Vec<(u32, Range)> = draft.ranges().collect();
         let frame = draft.freeze(case.path);
 
         prop_assert_eq!(frame.key_set(), set.key());
         prop_assert_eq!(frame.path(), case.path);
         prop_assert_eq!(frame.form(), case.form);
         prop_assert_eq!(frame.charge(), taken);
+        prop_assert_eq!(frame.ranges().collect::<Vec<_>>(), present);
         for (group, range) in (0_u32..).zip(ranges) {
             prop_assert_eq!(frame.range(group), range);
         }

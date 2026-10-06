@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::future::{Ready, pending};
+use std::panic::panic_any;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -9,8 +10,9 @@ use std::time::Duration;
 
 use env::shards::{Config, Shards};
 use env::tasks::Tasks;
-use env::thread::{Handle, Panicked};
 use tokio::task::yield_now;
+
+use crate::common::{Bomb, Relay, Relayed, Stuck, assert_joins, panicked};
 
 fn shards() -> Shards {
     os::shards().expect("the OS gives the cores of this process")
@@ -21,20 +23,6 @@ fn config(name: &str) -> Config {
         name: name.into(),
         core: None,
     }
-}
-
-/// Asserts that `handle` joins with `outcome` in ten seconds, so a shard that does not
-/// end fails its test and does not hang the run.
-#[expect(clippy::disallowed_methods, reason = "the test bounds the join")]
-fn assert_joins(handle: Handle, outcome: Result<(), Panicked>) {
-    let (done, joined) = mpsc::channel();
-    std::thread::spawn(move || done.send(handle.join()));
-    let joined = joined.recv_timeout(Duration::from_secs(10));
-    assert_eq!(joined, Ok(outcome), "the shard ends in ten seconds");
-}
-
-fn panicked(name: &str) -> Result<(), Panicked> {
-    Err(Panicked { name: name.into() })
 }
 
 /// A flag that a [`Dropped`] sets.
@@ -52,15 +40,6 @@ struct Dropped(Arc<AtomicBool>);
 impl Drop for Dropped {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);
-    }
-}
-
-/// Panics when it drops.
-struct Bomb;
-
-impl Drop for Bomb {
-    fn drop(&mut self) {
-        panic!("bomb");
     }
 }
 
@@ -297,16 +276,8 @@ fn a_name_with_a_nul_starts_and_panicked_keeps_the_whole_name() {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use rustix::thread::{CpuSet, sched_getaffinity};
-
     use super::*;
-
-    fn affinity() -> Vec<usize> {
-        let set = sched_getaffinity(None).unwrap();
-        (0..CpuSet::MAX_CPU)
-            .filter(|&cpu| set.is_set(cpu))
-            .collect()
-    }
+    use crate::common::affinity;
 
     #[test]
     fn each_core_pins_its_shard_to_its_cpu_of_the_affinity_set() {
@@ -344,4 +315,44 @@ mod other {
         let count = std::thread::available_parallelism().unwrap();
         assert_eq!(shards().cores(), count);
     }
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_in_a_task_ends_the_shard() {
+    let main = |tasks: Tasks| async move {
+        tasks.spawn(async { panic_any(Relay(2)) });
+        pending::<()>().await;
+    };
+    let handle = shards().start(config("shard-9"), main).unwrap();
+    assert_joins(handle, panicked("shard-9"));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_in_the_drop_of_a_task_ends_the_shard() {
+    let main = |tasks: Tasks| async move {
+        tasks.spawn(Relayed);
+        pending::<()>().await;
+    };
+    let handle = shards().start(config("shard-10"), main).unwrap();
+    assert_joins(handle, panicked("shard-10"));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_in_the_main_future_ends_the_shard() {
+    let main = |_: Tasks| async {
+        yield_now().await;
+        panic_any(Relay(2))
+    };
+    let handle = shards().start(config("shard-11"), main).unwrap();
+    assert_joins(handle, panicked("shard-11"));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_as_a_tokio_task_drops_ends_the_shard() {
+    let main = |_: Tasks| async {
+        // Tokio catches the first two panics of the chain at the drop of the runtime.
+        drop(tokio::task::spawn_local(Stuck(4)));
+    };
+    let handle = shards().start(config("shard-12"), main).unwrap();
+    assert_joins(handle, panicked("shard-12"));
 }

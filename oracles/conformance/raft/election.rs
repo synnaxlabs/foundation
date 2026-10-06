@@ -2,9 +2,9 @@
 //! Authors, Apache License 2.0, see `LICENSE`). This file is modified from the etcd
 //! source: `README.md` lists each source and the changes.
 
-use raft::{Body, Hard, Message, Position, Raft, Role, Term};
+use raft::{Body, Grant, Hard, Message, Position, Raft, Role, Term};
 
-use crate::common::{ELECTION, Network, at_term, build, heartbeat, key};
+use crate::common::{ELECTION, Network, at_term, build, heartbeat, key, proof};
 
 fn drain(raft: &mut Raft) -> Vec<Message> {
     raft.ready().messages
@@ -101,12 +101,13 @@ fn vote_from_any_state() {
             term: new,
             index: 42,
         };
+        let pre_votes = proof(Grant::PreVote, 2, &[2, 3]);
         raft.step(Message {
             from: key(2),
             to: key(1),
             term: new,
             body: Body::Vote { last },
-            proof: None,
+            proof: Some(pre_votes.clone()),
         })
         .unwrap();
         let replies = drain(&mut raft);
@@ -128,7 +129,7 @@ fn vote_from_any_state() {
             term: new,
             vote: Some(key(2)),
             leader: None,
-            proof: None,
+            proof: Some(pre_votes),
         };
         assert_eq!(raft.hard(), hard, "{role:?}");
     }
@@ -205,10 +206,8 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
         .map(|(index, log_term, vote)| {
             let term = Term(log_term.max(2));
             let hard = Hard {
-                term,
                 vote: vote.map(key),
-                leader: None,
-                proof: None,
+                ..at_term(term.0)
             };
             let (mut raft, _) = build(1, &[1], ELECTION, hard, own);
             let last = Position {
@@ -479,7 +478,7 @@ fn free_stuck_candidate_with_check_quorum() {
         term: Term(3),
         vote: Some(key(3)),
         leader: None,
-        proof: None,
+        proof: Some(proof(Grant::PreVote, 3, &[1, 2, 3])),
     };
     let first = Position {
         term: Term(1),

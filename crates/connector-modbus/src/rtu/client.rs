@@ -74,15 +74,17 @@ impl Client {
         super::encode(unit.get(), request, &mut self.bytes)
             .map_err(Failure::Request)?;
         let (stale, now) = (self.stale, self.line.now());
-        // A timeout past the end of the clock never ends.
+        // The end of the clock never comes, so a timeout past it never ends.
         let deadline = stale
             .map_or(now, |stale| stale.max(now))
-            .checked_add(self.timeout);
-        self.stale = deadline;
-        let read = self.ask(request, stale, deadline).await;
+            .checked_add(self.timeout)
+            .unwrap_or(Monotonic(u64::MAX));
+        self.stale = Some(deadline);
+        let read = self.ask(request, stale, Some(deadline)).await;
         self.stale = None;
         read?;
-        let frame = super::decode_reply(request, &self.bytes)?
+        let frame = super::decode_reply(request, &self.bytes)
+            .map_err(Failure::Frame)?
             .expect("invariant: the loop ends at a whole frame");
         if frame.unit != unit.get() {
             return Err(Failure::Unit {
@@ -90,7 +92,7 @@ impl Client {
                 got: frame.unit,
             });
         }
-        Ok(request.decode_reply(frame.pdu)?)
+        request.decode_reply(frame.pdu).map_err(Failure::Frame)
     }
 
     /// Sends the frame in `bytes` after the quiet, and reads into `bytes` until it
@@ -107,7 +109,10 @@ impl Client {
             return Err(Failure::Timeout);
         }
         self.bytes.clear();
-        while super::decode_reply(request, &self.bytes)?.is_none() {
+        while super::decode_reply(request, &self.bytes)
+            .map_err(Failure::Frame)?
+            .is_none()
+        {
             if !self.line.read(&mut self.bytes, deadline).await? {
                 return Err(Failure::Timeout);
             }
@@ -139,12 +144,6 @@ pub enum Failure {
 impl From<serial::Error> for Failure {
     fn from(error: serial::Error) -> Self {
         Self::Serial(error)
-    }
-}
-
-impl From<Error> for Failure {
-    fn from(error: Error) -> Self {
-        Self::Frame(error)
     }
 }
 
