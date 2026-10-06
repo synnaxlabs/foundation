@@ -133,24 +133,11 @@ impl std::error::Error for Error {}
 impl Shard {
     /// A shard over `buffer` that carries no index yet. Index frames, stored headers,
     /// and handoff bodies come from `pool`, the pool of `buffer`.
-    ///
-    /// # Panics
-    ///
-    /// If one entry alone in a record of `buffer` holds less than the largest handoff
-    /// body.
     pub(crate) fn new(
         buffer: Buffer,
         pool: Rc<block::Pool>,
         limits: order::Config,
     ) -> Self {
-        let layout = buffer.layout();
-        let entry_max = layout.entry_max();
-        assert!(
-            entry_max >= handoff::MAX_BYTES,
-            "the ring's body_max of {} is under {}, the least that holds a handoff",
-            layout.body_max(),
-            layout.body_max() - entry_max + handoff::MAX_BYTES
-        );
         Self {
             buffer,
             pool,
@@ -1606,36 +1593,11 @@ mod tests {
         });
     }
 
-    /// The `body_max` of a ring whose records hold `len` bytes of one entry alone.
-    fn body_max(len: usize) -> usize {
-        let layout = Layout::new(AREA, BODY_MAX).expect("a ring");
-        len + BODY_MAX - layout.entry_max()
-    }
-
+    /// The smallest ring holds the largest handoff, so `new` needs no check for it.
     #[test]
-    fn panics_at_new_when_one_entry_of_a_record_holds_less_than_a_handoff() {
-        let (mut sim, _handle) = start(41, |test| async move {
-            let buffer = test.buffer(AREA, body_max(handoff::MAX_BYTES - 1), 1).await;
-            Shard::new(buffer, Rc::clone(&test.pool), LIMITS);
-        });
-        assert_eq!(
-            sim.run(),
-            Err(sim::Error::Panicked {
-                thread: DIR.into(),
-                message:
-                    "the ring's body_max of 310 is under 311, the least that holds \
-                          a handoff"
-                        .into(),
-                seed: 41,
-            })
-        );
-    }
-
-    #[test]
-    fn records_the_largest_handoff_when_one_entry_of_a_record_holds_it() {
+    fn records_the_largest_handoff_in_the_smallest_ring() {
         run(42, |test| async move {
-            let buffer = test.buffer(AREA, body_max(handoff::MAX_BYTES), 1).await;
-            assert_eq!(buffer.layout().entry_max(), handoff::MAX_BYTES);
+            let buffer = test.buffer(AREA, 4087, 1).await;
             let mut shard = Shard::new(buffer, Rc::clone(&test.pool), LIMITS);
             shard.carry(Slot::new(0));
             let set = interner().intern(&[Group {
