@@ -287,7 +287,8 @@ impl Endpoint {
     /// Puts `message` on the stream after the messages before it. `Ready` when the
     /// stream took all of it. Else `sender` holds the rest: call
     /// [`Endpoint::flush`] after [`Event::Writable`]. `Pending` also when the
-    /// connection ended.
+    /// connection ended. The streams that wait for the connection take turns, by
+    /// class and then oldest first, so a write behind one waits.
     ///
     /// # Errors
     ///
@@ -313,8 +314,8 @@ impl Endpoint {
     /// Puts `message` on the stream after the messages before it when the stream
     /// can take it now. Else gives it back with nothing of it sent: when `sender`
     /// still holds part of an earlier message after a flush, when the send budget
-    /// has no room for it or a stream of its class or a higher class waits for room,
-    /// or when the connection ended. The stream does not wait for room for a message
+    /// has no room for it or a stream of its class or a higher class waits for room
+    /// or its turn, or when the connection ended. The stream does not wait for room for a message
     /// it gives back. Once taken, `sender` may hold the rest of it: call
     /// [`Endpoint::flush`] after [`Event::Writable`].
     ///
@@ -343,8 +344,8 @@ impl Endpoint {
     }
 
     /// Writes the rest of the message that `sender` holds. `Ready` when it holds
-    /// none. `Pending` when the stream takes no more now ([`Event::Writable`]
-    /// follows), or when the connection ended.
+    /// none. `Pending` when the stream takes no more now or waits its turn
+    /// ([`Event::Writable`] follows), or when the connection ended.
     ///
     /// # Errors
     ///

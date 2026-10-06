@@ -900,44 +900,49 @@ How to read this record:
   class share in turn. The priority is strict: a class sends nothing, resends too, while
   a higher class has bytes to send, so a steady higher class starves the lower ones. It
   orders only the bytes that QUIC holds. All classes share one QUIC send window, so a
-  message can wait for bytes of a lower class to be acknowledged (#797). `Complete` gets
-  a guaranteed minimum share in the class-ordered send budget, not in QUIC (#819, before
-  the alpha). The budget bounds what QUIC holds to `window_bytes`, so QUIC's strict
-  order acts only inside that bound. Lost: a connection per class, because four
-  handshakes and four congestion controllers compete on one path (#55). Settled by the
-  advisor and the coordinator under the person's delegation (#789). A node resets a
-  stream with the stop's code when the stop arrives. A peer breaks the protocol
-  when it sends another class byte, ends a stream inside a message, sends a message over
-  the limit, or resets or stops a stream with a code over 32 bits. The node then closes
-  the connection with application code 2^32 and the reason as text, and the caller gets
-  `Error::Broken`. Each connection keeps two budgets, which count the length of each
-  message. A sender starts a message only when the messages it started and the streams
-  have not taken in full stay within the peer's `window_bytes`; else the write waits for
-  `Writable`. A message starts only when it fits and no stream of its class or a higher
-  class waits for room. Room that frees goes to the waiting streams highest class first,
-  then oldest first, until the next one does not fit, and only those streams wake
-  (#611). A send that does not wait (`try_send`) starts a message only by the same rule
-  and when, after a flush, the stream holds no part of an earlier one; else it gives the
-  message back with no byte of it sent, and the stream does not wait for room (#597). A
-  receiver takes a block by the same rule, within `window_bytes` plus
-  `message_bytes_max`; else the read waits for `Readable` (#611). So bytes that wait for
-  a block never use up the credit that a started message needs, and a peer that breaks
-  the send rule holds at most the receive budget and stops only its own connection. Each
-  node's first one-way stream is its hello, with no class byte: (id, value) pairs, both
-  QUIC varints, ids strictly increasing, then the stream end. Id 0 is `window_bytes` and
-  id 1 is `message_bytes_max`; both are required. A node ignores an id it does not know,
-  so an advisory field needs no new ALPN; a field that the peer must understand needs
-  one. The acceptor sends its hello at 0.5-RTT, once it has the whole ClientHello and so
-  the peer's transport parameters, or at its `Connected` when a HelloRetryRequest holds
-  them back. The dialer sends at its `Connected`. So the hello adds no round trip. The
-  hello has its own one-way stream: a node lets the peer open `streams_max` + 1 one-way
-  streams, and does not give back the credit of the peer's hello stream when it ends,
-  so after the hello the peer has at most `streams_max` open. Until the peer's hello
-  arrives, a node opens and accepts no stream; the caller bounds that wait, with its
-  other limits before admission (#563). A sender obeys only the peer's values: each
-  message is at most the peer's `message_bytes_max`, and the send budget is the peer's
-  `window_bytes`. A value over what the node can count counts as the largest it can
-  count. A peer breaks the protocol when its hello ends inside a
+  message can wait for bytes of a lower class to be acknowledged (#797). The QUIC send
+  window, not the send budget, bounds what QUIC holds. A message that QUIC does not take
+  in full waits its turn, by class, then oldest first. Only the first sender in turn
+  writes, and only it wakes when QUIC has room; a write behind it waits, and a
+  `try_send` behind it gives the message back. Stream credit is twice the connection
+  window, so a stream never waits on its own credit while the connection has room. This
+  relies on reader-granted credits (B3): a node takes every byte it granted credit for.
+  A peer that gives less stalls only its own connection (#819). `Complete` gets a
+  guaranteed minimum share of the turn (#819, before the alpha). Lost: a connection per
+  class, because four handshakes and four congestion controllers compete on one path
+  (#55). Settled by the advisor and the coordinator under the person's delegation
+  (#789). A node resets a stream with the stop's code when the stop arrives. A peer
+  breaks the protocol when it sends another class byte, ends a stream inside a message,
+  sends a message over the limit, or resets or stops a stream with a code over 32 bits.
+  The node then closes the connection with application code 2^32 and the reason as text,
+  and the caller gets `Error::Broken`. Each connection keeps two budgets, which count
+  the length of each message. A sender starts a message only when the messages it
+  started and the streams have not taken in full stay within the peer's `window_bytes`;
+  else the write waits for `Writable`. A message starts only when it fits and no stream
+  of its class or a higher class waits for room. Room that frees goes to the waiting
+  streams highest class first, then oldest first, until the next one does not fit, and
+  only those streams wake (#611). A send that does not wait (`try_send`) starts a
+  message only by the same rule and when, after a flush, the stream holds no part of an
+  earlier one; else it gives the message back with no byte of it sent, and the stream
+  does not wait for room (#597). A receiver takes a block by the same rule, within
+  `window_bytes` plus `message_bytes_max`; else the read waits for `Readable` (#611). So
+  bytes that wait for a block never use up the credit that a started message needs, and
+  a peer that breaks the send rule holds at most the receive budget and stops only its
+  own connection. Each node's first one-way stream is its hello, with no class byte:
+  (id, value) pairs, both QUIC varints, ids strictly increasing, then the stream end. Id
+  0 is `window_bytes` and id 1 is `message_bytes_max`; both are required. A node ignores
+  an id it does not know, so an advisory field needs no new ALPN; a field that the peer
+  must understand needs one. The acceptor sends its hello at 0.5-RTT, once it has the
+  whole ClientHello and so the peer's transport parameters, or at its `Connected` when a
+  HelloRetryRequest holds them back. The dialer sends at its `Connected`. So the hello
+  adds no round trip. The hello has its own one-way stream: a node lets the peer open
+  `streams_max` + 1 one-way streams, and does not give back the credit of the peer's
+  hello stream when it ends, so after the hello the peer has at most `streams_max` open.
+  Until the peer's hello arrives, a node opens and accepts no stream; the caller bounds
+  that wait, with its other limits before admission (#563). A sender obeys only the
+  peer's values: each message is at most the peer's `message_bytes_max`, and the send
+  budget is the peer's `window_bytes`. A value over what the node can count counts as
+  the largest it can count. A peer breaks the protocol when its hello ends inside a
   pair, misses a required id, has an id out of order, is over 256 bytes, has a
   `message_bytes_max` of 0 or a `window_bytes` below it, or resets. A peer whose QUIC
   transport parameters cannot take this node's whole hello at once (no one-way stream,
