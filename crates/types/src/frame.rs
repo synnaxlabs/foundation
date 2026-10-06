@@ -387,6 +387,14 @@ impl Draft {
         Form::from_byte(self.0[at::FORM])
     }
 
+    /// Bytes of the [`Frame::body`] that [`Draft::freeze`] gives: the series, with
+    /// the padding between them. Time is constant.
+    #[must_use]
+    pub fn body_len(&self) -> usize {
+        let (ranges, series) = counts(&self.0);
+        self.0.len() - body_start(ranges, series)
+    }
+
     /// The samples of group `group`, or `None` when its index is absent. Time is
     /// logarithmic in the number of present groups.
     #[must_use]
@@ -1708,9 +1716,10 @@ mod tests {
             let (set, series) = shape(&case);
             let sized = lengths(&set, &series);
             let draft = Draft::new(&pool(1 << 20), &set, case.form, &series).unwrap();
-            let block = draft.0.len();
+            let (block, drafted) = (draft.0.len(), draft.body_len());
             let body = draft.freeze(case.path).body().len();
             prop_assert_eq!(sized, Ok((block, body)));
+            prop_assert_eq!(drafted, body);
         }
 
         /// Key n has slot n, so shuffled keys give any slot order, and more groups
