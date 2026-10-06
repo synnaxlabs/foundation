@@ -660,7 +660,7 @@ mod tests {
         }
 
         #[test]
-        fn counts_the_pattern_after_the_bang_of_an_exclusion() {
+        fn counts_only_the_pattern_after_the_exclamation_mark() {
             let body = "b".repeat(Name::MAX_BYTES);
             let s = Selector::new(["**", &format!("!{body}")]).unwrap();
             assert_eq!(s.matches(&name(&body)), None);
@@ -671,6 +671,10 @@ mod tests {
             assert_eq!(
                 Selector::new(["a", &format!("!{}", "b".repeat(300))]),
                 Err(Error::Long { bytes: 300 })
+            );
+            assert_eq!(
+                Selector::new(["a", &format!("!{}", "é".repeat(128))]),
+                Err(Error::Long { bytes: 256 })
             );
         }
     }
