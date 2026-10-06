@@ -513,8 +513,8 @@ impl State {
     /// Ends the crash of `node` that [`State::stop`] began, its life, and its file
     /// calls in flight, and closes each serial port of the node. After a `Power`
     /// crash, its monotonic clock reads its boot value again, and its disk keeps what
-    /// is durable. Returns the wakers of the ports and the blocks of the calls, for
-    /// the caller to drop after it releases the lock.
+    /// is durable. Returns the wakers of the ports and the closes, and the blocks of
+    /// the calls, for the caller to drop after it releases the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
@@ -522,14 +522,16 @@ impl State {
     ) -> (Vec<Waker>, Vec<Held>) {
         self.nodes[node].crashing = false;
         self.nodes[node].life += 1;
-        let wakers = self.serial.crash(node);
+        let mut wakers = self.serial.crash(node);
         let now = self.now;
         if crash == Crash::Power {
             let wall = self.wall(node).time;
             let booted = &mut self.nodes[node];
             (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
         }
-        (wakers, self.files.crash(node, now, crash))
+        let (closes, held) = self.files.crash(node, now, crash);
+        wakers.extend(closes);
+        (wakers, held)
     }
 
     /// The names of the threads that have not ended, in start order.
