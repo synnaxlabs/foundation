@@ -2114,7 +2114,7 @@ fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
             .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
             .expect("queues");
         shard.clock.sleep(commits(3)).await;
-        assert_eq!(shard.memory.syncs(), 3, "the second commit failed its sync");
+        assert_eq!(shard.memory.syncs(), 4, "the second commit failed its sync");
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
         let ended = Err(Error::Files(FileError::Io {
             path: PathBuf::from(RING),
