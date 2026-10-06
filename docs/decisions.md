@@ -715,7 +715,14 @@ How to read this record:
   the OS bound to the error of its own read, so the error is never less than the OS
   bound. An error over 36500 days reads as unknown, the same as no bound (the
   coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
-  lint denies it elsewhere (BQ20).
+  lint denies it elsewhere (BQ20). On Linux the bound is the kernel's `maxerror`, and
+  only chrony and ntpd compute it. `systemd-timesyncd` sets it to 0 at each update,
+  while the clock can still be 0.4 s off. So a known OS bound on Linux needs chrony or
+  ntpd, and the operator docs must say so. A host with timesyncd (the default on Debian)
+  gives a false bound until its operator installs chrony. Lost: the Linux bound always
+  unknown, because it also drops the good bound from chrony and ntpd; detecting
+  timesyncd, because it reaches outside `env::wall` and is a guess. The person decided
+  on 2026-10-06 ("A is still fine"), #689.
 - **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its
   OS reading and its OS bound. Cold nodes then vote with each other's OS clocks, and
   each waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown
