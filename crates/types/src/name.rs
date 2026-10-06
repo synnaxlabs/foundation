@@ -262,16 +262,10 @@ impl Selector {
         })
     }
 
-    /// The patterns as written, in order, each exclusion with its `!`.
-    #[must_use]
-    pub fn texts(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.texts.iter().map(|t| &**t)
-    }
-
     /// The patterns as written, in order, each by what it does.
     #[must_use]
     pub fn written(&self) -> impl ExactSizeIterator<Item = Written<'_>> {
-        self.texts().map(written)
+        self.texts.iter().map(|text| written(text))
     }
 
     /// The specificity of the most specific include pattern that matches `name`, or
@@ -288,8 +282,8 @@ impl Selector {
             .max()
     }
 
-    /// The positions, in [`Selector::texts`], of the include patterns that can match a
-    /// name that does not start with `prefix`, by whole segments, as
+    /// The positions, in [`Selector::written`], of the include patterns that can match
+    /// a name that does not start with `prefix`, by whole segments, as
     /// [`Name::starts_with`] reads it. The selector stays within `prefix` when this
     /// gives no position. Exclusions are not read, so an include that only its
     /// exclusions keep inside `prefix` still gives its position.
@@ -317,7 +311,7 @@ impl Hash for Selector {
 
 impl fmt::Debug for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.texts()).finish()
+        f.debug_list().entries(self.texts.iter()).finish()
     }
 }
 
@@ -794,7 +788,6 @@ mod tests {
         fn keeps_the_patterns_as_written() {
             let s = Selector::new(["a.**.**", "!a.b"]).unwrap();
             assert_eq!(format!("{s:?}"), r#"["a.**.**", "!a.b"]"#);
-            assert_eq!(s.texts().collect::<Vec<_>>(), ["a.**.**", "!a.b"]);
             assert_eq!(
                 s.written().collect::<Vec<_>>(),
                 [Written::Include("a.**.**"), Written::Exclude("a.b")]
