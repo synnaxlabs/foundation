@@ -1134,11 +1134,23 @@ How to read this record:
   last index the caller applied). `Hard` holds the term, the vote, the leader of the
   term (this node when it led), and the proof that moved the node to the term: its
   own pre-votes when it campaigned, else the proof of the message that moved it. A
-  `Proof` is a `Grant` (pre-vote or vote), the candidate, and the voter keys, the
-  candidate included; `raft` counts the keys, and `mesh` holds and checks the
-  signatures. `Message.proof` carries one: a `Vote` carries the candidate's
-  pre-votes; a leader's `Heartbeat` or `Append` carries its votes until the receiver
-  answers an append, and again after the receiver is silent through a quorum check;
+  `Proof` is a `Grant` (pre-vote or vote), the candidate, and each voter's key with its
+  `Signature`, the candidate included. It proves the term of the message or hard state
+  that holds it. A granted `PreVoteReply` or `VoteReply` carries the voter's signature
+  in its `Answer`, and the candidate copies it into its proof. `raft` counts the keys
+  and carries the signatures as opaque bytes: it does no crypto. A signature attests
+  a `Claim`: the voter, the grant, the term, and the candidate. `raft` owns the rule
+  that gives each signature its claim: a proof entry claims the proof's grant to its
+  candidate in the term of the message or hard state, and a granted reply claims its
+  grant from the sender to the receiver in the message's term. `raft` gives this
+  node's own entries and grants with no signature (`None`). `Ready::sign` gives each
+  `None` the signature that the caller's closure makes for its claim, before the
+  write and the sends. The caller checks each pair that `Message::claims` gives
+  before `step` and refuses a `None`: `step` keeps each signature as it came, so an
+  unchecked `None` of another voter reaches `Ready::sign`.
+  `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
+  `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
+  again after the receiver is silent through a quorum check;
   an answer to a message of a lower term carries the sender's hard proof, and a node
   with no proof of its term sends no refusal. `step` checks a proof before anything
   changes. A `PreVote`, or a granted `PreVoteReply`, of a higher term needs none.
@@ -1155,8 +1167,8 @@ How to read this record:
   configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
   pins both, and the random runs skip exactly such a voter until #881. The advisor
   required a proof on every message and on each refusal, signatures only, and the
-  proof in the hard state (#750, 2026-10-05). The signatures follow in the third PR
-  of #750.
+  proof in the hard state (#750, 2026-10-05). `mesh` signs and checks the signatures
+  in the next PR of #750.
   `Raft` takes `tick(random)`,
   `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
   when it changed), `entries` to write, `committed` entries to apply, and `messages`
@@ -1269,7 +1281,7 @@ How to read this record:
   coordinator gives the person's words in its comment on #647. The removed node takes
   that answer only from a voter of its own region, and stops its `raft` group for that
   region. `raft` sends such a node no entries, only answers. A voter with a lease drops
-  its campaign or refuses it with a `PreVoteReply { granted: false }` at the voter's
+  its campaign or refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's
   term. Until `mesh` sends the answer, the node campaigns. While a voter has a lease,
   this has no effect. Once no voter has a lease, as after the leader fails, the voters
   can elect the node: it commits an entry of its term, which commits the leave, and
@@ -1303,10 +1315,13 @@ How to read this record:
   changed, and the entries, so one sync makes both durable; two slots for the hard state
   lost, because they need a second sync and a second torn-write rule. The hard state is
   the term, then the vote, the leader, and the proof, each behind a presence byte; the
-  proof is a grant byte, the candidate, and the voter keys as a count and the keys in
-  rising order (#750). A `raft` message on the wire carries its proof in the same
-  form, after the term and before the body. The signatures follow in the third PR of
-  #750. The format version stays 1: no log has shipped. A later record replaces the
+  proof is a grant byte, the candidate, a count of voters, then each voter's key (16
+  bytes) and signature (64 bytes) in rising key order (#750). A `raft` message on the
+  wire carries its proof in the same form, after the term and before the body. A
+  granted `PreVoteReply` or `VoteReply` is the byte 1, then the signature; a refusal
+  is the byte 0 alone. No form holds an entry with no signature: encode panics on
+  one, because the caller signs before each write and send. The format version stays
+  1: no log has shipped. A later record replaces the
   entries from its first index. A file is 1 MiB, or the length of its first
   record when that is more, and a record that does not fit starts the next file. In a
   file with no record, it makes that file again, larger, so each file but the last
