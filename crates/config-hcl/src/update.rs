@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
+use document::diagnostic::Diagnostic;
 use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
 use crate::write::{After, INDENT, Writer};
-use crate::{Error, read, write};
+use crate::{Error, Unwritable, read, write};
 
 /// Changes `text` so that [`read`] reads it as `document`, and returns the new text.
 /// Each attribute and block that keeps its value and its place keeps its bytes, with
@@ -16,15 +17,15 @@ use crate::{Error, read, write};
 ///
 /// # Errors
 ///
-/// Returns the problems in `text`, as `read` gives them. Otherwise, returns
-/// [`Error::Unwritable`] for each part of `document` that HCL text cannot hold.
+/// Returns [`Refusal::Text`] when `read` refuses `text`. Otherwise, returns
+/// [`Refusal::Document`] when `write` refuses `document`.
 pub fn update(
     source: Source,
     text: &str,
     document: &Document,
-) -> Result<String, Vec<Error>> {
-    let old = read(source, text)?;
-    write(document)?;
+) -> Result<String, Refusal> {
+    let old = read(source, text).map_err(Refusal::Text)?;
+    write(document).map_err(Refusal::Document)?;
     let file = File::new(source, text);
     let mut diff = Diff {
         file: &file,
@@ -38,6 +39,25 @@ pub fn update(
     };
     diff.body(&old, document, &body);
     Ok(file.apply(diff.edits))
+}
+
+/// Why [`update`] gives no text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The problems in the text, as [`read`] gives them.
+    Text(Vec<Error>),
+    /// The parts of the Document that HCL text cannot hold, as [`write()`] gives them.
+    Document(Vec<Unwritable>),
+}
+
+/// Gives the diagnostic of each problem, in the order of the refusal.
+impl From<&Refusal> for Vec<Diagnostic> {
+    fn from(refusal: &Refusal) -> Self {
+        match refusal {
+            Refusal::Text(errors) => errors.iter().map(Diagnostic::from).collect(),
+            Refusal::Document(parts) => parts.iter().map(Diagnostic::from).collect(),
+        }
+    }
 }
 
 /// A token's place in the text.
@@ -545,12 +565,13 @@ fn offset(position: Position) -> usize {
 #[cfg(test)]
 mod tests {
     use document::Map;
+    use document::encoding::TooDeep;
     use document::value::{Kind, Value};
     use proptest::prelude::*;
 
     use super::*;
+    use crate::Expected;
     use crate::arbitrary::document;
-    use crate::{Expected, Unwritable};
 
     fn parsed(text: &str) -> Document {
         read(Source(0), text).unwrap()
@@ -1005,17 +1026,64 @@ mod tests {
         };
         assert_eq!(
             update(Source(0), "a = \n", &document),
-            Err(vec![Error::Syntax {
+            Err(Refusal::Text(vec![Error::Syntax {
                 span: Span::new(Source(0), at(4, 0, 4), at(5, 1, 0)).unwrap(),
                 expected: Expected::Value,
-            }])
+            }]))
         );
         assert_eq!(
             update(Source(0), "a = 1\n", &document),
-            Err(vec![Error::Unwritable {
+            Err(Refusal::Document(vec![Unwritable::Key { span: None }]))
+        );
+
+        let mut deep = Value {
+            kind: Kind::List(Vec::new()),
+            span: None,
+        };
+        for _ in 0..64 {
+            deep = Value {
+                kind: Kind::List(vec![deep]),
                 span: None,
-                part: Unwritable::Key,
+            };
+        }
+        let document = Document {
+            attributes: Map::new(vec![Attribute {
+                key: "a".into(),
+                key_span: None,
+                value: deep,
             }])
+            .unwrap(),
+            blocks: Vec::new(),
+        };
+        assert_eq!(
+            update(Source(0), "a = 1\n", &document),
+            Err(Refusal::Document(vec![Unwritable::TooDeep(TooDeep {
+                span: None
+            })]))
+        );
+    }
+
+    #[test]
+    fn gives_the_diagnostic_of_each_problem_in_order() {
+        let at = |offset| Position {
+            offset,
+            line: 0,
+            column: offset,
+        };
+        let errors = [3, 1].map(|offset| Error::TooDeep {
+            span: Span::new(Source(0), at(offset), at(offset)).unwrap(),
+        });
+        assert_eq!(
+            Vec::<Diagnostic>::from(&Refusal::Text(errors.to_vec())),
+            errors.iter().map(Diagnostic::from).collect::<Vec<_>>()
+        );
+        let parts = [
+            Unwritable::For { span: None },
+            Unwritable::Key { span: None },
+        ];
+        assert_eq!(
+            Vec::<Diagnostic>::from(&Refusal::Document(parts.to_vec())),
+            parts.iter().map(Diagnostic::from).collect::<Vec<_>>()
         );
     }
 }

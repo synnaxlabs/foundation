@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::mem;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Wake, Waker};
@@ -478,14 +477,19 @@ impl State {
         (wakers, orphans)
     }
 
-    /// Ends each live thread of `node` in a crash, and makes the node crashing until
-    /// [`State::crash`]. Returns the tasks whose futures the caller drops, and the
-    /// starts of the threads that had not run, for the caller to drop after it
-    /// releases the lock.
-    pub(crate) fn stop(&mut self, node: usize) -> (Vec<u64>, Vec<Start>) {
-        self.nodes[node].crashing = true;
+    /// Ends each live thread of the nodes whose index `stopped` picks in a crash, and
+    /// makes those nodes crashing until [`State::crash`]. Returns the tasks whose
+    /// futures the caller drops, and the starts of the threads that had not run, each
+    /// in start order, for the caller to drop after it releases the lock.
+    pub(crate) fn stop(
+        &mut self,
+        stopped: impl Fn(usize) -> bool,
+    ) -> (Vec<u64>, Vec<Start>) {
+        for (key, node) in self.nodes.iter_mut().enumerate() {
+            node.crashing |= stopped(key);
+        }
         let live: Vec<(u64, u64)> = (self.threads.iter())
-            .filter(|(_, thread)| thread.node == node && thread.outcome.is_none())
+            .filter(|(_, thread)| stopped(thread.node) && thread.outcome.is_none())
             .map(|(&key, thread)| (key, thread.main))
             .collect();
         let (mut tasks, mut starts) = (Vec::new(), Vec::new());
@@ -493,14 +497,20 @@ impl State {
             starts.extend(self.starts.remove(&main));
             tasks.extend(self.end(thread, Outcome::Crashed));
         }
+        tasks.sort_unstable();
         (tasks, starts)
     }
 
     /// Ends the crash of `node` that [`State::stop`] began, and the file calls in
     /// flight of the node. After a `Power` crash, its monotonic clock reads its boot
-    /// value again, and its disk keeps what is durable. Returns the blocks of the
-    /// calls, for the caller to drop after it releases the lock.
-    pub(crate) fn crash(&mut self, node: usize, crash: Crash) -> Vec<Held> {
+    /// value again, and its disk keeps what is durable. Returns the wakers of the
+    /// closes and the blocks of the calls, for the caller to drop after it releases
+    /// the lock.
+    pub(crate) fn crash(
+        &mut self,
+        node: usize,
+        crash: Crash,
+    ) -> (Vec<Waker>, Vec<Held>) {
         self.nodes[node].crashing = false;
         let now = self.now;
         if crash == Crash::Power {
@@ -509,11 +519,6 @@ impl State {
             (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
         }
         self.files.crash(node, now, crash)
-    }
-
-    /// Removes the starts of the threads that have not run.
-    pub(crate) fn unstarted(&mut self) -> BTreeMap<u64, Start> {
-        mem::take(&mut self.starts)
     }
 
     /// The names of the threads that have not ended, in start order.
@@ -591,14 +596,6 @@ impl Futures {
     pub(crate) fn remove(&mut self, tasks: &[u64]) -> Vec<Task> {
         (tasks.iter())
             .filter_map(|task| self.0.remove(task)?.future)
-            .collect()
-    }
-
-    /// Removes every entry and returns the futures.
-    pub(crate) fn clear(&mut self) -> Vec<Task> {
-        mem::take(&mut self.0)
-            .into_values()
-            .filter_map(|entry| entry.future)
             .collect()
     }
 }
