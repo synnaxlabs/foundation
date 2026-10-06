@@ -6,9 +6,9 @@ version = 4
 name = "acceptance"
 version = "0.0.0"
 dependencies = [
+ "block",
  "env",
  "node",
- "os",
  "sim",
  "types",
 ]
@@ -834,11 +834,15 @@ name = "node"
 version = "0.0.0"
 dependencies = [
  "block",
+ "clock",
  "env",
+ "estimate",
  "loom",
  "ops",
  "os",
+ "proptest",
  "sim",
+ "types",
 ]
 
 [[package]]

@@ -11,13 +11,11 @@ use env::files::{Error, Mode, Operation};
 use env::rng::Rng;
 use types::time::Monotonic;
 
-use crate::Crash;
 use crate::disk::{self, Cause, Disk, Handle};
+use crate::{Crash, EIO};
 
 /// The count of call delays in nanoseconds: a call takes 0 to 100 us.
 const DELAYS: u64 = 100_001;
-/// The Linux code for an I/O error (`EIO`), which a fault gives.
-const IO: i32 = 5;
 
 /// One file call, as a driver starts it.
 pub(crate) enum Call {
@@ -258,9 +256,9 @@ impl Files {
         let result = match &call {
             Call::Sync { handle } if failed => {
                 disk.file(handle.inode).tear(key, &mut self.rng);
-                Err(Cause::Code(IO))
+                Err(Cause::Code(EIO))
             }
-            _ if failed => Err(Cause::Code(IO)),
+            _ if failed => Err(Cause::Code(EIO)),
             Call::Open(mode) => disk
                 .open(key, &path, *mode)
                 .map(|(handle, len)| Done::Open { handle, len }),

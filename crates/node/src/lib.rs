@@ -2,13 +2,17 @@
 //! ends, time sources, secret stores), the status collector, process lifecycle, and
 //! upgrades.
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the publish task waits on hub writer sessions")
+)]
+mod status;
 mod stop;
 #[cfg(test)]
 #[cfg(not(loom))]
 mod tests;
 
 use std::fmt;
-use std::sync::{Arc, OnceLock};
 
 use env::thread::Handle;
 
@@ -21,10 +25,9 @@ pub struct Config<M> {
     pub shards: env::shards::Shards,
     /// The most bytes the node's pools may commit, split evenly across its shards.
     pub budget: usize,
-    /// Reserves `len` bytes of address space for the pool of the shard on `core`, as
-    /// `memory(core, len)`. `node` calls it once for each shard, on that shard's
-    /// thread.
-    pub memory: Arc<dyn Fn(usize, usize) -> Result<M, os::memory::Error> + Send + Sync>,
+    /// Reserves `len` bytes of address space for one shard's pool. `node` calls it
+    /// once for each shard, in order of core.
+    pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -41,9 +44,7 @@ impl<M> fmt::Debug for Config<M> {
 pub struct Node {
     stop: Stop,
     handles: Vec<Handle>,
-    failed: Option<env::thread::Error>,
-    /// By core: why the shard got no pool.
-    unpooled: Vec<Arc<OnceLock<os::memory::Error>>>,
+    failed: Option<Error>,
 }
 
 impl Node {
@@ -52,53 +53,49 @@ impl Node {
     /// the remainder. Returns once each shard runs or one has failed to start. A
     /// failed start, or a shard with no memory, stops the node, and [`Node::join`]
     /// returns its error.
+    ///
+    /// # Panics
+    ///
+    /// If a shard's part of the budget needs more address space than a `usize` holds.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let Config {
             shards,
             budget,
-            memory,
+            mut memory,
         } = config;
         let stop = Stop::default();
         let mut node = Self {
             stop: stop.clone(),
             handles: Vec::new(),
             failed: None,
-            unpooled: Vec::new(),
         };
         let cores = shards.cores().get();
         for core in 0..cores {
+            let budget = budget / cores + if core == 0 { budget % cores } else { 0 };
+            let config = block::Config { budget };
+            let pool = match memory(config.reservation()) {
+                Ok(m) => block::Pool::new(config, m),
+                Err(error) => {
+                    node.failed = Some(Error::Memory { core, error });
+                    stop.set();
+                    break;
+                }
+            };
             let shard = env::shards::Config {
                 name: format!("shard-{core}"),
                 core: Some(core),
             };
-            let budget = budget / cores + if core == 0 { budget % cores } else { 0 };
-            let config = block::Config { budget };
-            let memory = Arc::clone(&memory);
-            let unpooled = Arc::new(OnceLock::new());
-            node.unpooled.push(Arc::clone(&unpooled));
             let guard = stop.guard();
-            let main = move |_tasks| {
-                let pool = memory(core, config.reservation())
-                    .map(|m| block::Pool::new(config, m));
-                async move {
-                    match pool {
-                        Ok(pool) => {
-                            guard.await;
-                            drop(pool);
-                        }
-                        Err(e) => {
-                            unpooled.get_or_init(|| e);
-                            drop(guard);
-                        }
-                    }
-                }
+            let main = move |_tasks| async move {
+                guard.await;
+                drop(pool);
             };
             match shards.start(shard, main) {
                 Ok(handle) => node.handles.push(handle),
                 Err(e) => {
                     // The driver dropped `main` and its guard, which stopped the node.
-                    node.failed = Some(e);
+                    node.failed = Some(Error::Start(e));
                     break;
                 }
             }
@@ -117,23 +114,16 @@ impl Node {
     /// # Errors
     ///
     /// The first failure: [`Error::Start`] for a shard that could not start or pin,
-    /// else [`Error::Memory`] for the first shard by core with no memory, else
-    /// [`Error::Panicked`] for the first shard by core that panicked. Any failed
-    /// shard stops the node.
+    /// or [`Error::Memory`] for a shard with no memory, else [`Error::Panicked`] for
+    /// the first shard by core that panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
-        let mut first = self.failed.map(Error::Start);
-        let mut panicked = None;
+        let mut first = self.failed;
         for handle in self.handles {
             if let Err(e) = handle.join() {
-                panicked.get_or_insert(Error::Panicked(e));
+                first.get_or_insert(Error::Panicked(e));
             }
         }
-        for (core, unpooled) in self.unpooled.iter().enumerate() {
-            if let Some(&error) = unpooled.get() {
-                first.get_or_insert(Error::Memory { core, error });
-            }
-        }
-        first.or(panicked).map_or(Ok(()), Err)
+        first.map_or(Ok(()), Err)
     }
 }
 

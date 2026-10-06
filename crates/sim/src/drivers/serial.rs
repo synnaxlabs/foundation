@@ -42,7 +42,7 @@ impl port::Driver for Port {
             .serial()
             .read(self.end, waker, buffer);
         drop(unused);
-        poll.map(Ok)
+        poll
     }
 
     fn poll_write(
@@ -58,7 +58,7 @@ impl port::Driver for Port {
             state.serial().write(now, self.end, waker, bytes)
         };
         drop(unused);
-        poll.map(Ok)
+        poll
     }
 }
 

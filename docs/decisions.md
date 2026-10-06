@@ -355,7 +355,15 @@ How to read this record:
   that do not hold `count` samples, and `validate` refuses encoded bytes that do not
   parse as `count` samples. The bytes do not carry the count, so a wrong count passes
   when the vectors also parse at it: a vector with bit width 0 holds any count up to
-  1024.
+  1024. A fixed array is the series of its `count * len` elements. A `String`,
+  `Bytes`, or `List` series is the `u32` series of its ends, then the series of its
+  elements (`u8` for `String` and `Bytes`). An end counts elements from the first, so
+  ends never decrease, and a `List` sample holds at most `max` elements. In the raw
+  form, zeros pad the ends to a multiple of the element width or 8, whichever is less
+  (R9-D3). A frame series starts on 8 bytes, so the elements are then aligned. The
+  encoded form has no padding. `codec` owns the check of the ends, raw and encoded,
+  and a view of a raw variable series relies on it. `codec` does not check UTF-8 (the
+  owner is #556). Vector numbers in errors count across the ends and the elements.
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
@@ -491,7 +499,12 @@ How to read this record:
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
-  home routes by key set.
+  home routes by key set. A mask holds the index of each channel it holds, so the
+  series of a view make a frame, and `View::charge` is its charge (CREDIT RULES). A
+  mask is a sorted list, or no list when it holds every entry, so a view's cost grows
+  with the smaller of its frame's series and its mask's entries (rule 11). A view
+  borrows its frame and mask, so making one takes no reference count. Approved by the
+  coordinator (#157).
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
@@ -519,9 +532,9 @@ How to read this record:
   their order and padding are part of the disk and wire format version (C9d). A change
   to either needs a new version. The padding is at most 7 bytes for each present
   series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
-  (measured on #317). `frame::series` reads a body from `(entry, end)` pairs and panics
-  on ends that do not fit. Copy mode runs `frame::check` once where remote records
-  enter (X43). Decided by the coordinator (#306).
+  (measured on #317). `frame::split` cuts a body at its `(tag, end)` pairs and
+  panics on ends that do not fit. Copy mode runs `frame::check` once where remote
+  records enter (X43). Decided by the coordinator (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -986,7 +999,12 @@ How to read this record:
   only delays the next round trip. A candidate counts its own vote at once because
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
   enters only through `tick`: a node draws its election timeout on the first tick
-  after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
+  after a reset. PreVote and CheckQuorum have no off switch. A PreVote answer, grant or
+  refusal, shows the voter's state when it sent the answer. A grant that arrives after
+  its voter got a lease back still counts, and costs one needless election; safety
+  holds. etcd/raft counts such a grant too. Lost: a round number in `PreVote`, which
+  changes the message format and closes only the case of two pre-campaigns. Decided by
+  the advisor under the failover delegation on 2026-10-05 (#719). A node that is not in
   its own voter list votes and follows, but never campaigns while that configuration
   is committed. `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
@@ -994,8 +1012,8 @@ How to read this record:
   `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
   as it is. It trusts its voters: one that lies can already break safety, because a
   false `AppendReply` counts as held, so a bound on the term would guard nothing. No
-  bound on a term jump spares an honest node that was down, either. Lost: a sender
-  proves a term jump with a signed term, which needs `mesh`. The person decided on
+  bound on a term jump spares an honest node that was down, either. Later: a sender
+  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
   2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
   `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
   before its write, so no peer counted a vote or an answer that a lost `hard` held. The
@@ -1020,7 +1038,17 @@ How to read this record:
   leader, and a node keeps the leader of its term until the term ends, through a
   step-down and a campaign. A node that knows no leader of its term, after a restart or
   its vote, takes the first. The person approved it on 2026-10-05 ("Yeah that's fine",
-  #391). A bad message changes nothing.
+  #391). A bad message changes nothing. A forged message that passes these checks
+  does, until a leader proves its election (#750). After a heartbeat or an `Append`
+  of a higher term from a voter that does not lead, or a reply of a higher term and
+  then either, a node follows the sender and writes and commits what it sends. So
+  two nodes can apply different entries at one index, and a forged voter set can
+  take the group over. The first leader after a restart or a vote is the same gap.
+  Tests pin it. Lost: a lease that drops a heartbeat or an `Append` of a higher term
+  from a node that is not the leader. A reply of a higher term ends any node's
+  lease, and a leader must step down on one; the lease also changed three etcd
+  oracle tests. The coordinator decided on 2026-10-06 under the person's delegation
+  (#391). The person may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1111,6 +1139,15 @@ How to read this record:
   search past the end for a record lost: a body can hold the bytes of a record, so a
   power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
+- **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
+  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a
+  proposal that a follower forwards to the leader, and its two answers (the position
+  of the entry, or "not the leader" with the leader the receiver knows). `wire` does
+  not carry them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and
+  `wire` must not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the
+  format version. A message has one byte form, and a decode takes nothing else. The
+  log (MESH LOG) and the messages share the byte form of an entry. Decided by
+  `consensus`, approved by the coordinator (#471).
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -1395,6 +1432,17 @@ How to read this record:
   writing the whole file with comments attached to items, which loses the layout; and
   moving the bytes of a moved block, which a caller that changes the Document it read
   never needs. Decided by the `config` builder; approved by the coordinator (#249).
+- **HCL ERRORS (2026-10-05)** Each function of `config-hcl` gives only the errors it
+  can have. `read` gives a list of `Error`, `write` a list of `Unwritable`, and
+  `update` a `Refusal`: the problems in the old text, or else the parts of the new
+  Document that HCL text cannot hold. Nesting past the depth limit is
+  `Error::TooDeep` from `read` and `Unwritable::TooDeep` from `write`, and both give
+  `document`'s diagnostic. Lost: one `Error` for all three, so each caller of `read`
+  handled a variant that `read` never gives; one `TooDeep` for both, which needs that
+  shared type (#370); a checked Document type, which gives each caller two calls; and
+  an `update` that takes the Document that `read` gave for the text, so it gives only
+  `Unwritable`, but writes wrong text with no error when a caller gives another
+  Document. Decided by the `config` builder; approved by the coordinator (#330).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -1511,6 +1559,13 @@ How to read this record:
 - **BQ11b** `node` pulls each crate's values and writes status channels through `hub`.
   Rebalancing is an outside controller that reads status channels and acts through
   plan and apply.
+- **STATUS CHANNELS (2026-10-06)** `node::status::TABLE` is the fixed set of a node's
+  status channels: `clock.status` (`U8`: 0 unsynced, 1 synced, 2 holdover),
+  `clock.offset` (`Span`), and `clock.error` (`Span`; an unknown error is the bound of
+  `estimate::Measurement::unknown`). An unsynced clock gives no offset or error. Each
+  table entry maps the pulled status to its value. A pure `Collector` pulls each value
+  from a reader that its crate gives; no crate calls `node`. Lost: each crate pushes
+  status events to a sink (BQ11b locks pull). Decided in #728.
 - **OWN REPO (revises C9a)** Foundation lives in its own private repository,
   `synnaxlabs/foundation`, with one Cargo workspace: `crates/` (crate list in section
   4), `xtask/`, `oracles/`, and later `sdk/` and `bench/`. Every PR runs the layer
@@ -1678,6 +1733,18 @@ How to read this record:
   differently on `os` and `sim`. A socket, listener, or port may move to another thread
   before its first poll. The first poll binds it to its thread, and a poll on another
   thread panics.
+- **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
+  to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
+  node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
+  once at start. `Shards::start` panics on a core then, as on a core past the count:
+  the answer never changes, so a core there is a bug in `node`. `Error::Pin` means
+  only a real fault, such as a CPU that went offline after the read, and carries the
+  cause as a `reason`. This is the advisor's choice A, narrowed from the set of cores
+  that can pin to a bool: the index map of ENV SEAMS makes that set always
+  `0..cores()` or empty. Lost: `Error::Pin` for a core on a node that cannot pin, which
+  gives two contracts for the same kind of bug, and a caller tells the bug from a
+  fault only by its `reason` text; each driver checks the core itself, which puts one
+  rule in each driver. Windows pinning waits for the person (#477). Amends ENV SEAMS.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -1707,8 +1774,9 @@ How to read this record:
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
   from its own stream as each byte is sent, so a change of the line acts only on the
   bytes sent after it. A flip with parity on is lost. Each port holds 4 KiB to send
-  and 4 KiB to read, as a Linux TTY does. An open ends at once. Built by `simulation`
-  in #431.
+  and 4 KiB to read, as a Linux TTY does. An open ends at once. `Node::fail_serial`
+  makes a port fail as a pulled USB adapter does: each read and write gives `EIO`
+  until the port drops. Built by `simulation` in #431 and #690.
 - **SIM PANICS (2026-10-05)** A panic in a poll or in the drop of a future ends the
   thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
   future drops in its own `catch_unwind`, so a second panic never aborts the process.
@@ -1748,15 +1816,17 @@ How to read this record:
   2026-10-05 ("Yeah taht's fine"), #461. `block::testing::{Scarce, Switch}`, behind
   the `sim` feature, is heap memory whose commits a test makes refuse, so a crate
   above `block` tests a refused commit through its production path (#591).
-- **SHARD POOLS (2026-10-06)** `Node::start` gives each shard one `block::Pool`,
-  made and dropped on the shard's thread (M4). Each of `n` shards gets `budget / n`,
-  and shard 0 also gets the remainder, so the parts add up to the node's budget
-  (MEMORY BOUNDS). The memory comes from `node::Config::memory`, a closure
-  `(core, len)` that `node` calls once per shard: production passes
-  `os::memory::Memory::new`, and tests pass heap memory or a refusal. A shard with no
-  memory stops the node, and `join` gives `Error::Memory` with the core and the
-  `os::memory::Error`. The purge timer lands with the first PR that allocates from a
-  pool, since no test can see a purge before then (#410).
+- **SHARD POOLS (2026-10-06)** `Node::start` makes one `block::Pool` for each shard
+  and moves it into the shard, which drops it (M4). Each of `n` shards gets
+  `budget / n`, and shard 0 also gets the remainder, so the parts add up to the node's
+  budget (MEMORY BOUNDS). The memory comes from `node::Config::memory`, a closure that
+  `node` calls once per shard, in order of core: production passes
+  `os::memory::Memory::new`, and `sim` tests pass `block::Heap`. A shard with no memory
+  is a start failure: later shards do not start, the node stops, and `join` gives
+  `Error::Memory` with the core and the `os::memory::Error`. Lost: making the pool on
+  the shard's thread, which needs a second path for the error and a `Send + Sync`
+  seam. The purge timer and `reclaim` on each loop turn land with the first PR that
+  allocates from a pool, since no test can see either before then (#410).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -1794,13 +1864,28 @@ How to read this record:
   price cap of 0.20 USD/h, and a hard stop on 2026-10-08 at 03:00 UTC. With it, the
   hosts and the factory host cost at most 99.73 USD a day (#15). The person said:
   "Once you are sure of costs provision and set strict limits on whatever you need
-  please".
+  please". With 51 runs still queued, a fourth host joined with twelve runners
+  (`foundation-arm-m` to `-x`): one 32-vCPU spot machine from a fleet over eight
+  Graviton types and five zones (launch template `foundation-arm-spot-32`). Limits: a
+  spot price cap of 0.60 USD/h, a hard stop with the factory host on 2026-10-07 at
+  07:03 UTC, and a cap of 18 USD (#15). Until that stop, the daily cap is 115 USD; then
+  it is 100 USD again. The person said: "Yes thats fine".
 - **LINUX CI (2026-10-05)** For the alpha, tests run only on Linux (x86-64 and ARM).
   No CI job runs on macOS or Windows. The design stays cross-OS: each C9d target must
   still be a valid build, so OS-specific code goes only in `os`. The person said: "As
   long as our systems are designed to cross compile i'm ok wiht only testing against
   linux for an alpha. as long as the system is designed for cross os deployment"
   (#574).
+- **CI PACE (2026-10-06)** The ARM pool must not hold up the agents. The ARM workflow
+  runs no loom step: loom is a software model, so the x86 `loom` job gives the same
+  result. A PR run is cancelled by a newer push. A run on main is never cancelled while
+  it runs; of the commits that merge during it, only the newest runs next. Each runner
+  keeps its build in `$HOME/target/<runner>`, outside the workspace, and deletes it
+  past 25 GiB. Dependencies build at opt-level 2 in the dev profile; workspace crates
+  stay at opt-level 0 with their checks. A PR tests only the changed crates and their
+  reverse dependencies (`cargo xtask affected`); main tests the whole workspace.
+  Decided by the advisor (#782). The person said: "We need to make the agentic
+  engineering the bottleneck, not CI".
 
 ### 1.15 Releases
 
@@ -1963,7 +2048,7 @@ Storage classes used in the table:
 | Current value | Memory: the index's newest live frame, one pinned pool block per index (B4, MEMORY BOUNDS) | `delivery` | A new latest reader | `delivery` |
 | Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; `delivery` spends when the home releases a frame | `delivery` | `delivery`, `wire` |
 | Live frames for complete readers | Memory: the index's live frames not yet on disk, and the frames released to each complete session and not taken, as refcount clones (B1, CREDIT RULES, MEMORY BOUNDS) | `delivery`: the home queues each stored live frame and releases them after a commit | The reader session | `delivery` |
-| Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `delivery` |
+| Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `types` (mask), `delivery` |
 | Death records | Quality channel samples (X19) | `home` | Sinks | `home` |
 | Read copy data | The copy node's index log | `replica` | The copy's readers, served by `home` in copy mode (X43) | `replica`, `home` |
 
@@ -1974,7 +2059,7 @@ Storage classes used in the table:
 | Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder; `home` (INDEX FRAMES) | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
-| View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |
+| View | Memory: none; borrows a frame and a mask | `delivery` | The reader session | `types` (value), `delivery` |
 | Reader session | Memory: `hub` session (selector expansion, max-age check); per-index state in `delivery` at the home or copy | The reader (SDK, CLI, connector) | `hub`, `delivery` | `hub`, `delivery` |
 | Writer session | Memory: `hub` session (key set, routing, confirmation); gate in `control`; seq and dedup in `home` | The writer | `hub`, `control`, `home` | `hub`, `control`, `home` |
 | Subscription | The selector of a reader session, kept live in `hub` against `mesh` watches | The reader | `hub` | `hub` |
@@ -2548,7 +2633,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
@@ -2556,7 +2641,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
 | 1 | `delivery` | Keeps each reader's state per index: positions, credits, live frames for complete readers, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
-| 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
+| 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY). | `env`, `types`, `block` |
@@ -2622,14 +2707,16 @@ Parameters and later choices, recorded and not asked:
   driven, not self-running), `ring` holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
-  after sync vs on receipt).
+  after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
+  voter's state when it sent the answer.").
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
-  tree key `<label>.@<kind>` of a policy (#729).
+  tree key `<label>.@<kind>` of a policy (#729), and `frame::split`, which cuts a
+  frame body at its ends and gives each part (#632).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
-  connector.
+  connector; SHARD PIN (#718), the advisor's choice A narrowed to a bool.
 
 ### 5.3 Parameters for experiment
 

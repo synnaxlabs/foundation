@@ -50,6 +50,8 @@ jobs:
               - 'crates/block/**'
               - 'crates/counting/**'
               - 'crates/node/**'
+              - 'crates/connector-ni/**'
+              - 'crates/daqmx-stub/**'
               - 'xtask/**'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -173,8 +175,10 @@ jobs:
         env:
           # A mutant can allocate in a loop until the host runs out of memory, which
           # kills the runner. Each test process gets 4 GiB, so the mutant aborts and
-          # is caught. The workspace tests peak under 1 GiB.
+          # is caught. The cap counts reserved memory, not touched pages: a sim test
+          # reserves 236 MiB for its block pool, so 8 threads stay under it.
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --data=4294967296 --
+          RUST_TEST_THREADS: 8
         run: |
           git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
           status=0

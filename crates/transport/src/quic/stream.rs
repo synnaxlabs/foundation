@@ -802,7 +802,8 @@ mod tests {
     use super::*;
     use crate::Config;
     use crate::quic::Endpoint;
-    use crate::quic::testing::{self, Pair, Shard, Side};
+    use crate::quic::pair::{self, Pair, Side};
+    use crate::testing::{self, Shard};
     use crate::tls;
 
     /// The link delay each way.
@@ -817,7 +818,7 @@ mod tests {
     /// A pair whose client dialed the server and connected.
     fn connected(shard: &Shard) -> Pair {
         let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-        pair.dial(tls::public(&testing::SERVER_KEY));
+        pair.dial(tls::public(&pair::SERVER_KEY));
         pair.run(RUN);
         pair
     }
@@ -1184,17 +1185,21 @@ mod tests {
     fn with_a_full_pool_fail_the_read_until_a_block_frees() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            // A 100-byte block takes 192 bytes of the budget.
-            let config = block::Config { budget: 300 };
+            // A 100-byte block takes 192 bytes of the budget, and `_filled` leaves 300.
+            let config = block::Config {
+                budget: block::footprint(1_472) + 300,
+            };
             let memory = Heap::new(config.reservation());
             let pool = Rc::new(Pool::new(config, memory));
+            let _filled = pool.alloc(1_472).expect("room");
             let config = Config {
+                message_bytes_max: NonZeroUsize::new(pool.largest()).expect("not zero"),
                 pool: Rc::clone(&pool),
-                ..shard.config(testing::SERVER_KEY, Span::SECOND)
+                ..shard.config(pair::SERVER_KEY, Span::SECOND)
             };
             pair.server.endpoint =
-                Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-            pair.dial(tls::public(&testing::SERVER_KEY));
+                Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+            pair.dial(tls::public(&pair::SERVER_KEY));
             pair.run(RUN);
             let mut sender = open_sender(&mut pair, Class::Complete);
             let now = pair.now();
@@ -1231,8 +1236,8 @@ mod tests {
     fn narrow(shard: &Shard) -> Pair {
         let mut pair = Pair::new(shard, Span::SECOND, DELAY);
         let sides = [
-            (&mut pair.client, testing::CLIENT_KEY, testing::CLIENT_SHARD),
-            (&mut pair.server, testing::SERVER_KEY, testing::SERVER_SHARD),
+            (&mut pair.client, pair::CLIENT_KEY, pair::CLIENT_SHARD),
+            (&mut pair.server, pair::SERVER_KEY, pair::SERVER_SHARD),
         ];
         for (side, private_key, index) in sides {
             let config = Config {
@@ -1241,7 +1246,7 @@ mod tests {
             };
             side.endpoint = Endpoint::new(&config, index, NonZeroUsize::MIN);
         }
-        pair.dial(tls::public(&testing::SERVER_KEY));
+        pair.dial(tls::public(&pair::SERVER_KEY));
         pair.run(RUN);
         pair
     }
@@ -1344,12 +1349,12 @@ mod tests {
             let config = Config {
                 window_bytes: NARROW,
                 pool: Rc::new(Pool::new(config, memory)),
-                ..shard.config(testing::SERVER_KEY, Span::SECOND)
+                ..shard.config(pair::SERVER_KEY, Span::SECOND)
             };
             pair.server.endpoint =
-                Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
+                Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
             pair.server.key = None;
-            pair.dial(tls::public(&testing::SERVER_KEY));
+            pair.dial(tls::public(&pair::SERVER_KEY));
             pair.run(RUN);
             prefixes(&mut pair, 3);
             let (now, server) = (pair.now(), key(&pair.server));
@@ -2077,18 +2082,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "a window of 65535 bytes is below the largest message, 65536 bytes"
-    )]
+    #[should_panic(expected = "config window_bytes must be at least message_bytes_max")]
     fn with_a_window_below_one_message_panics() {
         testing::run(1, |shard| {
             let config = Config {
                 window_bytes: MESSAGE_MAX - 1,
-                ..shard.config(testing::SERVER_KEY, Span::SECOND)
+                ..shard.config(pair::SERVER_KEY, Span::SECOND)
             };
             drop(Endpoint::new(
                 &config,
-                testing::SERVER_SHARD,
+                pair::SERVER_SHARD,
                 NonZeroUsize::MIN,
             ));
         });
@@ -2129,7 +2132,7 @@ mod tests {
     fn before_the_connection_connects_open_none() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            pair.dial(tls::public(&testing::SERVER_KEY));
+            pair.dial(tls::public(&pair::SERVER_KEY));
             let (now, key) = (pair.now(), key(&pair.client));
             let opened = pair.client.endpoint.open(now, key, Class::Command);
             assert!(opened.is_none(), "{opened:?}");

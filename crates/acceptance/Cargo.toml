@@ -8,9 +8,9 @@ publish.workspace = true
 [dependencies]
 
 [dev-dependencies]
+block = { path = "../block" }
 env = { path = "../env" }
 node = { path = "../node" }
-os = { path = "../os" }
 sim = { path = "../sim" }
 types = { path = "../types" }
 

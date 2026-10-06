@@ -13,21 +13,34 @@ struct Run {
     node: Node,
 }
 
-type Memory =
-    Arc<dyn Fn(usize, usize) -> Result<block::Heap, os::memory::Error> + Send + Sync>;
+type Memory = Box<dyn FnMut(usize) -> Result<block::Heap, os::memory::Error>>;
 
 /// Memory for a shard's pool, from the heap.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "it is the memory seam of `Config`"
 )]
-fn heap(_core: usize, len: usize) -> Result<block::Heap, os::memory::Error> {
+fn heap(len: usize) -> Result<block::Heap, os::memory::Error> {
     Ok(block::Heap::new(len))
+}
+
+/// Memory from the heap for each shard but the one on core `refused`, which gets
+/// `error`. `node` asks once per shard, in order of core.
+fn refuse(refused: usize, error: os::memory::Error) -> Memory {
+    let mut core = 0;
+    Box::new(move |len| {
+        core += 1;
+        if core - 1 == refused {
+            Err(error)
+        } else {
+            heap(len)
+        }
+    })
 }
 
 /// Starts a node on `cores` cores of a `sim` host, after `faults` aim at its shards.
 fn start(seed: u64, cores: usize, faults: &[(usize, Fault)]) -> Run {
-    start_with(seed, cores, faults, 1 << 20, Arc::new(heap))
+    start_with(seed, cores, faults, 1 << 20, Box::new(heap))
 }
 
 fn start_with(
@@ -223,9 +236,9 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
         3,
         &[],
         budget,
-        Arc::new(move |core, len| {
-            record.lock().unwrap().push((core, len));
-            heap(core, len)
+        Box::new(move |len| {
+            record.lock().unwrap().push(len);
+            heap(len)
         }),
     );
     run.node.stop();
@@ -234,38 +247,25 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
     let part = budget / 3;
     assert_eq!(part * 3 + 2, budget);
     let reservation = |budget| block::Config { budget }.reservation();
-    let mut calls = calls.lock().unwrap().clone();
-    calls.sort_unstable();
     assert_eq!(
-        calls,
-        [
-            (0, reservation(part + 2)),
-            (1, reservation(part)),
-            (2, reservation(part)),
-        ]
+        *calls.lock().unwrap(),
+        [reservation(part + 2), reservation(part), reservation(part)]
     );
 }
 
 #[test]
-fn a_shard_with_no_memory_stops_the_node() {
+fn a_shard_with_no_memory_stops_the_node_before_later_shards_start() {
     for seed in 0..32 {
-        let mut run = start_with(
-            seed,
-            3,
-            &[],
-            1 << 20,
-            Arc::new(|core, len| match core {
-                1 => Err(os::memory::Error::Refused),
-                _ => heap(core, len),
-            }),
-        );
+        let refused = os::memory::Error::Refused;
+        let mut run = start_with(seed, 3, &[], 1 << 20, refuse(1, refused));
+        assert_eq!(starts(&run), named(&[0]));
         assert_eq!(run.sim.run(), Ok(()), "seed {seed}");
         let e = run.node.join().unwrap_err();
         assert_eq!(
             e,
             Error::Memory {
                 core: 1,
-                error: os::memory::Error::Refused
+                error: refused
             }
         );
         assert_eq!(
@@ -279,28 +279,18 @@ fn a_shard_with_no_memory_stops_the_node() {
 #[test]
 fn join_gives_a_shard_with_no_memory_over_one_that_panicked() {
     for seed in 0..32 {
-        let mut run = start_with(
-            seed,
-            3,
-            &[(0, Fault::Panic)],
-            1 << 20,
-            Arc::new(|core, len| match core {
-                2 => Err(os::memory::Error::Reserve { len, code: 12 }),
-                _ => heap(core, len),
-            }),
-        );
-        assert_eq!(panics(&mut run), ["shard-0"], "seed {seed}");
-        let e = run.node.join().unwrap_err();
         let len = block::Config {
             budget: (1 << 20) / 3,
         }
         .reservation();
+        let error = os::memory::Error::Reserve { len, code: 12 };
+        let mut run =
+            start_with(seed, 3, &[(0, Fault::Panic)], 1 << 20, refuse(2, error));
+        assert_eq!(starts(&run), named(&[0, 1]));
+        assert_eq!(panics(&mut run), ["shard-0"], "seed {seed}");
         assert_eq!(
-            e,
-            Error::Memory {
-                core: 2,
-                error: os::memory::Error::Reserve { len, code: 12 }
-            },
+            run.node.join(),
+            Err(Error::Memory { core: 2, error }),
             "seed {seed}"
         );
     }
@@ -310,14 +300,19 @@ fn join_gives_a_shard_with_no_memory_over_one_that_panicked() {
 fn a_config_shows_its_budget_but_not_its_memory() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let host = sim.node(sim::node::Config::default());
-    let memory: Memory = Arc::new(heap);
     let config = Config {
         shards: host.shards(),
         budget: 4096,
-        memory,
+        memory: Box::new(heap),
     };
     assert_eq!(
         format!("{config:?}"),
         "Config { shards: Shards { .. }, budget: 4096, .. }"
     );
+}
+
+#[test]
+#[should_panic(expected = "pool budget 18446744073709551615 is too large")]
+fn a_budget_past_the_address_space_panics_at_start() {
+    drop(start_with(7, 1, &[], usize::MAX, Box::new(heap)));
 }

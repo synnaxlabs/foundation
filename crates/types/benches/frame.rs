@@ -1,8 +1,9 @@
 //! The time to build a frame (header, ranges, and descriptors, but not the series
 //! bytes), to set each seq on a built draft, to fill and read every series in order,
 //! to look each one up, to give its charge, to view the series bytes, to give the end
-//! of each series, and to check and walk the series from stored ends, for a dense
-//! frame and for frames of 100,000 channels.
+//! of each series, to check and walk the series from stored ends, to make a view
+//! through a full, a narrow, and an almost full mask and walk or charge it, and to make
+//! a narrow mask, for a dense frame and for frames of 100,000 channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{self, Draft, Form, Frame, Path};
+use types::frame::{self, Draft, Form, Frame, Mask, Path, View};
 use types::sample::{Scalar, Type};
 
 const F64: Type = Type::Scalar(Scalar::F64);
@@ -291,8 +292,102 @@ fn stored(bencher: Bencher<'_, '_>, case: &Case) {
     let frame = frame(&pool, case);
     let (body, ends): (_, Vec<_>) = (frame.body(), frame.ends().collect());
     bencher.bench_local(|| {
-        frame::series(black_box(&body), black_box(&ends).iter().copied())
+        frame::split(black_box(&body), black_box(&ends).iter().copied())
             .map(|(_, bytes)| bytes.len())
             .sum::<usize>()
     });
+}
+
+/// Makes a view through a mask that wants every channel, then sums the length of each
+/// of its series.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn full_walk(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, every(case));
+    bencher.bench_local(|| walk_view(View::new(black_box(&frame), black_box(&mask))));
+}
+
+/// Makes a view through a mask that wants every channel, then gives its charge.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn full_charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, every(case));
+    bencher.bench_local(|| View::new(black_box(&frame), black_box(&mask)).charge());
+}
+
+/// Makes a view through a mask that wants only the last present channel, then sums
+/// the length of each of its series.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn narrow_walk(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, last(case));
+    bencher.bench_local(|| walk_view(View::new(black_box(&frame), black_box(&mask))));
+}
+
+/// Makes a view through a mask that wants only the last present channel, then gives
+/// its charge.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn narrow_charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, last(case));
+    bencher.bench_local(|| View::new(black_box(&frame), black_box(&mask)).charge());
+}
+
+/// Makes a view through a mask that wants every channel but one, then sums the length
+/// of each of its series.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn most_walk(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, most(case));
+    bencher.bench_local(|| walk_view(View::new(black_box(&frame), black_box(&mask))));
+}
+
+/// Makes a view through a mask that wants every channel but one, then gives its
+/// charge.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn most_charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, most(case));
+    bencher.bench_local(|| View::new(black_box(&frame), black_box(&mask)).charge());
+}
+
+/// Makes a mask that wants only the last present channel.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn narrow_mask(bencher: Bencher<'_, '_>, case: &Case) {
+    bencher.bench_local(|| Mask::new(black_box(&case.set), last(case)));
+}
+
+/// Each channel of `case`.
+fn every(case: &Case) -> impl Iterator<Item = channel::Slot> {
+    case.set.entries().iter().map(|entry| entry.slot)
+}
+
+/// Each channel of `case` but one that the mask cannot hold again as an index: the
+/// last data channel, or the last channel when each is an index without data.
+fn most(case: &Case) -> impl Iterator<Item = channel::Slot> {
+    let set = &case.set;
+    let skip = (0..set.entries().len())
+        .rev()
+        .find(|&entry| set.index(entry) != entry)
+        .or(set.entries().len().checked_sub(1));
+    let entries = set.entries().iter().enumerate();
+    entries
+        .filter(move |&(entry, _)| Some(entry) != skip)
+        .map(|(_, entry)| entry.slot)
+}
+
+/// The channel of the last present series of `case`.
+fn last(case: &Case) -> [channel::Slot; 1] {
+    let (entry, _) = *case.series.last().expect("each case has a series");
+    [case.set.entries()[entry].slot]
+}
+
+fn walk_view(view: View<'_>) -> usize {
+    view.iter().map(|(_, bytes)| bytes.len()).sum()
 }

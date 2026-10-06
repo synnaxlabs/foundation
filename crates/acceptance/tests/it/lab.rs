@@ -107,7 +107,7 @@ impl Lab {
         let node = node::Node::start(node::Config {
             shards: host.shards(),
             budget: 1 << 20,
-            memory: Arc::new(|_, len| os::memory::Memory::new(len)),
+            memory: Box::new(|len| Ok(block::Heap::new(len))),
         });
         self.members.push(Member {
             name: name.into(),
