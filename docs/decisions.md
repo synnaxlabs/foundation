@@ -642,8 +642,8 @@ How to read this record:
   at `now`, given or grown by drift, votes only when no bound is known. A vote for it
   lost: it turned a peer split into a wide estimate that no peer gave. The person chose
   this (OS CLOCK BOUND); counting a grown bound is from the `time` builder, approved by
-  the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
-  Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
+  the coordinator (#314). A known bound votes at any width, so a wide one (a Linux
+  bound of 15 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. When only unknown bounds vote, the estimate
   is unknown too, at the center of the same hull. Approved by the coordinator (#437),
   with the hull of #344. When drift grows unknown bounds so that this hull spans more
@@ -769,7 +769,11 @@ How to read this record:
   gives a false bound until its operator installs chrony. Lost: the Linux bound always
   unknown, because it also drops the good bound from chrony and ntpd; detecting
   timesyncd, because it reaches outside `env::wall` and is a guess. The person decided
-  on 2026-10-06 ("A is still fine"), #689.
+  on 2026-10-06 ("A is still fine"), #689. `os` also gives `None` in clock state
+  `TIME_ERROR`, and for a negative `maxerror` or one past the end of a `Span`, because
+  root can set any value. `os::wall()` reads once and returns `Error::Wall` when the OS
+  refuses the call, as a seccomp filter or systemd's `ProtectClock` can. A later
+  refusal panics (#117).
 - **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its
   OS reading and its OS bound. Cold nodes then vote with each other's OS clocks, and
   each waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown

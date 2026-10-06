@@ -43,13 +43,17 @@ pub fn clock() -> env::clock::Clock {
 /// The bound is `None` when the OS says its clock is not in sync, or gives a bound
 /// that is negative or past the end of a `Span`.
 ///
+/// # Errors
+///
+/// [`Error::Wall`] when the OS refuses a read, as a seccomp filter can.
+///
 /// # Panics
 ///
-/// A read panics when the OS refuses the call.
+/// A read panics when the OS refuses a later call.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[must_use]
-pub fn wall() -> env::wall::Wall {
-    env::wall::Wall::new(wall::Driver)
+pub fn wall() -> Result<env::wall::Wall, Error> {
+    wall::read().map_err(Error::Wall)?;
+    Ok(env::wall::Wall::new(wall::Driver))
 }
 
 /// The random source of the OS. Its bytes are fit for keys and nonces.
@@ -123,6 +127,8 @@ pub enum Error {
     Dir(std::io::Error),
     /// The I/O thread could not start.
     Thread(env::thread::Error),
+    /// The OS refused a read of its wall clock.
+    Wall(std::io::Error),
 }
 
 impl fmt::Display for Error {
@@ -131,6 +137,7 @@ impl fmt::Display for Error {
             Self::Cores(e) => write!(f, "cannot read the cores of this thread: {e}"),
             Self::Dir(e) => write!(f, "cannot open the data directory: {e}"),
             Self::Thread(e) => write!(f, "{e}"),
+            Self::Wall(e) => write!(f, "cannot read the wall clock: {e}"),
         }
     }
 }
@@ -138,7 +145,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Cores(e) | Self::Dir(e) => Some(e),
+            Self::Cores(e) | Self::Dir(e) | Self::Wall(e) => Some(e),
             Self::Thread(e) => std::error::Error::source(e),
         }
     }
@@ -157,6 +164,14 @@ mod tests {
         );
         let source = std::error::Error::source(&e).map(ToString::to_string);
         assert_eq!(source.as_deref(), Some("no affinity"));
+    }
+
+    #[test]
+    fn a_wall_error_names_the_os_error_as_its_source() {
+        let e = Error::Wall(std::io::Error::other("no clock"));
+        assert_eq!(e.to_string(), "cannot read the wall clock: no clock");
+        let source = std::error::Error::source(&e).map(ToString::to_string);
+        assert_eq!(source.as_deref(), Some("no clock"));
     }
 
     #[test]
