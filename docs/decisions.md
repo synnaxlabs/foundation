@@ -652,13 +652,20 @@ How to read this record:
   bounds. Decided by the `time` builder (#344). `Measurement::unknown(at, offset)` gives
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
-  (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
-  whose readings allow one before drift gives `None`: a stopped bound stored as a
-  measurement could miss the true offset. Decided by the `time` builder (#258). Each
-  function returns only the errors it can give: one `Error` per module (`exchange`,
-  `overlap`, `combine`), and `Option` where a caller does the same for each cause
-  (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the coordinator
-  (#272).
+  (#144). An exchange with an error over 36500 days gives an unknown measurement,
+  centered between its edges or at the nearest span, so no caller maps a failure to
+  one. It cuts no known bound, because an unknown bound votes only when no bound is
+  known. An exchange can still give a known bound from two unknown readings whose
+  centers move apart by more than the round trip, so the node that asks makes an
+  unknown answer unknown itself (CLOCK PEER ANSWER). An overlap whose readings allow
+  an error over 36500 days before drift gives `None`, as an overlap with no edge
+  does, because no caller needs an unknown device measurement yet. A device source
+  can ask for one when it calls `Overlap::at`. Decided by the `time` builder (#258),
+  and for the exchange approved by the coordinator (#903). Each function returns only
+  the errors it can give: one `Error` per module (`overlap`, `combine`), and `Option`
+  where a caller does the same for each cause (`Drift::from_ppb`, `Measurement::new`,
+  `Overlap::at`). Decided by the coordinator (#272). `Exchange::measure` has one cause
+  left, so it gives `Option` (#903).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
