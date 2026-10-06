@@ -1183,11 +1183,8 @@ How to read this record:
   configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
   pins both, and the random runs skip exactly such a voter until #881. The advisor
   required a proof on every message and on each refusal, signatures only, and the
-  proof in the hard state (#750, 2026-10-05). `mesh::grant` signs each claim with
-  the node's Ed25519 key over `foundation/grant/1`, the grant byte (pre-vote 0, vote
-  1), the term (8 bytes, little endian), and the candidate (16 bytes, little endian).
-  It checks each claim of a message against the public keys of the members, and the
-  driver (#471) runs that check before each `step`.
+  proof in the hard state (#750, 2026-10-05). `mesh` signs and checks the
+  signatures (MESH LOG).
   `Raft` takes `tick(random)`,
   `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
   when it changed), `entries` to write, `committed` entries to apply, and `messages`
@@ -1339,8 +1336,14 @@ How to read this record:
   wire carries its proof in the same form, after the term and before the body. A
   granted `PreVoteReply` or `VoteReply` is the byte 1, then the signature; a refusal
   is the byte 0 alone. No form holds an entry with no signature: encode panics on
-  one, because the caller signs before each write and send. The format version stays
-  1: no log has shipped. A later record replaces the
+  one, because the caller signs before each write and send. `mesh::grant` signs each
+  claim with the node's Ed25519 key over `foundation/grant/1`, the voter (16 bytes,
+  little endian), the grant byte (pre-vote 0, vote 1), the term (8 bytes, little
+  endian), and the candidate (16 bytes, little endian). The voter in the bytes keeps
+  two members that share a key from sharing a signature. Grants name no region; a
+  second region adds the region key under `foundation/grant/2`. The driver (#471)
+  checks each claim of a message against the public keys of the members before each
+  `step`. The format version stays 1: no log has shipped. A later record replaces the
   entries from its first index. A file is 1 MiB, or the length of its first
   record when that is more, and a record that does not fit starts the next file. In a
   file with no record, it makes that file again, larger, so each file but the last
