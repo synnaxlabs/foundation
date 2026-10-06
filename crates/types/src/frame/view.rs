@@ -217,7 +217,7 @@ fn join<'a, const N: usize>(
 /// gives it, in time logarithmic in that position.
 fn gallop<T>(items: &[T], mut before: impl FnMut(&T) -> bool) -> usize {
     let mut high = 1;
-    while items.get(high - 1).is_some_and(&mut before) {
+    while items.get(high).is_some_and(&mut before) {
         high *= 2;
     }
     let low = high / 2;
