@@ -89,9 +89,9 @@ How to read this record:
   the dot. MQTT maps `.` to `/`. Letters are ASCII (decided by the person,
   2026-10-04). Widening to Unicode later stays backward compatible. `discover` maps
   non-ASCII device tags to ASCII names.
-- **NAME LENGTH (2026-10-04)** A name or pattern holds at most 255 bytes. The person
-  chose "255 bytes": it fits a one-byte length prefix, and raising it later stays
-  backward compatible.
+- **NAME LENGTH (2026-10-04)** A name or pattern holds at most 255 bytes as written:
+  the `!` of an exclusion counts (#735). The person chose "255 bytes": it fits a
+  one-byte length prefix, and raising it later stays backward compatible.
 - **SPECIFICITY (#3)** Pattern specificity orders by more literal segments, then fewer
   `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` > `**`. A run of wildcards
   counts as its `*`s and one `**` (`a.**.*.**` is `a.*.**`). Two different patterns may

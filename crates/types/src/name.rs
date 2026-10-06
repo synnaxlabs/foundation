@@ -212,12 +212,6 @@ impl Selector {
         let mut exclude = Vec::new();
         for text in patterns {
             match text.strip_prefix('!') {
-                Some("") => {
-                    return Err(Error::Segment {
-                        input: text.into(),
-                        segment: String::new(),
-                    });
-                }
                 Some(body) => exclude.push(Pattern::read(text, body)?),
                 None => include.push(Pattern::read(text, text)?),
             }
@@ -243,9 +237,9 @@ impl Selector {
     }
 }
 
-/// Splits `body` into segments. The limit counts `input`, the text the user wrote.
+/// Splits `body` into segments after it checks `input`, the text the user wrote.
 fn split<'a>(input: &str, body: &'a str) -> Result<Split<'a, char>, Error> {
-    if body.is_empty() {
+    if input.is_empty() {
         return Err(Error::Empty);
     }
     if input.len() > Name::MAX_BYTES {
