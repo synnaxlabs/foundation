@@ -547,7 +547,8 @@ How to read this record:
   are in mesh time; connectors convert device time. Each node publishes
   `<node>.clock.offset` and `<node>.clock.error`. Zero time config by default: sources
   are detected, and the clock follows the smallest measured bound, with no fixed
-  ranking. Supersedes: C6 fixed source choice (X36).
+  ranking. Supersedes: C6 fixed source choice (X36). Amended by ESTIMATE COMBINE: the
+  clock follows more than half of the bounds, not the smallest one (#344).
 - **R6 TIME LOCKED** Own sans-I/O estimator over our transport. The bound is half the
   round trip. Keep the fastest exchange per source, combine sources, widen the bound
   with drift, slew only. Sources are read directly: mesh peers, GPS, PPS with NMEA, the
@@ -569,17 +570,23 @@ How to read this record:
   its last 8 measurements and offers the one with the smallest bound now. This reads R6
   TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
   fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
-  offsets inside the most bounds (Marzullo). It fails when no offset is inside the
-  bounds of more than half of the sources that vote. This reads C6's "follows the
-  smallest measured bound": when sources agree, the result is never wider than the
-  narrowest. The result holds the true offset when the bounds that hold it are a
-  majority of the sources that vote, and every other bound that votes misses them.
-  Decided by the `time` builder (#49). Each
-  source votes: a source with no measurement agrees with no offset, and it votes beside
-  the known bounds, or beside the unknown bounds when no bound is known. So before its
-  first estimate a clock waits until more than half of its sources agree, and one
-  source that answers first cannot set mesh time. The person decided on 2026-10-05
-  ("clock question si approved at whatever path you think"), #488. A device's readings
+  offsets inside more than half of the bounds that vote. A known result holds the true
+  offset when more than half of the bounds that vote hold it, whatever the other bounds
+  are. It can be wider than the narrowest bound, so C6's "follows the smallest measured
+  bound" no longer holds. Cost: PPS at ±100 ns beside two peers at ±1 ms, all centered
+  on the true offset, gives ±1 ms, not ±100 ns. Lost: the hull of the offsets inside the
+  most bounds (Marzullo), and NTP's selection, which first tries the offsets inside
+  every bound. When one lying source of three put a small bound inside the honest
+  overlap, each followed the liar. A threshold that also counts the sources with no
+  measurement lost too: beside two of them, it needs all three bounds of that case. The
+  person decided on 2026-10-05 ("a is fine"), #344. Amends C6 and X36. `combine` fails
+  when no offset is inside the bounds of more than half of the sources that vote.
+  Decided by the `time` builder (#49). Each source votes: a source with no measurement
+  agrees with no offset, and it votes beside the known bounds, or beside the unknown
+  bounds when no bound is known. So before its first estimate a clock waits until more
+  than half of its sources agree, and one source that answers first cannot set mesh
+  time. The person decided on 2026-10-05 ("clock question si approved at whatever path
+  you think"), #488. A device's readings
   go to the oscillator fit (`Overlap`), never to `combine`. Node
   sources keep `Filter`, not `Overlap`: a network exchange puts the true offset at about
   the same place in each bracket, so an overlap gains little, and a broken drift bound
@@ -597,8 +604,11 @@ How to read this record:
   the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
   Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. When only unknown bounds vote, the estimate
-  is unknown too, at the center of the offsets inside the most of them. Approved by the
-  coordinator (#437). `Measurement::unknown(at, offset)` gives
+  is unknown too, at the center of the same hull. Approved by the coordinator (#437),
+  with the hull of #344. When drift grows unknown bounds so that this hull spans more
+  than 73000 days, no unknown estimate holds it, and its center can miss an offset that
+  every bound holds. The estimate is then at the center of the offsets inside the most
+  bounds. Decided by the `time` builder (#344). `Measurement::unknown(at, offset)` gives
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
   (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
@@ -966,11 +976,15 @@ How to read this record:
   changes state: entries that do not follow `prev` are `Error::EntryOutOfOrder`, and a
   heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
   log is `Error::IndexPastLog`, unless `step` drops the reply (RAFT SURFACE). An
-  append's `prev` and `commit` and a vote's `last` can be past the log of a node that
-  is behind. An `Append` with an entry whose term is above the message's term is
-  `Error::TermBehindLog`: no leader sends one, so the sender is faulty. The
-  conformance oracle changed to match; the person decided on 2026-10-05 ("a is
-  fine", #232). A bad message changes nothing.
+  append's `prev` and `commit` and a vote's `last` can be past the log of a node that is
+  behind. An `Append` with an entry whose term is above the message's term is
+  `Error::TermBehindLog`: no leader sends one, so the sender is faulty. The conformance
+  oracle changed to match; the person decided on 2026-10-05 ("a is fine", #232). A
+  heartbeat or an append of this node's term from a node other than the leader it knows
+  is `Error::SecondLeader`: one term has one leader, and a node keeps the leader of its
+  term until the term ends, through a step-down and a campaign. A node that knows no
+  leader of its term, after a restart or its vote, takes the first (#391). A bad message
+  changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -978,6 +992,18 @@ How to read this record:
   written. Batch size (64 entries) and the number of appends in flight per follower
   (8) are constants, not `Config` fields: nothing measured asks for a knob. `Message`
   and `Body` are `Clone`, not `Copy`, because an append carries entries.
+- **RAFT DURABILITY (#352)** `raft` is safe only when a disk keeps what it synced. The
+  disk owns that (`env::files`); `mesh` writes each `Ready` there. `raft` does not
+  find a loss. When a follower's disk lost synced entries, and what it applied of
+  them, the leader still counts them. While the leader's commit is below the
+  follower's last entry, the follower follows, and the leader can commit an entry
+  that fewer than a quorum hold. Once the commit passes that entry, each heartbeat
+  gives the follower `Error::IndexPastLog`; an append to it fails with no error. A
+  loss that keeps `applied` fails at `Raft::new` with `Error::AppliedPastLog`. `node`
+  shows the error in its status (#648). Lost: the leader sends again from below what
+  it counted, which lowers its count under a commit that a quorum may no longer
+  hold. Decided on 2026-10-05 (#352 item 3). Later, at low priority: the leader
+  learns the follower's real last index and stops counting lost entries (#663).
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
@@ -2257,7 +2283,8 @@ follows the smallest measured bound with no fixed ranking and detects sources.
 Resolution: the time policy lists only the peer nodes a node may use as mesh
 references (default: its region's voters). Local hardware sources are found
 automatically. The estimator always follows the smallest bound. Basis: R6 TIME LOCKED,
-TIME ADAPTERS.
+TIME ADAPTERS. Amended by ESTIMATE COMBINE: the estimator follows more than half of the
+bounds, not the smallest one (#344).
 
 **X37. Bootstrap peers and relays.**
 Conflict: D7 puts bootstrap peers in the file and lets any public node relay. R5 drops
