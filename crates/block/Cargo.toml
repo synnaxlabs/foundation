@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+sim = []
+
 [dependencies]
 
 [dev-dependencies]

@@ -100,7 +100,7 @@ pub enum Error {
     NoSources,
     /// No offset is inside the bounds of more than half of the sources that vote.
     NoMajority {
-        /// The number of sources that vote.
+        /// The number of sources that vote, at least 1.
         sources: usize,
         /// The most sources whose bounds share an offset.
         agreeing: usize,

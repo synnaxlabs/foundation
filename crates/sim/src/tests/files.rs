@@ -6,7 +6,6 @@ use std::future::poll_fn;
 use std::path::Path;
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use block::{Block, Pool};
@@ -37,16 +36,7 @@ where
         disk_bytes,
         ..node::Config::default()
     });
-    let out = Arc::new(Mutex::new(None));
-    let slot = Arc::clone(&out);
-    let shards = node.shards();
-    let handle = shards.start(shard("disk"), move |tasks| async move {
-        let value = body(node, tasks).await;
-        *slot.lock().unwrap() = Some(value);
-    });
-    sim.run().unwrap();
-    handle.unwrap().join().unwrap();
-    out.lock().unwrap().take().expect("the shard gave a value")
+    sim.run_on(&node, body).unwrap()
 }
 
 pub(super) fn pool() -> Pool {
@@ -259,17 +249,12 @@ fn each_node_has_its_own_disk() {
     let made = a.shards().start(shard("a"), move |_| async move {
         a.files().create_dir(Path::new("d")).await.unwrap();
     });
-    let names = Arc::new(Mutex::new(None));
-    let slot = Arc::clone(&names);
-    let listed = b.shards().start(shard("b"), move |_| async move {
+    let names = sim.run_on(&b, |b, _| async move {
         b.clock().sleep(Span::MILLISECOND).await;
-        *slot.lock().unwrap() = Some(b.files().list(Path::new("")).await);
+        b.files().list(Path::new("")).await
     });
-    sim.run().unwrap();
-    for handle in [made, listed] {
-        handle.unwrap().join().unwrap();
-    }
-    assert_eq!(names.lock().unwrap().take(), Some(Ok(Vec::new())));
+    made.unwrap().join().unwrap();
+    assert_eq!(names, Ok(Ok(Vec::new())));
 }
 
 #[test]
