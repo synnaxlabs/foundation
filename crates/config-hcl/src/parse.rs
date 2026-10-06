@@ -1817,12 +1817,11 @@ c = "°C # not a comment"
         const REPEAT: &str = "the key \"a\" repeats an earlier key. Remove it, or \
                               give it a different key";
 
-        /// The text of the error for a reference `input` with a bad `segment`.
-        fn bad_segment(input: &str, segment: &str) -> String {
+        /// The text of a bad segment error: `message`, then its fix.
+        fn bad_segment(message: &str) -> String {
             format!(
-                "{input:?} has a segment that is not valid: {segment:?}. Use one or \
-                 more ASCII letters, digits, `_`, and `-` in that segment, and no \
-                 other character"
+                "{message}. Use one or more ASCII letters, digits, `_`, and `-` in \
+                 that segment, and no other character"
             )
         }
 
@@ -2322,15 +2321,18 @@ c = "°C # not a comment"
                 &[
                     (
                         name("x.température", span(at(4, 0, 4), at(18, 0, 17))),
-                        &bad_segment("x.température", "température"),
+                        &bad_segment(
+                            "\"x.température\" has a segment that is not valid: \
+                             \"température\"",
+                        ),
                     ),
                     (
                         name("é", span(at(24, 1, 5), at(26, 1, 6))),
-                        &bad_segment("é", "é"),
+                        &bad_segment(r#""é" has a segment that is not valid: "é""#),
                     ),
                     (
                         name("x.é", span(at(34, 2, 6), at(38, 2, 9))),
-                        &bad_segment("x.é", "é"),
+                        &bad_segment(r#""x.é" has a segment that is not valid: "é""#),
                     ),
                 ],
             );
@@ -2347,11 +2349,16 @@ c = "°C # not a comment"
             check(
                 "a = plc[\"\"]\nb = plc[\"*\"]\nc = plc[<<EOT\nx\nEOT\n]\n",
                 &[
-                    (name("plc.", on(4, 11)), &bad_segment("plc.", "")),
+                    (
+                        name("plc.", on(4, 11)),
+                        &bad_segment(r#""plc." has a segment that is not valid: """#),
+                    ),
                     (name("plc.*", span(at(16, 1, 4), at(24, 1, 12))), wildcard),
                     (
                         name("plc.x\n", span(at(29, 2, 4), at(46, 5, 1))),
-                        &bad_segment("plc.x\n", "x\n"),
+                        &bad_segment(
+                            r#""plc.x\n" has a segment that is not valid: "x\n""#,
+                        ),
                     ),
                 ],
             );
@@ -2576,7 +2583,10 @@ c = "°C # not a comment"
                 &[
                     (Error::Document(repeat), REPEAT),
                     (null, NULL),
-                    (name, &bad_segment("é", "é")),
+                    (
+                        name,
+                        &bad_segment(r#""é" has a segment that is not valid: "é""#),
+                    ),
                     (value, &needs("a value")),
                 ],
             );
