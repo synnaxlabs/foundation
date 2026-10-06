@@ -210,12 +210,17 @@ impl<'a> Reader<'a> {
         let mut written = Vec::with_capacity(n);
         for _ in 0..n {
             let flag = self.at();
-            let pattern: fn(&'a str) -> Written<'a> = match self.byte()? {
-                0 => Written::Include,
-                1 => Written::Exclude,
+            let excluded = match self.byte()? {
+                0 => false,
+                1 => true,
                 found => return Err(Error::Excluded { at: flag, found }),
             };
-            written.push(pattern(self.text()?));
+            let text = self.text()?;
+            written.push(if excluded {
+                Written::Exclude(text)
+            } else {
+                Written::Include(text)
+            });
         }
         Selector::from_written(written).map_err(|error| Error::Pattern { at, error })
     }
