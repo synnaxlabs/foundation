@@ -437,8 +437,9 @@ How to read this record:
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
   records. An open of a header with a smaller `body_max` fails with `Unfit` (#627).
   `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
-  one entry, at least 4032; a batch of more entries holds less. An entry has no
-  part, one, or two; `append` takes them owned and drops them when it fails (#582).
+  one entry, at least `Layout::ENTRY_MAX_MIN` (4032); a batch of more entries holds
+  less. An entry has no part, one, or two; `append` takes them owned and drops them
+  when it fails (#582).
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
@@ -926,25 +927,34 @@ How to read this record:
   QUIC varints, ids strictly increasing, then the stream end. Id 0 is `window_bytes` and
   id 1 is `message_bytes_max`; both are required. A node ignores an id it does not know,
   so an advisory field needs no new ALPN; a field that the peer must understand needs
-  one. The acceptor sends its hello in its first flight and the dialer at its
-  `Connected`, so the hello adds no round trip. Until the peer's hello arrives, a node
-  opens and accepts no stream. A sender obeys only the peer's values: each message is at
-  most the peer's `message_bytes_max`, and the send budget is the peer's `window_bytes`.
-  A value over what the node can count counts as the largest it can count. A peer breaks
-  the protocol when its hello ends inside a pair, misses a required id, has an id out of
-  order, is over 256 bytes, has a `message_bytes_max` of 0 or a `window_bytes` below it,
-  or resets. A peer whose QUIC transport parameters cannot take this node's hello at
-  once (no one-way stream, or a stream window under the hello) also breaks it, with the
-  reason `a peer with no room for the hello`. `Transport::new` refuses a config that
-  gives a peer no one-way stream or a stream window under 256 bytes, so only a foreign
-  peer gets this. Lost: send the hello later when credit comes, because `open` then
-  needs a second gate and a state that only a foreign peer reaches. `Endpoint::write`
-  gives `Error::TooLarge` for a message over the peer's limit; a caller that forwards a
-  writer's frame gives the writer `Large`, and the writer splits the frame (LARGE
-  FRAME). Proposed by `network` in #55; approved by the coordinator on PR #407. The
-  budgets: proposed by `network` in #228. The room order: approved by the advisor on
-  #611. The hello: proposed by `network` in #55; settled by the advisor and the
-  coordinator under the person's delegation (#55).
+  one. The acceptor sends its hello at 0.5-RTT, once it has the whole ClientHello and so
+  the peer's transport parameters, or at its `Connected` when a HelloRetryRequest holds
+  them back. The dialer sends at its `Connected`. So the hello adds no round trip. The
+  hello has its own one-way stream: a node lets the peer open `streams_max` + 1 one-way
+  streams, and does not give back the credit of the peer's hello stream when it ends,
+  so after the hello the peer has at most `streams_max` open. Until the peer's hello
+  arrives, a node opens and accepts no stream; the caller bounds that wait, with its
+  other limits before admission (#563). A sender obeys only the peer's values: each
+  message is at most the peer's `message_bytes_max`, and the send budget is the peer's
+  `window_bytes`. A value over what the node can count counts as the largest it can
+  count. A peer breaks the protocol when its hello ends inside a
+  pair, misses a required id, has an id out of order, is over 256 bytes, has a
+  `message_bytes_max` of 0 or a `window_bytes` below it, or resets. A peer whose QUIC
+  transport parameters cannot take this node's whole hello at once (no one-way stream,
+  or a stream or connection window under the hello) also breaks it, with the reason `a
+  peer with no room for the hello`. A dial that breaks so gets `Error::Broken` with no
+  `Connected` before it, and an accept gives the caller no event. Before the handshake
+  is confirmed, QUIC gives the peer no reason, only APPLICATION_ERROR. A Foundation node
+  always has room: `streams_max` is at least 1, and `window_bytes` is at least
+  `message_bytes_max`, which is at least 1472. A compile-time assertion holds 1472 at or
+  above the hello limit, so only a foreign peer gets this. Lost: send the hello later
+  when credit comes, because `open` then needs a second gate and a state that only a
+  foreign peer reaches. `Endpoint::write` gives `Error::TooLarge` for a message over the
+  peer's limit; a caller that forwards a writer's frame gives the writer `Large`, and
+  the writer splits the frame (LARGE FRAME). Proposed by `network` in #55; approved by
+  the coordinator on PR #407. The budgets: proposed by `network` in #228. The room
+  order: approved by the advisor on #611. The hello: proposed by `network` in #55;
+  settled by the advisor and the coordinator under the person's delegation (#55).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
