@@ -5,8 +5,8 @@ use std::iter;
 
 use super::key_set::{self, KeySet};
 use super::{
-    Form, Frame, Path, Range, body_start, bounds, charge_of, lead, next_end, parts,
-    to_u32, to_usize,
+    Form, Frame, Path, Range, SERIES_ALIGN, body_start, bounds, charge_of, end_of,
+    lead, parts, to_u32, to_usize,
 };
 use crate::channel;
 
@@ -18,15 +18,42 @@ pub struct Mask {
     held: Held,
 }
 
+/// The entries a mask holds. A list is the shorter side: at most half the key set.
 #[derive(Debug)]
 enum Held {
     /// Every entry of a key set that has at least one.
     Every,
-    /// The entries held and the groups whose index is held, each sorted.
-    Listed {
-        entries: Box<[u32]>,
-        groups: Box<[u32]>,
-    },
+    /// Only the listed entries.
+    Only(List),
+    /// Every entry but the listed ones, at least one.
+    Except(List),
+}
+
+/// Sorted entries, and the sorted groups whose index is among them.
+#[derive(Debug)]
+struct List {
+    entries: Box<[u32]>,
+    groups: Box<[u32]>,
+}
+
+impl List {
+    fn new(set: &KeySet, entries: Vec<u32>) -> Self {
+        // Indexes in entry order are in group order (`KeySet::groups`).
+        let groups = entries
+            .iter()
+            .map(|&entry| to_usize(entry))
+            .filter(|&entry| set.index(entry) == entry)
+            .map(|index| set.entries()[index].group)
+            .collect();
+        Self {
+            entries: entries.into(),
+            groups,
+        }
+    }
+
+    fn holds_group(&self, group: u32) -> bool {
+        self.groups.binary_search(&group).is_ok()
+    }
 }
 
 impl Mask {
@@ -43,20 +70,18 @@ impl Mask {
             .collect();
         entries.sort_unstable();
         entries.dedup();
-        let held = if entries.is_empty() || entries.len() < set.entries().len() {
-            // Indexes in entry order are in group order (`KeySet::groups`).
-            let groups = entries
-                .iter()
-                .map(|&entry| to_usize(entry))
-                .filter(|&entry| set.index(entry) == entry)
-                .map(|index| set.entries()[index].group)
-                .collect();
-            Held::Listed {
-                entries: entries.into(),
-                groups,
-            }
-        } else {
+        let len = set.entries().len();
+        // The complement costs O(k), and k < 2 * entries.len() <= 4m.
+        let held = if 2 * entries.len() <= len {
+            Held::Only(List::new(set, entries))
+        } else if entries.len() == len {
             Held::Every
+        } else {
+            let mut held = entries.into_iter().peekable();
+            let others = (0..to_u32(len))
+                .filter(|&entry| held.next_if_eq(&entry).is_none())
+                .collect();
+            Held::Except(List::new(set, others))
         };
         Self {
             set: set.key(),
@@ -67,7 +92,7 @@ impl Mask {
     /// Whether the mask holds no entry: the reader wants nothing of the key set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        matches!(&self.held, Held::Listed { entries, .. } if entries.is_empty())
+        matches!(&self.held, Held::Only(list) if list.entries.is_empty())
     }
 }
 
@@ -118,72 +143,117 @@ impl<'a> View<'a> {
     /// group's index. Time is logarithmic in the frame's ranges and the mask's groups.
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
-        match &self.mask.held {
-            Held::Listed { groups, .. } if groups.binary_search(&group).is_err() => {
-                None
-            }
-            _ => self.frame.range(group),
-        }
+        let held = match &self.mask.held {
+            Held::Every => true,
+            Held::Only(list) => list.holds_group(group),
+            Held::Except(list) => !list.holds_group(group),
+        };
+        if held { self.frame.range(group) } else { None }
     }
 
     /// Each present entry that the mask holds and its series bytes, in entry order.
-    /// Time is linear in the frame's series when the mask holds every entry, else
-    /// O(m log(n/m)) for the smaller m and larger n of the frame's series and the
-    /// mask's entries.
+    /// Time is O(m log(n/m)) for the smaller m and larger n of the frame's series and
+    /// the mask's entries when the mask holds at most half the key set, else linear in
+    /// the frame's series.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &'a [u8])> + use<'a> {
-        let Held::Listed { entries, .. } = &self.mask.held else {
-            return Series::Every(self.frame.iter());
+        let list = match &self.mask.held {
+            Held::Every => return Series::Every(self.frame.iter()),
+            Held::Only(list) | Held::Except(list) => list,
         };
         let (_, descriptors, body) = parts(&self.frame.0);
-        Series::Listed(join(descriptors, entries).map(move |n| {
+        let series = move |n| {
             let (start, end) = bounds(descriptors, n);
             (to_usize(lead(&descriptors[n])), &body[start..end])
-        }))
+        };
+        let mut listed = join(descriptors, &list.entries);
+        if let Held::Only(_) = self.mask.held {
+            return Series::Only(listed.map(series));
+        }
+        let mut next = Some(0);
+        // The runs of series between those left out.
+        let runs = iter::from_fn(move || {
+            let first = next?;
+            let end = listed.next();
+            next = end.map(|end| end + 1);
+            Some(first..end.unwrap_or(descriptors.len()))
+        });
+        Series::Except(runs.flatten().map(series))
     }
 
     /// The charge of a frame of only the view's series (CREDIT RULES): what a remote
     /// complete reader spends. Equal to [`Frame::charge`] when the mask holds every
-    /// present series. Time is constant when the mask holds every entry, else as for
-    /// [`View::iter`].
+    /// present series. Time is constant when the mask holds every entry, else
+    /// O(m log(n/m)) for the smaller m and larger n of the frame's series and the
+    /// entries the mask lists: those it holds, or those it leaves out when it holds
+    /// more than half the key set.
     #[must_use]
     pub fn charge(&self) -> u64 {
-        let Held::Listed { entries, groups } = &self.mask.held else {
-            return self.frame.charge();
+        let list = match &self.mask.held {
+            Held::Every => return self.frame.charge(),
+            Held::Only(list) | Held::Except(list) => list,
         };
         let (ranges, descriptors, _) = parts(&self.frame.0);
-        let ranges = join(ranges, groups).count();
+        // Each block size class is a multiple of SERIES_ALIGN, so a frame padded to it
+        // has the same charge.
+        let padded = |end: usize| end.next_multiple_of(SERIES_ALIGN);
+        let groups = join(ranges, &list.groups).count();
         let (mut series, mut bytes) = (0, 0);
-        for n in join(descriptors, entries) {
+        for n in join(descriptors, &list.entries) {
             let (start, end) = bounds(descriptors, n);
             series += 1;
-            bytes = next_end(bytes, end - start);
+            bytes += padded(end) - start;
         }
-        charge_of(body_start(ranges, series) + bytes)
+        let len = if let Held::Except(_) = self.mask.held {
+            let all = descriptors.last().map_or(0, |&last| padded(end_of(last)));
+            body_start(ranges.len() - groups, descriptors.len() - series) + all - bytes
+        } else {
+            body_start(groups, series) + bytes
+        };
+        charge_of(len)
     }
 }
 
-/// The series of a view: those of the whole frame, or those of the listed entries.
-enum Series<E, L> {
-    Every(E),
-    Listed(L),
+/// The series of a view, as [`Held`] gives them.
+enum Series<V, O, E> {
+    Every(V),
+    Only(O),
+    Except(E),
 }
 
-impl<T, E: Iterator<Item = T>, L: Iterator<Item = T>> Iterator for Series<E, L> {
+impl<T, V, O, E> Iterator for Series<V, O, E>
+where
+    V: Iterator<Item = T>,
+    O: Iterator<Item = T>,
+    E: Iterator<Item = T>,
+{
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
         match self {
             Self::Every(series) => series.next(),
-            Self::Listed(series) => series.next(),
+            Self::Only(series) => series.next(),
+            Self::Except(series) => series.next(),
         }
     }
 
     fn fold<B, F: FnMut(B, T) -> B>(self, init: B, f: F) -> B {
         match self {
             Self::Every(series) => series.fold(init, f),
-            Self::Listed(series) => series.fold(init, f),
+            Self::Only(series) => series.fold(init, f),
+            Self::Except(series) => fold_apart(series, init, f),
         }
     }
+}
+
+/// Folds `series` out of line. Inline, its state takes the caller's registers, and
+/// the walk of a narrow view takes about 15% longer.
+#[inline(never)]
+fn fold_apart<T, B>(
+    series: impl Iterator<Item = T>,
+    init: B,
+    f: impl FnMut(B, T) -> B,
+) -> B {
+    series.fold(init, f)
 }
 
 /// The position of each record in `records` that leads with a key in `keys`, in order.
@@ -194,23 +264,27 @@ fn join<'a, const N: usize>(
     mut keys: &'a [u32],
 ) -> impl Iterator<Item = usize> + 'a {
     let mut at = 0;
-    iter::from_fn(move || {
-        loop {
-            let key = lead(records.get(at)?);
-            let &next = keys.first()?;
-            match next.cmp(&key) {
-                Ordering::Less => keys = &keys[gallop(keys, |&held| held < key)..],
-                Ordering::Greater => {
-                    at += gallop(&records[at..], |record| lead(record) < next);
-                }
-                Ordering::Equal => {
-                    keys = &keys[1..];
-                    at += 1;
-                    return Some(at - 1);
+    iter::from_fn(
+        // Without it, the walk of a narrow view takes about 40% longer.
+        #[inline(always)]
+        move || {
+            loop {
+                let key = lead(records.get(at)?);
+                let &next = keys.first()?;
+                match next.cmp(&key) {
+                    Ordering::Less => keys = &keys[gallop(keys, |&held| held < key)..],
+                    Ordering::Greater => {
+                        at += gallop(&records[at..], |record| lead(record) < next);
+                    }
+                    Ordering::Equal => {
+                        keys = &keys[1..];
+                        at += 1;
+                        return Some(at - 1);
+                    }
                 }
             }
-        }
-    })
+        },
+    )
 }
 
 /// The first position in `items` where `before` is false, as `slice::partition_point`
@@ -239,11 +313,18 @@ mod tests {
 
     /// The entries of `set` that `mask` holds.
     fn held(set: &KeySet, mask: &Mask) -> Vec<usize> {
+        let listed = |entry: &usize| listed(mask).contains(&to_u32(*entry));
+        let only = matches!(mask.held, Held::Only(_));
+        (0..set.entries().len())
+            .filter(|entry| listed(entry) == only)
+            .collect()
+    }
+
+    /// The entries that `mask` lists.
+    fn listed(mask: &Mask) -> &[u32] {
         match &mask.held {
-            Held::Every => (0..set.entries().len()).collect(),
-            Held::Listed { entries, .. } => {
-                entries.iter().map(|&entry| to_usize(entry)).collect()
-            }
+            Held::Every => &[],
+            Held::Only(list) | Held::Except(list) => &list.entries,
         }
     }
 
@@ -297,6 +378,23 @@ mod tests {
     }
 
     #[test]
+    fn lists_the_entries_that_a_mask_of_most_leaves_out() {
+        let set = two_groups();
+        let mask = Mask::new(&set, [1, 3, 4].map(Slot::new));
+        assert!(matches!(mask.held, Held::Except(_)));
+        assert_eq!(listed(&mask), [1]);
+        assert_eq!(held(&set, &mask), [0, 2, 3]);
+    }
+
+    #[test]
+    fn lists_the_entries_held_when_they_are_half() {
+        let set = two_groups();
+        let mask = Mask::new(&set, [Slot::new(2)]);
+        assert!(matches!(mask.held, Held::Only(_)));
+        assert_eq!(listed(&mask), [0, 1]);
+    }
+
+    #[test]
     fn reads_as_the_frame_of_only_the_held_series() {
         let set = two_groups();
         let frame = full(&set);
@@ -321,6 +419,37 @@ mod tests {
         let len = 16 + 16 + 2 * 8 + 8 + 1;
         let charge = u64::try_from(block::footprint(len)).unwrap();
         assert_eq!(View::new(&frame, &mask).charge(), charge);
+    }
+
+    /// Two ranges, three descriptors, and 3 bytes and 5 of padding, 5 bytes and 3 of
+    /// padding, and 1 byte.
+    #[test]
+    fn charges_a_view_that_leaves_out_a_middle_series() {
+        let set = two_groups();
+        let frame = full(&set);
+        let mask = Mask::new(&set, [1, 3, 4].map(Slot::new));
+        let charge = u64::try_from(block::footprint(89)).unwrap();
+        assert_eq!(View::new(&frame, &mask).charge(), charge);
+    }
+
+    /// Two ranges, three descriptors, and 3 bytes and 5 of padding, 10 bytes and 6 of
+    /// padding, and 5 bytes.
+    #[test]
+    fn charges_a_view_that_leaves_out_the_last_series() {
+        let set = two_groups();
+        let frame = full(&set);
+        let mask = Mask::new(&set, [1, 2, 3].map(Slot::new));
+        assert_eq!(listed(&mask), [3]);
+        let charge = u64::try_from(block::footprint(101)).unwrap();
+        assert_eq!(View::new(&frame, &mask).charge(), charge);
+    }
+
+    #[test]
+    fn charges_the_same_for_a_series_padded_to_its_alignment() {
+        for len in 0..=1_usize << 16 {
+            let padded = len.next_multiple_of(SERIES_ALIGN);
+            assert_eq!(block::footprint(len), block::footprint(padded), "{len}");
+        }
     }
 
     #[test]
@@ -407,6 +536,11 @@ mod tests {
                 .collect();
             prop_assert_eq!(held(&set, &mask), expected.clone());
             prop_assert_eq!(mask.is_empty(), expected.is_empty());
+            prop_assert!(2 * listed(&mask).len() <= entries);
+            let only = 2 * expected.len() <= entries;
+            prop_assert_eq!(matches!(mask.held, Held::Only(_)), only);
+            let every = !only && expected.len() == entries;
+            prop_assert_eq!(matches!(mask.held, Held::Every), every);
         }
 
         #[test]
@@ -418,7 +552,12 @@ mod tests {
             let read: Vec<(usize, &[u8])> = view.iter().collect();
             let expected: Vec<(usize, &[u8])> =
                 frame.iter().filter(|(entry, _)| held.contains(entry)).collect();
-            prop_assert_eq!(read, expected);
+            prop_assert_eq!(&read, &expected);
+            let folded = view.iter().fold(Vec::new(), |mut folded, series| {
+                folded.push(series);
+                folded
+            });
+            prop_assert_eq!(folded, expected);
             for (group, &index) in (0..).zip(set.groups()) {
                 let range = frame.range(group).filter(|_| held.contains(&index));
                 prop_assert_eq!(view.range(group), range, "group {}", group);
