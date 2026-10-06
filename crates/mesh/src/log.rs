@@ -406,24 +406,14 @@ fn scan(dir: &Path, segments: &[Vec<u8>]) -> Result<Scan, Error> {
             let offset = wide(start(end));
             return Err(Error::Corrupt { path: file, offset });
         }
-        let after = path(dir, wide(segment.saturating_add(1)));
         match first {
-            Some(At::Header(head)) if head.number == next => {
-                segment = segment.saturating_add(1);
-            }
-            // A next file that starts with a stale record or with garbage, or that has
-            // no record and is not the last file.
-            Some(At::Header(_) | At::Garbage) => {
-                return Err(Error::Corrupt {
-                    path: after,
-                    offset: 0,
-                });
-            }
+            // `records` refuses a next file that starts with a stale record or with
+            // garbage.
+            Some(At::Header(_) | At::Garbage) => segment = segment.saturating_add(1),
+            // A next file with no record that is not the last file.
             Some(At::End) if segments.len() > segment.saturating_add(2) => {
-                return Err(Error::Corrupt {
-                    path: after,
-                    offset: 0,
-                });
+                let path = path(dir, wide(segment.saturating_add(1)));
+                return Err(Error::Corrupt { path, offset: 0 });
             }
             spare => {
                 return Ok(Scan {
@@ -938,6 +928,21 @@ mod tests {
         assert_eq!(stored(&mut sim, &node), Ok(expected));
     }
 
+    #[test]
+    fn an_open_with_no_torn_end_writes_nothing() {
+        let (mut sim, node) = sim(0);
+        three(&mut sim, &node);
+        let opened = on(&mut sim, &node, |node| async move {
+            node.fail_file(&file("log-0"), Operation::WriteAt);
+            open(&node).await.map(|(_, stored)| stored)
+        });
+        let expected = Stored {
+            hard: Hard::default(),
+            entries: (1..=3).map(|index| bytes(index, 100)).collect(),
+        };
+        assert_eq!(opened, Ok(expected));
+    }
+
     // A power cut keeps a header whole or not at all, so a damaged one is never
     // the torn end.
     #[test]
@@ -1111,17 +1116,19 @@ mod tests {
     #[test]
     fn a_record_that_ends_at_the_end_of_a_file_stays_in_it() {
         let (mut sim, node) = sim(0);
-        let empty = encode(0, None, &[bytes(1, 0)]).len();
-        let len = usize::try_from(SEGMENT).unwrap() - empty;
-        let names = on(&mut sim, &node, move |node| async move {
+        let empty = encode(1, None, &[bytes(2, 0)]).len();
+        let (len, names) = on(&mut sim, &node, move |node| async move {
             let (mut log, _) = open(&node).await.unwrap();
-            log.write(None, &[bytes(1, len)]).await.unwrap();
-            node.files().list(Path::new(DIR)).await.unwrap()
+            log.write(None, &[bytes(1, 10)]).await.unwrap();
+            let len =
+                usize::try_from(SEGMENT).unwrap() - start(narrow(log.offset)) - empty;
+            log.write(None, &[bytes(2, len)]).await.unwrap();
+            (len, node.files().list(Path::new(DIR)).await.unwrap())
         });
         assert_eq!(names, [PathBuf::from("log-0")]);
         let expected = Stored {
             hard: Hard::default(),
-            entries: vec![bytes(1, len)],
+            entries: vec![bytes(1, 10), bytes(2, len)],
         };
         assert_eq!(stored(&mut sim, &node), Ok(expected));
     }
