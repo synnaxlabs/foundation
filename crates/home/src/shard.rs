@@ -2164,6 +2164,24 @@ mod tests {
         }
 
         #[test]
+        fn lists_no_index_for_a_live_frame_with_no_complete_reader() {
+            run(49, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                assert_eq!(shard.wake.pending, Vec::new());
+                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                write(&test, &mut shard, a, &[20]);
+                let place = shard.place(Slot::new(0));
+                assert_eq!(shard.wake.pending, [(Slot::new(0), place)]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
         fn gives_a_complete_reader_a_frame_on_disk_with_no_commit_future() {
             run(39, |test| async move {
                 let set = two_indexes();

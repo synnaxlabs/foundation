@@ -253,14 +253,14 @@ impl Readers {
 
     /// Queues `frame`, stored on the live path with the samples `seq`, for the
     /// complete sessions. [`Readers::release`] gives it to them once it is on disk.
-    /// Keeps nothing when no complete session is open. A frame with no samples
-    /// reaches no session.
+    /// Returns whether it kept the frame: `false` when no complete session is open
+    /// or the frame has no samples, so a release has nothing to give.
     ///
     /// # Panics
     ///
     /// If `seq` ends before it starts, or starts below the end of an earlier live
     /// frame or below the `live` given to [`Readers::new`] or [`Readers::restore`].
-    pub fn queue(&mut self, frame: &Frame, seq: Range<u64>) {
+    pub fn queue(&mut self, frame: &Frame, seq: Range<u64>) -> bool {
         assert!(
             seq.start <= seq.end,
             "live frame at seq {}..{} ends before it starts",
@@ -276,13 +276,14 @@ impl Readers {
         );
         self.queued = seq.end;
         if seq.is_empty() {
-            return;
+            return false;
         }
         if self.complete.is_empty() {
             self.released = seq.end;
-        } else {
-            self.queue.push_back((frame.clone(), seq));
+            return false;
         }
+        self.queue.push_back((frame.clone(), seq));
+        true
     }
 
     /// Gives each queued frame that ends at or below `durable`, the first live seq not
@@ -1223,6 +1224,18 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn keeps_a_frame_only_with_a_complete_session_open() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            assert!(!readers.queue(&frames.frame(1), 0..2));
+            let key = opened(&mut readers, 2, 10);
+            assert!(readers.queue(&frames.frame(2), 2..4));
+            assert!(!readers.queue(&frames.frame(3), 4..4));
+            assert_eq!(released(&mut readers, 4), [key]);
+            assert_eq!(taken(&mut readers, key), [2]);
+        }
+
+        #[test]
         fn gives_only_frames_on_disk() {
             let frames = Frames::new(2);
             let mut readers = Readers::new(0);
@@ -1970,9 +1983,12 @@ pub(super) mod tests {
                 self.open.get_mut(&key).expect("the session is open")
             }
 
-            fn queue(&mut self, n: u64, seq: Range<u64>) {
+            /// Queues frame `n` and returns whether a release can give it.
+            fn queue(&mut self, n: u64, seq: Range<u64>) -> bool {
                 let held = !self.open.is_empty();
+                let kept = held && !seq.is_empty();
                 self.queued.push(Queued { n, seq, held });
+                kept
             }
 
             fn close(&mut self, key: Key) {
@@ -2095,8 +2111,8 @@ pub(super) mod tests {
                         made += 1;
                         let seq = end + gap..end + gap + len;
                         end = seq.end;
-                        readers.queue(&frames.frame(made), seq.clone());
-                        model.queue(made, seq);
+                        let kept = readers.queue(&frames.frame(made), seq.clone());
+                        assert_eq!(kept, model.queue(made, seq));
                     }
                     Live::Release(back) => {
                         let durable = end.saturating_sub(back);
