@@ -63,8 +63,8 @@ impl Wall {
 
     /// Reads the OS clock between two readings of the monotonic clock. The error is
     /// the OS bound plus half the time between the readings, grown by drift. With no
-    /// OS bound, or an error over 36500 days, the measurement is unknown
-    /// ([`Measurement::unknown`]).
+    /// OS bound, an edge of the bound past the range of a stamp, or an error of 36500
+    /// days or more, the measurement is unknown ([`Measurement::unknown`]).
     ///
     /// # Panics
     ///
@@ -75,39 +75,32 @@ impl Wall {
         #[expect(clippy::disallowed_methods, reason = "clock reads the OS clock")]
         let os = self.os.now();
         let returned = self.monotonic.now();
-        let bound = os.error.inspect(|&bound| {
+        let edges = os.error.and_then(|bound| {
             assert!(
                 bound >= Span::ZERO,
                 "invariant: the OS error bound {bound} is negative"
             );
+            Some(Interval {
+                earliest: os.time.checked_sub(bound)?,
+                latest: os.time.checked_add(bound)?,
+            })
         });
-        let instant = Interval {
-            earliest: os.time,
-            latest: os.time,
-        };
         let exchange = Exchange {
             sent,
-            reading: match bound {
-                Some(_) => Reading::Known {
-                    received: instant,
-                    answered: instant,
+            reading: match edges {
+                Some(edges) => Reading::Known {
+                    received: edges,
+                    answered: edges,
                 },
                 None => Reading::Unknown(os.time),
             },
             returned,
         };
-        // The OS reading is one instant, so only a clock that goes back allows no
+        // Both readings are one interval, so only a clock that goes back allows no
         // offset.
-        let Some(read) = exchange.measure(DRIFT) else {
+        exchange.measure(DRIFT).unwrap_or_else(|| {
             panic!("invariant: the monotonic clock went from {sent:?} to {returned:?}")
-        };
-        let Some(bound) = bound else {
-            return read;
-        };
-        let error =
-            Span::from_nanos(read.error().nanos().saturating_add(bound.nanos()));
-        Measurement::new(read.at(), read.offset(), error)
-            .unwrap_or(Measurement::unknown(read.at(), read.offset()))
+        })
     }
 }
 
@@ -201,6 +194,18 @@ mod tests {
             assert_eq!(m.error(), Span::DAY);
             let m = measure_at(Stamp::from_nanos(wall), Some(days(40_000)));
             assert_eq!(m.error(), UNKNOWN);
+        }
+    }
+
+    #[test]
+    fn is_unknown_when_an_edge_of_the_os_bound_passes_the_stamps() {
+        let monotonic = i64::try_from(at().0).expect("one hour fits");
+        for wall in [i64::MAX - Span::DAY.nanos(), i64::MIN + Span::DAY.nanos()] {
+            let past = Span::from_nanos(Span::DAY.nanos() + 1);
+            let m = measure_at(Stamp::from_nanos(wall), Some(past));
+            let offset = Span::from_nanos(wall - monotonic);
+            assert_eq!(m, Measurement::unknown(at(), offset));
+            assert_eq!(m, measure_at(Stamp::from_nanos(wall), None));
         }
     }
 
@@ -310,14 +315,18 @@ mod tests {
                 wall_error: error.map(Span::from_nanos),
                 ..node::Config::default()
             });
-            // Only the low end of a span can cut the offset, and the error covers the
-            // cut.
+            // An edge of the bound past the stamps gives unknown. Only the low end of a
+            // span can cut the offset, and the error covers the cut.
             let at = Monotonic(monotonic);
             let exact = i128::from(wall) - i128::from(monotonic);
             let offset = i64::try_from(exact).unwrap_or(i64::MIN);
             let cut = i128::from(offset) - exact;
             let offset = Span::from_nanos(offset);
+            let fits = |&error: &i64| {
+                wall.checked_sub(error).is_some() && wall.checked_add(error).is_some()
+            };
             let expected = error
+                .filter(fits)
                 .and_then(|error| i64::try_from(i128::from(error) + cut).ok())
                 .and_then(|error| Measurement::new(at, offset, Span::from_nanos(error)))
                 .unwrap_or(Measurement::unknown(at, offset));
