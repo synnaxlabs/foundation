@@ -204,8 +204,7 @@ fn refuses_an_included_pattern_that_starts_with_a_bang() {
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        "the patterns at byte 2 do not read: \"!a\" has a segment that is not valid: \
-         \"!a\""
+        "the patterns at byte 2 do not read: a segment is not valid: \"!a\" in \"!a\""
     );
 }
 
@@ -222,8 +221,7 @@ fn refuses_an_excluded_pattern_that_starts_with_a_bang() {
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        "the patterns at byte 20 do not read: \"!!c\" has a segment that is not valid: \
-         \"!c\""
+        "the patterns at byte 20 do not read: a segment is not valid: \"!c\" in \"!!c\""
     );
 }
 
