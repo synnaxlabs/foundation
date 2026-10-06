@@ -36,26 +36,46 @@ pub struct Frame<'a> {
 /// # Errors
 ///
 /// As [`Request::encode`]. `out` is unchanged then.
-///
-/// # Panics
-///
-/// Only on a bug in this crate: a checked PDU longer than 253 bytes.
 pub fn encode(
     header: Header,
     request: &Request,
     out: &mut Vec<u8>,
 ) -> Result<(), Error> {
-    let length = request
-        .size()?
+    request.size()?;
+    let start = open(header, out);
+    request.write_to(out);
+    seal(out, start);
+    Ok(())
+}
+
+/// Appends the MBAP header of a frame, with its length left to [`seal`], and gives
+/// where the frame starts in `out`.
+fn open(header: Header, out: &mut Vec<u8>) -> usize {
+    let start = out.len();
+    out.extend_from_slice(&header.transaction.to_be_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0, header.unit]);
+    start
+}
+
+/// Fills in the length of the frame that starts at `start` in `out` and runs to its
+/// end.
+///
+/// # Panics
+///
+/// Only on a bug in this crate: no header at `start`, or a PDU longer than 253
+/// bytes.
+fn seal(out: &mut [u8], start: usize) {
+    let (head, pdu) = out
+        .get_mut(start..)
+        .and_then(|frame| frame.split_first_chunk_mut::<HEADER>())
+        .expect("invariant: `open` wrote a header at `start`");
+    let length = pdu
+        .len()
         .checked_add(1)
         .and_then(|n| u16::try_from(n).ok())
-        .expect("invariant: a checked PDU is at most 253 bytes");
-    out.extend_from_slice(&header.transaction.to_be_bytes());
-    out.extend_from_slice(&[0, 0]);
-    out.extend_from_slice(&length.to_be_bytes());
-    out.push(header.unit);
-    request.write_to(out);
-    Ok(())
+        .expect("invariant: a PDU is at most 253 bytes");
+    let [_, _, _, _, high, low, _] = head;
+    [*high, *low] = length.to_be_bytes();
 }
 
 /// Reads the first frame in `bytes`, or `None` when `bytes` holds less than one

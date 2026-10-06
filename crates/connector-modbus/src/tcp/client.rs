@@ -70,7 +70,7 @@ impl Client {
     ///   stream failed, ended, or is out of step. The client is no use then.
     #[expect(
         clippy::missing_panics_doc,
-        reason = "the second decode gives the whole frame the first found"
+        reason = "receive gives the length of a whole frame it found"
     )]
     pub async fn exchange(
         &mut self,
@@ -88,19 +88,14 @@ impl Client {
         // A timeout past the end of the clock never ends.
         let deadline = self.clock.now().checked_add(self.timeout);
         self.send(deadline).await?;
-        self.receive(header.transaction, deadline).await?;
-        let frame = super::decode(&self.received)
-            .ok()
-            .flatten()
-            .expect("invariant: receive leaves a whole frame at the front");
-        self.given = frame.len;
-        if frame.header.unit != unit {
-            return Err(Failure::Unit {
-                want: unit,
-                got: frame.header.unit,
-            });
+        let (got, len) = self.receive(header.transaction, deadline).await?;
+        self.given = len;
+        if got != unit {
+            return Err(Failure::Unit { want: unit, got });
         }
-        Ok(request.decode_reply(frame.pdu)?)
+        let pdu = self.received.get(super::HEADER..len);
+        let pdu = pdu.expect("invariant: receive found a whole frame");
+        request.decode_reply(pdu).map_err(Failure::Frame)
     }
 
     /// Sends the bytes in `unsent`.
@@ -117,16 +112,18 @@ impl Client {
     }
 
     /// Reads until a whole reply to `transaction` is at the front of `received`, and
-    /// drops the replies to other requests before it.
+    /// gives its unit and length. It drops the replies to other requests before it.
     async fn receive(
         &mut self,
         transaction: u16,
         deadline: Option<Monotonic>,
-    ) -> Result<(), Failure> {
+    ) -> Result<(u8, usize), Failure> {
         let mut buffer = [0; 260];
         loop {
             match super::decode(&self.received).map_err(Failure::Stream)? {
-                Some(frame) if frame.header.transaction == transaction => return Ok(()),
+                Some(frame) if frame.header.transaction == transaction => {
+                    return Ok((frame.header.unit, frame.len));
+                }
                 Some(frame) => {
                     let len = frame.len;
                     self.received.drain(..len);
@@ -174,12 +171,6 @@ pub enum Failure {
 impl From<net::Error> for Failure {
     fn from(error: net::Error) -> Self {
         Self::Net(error)
-    }
-}
-
-impl From<Error> for Failure {
-    fn from(error: Error) -> Self {
-        Self::Frame(error)
     }
 }
 
