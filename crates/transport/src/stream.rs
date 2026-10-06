@@ -76,8 +76,9 @@ impl Sender {
     /// carrier leave no room for it within the peer's
     /// [`Config::window_bytes`](crate::Config::window_bytes), a stream of its class
     /// or a higher class waits for that room or for the carrier to take more, or the
-    /// stream still holds part of an earlier message. Like [`send`](Self::send), it returns once the stream holds
-    /// the message, not when the peer has it. It never resets the stream.
+    /// stream still holds part of an earlier message. Like [`send`](Self::send), it
+    /// returns once the stream holds the message, not when the peer has it. It never
+    /// resets the stream.
     ///
     /// # Errors
     ///

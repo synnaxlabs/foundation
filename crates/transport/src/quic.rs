@@ -315,9 +315,9 @@ impl Endpoint {
     /// can take it now. Else gives it back with nothing of it sent: when `sender`
     /// still holds part of an earlier message after a flush, when the send budget
     /// has no room for it or a stream of its class or a higher class waits for room
-    /// or its turn, or when the connection ended. The stream does not wait for room for a message
-    /// it gives back. Once taken, `sender` may hold the rest of it: call
-    /// [`Endpoint::flush`] after [`Event::Writable`].
+    /// or its turn, or when the connection ended. The stream does not wait for room
+    /// for a message it gives back. Once taken, `sender` may hold the rest of it:
+    /// call [`Endpoint::flush`] after [`Event::Writable`].
     ///
     /// # Errors
     ///
