@@ -10,7 +10,7 @@ mod shards;
 mod tcp;
 
 use std::collections::BTreeSet;
-use std::future::pending;
+use std::future::{Ready, pending};
 use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
@@ -932,6 +932,85 @@ fn two_panics_in_drops_of_unstarted_threads_at_a_crash_give_one_panic() {
     assert_eq!(crash_panic(&mut sim, &node, crate::Crash::Process), message);
     drop(handles);
     assert_restarts(&mut sim, &node);
+}
+
+/// Panics in its drop with a [`Bomb`] as the payload.
+struct Thrower;
+
+impl Drop for Thrower {
+    fn drop(&mut self) {
+        panic::panic_any(Bomb("bomb"));
+    }
+}
+
+/// A panic payload whose drop panics with another one, forever.
+struct Relay;
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        panic::panic_any(Relay);
+    }
+}
+
+/// The message of a panic with a [`Bomb`] as the payload.
+const THROWN: &str = "a payload that is not a string, then a drop panicked: bomb";
+
+#[test]
+fn a_poll_whose_payload_panics_in_its_drop_gives_both_panics() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let handle = node.shards().start(shard("shard-0"), |_| async {
+        panic::panic_any(Bomb("bomb"));
+    });
+    assert_panicked(&mut sim, handle.unwrap(), THROWN);
+}
+
+#[test]
+fn a_body_whose_payload_panics_in_its_drop_gives_both_panics() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let handle = (node.threads())
+        .start("body", || -> Ready<()> { panic::panic_any(Bomb("bomb")) });
+    assert_eq!(sim.run(), Err(panicked("body", THROWN)));
+    let panicked = thread::Panicked {
+        name: "body".into(),
+    };
+    assert_eq!(handle.unwrap().join(), Err(panicked));
+}
+
+#[test]
+fn a_drop_whose_payload_panics_in_its_drop_gives_both_panics() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let handle = node.shards().start(shard("shard-0"), |tasks| async move {
+        spawn_holding(&tasks, Thrower);
+    });
+    assert_panicked(&mut sim, handle.unwrap(), THROWN);
+}
+
+#[test]
+fn a_drop_at_a_crash_whose_payload_panics_in_its_drop_panics_with_both() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let _handle = node.shards().start(shard("shard-0"), |tasks| async move {
+        spawn_holding(&tasks, Thrower);
+        pending::<()>().await;
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(crash_panic(&mut sim, &node, crate::Crash::Process), THROWN);
+    assert_restarts(&mut sim, &node);
+}
+
+#[test]
+fn a_payload_whose_drop_always_panics_ends_the_run_after_the_chain() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let handle = node.shards().start(shard("shard-0"), |_| async {
+        panic::panic_any(Relay);
+    });
+    let chain = ["a payload that is not a string"; crate::CHAIN];
+    let message = chain.join(", then a drop panicked: ");
+    assert_panicked(&mut sim, handle.unwrap(), &message);
 }
 
 /// Spawns on `tasks` a task that holds `value` and waits forever.

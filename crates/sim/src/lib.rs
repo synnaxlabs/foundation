@@ -28,6 +28,7 @@ mod tests;
 use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
+use std::mem;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
@@ -376,7 +377,7 @@ impl Sim {
             self.drop_ended(done)
         }));
         lock(&self.shared).release();
-        let mut panics = run.unwrap_or_else(|payload| vec![message(&*payload)]);
+        let mut panics = run.unwrap_or_else(messages);
         if panics.is_empty() {
             return Ok(());
         }
@@ -457,16 +458,19 @@ impl Sim {
 }
 
 /// Drops each item on its own, as a second panic in one unwind aborts the process.
-/// Returns the message of each drop that panicked, in order.
+/// Returns the [`messages`] of each drop that panicked, in order.
 fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
     (items.into_iter())
         .filter_map(|item| panic::catch_unwind(AssertUnwindSafe(|| drop(item))).err())
-        .map(|payload| message(&*payload))
+        .flat_map(messages)
         .collect()
 }
 
 /// The Linux code for an I/O error (`EIO`), which a fault of a file or a port gives.
 const EIO: i32 = 5;
+
+/// The most payloads that [`messages`] reads in one chain.
+const CHAIN: usize = 16;
 
 /// What joins the messages of two panics.
 const THEN: &str = ", then a drop panicked: ";
@@ -480,6 +484,24 @@ fn message(payload: &(dyn Any + Send)) -> String {
     } else {
         "a payload that is not a string".to_owned()
     }
+}
+
+/// The message of `payload`, then of each panic in the drop of the payload before
+/// it, up to [`CHAIN`] payloads. Each drop is caught. A payload past them is
+/// forgotten, so that a drop that always panics cannot hang the run.
+fn messages(payload: Box<dyn Any + Send>) -> Vec<String> {
+    let mut messages = Vec::new();
+    let mut next = Some(payload);
+    for _ in 0..CHAIN {
+        let Some(payload) = next else {
+            return messages;
+        };
+        messages.push(message(&*payload));
+        next = panic::catch_unwind(AssertUnwindSafe(|| drop(payload))).err();
+    }
+    #[expect(clippy::mem_forget, reason = "its drop may panic again")]
+    mem::forget(next);
+    messages
 }
 
 impl Drop for Sim {
@@ -540,8 +562,9 @@ pub enum Error {
     Panicked {
         /// The thread's name.
         thread: String,
-        /// The panic message. When drops of the thread's futures panic after it, the
-        /// message of each follows, after ", then a drop panicked: ".
+        /// The panic message. When drops of the thread's futures or of a panic
+        /// payload panic after it, the message of each follows, after ", then a drop
+        /// panicked: ".
         message: String,
         /// The seed that replays the run.
         seed: u64,
