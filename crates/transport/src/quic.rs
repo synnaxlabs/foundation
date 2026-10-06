@@ -265,7 +265,7 @@ impl Endpoint {
         key: connection::Key,
         class: Class,
     ) -> Option<(Sender, Receiver)> {
-        let stream = self.start(now, key, Dir::Bi)?;
+        let stream = self.start(now, key, Dir::Bi, class)?;
         let receiver = Receiver::new(stream, class, self.message_bytes_max);
         Some((Sender::new(stream, class), receiver))
     }
@@ -277,7 +277,7 @@ impl Endpoint {
         key: connection::Key,
         class: Class,
     ) -> Option<Sender> {
-        let stream = self.start(now, key, Dir::Uni)?;
+        let stream = self.start(now, key, Dir::Uni, class)?;
         Some(Sender::new(stream, class))
     }
 
@@ -286,7 +286,10 @@ impl Endpoint {
     /// connection ended.
     pub(crate) fn accept(&mut self, key: connection::Key) -> Option<Incoming> {
         let connection = find(&mut self.connections, key).filter(|c| c.live())?;
-        connection.streams.accept(key, self.message_bytes_max)
+        let inner = &mut connection.inner;
+        connection
+            .streams
+            .accept(inner, key, self.message_bytes_max)
     }
 
     /// Puts `message` on the stream after the messages before it. `Ready` when the
@@ -489,15 +492,16 @@ impl Endpoint {
         self.epoch + Duration::from_nanos(now.0)
     }
 
-    /// Opens a stream in `dir` on the connection of `key`, unless it ended.
+    /// Opens a stream of `class` in `dir` on the connection of `key`, unless it ended.
     fn start(
         &mut self,
         now: Monotonic,
         key: connection::Key,
         dir: Dir,
+        class: Class,
     ) -> Option<stream::Key> {
         let connection = find(&mut self.connections, key).filter(|c| c.live())?;
-        let id = connection.streams.open(&mut connection.inner, dir);
+        let id = connection.streams.open(&mut connection.inner, dir, class);
         self.drive(key.handle, self.instant(now));
         Some(stream::Key {
             connection: key,

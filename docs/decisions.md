@@ -830,7 +830,9 @@ How to read this record:
   first message. A stream that ends or resets before its class byte drops: the peer
   never accepts it, and resets the reply half of a two-way stream with code 0. Each
   message is a QUIC varint length, then that many bytes, at most `message_bytes_max`. A
-  node accepts the waiting streams highest class first. A node resets a stream with the
+  node accepts the waiting streams highest class first. Each stream sends at the QUIC
+  priority of its class, `Command` first, and streams of one class share in turn. The
+  mapping is a parameter for experiment (5.3) (#55). A node resets a stream with the
   stop's code when the stop arrives. A peer breaks the protocol when it sends another
   class byte, ends a stream inside a message, sends a message over the limit, or resets
   or stops a stream with a code over 32 bits. The node then closes the connection with

@@ -418,13 +418,17 @@ impl Streams {
         }
     }
 
-    /// Opens a stream of `inner` in `dir`. `None` when the peer allows no more now.
+    /// Opens a stream of `class` of `inner` in `dir`. `None` when the peer allows no
+    /// more now.
     pub(super) fn open(
         &mut self,
         inner: &mut noq_proto::Connection,
         dir: Dir,
+        class: Class,
     ) -> Option<StreamId> {
         let id = inner.streams().open(dir)?;
+        let prioritized = inner.send_stream(id).set_priority(priority(class));
+        prioritized.expect("invariant: a stream that opens has a send half");
         self.senders.push((id, None));
         Some(id)
     }
@@ -436,6 +440,7 @@ impl Streams {
     )]
     pub(super) fn accept(
         &mut self,
+        inner: &mut noq_proto::Connection,
         connection: connection::Key,
         bytes_max: usize,
     ) -> Option<Incoming> {
@@ -444,10 +449,18 @@ impl Streams {
             .find_map(|(byte, queue)| Some((byte, queue.pop_front()?)))?;
         let key = Key { connection, id };
         let class = class(byte).expect("invariant: a queued stream has a class byte");
+        let sender = (id.dir() == Dir::Bi).then(|| {
+            // A stop resets the reply half at once, and noq-proto frees it once the
+            // peer has the reset. Its first write then gives `Stopped`.
+            match inner.send_stream(id).set_priority(priority(class)) {
+                Ok(()) | Err(ClosedStream { .. }) => {}
+            }
+            Sender::reply(key, class)
+        });
         Some(Incoming {
             class,
             receiver: Receiver::new(key, class, bytes_max),
-            sender: (id.dir() == Dir::Bi).then(|| Sender::reply(key, class)),
+            sender,
         })
     }
 
@@ -753,6 +766,13 @@ fn byte(class: Class) -> u8 {
         Class::Complete => 2,
         Class::CatchUp => 3,
     }
+}
+
+/// The noq-proto priority of a stream of `class`. noq-proto sends a higher priority
+/// first, and 0, its default, is the lowest class.
+fn priority(class: Class) -> i32 {
+    let priority = Class::CatchUp.rank() - class.rank();
+    i32::try_from(priority).expect("invariant: four classes")
 }
 
 /// The class whose streams start with `byte`, if any.
@@ -2866,6 +2886,24 @@ mod tests {
             let receivers = vec![(Class::Command, receiver)];
             let whole = arrivals(&mut pair.server, &mut pair.client, now, receivers);
             assert_eq!(whole, [[Class::Command], [Class::Latest]]);
+        });
+    }
+
+    #[test]
+    fn a_reply_that_the_peer_stopped_before_the_accept_fails_the_first_write() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.client));
+            let opened = pair.client.endpoint.open(now, key, Class::Command);
+            let (mut sender, receiver) = opened.expect("a stream");
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.client.endpoint.stop(now, receiver, Code(9));
+            pair.run(RUN);
+            let incoming = accept(&mut pair.server);
+            let mut reply = incoming.sender.expect("a two-way stream");
+            let (now, message) = (pair.now(), shard.block(b"b"));
+            let written = pair.server.endpoint.write(now, &mut reply, message);
+            assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
         });
     }
 
