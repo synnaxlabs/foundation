@@ -175,6 +175,7 @@ const PARENTHESES: Code = Code::new("hcl.parentheses");
 const NAMESPACE: Code = Code::new("hcl.namespace");
 const EXPANSION: Code = Code::new("hcl.expansion");
 const NUMBER_KEY: Code = Code::new("hcl.number-key");
+const EXPRESSION_KEY: Code = Code::new("hcl.expression-key");
 const NAME: Code = Code::new("hcl.name");
 const NUMBER: Code = Code::new("hcl.number");
 const ESCAPE: Code = Code::new("hcl.escape");
@@ -218,7 +219,8 @@ pub enum Form {
     /// A `for` expression, such as `[for x in xs : x]`. HCL reads a list or an object
     /// that starts with the word `for` as one, such as `[for]` or `{ for = 1 }`.
     For,
-    /// An index or an attribute access after a value, such as `a[0]` or `f().b`.
+    /// An index or an attribute access after a value, such as `a[0]`, `a.0`, or
+    /// `f().b`.
     Index,
     /// A splat, such as `a[*].b` or `a.*.b`.
     Splat,
@@ -231,6 +233,9 @@ pub enum Form {
     /// An object key that is a number HCL rounds: one with a fraction or an exponent,
     /// or an integer of more than 154 digits, such as `{ 1.5 = 1 }`.
     NumberKey,
+    /// An object key that is an expression, such as `{ f() = 1 }`, which HCL
+    /// evaluates.
+    ExpressionKey,
 }
 
 impl Form {
@@ -293,6 +298,11 @@ impl Form {
                  digits do not exist in Foundation files",
                 "Write the key as a quoted string",
             ),
+            Self::ExpressionKey => (
+                EXPRESSION_KEY,
+                "an object key here is an expression",
+                "Write the key as a name or a quoted string",
+            ),
         };
         Diagnostic::new(code, Some(span), message.into(), fix.into())
     }
@@ -337,8 +347,9 @@ pub enum Unwritable {
     Keyword,
     /// A function name that is not an identifier.
     Function,
-    /// A name that HCL does not read as a reference, such as `true`, `null`, `7a`, or
-    /// `-a`.
+    /// A name that HCL does not read as a reference: a segment does not start with a
+    /// letter or `_`, or the first segment is `true`, `false`, or `null`, such as
+    /// `a.7b`, `site_a.@changes`, or `true.x`.
     Reference,
     /// A list whose first item starts with the word `for`, such as the reference `for`
     /// or `for.x`, or the call `for(1)`. HCL reads `[for` as a `for` expression.
@@ -369,8 +380,8 @@ impl Unwritable {
             Self::Reference => (
                 UNWRITABLE_REFERENCE,
                 "the name does not read as a reference in HCL",
-                "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, \
-                 or `null`",
+                "Start each segment with a letter or `_`, and do not make `true`, \
+                 `false`, or `null` the first segment",
             ),
             Self::For => (
                 UNWRITABLE_FOR,
@@ -399,7 +410,7 @@ pub enum Expected {
     BlockEnd,
     /// A value.
     Value,
-    /// A new line after an attribute or a block.
+    /// A new line after an attribute, a block, or the marker that ends a heredoc.
     Newline,
     /// `,` or `]` in a list.
     ListEnd,
@@ -583,7 +594,7 @@ mod tests {
         }
     }
 
-    const FORMS: [(Form, &str, &str, &str); 11] = [
+    const FORMS: [(Form, &str, &str, &str); 12] = [
         (
             Form::Null,
             "hcl.null",
@@ -652,6 +663,12 @@ mod tests {
              not exist in Foundation files",
             "Write the key as a quoted string",
         ),
+        (
+            Form::ExpressionKey,
+            "hcl.expression-key",
+            "an object key here is an expression",
+            "Write the key as a name or a quoted string",
+        ),
     ];
 
     #[test]
@@ -669,7 +686,8 @@ mod tests {
                 | Form::Parentheses
                 | Form::Namespace
                 | Form::Expansion
-                | Form::NumberKey => {}
+                | Form::NumberKey
+                | Form::ExpressionKey => {}
             }
             let error = Error::Form {
                 span: span(7),
@@ -764,8 +782,8 @@ mod tests {
             Unwritable::Reference,
             "hcl.unwritable-reference",
             "the name does not read as a reference in HCL",
-            "Start it with a letter, `_`, or `@`, and do not use `true`, `false`, or \
-             `null`",
+            "Start each segment with a letter or `_`, and do not make `true`, \
+             `false`, or `null` the first segment",
         ),
         (
             Unwritable::For,

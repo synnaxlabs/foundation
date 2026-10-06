@@ -48,6 +48,7 @@ for-namespace refused
 for-nested refused
 for-object accepted hcl.for
 for-quoted-key accepted
+heredoc-closer-at-end refused
 heredoc-indented-written accepted
 heredoc-indented accepted
 heredoc accepted
@@ -79,6 +80,8 @@ number-dot-exponent accepted
 number-dots refused
 number-expansion accepted hcl.expansion
 number-exponent-i64 accepted
+number-exponent-long-written accepted
+number-exponent-long accepted
 number-exponent-past-i64 refused
 number-exponent-twice refused
 number-key-binary-exponent-past-i32 refused
@@ -88,32 +91,56 @@ number-malformed refused
 number-zero-written accepted
 object-bool-key-string-written accepted
 object-bool-key-string accepted
+object-call-key accepted hcl.expression-key
 object-colon accepted
 object-duplicate-key accepted
+object-fraction-operator-key accepted hcl.expression-key hcl.operator
+object-heredoc-key refused
+object-index-key accepted hcl.expression-key hcl.index
 object-integer-key-154-written accepted
 object-integer-key-154 accepted
 object-key-155-digits accepted
 object-key-leading-zeros accepted
+object-key-traversal accepted hcl.expression-key
 object-keyword-keys-written accepted
 object-keyword-keys accepted
 object-lines accepted
+object-list-key accepted hcl.expression-key
 object-long-integer-key accepted hcl.number-key
 object-negative-fraction-key accepted hcl.number-key
 object-negative-key-written accepted
 object-negative-key accepted
+object-not-key accepted hcl.expression-key hcl.operator
 object-null-key-parentheses accepted hcl.null hcl.parentheses
 object-number-key-written accepted
 object-number-key accepted
+object-object-key accepted hcl.expression-key
 object-one-line accepted
+object-operator-key accepted hcl.expression-key hcl.operator
 object-parentheses-key accepted hcl.parentheses
+object-string-call-key refused
 object-template-key accepted hcl.template
 object-template-wrap-key accepted hcl.template
+object-two-names-key refused
 object-written accepted
 object accepted
 operator-negate-reference accepted hcl.operator
 operator-not accepted hcl.operator
 operator accepted hcl.operator
 parentheses accepted hcl.parentheses
+reference-at-start refused
+reference-bracket-lines-written accepted
+reference-bracket-lines accepted
+reference-digit-part refused
+reference-dot-end refused
+reference-keyword-first accepted hcl.index
+reference-keyword-parts accepted
+reference-line-before-dot refused
+reference-null-first accepted hcl.index hcl.null
+reference-number-part accepted hcl.index
+reference-reserved refused
+reference-spaces-written accepted
+reference-spaces accepted
 reference-unicode accepted
 reference accepted
 splat-attribute accepted hcl.splat

@@ -16,7 +16,7 @@
 
 use std::{iter, mem};
 
-use crate::{Error, Layout, bits, word};
+use crate::{Error, Layout, VECTOR_LEN, bits, word};
 
 pub(crate) const RAW: u8 = 0;
 pub(crate) const FFOR: u8 = 1;
@@ -201,14 +201,22 @@ pub(crate) struct Vector<'a> {
     body: &'a [u8],
 }
 
-/// Reads vector `index` of a series, which holds `count` samples, from the front of
-/// `bytes`. Returns it and the bytes after it.
+/// Reads vector `index` of a series from the front of `bytes`. The vector holds `count`
+/// samples. Returns it and the bytes after it.
+///
+/// # Panics
+///
+/// Panics when `count` is over [`VECTOR_LEN`].
 pub(crate) fn read(
     bytes: &[u8],
     layout: Layout,
     count: usize,
     index: usize,
 ) -> Result<(Vector<'_>, &[u8]), Error> {
+    assert!(
+        count <= VECTOR_LEN,
+        "invariant: vector {index} holds {count} samples, over {VECTOR_LEN}"
+    );
     let width = layout.width();
     let plan = header(bytes, layout, index)?;
     let len = plan.len(count, width);
@@ -349,5 +357,18 @@ impl Vector<'_> {
             "invariant: raw layouts read only raw vectors"
         );
         out.copy_from_slice(self.body);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use types::sample::Scalar;
+
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "invariant: vector 2 holds 1025 samples, over 1024")]
+    fn panics_past_one_vector() {
+        let _result = read(&[RAW, 0], Layout::of(Scalar::U8), VECTOR_LEN + 1, 2);
     }
 }

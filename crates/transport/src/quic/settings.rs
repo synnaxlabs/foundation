@@ -32,11 +32,19 @@ pub(super) const MTU_MIN: u16 = 1200;
 
 /// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
 /// node takes.
-const PAYLOAD_IPV4: u16 = 1472;
+pub(super) const PAYLOAD_IPV4: u16 = 1472;
 
 /// Ethernet's 1500 bytes less the IPv6 and UDP headers: the largest datagram MTU
 /// discovery tries, so it fits both IP versions.
 const PAYLOAD_IPV6: u16 = 1452;
+
+/// The most bytes of QUIC datagrams that wait to be sent on one connection. When a
+/// new one does not fit, the oldest drops.
+const DATAGRAM_QUEUE_BYTES_MAX: usize = 64 << 10;
+const _: () = assert!(
+    DATAGRAM_QUEUE_BYTES_MAX >= PAYLOAD_IPV4 as usize,
+    "noq-proto refuses a datagram over the queue, so it must hold the path's largest"
+);
 
 /// What each dial from one shard needs.
 pub(super) struct Settings {
@@ -110,9 +118,8 @@ fn endpoint(config: &Config, shard: u8) -> EndpointConfig {
         .rng_seed(Some(rng))
         .supported_versions(VERSIONS.to_vec())
         .grease_quic_bit(true)
-        // A reset answers only an ID this node issued, and is smaller than the
-        // datagram that caused it, so it needs no rate limit. One shared limit lets
-        // one address take every reset.
+        // `Endpoint` limits resets for each address: one shared limit lets one
+        // address take every reset.
         .min_reset_interval(Duration::ZERO);
     endpoint
 }
@@ -173,7 +180,8 @@ fn transport(config: &Config) -> TransportConfig {
         .max_outgoing_bytes_per_second(None)
         .crypto_buffer_size(16 << 10)
         .allow_spin(false)
-        .datagram_receive_buffer_size(None)
+        .datagram_receive_buffer_size(Some(config.message_bytes_max.get()))
+        .datagram_send_buffer_size(DATAGRAM_QUEUE_BYTES_MAX)
         .max_concurrent_multipath_paths(0)
         .max_remote_nat_traversal_addresses(0)
         .server_handshake_migration(false)
@@ -227,7 +235,7 @@ impl TimeSource for Epoch {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use std::num::NonZeroUsize;
     use std::task::Poll;
@@ -666,8 +674,71 @@ mod tests {
         const ROUND_TRIP: Duration = Duration::from_millis(125);
     }
 
+    mod datagrams {
+        use super::*;
+
+        #[test]
+        fn to_a_peer_that_takes_none_are_too_large_at_any_size() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let client = &mut pair.client.endpoint.settings.transport;
+                Arc::make_mut(client).datagram_receive_buffer_size(None);
+                pair.dial(tls::public(&testing::SERVER_KEY));
+                pair.run(Duration::from_millis(100));
+                let key = pair.server.key.expect("a connection");
+                let server = &mut pair.server.endpoint;
+                let mut datagrams = server.datagrams(key).expect("connected");
+                assert_eq!(datagrams.bytes_max(), 0);
+                for bytes in [0, 10] {
+                    let sent = datagrams.send(shard.block(&vec![1; bytes]));
+                    assert_eq!(
+                        sent,
+                        Err(Error::TooLarge {
+                            bytes,
+                            bytes_max: 0
+                        })
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn to_a_peer_that_takes_fewer_bytes_are_too_large_over_its_limit() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let client = &mut pair.client.endpoint.settings.transport;
+                Arc::make_mut(client).datagram_receive_buffer_size(Some(500));
+                pair.dial(tls::public(&testing::SERVER_KEY));
+                pair.run(Duration::from_millis(100));
+                let key = pair.server.key.expect("a connection");
+                let server = &mut pair.server.endpoint;
+                let mut datagrams = server.datagrams(key).expect("connected");
+                // The peer's limit less the frame header.
+                assert_eq!(datagrams.bytes_max(), 491);
+                let over = datagrams.send(shard.block(&[1; 492]));
+                let too_large = Error::TooLarge {
+                    bytes: 492,
+                    bytes_max: 491,
+                };
+                assert_eq!(over, Err(too_large));
+                datagrams.send(shard.block(&[2; 491])).expect("sent");
+                pair.run(Duration::from_millis(100));
+                let key = pair.client.key.expect("a connection");
+                let client = &mut pair.client.endpoint;
+                let mut datagrams = client.datagrams(key).expect("connected");
+                let arrived = datagrams.receive().map(|block| block.to_vec());
+                assert_eq!(arrived, Some(vec![2; 491]));
+            });
+        }
+    }
+
     mod restart {
         use super::*;
+        use crate::quic::stateless::WINDOW;
+
+        /// An address on another host than [`testing::CLIENT`].
+        const OTHER: SocketAddr =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9)), 9);
 
         #[test]
         fn resets_the_old_connection_at_its_next_datagram() {
@@ -720,16 +791,95 @@ mod tests {
             assert_eq!(resets, 10);
         }
 
+        /// A 40-byte short header with the ID that the server issued to a dial with
+        /// a wrong key, and a new server endpoint with the same node key.
+        fn stranger(shard: &testing::Shard) -> (Vec<u8>, Endpoint) {
+            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+            pair.dial(tls::public(&PrivateKey([9; 32])));
+            pair.run(Duration::from_secs(5));
+            let (_, _, initial) = pair.server.sent.first().expect("a reply");
+            let (_, Some(issued)) = ids(initial) else {
+                panic!("not a long header");
+            };
+            let mut forged = [[0x40].as_slice(), issued].concat();
+            forged.resize(40, 0);
+            let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+            let endpoint = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
+            (forged, endpoint)
+        }
+
+        #[test]
+        fn sends_a_stranger_one_reset_for_many_ports_of_one_ip_at_once() {
+            let resets = testing::run(1, |shard| {
+                let (forged, mut endpoint) = stranger(shard);
+                let now = testing::at(Duration::from_millis(1));
+                (0..1_000u16)
+                    .filter(|port| {
+                        let victim =
+                            SocketAddr::new(testing::CLIENT.ip(), 1_000 + port);
+                        reply(&mut endpoint, now, victim, &forged).is_some()
+                    })
+                    .count()
+            });
+            assert_eq!(resets, 1);
+        }
+
+        #[test]
+        fn sends_a_stranger_fifty_resets_a_second_for_many_ports_of_one_ip() {
+            let resets = testing::run(1, |shard| {
+                let (forged, mut endpoint) = stranger(shard);
+                (0..1_000u16)
+                    .filter(|&ms| {
+                        let now = testing::at(Duration::from_millis(u64::from(ms)));
+                        let victim = SocketAddr::new(testing::CLIENT.ip(), 1_000 + ms);
+                        reply(&mut endpoint, now, victim, &forged).is_some()
+                    })
+                    .count()
+            });
+            assert_eq!(resets, 50);
+        }
+
         #[test]
         fn resets_a_stale_datagram_that_another_address_sent_at_the_same_time() {
             let resets = testing::run(1, |shard| {
                 let (stale, mut endpoint) = stale(shard);
-                let attacker = SocketAddr::new(testing::CLIENT.ip(), 9);
                 let now = testing::at(Duration::from_millis(1));
-                [attacker, testing::CLIENT]
+                [OTHER, testing::CLIENT]
                     .map(|source| reply(&mut endpoint, now, source, &stale).is_some())
             });
             assert_eq!(resets, [true, true]);
+        }
+
+        #[test]
+        fn resets_each_stale_datagram_while_another_address_sends_its_id() {
+            let resets = testing::run(1, |shard| {
+                let (stale, mut endpoint) = stale(shard);
+                let mut resets = 0;
+                for ms in 0..1_000 {
+                    let now = testing::at(Duration::from_millis(ms));
+                    reply(&mut endpoint, now, OTHER, &stale);
+                    if ms % 100 == 5 {
+                        let reset = reply(&mut endpoint, now, testing::CLIENT, &stale);
+                        resets += usize::from(reset.is_some());
+                    }
+                }
+                resets
+            });
+            assert_eq!(resets, 10);
+        }
+
+        #[test]
+        fn resets_one_address_again_after_a_window() {
+            let resets = testing::run(1, |shard| {
+                let (stale, mut endpoint) = stale(shard);
+                let (start, nano) = (Duration::from_millis(1), Duration::from_nanos(1));
+                let at = [start + nano, start + WINDOW, start + WINDOW + nano];
+                at.map(|at| {
+                    let now = testing::at(at);
+                    reply(&mut endpoint, now, testing::CLIENT, &stale).is_some()
+                })
+            });
+            assert_eq!(resets, [true, false, true]);
         }
 
         #[test]
