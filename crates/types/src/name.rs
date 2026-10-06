@@ -271,7 +271,8 @@ fn check_literal(input: &str, segment: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// A name, pattern, or selector that is not valid.
+/// A name, pattern, or selector that is not valid. `Display` gives the message: a
+/// lower-case clause with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The text of a name or pattern is empty.
@@ -298,28 +299,43 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// What to do instead: a sentence with no final period, the same for every error of
+    /// one variant.
+    #[must_use]
+    pub fn fix(&self) -> &'static str {
+        match self {
+            Self::Empty => "Write at least one segment",
+            Self::Long { .. } => "Use fewer or shorter segments",
+            Self::NoInclude => "Add a pattern without a leading `!`",
+            Self::Segment { .. } => {
+                "Use ASCII letters, digits, `_`, and `-` in each segment, and separate \
+                 segments with dots"
+            }
+            Self::Wildcard { .. } => {
+                "Use `*` and `**` only as whole segments of a pattern"
+            }
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("a name or pattern is empty"),
             Self::Long { bytes } => write!(
                 f,
-                "a name or pattern is {bytes} bytes long. The limit is {} bytes",
+                "a name or pattern is {bytes} bytes long, more than the limit of \
+                 {} bytes",
                 Name::MAX_BYTES
             ),
-            Self::NoInclude => f.write_str(
-                "a selector includes no names. Add a pattern without a leading `!`",
-            ),
-            Self::Segment { input, segment } => write!(
-                f,
-                "{input:?} has a segment that is not valid: {segment:?}. Use letters, \
-                 digits, `_`, and `-`, separated by dots"
-            ),
-            Self::Wildcard { input } => write!(
-                f,
-                "{input:?} uses a wildcard where it cannot. `*` and `**` must be whole \
-                 segments of a pattern"
-            ),
+            Self::NoInclude => f.write_str("a selector includes no names"),
+            Self::Segment { input, segment } => {
+                write!(f, "{input:?} has a segment that is not valid: {segment:?}")
+            }
+            Self::Wildcard { input } => {
+                write!(f, "{input:?} uses a wildcard where it cannot")
+            }
         }
     }
 }
@@ -374,6 +390,7 @@ mod tests {
         fn rejects_empty_text() {
             assert_eq!("".parse::<Name>(), Err(Error::Empty));
             assert_eq!(Error::Empty.to_string(), "a name or pattern is empty");
+            assert_eq!(Error::Empty.fix(), "Write at least one segment");
         }
 
         #[test]
@@ -384,10 +401,12 @@ mod tests {
                 format!("{text}c").parse::<Name>(),
                 Err(Error::Long { bytes: 256 })
             );
+            let error = Error::Long { bytes: 256 };
             assert_eq!(
-                Error::Long { bytes: 256 }.to_string(),
-                "a name or pattern is 256 bytes long. The limit is 255 bytes"
+                error.to_string(),
+                "a name or pattern is 256 bytes long, more than the limit of 255 bytes"
             );
+            assert_eq!(error.fix(), "Use fewer or shorter segments");
         }
 
         #[test]
@@ -412,10 +431,15 @@ mod tests {
 
         #[test]
         fn shows_the_segment_and_the_fix() {
+            let error = "a.b c".parse::<Name>().unwrap_err();
             assert_eq!(
-                "a.b c".parse::<Name>().unwrap_err().to_string(),
-                "\"a.b c\" has a segment that is not valid: \"b c\". Use letters, \
-                 digits, `_`, and `-`, separated by dots"
+                error.to_string(),
+                "\"a.b c\" has a segment that is not valid: \"b c\""
+            );
+            assert_eq!(
+                error.fix(),
+                "Use ASCII letters, digits, `_`, and `-` in each segment, and separate \
+                 segments with dots"
             );
         }
 
@@ -424,10 +448,11 @@ mod tests {
             for input in ["a.*", "a.**", "a*", "*", "a.b*c"] {
                 assert_eq!(input.parse::<Name>(), Err(wildcard_error(input)));
             }
+            let error = wildcard_error("a.*");
+            assert_eq!(error.to_string(), "\"a.*\" uses a wildcard where it cannot");
             assert_eq!(
-                wildcard_error("a.*").to_string(),
-                "\"a.*\" uses a wildcard where it cannot. `*` and `**` must be whole \
-                 segments of a pattern"
+                error.fix(),
+                "Use `*` and `**` only as whole segments of a pattern"
             );
         }
 
@@ -643,9 +668,10 @@ mod tests {
         fn rejects_no_includes() {
             assert_eq!(Selector::new([]), Err(Error::NoInclude));
             assert_eq!(Selector::new(["!a", "!b.**"]), Err(Error::NoInclude));
+            assert_eq!(Error::NoInclude.to_string(), "a selector includes no names");
             assert_eq!(
-                Error::NoInclude.to_string(),
-                "a selector includes no names. Add a pattern without a leading `!`"
+                Error::NoInclude.fix(),
+                "Add a pattern without a leading `!`"
             );
         }
 
@@ -657,6 +683,25 @@ mod tests {
             );
             assert_eq!(Selector::new(["a", "!b*"]), Err(wildcard_error("!b*")));
             assert_eq!(Selector::new(["a", "!"]), Err(segment_error("!", "")));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn every_error_is_a_clause_and_a_sentence_with_no_final_period(
+            text in "[a.*!@ ]{0,8}|a{256}",
+        ) {
+            let errors = [
+                text.parse::<Name>().err(),
+                text.parse::<Pattern>().err(),
+                Selector::new([text.as_str()]).err(),
+            ];
+            for error in errors.into_iter().flatten() {
+                let (message, fix) = (error.to_string(), error.fix());
+                prop_assert!(!message.starts_with(char::is_uppercase), "{message}");
+                prop_assert!(fix.starts_with(char::is_uppercase), "{fix}");
+                prop_assert!(!message.ends_with('.') && !fix.ends_with('.'));
+            }
         }
     }
 
