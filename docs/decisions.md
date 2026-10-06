@@ -1261,15 +1261,21 @@ How to read this record:
   (`plc["40001"]`, `site_a["@changes"]`). A first segment that does not start with a
   letter or `_`, or that is `true`, `false`, or `null`, has no reference form, and
   `write` refuses it with `Unwritable::Reference`. A file writes such a name as a string
-  where a kind takes a name. `export` and `discover` write such a name as a string on
-  their own and never surface `Unwritable::Reference`. This replaces the #363 ruling
-  that a file writes a reserved name only as a string. The advisor decided (names
-  delegation, 2026-10-05), #536. Lost: a reserved call `name("40001.x")`, which reserves
-  a function name and adds an error for names that a string already carries; it can be
-  added later without breaking a file. Lost: A3 segments that start with a letter or
-  `_`, which shrinks the name model to fit one file format. The person decided on
-  2026-10-05 ("a is fine"), #519. Lost: a new `Expected` variant for a name after `.`, a
-  public change when the error already names what may come at the `.`. #363.
+  where a kind takes a name: a kind reads a string or a reference as the same `Name`,
+  through one reader in `document::read` (#474). `export` and `discover` write every
+  name as a string (`"site_a.pt_1"`): they need no HCL rule, and a generated file reads
+  back as exactly the Document it came from. This replaces the #363 ruling that a file
+  writes a reserved name only as a string. The advisor decided (names and architecture
+  delegations, 2026-10-05), #536 and #701. Lost: a reserved call `name("40001.x")`,
+  which reserves a function name and adds an error for names that a string already
+  carries; it can be added later without breaking a file. Lost: bare names in generated
+  files, which changes only how a file looks. Lost: `export` and `discover` write only
+  such a name as a string, which copies HCL's identifier rule into `config` and layer 3.
+  Lost: `write` gives such a reference as a string, which reads back as a `String` and
+  changes the spec hash. Lost: A3 segments that start with a letter or `_`, which
+  shrinks the name model to fit one file format. The person decided on 2026-10-05 ("a is
+  fine"), #519. Lost: a new `Expected` variant for a name after `.`, a public change
+  when the error already names what may come at the `.`. #363.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -2495,7 +2501,7 @@ Parameters and later choices, recorded and not asked:
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, HCL
-  REFERENCES first segment (#536).
+  REFERENCES first segment (#536) and generated names as strings (#701).
 - Delivery and wire internals: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,

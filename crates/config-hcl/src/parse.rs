@@ -54,7 +54,7 @@ struct Parser<'a> {
     /// The next token, not yet taken.
     token: Token<'a>,
     /// Inside `[` or `(`, where HCL skips new lines, so `take` never returns one.
-    /// Only [`Parser::level`] sets it.
+    /// Only [`Parser::enclosed`] sets it.
     newlines_skipped: bool,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
@@ -692,10 +692,9 @@ pub(crate) fn opens_for(identifier: &str) -> bool {
     identifier == "for"
 }
 
-/// Reports whether HCL reads `name` as one reference: its first segment is an
-/// identifier and not a literal. Each later segment is an identifier or a string
-/// index.
-pub(crate) fn reference(name: &Name) -> bool {
+/// Reports whether HCL reads the first segment of `name` as the root of a reference:
+/// an identifier that is not a literal.
+pub(crate) fn rooted(name: &Name) -> bool {
     name.segments()
         .next()
         .is_some_and(|first| lex::identifier(first) && literal(first).is_none())

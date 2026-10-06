@@ -5,7 +5,7 @@ use document::value::{Call, Kind, Value};
 use document::{Attribute, Block, Document, Map, Span};
 
 use crate::lex;
-use crate::parse::{opens_for, reference};
+use crate::parse::{opens_for, rooted};
 use crate::{Error, Unwritable};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
@@ -259,7 +259,7 @@ impl<'a> Writer<'a> {
             }
             Kind::String(text) => return quoted(&mut self.out, text),
             Kind::Reference(name) => {
-                if !reference(name) {
+                if !rooted(name) {
                     self.refuse(value.span, Unwritable::Reference);
                 }
                 let mut segments = name.segments();

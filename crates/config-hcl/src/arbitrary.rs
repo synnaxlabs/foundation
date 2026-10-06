@@ -29,7 +29,7 @@ fn name() -> impl Strategy<Value = Kind> {
         1 => Just("for.x".to_owned()),
     ]
     .prop_map(|name| name.parse().unwrap())
-    .prop_filter("HCL reads the name as a reference", parse::reference)
+    .prop_filter("HCL reads the first segment as a root", parse::rooted)
     .prop_map(Kind::Reference)
 }
 
