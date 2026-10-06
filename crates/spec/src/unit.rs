@@ -131,7 +131,8 @@ impl fmt::Display for Error {
             Self::Character { at, found } => {
                 write!(
                     f,
-                    "a unit has the character {found:?} at byte {at}, which is not printable ASCII"
+                    "a unit has the character {found:?} at byte {at}, which is not \
+                     printable ASCII"
                 )
             }
         }

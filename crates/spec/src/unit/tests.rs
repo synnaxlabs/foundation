@@ -67,7 +67,9 @@ fn holds_a_sorted_table_of_units_that_read() {
 
 proptest! {
     #[test]
-    fn reads_exactly_the_short_printable_ascii_texts(text in "[\\x00-\\x7f°\u{200B}]{0,40}") {
+    fn reads_exactly_the_short_printable_ascii_texts(
+        text in "[\\x00-\\x7f°\u{200B}]{0,40}",
+    ) {
         let valid = (1..=32).contains(&text.len())
             && text.bytes().all(|b| (0x21..=0x7e).contains(&b));
         prop_assert_eq!(Unit::new(&text).is_ok(), valid);
