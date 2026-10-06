@@ -354,8 +354,10 @@ impl File {
 
     /// Ends a write of `bytes` at `offset` that started at tick `started`. Each
     /// sector of a write whose future dropped keeps its bytes or takes the new ones
-    /// by a coin. In each sector that takes them, the write goes at a random place
-    /// among the writes that ended since tick `started` and are not durable.
+    /// by a coin. In each sector that takes them, the write takes the bytes of one
+    /// write that ended since tick `started` over a random part of the bytes they
+    /// share. It then goes at a random place among the writes that ended since tick
+    /// `started` and are not durable.
     pub(crate) fn write(
         &mut self,
         offset: u64,
@@ -377,11 +379,24 @@ impl File {
             let first = (found.writes.iter())
                 .rposition(|write| write.written < started)
                 .map_or(0, |at| at + 1);
+            let covered = within(sector * SECTOR, &part);
+            let mut bytes = bytes[within(offset, &part)].to_vec();
+            let racing: Vec<(&Write, Range<usize>)> = (found.writes.iter())
+                .filter(|write| write.written >= started)
+                .filter_map(|write| Some((write, overlap(&write.covered, &covered)?)))
+                .collect();
+            if !racing.is_empty() {
+                let (other, common) = &racing[index(rng.below(len(&racing)))];
+                let taken = piece(common, rng);
+                let from = |start| taken.start - start..taken.end - start;
+                bytes[from(covered.start)]
+                    .copy_from_slice(&other.bytes[from(other.covered.start)]);
+            }
             let place = first + index(rng.below(len(&found.writes[first..]) + 1));
             let write = Write {
                 written: tick,
-                covered: within(sector * SECTOR, &part),
-                bytes: bytes[within(offset, &part)].to_vec(),
+                covered,
+                bytes,
                 after: [0; env::files::SECTOR],
             };
             found.writes.insert(place, write);
@@ -434,7 +449,8 @@ impl File {
     /// Ends a read of `range`, whose bytes were `before` when it started, while
     /// `writes` (offset and bytes) are in flight on the file. Each sector of the
     /// range takes its bytes at the start, its bytes now, or the bytes of one of
-    /// those writes over it, by the run's disk stream.
+    /// those writes over it, and then one of these over a random part of it, by the
+    /// run's disk stream.
     pub(crate) fn read(
         &self,
         range: Range<u64>,
@@ -442,7 +458,8 @@ impl File {
         writes: &[(u64, &[u8])],
         rng: &mut Rng,
     ) -> Vec<u8> {
-        let mut bytes = self.bytes(range.clone());
+        let now = self.bytes(range.clone());
+        let mut bytes = now.clone();
         for (_, part) in sectors(&range) {
             let over: Vec<(u64, &[u8], Range<u64>)> = (writes.iter())
                 .filter_map(|&(offset, write)| {
@@ -450,16 +467,22 @@ impl File {
                     Some((offset, write, common))
                 })
                 .collect();
-            let choices =
-                u64::try_from(over.len() + 2).expect("invariant: usize fits u64");
-            let to = within(range.start, &part);
-            match rng.below(choices) {
-                0 => bytes[to.clone()].copy_from_slice(&before[to]),
-                1 => {}
-                pick => {
-                    let (offset, write, common) = &over[index(pick - 2)];
-                    let to = within(range.start, common);
-                    bytes[to].copy_from_slice(&write[within(*offset, common)]);
+            let choices = len(&over) + 2;
+            let first = rng.below(choices);
+            let (second, over_part) = (rng.below(choices), piece(&part, rng));
+            for (pick, part) in [(first, part), (second, over_part)] {
+                let to = within(range.start, &part);
+                match pick {
+                    0 => bytes[to.clone()].copy_from_slice(&before[to]),
+                    1 => bytes[to.clone()].copy_from_slice(&now[to]),
+                    pick => {
+                        let (offset, write, common) = &over[index(pick - 2)];
+                        let Some(common) = overlap(common, &part) else {
+                            continue;
+                        };
+                        let to = within(range.start, &common);
+                        bytes[to].copy_from_slice(&write[within(*offset, &common)]);
+                    }
                 }
             }
         }
@@ -491,6 +514,28 @@ impl Sector {
 fn overlap<T: Ord + Copy>(a: &Range<T>, b: &Range<T>) -> Option<Range<T>> {
     let (start, end) = (a.start.max(b.start), a.end.min(b.end));
     (start < end).then_some(start..end)
+}
+
+/// A random part of `range`, by `rng`: none of it, a start, an end, a middle, or all
+/// of it.
+fn piece<T>(range: &Range<T>, rng: &mut Rng) -> Range<T>
+where
+    T: Copy + TryFrom<u64> + TryInto<u64>,
+{
+    let wide = |at: T| at.try_into().ok().expect("invariant: a position fits u64");
+    let narrow = |at| {
+        T::try_from(at)
+            .ok()
+            .expect("invariant: a part fits its range")
+    };
+    let (start, end) = (wide(range.start), wide(range.end));
+    let mut cut = || match rng.below(4) {
+        0 => start,
+        1 => end,
+        _ => start + rng.below(end - start + 1),
+    };
+    let (a, b) = (cut(), cut());
+    narrow(a.min(b))..narrow(a.max(b))
 }
 
 /// Each sector that holds a byte of `range`, with the part of `range` in it.
@@ -580,7 +625,10 @@ mod tests {
                 file.bytes(0..SECTOR)
             })
             .collect();
-        assert_eq!(last, BTreeSet::from([vec![1; 512], vec![2; 512]]));
+        assert!(last.iter().flatten().all(|byte| [1, 2].contains(byte)));
+        let whole = (last.iter()).filter(|bytes| bytes.iter().all(|&b| b == bytes[0]));
+        let whole: BTreeSet<&Vec<u8>> = whole.collect();
+        assert_eq!(whole, BTreeSet::from([&vec![1; 512], &vec![2; 512]]));
     }
 
     #[test]

@@ -656,7 +656,7 @@ pub trait Driver {
 /// Dropping the descriptor closes the file without a wait, after its calls end.
 ///
 /// Its calls follow the overlap and crash rules of [`File`] and [`File::write_at`];
-/// `sim` models exactly those rules.
+/// `sim` models those rules, with bytes that a real disk can give.
 ///
 /// ```
 /// fn len(descriptor: &dyn env::files::Descriptor) -> u64 {
