@@ -1764,7 +1764,9 @@ How to read this record:
   host ran at 80 to 86% CPU with 14 runs queued, so a second host, an m7g.4xlarge (16
   vCPU, 300 GB) with six runners (`foundation-arm-d` to `-i`), joined it. The person
   chose "m7g.4xlarge, 6 runners". On 2026-10-06, with 55 runs queued, a third host
-  joined: an m7g.2xlarge spot with three runners (`foundation-arm-j` to `-l`), a spot
+  joined with three runners (`foundation-arm-j` to `-l`): one spot machine from an EC2
+  Fleet over six Graviton types and six zones (launch template `foundation-arm-spot`),
+  because AWS took back a single-type spot machine after 30 minutes. Limits: a spot
   price cap of 0.20 USD/h, and a hard stop on 2026-10-08 at 03:00 UTC. With it, the
   hosts and the factory host cost at most 99.73 USD a day (#15). The person said:
   "Once you are sure of costs provision and set strict limits on whatever you need
