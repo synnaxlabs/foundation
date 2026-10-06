@@ -229,10 +229,11 @@ next issue for a crate early, labeled `blocked` with a link to the open one.
   removes, or changes no `pub` item, has no `interface` label, and touches nothing in
   `oracles/`, `docs/decisions.md`, `docs/coordination.md`, `CLAUDE.md`, `.github/`,
   `.claude/`, `.cargo/`, `xtask/`, `clippy.toml`, or any `Cargo.toml`.
-- **Stale base:** before each merge, the coordinator checks that no commit on `main`
-  since the PR's last CI run changed a crate that the PR changes, uses, or is used by.
-  If one did, the owner merges `main`, and CI runs again. Two PRs can each pass CI and
-  not build together: #721 used a function that #671 had renamed, and `main` broke.
+- **Stale base:** before each merge, if `main` moved since the PR's last CI run, the
+  coordinator merges the PR into `main` locally and runs clippy with `-D warnings` on
+  the crates the PR changes and every crate that uses them. If it fails, the owner
+  merges `main`, and CI runs again. Two PRs can each pass CI and not build together:
+  #721 used a function that #671 had renamed, and `main` broke.
 
 ## Interface changes
 
