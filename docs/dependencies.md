@@ -27,6 +27,8 @@ approval; pin the version you build against there.
 | `unicode-ident` | `config-hcl` | Identifiers outside ASCII, as HCL reads them (HCL IDENTIFIERS, #263) | (MIT or Apache-2.0) and Unicode-3.0 | 1.0.26 | 2026-10-05 |
 | `zeroize` | `secret` | Overwrite a secret value when it drops; a plain write may be optimized away, and a volatile write needs `unsafe` (#230) | Apache-2.0 or MIT | 1.9.0 | 2026-10-05 |
 | `libloading` | `connector-ni` | Loads NI's DAQmx driver at run time, so the binary runs on hosts without it (R7). The person: "Ok libloading is fine" (#436) | ISC | 0.9.0 | 2026-10-06 |
+| `libc` | `os` | `clock_gettime`, `adjtimex`, and `ntp_gettime` for `env::clock` and `env::wall` (CLOCK SUSPEND, OS CLOCK BOUND); `rustix` has no `adjtimex`, no `ntp_gettime`, and no raw clock on macOS. The person: "Yes" (#117) | MIT or Apache-2.0 | 0.2.190 | 2026-10-06 |
+| `getrandom` | `os` | Random bytes from the OS for `env::entropy`; it handles short reads and the 256-byte limit of `getentropy`. The person: "Yes" (#117) | MIT or Apache-2.0 | 0.4.3 | 2026-10-06 |
 
 One exception to "`aws-lc-rs` is the only crypto provider": `noq-proto`'s `rustls`
 feature pulls RustCrypto's `aes-gcm`, used only for the QUIC Retry integrity tag, whose
