@@ -234,9 +234,13 @@ next issue for a crate early, labeled `blocked` with a link to the open one.
   crates the PR changes and every crate that uses them, and runs the tests of each
   crate that depends (dev-dependencies too) on both a crate the PR changes and a crate
   `main` changed since that CI run. Only those tests can newly fail. If either fails,
-  the owner merges `main`, and CI runs again. A PR that changes any `Cargo.toml`,
-  `Cargo.lock`, `.cargo/`, `rust-toolchain*`, `clippy.toml`, `fuzz/`, or `oracles/`, or
-  that has over 8 crates to test, goes back to CI instead. Two PRs can each pass
+  the owner merges `main`, and CI runs again. A crate's own `Cargo.toml` and the files
+  under the folder of one of its targets (such as `oracles/conformance/raft`) count as
+  that crate. A package added to `Cargo.lock` is fine. A `fuzz/` change also builds the
+  fuzz targets with `--locked` when `main` changed a crate they reach. These go back to
+  CI instead: a removed or changed package in `Cargo.lock`, an `oracles/` file under no
+  target, the root `Cargo.toml`, `.cargo/`, `rust-toolchain*`, or `clippy.toml` (unless
+  `main` changed no crate), and over 8 crates to test. Two PRs can each pass
   CI and fail together: #721 used a function that #671 had renamed, and `main` did not
   build; a test from #761 failed after #672 added a sync, and `main` tests failed.
 
