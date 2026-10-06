@@ -1358,7 +1358,7 @@ fn commit_cut_and_recover(
     node: &sim::node::Node,
     dir: &'static str,
 ) -> Tail {
-    let committed = sim.run_on(node, move |node, tasks| async move {
+    sim.run_on(node, move |node, tasks| async move {
         let mut slots = Slots::new();
         let config = node_config(&node, tasks, dir);
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
@@ -1368,8 +1368,8 @@ fn commit_cut_and_recover(
             .expect("queues");
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
-    });
-    committed.expect("the commit ends");
+    })
+    .expect("the commit ends");
     sim.crash(node, sim::Crash::Power);
     let recovered = sim.run_on(node, move |node, tasks| async move {
         let mut slots = Slots::new();
@@ -1556,7 +1556,7 @@ fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
     for dir in ["", DIR] {
         let (mut sim, node) = one_node(1);
         node.fail_file(FilePath::new(dir), Operation::SyncDir);
-        let first = sim.run_on(&node, move |node, tasks| async move {
+        sim.run_on(&node, move |node, tasks| async move {
             let config = node_config(&node, tasks, DIR);
             let opened = Buffer::open(config, &mut Slots::new()).await;
             let error = FileError::Io {
@@ -1565,8 +1565,8 @@ fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
                 code: 5,
             };
             assert_eq!(opened.map(drop), Err(Error::Files(error)));
-        });
-        first.expect("the first open ends");
+        })
+        .expect("the first open ends");
         let recovered = commit_cut_and_recover(&mut sim, &node, DIR);
         assert_eq!(recovered, tail(3, Some(30)), "{dir:?}");
     }
@@ -1576,7 +1576,7 @@ fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
 #[test]
 fn a_ring_in_a_nested_directory_keeps_its_commits_across_a_power_cut() {
     let (mut sim, node) = one_node(1);
-    let made = sim.run_on(&node, |node, _tasks| async move {
+    sim.run_on(&node, |node, _tasks| async move {
         let files = node.files();
         files
             .create_dir(FilePath::new("a"))
@@ -1586,8 +1586,8 @@ fn a_ring_in_a_nested_directory_keeps_its_commits_across_a_power_cut() {
             .sync_dir(FilePath::new(""))
             .await
             .expect("the dir is durable");
-    });
-    made.expect("the parent is made");
+    })
+    .expect("the parent is made");
     let recovered = commit_cut_and_recover(&mut sim, &node, "a/shard-0");
     assert_eq!(recovered, tail(3, Some(30)));
 }
@@ -1911,7 +1911,7 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
 #[test]
 fn a_failed_record_write_ends_the_buffer_with_its_error() {
     let (mut sim, node) = one_node(111);
-    let ended = sim.run_on(&node, |node, tasks| async move {
+    sim.run_on(&node, |node, tasks| async move {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
@@ -1931,8 +1931,8 @@ fn a_failed_record_write_ends_the_buffer_with_its_error() {
             buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
             Err(Rejected::Files(failed))
         );
-    });
-    ended.expect("the buffer ends");
+    })
+    .expect("the buffer ends");
 }
 
 #[test]
