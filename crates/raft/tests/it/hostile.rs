@@ -3,6 +3,7 @@
 use raft::{Body, Data, Entry, Error, Message, Position, Raft, Role, Term, Voters};
 use types::node;
 
+use crate::change::{heartbeat, joining};
 use crate::network::{Action, ELECTION, Network};
 
 // An `Append` from `sender` in `term` that writes and commits one entry, which makes
@@ -140,4 +141,15 @@ fn a_voter_that_does_not_lead_cannot_take_the_group_over_in_a_new_term() {
         .filter(|disk| disk.entries.contains(&entry));
     assert_eq!(taken.count(), 0);
     assert_eq!(network.voters(leader).count(), 5);
+}
+
+// A new node must not take the empty set it started with as its committed
+// configuration once it holds one.
+#[test]
+fn a_voter_cannot_move_a_new_node_that_holds_the_joint_configuration() {
+    let (node, restarted) = joining();
+    for mut node in [node, restarted] {
+        check_refused(&mut node, heartbeat(2, u64::MAX, &[]), unproven);
+        check_refused(&mut node, heartbeat(2, u64::MAX, &[2]), unproven);
+    }
 }

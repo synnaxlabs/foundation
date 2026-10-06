@@ -416,19 +416,26 @@ How to read this record:
   not check the record CRC: the open's walk checked each record, and a record
   this process wrote is read as written. A read's budget counts the pool bytes
   that its entries' blocks take (`block::footprint`), so an entry with no bytes
-  still costs its block. A read holds no record while it waits for a file read,
-  so a change that frees ring space must first hold the records of each read in
-  progress (#510).
+  still costs its block. A read drops a record's table block before it takes the
+  blocks of the record's entries, so an entry of the pool's largest block reads
+  (#968). A read holds no record while it waits for a file read, so a change that
+  frees ring space must first hold the records of each read in progress (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
   `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
-  durable: a killed process may have written records that it never synced (#657). The
-  restart record needs one free block: an open of a full ring first moves records at
-  the tail to a segment. The walk holds one pool block at a time and reads a longer
-  record in pieces of the pool's largest block, so the pool puts no bound on
-  `body_max`. An open with no such block free fails with `Pool`, and the next open
-  recovers the record (#440, #572).
+  durable: a killed process may have written records that it never synced (#657). Before
+  that sync, the open writes again, as read, the two header blocks and each window the
+  walk reads before the one that ends the chain. A read can see, from the cache, writes
+  that a failed sync of an earlier process in the same boot lost, and the cache can drop
+  them between two reads. So an open writes again the header, 8 KiB, and the bytes it
+  walks, at most the area, and the first 52 KiB of each record over one block twice
+  (#698). Lost: a walk with direct I/O, which needs a new `env::files` read mode in each
+  driver and in `sim`. The restart record needs one free block: an open of a full ring
+  first moves records at the tail to a segment. The walk holds one pool
+  block at a time and reads a longer record in pieces of the pool's largest block, so
+  the pool puts no bound on `body_max`. An open with no such block free fails with
+  `Pool`, and the next open recovers the record (#440, #572).
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and
@@ -452,13 +459,19 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. An open of a header with a smaller `body_max` fails with `Unfit` (#627).
+  records. It also refuses with `Large` a batch with an entry whose parts, joined,
+  pass the largest block of the shard's pool (`Limit::Block`), because a read gives
+  each entry in one block (#968). An open fails with `Pool(TooLarge)` when a
+  recovered entry passes that block, as after a restart with a smaller budget; a
+  larger pool opens the ring. An open of a header with a smaller `body_max` fails
+  with `Unfit` (#627).
   `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
   one entry, at least `Layout::ENTRY_MAX_MIN` (4032); a batch of more entries holds
   less. `Layout::check` gives the `Limit` that `append` would refuse a batch with,
   from its counts of entries, parts, and bytes, so the home checks a frame before it
-  takes the blocks of its entries (#795). An entry has no part, one, or two; `append`
-  takes them owned and drops them when it fails (#582).
+  takes the blocks of its entries (#795). It does not check `Limit::Block`, which
+  depends on the pool. An entry has no part, one, or two; `append` takes them owned
+  and drops them when it fails (#582).
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
@@ -498,8 +511,9 @@ How to read this record:
   record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **LARGE FRAME (#191)** The home refuses a write whose bodies no record of the ring or
-  no block of the shard's pool holds, on either path, with `Large`. No seq moves and the
-  home stores no part of the frame. The waiting handoffs of the frame's indexes are
+  no block of the shard's pool holds, on either path, with `Large`. The pool bound is on
+  each entry's parts joined, the home's header part included (#968). No seq moves and
+  the home stores no part of the frame. The waiting handoffs of the frame's indexes are
   still recorded (HANDOFF RECORD). The writer splits the frame by samples or by indexes
   and writes each part. The home never splits a frame, because a frame applies whole
   (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
@@ -835,6 +849,9 @@ How to read this record:
   a node that never syncs fills it. Lost: drop the samples, a patch that loses data;
   stamp them with OS time at once, a patch that writes a time the clock refused and
   cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
+  `clock::Reader::first` gives that stamp: the first estimate at a reading. Later
+  estimates never change it, so the stamps keep the order of their readings and are
+  never after mesh time (#523).
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
@@ -1168,7 +1185,7 @@ How to read this record:
   down through a change holds the old configuration and refuses a leader whose votes
   are no quorum of it until an election whose grants are. When a second node fails
   first, the group waits for an operator, who wipes the voter and starts it with no
-  configuration (a node with no voters proves anything). The chain of proofs over
+  configuration (a node with no configuration proves anything). The chain of proofs over
   configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
   pins both, and the random runs skip exactly such a voter until #881. The advisor
   required a proof on every message and on each refusal, signatures only, and the
@@ -1263,9 +1280,21 @@ How to read this record:
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
   its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. A `Voters` entry with an empty `incoming` set, in `Start.entries`
-  or in an `Append`, is `Error::NoVoters`: a group with no voter can never commit or
-  elect. A leader changes the voters with `Raft::propose_voters(set)`: it writes the
+  `Start.entries`. An empty `Start.voters` is a node that joins, or a voter that an
+  operator wiped. It takes any proof until it holds a `Voters` entry (#1004). Then its
+  first `Voters` entry shows the configuration before the entries: a joint entry's
+  outgoing set, or for a leave its own set (#928, coordinator, 2026-10-06). A log
+  starts at index 1, so that entry is the joint entry of the group's first change, and
+  the node checks proofs as a founder with the same log does, gaps included (#881,
+  #1005). Lost: an empty committed set proves nothing (the new node then refuses a
+  leader that the outgoing set elects when the old leader fails before the joint entry
+  commits); a joining node starts with the group's configuration (the caller must know
+  it, and it removes the operator's recovery of a wiped voter); the founding
+  configuration as entry 1, as in etcd (a wider change that alone leaves the node open
+  until it holds that entry). A `Voters` entry with an empty `incoming` set, in
+  `Start.entries` or in an `Append`, is `Error::NoVoters`: a group with no voter can
+  never commit or elect.
+  A leader changes the voters with `Raft::propose_voters(set)`: it writes the
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.
@@ -1508,7 +1537,12 @@ How to read this record:
   turns verification off. Lost: a sans-I/O HTTP/1.1 module in `connector-influx`. The
   person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
   binary larger is fine." "we should be careful about writing raw HTTP transports.",
-  relayed by `advisor`; "Yes I approve", to the coordinator) (#341).
+  relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an
+  `httparse` reader) closed: the person told `connector` to use the `hyper` client on
+  2026-10-06. `httparse` comes in only as a dependency of `hyper`. The client is
+  HTTP/1.1 only for now: `h2` 0.4 reads the OS clock to expire a reset stream, so
+  HTTP/2 turns on only when `h2` takes its clock through `env`, by an upstream change.
+  Decided by the coordinator with `advisor` on 2026-10-06 (#341).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -1721,7 +1755,7 @@ How to read this record:
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
   default. A policy that sets no budget is a user mistake, refused as normal
-  validation with the fix in the message (#869). The data directory is node-local:
+  validation with a fix (DIAGNOSTICS, #869, #1000). The data directory is node-local:
   a start argument of `foundation`, with a default, because the spec is stored in it.
   Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
   change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),

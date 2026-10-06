@@ -1,6 +1,6 @@
-//! Reading mesh time or the status makes no heap allocation. This binary has no test
-//! harness: the count covers each thread, and a harness allocates on its own thread at
-//! any time.
+//! Reading mesh time, the status, or the first estimate makes no heap allocation. This
+//! binary has no test harness: the count covers each thread, and a harness allocates
+//! on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -33,6 +33,14 @@ fn main() {
         interval,
         Some(first.interval()),
         "the reader reads mesh time"
+    );
+    let reading = first.at();
+    let (interval, allocations) = ALLOCATOR.count(|| reader.first(reading));
+    assert_eq!(allocations, 0, "the first estimate read allocated");
+    assert_eq!(
+        interval,
+        Some(first.interval()),
+        "the reader reads the first estimate"
     );
 
     let os = clock.add();

@@ -176,7 +176,7 @@ impl Raft {
         let last = log.last();
         let (in_force, voters) = log.voters();
         let voters = voters.clone();
-        let before = log.voters_before(in_force.index).clone();
+        let before = log.voters_before(in_force.index);
         let peers = others(&log, key)
             .into_iter()
             .map(|key| (key, Peer::new(last.index)))
@@ -692,7 +692,7 @@ impl Raft {
             return;
         }
         self.in_force = at;
-        self.before = self.log.voters_before(at.index).clone();
+        self.before = self.log.voters_before(at.index);
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
         let keep = others(&self.log, self.key);
@@ -801,7 +801,7 @@ impl Raft {
         // configuration entry that is not committed yet.
         let quorum =
             |voters: &Voters| voters.quorum(|key| proof.voters.contains_key(&key));
-        fits && (quorum(&self.voters) || quorum(self.log.committed_voters()))
+        fits && (quorum(&self.voters) || quorum(&self.log.committed_voters()))
     }
 
     // Steps down for a message of a higher term that `check` passed, except a PreVote

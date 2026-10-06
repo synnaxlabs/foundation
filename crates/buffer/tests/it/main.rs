@@ -1570,6 +1570,160 @@ fn a_tail_reported_durable_after_a_kill_survives_a_power_cut() {
     });
 }
 
+/// A ring of 64 blocks with records of up to 60,000 bytes, on the files of `node`.
+fn long_config(node: &sim::node::Node, tasks: Tasks) -> Config {
+    Config {
+        layout: layout(64 * BLOCK, 60_000),
+        ..node_config(node, tasks, DIR)
+    }
+}
+
+/// Commits one entry of `len` bytes, zero except at `marked`, on a new ring on a
+/// node with `seed` while the commit's sync fails. The process dies, a new one opens
+/// the ring and reports what is durable, the power is cut, and a last open recovers.
+/// Returns what the second open reported and what the last one recovered.
+fn fail_a_sync_and_cut(seed: u64, len: usize, marked: Range<usize>) -> (Tail, Tail) {
+    let (mut sim, node) = one_node(seed);
+    let failed = sim.run_on(&node, move |node, tasks| async move {
+        let config = long_config(&node, tasks);
+        let pool = Rc::clone(&config.pool);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        node.fail_file(FilePath::new(RING), Operation::Sync);
+        let mut bytes = pool.alloc(len).expect("a block");
+        bytes[marked].fill(0xab);
+        let bytes = bytes.freeze();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::from(bytes))])
+            .expect("queues");
+        buffer.committed().await
+    });
+    let sync = FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::Sync,
+        code: 5,
+    };
+    assert_eq!(failed, Ok(Err(sync)), "seed {seed}");
+    sim.crash(&node, sim::Crash::Process);
+    let reported = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(long_config(&node, tasks), &mut slots)
+            .await
+            .expect("opens after the failed sync");
+        buffer.durable(slots.assign(key(1)), Path::Live)
+    });
+    let reported = reported.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+    sim.crash(&node, sim::Crash::Power);
+    let recovered = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(long_config(&node, tasks), &mut slots)
+            .await
+            .expect("opens after the power cut");
+        buffer.tail(slots.assign(key(1)), Path::Live)
+    });
+    let recovered = recovered.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+    (reported, recovered)
+}
+
+/// A process that opens a ring after a commit whose sync failed, in the same boot,
+/// reports durable only what a power cut then keeps. The failed sync can leave a
+/// record in the cache only, where the open's walk sees it.
+#[test]
+fn an_open_after_a_failed_sync_in_the_same_boot_reports_only_disk_records_durable() {
+    for seed in 0..32 {
+        let (reported, recovered) = fail_a_sync_and_cut(seed, 0, 0..0);
+        assert_eq!(recovered, reported, "seed {seed}");
+    }
+}
+
+/// As above, for a record of three blocks, which the walk reads in pieces and then
+/// reads its start again. Only the entry's bytes in the third block are not zero:
+/// a lost sector that reads as zeros on a new ring loses nothing, and many lost
+/// sectors rarely all stay in the cache.
+#[test]
+fn an_open_after_a_failed_sync_of_a_long_record_reports_only_disk_records_durable() {
+    for seed in 0..32 {
+        let (reported, recovered) = fail_a_sync_and_cut(seed, 8_300, 8_128..8_300);
+        assert_eq!(recovered, reported, "seed {seed}");
+    }
+}
+
+/// A failed write of the bytes an open read fails the open with the write's error.
+#[test]
+fn a_failed_write_of_the_read_bytes_fails_the_open() {
+    let (mut sim, node) = one_node(7);
+    let first = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await
+    });
+    assert_eq!(first, Ok(Ok(())));
+    sim.crash(&node, sim::Crash::Process);
+    let opened = sim.run_on(&node, |node, tasks| async move {
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        let config = node_config(&node, tasks, DIR);
+        Buffer::open(config, &mut Slots::new()).await.map(drop)
+    });
+    let failed = FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::WriteAt,
+        code: 5,
+    };
+    assert_eq!(opened, Ok(Err(Error::Files(failed))));
+}
+
+/// A process that opens a new ring whose first header sync failed, in the same
+/// boot, reports durable only what a power cut then keeps. The failed sync can
+/// leave the header in the cache only, where the open reads it.
+#[test]
+fn an_open_after_a_failed_sync_of_the_first_header_reports_only_disk_records_durable() {
+    for seed in 0..32 {
+        let (mut sim, node) = one_node(seed);
+        let failed = sim.run_on(&node, |node, tasks| async move {
+            node.fail_file(FilePath::new(RING), Operation::Sync);
+            let config = node_config(&node, tasks, DIR);
+            Buffer::open(config, &mut Slots::new()).await.map(drop)
+        });
+        let sync = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(failed, Ok(Err(Error::Files(sync))), "seed {seed}");
+        sim.crash(&node, sim::Crash::Process);
+        let reported = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the failed sync");
+            let a = slots.assign(key(1));
+            buffer
+                .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            buffer.durable(a, Path::Live)
+        });
+        let reported = reported.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        sim.crash(&node, sim::Crash::Power);
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the power cut");
+            buffer.tail(slots.assign(key(1)), Path::Live)
+        });
+        let recovered = recovered.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        assert_eq!(recovered, reported, "seed {seed}");
+    }
+}
+
 /// A power cut at any point of an open whose restart record goes over the one of
 /// an open with no data keeps the committed entry. The ring then takes the next
 /// entry, and it survives a power cut.
@@ -2375,12 +2529,16 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
-        let parts = Parts::from([shard.block(512 << 10), shard.block(60_000)]);
+        let first = Parts::from(shard.block(512 << 10));
+        let second = Parts::from(shard.block(60_000));
         buffer
-            .append([entry(1, a, Path::Live, 0, 1, Some(1), parts)])
+            .append([
+                entry(1, a, Path::Live, 0, 1, Some(1), first),
+                entry(1, a, Path::Live, 1, 1, Some(2), second),
+            ])
             .expect("queues");
         buffer.committed().await.expect("commits");
-        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        assert_eq!(buffer.durable(a, Path::Live), tail(2, Some(2)));
         drop(buffer);
         let held = shard.pool.alloc(150_000).expect("the pool has a block");
         let opened = shard.open(ring, &mut Slots::new()).await;
@@ -2390,6 +2548,98 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
         };
         assert_eq!(opened.map(drop), Err(Error::Pool(exhausted)));
         drop(held);
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(2, Some(2))));
+    });
+}
+
+/// `append` refuses an entry whose parts, joined, no block of the shard's pool
+/// holds, with `Limit::Block` for the first such entry, and takes nothing. An entry
+/// of the largest block, which takes the whole budget, commits, a read gives it,
+/// and an open recovers it.
+#[test]
+fn an_entry_over_the_largest_pool_block_is_large() {
+    run(155, Memory::default(), |mut shard| async move {
+        let largest = 1 << 17;
+        let over = Parts::from([shard.block(largest), shard.block(1)]);
+        let more = Parts::from([shard.block(largest), shard.block(2)]);
+        let fits = Parts::from(shard.block(largest));
+        let config = block::Config {
+            budget: block::footprint(largest),
+        };
+        shard.pool =
+            Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+        assert_eq!(shard.pool.largest(), largest);
+        let ring = layout(320 * BLOCK, 600_000);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let large = buffer.append([
+            entry(1, a, Path::Live, 0, 1, Some(1), over),
+            entry(1, a, Path::Live, 1, 1, Some(2), more),
+        ]);
+        let limit = Limit::Block {
+            len: largest + 1,
+            max: largest,
+        };
+        assert_eq!(large, Err(Rejected::Large(limit)));
+        assert_eq!(
+            Rejected::Large(limit).to_string(),
+            "an entry has 131073 bytes of parts, and a block of the pool holds at \
+             most 131072"
+        );
+        assert_eq!(buffer.tail(a, Path::Live), tail(0, None));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), fits)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        let read = buffer.read(a, Path::Live, Mark::at(0), usize::MAX).await;
+        let lens =
+            read.map(|read| read.entries.iter().map(|e| e.bytes.len()).collect());
+        assert_eq!(lens, Ok(vec![largest]));
+        drop(buffer);
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(1, Some(1))), "an open recovers it");
+    });
+}
+
+/// An open fails with `Pool(TooLarge)` when a recovered entry is over the largest
+/// block of its pool, as after a restart with a smaller budget, and leaves the ring
+/// as it is: an open with the larger pool recovers the entry.
+#[test]
+fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
+    run(156, Memory::default(), |mut shard| async move {
+        let ring = layout(320 * BLOCK, 600_000);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let bytes = Parts::from(shard.block(200_000));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), bytes)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let larger = Rc::clone(&shard.pool);
+        let config = block::Config { budget: 1 << 17 };
+        shard.pool =
+            Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+        let opened = shard.open(ring, &mut Slots::new()).await;
+        let large = block::Error::TooLarge {
+            requested: 200_000,
+            largest: 114_688,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Pool(large.clone())));
+        assert_eq!(
+            Error::Pool(large).to_string(),
+            "the pool has no block: block of 200000 bytes is above the largest block \
+             of 114688 bytes"
+        );
+        shard.pool = larger;
         let mut slots = Slots::new();
         let opened = shard.open(ring, &mut slots).await;
         let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
@@ -3300,8 +3550,10 @@ fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
         let second = entry(1, a, Path::Live, 3, 2, Some(50), shard.block(12).into());
         buffer.append([second]).expect("queues");
         buffer.committed().await.expect("commits");
-        let table = shard.pool.alloc(4096).expect("a block for one table");
-        let bytes = shard.pool.alloc(10).expect("a block for one entry");
+        let one = shard
+            .pool
+            .alloc(4096)
+            .expect("a block for a table, then an entry");
         let mut held = Vec::new();
         let mut len = shard.pool.largest();
         while len > 0 {
@@ -3310,7 +3562,7 @@ fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
             }
             len -= len.div_ceil(16);
         }
-        drop((table, bytes));
+        drop(one);
         let read = buffer
             .read(a, Path::Live, Mark::at(0), usize::MAX)
             .await
