@@ -64,9 +64,9 @@ them, such as `{ a.b = 1 }`. The program only parses, so their verdict is "accep
   past the largest `f64` is infinity.
 - A string, a key, a label, a keyword, or a function name is in `"`, with `\` before
   `"` and `\`. Printable ASCII is as it is, and each other character is `\u{hex}`.
-- A reference is `$` and its name, such as `$a.b`. A string index is a segment:
-  `a["b"]` is `$a.b`. A call is `"f"(value, ...)`, a
-  list is `[value, ...]`, and a map is `{"key" = value, ...}`, by key.
+- A reference is `$` and its name, such as `$a.b`. A string index is a segment, with
+  the escapes of a string but no `"`: `a["b"]` is `$a.b`. A call is `"f"(value, ...)`,
+  a list is `[value, ...]`, and a map is `{"key" = value, ...}`, by key.
 
 HCL makes each object key a string: the number key `007` is `"7"`. A value outside
 this form stops the program with its type and position.

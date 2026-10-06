@@ -125,6 +125,7 @@ reference-dot-end refused
 reference-index-dot-written accepted
 reference-index-dot accepted
 reference-index-empty accepted
+reference-index-heredoc accepted
 reference-index-name-written accepted
 reference-index-name accepted
 reference-index-number accepted hcl.index

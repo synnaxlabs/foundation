@@ -78,6 +78,7 @@ reference-bracket-lines {"a" = [$x.b]}
 reference-index-dot-written {"a" = $plc.a.b}
 reference-index-dot {"a" = $plc.a.b}
 reference-index-empty {"a" = $plc.}
+reference-index-heredoc {"a" = $plc.x\u{a}}
 reference-index-name-written {"a" = $a.b}
 reference-index-name {"a" = $a.b}
 reference-index-reserved {"a" = $site_a.@changes}

@@ -383,16 +383,25 @@ impl<'a> Parser<'a> {
     }
 
     /// Reports whether the next tokens are `[`, a string or a heredoc, and `]`: an
-    /// index that HCL reads as a step of a reference, not as an expression.
+    /// index that HCL reads as a step of a reference, not as an expression. It also
+    /// reports a lexer error after `[`, so that error is the only one, except a
+    /// template, which HCL reads as an expression.
     fn string_index(&self) -> bool {
         if self.token.kind != lex::Kind::OpenBracket {
             return false;
         }
         let mut ahead = self.tokens.clone();
-        matches!(
-            ahead.next_past_lines().kind,
-            lex::Kind::String(_) | lex::Kind::Heredoc(_)
-        ) && ahead.next_past_lines().kind == lex::Kind::CloseBracket
+        match ahead.next_past_lines().kind {
+            lex::Kind::String(_) | lex::Kind::Heredoc(_) => {
+                ahead.next_past_lines().kind == lex::Kind::CloseBracket
+            }
+            lex::Kind::Error(Error::Form {
+                form: Form::Template,
+                ..
+            }) => false,
+            lex::Kind::Error(_) => true,
+            _ => false,
+        }
     }
 
     /// Reads a number, after its minus sign if `minus` holds the sign's span. Returns
@@ -2228,6 +2237,23 @@ c = "°C # not a comment"
             check(
                 "a = plc[\"${x}\"]\n",
                 &[(index, &refused(Form::Index)), (template, TEMPLATE)],
+            );
+        }
+
+        #[test]
+        fn gives_only_the_string_error_in_a_string_index() {
+            check(
+                "a = plc[\"\\q\"]\n",
+                &[(Error::Escape { span: on(9, 11) }, ESCAPE)],
+            );
+            let unclosed = Error::Unclosed {
+                span: on(12, 12),
+                opener: on(8, 9),
+                part: Unclosed::String,
+            };
+            check(
+                "a = plc[\"abc",
+                &[(unclosed, &needs("`\"` to end the string"))],
             );
         }
 
