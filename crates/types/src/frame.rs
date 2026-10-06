@@ -78,7 +78,8 @@ pub enum Label {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Form {
     /// As a connector writes them: fixed-width values back to back, or for strings,
-    /// bytes, and lists, `u32` end offsets and then the data.
+    /// bytes, and lists, the `u32` end of each sample, in elements, then zeros up to a
+    /// multiple of the element width or 8, whichever is less, then the elements.
     Raw,
     /// As `codec` encodes them, in tagged vectors.
     Encoded,
@@ -113,7 +114,7 @@ pub struct Range {
 impl Range {
     /// The range of `group` in the frame `bytes`, or `None` when it is absent.
     fn find(bytes: &[u8], group: u32) -> Option<Self> {
-        let (ranges, ..) = split(bytes);
+        let (ranges, ..) = parts(bytes);
         let range = &ranges[search(ranges, group)?];
         Some(Self {
             seq: u64::from_le_bytes(get(range, at::range::SEQ)),
@@ -218,7 +219,7 @@ impl Draft {
         put(head, at::RANGES, &to_u32(groups).to_le_bytes());
         put(head, at::SERIES, &to_u32(series.len()).to_le_bytes());
         head[at::FORM] = form.byte();
-        let (ranges, descriptors, body) = split_mut(&mut block);
+        let (ranges, descriptors, body) = parts_mut(&mut block);
         let indexes = series
             .iter()
             .map(|&(entry, _)| entry)
@@ -241,7 +242,7 @@ impl Draft {
     /// The bytes of `entry`'s series, to fill, or `None` when it is absent. Time is
     /// logarithmic in the number of present series.
     pub fn series_mut(&mut self, entry: usize) -> Option<&mut [u8]> {
-        let (_, descriptors, body) = split_mut(&mut self.0);
+        let (_, descriptors, body) = parts_mut(&mut self.0);
         let n = search(descriptors, u32::try_from(entry).ok()?)?;
         let (start, end) = bounds(descriptors, n);
         Some(&mut body[start..end])
@@ -249,7 +250,7 @@ impl Draft {
 
     /// Each present entry and its series bytes, to fill, in entry order.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut [u8])> {
-        let (_, descriptors, mut body) = split_mut(&mut self.0);
+        let (_, descriptors, mut body) = parts_mut(&mut self.0);
         let mut offset = 0_usize;
         spans(ends(descriptors)).map(move |(entry, start, end)| {
             let (_, rest) = mem::take(&mut body).split_at_mut(start - offset);
@@ -261,8 +262,8 @@ impl Draft {
 
     /// Each present entry and its series bytes, in entry order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        let (_, descriptors, body) = split(&self.0);
-        series(body, ends(descriptors))
+        let (_, descriptors, body) = parts(&self.0);
+        split(body, ends(descriptors))
     }
 
     /// The key set the draft's entries number into.
@@ -308,7 +309,7 @@ impl Draft {
     }
 
     fn record_mut(&mut self, group: u32) -> &mut [u8; RANGE] {
-        let (ranges, ..) = split_mut(&mut self.0);
+        let (ranges, ..) = parts_mut(&mut self.0);
         let Some(n) = search(ranges, group) else {
             panic!("group {group} is absent from the frame");
         };
@@ -357,7 +358,7 @@ impl Frame {
     /// in the number of present series.
     #[must_use]
     pub fn series(&self, entry: usize) -> Option<&[u8]> {
-        let (_, descriptors, body) = split(&self.0);
+        let (_, descriptors, body) = parts(&self.0);
         let n = search(descriptors, u32::try_from(entry).ok()?)?;
         let (start, end) = bounds(descriptors, n);
         Some(&body[start..end])
@@ -365,8 +366,8 @@ impl Frame {
 
     /// Each present entry and its series bytes, in entry order.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
-        let (_, _, body) = split(&self.0);
-        series(body, self.ends())
+        let (_, _, body) = parts(&self.0);
+        split(body, self.ends())
     }
 
     /// The credit that sending the frame to a reader spends: the bytes a block of the
@@ -389,9 +390,9 @@ impl Frame {
 
     /// Each present entry and the end of its series, as `(entry, end)`, in the order
     /// of [`Frame::iter`]. `end` counts from the start of [`Frame::body`], and
-    /// [`series`] reads each series back from the body and these ends.
+    /// [`split`] cuts the body at these ends.
     pub fn ends(&self) -> impl Iterator<Item = (usize, usize)> {
-        let (_, descriptors, _) = split(&self.0);
+        let (_, descriptors, _) = parts(&self.0);
         ends(descriptors)
     }
 }
@@ -401,10 +402,11 @@ impl Frame {
 ///
 /// # Panics
 ///
-/// The iterator panics where [`check`] refuses `body` and `ends`. The body and ends of
-/// one frame never panic. Run [`check`] once on a body and ends from another node
-/// before the first read.
-pub fn series<T>(
+/// The iterator panics at the first end that [`check`] refuses. When the body runs past
+/// the last end, it panics only once it runs out. The body and ends of one frame never
+/// panic. Run [`check`] once on a body and ends from another node before the first
+/// [`split`].
+pub fn split<T>(
     body: &[u8],
     ends: impl IntoIterator<Item = (T, usize)>,
 ) -> impl Iterator<Item = (T, &[u8])> {
@@ -422,7 +424,7 @@ pub fn series<T>(
     })
 }
 
-/// Checks that `ends` fit `body`, so that [`series`] reads them without a panic.
+/// Checks that `ends` fit `body`, so that [`split`] cuts at them without a panic.
 ///
 /// # Errors
 ///
@@ -573,14 +575,14 @@ fn measure(set: &KeySet, series: &[(usize, usize)]) -> Result<(usize, usize), Er
 }
 
 /// A frame's ranges, its descriptors, and its series bytes.
-fn split(bytes: &[u8]) -> (&[[u8; RANGE]], &[[u8; DESCRIPTOR]], &[u8]) {
+fn parts(bytes: &[u8]) -> (&[[u8; RANGE]], &[[u8; DESCRIPTOR]], &[u8]) {
     let (ranges, series) = counts(bytes);
     let (head, body) = bytes.split_at(body_start(ranges, series));
     let (ranges, descriptors) = head[HEAD..].split_at(RANGE * ranges);
     (ranges.as_chunks().0, descriptors.as_chunks().0, body)
 }
 
-fn split_mut(
+fn parts_mut(
     bytes: &mut [u8],
 ) -> (&mut [[u8; RANGE]], &mut [[u8; DESCRIPTOR]], &mut [u8]) {
     let (ranges, series) = counts(bytes);
@@ -869,13 +871,13 @@ mod tests {
         assert_eq!(ends, [(0, 3), (1, 8), (2, 17)]);
         let body = frame.body();
         assert_eq!(check(&body, ends.iter().copied()), Ok(()));
-        let read: Vec<_> = series(&body, ends).collect();
+        let read: Vec<_> = split(&body, ends).collect();
         assert_eq!(read, [(0, [1; 3].as_slice()), (1, &[]), (2, &[2; 9])]);
         let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
         let empty = empty.freeze(Path::Live);
         assert_eq!(empty.ends().count(), 0);
         assert_eq!(check(&empty.body(), empty.ends()), Ok(()));
-        assert_eq!(series(&empty.body(), empty.ends()).count(), 0);
+        assert_eq!(split(&empty.body(), empty.ends()).count(), 0);
     }
 
     /// Tags `ends` with their positions.
@@ -927,19 +929,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "the end 5 is past the body of 4 bytes")]
     fn panics_on_an_end_past_the_body() {
-        series(&[0; 4], tagged(&[5])).for_each(drop);
+        split(&[0; 4], tagged(&[5])).for_each(drop);
     }
 
     #[test]
     #[should_panic(expected = "the end 2 is before 8, the start of its series")]
     fn panics_on_an_end_before_the_start_of_its_series() {
-        series(&[0; 16], tagged(&[3, 2])).for_each(drop);
+        split(&[0; 16], tagged(&[3, 2])).for_each(drop);
     }
 
     #[test]
     #[should_panic(expected = "the last end 8 is not the end of the body of 17 bytes")]
     fn panics_when_the_ends_stop_before_the_body() {
-        series(&[1; 17], tagged(&[3, 8])).for_each(drop);
+        split(&[1; 17], tagged(&[3, 8])).for_each(drop);
+    }
+
+    #[test]
+    #[should_panic(expected = "the last end 0 is not the end of the body of 16 bytes")]
+    fn panics_on_a_body_with_no_ends() {
+        split(&[1; 16], tagged(&[])).for_each(drop);
     }
 
     #[test]
@@ -1445,7 +1453,7 @@ mod tests {
         prop_assert_eq!(&*frame.body(), body.as_slice());
         let view = frame.body();
         prop_assert_eq!(check(&view, frame.ends()), Ok(()));
-        let from_ends: Vec<(usize, Vec<u8>)> = super::series(&view, frame.ends())
+        let from_ends: Vec<(usize, Vec<u8>)> = super::split(&view, frame.ends())
             .map(|(entry, bytes)| (entry, bytes.to_vec()))
             .collect();
         prop_assert_eq!(&from_ends, &written);
