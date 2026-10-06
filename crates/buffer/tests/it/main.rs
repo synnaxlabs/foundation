@@ -5,6 +5,7 @@
 
 mod memory;
 
+use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -913,6 +914,16 @@ fn a_ring_whose_first_header_write_was_lost_opens_as_new() {
     });
 }
 
+/// A sim with `seed` and one node on it.
+fn one_node(seed: u64) -> (sim::Sim, sim::node::Node) {
+    let mut sim = sim::Sim::new(sim::Config {
+        seed,
+        ..sim::Config::default()
+    });
+    let node = sim.node(sim::node::Config::default());
+    (sim, node)
+}
+
 /// Starts a shard named `name` on `node` to run `main`.
 fn on_node<F>(
     node: &sim::node::Node,
@@ -929,54 +940,61 @@ where
     node.shards().start(config, main).expect("the shard starts")
 }
 
-/// A buffer config on the files of `node`.
-fn node_config(node: &sim::node::Node, tasks: Tasks, layout: Layout) -> Config {
+/// Runs `main` on a shard named `name` of `node` until it returns.
+fn run_on<F>(
+    sim: &mut sim::Sim,
+    node: &sim::node::Node,
+    name: &str,
+    main: impl FnOnce(Tasks) -> F + Send + 'static,
+) where
+    F: Future<Output = ()> + 'static,
+{
+    let handle = on_node(node, name, main);
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+}
+
+/// A buffer config for the ring in `dir` on the files of `node`.
+fn node_config(node: &sim::node::Node, tasks: Tasks, dir: &str) -> Config {
     let config = block::Config { budget: POOL };
     let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
     Config {
         files: node.files(),
-        dir: PathBuf::from(DIR),
+        dir: PathBuf::from(dir),
         pool: Rc::new(pool),
         clock: node.clock(),
         tasks,
         entropy: node.entropy(),
-        layout,
+        layout: layout(AREA, BODY_MAX),
         commit: COMMIT,
     }
 }
 
-/// Cuts the power `cut` nanoseconds into the first open of a ring on a node
-/// with `seed`, then opens the ring again. Returns whether the first open had
-/// ended at the cut, and what the second open gave.
-fn open_after_a_cut(
+/// Calls `at` with each seed of `seeds` and each cut from 0 ns in steps of `step`
+/// ns, until `at` returns that the first open had ended at the cut.
+fn each_cut(seeds: Range<u64>, step: i64, mut at: impl FnMut(u64, i64) -> bool) {
+    for seed in seeds {
+        let mut cut = 0;
+        while !at(seed, cut) {
+            cut += step;
+        }
+    }
+}
+
+/// Starts the first open of a ring on a new node with `seed`, and stops the node
+/// with `crash` `cut` nanoseconds into it. Returns the sim, the node, and whether
+/// the open had ended.
+fn cut_the_first_open(
     seed: u64,
     cut: i64,
-    ring: Layout,
-) -> (bool, Result<Layout, String>) {
-    let mut sim = sim::Sim::new(sim::Config {
-        seed,
-        ..sim::Config::default()
-    });
-    let node = sim.node(sim::node::Config::default());
-    let made = node.clone();
-    let handle = on_node(&node, "dir", move |_| async move {
-        let files = made.files();
-        files
-            .create_dir(FilePath::new(DIR))
-            .await
-            .expect("the dir is made");
-        files
-            .sync_dir(FilePath::new(""))
-            .await
-            .expect("the dir is synced");
-    });
-    sim.run().expect("the run ends");
-    handle.join().expect("the shard ended");
+    crash: sim::Crash,
+) -> (sim::Sim, sim::node::Node, bool) {
+    let (mut sim, node) = one_node(seed);
     let ended = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&ended);
     let first = node.clone();
     drop(on_node(&node, "first", move |tasks| async move {
-        let config = node_config(&first, tasks, ring);
+        let config = node_config(&first, tasks, DIR);
         let _buffer = Buffer::open(config, &mut Slots::new())
             .await
             .expect("the first open ends well");
@@ -984,24 +1002,42 @@ fn open_after_a_cut(
         std::future::pending::<()>().await;
     }));
     sim.run_for(Span::from_nanos(cut)).expect("the run goes on");
-    sim.crash(&node, sim::Crash::Power);
-    let opened = Arc::new(Mutex::new(None));
-    let slot = Arc::clone(&opened);
-    let second = node.clone();
-    let handle = on_node(&node, "second", move |tasks| async move {
-        let config = node_config(&second, tasks, ring);
-        let buffer = Buffer::open(config, &mut Slots::new()).await;
-        let layout = buffer.map(|buffer| buffer.layout());
-        *slot.lock().expect("no panic held the lock") =
-            Some(layout.map_err(|error| error.to_string()));
+    sim.crash(&node, crash);
+    (sim, node, ended.load(Ordering::Relaxed))
+}
+
+/// Opens the ring in `dir` on `node`, commits one entry, cuts the power, and opens
+/// the ring again. Returns the tail that the last open recovers.
+fn commit_cut_and_recover(
+    sim: &mut sim::Sim,
+    node: &sim::node::Node,
+    dir: &'static str,
+) -> Tail {
+    let own = node.clone();
+    run_on(sim, node, "commit", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&own, tasks, dir);
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
     });
-    sim.run().expect("the run ends");
-    handle.join().expect("the shard ended");
-    let opened = opened.lock().expect("no panic held the lock").take();
-    (
-        ended.load(Ordering::Relaxed),
-        opened.expect("the second open ended"),
-    )
+    sim.crash(node, sim::Crash::Power);
+    let recovered = Arc::new(Mutex::new(None));
+    let out = Arc::clone(&recovered);
+    let own = node.clone();
+    run_on(sim, node, "recover", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&own, tasks, dir);
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens again");
+        let a = slots.assign(key(1));
+        *out.lock().expect("no panic held the lock") = Some(buffer.tail(a, Path::Live));
+    });
+    let recovered = recovered.lock().expect("no panic held the lock").take();
+    recovered.expect("the last open ended")
 }
 
 /// A power cut at any point of the first open leaves a ring that opens again
@@ -1009,18 +1045,92 @@ fn open_after_a_cut(
 /// set of its sectors.
 #[test]
 fn a_power_cut_during_the_first_open_leaves_a_ring_that_opens() {
-    let ring = layout(AREA, BODY_MAX);
-    for seed in 0..64 {
-        let mut cut = 0;
-        loop {
-            let (ended, opened) = open_after_a_cut(seed, cut, ring);
-            assert_eq!(opened, Ok(ring), "seed {seed}, cut at {cut} ns");
-            if ended {
-                break;
-            }
-            cut += 10_000;
-        }
+    each_cut(0..64, 10_000, |seed, cut| {
+        let (mut sim, node, ended) = cut_the_first_open(seed, cut, sim::Crash::Power);
+        let opened = Arc::new(Mutex::new(None));
+        let out = Arc::clone(&opened);
+        let own = node.clone();
+        run_on(&mut sim, &node, "second", move |tasks| async move {
+            let config = node_config(&own, tasks, DIR);
+            let buffer = Buffer::open(config, &mut Slots::new()).await;
+            let layout = buffer.map(|buffer| buffer.layout());
+            *out.lock().expect("no panic held the lock") = Some(layout);
+        });
+        let opened = opened.lock().expect("no panic held the lock").take();
+        let opened = opened.expect("the second open ended");
+        assert_eq!(
+            opened,
+            Ok(layout(AREA, BODY_MAX)),
+            "seed {seed}, cut at {cut} ns"
+        );
+        ended
+    });
+}
+
+#[test]
+fn a_power_cut_after_the_first_commit_keeps_the_committed_entries() {
+    let (mut sim, node) = one_node(1);
+    let recovered = commit_cut_and_recover(&mut sim, &node, DIR);
+    assert_eq!(recovered, tail(3, Some(30)));
+}
+
+/// A kill can leave a ring that the first open made but did not make durable. The
+/// next open finds it and makes it durable.
+#[test]
+fn a_kill_during_the_first_open_keeps_the_commits_of_the_next() {
+    each_cut(0..16, 2_000, |seed, cut| {
+        let (mut sim, node, ended) = cut_the_first_open(seed, cut, sim::Crash::Process);
+        let recovered = commit_cut_and_recover(&mut sim, &node, DIR);
+        assert_eq!(
+            recovered,
+            tail(3, Some(30)),
+            "seed {seed}, kill at {cut} ns"
+        );
+        ended
+    });
+}
+
+/// A failed sync of the ring's directory or of its parent fails the open. The next
+/// open makes the ring durable.
+#[test]
+fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
+    for dir in ["", DIR] {
+        let (mut sim, node) = one_node(1);
+        node.fail_file(FilePath::new(dir), Operation::SyncDir);
+        let own = node.clone();
+        run_on(&mut sim, &node, "first", move |tasks| async move {
+            let config = node_config(&own, tasks, DIR);
+            let opened = Buffer::open(config, &mut Slots::new()).await;
+            let error = FileError::Io {
+                path: PathBuf::from(dir),
+                operation: Operation::SyncDir,
+                code: 5,
+            };
+            assert_eq!(opened.map(drop), Err(Error::Files(error)));
+        });
+        let recovered = commit_cut_and_recover(&mut sim, &node, DIR);
+        assert_eq!(recovered, tail(3, Some(30)), "{dir:?}");
     }
+}
+
+/// The open syncs the parent of a nested ring directory, not the data directory.
+#[test]
+fn a_ring_in_a_nested_directory_keeps_its_commits_across_a_power_cut() {
+    let (mut sim, node) = one_node(1);
+    let own = node.clone();
+    run_on(&mut sim, &node, "parent", move |_| async move {
+        let files = own.files();
+        files
+            .create_dir(FilePath::new("a"))
+            .await
+            .expect("the dir is made");
+        files
+            .sync_dir(FilePath::new(""))
+            .await
+            .expect("the dir is durable");
+    });
+    let recovered = commit_cut_and_recover(&mut sim, &node, "a/shard-0");
+    assert_eq!(recovered, tail(3, Some(30)));
 }
 
 #[test]
