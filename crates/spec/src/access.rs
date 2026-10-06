@@ -168,6 +168,16 @@ mod tests {
         assert!(both.contains(Action::Write));
         assert!(!both.contains(Action::Admin));
         assert!(!Actions::NONE.contains(Action::Read));
+        assert_eq!(both.union(read), both);
+    }
+
+    #[test]
+    fn holds_a_repeated_action_once() {
+        let twice = [Action::Read, Action::Read]
+            .into_iter()
+            .collect::<Actions>();
+        assert!(twice.contains(Action::Read));
+        assert_eq!(twice, [Action::Read].into_iter().collect());
     }
 
     #[test]
