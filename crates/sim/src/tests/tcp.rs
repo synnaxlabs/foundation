@@ -1340,8 +1340,7 @@ fn a_syn_to_a_refused_connect_that_a_driver_holds_reaches_the_listener() {
 }
 
 #[test]
-fn a_reset_stream_that_a_driver_holds_frees_its_port_for_a_connect_after_the_ports_wrap()
- {
+fn a_reset_stream_that_a_driver_holds_frees_its_port_after_the_ports_wrap() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let mut listener = listen(&b, 4433);
     let server = start(&b, "server", move |_| async move {
