@@ -3,6 +3,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use clock::{Clock, Reader, Status};
 use estimate::Measurement;
 use estimate::combine::Error;
+use estimate::discipline::Cause;
 use sim::node::Node;
 use types::time::{Monotonic, Span};
 
@@ -22,7 +23,7 @@ fn synced(node: &Node, offset: Span, error: Span) -> Status {
     Status::Synced(measure(node, offset, error))
 }
 
-fn holdover(node: &Node, offset: Span, error: Span, cause: Error) -> Status {
+fn holdover(node: &Node, offset: Span, error: Span, cause: Cause) -> Status {
     Status::Holdover(measure(node, offset, error), cause)
 }
 
@@ -103,7 +104,8 @@ fn an_add_after_the_first_estimate_holds_over_at_once() {
         agreeing: 1,
         empty: 1,
     };
-    assert_eq!(reader.status(), Status::Holdover(first, alone));
+    let cause = Cause::NoEstimate(alone);
+    assert_eq!(reader.status(), Status::Holdover(first, cause));
     assert_eq!(reader.now(), Some(first.interval()));
 }
 
@@ -150,6 +152,35 @@ fn an_unknown_source_alone_gives_unknown_time() {
     assert_eq!(reader.now(), Some(unknown.interval()));
 }
 
+/// An unknown estimate never replaces a known one.
+#[test]
+fn holds_over_when_only_an_unknown_source_is_left() {
+    let (mut sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    let [peer, os] = [clock.add(), clock.add()];
+    let known = measure(&node, Span::ZERO, ms(1));
+    let os_offset = Span::from_nanos(5 * Span::SECOND.nanos());
+    clock.push(peer, known);
+    clock.push(os, Measurement::unknown(node.clock().now(), os_offset));
+    assert_eq!(reader.status(), Status::Synced(known));
+    clock.remove(peer);
+    let unknown = holdover(&node, Span::ZERO, ms(1), Cause::UnknownEstimate);
+    assert_eq!(reader.status(), unknown);
+    sim.run_for(Span::HOUR).expect("the run ends");
+    clock.push(os, Measurement::unknown(node.clock().now(), os_offset));
+    // An hour of drift adds 720 ms.
+    let grown = ms(721);
+    let unknown = holdover(&node, Span::ZERO, grown, Cause::UnknownEstimate);
+    assert_eq!(reader.status(), unknown);
+    assert_eq!(
+        read(&node, &reader),
+        Some(measure(&node, Span::ZERO, grown))
+    );
+    let peer = clock.add();
+    clock.push(peer, measure(&node, Span::ZERO, ms(1)));
+    assert_eq!(reader.status(), synced(&node, Span::ZERO, ms(1)));
+}
+
 #[test]
 fn holds_over_while_sources_split_then_follows_the_next_majority() {
     let (mut sim, node) = node();
@@ -180,16 +211,25 @@ fn holds_over_while_sources_split_then_follows_the_next_majority() {
         empty: 0,
     };
     clock.push(c, behind);
-    assert_eq!(reader.status(), holdover(&node, Span::ZERO, grown, split));
+    assert_eq!(
+        reader.status(),
+        holdover(&node, Span::ZERO, grown, Cause::NoEstimate(split))
+    );
     assert_eq!(
         read(&node, &reader),
         Some(measure(&node, Span::ZERO, grown))
     );
     sim.run_for(Span::SECOND).expect("the run ends");
     let grown = us(1_400);
-    assert_eq!(reader.status(), holdover(&node, Span::ZERO, grown, split));
+    assert_eq!(
+        reader.status(),
+        holdover(&node, Span::ZERO, grown, Cause::NoEstimate(split))
+    );
     clock.push(b, measure(&node, Span::SECOND, ms(1)));
-    assert_eq!(reader.status(), holdover(&node, Span::ZERO, grown, split));
+    assert_eq!(
+        reader.status(),
+        holdover(&node, Span::ZERO, grown, Cause::NoEstimate(split))
+    );
     assert_eq!(
         read(&node, &reader),
         Some(measure(&node, Span::ZERO, grown))
@@ -211,9 +251,15 @@ fn keeps_its_slew_in_holdover() {
         agreeing: 1,
         empty: 1,
     };
-    assert_eq!(reader.status(), holdover(&node, Span::ZERO, us(400), alone));
+    assert_eq!(
+        reader.status(),
+        holdover(&node, Span::ZERO, us(400), Cause::NoEstimate(alone))
+    );
     sim.run_for(ms(400)).expect("the run ends");
-    assert_eq!(reader.status(), holdover(&node, us(200), us(280), alone));
+    assert_eq!(
+        reader.status(),
+        holdover(&node, us(200), us(280), Cause::NoEstimate(alone))
+    );
     assert_eq!(read(&node, &reader), Some(measure(&node, us(200), us(280))));
 }
 
@@ -276,7 +322,10 @@ fn a_remove_follows_the_sources_left_then_holds_over_with_none() {
         empty: 0,
     };
     clock.push(b, measure(&node, Span::SECOND, us(500)));
-    assert_eq!(reader.status(), holdover(&node, Span::ZERO, ms(1), split));
+    assert_eq!(
+        reader.status(),
+        holdover(&node, Span::ZERO, ms(1), Cause::NoEstimate(split))
+    );
     // The earliest offset b allows is 999.5 ms; its latest is 1 ms above.
     let stepped = us(999_500);
     clock.remove(a);
@@ -284,7 +333,7 @@ fn a_remove_follows_the_sources_left_then_holds_over_with_none() {
     clock.remove(b);
     assert_eq!(
         reader.status(),
-        holdover(&node, stepped, ms(1), Error::NoSources)
+        holdover(&node, stepped, ms(1), Cause::NoEstimate(Error::NoSources))
     );
     assert_eq!(read(&node, &reader), Some(measure(&node, stepped, ms(1))));
 }

@@ -7,6 +7,7 @@
 use clock::{Clock, Status};
 use estimate::Measurement;
 use estimate::combine::Error;
+use estimate::discipline::Cause;
 use types::time::Span;
 
 #[global_allocator]
@@ -51,7 +52,7 @@ fn main() {
     };
     assert_eq!(
         status,
-        Status::Holdover(first, alone),
+        Status::Holdover(first, Cause::NoEstimate(alone)),
         "the reader reads the status"
     );
 }

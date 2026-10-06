@@ -701,7 +701,10 @@ How to read this record:
   also return it: one value gets one way to read it (#634). The next majority ends the
   holdover. Decided by the `time` builder (#142). The coordinator approved
   `Reader::status` within it (#598). `estimate::discipline` chooses what mesh time
-  follows, and `clock` writes it, so the decision logic is in layer 1 (#635).
+  follows, and `clock` writes it, so the decision logic is in layer 1 (#635). An
+  unknown estimate never replaces a known one: after a known estimate, when only
+  unknown bounds agree, the clock holds over until a known estimate. The person decided
+  on 2026-10-05 ("a is fine"), #489.
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
   not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says

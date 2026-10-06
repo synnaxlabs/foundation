@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7cdee12377764212a830b32950af0c00ffa0b239dbfb9bf7d8a546efd4110218 # shrinks to discipline = Holdover(Slew { start: Monotonic(0), from: Span(0), target: Measurement { at: Monotonic(0), offset: Span(0), error: Span(0) } }, Unknown)
