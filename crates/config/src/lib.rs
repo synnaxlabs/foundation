@@ -669,9 +669,9 @@ mod tests {
                 refused(
                     "document.bad-name",
                     at(0, 1),
-                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    "a segment is not valid: \"site a\" in \"site a\"",
                     "Use one or more ASCII letters, digits, `_`, and `-` in that \
-                     segment, and no other character",
+                     segment, after an optional leading `@`",
                 ),
                 refused(
                     "document.bad-size",
@@ -682,7 +682,7 @@ mod tests {
                 refused(
                     "document.bad-selector",
                     at(0, 111),
-                    "\"a*b\" uses a wildcard where it cannot",
+                    "a wildcard is out of place: \"a*b\"",
                     "Use `*` and `**` only as whole segments of a pattern, never in a \
                      name",
                 ),
