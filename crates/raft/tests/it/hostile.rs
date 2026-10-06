@@ -97,3 +97,30 @@ fn a_voter_that_does_not_lead_can_make_the_leader_commit_alone_in_a_new_term() {
     assert_eq!(state, (Role::Follower, forged, None));
     check_taken(node, append, entry);
 }
+
+// A known gap until #750. The forged voter set is in force once written, so the victim
+// wins an election alone and commits it on the nodes it reaches.
+#[test]
+fn a_voter_that_does_not_lead_can_take_the_group_over_in_a_new_term() {
+    let mut network = Network::new(&[Position::default(); 5], 0);
+    let (leader, term) = network.settle(&[]).unwrap();
+    let victim = (leader + 1) % 5;
+    let sender = (leader + 2) % 5;
+    let (mut append, entry) = forged_append(&network, sender, victim, Term(term.0 + 1));
+    // A forged commit makes the network panic on leader completeness first.
+    let Body::Append { commit, .. } = &mut append.body else {
+        unreachable!()
+    };
+    *commit = 0;
+    network.apply(&Action::Cut { node: sender });
+    network.nodes[victim].step(append).unwrap();
+    network.propose(leader).unwrap();
+    for _ in 0..4 * ELECTION {
+        network.round();
+    }
+    let taken = network
+        .disks
+        .iter()
+        .filter(|disk| disk.applied >= entry.at.index && disk.entries.contains(&entry));
+    assert_eq!(taken.count(), 4);
+}

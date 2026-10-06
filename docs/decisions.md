@@ -1005,12 +1005,13 @@ How to read this record:
   does, until a leader proves its election (#750). After a heartbeat or an `Append`
   of a higher term from a voter that does not lead, or a reply of a higher term and
   then either, a node follows the sender and writes and commits what it sends. So
-  two nodes can apply different entries at one index. The first leader after a
-  restart or a vote is the same gap. Tests pin it. Lost: a lease that drops a
-  heartbeat or an `Append` of a higher term from a node that is not the leader. A
-  reply of a higher term ends any node's lease, and a leader must step down on one;
-  the lease also changed three etcd oracle tests. The coordinator decided on
-  2026-10-06 under the person's delegation (#391). The person may change it.
+  two nodes can apply different entries at one index, and a forged voter set can
+  take the group over. The first leader after a restart or a vote is the same gap.
+  Tests pin it. Lost: a lease that drops a heartbeat or an `Append` of a higher term
+  from a node that is not the leader. A reply of a higher term ends any node's
+  lease, and a leader must step down on one; the lease also changed three etcd
+  oracle tests. The coordinator decided on 2026-10-06 under the person's delegation
+  (#391). The person may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
