@@ -184,10 +184,11 @@ state on `main`.
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
 - Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
-  reported durable or cannot open), #553 (a power cut after the first open loses
-  the new ring: its directory is not synced in its parent), #566 (a write of a dead
-  process can land on a ring that a new process opened), #572 (`append` takes a
-  record over the pool's largest block, and then each open fails). Fixed: #393 (two
+  reported durable or cannot open), #566 (a write of a dead process can land on a
+  ring that a new process opened), #572 (`append` takes a record over the pool's
+  largest block, and then each open fails), #657 (an open reports durable the
+  records a killed process never synced). Fixed: #553 (a power cut after the first
+  open lost the new ring: its directory was not synced in its parent), #393 (two
   CRC-valid fields stopped the node at open); the `area` and `below_tail` inputs
   hold both.
 
