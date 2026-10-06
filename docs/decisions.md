@@ -1693,11 +1693,13 @@ How to read this record:
   a restart finds no file held (#392). A `Power` crash keeps, for each 512-byte
   sector, its durable bytes or the bytes of any one write since then, a write in flight
   too. A `sync` makes durable the writes that ended before it started. A failed `sync`
-  makes each sector keep its durable bytes or those of one such write, at random. A
-  `sync_dir` makes durable the entries at its end. A removed file takes space until the
-  removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
-  thread that a crash ended panics, because no process joins its own threads after it
-  dies. Built by `simulation` in #114.
+  makes each sector keep its durable bytes or those of one such write, at random.
+  Where writes in flight at once overlap, a power cut or a failed `sync` can keep a
+  part of one of them in a sector (#580). A `sync_dir` makes durable the entries at its
+  end. A removed file takes space until the removal is durable. The monotonic clock
+  starts again and the wall runs on. `join` on a thread that a crash ended panics,
+  because no process joins its own threads after it dies. Built by `simulation` in
+  #114.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes

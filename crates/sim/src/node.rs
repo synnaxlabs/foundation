@@ -120,9 +120,9 @@ impl Node {
     /// - Where calls in flight at the same time overlap, a read gives, in each
     ///   512-byte sector, the old bytes, the bytes of one of the writes, or the bytes
     ///   of one of these over a part of the sector and of another over the rest.
-    ///   Each sector keeps the bytes of one write, or the bytes of two writes that
-    ///   were in flight at once, split the same way. A write whose future dropped
-    ///   still ends, with any subset of its sectors.
+    ///   Writes go on each sector in an order that their times allow, and a write
+    ///   that overlaps another can go in up to three parts, each at its own place.
+    ///   A write whose future dropped still ends, with any subset of its sectors.
     /// - A failure gives the code that Linux gives: 20 (`ENOTDIR`) for a path
     ///   through a file, 21 (`EISDIR`) for a file call on a directory, and 17
     ///   (`EEXIST`) for `create_dir` on a file.
@@ -134,9 +134,9 @@ impl Node {
     /// Makes the next call of `operation` on `path` on the node fail with
     /// `Error::Io` and code 5 (`EIO`). Faults on one path and operation fire in
     /// turn, one per call. The call does not touch the disk, except a sync: each
-    /// sector keeps its durable bytes or the bytes of one write that the sync
-    /// covers. These bytes are then durable, and a read sees them unless a later
-    /// write covers the sector.
+    /// sector keeps its durable bytes, or its bytes after one write that the sync
+    /// covers or a part of one. These bytes are then durable, and a read sees them
+    /// unless a later write covers the sector.
     ///
     /// # Panics
     ///

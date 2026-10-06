@@ -360,6 +360,9 @@ fn a_read_in_flight_with_a_write_sees_old_or_new_bytes_and_may_split_a_sector() 
         BTreeSet::from([vec![0, 0], vec![0, 0xab], vec![0xab, 0], vec![0xab; 2]]);
     assert_eq!(whole(&reads), both);
     assert!(reads.iter().any(|bytes| split(bytes)), "no sector split");
+    let three = (reads.iter().flat_map(|bytes| bytes.chunks(512)))
+        .any(|sector| sector.chunk_by(PartialEq::eq).count() == 3);
+    assert!(three, "no sector in three runs");
     assert_eq!(read_in_flight(7), read_in_flight(7));
 }
 
@@ -844,6 +847,18 @@ fn three_writes_in_flight_over_nested_bytes_leave_each_order_or_a_mix() {
         "{:?}",
         halves(&results)
     );
+}
+
+#[test]
+fn a_write_in_flight_over_two_in_turn_keeps_their_order() {
+    let writes = [(0, 200, 1, true), (0, 100, 2, false), (0, 100, 3, false)];
+    let results: Vec<Vec<u8>> = (0..256)
+        .map(|value| writes_in_order(value, writes))
+        .collect();
+    assert_bytes_in(results.iter().map(|bytes| &bytes[..100]), &[1, 3]);
+    assert_bytes_in(results.iter().map(|bytes| &bytes[100..]), &[1]);
+    assert_eq!(halves(&results), BTreeSet::from([(1, 1), (3, 1)]));
+    assert!(results.iter().any(|bytes| split(&bytes[..100])), "no mix");
 }
 
 /// The bytes of a one-sector file after writes of 1, 2, and 3, with a sync started

@@ -1,5 +1,6 @@
 //! The file system of one node: directories, and sparse files of sectors.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::mem;
@@ -79,13 +80,14 @@ pub(crate) struct File {
 }
 
 /// The durable bytes of a sector, and the writes on it since then in one order that
-/// the times of their calls allow.
+/// the times of their calls allow. A write that overlapped another in flight can be
+/// in the order as up to three parts, each at its own place.
 struct Sector {
     durable: [u8; env::files::SECTOR],
     writes: Vec<Write>,
 }
 
-/// One write on a sector.
+/// One write on a sector, or a part of one.
 struct Write {
     /// The tick at which it ended.
     written: u64,
@@ -301,9 +303,9 @@ impl Disk {
     }
 
     /// Cuts the power: each directory goes back to its durable entries, what they no
-    /// longer reach is freed, and each sector keeps its durable bytes or those of
-    /// one write since then, by `rng`. No descriptor and no call in flight may hold
-    /// a file.
+    /// longer reach is freed, and each sector keeps its durable bytes or its bytes
+    /// after one write since then, by `rng`. No descriptor and no call in flight may
+    /// hold a file.
     pub(crate) fn cut_power(&mut self, rng: &mut Rng) {
         let mut reached = BTreeSet::from([ROOT]);
         let mut next = vec![ROOT];
@@ -354,10 +356,11 @@ impl File {
 
     /// Ends a write of `bytes` at `offset` that started at tick `started`. Each
     /// sector of a write whose future dropped keeps its bytes or takes the new ones
-    /// by a coin. In each sector that takes them, the write takes the bytes of one
-    /// write that ended since tick `started` over a random part of the bytes they
-    /// share. It then goes at a random place among the writes that ended since tick
-    /// `started` and are not durable.
+    /// by a coin. In each sector that takes them, the write goes at a random place
+    /// among the writes that ended since tick `started` and are not durable. Where it
+    /// shares bytes with one of those, it goes in three parts, each at its own
+    /// place: a random part of the bytes it shares with one of them, and the bytes
+    /// before and after that part.
     pub(crate) fn write(
         &mut self,
         offset: u64,
@@ -380,27 +383,40 @@ impl File {
                 .rposition(|write| write.written < started)
                 .map_or(0, |at| at + 1);
             let covered = within(sector * SECTOR, &part);
-            let mut bytes = bytes[within(offset, &part)].to_vec();
-            let racing: Vec<(&Write, Range<usize>)> = (found.writes.iter())
-                .filter(|write| write.written >= started)
-                .filter_map(|write| Some((write, overlap(&write.covered, &covered)?)))
+            let mut own = [0; env::files::SECTOR];
+            own[covered.clone()].copy_from_slice(&bytes[within(offset, &part)]);
+            let shared: Vec<Range<usize>> = (found.writes[first..].iter())
+                .filter_map(|write| overlap(&write.covered, &covered))
                 .collect();
-            if !racing.is_empty() {
-                let (other, common) = &racing[index(rng.below(len(&racing)))];
-                let taken = piece(common, rng);
-                let from = |start| taken.start - start..taken.end - start;
-                bytes[from(covered.start)]
-                    .copy_from_slice(&other.bytes[from(other.covered.start)]);
-            }
-            let place = first + index(rng.below(len(&found.writes[first..]) + 1));
-            let write = Write {
-                written: tick,
-                covered,
-                bytes,
-                after: [0; env::files::SECTOR],
+            let parts = if shared.is_empty() {
+                vec![covered]
+            } else {
+                let taken = piece(&shared[index(rng.below(len(&shared)))], rng);
+                vec![
+                    covered.start..taken.start,
+                    taken.clone(),
+                    taken.end..covered.end,
+                ]
             };
-            found.writes.insert(place, write);
-            found.replay(place);
+            let choices = len(&found.writes[first..]) + 1;
+            let mut placed: Vec<(usize, Write)> = (parts.into_iter())
+                .filter(|part| !part.is_empty())
+                .map(|part| {
+                    let write = Write {
+                        written: tick,
+                        bytes: own[part.clone()].to_vec(),
+                        covered: part,
+                        after: [0; env::files::SECTOR],
+                    };
+                    (first + index(rng.below(choices)), write)
+                })
+                .collect();
+            // Later places first, so that each place indexes the old order.
+            placed.sort_by_key(|(place, _)| Reverse(*place));
+            for (place, write) in placed {
+                found.writes.insert(place, write);
+            }
+            found.replay(first);
             self.dirty.insert(sector);
         }
     }
@@ -461,27 +477,30 @@ impl File {
         let now = self.bytes(range.clone());
         let mut bytes = now.clone();
         for (_, part) in sectors(&range) {
-            let over: Vec<(u64, &[u8], Range<u64>)> = (writes.iter())
+            let over: Vec<(Range<usize>, &[u8])> = (writes.iter())
                 .filter_map(|&(offset, write)| {
                     let common = overlap(&part, &(offset..offset + len(write)))?;
-                    Some((offset, write, common))
+                    Some((
+                        within(range.start, &common),
+                        &write[within(offset, &common)],
+                    ))
                 })
                 .collect();
             let choices = len(&over) + 2;
+            let sector = within(range.start, &part);
             let first = rng.below(choices);
-            let (second, over_part) = (rng.below(choices), piece(&part, rng));
-            for (pick, part) in [(first, part), (second, over_part)] {
-                let to = within(range.start, &part);
+            let (second, run) = (rng.below(choices), piece(&sector, rng));
+            for (pick, run) in [(first, sector), (second, run)] {
                 match pick {
-                    0 => bytes[to.clone()].copy_from_slice(&before[to]),
-                    1 => bytes[to.clone()].copy_from_slice(&now[to]),
+                    0 => bytes[run.clone()].copy_from_slice(&before[run]),
+                    1 => bytes[run.clone()].copy_from_slice(&now[run]),
                     pick => {
-                        let (offset, write, common) = &over[index(pick - 2)];
-                        let Some(common) = overlap(common, &part) else {
-                            continue;
-                        };
-                        let to = within(range.start, &common);
-                        bytes[to].copy_from_slice(&write[within(*offset, &common)]);
+                        let (common, write) = &over[index(pick - 2)];
+                        if let Some(run) = overlap(common, &run) {
+                            let skip = run.start - common.start;
+                            bytes[run.clone()]
+                                .copy_from_slice(&write[skip..][..run.len()]);
+                        }
                     }
                 }
             }
@@ -516,26 +535,12 @@ fn overlap<T: Ord + Copy>(a: &Range<T>, b: &Range<T>) -> Option<Range<T>> {
     (start < end).then_some(start..end)
 }
 
-/// A random part of `range`, by `rng`: none of it, a start, an end, a middle, or all
-/// of it.
-fn piece<T>(range: &Range<T>, rng: &mut Rng) -> Range<T>
-where
-    T: Copy + TryFrom<u64> + TryInto<u64>,
-{
-    let wide = |at: T| at.try_into().ok().expect("invariant: a position fits u64");
-    let narrow = |at| {
-        T::try_from(at)
-            .ok()
-            .expect("invariant: a part fits its range")
-    };
-    let (start, end) = (wide(range.start), wide(range.end));
-    let mut cut = || match rng.below(4) {
-        0 => start,
-        1 => end,
-        _ => start + rng.below(end - start + 1),
-    };
+/// A random part of `range` between two cuts, by `rng`: from none of it to all of it.
+fn piece(range: &Range<usize>, rng: &mut Rng) -> Range<usize> {
+    let count = u64::try_from(range.len()).expect("invariant: usize fits u64");
+    let mut cut = || range.start + index(rng.below(count + 1));
     let (a, b) = (cut(), cut());
-    narrow(a.min(b))..narrow(a.max(b))
+    a.min(b)..a.max(b)
 }
 
 /// Each sector that holds a byte of `range`, with the part of `range` in it.
@@ -645,6 +650,49 @@ mod tests {
             .collect();
         let expected = [[[2; 256], [0; 256]].concat(), [[2; 256], [1; 256]].concat()];
         assert_eq!(kept, BTreeSet::from(expected));
+    }
+
+    #[test]
+    fn a_write_in_flight_never_brings_back_bytes_that_a_later_write_covered() {
+        for (len, seed) in [100, 512]
+            .into_iter()
+            .flat_map(|len| (0..256).map(move |seed| (len, seed)))
+        {
+            let mut rng = Rng::from_seed(seed);
+            let mut file = file();
+            file.write(0, &vec![2; len], 2, 3, false, &mut rng);
+            file.write(0, &vec![3; len], 4, 5, false, &mut rng);
+            file.write(0, &[1; 512], 1, 6, false, &mut rng);
+            assert!(!file.bytes(0..SECTOR).contains(&2), "{len} {seed}");
+        }
+    }
+
+    #[test]
+    fn a_power_cut_may_keep_a_part_of_a_write_that_overlapped_another() {
+        let kept: Vec<Vec<u8>> = (0..256)
+            .map(|seed| {
+                let mut rng = Rng::from_seed(seed);
+                let mut file = file();
+                file.write(0, &[2; 512], 1, 2, false, &mut rng);
+                file.write(0, &[1; 512], 1, 3, false, &mut rng);
+                file.tear(u64::MAX, &mut rng);
+                file.bytes(0..SECTOR)
+            })
+            .collect();
+        assert!(kept.iter().flatten().all(|byte| [0, 1, 2].contains(byte)));
+        let part = (kept.iter()).any(|bytes| bytes.contains(&0) && bytes.contains(&1));
+        assert!(part, "{kept:?}");
+    }
+
+    #[test]
+    fn a_piece_can_be_each_part_of_its_range() {
+        let mut rng = Rng::from_seed(0);
+        let pieces: BTreeSet<(usize, usize)> = (0..64)
+            .map(|_| piece(&(3..5), &mut rng))
+            .map(|part| (part.start, part.end))
+            .collect();
+        let parts = [(3, 3), (3, 4), (3, 5), (4, 4), (4, 5), (5, 5)];
+        assert_eq!(pieces, BTreeSet::from(parts));
     }
 
     #[test]
