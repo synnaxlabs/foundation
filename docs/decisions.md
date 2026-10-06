@@ -762,12 +762,14 @@ How to read this record:
   the OS reading to the exchange as an interval, its time plus or minus its bound, so
   the error is never less than the OS bound. An error of 36500 days or more reads as
   unknown, the same as no bound (the coordinator, #144). So does an edge of the bound
-  past the range of a stamp (the `time` builder, #910). Lost: the edge stopped at the
-  range, because it narrows a bound of 36500 days or more into a known one; edges in
-  `i128` through a new `estimate` input, a second exchange shape for 1677 and 2262 only;
-  `Measurement::widened`, a public item that keeps the OS reading a special path. Only
-  `clock` and `node` call `clock::source::Wall::measure`; a lint denies it elsewhere
-  (BQ20). On Linux the bound is the kernel's `maxerror`, and
+  past the range of a stamp, centered at the reading as with no bound: a known bound
+  with such an edge needs a reading after 2162 or before 1777, so it cannot hold a true
+  time between those years. The coordinator approved it with the advisor, #910. Lost:
+  the edge stopped at the range, because it narrows a bound of 36500 days or more into a
+  known one; edges in `i128` through a new `estimate` input, because it keeps a false
+  bound that votes (#314); `Measurement::widened`, a public item that keeps the OS
+  reading a special path. Only `clock` and `node` call `clock::source::Wall::measure`; a
+  lint denies it elsewhere (BQ20). On Linux the bound is the kernel's `maxerror`, and
   only chrony and ntpd compute it. `systemd-timesyncd` sets it to 0 at each update,
   while the clock can still be 0.4 s off. So a known OS bound on Linux needs chrony or
   ntpd, and the operator docs must say so. A host with timesyncd (the default on Debian)

@@ -205,6 +205,7 @@ mod tests {
             let m = measure_at(Stamp::from_nanos(wall), Some(past));
             let offset = Span::from_nanos(wall - monotonic);
             assert_eq!(m, Measurement::unknown(at(), offset));
+            assert_eq!(m, measure_at(Stamp::from_nanos(wall), None));
         }
     }
 
