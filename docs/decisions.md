@@ -1568,9 +1568,9 @@ How to read this record:
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
-  default. A policy sets at least one budget, because one with none changes nothing
-  but can still tie on specificity (#869). The data directory is node-local: a start
-  argument of `foundation`, with a default, because the spec is stored in it.
+  default. A policy that sets no budget is a user mistake, refused as normal
+  validation with the fix in the message (#869). The data directory is node-local:
+  a start argument of `foundation`, with a default, because the spec is stored in it.
   Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
   change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
   #342.
@@ -2472,7 +2472,11 @@ conflicts (a union of allows).
 Resolution: `spec::resolve` applies most-specific-wins to setting policies (retention,
 placement, transmission, compression, reduction, time, secret store, node settings).
 For node settings, each budget resolves on its own: a policy that leaves a budget unset
-gives that budget to a less specific policy. Access is
+gives that budget to a less specific policy. Two policies of equal specificity that
+both set the same budget for one node are a plan error; two that set different budgets
+do not conflict. Per-budget resolution holds only because `disk` and `pool` are
+independent. It does not extend to kinds whose fields go together (such as placement),
+where values from different policies could make a combination nobody wrote. Access is
 evaluated only in `access`, as the union of matching allows; the authority cap is the
 highest authority among matching allows that grant `write`. Both use the one selector
 matcher in `types`. Basis: C8, SRP PASS (`access` split).

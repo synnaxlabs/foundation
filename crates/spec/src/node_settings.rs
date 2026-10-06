@@ -64,7 +64,7 @@ pub enum Error {
     ZeroDisk,
     /// The pool budget is zero bytes.
     ZeroPool,
-    /// The policy sets neither budget, so it changes nothing.
+    /// The policy sets neither budget.
     NoBudget,
 }
 
@@ -73,7 +73,9 @@ impl fmt::Display for Error {
         match self {
             Self::ZeroDisk => f.write_str("the disk budget is zero"),
             Self::ZeroPool => f.write_str("the pool budget is zero"),
-            Self::NoBudget => f.write_str("the policy sets no budget"),
+            Self::NoBudget => {
+                f.write_str("the policy sets no budget; set `disk`, `pool`, or both")
+            }
         }
     }
 }
@@ -106,6 +108,9 @@ mod tests {
     #[test]
     fn refuses_a_policy_with_no_budget() {
         assert_eq!(Policy::new(select(), None, None), Err(Error::NoBudget));
-        assert_eq!(Error::NoBudget.to_string(), "the policy sets no budget");
+        assert_eq!(
+            Error::NoBudget.to_string(),
+            "the policy sets no budget; set `disk`, `pool`, or both"
+        );
     }
 }

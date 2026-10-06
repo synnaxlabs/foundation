@@ -289,7 +289,10 @@ fn refuses_node_settings_with_no_budget() {
     );
     assert_eq!(
         error.to_string(),
-        format!("the budgets at byte {at}: the policy sets no budget")
+        format!(
+            "the budgets at byte {at}: {}",
+            node_settings::Error::NoBudget
+        )
     );
 }
 
