@@ -2006,7 +2006,11 @@ How to read this record:
   to a nanosecond does not add up. A packet sent after the rate is removed still waits
   for the packets before it. Then it takes the delay and the jitter. A power cut drops
   the packets of the node that wait to leave. With no rate, a link adds no events and
-  no draws, so the digest of a run does not change. Approved by the coordinator.
+  no draws, so the digest of a run does not change. A UDP datagram takes its length
+  plus 768 bytes of its socket's send buffer until it leaves its link. As on Linux, a
+  send goes whole while the send buffer takes less than `send_buffer_bytes`, and is
+  pending from then. When a datagram leaves and the send buffer is no longer full,
+  each send that waits wakes in the same step. Approved by the coordinator.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
