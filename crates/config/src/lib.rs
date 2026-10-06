@@ -16,6 +16,7 @@ const UNKNOWN_BLOCK: Code = Code::new("config.unknown-block");
 const UNKNOWN_ATTRIBUTE: Code = Code::new("config.unknown-attribute");
 const LABEL_COUNT: Code = Code::new("config.label-count");
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
+const RESERVED_NAME: Code = Code::new("config.reserved-name");
 
 /// The definitions that a mesh's files give, checked.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub struct Definitions {
 /// # Errors
 ///
 /// Every problem in the Documents, in the order of `documents`, then in source order.
+/// A value that a reader refuses gives only its first problem.
 pub fn check(documents: &[Document]) -> Result<Definitions, Vec<Diagnostic>> {
     let mut check = Check::default();
     for document in documents {
@@ -44,7 +46,7 @@ pub fn check(documents: &[Document]) -> Result<Definitions, Vec<Diagnostic>> {
         }
         for block in &document.blocks {
             match &*block.keyword {
-                "node_settings" => check.node_settings(block),
+                "node_settings" => node_settings::check(&mut check, block),
                 keyword => check.diagnostics.push(Diagnostic::new(
                     UNKNOWN_BLOCK,
                     block.keyword_span,
@@ -53,11 +55,8 @@ pub fn check(documents: &[Document]) -> Result<Definitions, Vec<Diagnostic>> {
                 )),
             }
         }
-        if let Some(found) = check.diagnostics.get_mut(start..) {
-            found.sort_by_key(|diagnostic| {
-                diagnostic.span.map(|span| span.start().offset)
-            });
-        }
+        check.diagnostics[start..]
+            .sort_by_key(|diagnostic| diagnostic.span.map(|span| span.start().offset));
     }
     if check.diagnostics.is_empty() {
         Ok(check.definitions)
@@ -98,6 +97,18 @@ impl<'a> Check<'a> {
             return None;
         };
         let name = self.report(read::name(label))?;
+        if name.reserved() {
+            self.diagnostics.push(Diagnostic::new(
+                RESERVED_NAME,
+                label.span,
+                format!(
+                    "{:?} has a segment that starts with `@`, which is reserved",
+                    name.as_str()
+                ),
+                "Remove the `@` from each segment".into(),
+            ));
+            return None;
+        }
         let folded = name.as_str().to_ascii_lowercase().into();
         let first = match self.names.entry((keyword, folded)) {
             Entry::Occupied(first) => *first.get(),
@@ -172,13 +183,17 @@ mod tests {
 
     use super::*;
 
+    /// The position at `offset`, in a file of lines that are 100 bytes long.
+    fn position(offset: u32) -> Position {
+        Position {
+            offset,
+            line: offset / 100,
+            column: offset % 100,
+        }
+    }
+
     /// A one-byte span at `offset` in file `file`.
     fn at(file: u32, offset: u32) -> Option<Span> {
-        let position = |offset| Position {
-            offset,
-            line: 0,
-            column: offset,
-        };
         Span::new(Source(file), position(offset), position(offset + 1))
     }
 
@@ -205,11 +220,6 @@ mod tests {
                 span: at(file, offset + 1),
             },
         });
-        let position = |offset| Position {
-            offset,
-            line: 0,
-            column: offset,
-        };
         Block {
             keyword: keyword.into(),
             keyword_span: at(file, offset),
@@ -432,6 +442,22 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_reserved_name() {
+        let select = [("select", string("site_a.*"))];
+        let documents = [document(vec![settings(0, 0, "site_a.@changes", &select)])];
+        assert_eq!(
+            check(&documents),
+            Err(vec![refused(
+                "config.reserved-name",
+                at(0, 1),
+                "\"site_a.@changes\" has a segment that starts with `@`, which is \
+                 reserved",
+                "Remove the `@` from each segment",
+            )])
+        );
+    }
+
+    #[test]
     fn refuses_what_a_node_settings_block_cannot_hold() {
         let mut block = settings(
             0,
@@ -546,6 +572,7 @@ mod tests {
     #[test]
     fn reports_in_file_then_source_order() {
         // `select` is first in the file but last in the body's map, which sorts keys.
+        // The block at 100 is on a later line, at a smaller column.
         let policy = settings(
             0,
             0,

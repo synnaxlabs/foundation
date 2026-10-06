@@ -1526,7 +1526,8 @@ How to read this record:
   default. The data directory is node-local: a start argument of `foundation`, with a
   default, because the spec is stored in it. Node-local config for the budgets lost:
   `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
-  decided on 2026-10-05 ("Yeah mesh node"), #342.
+  decided on 2026-10-05 ("Yeah mesh node"), #342. The `config` builder added the label
+  and the bound above zero (#474).
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
   policies of its kind. A policy name can equal a channel name. A policy belongs to the
   region that governs its name (X2: the longest region prefix that contains it), and it

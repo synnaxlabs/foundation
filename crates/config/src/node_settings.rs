@@ -24,56 +24,54 @@ pub struct NodeSettings {
     pub span: Option<Span>,
 }
 
-impl<'a> Check<'a> {
-    /// Checks a `node_settings` block and adds its policy to the definitions.
-    pub(crate) fn node_settings(&mut self, block: &'a Block) {
-        let keyword = &*block.keyword;
-        let name = self.name(block);
-        let (mut select, mut disk, mut pool) = (None, None, None);
-        for attribute in block.body.attributes.iter() {
-            match &*attribute.key {
-                "select" => select = self.report(read::selector(&attribute.value)),
-                "disk" => disk = self.budget(attribute),
-                "pool" => pool = self.budget(attribute),
-                _ => self.unknown_attribute(
-                    keyword,
-                    attribute,
-                    "`select`, `disk`, or `pool`",
-                ),
-            }
-        }
-        self.unknown_blocks(keyword, &block.body);
-        if block.body.attributes.get("select").is_none() {
-            self.diagnostics.push(Diagnostic::new(
-                MISSING_ATTRIBUTE,
-                block.keyword_span,
-                format!("the `{keyword}` block has no `select`"),
-                "Add the nodes that it sets, such as `select = \"site_a.*\"`".into(),
-            ));
-        }
-        if let (Some(name), Some(select)) = (name, select) {
-            self.definitions.node_settings.push(NodeSettings {
-                name,
-                select,
-                disk,
-                pool,
-                span: block.span,
-            });
+/// Checks a `node_settings` block and adds its policy to the definitions.
+pub(crate) fn check<'a>(check: &mut Check<'a>, block: &'a Block) {
+    let keyword = &*block.keyword;
+    let name = check.name(block);
+    let (mut select, mut disk, mut pool) = (None, None, None);
+    for attribute in block.body.attributes.iter() {
+        match &*attribute.key {
+            "select" => select = check.report(read::selector(&attribute.value)),
+            "disk" => disk = budget(check, attribute),
+            "pool" => pool = budget(check, attribute),
+            _ => check.unknown_attribute(
+                keyword,
+                attribute,
+                "`select`, `disk`, or `pool`",
+            ),
         }
     }
+    check.unknown_blocks(keyword, &block.body);
+    if block.body.attributes.get("select").is_none() {
+        check.diagnostics.push(Diagnostic::new(
+            MISSING_ATTRIBUTE,
+            block.keyword_span,
+            format!("the `{keyword}` block has no `select`"),
+            "Add the nodes that it sets, such as `select = \"site_a.*\"`".into(),
+        ));
+    }
+    if let (Some(name), Some(select)) = (name, select) {
+        check.definitions.node_settings.push(NodeSettings {
+            name,
+            select,
+            disk,
+            pool,
+            span: block.span,
+        });
+    }
+}
 
-    /// Reads a budget, a size above zero.
-    fn budget(&mut self, attribute: &Attribute) -> Option<byte::Size> {
-        let size = self.report(read::size(&attribute.value))?;
-        if size.bytes() == 0 {
-            self.diagnostics.push(Diagnostic::new(
-                ZERO_SIZE,
-                attribute.value.span,
-                format!("the `{}` budget is zero", attribute.key),
-                format!("Write a size above zero, or remove `{}`", attribute.key),
-            ));
-            return None;
-        }
-        Some(size)
+/// Reads a budget, a size above zero.
+fn budget(check: &mut Check<'_>, attribute: &Attribute) -> Option<byte::Size> {
+    let size = check.report(read::size(&attribute.value))?;
+    if size.bytes() == 0 {
+        check.diagnostics.push(Diagnostic::new(
+            ZERO_SIZE,
+            attribute.value.span,
+            format!("the `{}` budget is zero", attribute.key),
+            format!("Write a size above zero, or remove `{}`", attribute.key),
+        ));
+        return None;
     }
+    Some(size)
 }
