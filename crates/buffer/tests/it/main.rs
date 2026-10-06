@@ -2535,3 +2535,60 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
         );
     });
 }
+
+/// A `Commit` on an entry queued at the drop resolves with the error of the write
+/// after the drop.
+#[test]
+fn a_commit_on_an_entry_queued_at_the_drop_resolves_with_a_failed_write() {
+    run(138, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let commit = buffer.committed();
+        drop(buffer);
+        let ended = Err(FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        });
+        assert_eq!(commit.await, ended, "the write after the drop failed");
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+    });
+}
+
+/// A synced `Commit` held past the drop resolves well when the write after the
+/// drop fails.
+#[test]
+fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
+    run(139, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let first = buffer.committed();
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues");
+        drop(buffer);
+        assert_eq!(
+            first.await,
+            Ok(()),
+            "its entries were durable before the drop"
+        );
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+    });
+}

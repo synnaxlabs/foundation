@@ -218,8 +218,8 @@ impl From<header::Error> for Error {
 /// One shard's logs. It lives on its shard: the commit task runs on the shard's
 /// `tasks`. The task idles while nothing is queued. A drop ends the task at once
 /// when it idles, else at its next deadline, after it wrote the entries queued at
-/// the drop. A [`Commit`] held past the drop resolves once the task ended, so await
-/// it before a reopen.
+/// the drop. A [`Commit`] held past the drop resolves once the task ended: await it
+/// before a reopen, and before the shard ends, which cancels the task.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -267,7 +267,7 @@ struct State {
     parked: Option<Waker>,
     /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
-    /// Whether the task ended after a drop. A [`Commit`] waits for it.
+    /// Whether the task ended. A [`Commit`] held past the drop waits for it.
     ended: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
@@ -699,7 +699,10 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         let mut state = shared.state.borrow_mut();
         match result {
             Ok(()) => state.synced(sealed.drain(..)),
-            Err(error) => state.failed = Some(error),
+            Err(error) => {
+                state.failed = Some(error);
+                state.ended = true;
+            }
         }
         woken.append(&mut state.wakers);
         drop(state);
