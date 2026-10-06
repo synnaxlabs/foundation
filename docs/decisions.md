@@ -879,11 +879,13 @@ How to read this record:
   priority is strict: a class sends nothing, resends too, while a higher class has bytes
   to send, so a steady higher class starves the lower ones. It orders only the bytes
   that QUIC holds. All classes share one QUIC send window, so a message can wait for
-  bytes of a lower class to be acknowledged (#797). The mapping is a `transport`
-  constant that simulation tunes (5.3); weights need a scheduler above QUIC. Lost: a
-  scheduler of ours, because the bytes QUIC holds and their resends still go in turn; a
-  connection per class, because four handshakes and four congestion controllers compete
-  on one path (#55). A node resets a stream with the stop's code when the stop arrives.
+  bytes of a lower class to be acknowledged (#797). `Complete` gets a guaranteed minimum
+  share in the class-ordered send budget, not in QUIC (#819, before the alpha). The
+  budget bounds what QUIC holds to `window_bytes`, so QUIC's strict order acts only
+  inside that bound. Lost: a connection per class, because four handshakes and four
+  congestion controllers compete on one path (#55). Settled by the advisor and the
+  coordinator under the person's delegation (#789). A node resets a stream with the
+  stop's code when the stop arrives.
   A peer breaks the protocol when it sends another class byte, ends a stream inside a
   message, sends a message over the limit, or resets or stops a stream with a code over
   32 bits. The node then closes the connection with application code 2^32 and the reason
