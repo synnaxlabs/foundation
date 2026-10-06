@@ -276,12 +276,16 @@ impl<'a> Decoder<'a> {
     /// # Errors
     ///
     /// Returns the error of the vector it reads, as [`validate`] gives it, or
-    /// [`Error::Trailing`] after the last vector.
+    /// [`Error::Trailing`] after the last vector. It never gives
+    /// [`Error::Overflow`], because it needs no room for all the samples: for a
+    /// count whose bytes pass `usize::MAX`, it gives the error of the vector where the
+    /// bytes end.
     ///
     /// # Panics
     ///
     /// Panics when `out` holds fewer than [`VECTOR_LEN`] samples, whatever the next
     /// vector holds.
+    #[must_use = "the result holds the error of the vector"]
     pub fn next<'o>(&mut self, out: &'o mut [u8]) -> Option<Result<&'o [u8], Error>> {
         let width = self.layout.width();
         assert!(
@@ -1679,6 +1683,31 @@ mod tests {
             let _vector = Decoder::new(Scalar::U16, 1, &[]).next(&mut [0; 2_047]);
         }
 
+        #[test]
+        #[should_panic(
+            expected = "out holds 1023 bytes, fewer than 1024 samples of 1 bytes"
+        )]
+        fn panics_when_out_holds_less_than_a_vector_after_the_last() {
+            let _vector = Decoder::new(Scalar::U8, 0, &[]).next(&mut [0; 1_023]);
+        }
+
+        #[test]
+        fn gives_the_vector_error_for_a_count_past_usize_bytes() {
+            let mut decoder = Decoder::new(Scalar::U64, usize::MAX, &[]);
+            assert_eq!(
+                validate(Type::Scalar(Scalar::U64), usize::MAX, &[]),
+                Err(Error::Overflow)
+            );
+            assert_eq!(
+                decoder.next(&mut [0; VECTOR_LEN * 8]),
+                Some(Err(Error::Truncated {
+                    vector: 0,
+                    needed: 2,
+                    available: 0
+                }))
+            );
+        }
+
         proptest! {
             #[test]
             fn gives_what_decode_and_validate_give(
@@ -1705,7 +1734,8 @@ mod tests {
                 let count = (values.len() / width).saturating_add_signed(skew);
 
                 let mut out = vec![0; count * width];
-                let decoded = decode(Type::Scalar(scalar), count, &series, &mut out).map(|()| out);
+                let decoded = decode(Type::Scalar(scalar), count, &series, &mut out)
+                    .map(|()| out);
                 prop_assert_eq!(
                     validate(Type::Scalar(scalar), count, &series),
                     decoded.as_ref().map(Vec::len).map_err(Clone::clone)

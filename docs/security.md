@@ -222,9 +222,9 @@ state on `main`.
 
 ### Encoded series
 
-- `codec::validate` and `codec::decode` read series from peers and from disk. A
-  series cannot make `decode` write outside `out`. Fuzzed: `codec_series`,
-  `codec_encoder`.
+- `codec::validate`, `codec::decode`, and `codec::Decoder` read series from peers
+  and from disk. A series cannot make `decode` or `Decoder` write outside `out`.
+  Fuzzed: `codec_series`, `codec_encoder`.
 
 ## Secrets
 
@@ -278,7 +278,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
-| `codec_series` | `codec::validate`, `codec::decode` | Both give one result |
+| `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
