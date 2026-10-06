@@ -9,6 +9,7 @@ use std::sync::Arc;
 use types::time::Span;
 
 pub mod analog;
+pub mod digital;
 mod ffi;
 
 use ffi::{Functions, Handle};
@@ -129,6 +130,21 @@ impl Task {
     fn start(&mut self) -> Result<(), Error> {
         // SAFETY: a live handle.
         self.check(unsafe { (self.functions().start_task)(self.handle) })
+    }
+
+    fn clock(&mut self, rate: f64, buffer: u64) -> Result<(), Error> {
+        // SAFETY: a live handle and a NUL-terminated string.
+        let code = unsafe {
+            (self.functions().clock)(
+                self.handle,
+                c"".as_ptr(),
+                rate,
+                ffi::RISING,
+                ffi::CONTINUOUS,
+                buffer,
+            )
+        };
+        self.check(code)
     }
 
     fn stop(&mut self) -> Result<(), Error> {

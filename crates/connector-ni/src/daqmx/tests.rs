@@ -25,6 +25,10 @@ fn linked() -> Library {
         clock: stub::DAQmxCfgSampClkTiming,
         read_analog: stub::DAQmxReadAnalogF64,
         write_analog: stub::DAQmxWriteAnalogF64,
+        digital_in: stub::DAQmxCreateDIChan,
+        digital_out: stub::DAQmxCreateDOChan,
+        read_digital: stub::DAQmxReadDigitalLines,
+        write_digital: stub::DAQmxWriteDigitalLines,
         error: stub::DAQmxGetExtendedErrorInfo,
     };
     Library(Arc::new(Loaded {
@@ -177,6 +181,8 @@ const _: () = {
     const fn send<T: Send>() {}
     send::<Input>();
     send::<Output>();
+    send::<digital::Input>();
+    send::<digital::Output>();
     send::<Library>();
 };
 
@@ -196,6 +202,68 @@ fn panics_on_a_name_with_a_nul() {
     drop(Input::create(&linked(), "a\0b"));
 }
 
+fn reads_digital_lines(library: &Library) {
+    let mut task = digital::Input::create(library, "lines").unwrap();
+    task.add("Dev1/port0/line0:1").unwrap();
+    task.add("Dev1/port0/line2").unwrap();
+    task.start().unwrap();
+    let mut out = [9; 6];
+    assert_eq!(task.read(&mut out, SECOND), Ok(6));
+    assert_eq!(out, [0, 1, 0, 1, 0, 1]);
+    assert_eq!(task.read(&mut out[..3], SECOND), Ok(3));
+    assert_eq!(out[..3], [0, 1, 0]);
+}
+
+#[test]
+fn reads_each_line_by_scan_with_no_clock() {
+    reads_digital_lines(&linked());
+}
+
+#[test]
+fn reads_digital_lines_on_a_clock() {
+    let library = linked();
+    let mut task = digital::Input::create(&library, "clocked").unwrap();
+    task.add("short/port0/line0").unwrap();
+    task.clock(1000.0, 100).unwrap();
+    assert_eq!(task.clock(-1.0, 100), Err(refused(stub::ARGUMENT)));
+    task.start().unwrap();
+    let mut out = [9; 4];
+    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    assert_eq!(out, [0, 1, 9, 9]);
+}
+
+#[test]
+fn counts_the_lines_a_failed_add_left() {
+    let library = linked();
+    let mut task = digital::Input::create(&library, "partial").unwrap();
+    task.add("Dev1/port0/line0").unwrap();
+    assert_eq!(task.add("fail/port0/line1"), Err(refused(stub::FAIL)));
+    task.start().unwrap();
+    let mut out = [9; 2];
+    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    assert_eq!(out, [0, 1]);
+}
+
+#[test]
+fn writes_each_line() {
+    let library = linked();
+    let mut task = digital::Output::create(&library, "write").unwrap();
+    task.add("Dev1/port0/line0:1").unwrap();
+    assert_eq!(task.write(&[0, 1], SECOND), Err(refused(stub::STOPPED)));
+    task.start().unwrap();
+    task.write(&[0, 1, 255, 0], SECOND).unwrap();
+}
+
+#[test]
+#[should_panic(expected = "3 values do not fill 2 channels")]
+fn panics_on_lines_that_do_not_fill_the_channels() {
+    let library = linked();
+    let mut task = digital::Output::create(&library, "panic").unwrap();
+    task.add("Dev1/port0/line0:1").unwrap();
+    task.start().unwrap();
+    drop(task.write(&[0, 1, 0], SECOND));
+}
+
 /// The stub built as a shared library, which Cargo puts next to the test binary.
 fn stub_path() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
@@ -212,6 +280,7 @@ fn reads_through_the_loaded_driver() {
     // SAFETY: the stub has NI's functions and signatures.
     let library = unsafe { Library::open(Some(&stub_path())) }.unwrap();
     reads_a_ramp(&library);
+    reads_digital_lines(&library);
 }
 
 #[test]

@@ -1,14 +1,12 @@
-//! Tasks that read or write voltages. A task holds inputs or outputs, never both, as
-//! NI's driver requires.
-
-use std::ptr;
+//! Tasks that read or write digital lines, one channel for each line. A task holds
+//! inputs or outputs, never both, as NI's driver requires.
 
 use types::time::Span;
 
-use super::ffi::{BY_SCAN, DEFAULT, VOLTS};
+use super::ffi::{BY_SCAN, PER_LINE};
 use super::{Error, Library, Task, scans, seconds, size, text, values};
 
-/// A task that reads voltages. Dropping it clears it in the driver.
+/// A task that reads digital lines. Dropping it clears it in the driver.
 #[derive(Debug)]
 pub struct Input(Task);
 
@@ -26,42 +24,40 @@ impl Input {
         Task::create(library, name).map(Self)
     }
 
-    /// Adds the channels `physical` names (`Dev1/ai0`, or `Dev1/ai0:3` for four), which
-    /// measure from `min` to `max` volts on the device's default terminal setup.
+    /// Adds the lines `lines` names (`Dev1/port0/line0`, or `Dev1/port0/line0:7` for
+    /// eight), one channel for each line.
     ///
     /// # Errors
     ///
-    /// [`Error::Daqmx`] when the driver refuses, as for an unknown channel. A refused
-    /// call can still leave some of the channels in the task.
+    /// [`Error::Daqmx`] when the driver refuses, as for an unknown line. A refused
+    /// call can still leave some of the lines in the task.
     ///
     /// # Panics
     ///
-    /// When `physical` holds a NUL byte.
-    pub fn add(&mut self, physical: &str, min: f64, max: f64) -> Result<(), Error> {
+    /// When `lines` holds a NUL byte.
+    pub fn add(&mut self, lines: &str) -> Result<(), Error> {
         let task = &self.0;
-        let physical = text(physical);
-        // SAFETY: a live handle, NUL-terminated strings, and a null scale for none.
+        let lines = text(lines);
+        // SAFETY: a live handle and NUL-terminated strings.
         let code = unsafe {
-            (task.functions().analog_in)(
+            (task.functions().digital_in)(
                 task.handle,
-                physical.as_ptr(),
+                lines.as_ptr(),
                 c"".as_ptr(),
-                DEFAULT,
-                min,
-                max,
-                VOLTS,
-                ptr::null(),
+                PER_LINE,
             )
         };
         task.check(code)
     }
 
-    /// Samples each channel `rate` times a second without end, on the device's own
-    /// clock, into a driver buffer that holds `buffer` samples of each channel.
+    /// Samples each line `rate` times a second without end, on the device's own
+    /// clock, into a driver buffer that holds `buffer` samples of each line. Without a
+    /// clock, each read takes one sample when called.
     ///
     /// # Errors
     ///
-    /// [`Error::Daqmx`] when the driver refuses, as for a rate the device cannot do.
+    /// [`Error::Daqmx`] when the driver refuses, as for a device with no clock for
+    /// its lines.
     pub fn clock(&mut self, rate: f64, buffer: u64) -> Result<(), Error> {
         self.0.clock(rate, buffer)
     }
@@ -84,9 +80,10 @@ impl Input {
         self.0.stop()
     }
 
-    /// Reads into `out` by scan (each channel of the first sample, then each channel of
-    /// the next), and gives the number of values read. It waits up to `timeout`, cut to
-    /// whole milliseconds, for `out` to fill. A driver warning reads as success.
+    /// Reads into `out` by scan (each line of the first sample, then each line of the
+    /// next), 0 for low and 1 for high, and gives the number of values read. It waits
+    /// up to `timeout`, cut to whole milliseconds, for `out` to fill. A driver warning
+    /// reads as success.
     ///
     /// # Errors
     ///
@@ -95,18 +92,18 @@ impl Input {
     ///
     /// # Panics
     ///
-    /// When `out` does not hold a whole number of samples of each channel, more than
-    /// `i32::MAX` samples of each channel, or more than `u32::MAX` values.
-    pub fn read(&mut self, out: &mut [f64], timeout: Span) -> Result<usize, Error> {
+    /// When `out` does not hold a whole number of samples of each line, more than
+    /// `i32::MAX` samples of each line, or more than `u32::MAX` values.
+    pub fn read(&mut self, out: &mut [u8], timeout: Span) -> Result<usize, Error> {
         let task = &self.0;
         let channels = task.channels()?;
         let per_channel = scans(out.len(), channels);
         let size = size(out.len());
-        let (mut read, mut reserved) = (0, 0);
-        // SAFETY: a live handle, `out` holds `size` values, and `read` and `reserved`
-        // are valid for one write each.
+        let (mut read, mut bytes, mut reserved) = (0, 0, 0);
+        // SAFETY: a live handle, `out` holds `size` bytes, and `read`, `bytes`, and
+        // `reserved` are valid for one write each.
         let code = unsafe {
-            (task.functions().read_analog)(
+            (task.functions().read_digital)(
                 task.handle,
                 per_channel,
                 seconds(timeout),
@@ -114,6 +111,7 @@ impl Input {
                 out.as_mut_ptr(),
                 size,
                 &raw mut read,
+                &raw mut bytes,
                 &raw mut reserved,
             )
         };
@@ -122,7 +120,7 @@ impl Input {
     }
 }
 
-/// A task that writes voltages. Dropping it clears it in the driver.
+/// A task that writes digital lines. Dropping it clears it in the driver.
 #[derive(Debug)]
 pub struct Output(Task);
 
@@ -140,30 +138,27 @@ impl Output {
         Task::create(library, name).map(Self)
     }
 
-    /// Adds the channels `physical` names (`Dev1/ao0`, or `Dev1/ao0:1` for two), which
-    /// write from `min` to `max` volts.
+    /// Adds the lines `lines` names (`Dev1/port0/line0`, or `Dev1/port0/line0:7` for
+    /// eight), one channel for each line.
     ///
     /// # Errors
     ///
-    /// [`Error::Daqmx`] when the driver refuses, as for an unknown channel. A refused
-    /// call can still leave some of the channels in the task.
+    /// [`Error::Daqmx`] when the driver refuses, as for an unknown line. A refused
+    /// call can still leave some of the lines in the task.
     ///
     /// # Panics
     ///
-    /// When `physical` holds a NUL byte.
-    pub fn add(&mut self, physical: &str, min: f64, max: f64) -> Result<(), Error> {
+    /// When `lines` holds a NUL byte.
+    pub fn add(&mut self, lines: &str) -> Result<(), Error> {
         let task = &self.0;
-        let physical = text(physical);
-        // SAFETY: a live handle, NUL-terminated strings, and a null scale for none.
+        let lines = text(lines);
+        // SAFETY: a live handle and NUL-terminated strings.
         let code = unsafe {
-            (task.functions().analog_out)(
+            (task.functions().digital_out)(
                 task.handle,
-                physical.as_ptr(),
+                lines.as_ptr(),
                 c"".as_ptr(),
-                min,
-                max,
-                VOLTS,
-                ptr::null(),
+                PER_LINE,
             )
         };
         task.check(code)
@@ -187,27 +182,27 @@ impl Output {
         self.0.stop()
     }
 
-    /// Writes `values` by scan (each channel of the first sample, then each channel of
-    /// the next). It waits up to `timeout`, cut to whole milliseconds, for room in the
-    /// driver's buffer. A driver warning reads as success.
+    /// Writes `values` by scan (each line of the first sample, then each line of the
+    /// next): 0 sets a line low, and any other value sets it high. It waits up to
+    /// `timeout`, cut to whole milliseconds, for room in the driver's buffer. A driver
+    /// warning reads as success.
     ///
     /// # Errors
     ///
-    /// [`Error::Daqmx`] when the driver refuses, as when the task is not running or a
-    /// value is outside its channel's range.
+    /// [`Error::Daqmx`] when the driver refuses, as when the task is not running.
     ///
     /// # Panics
     ///
-    /// When `values` does not hold a whole number of samples of each channel, or holds
-    /// more than `i32::MAX` samples of each channel.
-    pub fn write(&mut self, values: &[f64], timeout: Span) -> Result<(), Error> {
+    /// When `values` does not hold a whole number of samples of each line, or holds
+    /// more than `i32::MAX` samples of each line.
+    pub fn write(&mut self, values: &[u8], timeout: Span) -> Result<(), Error> {
         let task = &self.0;
         let per_channel = scans(values.len(), task.channels()?);
         let (mut written, mut reserved) = (0, 0);
-        // SAFETY: a live handle, `values` holds `per_channel` samples of each channel,
+        // SAFETY: a live handle, `values` holds `per_channel` samples of each line,
         // and `written` and `reserved` are valid for one write each.
         let code = unsafe {
-            (task.functions().write_analog)(
+            (task.functions().write_digital)(
                 task.handle,
                 per_channel,
                 0,

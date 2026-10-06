@@ -22,7 +22,7 @@ fn create() -> *mut c_void {
 }
 
 /// Adds analog inputs to the task behind `handle`.
-fn input(handle: *mut c_void, physical: &CStr, terminal: i32, units: i32) -> i32 {
+fn analog_in(handle: *mut c_void, physical: &CStr, terminal: i32, units: i32) -> i32 {
     // SAFETY: a live handle and NUL-terminated strings.
     unsafe {
         DAQmxCreateAIVoltageChan(
@@ -55,7 +55,7 @@ fn output(handle: *mut c_void, physical: &CStr, max: f64) -> i32 {
 }
 
 /// Reads 2 samples of 2 channels with `layout`, and gives the code and the count.
-fn read(handle: *mut c_void, layout: u32, out: &mut [f64; 4]) -> (i32, i32) {
+fn read_analog(handle: *mut c_void, layout: u32, out: &mut [f64; 4]) -> (i32, i32) {
     let (mut read, mut reserved) = (0, 0);
     // SAFETY: a live handle, and out pointers valid for their sizes.
     let code = unsafe {
@@ -86,15 +86,15 @@ fn clear(handle: *mut c_void) {
 #[test]
 fn reads_a_ramp_on_each_channel() {
     let handle = create();
-    assert_eq!(input(handle, c"Dev1/ai0:1", DEFAULT, VOLTS), 0);
-    assert_eq!(input(handle, c"fail/ai2", DEFAULT, VOLTS), FAIL);
+    assert_eq!(analog_in(handle, c"Dev1/ai0:1", DEFAULT, VOLTS), 0);
+    assert_eq!(analog_in(handle, c"fail/ai2", DEFAULT, VOLTS), FAIL);
     let mut out = [0.0; 4];
-    assert_eq!(read(handle, BY_SCAN, &mut out), (STOPPED, 0));
+    assert_eq!(read_analog(handle, BY_SCAN, &mut out), (STOPPED, 0));
     start(handle);
-    assert_eq!(read(handle, 0, &mut out), (ARGUMENT, 0));
-    assert_eq!(read(handle, BY_SCAN, &mut out), (0, 2));
+    assert_eq!(read_analog(handle, 0, &mut out), (ARGUMENT, 0));
+    assert_eq!(read_analog(handle, BY_SCAN, &mut out), (0, 2));
     assert_eq!(out, [0.0, 1000.0, 1.0, 1001.0]);
-    assert_eq!(read(handle, BY_SCAN, &mut out), (0, 2));
+    assert_eq!(read_analog(handle, BY_SCAN, &mut out), (0, 2));
     assert_eq!(out, [2.0, 1002.0, 3.0, 1003.0]);
     clear(handle);
 }
@@ -102,11 +102,11 @@ fn reads_a_ramp_on_each_channel() {
 #[test]
 fn warns_and_reads_short_on_demand() {
     let handle = create();
-    assert_eq!(input(handle, c"warn/ai0", DEFAULT, VOLTS), 0);
-    assert_eq!(input(handle, c"short/ai1", DEFAULT, VOLTS), 0);
+    assert_eq!(analog_in(handle, c"warn/ai0", DEFAULT, VOLTS), 0);
+    assert_eq!(analog_in(handle, c"short/ai1", DEFAULT, VOLTS), 0);
     start(handle);
     let mut out = [0.0; 4];
-    assert_eq!(read(handle, BY_SCAN, &mut out), (WARN, 1));
+    assert_eq!(read_analog(handle, BY_SCAN, &mut out), (WARN, 1));
     assert_eq!(out[..2], [0.0, 1000.0]);
     clear(handle);
 }
@@ -114,10 +114,10 @@ fn warns_and_reads_short_on_demand() {
 #[test]
 fn refuses_what_it_does_not_model() {
     let handle = create();
-    assert_eq!(input(handle, c"Dev1/ai0", 10_083, VOLTS), ARGUMENT);
-    assert_eq!(input(handle, c"Dev1/ai0", DEFAULT, 10_000), ARGUMENT);
+    assert_eq!(analog_in(handle, c"Dev1/ai0", 10_083, VOLTS), ARGUMENT);
+    assert_eq!(analog_in(handle, c"Dev1/ai0", DEFAULT, 10_000), ARGUMENT);
     assert_eq!(output(handle, c"Dev1/ao0", 0.0), ARGUMENT);
-    assert_eq!(input(handle, c"Dev1/ai0", DEFAULT, VOLTS), 0);
+    assert_eq!(analog_in(handle, c"Dev1/ai0", DEFAULT, VOLTS), 0);
     assert_eq!(output(handle, c"Dev1/ao0", 5.0), DIRECTION);
     let clock = |rate, edge, mode| {
         // SAFETY: a live handle and a NUL-terminated string.
@@ -134,10 +134,10 @@ fn refuses_what_it_does_not_model() {
 fn refuses_an_output_outside_its_range() {
     let handle = create();
     assert_eq!(output(handle, c"Dev1/ao0", 5.0), 0);
-    assert_eq!(input(handle, c"Dev1/ai0", DEFAULT, VOLTS), DIRECTION);
+    assert_eq!(analog_in(handle, c"Dev1/ai0", DEFAULT, VOLTS), DIRECTION);
     start(handle);
     let mut out = [0.0; 4];
-    assert_eq!(read(handle, BY_SCAN, &mut out), (DIRECTION, 0));
+    assert_eq!(read_analog(handle, BY_SCAN, &mut out), (DIRECTION, 0));
     let (mut written, mut reserved) = (0, 0);
     let mut write = |value: f64, layout| {
         // SAFETY: a live handle, and `value` is one sample of one channel.
@@ -168,4 +168,66 @@ fn cuts_the_message_to_the_buffer() {
     // SAFETY: the call wrote a NUL inside `out`.
     let got = unsafe { CStr::from_ptr(out.as_ptr()) };
     assert_eq!(got, c"the stu");
+}
+
+/// Adds digital lines to the task behind `handle`, and gives the code.
+fn lines(handle: *mut c_void, physical: &CStr, output: bool, grouping: i32) -> i32 {
+    let add = if output {
+        DAQmxCreateDOChan
+    } else {
+        DAQmxCreateDIChan
+    };
+    // SAFETY: a live handle and NUL-terminated strings.
+    unsafe { add(handle, physical.as_ptr(), c"".as_ptr(), grouping) }
+}
+
+#[test]
+fn reads_and_writes_digital_lines() {
+    let input = create();
+    assert_eq!(lines(input, c"Dev1/port0/line0:1", false, 1), ARGUMENT);
+    assert_eq!(lines(input, c"Dev1/port0/line0:1", false, PER_LINE), 0);
+    assert_eq!(lines(input, c"Dev1/port0/line2", true, PER_LINE), DIRECTION);
+    assert_eq!(analog_in(input, c"Dev1/ai0", DEFAULT, VOLTS), DIRECTION);
+    start(input);
+    let mut out = [9_u8; 4];
+    let (mut read, mut bytes, mut reserved) = (0, 0, 0);
+    // SAFETY: a live handle, and out pointers valid for their sizes.
+    let code = unsafe {
+        DAQmxReadDigitalLines(
+            input,
+            2,
+            1.0,
+            BY_SCAN,
+            out.as_mut_ptr(),
+            4,
+            &raw mut read,
+            &raw mut bytes,
+            &raw mut reserved,
+        )
+    };
+    assert_eq!((code, read, bytes), (0, 2, 1));
+    assert_eq!(out, [0, 1, 1, 0]);
+    let mut analog = [0.0; 4];
+    assert_eq!(read_analog(input, BY_SCAN, &mut analog), (DIRECTION, 0));
+    clear(input);
+
+    let output = create();
+    assert_eq!(lines(output, c"Dev1/port0/line0:1", true, PER_LINE), 0);
+    start(output);
+    let (mut written, mut reserved) = (0, 0);
+    // SAFETY: a live handle, and two lines of one sample each.
+    let code = unsafe {
+        DAQmxWriteDigitalLines(
+            output,
+            1,
+            0,
+            1.0,
+            BY_SCAN,
+            [0, 1].as_ptr(),
+            &raw mut written,
+            &raw mut reserved,
+        )
+    };
+    assert_eq!((code, written), (0, 1));
+    clear(output);
 }
