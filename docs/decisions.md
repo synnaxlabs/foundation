@@ -1734,7 +1734,7 @@ How to read this record:
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
   default. A policy that sets no budget is a user mistake, refused as normal
-  validation with the fix in the message (#869). The data directory is node-local:
+  validation with a fix (DIAGNOSTICS, #869, #1000). The data directory is node-local:
   a start argument of `foundation`, with a default, because the spec is stored in it.
   Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
   change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
