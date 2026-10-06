@@ -1,0 +1,271 @@
+//! One HTTP/1.1 client for every connector, over `env`.
+
+mod body;
+mod stream;
+
+use std::fmt;
+use std::future::poll_fn;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::task::Poll;
+
+use bytes::Bytes;
+use env::clock::Clock;
+use env::net::{self, Net, tcp};
+use env::tasks::Tasks;
+use http::uri::{PathAndQuery, Scheme};
+use http::{HeaderValue, Request, Response, Uri, header};
+use http_body::Body as _;
+use hyper::client::conn::http1;
+use types::time::Span;
+
+use self::body::Whole;
+use self::stream::Stream;
+
+const OPTIONS: tcp::Options = tcp::Options {
+    send_buffer_bytes: 1 << 16,
+    recv_buffer_bytes: 1 << 16,
+    unsent_bytes_max: 1 << 14,
+    delayed: false,
+};
+
+/// Sends HTTP/1.1 requests over `env`. Each request gets its own connection. It stays
+/// on the thread that made it.
+///
+/// ```
+/// use bytes::Bytes;
+/// use connector::http::{Client, Error};
+///
+/// async fn ping(client: &Client) -> Result<u16, Error> {
+///     let request = http::Request::get("http://10.0.0.2:8086/ping")
+///         .body(Bytes::new())
+///         .expect("a valid request");
+///     Ok(client.send(request).await?.status().as_u16())
+/// }
+/// ```
+pub struct Client {
+    net: Net,
+    clock: Clock,
+    tasks: Tasks,
+    timeout: Span,
+    body_max: usize,
+}
+
+/// What a [`Client`] needs.
+pub struct Config {
+    /// Connects streams.
+    pub net: Net,
+    /// Gives each request's deadline.
+    pub clock: Clock,
+    /// Runs each connection's I/O.
+    pub tasks: Tasks,
+    /// The longest a request may take, from the connect to the last body byte. A
+    /// timeout below zero acts as zero.
+    pub timeout: Span,
+    /// The largest response body the client reads.
+    pub body_max: usize,
+}
+
+impl Client {
+    /// Makes a client.
+    #[must_use]
+    pub fn new(config: Config) -> Self {
+        Self {
+            net: config.net,
+            clock: config.clock,
+            tasks: config.tasks,
+            timeout: config.timeout.max(Span::ZERO),
+            body_max: config.body_max,
+        }
+    }
+
+    /// Sends `request` and reads the whole response. The URI gives the host and the
+    /// port, which defaults to 80. The client sets `Host` when the request has none,
+    /// and sends the path and query only.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Uri`] when the scheme is not `http` or the host is not an IP
+    ///   address.
+    /// - [`Error::Connect`] when the host did not take the connection.
+    /// - [`Error::Net`] when the stream failed after the connect.
+    /// - [`Error::TimedOut`] when the whole exchange took longer than the timeout.
+    /// - [`Error::TooLarge`] when the response body is larger than the cap.
+    /// - [`Error::Protocol`] when the server broke HTTP or closed early.
+    pub async fn send(
+        &self,
+        request: Request<Bytes>,
+    ) -> Result<Response<Bytes>, Error> {
+        let deadline = self.clock.now().checked_add(self.timeout);
+        let mut exchange = Box::pin(self.exchange(request));
+        let mut sleep = deadline.map(|deadline| self.clock.sleep_until(deadline));
+        poll_fn(|cx| {
+            if let Poll::Ready(out) = exchange.as_mut().poll(cx) {
+                return Poll::Ready(out);
+            }
+            match &mut sleep {
+                Some(sleep) => Pin::new(sleep).poll(cx).map(|()| Err(Error::TimedOut)),
+                None => Poll::Pending,
+            }
+        })
+        .await
+    }
+
+    async fn exchange(
+        &self,
+        request: Request<Bytes>,
+    ) -> Result<Response<Bytes>, Error> {
+        let (mut parts, body) = request.into_parts();
+        let remote = remote(&parts.uri)?;
+        let config = tcp::Config {
+            remote,
+            options: OPTIONS,
+        };
+        let tcp = self.net.connect(&config).await.map_err(Error::Connect)?;
+        let (mut sender, connection) = http1::handshake(Stream(tcp)).await?;
+        // `hyper` gives a connection error to the request in flight, which reports it.
+        self.tasks.spawn(async move {
+            let _reported: Result<(), hyper::Error> = connection.await;
+        });
+        origin_form(&mut parts);
+        let response = sender
+            .send_request(Request::from_parts(parts, Whole(Some(body))))
+            .await?;
+        let (parts, mut incoming) = response.into_parts();
+        let mut bytes = Vec::new();
+        while let Some(frame) =
+            poll_fn(|cx| Pin::new(&mut incoming).poll_frame(cx)).await
+        {
+            if let Ok(data) = frame?.into_data() {
+                if data.len() > self.body_max.saturating_sub(bytes.len()) {
+                    return Err(Error::TooLarge { max: self.body_max });
+                }
+                bytes.extend_from_slice(&data);
+            }
+        }
+        Ok(Response::from_parts(parts, Bytes::from(bytes)))
+    }
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("timeout", &self.timeout)
+            .field("body_max", &self.body_max)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("timeout", &self.timeout)
+            .field("body_max", &self.body_max)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The address `uri` names.
+fn remote(uri: &Uri) -> Result<SocketAddr, Error> {
+    let fail = || Error::Uri { uri: uri.clone() };
+    if uri.scheme() != Some(&Scheme::HTTP) {
+        return Err(fail());
+    }
+    let authority = uri.authority().ok_or_else(fail)?;
+    let host = authority.host();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let ip: IpAddr = host.parse().map_err(|_not_ip| fail())?;
+    Ok(SocketAddr::new(ip, authority.port_u16().unwrap_or(80)))
+}
+
+/// Moves the authority into `Host`, unless the request has one, and leaves the path
+/// and query in the URI.
+fn origin_form(parts: &mut http::request::Parts) {
+    if !parts.headers.contains_key(header::HOST)
+        && let Some(authority) = parts.uri.authority()
+    {
+        let host = HeaderValue::from_str(authority.as_str())
+            .expect("an authority is a valid header value");
+        parts.headers.insert(header::HOST, host);
+    }
+    let mut uri = http::uri::Parts::default();
+    uri.path_and_query = Some(
+        parts
+            .uri
+            .path_and_query()
+            .cloned()
+            .unwrap_or_else(|| PathAndQuery::from_static("/")),
+    );
+    parts.uri = Uri::from_parts(uri).expect("a path alone is a valid URI");
+}
+
+/// Why an exchange failed.
+#[derive(Debug)]
+pub enum Error {
+    /// The scheme is not `http`, or the host is not an IP address.
+    Uri {
+        /// The URI of the request.
+        uri: Uri,
+    },
+    /// The host did not take the connection.
+    Connect(net::Error),
+    /// The stream failed after the connect.
+    Net(net::Error),
+    /// The exchange took longer than the timeout.
+    TimedOut,
+    /// The response body is larger than the cap.
+    TooLarge {
+        /// The cap, in bytes.
+        max: usize,
+    },
+    /// The server broke HTTP, or closed the stream early.
+    Protocol(hyper::Error),
+}
+
+impl From<hyper::Error> for Error {
+    fn from(error: hyper::Error) -> Self {
+        let mut source = std::error::Error::source(&error);
+        while let Some(cause) = source {
+            if let Some(net) = cause
+                .downcast_ref::<std::io::Error>()
+                .and_then(|io| io.get_ref())
+                .and_then(|inner| inner.downcast_ref::<net::Error>())
+            {
+                return Self::Net(net.clone());
+            }
+            source = cause.source();
+        }
+        Self::Protocol(error)
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Uri { uri } => write!(f, "{uri} is not an http URI with an IP host"),
+            Self::Connect(error) => write!(f, "the connect failed: {error}"),
+            Self::Net(error) => write!(f, "the stream failed: {error}"),
+            Self::TimedOut => write!(f, "the exchange timed out"),
+            Self::TooLarge { max } => {
+                write!(f, "the response body is larger than {max} bytes")
+            }
+            Self::Protocol(error) => write!(f, "the exchange failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Connect(error) | Self::Net(error) => Some(error),
+            Self::Protocol(error) => Some(error),
+            Self::Uri { .. } | Self::TimedOut | Self::TooLarge { .. } => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
