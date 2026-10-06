@@ -6,6 +6,7 @@
 
 use std::cmp::Reverse;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::str::{FromStr, Split};
 
 /// A name: dot-separated segments of letters, digits, `_`, and `-`, at most
@@ -142,6 +143,16 @@ impl Pattern {
         specificity
     }
 
+    /// Reports whether every name the pattern matches starts with `prefix`: the
+    /// pattern starts with the segments of `prefix`, as literals.
+    fn within(&self, prefix: &Name) -> bool {
+        let mut segments = self.segments.iter();
+        prefix.segments().all(|want| match segments.next() {
+            Some(Segment::Literal(literal)) => **literal == *want,
+            _ => false,
+        })
+    }
+
     /// Reads `body`, reporting errors against `input`, the text the user wrote.
     ///
     /// Each run of wildcards becomes its `*`s and then at most one `**`, so patterns
@@ -192,12 +203,24 @@ pub struct Specificity {
     ones: usize,
 }
 
-/// A set of patterns. A name matches when an include pattern matches it and no
-/// exclusion does. An exclusion is a pattern written with a leading `!`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// A list of patterns, as written. A name matches when an include pattern matches it
+/// and no exclusion does. An exclusion is a pattern written with a leading `!`.
+/// Equality and hashing compare the texts in order.
+#[derive(Clone)]
 pub struct Selector {
-    include: Vec<Pattern>,
+    texts: Box<[Box<str>]>,
+    // The patterns `texts` read as. Each include has its position in `texts`.
+    include: Vec<(usize, Pattern)>,
     exclude: Vec<Pattern>,
+}
+
+/// A pattern of a selector as written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Written<'a> {
+    /// A pattern that includes names.
+    Include(&'a str),
+    /// A pattern that excludes names: the text after the `!`.
+    Exclude(&'a str),
 }
 
 impl Selector {
@@ -208,24 +231,41 @@ impl Selector {
     /// The first pattern that does not read, or [`Error::NoInclude`] when no pattern
     /// includes names.
     pub fn new<'a>(patterns: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
+        let texts = patterns
+            .into_iter()
+            .map(Box::from)
+            .collect::<Box<[Box<str>]>>();
         let mut include = Vec::new();
         let mut exclude = Vec::new();
-        for text in patterns {
-            match text.strip_prefix('!') {
-                Some("") => {
+        for (position, text) in texts.iter().enumerate() {
+            let text = &**text;
+            match written(text) {
+                Written::Exclude("") => {
                     return Err(Error::Segment {
                         input: text.into(),
                         segment: String::new(),
                     });
                 }
-                Some(body) => exclude.push(Pattern::read(text, body)?),
-                None => include.push(Pattern::read(text, text)?),
+                Written::Exclude(body) => exclude.push(Pattern::read(text, body)?),
+                Written::Include(body) => {
+                    include.push((position, Pattern::read(text, body)?));
+                }
             }
         }
         if include.is_empty() {
             return Err(Error::NoInclude);
         }
-        Ok(Self { include, exclude })
+        Ok(Self {
+            texts,
+            include,
+            exclude,
+        })
+    }
+
+    /// The patterns as written, in order, each by what it does.
+    #[must_use]
+    pub fn written(&self) -> impl ExactSizeIterator<Item = Written<'_>> {
+        self.texts.iter().map(|text| written(text))
     }
 
     /// The specificity of the most specific include pattern that matches `name`, or
@@ -237,10 +277,48 @@ impl Selector {
         }
         self.include
             .iter()
-            .filter(|p| p.matches(name))
-            .map(Pattern::specificity)
+            .filter(|(_, p)| p.matches(name))
+            .map(|(_, p)| p.specificity())
             .max()
     }
+
+    /// The positions, in [`Selector::written`], of the include patterns that can match
+    /// a name that does not start with `prefix`, by whole segments, as
+    /// [`Name::starts_with`] reads it. The selector stays within `prefix` when this
+    /// gives no position. Exclusions are not read, so an include that only its
+    /// exclusions keep inside `prefix` still gives its position.
+    pub fn outside(&self, prefix: &Name) -> impl Iterator<Item = usize> {
+        self.include
+            .iter()
+            .filter(|(_, p)| !p.within(prefix))
+            .map(|(position, _)| *position)
+    }
+}
+
+impl PartialEq for Selector {
+    fn eq(&self, other: &Self) -> bool {
+        self.texts == other.texts
+    }
+}
+
+impl Eq for Selector {}
+
+impl Hash for Selector {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.texts.hash(state);
+    }
+}
+
+impl fmt::Debug for Selector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.texts.iter()).finish()
+    }
+}
+
+/// Reads a pattern as written: a leading `!` makes it an exclusion.
+fn written(text: &str) -> Written<'_> {
+    text.strip_prefix('!')
+        .map_or(Written::Include(text), Written::Exclude)
 }
 
 fn split(s: &str) -> Result<Split<'_, char>, Error> {
@@ -271,7 +349,8 @@ fn check_literal(input: &str, segment: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// A name, pattern, or selector that is not valid.
+/// A name, pattern, or selector that is not valid. `Display` gives the message: a
+/// lower-case clause with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The text of a name or pattern is empty.
@@ -298,28 +377,42 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub fn fix(&self) -> &'static str {
+        match self {
+            Self::Empty => "Write at least one segment",
+            Self::Long { .. } => "Use fewer or shorter segments",
+            Self::NoInclude => "Add a pattern without a leading `!`",
+            Self::Segment { .. } => {
+                "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
+                 and no other character"
+            }
+            Self::Wildcard { .. } => {
+                "Use `*` and `**` only as whole segments of a pattern, never in a name"
+            }
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("a name or pattern is empty"),
             Self::Long { bytes } => write!(
                 f,
-                "a name or pattern is {bytes} bytes long. The limit is {} bytes",
+                "a name or pattern is {bytes} bytes long, more than the limit of \
+                 {} bytes",
                 Name::MAX_BYTES
             ),
-            Self::NoInclude => f.write_str(
-                "a selector includes no names. Add a pattern without a leading `!`",
-            ),
-            Self::Segment { input, segment } => write!(
-                f,
-                "{input:?} has a segment that is not valid: {segment:?}. Use letters, \
-                 digits, `_`, and `-`, separated by dots"
-            ),
-            Self::Wildcard { input } => write!(
-                f,
-                "{input:?} uses a wildcard where it cannot. `*` and `**` must be whole \
-                 segments of a pattern"
-            ),
+            Self::NoInclude => f.write_str("a selector includes no names"),
+            Self::Segment { input, segment } => {
+                write!(f, "{input:?} has a segment that is not valid: {segment:?}")
+            }
+            Self::Wildcard { input } => {
+                write!(f, "{input:?} uses a wildcard where it cannot")
+            }
         }
     }
 }
@@ -374,6 +467,7 @@ mod tests {
         fn rejects_empty_text() {
             assert_eq!("".parse::<Name>(), Err(Error::Empty));
             assert_eq!(Error::Empty.to_string(), "a name or pattern is empty");
+            assert_eq!(Error::Empty.fix(), "Write at least one segment");
         }
 
         #[test]
@@ -384,10 +478,12 @@ mod tests {
                 format!("{text}c").parse::<Name>(),
                 Err(Error::Long { bytes: 256 })
             );
+            let error = Error::Long { bytes: 256 };
             assert_eq!(
-                Error::Long { bytes: 256 }.to_string(),
-                "a name or pattern is 256 bytes long. The limit is 255 bytes"
+                error.to_string(),
+                "a name or pattern is 256 bytes long, more than the limit of 255 bytes"
             );
+            assert_eq!(error.fix(), "Use fewer or shorter segments");
         }
 
         #[test]
@@ -412,10 +508,23 @@ mod tests {
 
         #[test]
         fn shows_the_segment_and_the_fix() {
+            let error = "a.b c".parse::<Name>().unwrap_err();
             assert_eq!(
-                "a.b c".parse::<Name>().unwrap_err().to_string(),
-                "\"a.b c\" has a segment that is not valid: \"b c\". Use letters, \
-                 digits, `_`, and `-`, separated by dots"
+                error.to_string(),
+                "\"a.b c\" has a segment that is not valid: \"b c\""
+            );
+            assert_eq!(
+                error.fix(),
+                "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
+                 and no other character"
+            );
+        }
+
+        #[test]
+        fn escapes_the_text_in_the_message() {
+            assert_eq!(
+                "a.\"b".parse::<Name>().unwrap_err().to_string(),
+                r#""a.\"b" has a segment that is not valid: "\"b""#
             );
         }
 
@@ -424,10 +533,11 @@ mod tests {
             for input in ["a.*", "a.**", "a*", "*", "a.b*c"] {
                 assert_eq!(input.parse::<Name>(), Err(wildcard_error(input)));
             }
+            let error = wildcard_error("a.*");
+            assert_eq!(error.to_string(), "\"a.*\" uses a wildcard where it cannot");
             assert_eq!(
-                wildcard_error("a.*").to_string(),
-                "\"a.*\" uses a wildcard where it cannot. `*` and `**` must be whole \
-                 segments of a pattern"
+                error.fix(),
+                "Use `*` and `**` only as whole segments of a pattern, never in a name"
             );
         }
 
@@ -476,6 +586,20 @@ mod tests {
             for input in ["a*", "a.***", "a.**b", "*a.b"] {
                 assert_eq!(input.parse::<Pattern>(), Err(wildcard_error(input)));
             }
+            assert_eq!(
+                "a*".parse::<Pattern>().unwrap_err().fix(),
+                "Use `*` and `**` only as whole segments of a pattern, never in a name"
+            );
+        }
+
+        #[test]
+        fn shows_only_the_bad_segment() {
+            let error = "site.*.t c".parse::<Pattern>().unwrap_err();
+            assert_eq!(error, segment_error("site.*.t c", "t c"));
+            assert_eq!(
+                error.to_string(),
+                "\"site.*.t c\" has a segment that is not valid: \"t c\""
+            );
         }
 
         #[test]
@@ -643,9 +767,10 @@ mod tests {
         fn rejects_no_includes() {
             assert_eq!(Selector::new([]), Err(Error::NoInclude));
             assert_eq!(Selector::new(["!a", "!b.**"]), Err(Error::NoInclude));
+            assert_eq!(Error::NoInclude.to_string(), "a selector includes no names");
             assert_eq!(
-                Error::NoInclude.to_string(),
-                "a selector includes no names. Add a pattern without a leading `!`"
+                Error::NoInclude.fix(),
+                "Add a pattern without a leading `!`"
             );
         }
 
@@ -657,6 +782,166 @@ mod tests {
             );
             assert_eq!(Selector::new(["a", "!b*"]), Err(wildcard_error("!b*")));
             assert_eq!(Selector::new(["a", "!"]), Err(segment_error("!", "")));
+        }
+
+        #[test]
+        fn keeps_the_patterns_as_written() {
+            let s = Selector::new(["a.**.**", "!a.b"]).unwrap();
+            assert_eq!(format!("{s:?}"), r#"["a.**.**", "!a.b"]"#);
+            assert_eq!(
+                s.written().collect::<Vec<_>>(),
+                [Written::Include("a.**.**"), Written::Exclude("a.b")]
+            );
+        }
+
+        #[test]
+        fn compares_the_texts_in_order() {
+            let read = |texts: &[&str]| Selector::new(texts.iter().copied()).unwrap();
+            for (a, b) in [
+                (read(&["a.**.**"]), read(&["a.**"])),
+                (read(&["a", "b"]), read(&["b", "a"])),
+            ] {
+                for n in ["a", "a.b", "b", "c"] {
+                    assert_eq!(a.matches(&name(n)), b.matches(&name(n)), "{n}");
+                }
+                assert_ne!(a, b);
+            }
+            let hash = |s: &Selector| {
+                let mut hasher = std::hash::DefaultHasher::new();
+                s.hash(&mut hasher);
+                hasher.finish()
+            };
+            let a = read(&["a", "!a.b"]);
+            assert_eq!(a, read(&["a", "!a.b"]));
+            assert_eq!(hash(&a), hash(&read(&["a", "!a.b"])));
+            assert_ne!(hash(&read(&["a", "b"])), hash(&read(&["b", "a"])));
+            assert_ne!(hash(&read(&["a.**.**"])), hash(&read(&["a.**"])));
+        }
+
+        mod outside {
+            use super::*;
+
+            fn selector(patterns: &[&str]) -> Selector {
+                Selector::new(patterns.iter().copied()).unwrap()
+            }
+
+            fn outside(patterns: &[&str], prefix: &str) -> Vec<usize> {
+                selector(patterns).outside(&name(prefix)).collect()
+            }
+
+            #[test]
+            fn holds_patterns_that_start_with_the_prefix() {
+                for pattern in
+                    ["site_a", "site_a.*", "site_a.**", "site_a.**.*", "site_a.b"]
+                {
+                    assert_eq!(outside(&[pattern], "site_a"), [], "{pattern}");
+                }
+            }
+
+            #[test]
+            fn refuses_patterns_that_reach_past_the_prefix() {
+                for (pattern, prefix) in [
+                    ("**", "site_a"),
+                    ("*.gw", "site_a"),
+                    ("site_a_b.*", "site_a"),
+                    ("site.*", "site_a"),
+                    ("**.site_a", "site_a"),
+                    ("site_a", "site_a.b"),
+                    ("site_a.**", "site_a.b"),
+                ] {
+                    assert_eq!(outside(&[pattern], prefix), [0], "{pattern} {prefix}");
+                }
+            }
+
+            #[test]
+            fn gives_each_include_that_reaches_out_by_its_position() {
+                let patterns = ["a.b", "!b.**", "b", "a.**", "*.c", "!a"];
+                assert_eq!(outside(&patterns, "a"), [2, 4]);
+                assert_eq!(outside(&["b", "a.b"], "a"), [0]);
+            }
+
+            #[test]
+            fn reads_no_exclusion() {
+                assert_eq!(outside(&["a.**", "!b.**"], "a"), []);
+                assert_eq!(outside(&["**", "!b.**"], "a"), [0]);
+            }
+
+            proptest! {
+                #[test]
+                fn every_match_starts_with_the_prefix(
+                    p in patterns(),
+                    prefix in prefixes(),
+                    fill in fills(),
+                ) {
+                    let segments: Vec<&str> = p
+                        .iter()
+                        .zip(&fill)
+                        .flat_map(|(segment, fill)| match *segment {
+                            "*" => &fill[..1],
+                            "**" => &fill[1..],
+                            _ => std::slice::from_ref(segment),
+                        })
+                        .copied()
+                        .collect();
+                    prop_assume!(!segments.is_empty());
+                    let selector = selector(&[&p.join(".")]);
+                    let n = name(&segments.join("."));
+                    let prefix = name(&prefix.join("."));
+                    prop_assert!(selector.matches(&n).is_some());
+                    if selector.outside(&prefix).next().is_none() {
+                        prop_assert!(n.starts_with(&prefix), "{n} outside {prefix}");
+                    }
+                }
+
+                #[test]
+                fn a_pattern_outside_matches_a_name_outside(
+                    p in patterns(),
+                    prefix in prefixes(),
+                ) {
+                    let selector = selector(&[&p.join(".")]);
+                    let prefix = name(&prefix.join("."));
+                    // `c` is never a segment of `prefix`.
+                    let outside: Vec<_> = p
+                        .iter()
+                        .map(|s| if s.starts_with('*') { "c" } else { s })
+                        .collect();
+                    let outside = name(&outside.join("."));
+                    if selector.outside(&prefix).next().is_some() {
+                        prop_assert!(selector.matches(&outside).is_some());
+                        prop_assert!(!outside.starts_with(&prefix), "{outside}");
+                    }
+                }
+            }
+
+            fn prefixes() -> impl Strategy<Value = Vec<&'static str>> {
+                prop::collection::vec(prop::sample::select(vec!["a", "b"]), 1..4)
+            }
+
+            /// For each pattern segment, the one segment a `*` takes and then the
+            /// segments a `**` takes.
+            fn fills() -> impl Strategy<Value = Vec<Vec<&'static str>>> {
+                let segment = prop::sample::select(vec!["a", "b", "c"]);
+                prop::collection::vec(prop::collection::vec(segment, 1..4), 7)
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn every_error_is_a_clause_and_a_sentence_with_no_final_period(
+            text in r#"[a.*!@ "\\]{0,8}|a{256}"#,
+        ) {
+            let errors = [
+                text.parse::<Name>().err(),
+                text.parse::<Pattern>().err(),
+                Selector::new([text.as_str()]).err(),
+            ];
+            for error in errors.into_iter().flatten() {
+                let (message, fix) = (error.to_string(), error.fix());
+                prop_assert!(!message.starts_with(char::is_uppercase), "{message}");
+                prop_assert!(fix.starts_with(char::is_uppercase), "{fix}");
+                prop_assert!(!message.ends_with('.') && !fix.ends_with('.'));
+            }
         }
     }
 

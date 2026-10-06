@@ -119,8 +119,7 @@ impl Future for Wait {
 impl Drop for Wait {
     fn drop(&mut self) {
         if !self.taken {
-            let (node, key) = (self.node.node, self.key);
-            let unused = lock(&self.node.shared).files().abandon(node, key);
+            let unused = lock(&self.node.shared).files().abandon(self.key);
             drop(unused);
         }
     }
@@ -177,12 +176,42 @@ impl env::files::Descriptor for Descriptor {
         };
         self.node.request(&self.path, call, drop)
     }
+
+    fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
+        Box::pin(Close(Some(*self)))
+    }
 }
 
 impl Drop for Descriptor {
     fn drop(&mut self) {
-        lock(&self.node.shared)
+        // No drop follows the crash that released the hold: a descriptor is `!Send`,
+        // no target holds a `thread_local!`, and a crash drops every task of its
+        // node.
+        let unused = lock(&self.node.shared)
             .files()
-            .close(self.node.node, self.handle);
+            .release(self.node.node, self.handle);
+        drop(unused);
+    }
+}
+
+/// The close of a descriptor, which ends when its calls end. A drop closes it at once.
+struct Close(Option<Descriptor>);
+
+impl Future for Close {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let descriptor =
+            (self.0.as_ref()).expect("invariant: a close is not polled after it ends");
+        let waker = cx.waker().clone();
+        let (poll, unused) = lock(&descriptor.node.shared)
+            .files()
+            .poll_close(descriptor.handle, waker);
+        drop(unused);
+        if poll.is_ready() {
+            // The drop closes the descriptor, which locks the state.
+            drop(self.0.take());
+        }
+        poll
     }
 }

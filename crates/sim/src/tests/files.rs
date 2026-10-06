@@ -4,15 +4,17 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::path::Path;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Pool};
 use env::files::{Error, File, Mode, Operation};
 use env::tasks::Tasks;
 use env::thread::Handle;
-use types::time::Span;
+use types::time::{Monotonic, Span};
 
 use super::{shard, sim};
 use crate::node;
@@ -338,28 +340,54 @@ fn a_fault_on_free_with_a_path_panics() {
     node.fail_file(Path::new("a"), Operation::Free);
 }
 
-/// The sectors that a read of two sectors gives while a write of 0xab over them is
-/// in flight.
+/// The bytes that a read of two sectors gives while a write of 0xab over them is in
+/// flight.
 fn read_in_flight(seed: u64) -> Vec<u8> {
     run(seed, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 1_024).await);
         let pool = Rc::new(pool());
         let (writer, parts) = (Rc::clone(&file), [block(&pool, &[0xab; 1_024])]);
         tasks.spawn(async move { writer.write_at(0, &parts).await.unwrap() });
-        sectors(&read(&file, &pool, 0, 1_024).await)
+        read(&file, &pool, 0, 1_024).await
     })
 }
 
 #[test]
-fn a_read_in_flight_with_a_write_sees_old_or_new_bytes_per_sector() {
-    let reads: BTreeSet<Vec<u8>> = (0..64).map(read_in_flight).collect();
+fn a_read_in_flight_with_a_write_sees_old_or_new_bytes_and_may_split_a_sector() {
+    let reads: Vec<Vec<u8>> = (0..128).map(read_in_flight).collect();
+    assert_bytes_in(reads.iter().map(Vec::as_slice), &[0, 0xab]);
     let both =
         BTreeSet::from([vec![0, 0], vec![0, 0xab], vec![0xab, 0], vec![0xab; 2]]);
-    assert_eq!(reads, both);
+    assert_eq!(whole(&reads), both);
+    assert!(reads.iter().any(|bytes| split(bytes)), "no sector split");
+    let three = (reads.iter().flat_map(|bytes| bytes.chunks(512)))
+        .any(|sector| sector.chunk_by(PartialEq::eq).count() == 3);
+    assert!(three, "no sector in three runs");
     assert_eq!(read_in_flight(7), read_in_flight(7));
 }
 
-/// Whether a write of 0xab over two sectors ended first, and the sectors that a read
+/// Asserts that each byte of each of `runs` is one of `values`.
+fn assert_bytes_in<'a>(runs: impl IntoIterator<Item = &'a [u8]>, values: &[u8]) {
+    for (value, bytes) in runs.into_iter().enumerate() {
+        let wrong = bytes.iter().find(|byte| !values.contains(byte));
+        assert_eq!(wrong, None, "value {value}");
+    }
+}
+
+/// The sectors of each of `runs` in which no sector holds two values.
+fn whole(runs: &[Vec<u8>]) -> BTreeSet<Vec<u8>> {
+    (runs.iter())
+        .filter(|bytes| !split(bytes))
+        .map(|bytes| sectors(bytes))
+        .collect()
+}
+
+/// Whether a sector of `bytes` holds two values.
+fn split(bytes: &[u8]) -> bool {
+    (bytes.chunks(512)).any(|sector| sector.iter().any(|&byte| byte != sector[0]))
+}
+
+/// Whether a write of 0xab over two sectors ended first, and the bytes that a read
 /// of them gives, when both start at once.
 fn read_over_write(seed: u64) -> (bool, Vec<u8>) {
     run(seed, MIB, |node, tasks| async move {
@@ -372,21 +400,19 @@ fn read_over_write(seed: u64) -> (bool, Vec<u8>) {
             writer.write_at(0, &parts).await.unwrap();
             flag.set(true);
         });
-        let sectors = sectors(&read(&file, &pool, 0, 1_024).await);
-        (written.get(), sectors)
+        let bytes = read(&file, &pool, 0, 1_024).await;
+        (written.get(), bytes)
     })
 }
 
 #[test]
 fn a_read_may_miss_a_write_that_ends_before_it() {
     let reads: Vec<(bool, Vec<u8>)> = (0..64).map(read_over_write).collect();
-    let missed = reads
-        .iter()
-        .any(|(ended, sectors)| *ended && sectors.contains(&0));
+    let missed = (reads.iter()).any(|(ended, bytes)| *ended && bytes.contains(&0));
     assert!(missed, "{reads:?}");
 }
 
-/// The sectors after two writes over the same two sectors were in flight at once.
+/// The bytes after two writes over the same two sectors were in flight at once.
 fn writes_in_flight(seed: u64) -> Vec<u8> {
     run(seed, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 1_024).await);
@@ -397,15 +423,17 @@ fn writes_in_flight(seed: u64) -> Vec<u8> {
             .await
             .unwrap();
         node.clock().sleep(Span::MILLISECOND).await;
-        sectors(&read(&file, &pool, 0, 1_024).await)
+        read(&file, &pool, 0, 1_024).await
     })
 }
 
 #[test]
-fn writes_in_flight_over_one_sector_leave_either_bytes() {
-    let writes: BTreeSet<Vec<u8>> = (0..64).map(writes_in_flight).collect();
+fn writes_in_flight_over_one_sector_leave_either_bytes_and_may_split_it() {
+    let writes: Vec<Vec<u8>> = (0..128).map(writes_in_flight).collect();
+    assert_bytes_in(writes.iter().map(Vec::as_slice), &[1, 2]);
     let both = BTreeSet::from([vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]]);
-    assert_eq!(writes, both);
+    assert_eq!(whole(&writes), both);
+    assert!(writes.iter().any(|bytes| split(bytes)), "no sector split");
 }
 
 /// The sectors of a file after a write of 0xab over its four sectors whose future
@@ -483,28 +511,28 @@ fn a_zero_length_write_races_no_write() {
 #[test]
 fn a_read_may_take_the_bytes_of_a_write_still_in_flight() {
     let reads: Vec<(bool, Vec<u8>)> = (0..64).map(read_over_write).collect();
-    let taken = reads
-        .iter()
-        .any(|(ended, sectors)| !*ended && sectors.contains(&0xab));
+    let taken = (reads.iter()).any(|(ended, bytes)| !*ended && bytes.contains(&0xab));
     assert!(taken, "{reads:?}");
 }
 
-/// The sectors that a read of two sectors gives while a write of 0xab over the
-/// second is in flight.
+/// The bytes that a read of two sectors gives while a write of 0xab over the second
+/// is in flight.
 fn read_beside_write(seed: u64) -> Vec<u8> {
     run(seed, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 1_024).await);
         let pool = Rc::new(pool());
         let (writer, parts) = (Rc::clone(&file), [block(&pool, &[0xab; 512])]);
         tasks.spawn(async move { writer.write_at(512, &parts).await.unwrap() });
-        sectors(&read(&file, &pool, 0, 1_024).await)
+        read(&file, &pool, 0, 1_024).await
     })
 }
 
 #[test]
 fn a_read_sees_a_write_in_flight_only_where_they_overlap() {
-    let reads: BTreeSet<Vec<u8>> = (0..64).map(read_beside_write).collect();
-    assert_eq!(reads, BTreeSet::from([vec![0, 0], vec![0, 0xab]]));
+    let reads: Vec<Vec<u8>> = (0..64).map(read_beside_write).collect();
+    assert_bytes_in(reads.iter().map(|bytes| &bytes[..512]), &[0]);
+    assert_bytes_in(reads.iter().map(|bytes| &bytes[512..]), &[0, 0xab]);
+    assert_eq!(whole(&reads), BTreeSet::from([vec![0, 0], vec![0, 0xab]]));
 }
 
 /// The sectors that a read of file `a` gives while a write of 0xab over file `b` is
@@ -571,8 +599,8 @@ fn a_call_ends_at_its_own_time_whatever_else_is_due() {
     }
 }
 
-/// The sectors after two writes were in flight at once over two sectors that a
-/// write of 9 filled before.
+/// The bytes after two writes were in flight at once over two sectors that a write
+/// of 9 filled before.
 fn writes_over_filled_sectors(seed: u64) -> Vec<u8> {
     run(seed, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 1_024).await);
@@ -586,15 +614,16 @@ fn writes_over_filled_sectors(seed: u64) -> Vec<u8> {
             .await
             .unwrap();
         node.clock().sleep(Span::MILLISECOND).await;
-        sectors(&read(&file, &pool, 0, 1_024).await)
+        read(&file, &pool, 0, 1_024).await
     })
 }
 
 #[test]
 fn writes_in_flight_over_filled_sectors_leave_either_bytes() {
-    let writes: BTreeSet<Vec<u8>> = (0..64).map(writes_over_filled_sectors).collect();
+    let writes: Vec<Vec<u8>> = (0..256).map(writes_over_filled_sectors).collect();
+    assert_bytes_in(writes.iter().map(Vec::as_slice), &[1, 2]);
     let both = BTreeSet::from([vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]]);
-    assert_eq!(writes, both);
+    assert_eq!(whole(&writes), both);
 }
 
 /// The free bytes after an open that makes a 64 KiB file is polled once, its future
@@ -709,10 +738,10 @@ fn a_write_to_the_last_sector_of_the_largest_file_stays() {
     assert_eq!(bytes, vec![0, 7]);
 }
 
-/// The values of bytes 0 to 100 and 100 to 200 of a file after writes of 1 over the
-/// first, 2 over the second, and 3 over both were in flight at once.
-fn three_writes_in_flight(value: u64) -> (u8, u8) {
-    let bytes = run(value, MIB, |node, tasks| async move {
+/// The first 200 bytes of a file after writes of 1 over bytes 0 to 100, 2 over 100 to
+/// 200, and 3 over both were in flight at once.
+fn three_writes_in_flight(value: u64) -> Vec<u8> {
+    run(value, MIB, |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 512).await);
         let pool = pool();
         for (offset, len, byte) in [(0, 100, 1), (100, 100, 2)] {
@@ -722,18 +751,26 @@ fn three_writes_in_flight(value: u64) -> (u8, u8) {
         file.write_at(0, &[block(&pool, &[3; 200])]).await.unwrap();
         node.clock().sleep(Span::MILLISECOND).await;
         read(&file, &pool, 0, 200).await
-    });
-    let (first, second) = bytes.split_at(100);
-    assert!(first.iter().all(|&byte| byte == first[0]), "{first:?}");
-    assert!(second.iter().all(|&byte| byte == second[0]), "{second:?}");
-    (first[0], second[0])
+    })
+}
+
+/// The values of each run of `runs` whose bytes 0 to 100 hold one value and bytes 100
+/// to 200 hold one value.
+fn halves(runs: &[Vec<u8>]) -> BTreeSet<(u8, u8)> {
+    (runs.iter())
+        .filter(|bytes| bytes[..100].iter().all(|&byte| byte == bytes[0]))
+        .filter(|bytes| bytes[100..].iter().all(|&byte| byte == bytes[100]))
+        .map(|bytes| (bytes[0], bytes[100]))
+        .collect()
 }
 
 #[test]
 fn three_writes_in_flight_leave_the_result_of_each_order() {
-    let results: BTreeSet<(u8, u8)> = (0..128).map(three_writes_in_flight).collect();
+    let results: Vec<Vec<u8>> = (0..128).map(three_writes_in_flight).collect();
+    assert_bytes_in(results.iter().map(|bytes| &bytes[..100]), &[1, 3]);
+    assert_bytes_in(results.iter().map(|bytes| &bytes[100..]), &[2, 3]);
     let orders = BTreeSet::from([(1, 2), (1, 3), (3, 2), (3, 3)]);
-    assert_eq!(results, orders);
+    assert_eq!(halves(&results), orders);
 }
 
 #[test]
@@ -775,11 +812,11 @@ fn a_path_with_a_trailing_slash_names_only_a_directory() {
     assert_eq!(results, expected);
 }
 
-/// The values of bytes 0 to 100 and 100 to 200 of a file after the writes of `order`
-/// (offset, length, and value), each started when the one before it ended or, when
-/// `spawned`, at once with it.
-fn writes_in_order(value: u64, order: [(u64, usize, u8, bool); 3]) -> (u8, u8) {
-    let bytes = run(value, MIB, move |node, tasks| async move {
+/// The first 200 bytes of a file after the writes of `order` (offset, length, and
+/// value), each started when the one before it ended or, when `spawned`, at once with
+/// it.
+fn writes_in_order(value: u64, order: [(u64, usize, u8, bool); 3]) -> Vec<u8> {
+    run(value, MIB, move |node, tasks| async move {
         let file = Rc::new(create(&node, "a", 512).await);
         let pool = pool();
         for (offset, len, byte, spawned) in order {
@@ -793,31 +830,35 @@ fn writes_in_order(value: u64, order: [(u64, usize, u8, bool); 3]) -> (u8, u8) {
         }
         node.clock().sleep(Span::MILLISECOND).await;
         read(&file, &pool, 0, 200).await
-    });
-    let (first, second) = bytes.split_at(100);
-    assert!(first.iter().all(|&byte| byte == first[0]), "{first:?}");
-    assert!(second.iter().all(|&byte| byte == second[0]), "{second:?}");
-    (first[0], second[0])
+    })
 }
 
 #[test]
-fn three_writes_in_flight_over_nested_bytes_leave_the_result_of_an_order() {
+fn three_writes_in_flight_over_nested_bytes_leave_each_order_or_a_mix() {
     let writes = [(0, 200, 1, true), (0, 100, 2, true), (0, 200, 3, false)];
-    let results: BTreeSet<(u8, u8)> = (0..256)
+    let results: Vec<Vec<u8>> = (0..256)
         .map(|value| writes_in_order(value, writes))
         .collect();
+    assert_bytes_in(results.iter().map(|bytes| &bytes[..100]), &[1, 2, 3]);
+    assert_bytes_in(results.iter().map(|bytes| &bytes[100..]), &[1, 3]);
     let orders = BTreeSet::from([(1, 1), (2, 1), (2, 3), (3, 3)]);
-    assert_eq!(results, orders);
+    assert!(
+        halves(&results).is_superset(&orders),
+        "{:?}",
+        halves(&results)
+    );
 }
 
 #[test]
 fn a_write_in_flight_over_two_in_turn_keeps_their_order() {
-    let writes = [(0, 200, 1, true), (0, 100, 2, false), (100, 100, 3, false)];
-    let results: BTreeSet<(u8, u8)> = (0..256)
+    let writes = [(0, 200, 1, true), (0, 100, 2, false), (0, 100, 3, false)];
+    let results: Vec<Vec<u8>> = (0..256)
         .map(|value| writes_in_order(value, writes))
         .collect();
-    let orders = BTreeSet::from([(1, 1), (1, 3), (2, 3)]);
-    assert_eq!(results, orders);
+    assert_bytes_in(results.iter().map(|bytes| &bytes[..100]), &[1, 3]);
+    assert_bytes_in(results.iter().map(|bytes| &bytes[100..]), &[1]);
+    assert_eq!(halves(&results), BTreeSet::from([(1, 1), (3, 1)]));
+    assert!(results.iter().any(|bytes| split(&bytes[..100])), "no mix");
 }
 
 /// The bytes of a one-sector file after writes of 1, 2, and 3, with a sync started
@@ -971,4 +1012,151 @@ fn slept_around_end(sleep: Span) -> u64 {
 fn the_digest_holds_the_polls_before_a_file_end() {
     let early = slept_around_end(Span::from_nanos(1));
     assert_ne!(early, slept_around_end(Span::MILLISECOND));
+}
+
+/// Polls `future` once, and checks that it is pending.
+async fn pend(mut future: Pin<&mut impl Future>) {
+    poll_fn(|cx| {
+        assert!(future.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+}
+
+/// What a write open of a file gives after a close of its write handle, whose sync
+/// dropped in flight.
+fn reopen_after_dropped_sync(value: u64) -> Result<(), Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        let file = create(&node, "a", 1_024).await;
+        let mut sync = Box::pin(file.sync());
+        pend(sync.as_mut()).await;
+        drop(sync);
+        let poisoned = Err(Error::Poisoned { path: path.into() });
+        assert_eq!(file.sync().await, poisoned);
+        file.close().await;
+        files.open(path, Mode::Write).await.map(drop)
+    })
+}
+
+#[test]
+fn a_poisoned_file_reopens_at_once_after_a_close() {
+    for value in 0..32 {
+        assert_eq!(reopen_after_dropped_sync(value), Ok(()), "value {value}");
+    }
+}
+
+/// The times before and after a write of a file, which is awaited, or dropped in
+/// flight and then the file closed.
+fn write_span(value: u64, dropped: bool) -> (Monotonic, Monotonic) {
+    run(value, MIB, move |node, _| async move {
+        let (file, pool, clock) =
+            (create(&node, "a", 1_024).await, pool(), node.clock());
+        let parts = [block(&pool, &[1; 1_024])];
+        let start = clock.now();
+        if dropped {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(write.as_mut()).await;
+            drop(write);
+            file.close().await;
+        } else {
+            file.write_at(0, &parts).await.unwrap();
+        }
+        (start, clock.now())
+    })
+}
+
+#[test]
+fn a_close_ends_when_a_dropped_write_ends() {
+    for value in 0..8 {
+        let (start, end) = write_span(value, true);
+        assert!(start < end, "value {value}");
+        assert_eq!((start, end), write_span(value, false), "value {value}");
+    }
+}
+
+#[test]
+fn a_close_with_no_call_in_flight_takes_no_time() {
+    let (start, end) = run(0, MIB, |node, _| async move {
+        let file = create(&node, "a", 1_024).await;
+        let start = node.clock().now();
+        file.close().await;
+        (start, node.clock().now())
+    });
+    assert_eq!(start, end);
+}
+
+#[test]
+fn a_close_waits_only_for_the_calls_of_its_handle() {
+    let (start, end) = run(0, MIB, |node, _| async move {
+        let (files, path, pool) = (node.files(), Path::new("a"), pool());
+        drop(create(&node, "a", 1_024).await);
+        let other = files.open(path, Mode::Read).await.unwrap();
+        let mine = files.open(path, Mode::Read).await.unwrap();
+        let mut read = Box::pin(other.read_at(0, pool.alloc(1_024).unwrap()));
+        pend(read.as_mut()).await;
+        let start = node.clock().now();
+        mine.close().await;
+        (start, node.clock().now())
+    });
+    assert_eq!(start, end);
+}
+
+/// What a write open of a file gives at once after a drop of a close that waits for a
+/// write in flight, and then after a millisecond.
+fn open_after_dropped_close(value: u64) -> (Option<Error>, Option<Error>) {
+    run(value, MIB, |node, _| async move {
+        let (files, path, pool) = (node.files(), Path::new("a"), pool());
+        let file = create(&node, "a", 1_024).await;
+        let parts = [block(&pool, &[1; 1_024])];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        let mut close = Box::pin(file.close());
+        pend(close.as_mut()).await;
+        drop(close);
+        let first = files.open(path, Mode::Write).await.err();
+        node.clock().sleep(Span::MILLISECOND).await;
+        (first, files.open(path, Mode::Write).await.err())
+    })
+}
+
+#[test]
+fn a_dropped_close_closes_the_file_without_a_wait() {
+    let both = [(Some(busy("a")), None), (None, None)];
+    let opens: Vec<_> = (0..32).map(open_after_dropped_close).collect();
+    assert!(opens.iter().all(|open| both.contains(open)), "{opens:?}");
+    assert!(both.iter().all(|end| opens.contains(end)), "{opens:?}");
+}
+
+/// A waker that counts its wakes.
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn a_dropped_close_is_not_woken_when_its_calls_end() {
+    for value in 0..8 {
+        let woken = run(value, MIB, |node, _| async move {
+            let pool = pool();
+            let file = create(&node, "a", 1_024).await;
+            let parts = [block(&pool, &[1; 1_024])];
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(write.as_mut()).await;
+            drop(write);
+            let count = Arc::new(Wakes(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&count));
+            let mut close = Box::pin(file.close());
+            let cx = &mut Context::from_waker(&waker);
+            assert!(close.as_mut().poll(cx).is_pending());
+            drop(close);
+            node.clock().sleep(Span::MILLISECOND).await;
+            count.0.load(Ordering::Relaxed)
+        });
+        assert_eq!(woken, 0, "value {value}");
+    }
 }

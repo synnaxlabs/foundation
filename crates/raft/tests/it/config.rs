@@ -37,6 +37,8 @@ fn node(id: u8, term: u64, voters: Voters, entries: Vec<Entry>, applied: u64) ->
         hard: Hard {
             term: Term(term),
             vote: None,
+            leader: None,
+            proof: None,
         },
         voters,
         entries,
@@ -122,6 +124,7 @@ fn restarted(id: u8, old: Voters, log: &[Entry]) -> Raft {
             entries: rest.to_vec(),
             commit: 2,
         },
+        proof: None,
     };
     raft.step(append).unwrap();
     let ready = raft.ready();

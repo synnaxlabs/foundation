@@ -1,22 +1,25 @@
-//! A sim shard for a [`Config`], and two endpoints over a link in virtual time.
+//! Two endpoints over a link in virtual time.
 
 use std::collections::VecDeque;
+use std::mem;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::num::{NonZeroU32, NonZeroUsize};
-use std::rc::Rc;
-use std::time::Duration;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use block::{Block, Heap, Pool};
-use env::clock::Clock;
-use env::entropy::Entropy;
+use bytes::{Bytes, BytesMut};
 use env::net::udp::Meta;
-use env::tasks::Tasks;
+use noq_proto::{
+    ClientConfig, ConnectionHandle, DatagramEvent, FourTuple, SendDatagramError,
+    TransportConfig,
+};
 use types::node::{PrivateKey, PublicKey};
 use types::time::{Monotonic, Span};
 
-use super::settings::MTU_MIN;
-use super::{Endpoint, Event, cid, connection, find, queue};
+use super::settings::{MTU_MIN, Settings};
+use super::{Endpoint, Event, SERVER_NAME, cid, connection, find, queue};
 use crate::Config;
+use crate::testing::Shard;
 
 /// The client's address. The server's is [`SERVER`].
 pub(super) const CLIENT: SocketAddr =
@@ -24,16 +27,21 @@ pub(super) const CLIENT: SocketAddr =
 /// The server's address.
 pub(super) const SERVER: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2);
+/// The address of a [`Foreign`] peer.
+pub(super) const FOREIGN: SocketAddr =
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4);
 /// The client's shard. The server's is [`SERVER_SHARD`].
 pub(super) const CLIENT_SHARD: u8 = 3;
 /// The server's shard.
 pub(super) const SERVER_SHARD: u8 = 5;
-/// The most streams of each kind a peer may open, in [`Shard::config`].
-pub(super) const STREAMS_MAX: u32 = 16;
+/// The shard of a [`Foreign`] peer.
+const FOREIGN_SHARD: u8 = 7;
 /// The client's node key. The server's is [`SERVER_KEY`].
 pub(super) const CLIENT_KEY: PrivateKey = PrivateKey([1; 32]);
 /// The server's node key.
 pub(super) const SERVER_KEY: PrivateKey = PrivateKey([2; 32]);
+/// The node key of a [`Foreign`] peer.
+pub(super) const FOREIGN_KEY: PrivateKey = PrivateKey([4; 32]);
 
 /// An Initial datagram in QUIC draft 29, which no endpoint here speaks.
 pub(super) fn draft_29() -> Vec<u8> {
@@ -75,68 +83,6 @@ pub(super) fn at(elapsed: Duration) -> Monotonic {
     Monotonic(u64::try_from(elapsed.as_nanos()).expect("fits"))
 }
 
-/// What one sim shard gives a [`Config`].
-pub(super) struct Shard {
-    clock: Clock,
-    entropy: Entropy,
-    tasks: Tasks,
-    /// The pool of each config.
-    pool: Rc<Pool>,
-}
-
-impl Shard {
-    /// A config for a node with `private_key` and `idle`, on this shard.
-    pub(super) fn config(&self, private_key: PrivateKey, idle: Span) -> Config {
-        Config {
-            private_key,
-            message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
-            window_bytes: 1 << 20,
-            streams_max: NonZeroU32::new(STREAMS_MAX).expect("not zero"),
-            idle,
-            clock: self.clock.clone(),
-            entropy: self.entropy.clone(),
-            tasks: self.tasks.clone(),
-            pool: Rc::clone(&self.pool),
-        }
-    }
-
-    /// A block from [`Shard::pool`] that holds `bytes`.
-    pub(super) fn block(&self, bytes: &[u8]) -> Block {
-        let mut block = self.pool.alloc(bytes.len()).expect("room");
-        block.copy_from_slice(bytes);
-        block.freeze()
-    }
-
-    /// The bytes of [`Shard::pool`] that blocks hold or keep for the next alloc.
-    pub(super) fn committed(&self) -> usize {
-        self.pool.committed()
-    }
-}
-
-/// Runs `test` on one shard of a sim run made from `value`, and gives its result.
-pub(super) fn run<T: Send + 'static>(
-    value: u64,
-    test: impl FnOnce(&Shard) -> T + Send + 'static,
-) -> T {
-    let mut sim = sim::Sim::new(sim::Config {
-        seed: value,
-        ..sim::Config::default()
-    });
-    let node = sim.node(sim::node::Config::default());
-    sim.run_on(&node, |node, tasks| async move {
-        let config = block::Config { budget: 1 << 22 };
-        let memory = Heap::new(config.reservation());
-        let shard = Shard {
-            clock: node.clock(),
-            entropy: node.entropy(),
-            tasks,
-            pool: Rc::new(Pool::new(config, memory)),
-        };
-        test(&shard)
-    })
-    .expect("the test passes")
-}
-
 /// An endpoint on [`CLIENT_SHARD`] and one on [`SERVER_SHARD`], over a link that
 /// delivers each batch `delay` after it leaves, unless it drops it. Time starts at
 /// `Monotonic(0)` and moves only in [`Pair::run`].
@@ -148,6 +94,8 @@ pub(super) struct Pair {
     pub(super) client: Side,
     /// The side that accepts.
     pub(super) server: Side,
+    /// A peer at [`FOREIGN`], if any.
+    pub(super) foreign: Option<Foreign>,
     /// Arrival, destination, and bytes of each batch on the link, in the order
     /// they arrive.
     link: VecDeque<(Duration, SocketAddr, Meta, Vec<u8>)>,
@@ -176,9 +124,21 @@ pub(super) struct Side {
 impl Pair {
     /// Two endpoints with `idle`, and no connection.
     pub(super) fn new(shard: &Shard, idle: Span, delay: Duration) -> Self {
-        let config = shard.config(CLIENT_KEY, idle);
+        Self::with(shard, idle, delay, |_| {})
+    }
+
+    /// As [`Pair::new`], with `change` made to the config of each endpoint.
+    pub(super) fn with(
+        shard: &Shard,
+        idle: Span,
+        delay: Duration,
+        change: impl Fn(&mut Config),
+    ) -> Self {
+        let mut config = shard.config(CLIENT_KEY, idle);
+        change(&mut config);
         let client = Endpoint::new(&config, CLIENT_SHARD, NonZeroUsize::MIN);
-        let config = shard.config(SERVER_KEY, idle);
+        let mut config = shard.config(SERVER_KEY, idle);
+        change(&mut config);
         let server = Endpoint::new(&config, SERVER_SHARD, NonZeroUsize::MIN);
         Self {
             now: Duration::ZERO,
@@ -186,6 +146,7 @@ impl Pair {
             idle,
             client: Side::new(client, CLIENT),
             server: Side::new(server, SERVER),
+            foreign: None,
             link: VecDeque::new(),
         }
     }
@@ -207,7 +168,8 @@ impl Pair {
         let end = self.now + span;
         loop {
             self.flush();
-            let next = [self.client.deadline(), self.server.deadline()]
+            let foreign = self.foreign.as_ref().and_then(Foreign::deadline);
+            let next = [self.client.deadline(), self.server.deadline(), foreign]
                 .into_iter()
                 .chain([self.link.front().map(|&(arrival, ..)| arrival)])
                 .flatten()
@@ -226,6 +188,9 @@ impl Pair {
                 if !side.silent {
                     side.endpoint.timeout(at(self.now));
                 }
+            }
+            if let Some(foreign) = &mut self.foreign {
+                foreign.timeout(self.now);
             }
         }
         self.now = end;
@@ -246,6 +211,11 @@ impl Pair {
                 self.link.push_back((arrival, to, meta, bytes));
             }
         }
+        if let Some(foreign) = &mut self.foreign {
+            for (to, meta, bytes) in foreign.flush(now) {
+                self.link.push_back((arrival, to, meta, bytes));
+            }
+        }
     }
 
     fn deliver(&mut self, to: SocketAddr, meta: &Meta, bytes: &[u8]) {
@@ -255,6 +225,8 @@ impl Pair {
             .find(|side| side.address == to && !side.silent);
         if let Some(side) = side {
             side.endpoint.receive(now, meta, bytes);
+        } else if let Some(foreign) = self.foreign.as_mut().filter(|_| to == FOREIGN) {
+            foreign.receive(self.now, meta, bytes);
         }
     }
 }
@@ -324,5 +296,162 @@ impl Side {
             self.events.push((now, event));
         }
         out
+    }
+}
+
+/// A peer that runs noq-proto with no [`Endpoint`] above it, so a test writes its
+/// streams, its hello too. It speaks the TLS of a node with [`FOREIGN_KEY`].
+pub(super) struct Foreign {
+    /// The instant at the start of a run.
+    epoch: Instant,
+    settings: Settings,
+    endpoint: noq_proto::Endpoint,
+    /// The one connection it dialed or accepted.
+    connection: Option<(ConnectionHandle, noq_proto::Connection)>,
+    /// Datagrams that no connection sends: destination and bytes.
+    responses: Vec<(SocketAddr, Vec<u8>)>,
+    /// Each event of its connection, in order.
+    pub(super) events: Vec<noq_proto::Event>,
+    /// A datagram it sends as soon as its connection can.
+    pub(super) datagram: Option<Bytes>,
+}
+
+impl Foreign {
+    /// A peer with the transport parameters of a node on `shard`, with `change` made.
+    pub(super) fn new(
+        shard: &Shard,
+        change: impl FnOnce(&mut TransportConfig),
+    ) -> Self {
+        let config = shard.config(FOREIGN_KEY, Span::SECOND);
+        let (settings, endpoint) = Settings::foreign(&config, FOREIGN_SHARD, change);
+        Self {
+            epoch: config.clock.epoch(),
+            settings,
+            endpoint,
+            connection: None,
+            responses: Vec::new(),
+            events: Vec::new(),
+            datagram: None,
+        }
+    }
+
+    /// Dials `remote` at `now`, which must prove `peer`.
+    pub(super) fn dial(&mut self, now: Monotonic, peer: PublicKey, remote: SocketAddr) {
+        let dial = self.settings.client(peer);
+        self.connect(now, dial, remote);
+    }
+
+    /// Dials `remote` at `now` with `tls`.
+    pub(super) fn dial_with(
+        &mut self,
+        now: Monotonic,
+        tls: Arc<rustls::ClientConfig>,
+        remote: SocketAddr,
+    ) {
+        let dial = self.settings.dial(tls);
+        self.connect(now, dial, remote);
+    }
+
+    fn connect(&mut self, now: Monotonic, dial: ClientConfig, remote: SocketAddr) {
+        let now = self.epoch + Duration::from_nanos(now.0);
+        let connection = self.endpoint.connect(now, dial, remote, SERVER_NAME);
+        self.connection = Some(connection.expect("a dial"));
+    }
+
+    /// Its connection.
+    ///
+    /// # Panics
+    ///
+    /// When it has none.
+    pub(super) fn connection(&mut self) -> &mut noq_proto::Connection {
+        &mut self.connection.as_mut().expect("a connection").1
+    }
+
+    fn deadline(&self) -> Option<Duration> {
+        let (_, connection) = self.connection.as_ref()?;
+        let deadline = connection.poll_timeout()?;
+        Some(deadline.saturating_duration_since(self.epoch))
+    }
+
+    fn timeout(&mut self, now: Duration) {
+        let now = self.epoch + now;
+        if let Some((_, connection)) = &mut self.connection
+            && connection
+                .poll_timeout()
+                .is_some_and(|deadline| deadline <= now)
+        {
+            connection.handle_timeout(now);
+        }
+    }
+
+    fn receive(&mut self, now: Duration, meta: &Meta, bytes: &[u8]) {
+        let now = self.epoch + now;
+        let path = FourTuple::new(meta.source, None);
+        for datagram in bytes[..meta.len].chunks(meta.stride) {
+            let datagram = BytesMut::from(datagram);
+            let mut reply = Vec::new();
+            match self.endpoint.handle(now, path, None, datagram, &mut reply) {
+                Some(DatagramEvent::NewConnection(incoming)) => {
+                    let accepted =
+                        self.endpoint.accept(incoming, now, &mut reply, None);
+                    self.connection = Some(accepted.expect("an accept"));
+                }
+                Some(DatagramEvent::ConnectionEvent(_, event)) => {
+                    self.connection().handle_event(event);
+                }
+                Some(DatagramEvent::Response(transmit)) => {
+                    let reply = reply[..transmit.size].to_vec();
+                    self.responses.push((transmit.destination, reply));
+                }
+                None => {}
+            }
+            self.drive();
+        }
+    }
+
+    /// Takes every event and datagram the connection has at `now`, and gives the
+    /// batches the link carries, one datagram each.
+    fn flush(&mut self, now: Duration) -> Vec<(SocketAddr, Meta, Vec<u8>)> {
+        let now = self.epoch + now;
+        let mut out = mem::take(&mut self.responses);
+        if let Some((_, connection)) = &mut self.connection {
+            let mut buffer = Vec::new();
+            while let Some(transmit) =
+                connection.poll_transmit(now, NonZeroUsize::MIN, &mut buffer)
+            {
+                out.push((transmit.destination, buffer[..transmit.size].to_vec()));
+                buffer.clear();
+            }
+        }
+        self.drive();
+        let out = out
+            .into_iter()
+            .map(|(to, bytes)| (to, meta(FOREIGN, &bytes), bytes));
+        out.collect()
+    }
+
+    /// Moves the connection's events to the endpoint and to [`Foreign::events`].
+    fn drive(&mut self) {
+        let Some((handle, connection)) = &mut self.connection else {
+            return;
+        };
+        while let Some(event) = connection.poll_endpoint_events() {
+            if let Some(event) = self.endpoint.handle_event(*handle, event) {
+                connection.handle_event(event);
+            }
+        }
+        while let Some(event) = connection.poll() {
+            self.events.push(event);
+        }
+        if let Some(datagram) = self.datagram.take() {
+            match connection.datagrams().send(datagram.clone(), false) {
+                Ok(()) => {}
+                // Until it has the peer's transport parameters.
+                Err(SendDatagramError::UnsupportedByPeer) => {
+                    self.datagram = Some(datagram);
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
     }
 }

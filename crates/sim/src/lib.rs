@@ -42,7 +42,7 @@ use crate::files::Files;
 use crate::net::Network;
 use crate::node::Node;
 use crate::serial::Serial;
-use crate::state::{Futures, Next, Outcome, Shared, Start, State, lock};
+use crate::state::{Ended, Futures, Next, Outcome, Shared, Start, State, lock};
 
 /// Settings for one run. Build it with `..Config::default()`: fields get added.
 ///
@@ -90,6 +90,15 @@ impl Default for Config {
 /// sim.run().unwrap();
 /// handle.unwrap().join().unwrap();
 /// ```
+///
+/// # Panics
+///
+/// The drop of a `Sim` ends every thread as [`Sim::crash`] does, so it drops each task
+/// and each thread that has not started, and a task or thread that one of these drops
+/// starts is dropped in that drop. When one of these drops panics, the others still
+/// run, and then the drop panics once with each message, as [`Error::Panicked`] gives
+/// them: those of the tasks first, then those of the threads, each in start order. It
+/// does not panic while the thread already panics.
 pub struct Sim {
     config: Config,
     shared: Shared,
@@ -187,32 +196,36 @@ impl Sim {
         }
     }
 
-    /// Crashes `node` now, between runs. Each thread of the node ends at once: no
-    /// task of it polls again, its futures and its threads that have not run drop,
-    /// so its sockets and ports close and its timers stop, and
-    /// [`env::thread::Handle::join`] on one of them panics. The node keeps its disk
-    /// and its addresses: start new threads on it to restart it.
+    /// Crashes `node` now, between runs. Each thread of the node ends at once: no task
+    /// of it polls again, its futures and its threads that have not run drop, so its
+    /// sockets and ports close and its timers stop, and [`env::thread::Handle::join`]
+    /// on one of them panics. A thread that one of these drops starts on the node also
+    /// ends in the crash and never runs. Each file call of the node ends, and each file
+    /// handle and serial port closes, leaked ones too. The blocks of the calls go back
+    /// to their pools. The node keeps its disk and its addresses: start new threads on
+    /// it to restart it.
     ///
     /// # Panics
     ///
     /// - When `node` belongs to another run.
-    /// - When the drop of a future panics. The crash still ends, and the panic gives
-    ///   each message as [`Error::Panicked`] does.
+    /// - When the drop of a future or of a thread that has not run panics. The crash
+    ///   still ends, and the panic gives each message as [`Error::Panicked`] does:
+    ///   those of the futures first, then those of the threads, each in start order.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
-        let (tasks, starts) = lock(&self.shared).stop(node);
-        let panics = self.drop_futures(&tasks);
-        drop(starts);
-        let orphans = lock(&self.shared).crash(node, crash);
-        drop(orphans);
+        let wakers = lock(&self.shared).net().crash(node, crash);
+        let panics = self.stop(|key| key == node);
+        drop(wakers);
+        let ended = lock(&self.shared).crash(node, crash);
+        drop(ended);
         assert!(panics.is_empty(), "{}", panics.join(THEN));
     }
 
-    /// A hash of every scheduler pick, every datagram event, every byte arrival on a
+    /// A hash of every scheduler pick, every packet event, every byte arrival on a
     /// line, and every end of a file call so far: the time, addresses, length, and
-    /// fate of a datagram, the time, end, and fate of a byte, and the time, kind,
-    /// and success of a call, never the bytes. In one build, the same seed and the
-    /// same calls give the same digest.
+    /// fate of a packet, the kind of a TCP segment, the time, end, and fate of a
+    /// byte, and the time, kind, and success of a call, never the bytes. In one
+    /// build, the same seed and the same calls give the same digest.
     #[must_use]
     pub fn digest(&self) -> u64 {
         lock(&self.shared).digest()
@@ -230,6 +243,12 @@ impl Sim {
     /// - [`Error::Stuck`] when threads remain but nothing can run again: no task is
     ///   ready on a node that runs, and no timer, arrival, file call, or pause ends
     ///   before the end of true time.
+    ///
+    /// # Panics
+    ///
+    /// When a TCP segment, or the drop of a stream, meets a case that sim does not
+    /// simulate yet, as [`Node::net`](node::Node::net) lists. A case met between
+    /// runs, as in a drop or a crash, panics at the start of the next run.
     pub fn run(&mut self) -> Result<(), Error> {
         self.drive(None)
     }
@@ -302,7 +321,7 @@ impl Sim {
     ///
     /// # Panics
     ///
-    /// When `span` reaches past the end of true time.
+    /// When `span` reaches past the end of true time, and as [`Sim::run`].
     pub fn run_for(&mut self, span: Span) -> Result<(), Error> {
         let span = span.max(Span::ZERO);
         let end = lock(&self.shared).after(span);
@@ -317,7 +336,12 @@ impl Sim {
     fn drive(&mut self, end: Option<Monotonic>) -> Result<(), Error> {
         let mut steps = self.config.steps_max;
         loop {
-            let next = lock(&self.shared).next(end);
+            let mut state = lock(&self.shared);
+            let (yet, next) = (state.net().yet(), state.next(end));
+            drop(state);
+            if let Some(yet) = yet {
+                panic!("{yet}");
+            }
             let Some(next) = next else { break };
             steps = steps.checked_sub(1).ok_or(Error::Steps {
                 max: self.config.steps_max,
@@ -349,7 +373,7 @@ impl Sim {
                 return Vec::new();
             }
             let done = lock(&self.shared).finish(task, thread);
-            self.drop_futures(&done)
+            self.drop_ended(done)
         }));
         lock(&self.shared).release();
         let mut panics = run.unwrap_or_else(|payload| vec![message(&*payload)]);
@@ -358,8 +382,8 @@ impl Sim {
         }
         let name = lock(&self.shared).name(thread);
         let panicked = env::thread::Panicked { name: name.clone() };
-        let tasks = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
-        panics.extend(self.drop_futures(&tasks));
+        let ended = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
+        panics.extend(self.drop_ended(ended));
         Err(Error::Panicked {
             thread: name,
             message: panics.join(THEN),
@@ -411,21 +435,40 @@ impl Sim {
         node.0.node
     }
 
-    /// Drops the futures of `tasks`, outside the borrow, since a drop may spawn.
-    /// Returns the message of each drop that panicked, in order. Each future drops on
-    /// its own, as a second panic in one unwind aborts the process.
-    fn drop_futures(&self, tasks: &[u64]) -> Vec<String> {
-        let futures = self.futures.borrow_mut().remove(tasks);
-        (futures.into_iter())
-            .filter_map(|future| {
-                panic::catch_unwind(AssertUnwindSafe(|| drop(future))).err()
-            })
-            .map(|payload| message(&*payload))
-            .collect()
+    /// Ends each live thread of the nodes whose index `stopped` picks, as
+    /// [`State::stop`] does, and drops their tasks, then the threads that have not
+    /// started, outside the lock. Returns the message of each drop that panicked, in
+    /// order.
+    fn stop(&self, stopped: impl Fn(usize) -> bool) -> Vec<String> {
+        let (ended, starts) = lock(&self.shared).stop(stopped);
+        let mut panics = self.drop_ended(ended);
+        panics.extend(drop_each(starts));
+        panics
+    }
+
+    /// Drops the timer wakers of `ended`, and the futures of its tasks outside the
+    /// borrow, since a drop may spawn. Returns the message of each drop that panicked,
+    /// in order.
+    fn drop_ended(&self, ended: Ended) -> Vec<String> {
+        drop(ended.timers);
+        let futures = self.futures.borrow_mut().remove(&ended.tasks);
+        drop_each(futures)
     }
 }
 
-/// What joins the messages of two panics of one thread.
+/// Drops each item on its own, as a second panic in one unwind aborts the process.
+/// Returns the message of each drop that panicked, in order.
+fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
+    (items.into_iter())
+        .filter_map(|item| panic::catch_unwind(AssertUnwindSafe(|| drop(item))).err())
+        .map(|payload| message(&*payload))
+        .collect()
+}
+
+/// The Linux code for an I/O error (`EIO`), which a fault of a file or a port gives.
+const EIO: i32 = 5;
+
+/// What joins the messages of two panics.
 const THEN: &str = ", then a drop panicked: ";
 
 /// The message of a panic payload.
@@ -440,13 +483,15 @@ fn message(payload: &(dyn Any + Send)) -> String {
 }
 
 impl Drop for Sim {
-    /// Drops every task and every thread that has not started. They may hold handles
-    /// to the run, so they are dropped outside its lock.
+    /// Stops every node first, so a task that a drop spawns or a thread that it starts
+    /// is born ended and dropped in that drop.
     fn drop(&mut self) {
-        let starts = lock(&self.shared).unstarted();
-        let futures = self.futures.borrow_mut().clear();
-        drop(starts);
-        drop(futures);
+        let panics = self.stop(|_| true);
+        assert!(
+            panics.is_empty() || std::thread::panicking(),
+            "{}",
+            panics.join(THEN)
+        );
     }
 }
 
@@ -464,17 +509,21 @@ pub enum Crash {
     /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
     /// keeps each call that ended. Each file call in flight takes effect at the
     /// crash, as if its future dropped, so a write keeps any subset of its sectors.
+    /// Each TCP stream and listener drops.
     Process,
     /// The machine loses power and boots again.
     ///
     /// - Each [`SECTOR`](env::files::SECTOR) of a file keeps the bytes that a sync
-    ///   made durable, or the bytes of any one write on it since then, a write in
-    ///   flight too.
+    ///   made durable, or its bytes after any one write on it since then, a write
+    ///   in flight too. Where writes in flight at once overlap, it can keep a part
+    ///   of one of them.
     /// - Each directory goes back to its entries when its last `sync_dir` ended,
     ///   and what those entries no longer reach is gone.
     /// - Other file calls in flight have no effect.
     /// - The monotonic clock reads [`node::Config::monotonic`] again. The wall
     ///   clock runs on.
+    /// - Each TCP stream and listener ends with no segment, so a peer gets an RST
+    ///   only when it sends.
     Power,
 }
 

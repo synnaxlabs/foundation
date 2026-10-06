@@ -2,7 +2,8 @@
 //! complete readers, which runs per frame, and of one floor, which the home reads when
 //! `buffer` trims.
 
-use delivery::{Key, Position, Reader, Readers, Start};
+use delivery::complete::Key;
+use delivery::{Position, Reader, Readers, Start};
 use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner};
@@ -12,15 +13,15 @@ fn main() {
     divan::main();
 }
 
-/// `sessions` recording readers.
-fn opened(sessions: usize) -> (Readers, Vec<Key>) {
+/// `sessions` recording readers, each with credit for `limit_bytes`.
+fn opened(sessions: usize, limit_bytes: u64) -> (Readers, Vec<Key>) {
     let start = Start::At(Position {
         live: 0,
         backfill: Some(0),
     });
     let mut readers = Readers::new(0);
     let keys = (0..sessions)
-        .map(|_| readers.open(Reader::Unnamed, start).key)
+        .map(|_| readers.open(Reader::Unnamed, start, limit_bytes).key)
         .collect();
     (readers, keys)
 }
@@ -28,7 +29,7 @@ fn opened(sessions: usize) -> (Readers, Vec<Key>) {
 /// The last of `sessions` recording readers acknowledges.
 #[divan::bench(args = [1, 16])]
 fn ack(bencher: Bencher<'_, '_>, sessions: usize) {
-    let (mut readers, keys) = opened(sessions);
+    let (mut readers, keys) = opened(sessions, 0);
     let key = keys[sessions - 1];
     let mut seq = 0;
     bencher.bench_local(|| {
@@ -58,10 +59,7 @@ fn frame() -> Frame {
 /// releases it once it is on disk, and each session takes it.
 #[divan::bench(args = [1, 16, 256])]
 fn release(bencher: Bencher<'_, '_>, sessions: usize) {
-    let (mut readers, keys) = opened(sessions);
-    for &key in &keys {
-        readers.grant(key, u64::MAX);
-    }
+    let (mut readers, keys) = opened(sessions, u64::MAX);
     let frame = frame();
     let mut seq = 0;
     bencher.bench_local(|| {
@@ -69,13 +67,13 @@ fn release(bencher: Bencher<'_, '_>, sessions: usize) {
         seq += 1;
         divan::black_box(readers.release(seq));
         for &key in &keys {
-            divan::black_box(readers.take(key));
+            divan::black_box(readers.take(key.into()));
         }
     });
 }
 
 #[divan::bench(args = [1, 16, 256])]
 fn floor(bencher: Bencher<'_, '_>, sessions: usize) {
-    let (readers, _) = opened(sessions);
+    let (readers, _) = opened(sessions, 0);
     bencher.bench_local(|| divan::black_box(&readers).floor());
 }

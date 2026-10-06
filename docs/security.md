@@ -28,7 +28,7 @@ attacker can use is a GitHub issue with the `security` label and a failing test.
 | Subject | Sign hellos and session opens with a key in the spec | Go past its `access` allows |
 | Member node | Act as itself and as the connectors placed on it; read and change the traffic of subjects connected through it; use their open sessions until the hello expires; drop or delay what it forwards | Hold another node's key; change the spec |
 | Home of an index | Write any data into the index, run its gate, lie to its readers | Act outside its placement |
-| Voter | Vote and stall its region | Forge a spec change or move a home outside placement |
+| Voter | Vote and stall its region; break `raft` safety (Node to node) | Forge a spec change or move a home outside placement |
 | Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
 | Local user | Read and write the node's files, and so hold its keys and cached secrets and become that member node | Read memory of the process |
@@ -133,17 +133,25 @@ state on `main`.
   append's term. A node that a change removed and that missed its release can win
   an election once no voter has a lease, and lead until it commits the leave
   (#483).
-- `raft` drops a reply from a node that is not a voter, unless a change removed the
-  node and `raft` still sends to it (#352). But it takes a higher term from any
-  sender of a request but a `PreVote`, or a `Vote` to a node with a lease, and from
-  any reply it keeps but a granted `PreVoteReply`.
+- `raft` drops a reply from a node that is not a voter, unless a change removed the node
+  and `raft` still sends to it (#352). But it takes a higher term from any sender of a
+  request but a `PreVote`, or a `Vote` to a node with a lease, and from any reply it
+  keeps but a granted `PreVoteReply`.
 - A node that may send to a group and lies can stop the group for good with one message
   in term `u64::MAX`: each node writes that term to disk, and none can campaign. Only a
   voter, or a removed node that `raft` still sends to, can: `mesh` admits a `raft`
   request only from a voter of the newest configuration (RAFT VOTERS, #654), and `raft`
   drops a reply from any other node. Not built (`mesh`). A voter that lies can also
   break safety, because a false `AppendReply` counts as held, so `raft` trusts its
-  voters. No change in `raft` (RAFT SURFACE, #352 item 2).
+  voters. No change in `raft` for that (RAFT SURFACE, #352 item 2). Proof of election
+  closes the `u64::MAX` case (#750).
+- A voter that does not lead can make a node commit a voter set alone. It sends a
+  heartbeat or an `Append` of a higher term, or a reply of a higher term and then
+  either, or an `Append` in the node's term before the node hears that term's
+  leader. The node follows the voter and writes and commits what it sends. So two
+  nodes can apply different entries at one index, and a forged voter set can take
+  the group over (RAFT LOG). Open by decision; `raft/tests/it/hostile.rs` pins it.
+  The long-term fix is a proof of election (#750).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
@@ -200,10 +208,11 @@ state on `main`.
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
 - Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
-  reported durable or cannot open), #553 (a power cut after the first open loses
-  the new ring: its directory is not synced in its parent), #566 (a write of a dead
-  process can land on a ring that a new process opened), #572 (`append` takes a
-  record over the pool's largest block, and then each open fails). Fixed: #393 (two
+  reported durable or cannot open), #566 (a write of a dead process can land on a
+  ring that a new process opened), #572 (`append` takes a record over the pool's
+  largest block, and then each open fails), #657 (an open reports durable the
+  records a killed process never synced). Fixed: #553 (a power cut after the first
+  open lost the new ring: its directory was not synced in its parent), #393 (two
   CRC-valid fields stopped the node at open); the `area` and `below_tail` inputs
   hold both.
 
@@ -214,9 +223,9 @@ state on `main`.
 
 ### Encoded series
 
-- `codec::validate` and `codec::decode` read series from peers and from disk. A
-  series cannot make `decode` write outside `out`. Fuzzed: `codec_series`,
-  `codec_encoder`.
+- `codec::validate`, `codec::decode`, and `codec::Decoder` read series from peers
+  and from disk. A series cannot make `decode` or `Decoder` write outside `out`.
+  Fuzzed: `codec_series`, `codec_encoder`.
 
 ## Secrets
 
@@ -270,9 +279,10 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
-| `codec_series` | `codec::validate`, `codec::decode` | Both give one result |
+| `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
+| `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |

@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
+use document::diagnostic::Diagnostic;
 use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
 use crate::write::{After, INDENT, Writer};
-use crate::{Error, read, write};
+use crate::{Error, Unwritable, read, write};
 
 /// Changes `text` so that [`read`] reads it as `document`, and returns the new text.
 /// Each attribute and block that keeps its value and its place keeps its bytes, with
@@ -16,15 +17,15 @@ use crate::{Error, read, write};
 ///
 /// # Errors
 ///
-/// Returns the problems in `text`, as `read` gives them. Otherwise, returns
-/// [`Error::Unwritable`] for each part of `document` that HCL text cannot hold.
+/// Returns [`Refusal::Text`] when `read` refuses `text`. Otherwise, returns
+/// [`Refusal::Document`] when `write` refuses `document`.
 pub fn update(
     source: Source,
     text: &str,
     document: &Document,
-) -> Result<String, Vec<Error>> {
-    let old = read(source, text)?;
-    write(document)?;
+) -> Result<String, Refusal> {
+    let old = read(source, text).map_err(Refusal::Text)?;
+    write(document).map_err(Refusal::Document)?;
     let file = File::new(source, text);
     let mut diff = Diff {
         file: &file,
@@ -38,6 +39,25 @@ pub fn update(
     };
     diff.body(&old, document, &body);
     Ok(file.apply(diff.edits))
+}
+
+/// Why [`update`] gives no text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The problems in the text, as [`read`] gives them.
+    Text(Vec<Error>),
+    /// The parts of the Document that HCL text cannot hold, as [`write()`] gives them.
+    Document(Vec<Unwritable>),
+}
+
+/// Gives the diagnostic of each problem, in the order of the refusal.
+impl From<&Refusal> for Vec<Diagnostic> {
+    fn from(refusal: &Refusal) -> Self {
+        match refusal {
+            Refusal::Text(errors) => errors.iter().map(Diagnostic::from).collect(),
+            Refusal::Document(parts) => parts.iter().map(Diagnostic::from).collect(),
+        }
+    }
 }
 
 /// A token's place in the text.
@@ -86,8 +106,8 @@ struct File<'a> {
     marks: Vec<Mark>,
     /// The start of the text after its byte order mark.
     floor: usize,
-    /// `\r\n` when the first line ends so, and `\n` when not.
-    line_end: &'static str,
+    /// The first line ends in `\r\n`.
+    crlf: bool,
 }
 
 impl<'a> File<'a> {
@@ -116,7 +136,7 @@ impl<'a> File<'a> {
                 floor: text
                     .strip_prefix('\u{feff}')
                     .map_or(0, |_| '\u{feff}'.len_utf8()),
-                line_end: if crlf { "\r\n" } else { "\n" },
+                crlf,
             };
         }
         unreachable!("invariant: each token but the last covers a byte")
@@ -253,12 +273,13 @@ impl<'a> File<'a> {
         // At one place, inserts after the item above come first, then inserts before
         // the item below, each in the order made, then a cut.
         edits.sort_by_key(|edit| (edit.range.start, edit.range.end, edit.below));
+        let line_end = if self.crlf { "\r\n" } else { "\n" };
         let mut out = String::with_capacity(self.text.len());
         let mut at = 0;
         for Edit { range, text, .. } in edits {
             let kept = self.text.get(at..range.start);
             out.push_str(kept.expect("invariant: edits do not overlap"));
-            out.push_str(&text.replace('\n', self.line_end));
+            out.push_str(&text.replace('\n', line_end));
             at = range.end;
         }
         out.push_str(
@@ -359,7 +380,7 @@ impl Diff<'_, '_> {
         if pending.attributes.is_empty() && pending.blocks.is_empty() {
             return;
         }
-        let mut writer = Writer::new(&body.margin, 0);
+        let mut writer = Writer::new(&body.margin, 0, self.file.crlf);
         let (attributes, blocks) =
             (pending.attributes.drain(..), pending.blocks.drain(..));
         writer.body(attributes, blocks, 0, pending.ends.contains(&at));
@@ -397,7 +418,8 @@ impl Diff<'_, '_> {
         } else {
             After::Other
         };
-        let mut writer = Writer::new(file.margin(old.key_span), column(old.value.span));
+        let mut writer =
+            Writer::new(file.margin(old.key_span), column(old.value.span), file.crlf);
         writer.value(&new.value, 0, after);
         self.edits.push(Edit {
             range: start..end,
@@ -438,7 +460,7 @@ impl Diff<'_, '_> {
             self.body(&old.body, &new.body, &body);
         } else {
             // A block on one line holds one attribute or none, so it is written again.
-            let mut writer = Writer::new(margin, column(old.span));
+            let mut writer = Writer::new(margin, column(old.span), file.crlf);
             writer.block(new, 0);
             self.edits.push(Edit {
                 range: start..end,
@@ -543,12 +565,13 @@ fn offset(position: Position) -> usize {
 #[cfg(test)]
 mod tests {
     use document::Map;
+    use document::encoding::TooDeep;
     use document::value::{Kind, Value};
     use proptest::prelude::*;
 
     use super::*;
+    use crate::Expected;
     use crate::arbitrary::document;
-    use crate::{Expected, Unwritable};
 
     fn parsed(text: &str) -> Document {
         read(Source(0), text).unwrap()
@@ -929,6 +952,20 @@ mod tests {
     }
 
     #[test]
+    fn writes_no_heredoc_in_a_text_with_crlf_line_ends() {
+        // HCL keeps the `\r` of each line end in the value of a heredoc.
+        assert_eq!(updated("a = 1\r\n", "a = \"x\\n\""), "a = \"x\\n\"\r\n");
+        assert_eq!(
+            updated("a = 1\r\n", "a = { k = \"x\\n\" }"),
+            "a = { k = \"x\\n\" }\r\n"
+        );
+        assert_eq!(
+            updated("b { a = 1 }\r\n", "b {\na = \"x\\n\"\n}"),
+            "b {\r\n  a = \"x\\n\"\r\n}\r\n"
+        );
+    }
+
+    #[test]
     fn quotes_a_value_at_the_end_of_a_text_with_no_line_end() {
         assert_eq!(updated("a = 1", "a = \"x\\n\""), "a = \"x\\n\"");
         assert_eq!(updated("a = 1  ", "a = \"x\\n\""), "a = \"x\\n\"  ");
@@ -950,7 +987,7 @@ mod tests {
                 "a = 1\r\nb {\r\n  c = 2\r\n}\r\n",
                 "a = 1\nd = \"x\\n\"\nb {\nc = 2\ne = 3\n}"
             ),
-            "a = 1\r\nd = <<EOT\r\nx\r\nEOT\r\nb {\r\n  c = 2\r\n  e = 3\r\n}\r\n"
+            "a = 1\r\nd = \"x\\n\"\r\nb {\r\n  c = 2\r\n  e = 3\r\n}\r\n"
         );
         assert_eq!(updated("a = 1", "a = 1\nb = 2"), "a = 1\nb = 2\n");
         assert_eq!(
@@ -989,17 +1026,64 @@ mod tests {
         };
         assert_eq!(
             update(Source(0), "a = \n", &document),
-            Err(vec![Error::Syntax {
+            Err(Refusal::Text(vec![Error::Syntax {
                 span: Span::new(Source(0), at(4, 0, 4), at(5, 1, 0)).unwrap(),
                 expected: Expected::Value,
-            }])
+            }]))
         );
         assert_eq!(
             update(Source(0), "a = 1\n", &document),
-            Err(vec![Error::Unwritable {
+            Err(Refusal::Document(vec![Unwritable::Key { span: None }]))
+        );
+
+        let mut deep = Value {
+            kind: Kind::List(Vec::new()),
+            span: None,
+        };
+        for _ in 0..64 {
+            deep = Value {
+                kind: Kind::List(vec![deep]),
                 span: None,
-                part: Unwritable::Key,
+            };
+        }
+        let document = Document {
+            attributes: Map::new(vec![Attribute {
+                key: "a".into(),
+                key_span: None,
+                value: deep,
             }])
+            .unwrap(),
+            blocks: Vec::new(),
+        };
+        assert_eq!(
+            update(Source(0), "a = 1\n", &document),
+            Err(Refusal::Document(vec![Unwritable::TooDeep(TooDeep {
+                span: None
+            })]))
+        );
+    }
+
+    #[test]
+    fn gives_the_diagnostic_of_each_problem_in_order() {
+        let at = |offset| Position {
+            offset,
+            line: 0,
+            column: offset,
+        };
+        let errors = [3, 1].map(|offset| Error::TooDeep {
+            span: Span::new(Source(0), at(offset), at(offset)).unwrap(),
+        });
+        assert_eq!(
+            Vec::<Diagnostic>::from(&Refusal::Text(errors.to_vec())),
+            errors.iter().map(Diagnostic::from).collect::<Vec<_>>()
+        );
+        let parts = [
+            Unwritable::For { span: None },
+            Unwritable::Key { span: None },
+        ];
+        assert_eq!(
+            Vec::<Diagnostic>::from(&Refusal::Document(parts.to_vec())),
+            parts.iter().map(Diagnostic::from).collect::<Vec<_>>()
         );
     }
 }

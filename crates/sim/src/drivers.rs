@@ -21,7 +21,7 @@ use env::threads::Body;
 use types::time::Monotonic;
 
 use crate::shard::Fault;
-use crate::state::{Due, Futures, Outcome, Shared, Start, lock};
+use crate::state::{Due, Futures, Outcome, Shared, Start, State, lock};
 
 /// Drives every seam of one node.
 #[derive(Clone)]
@@ -33,7 +33,9 @@ pub(crate) struct Node {
 impl Node {
     /// Adds a thread that runs when the scheduler picks its first task.
     fn thread(&self, name: String, start: Start) -> Handle {
-        let thread = lock(&self.shared).start(self.node, name, start);
+        let (thread, crashed) = lock(&self.shared).start(self.node, name, start);
+        // After the lock: the drop may start a thread.
+        drop(crashed);
         let (shared, node) = (Arc::clone(&self.shared), self.node);
         Handle::new(move || {
             let state = lock(&shared);
@@ -70,28 +72,44 @@ impl Node {
     }
 }
 
-/// The sim thread that a handle of a node binds to at its first poll.
+/// What a handle of a node binds to: the life of the node at its open, and the sim
+/// thread of its first poll.
 struct Owner {
     /// The handle, in a panic.
     what: &'static str,
+    life: u64,
     thread: OnceLock<u64>,
 }
 
 impl Owner {
-    /// The owner of a handle that `what` names in a panic.
-    fn new(what: &'static str) -> Self {
+    /// The owner of a handle that `what` names in a panic, opened in `life` of its
+    /// node.
+    fn new(what: &'static str, life: u64) -> Self {
         Self {
             what,
+            life,
             thread: OnceLock::new(),
         }
+    }
+
+    /// Whether `node` lives the life of the open in `state`: no crash of it since.
+    fn current(&self, state: &State, node: usize) -> bool {
+        state.life(node) == self.life
     }
 
     /// Binds the handle to the sim thread of `node` that polls it first.
     ///
     /// # Panics
     ///
-    /// As [`Node::running`], and on a thread other than the first.
+    /// After a crash of `node`, as [`Node::running`], and on a thread other than the
+    /// first.
     fn check(&self, node: &Node) {
+        let (key, current) = (node.node, self.current(&lock(&node.shared), node.node));
+        assert!(
+            current,
+            "{} of node {key} polls after a crash of the node",
+            self.what
+        );
         let thread = node.running(self.what);
         let first = *self.thread.get_or_init(|| thread);
         if first != thread {
@@ -114,11 +132,12 @@ impl env::clock::Driver for Node {
     }
 
     fn timer(&self) -> Pin<Box<dyn env::clock::Timer>> {
-        self.running("a sleep");
+        let thread = self.running("a sleep");
         let key = lock(&self.shared).key();
         Box::pin(Timer {
             shared: Arc::clone(&self.shared),
             node: self.node,
+            thread,
             key,
             due: None,
         })
@@ -142,6 +161,10 @@ impl env::shards::Driver for Node {
         lock(&self.shared).cores(self.node)
     }
 
+    fn pinnable(&self) -> bool {
+        lock(&self.shared).pinnable(self.node)
+    }
+
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error> {
         let fault = lock(&self.shared).shards(self.node).record(&config);
         let name = config.name;
@@ -151,7 +174,10 @@ impl env::shards::Driver for Node {
                 let reason = "injected".into();
                 return Err(Error::Start { name, reason });
             }
-            Some((core, Fault::Pin)) => return Err(Error::Pin { name, core }),
+            Some((core, Fault::Pin)) => {
+                let reason = "injected".into();
+                return Err(Error::Pin { name, core, reason });
+            }
             Some((_, Fault::Panic)) => Box::new(|tasks: env::tasks::Tasks| -> Task {
                 tasks.spawn(async { panic!("injected") });
                 let main = main(tasks);
@@ -189,8 +215,10 @@ impl env::threads::Driver for Node {
 struct Timer {
     shared: Shared,
     node: usize,
+    /// The thread that made it, the only one that can poll it: a sleep is not `Send`.
+    thread: u64,
     key: u64,
-    /// The true deadline of its entry, while it has one.
+    /// The true deadline it armed last, until it disarms.
     due: Option<Monotonic>,
 }
 
@@ -207,7 +235,7 @@ impl env::clock::Timer for Timer {
         let (poll, unused) = match state.due(this.node, deadline) {
             Due::Passed => (Poll::Ready(()), Some(waker)),
             Due::At(at) => {
-                state.arm(at, this.key, waker);
+                state.arm(this.thread, at, this.key, waker);
                 this.due = Some(at);
                 (Poll::Pending, None)
             }

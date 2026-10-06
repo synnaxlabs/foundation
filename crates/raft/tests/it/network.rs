@@ -8,8 +8,8 @@ use proptest::prelude::*;
 use proptest::sample::Index;
 use proptest::strategy::Union;
 use raft::{
-    Body, Config, Data, Entry, Error, Hard, Message, Position, Raft, Role, Start, Term,
-    Voters,
+    Body, Config, Data, Entry, Error, Grant, Hard, Message, Position, Raft, Role,
+    Start, Term, Voters,
 };
 use types::node;
 
@@ -166,6 +166,9 @@ pub(crate) struct Network {
     // The last positions each candidate claimed, by candidate, term, and whether
     // the request was a PreVote.
     asked: BTreeMap<(node::Key, Term, bool), Vec<Position>>,
+    // The voters whose grant reached each candidate, forged ones included, by
+    // candidate, term, and whether the grant was a PreVote.
+    granted: BTreeMap<(node::Key, Term, bool), BTreeSet<node::Key>>,
     /// Every entry some node applied, in index order.
     pub(crate) applied: Vec<Entry>,
     // The term of the leader that committed each entry of `applied`.
@@ -183,7 +186,12 @@ impl Network {
         let disks = logs
             .iter()
             .map(|last| Disk {
-                hard: Hard { term, vote: None },
+                hard: Hard {
+                    term,
+                    vote: None,
+                    leader: None,
+                    proof: None,
+                },
                 entries: (1..=last.index)
                     .map(|index| Entry {
                         at: Position {
@@ -206,6 +214,7 @@ impl Network {
             flight: Vec::new(),
             leaders: BTreeMap::new(),
             asked: BTreeMap::new(),
+            granted: BTreeMap::new(),
             applied: Vec::new(),
             committed: Vec::new(),
             proposed: 0,
@@ -237,7 +246,7 @@ impl Network {
         };
         let disk = &self.disks[node];
         let start = Start {
-            hard: disk.hard,
+            hard: disk.hard.clone(),
             voters: Voters {
                 incoming: (0..self.disks.len()).map(Self::key).collect(),
                 ..Voters::default()
@@ -251,6 +260,15 @@ impl Network {
     pub(crate) fn deliver(&mut self, message: Message) {
         let (from, to) = (self.at(message.from), self.at(message.to));
         if self.cut[from] == self.cut[to] {
+            let prevote = match message.body {
+                Body::PreVoteReply { granted: true } => Some(true),
+                Body::VoteReply { granted: true } => Some(false),
+                _ => None,
+            };
+            if let Some(prevote) = prevote {
+                let key = (message.to, message.term, prevote);
+                self.granted.entry(key).or_default().insert(message.from);
+            }
             match self.nodes[to].step(message) {
                 Err(error @ Error::IndexPastLog { .. }) if self.wiped[to] => {
                     self.refused.push(error);
@@ -482,7 +500,28 @@ impl Network {
     }
 
     // A vote goes only to a candidate whose log is at least as new as the voter's.
+    // A proof names the sender, with the grant its body carries, and only the voters
+    // that granted it.
     fn note(&mut self, at: usize, message: &Message) {
+        if let Some(proof) = &message.proof {
+            let grant = match message.body {
+                Body::Vote { .. } => Some(Grant::PreVote),
+                Body::Heartbeat { .. } | Body::Append { .. } => Some(Grant::Vote),
+                _ => None,
+            };
+            if let Some(grant) = grant {
+                let key = (message.from, message.term, grant == Grant::PreVote);
+                assert_eq!(proof.grant, grant, "node {at} carries the wrong grant");
+                assert_eq!(proof.candidate, message.from, "node {at} proves another");
+                let mut granted = self.granted.get(&key).cloned().unwrap_or_default();
+                granted.insert(message.from);
+                assert!(
+                    proof.voters.is_subset(&granted),
+                    "node {at} carries voters that did not grant: {:?}",
+                    proof.voters.difference(&granted).collect::<Vec<_>>()
+                );
+            }
+        }
         if matches!(message.body, Body::PreVote { .. } | Body::Vote { .. }) {
             let node = &self.nodes[at];
             let voters = node.voters();

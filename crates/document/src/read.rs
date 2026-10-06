@@ -1,12 +1,18 @@
-//! Readers for the quantities that kinds and `config` share, so a value reads the same
-//! in every block.
+//! Readers for the values that kinds and `config` share, so a value reads the same in
+//! every block.
+
+use std::slice;
 
 use types::byte;
+use types::name::{Error, Name, Selector};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::value::{Kind, Value};
+use crate::{Label, Span};
 
 const BAD_SIZE: Code = Code::new("document.bad-size");
+const BAD_NAME: Code = Code::new("document.bad-name");
+const BAD_SELECTOR: Code = Code::new("document.bad-selector");
 
 /// Reads a byte size from a string that [`byte::Size`] reads, such as `"200GiB"` or
 /// `"1.5GiB"`.
@@ -26,24 +32,110 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
         ));
     };
     text.parse::<byte::Size>().map_err(|error| {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        // `1 5GiB` may mean `15GiB` or `1.5GiB`, so it gets no `Write` fix.
-        let joins_digits = words.iter().zip(words.iter().skip(1)).any(|(a, b)| {
-            a.ends_with(|c: char| c.is_ascii_digit())
-                && b.starts_with(|c: char| c.is_ascii_digit())
-        });
-        let compact = words.concat();
-        let fix = if !joins_digits && compact.parse::<byte::Size>().is_ok() {
-            format!("Write \"{compact}\"")
-        } else {
-            format!(
-                "Use a whole number of bytes, at most {}, with no space before the \
-                 unit, such as \"200GiB\" or \"1.5GiB\"",
-                byte::Size::from_bytes(u64::MAX)
-            )
-        };
-        bad(format!("cannot read the byte size {text:?}: {error}"), fix)
+        bad(
+            format!("cannot read the byte size {text:?}: {error}"),
+            size_fix(text, error),
+        )
     })
+}
+
+/// The fix for `text`, which `byte::Size` refuses with `error`. It is `Write` and the
+/// text with no whitespace and the unit that `text` likely means, when that text reads,
+/// so `"200 GB"` gets `Write "200GiB"`. Otherwise it is the fix for `error`.
+fn size_fix(text: &str, error: byte::Error) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    // `1 5GiB` may mean `15GiB` or `1.5GiB`, so it has no likely text.
+    let joins_digits = words.iter().zip(words.iter().skip(1)).any(|(a, b)| {
+        a.ends_with(|c: char| c.is_ascii_digit())
+            && b.starts_with(|c: char| c.is_ascii_digit())
+    });
+    if !joins_digits {
+        let mut likely = words.concat();
+        let mut parsed = likely.parse::<byte::Size>();
+        if let Err(byte::Error::Unit {
+            start,
+            meant: Some(meant),
+        }) = parsed
+        {
+            likely.truncate(start);
+            likely.push_str(meant);
+            parsed = likely.parse::<byte::Size>();
+        }
+        if parsed.is_ok() {
+            return format!("Write \"{likely}\"");
+        }
+    }
+    match error {
+        byte::Error::Syntax => "Write a size such as \"200GiB\" or \"1.5GiB\"".into(),
+        byte::Error::Unit { .. } => {
+            "Use a unit such as `MiB` or `GiB`, with exact case".into()
+        }
+        byte::Error::Fraction => "Round the size to whole bytes".into(),
+        byte::Error::Range { largest } => format!("Use at most \"{largest}\""),
+    }
+}
+
+/// Reads a block label as a name, such as `"site_a.cell_1"`.
+///
+/// # Errors
+///
+/// A `document.bad-name` diagnostic at the label when [`Name`] refuses its text, with
+/// the message and the fix of its [`Error`].
+pub fn name(label: &Label) -> Result<Name, Diagnostic> {
+    label
+        .text
+        .parse()
+        .map_err(|error| diagnose(BAD_NAME, label.span, &error))
+}
+
+/// Reads a selector from one pattern or a list of patterns, each a string or a
+/// reference, such as `"site_a.*"` or `["site_a.*", "!site_a.test"]`.
+///
+/// # Errors
+///
+/// A `document.bad-selector` diagnostic for the first problem in source order: at a
+/// pattern that is not a string or a reference; at a pattern that [`Selector`]
+/// refuses, with the message and the fix of its [`Error`]; or at the value when no
+/// pattern includes names, with those of [`Error::NoInclude`].
+pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
+    let patterns = patterns(value);
+    let mut texts = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        let text: &str = match &pattern.kind {
+            Kind::String(text) => text,
+            Kind::Reference(name) => name.as_str(),
+            kind => {
+                return Err(Diagnostic::new(
+                    BAD_SELECTOR,
+                    pattern.span,
+                    format!("a pattern is a string or a reference, not {}", noun(kind)),
+                    "Write a string such as \"site_a.*\"".into(),
+                ));
+            }
+        };
+        // `Selector::new` does not say which pattern it refuses, so each reads alone
+        // first. Alone, an exclusion includes no names, which is not its error.
+        match Selector::new([text]) {
+            Err(error) if error != Error::NoInclude => {
+                return Err(diagnose(BAD_SELECTOR, pattern.span, &error));
+            }
+            _ => texts.push(text),
+        }
+    }
+    Selector::new(texts).map_err(|error| diagnose(BAD_SELECTOR, value.span, &error))
+}
+
+/// The patterns of a selector value, at the positions that [`Selector`] gives: the
+/// items of a list, or the value itself.
+fn patterns(value: &Value) -> &[Value] {
+    match &value.kind {
+        Kind::List(items) => items,
+        _ => slice::from_ref(value),
+    }
+}
+
+fn diagnose(code: Code, span: Option<Span>, error: &Error) -> Diagnostic {
+    Diagnostic::new(code, span, error.to_string(), error.fix().into())
 }
 
 /// The noun for a kind of value, with its article.
@@ -67,8 +159,9 @@ mod tests {
     use crate::{Map, Position, Source, Span};
     use proptest::prelude::*;
 
-    const FIX: &str = "Use a whole number of bytes, at most 18446744073709551615B, \
-                       with no space before the unit, such as \"200GiB\" or \"1.5GiB\"";
+    const SYNTAX: &str = "Write a size such as \"200GiB\" or \"1.5GiB\"";
+    const UNIT: &str = "Use a unit such as `MiB` or `GiB`, with exact case";
+    const FRACTION: &str = "Round the size to whole bytes";
 
     /// The message for `text`, which is not a number and a unit with no space.
     fn syntax(text: &str) -> String {
@@ -169,26 +262,64 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_text_that_byte_size_refuses() {
-        for text in ["200 GB", "", "1 5GiB", "1 024B"] {
-            assert_eq!(size(&string(text)), refused(&syntax(text), FIX), "{text:?}");
-        }
+    fn gives_the_unit_that_the_text_likely_means() {
+        let unit = |text: &str| {
+            format!("cannot read the byte size {text:?}: expected the unit GiB")
+        };
         assert_refused(&[
-            (
-                "200GB",
-                "cannot read the byte size \"200GB\": expected the unit GiB",
-                FIX,
-            ),
+            ("200GB", &unit("200GB"), "Write \"200GiB\""),
+            ("1.5gib", &unit("1.5gib"), "Write \"1.5GiB\""),
+            ("200 GB", &syntax("200 GB"), "Write \"200GiB\""),
+            ("200 gb", &syntax("200 gb"), "Write \"200GiB\""),
+            ("0.3GB", &unit("0.3GB"), UNIT),
+            ("20000000000GB", &unit("20000000000GB"), UNIT),
+        ]);
+    }
+
+    #[test]
+    fn gives_a_fix_for_each_cause() {
+        for text in [
+            "",
+            "GiB",
+            "1e3B",
+            "-1B",
+            "1 5GiB",
+            "1 024B",
+            "200 Gb",
+            "0.3 B",
+            "200 GiB GiB",
+        ] {
+            assert_eq!(
+                size(&string(text)),
+                refused(&syntax(text), SYNTAX),
+                "{text:?}"
+            );
+        }
+        let units = |text: &str| {
+            format!(
+                "cannot read the byte size {text:?}: expected the unit B, KiB, MiB, \
+                 GiB, or TiB"
+            )
+        };
+        assert_refused(&[
+            ("200Gb", &units("200Gb"), UNIT),
+            ("200PiB", &units("200PiB"), UNIT),
             (
                 "0.3B",
                 "cannot read the byte size \"0.3B\": expected a whole number of bytes",
-                FIX,
+                FRACTION,
             ),
             (
                 "16777216TiB",
                 "cannot read the byte size \"16777216TiB\": expected a size of at most \
                  16777215TiB",
-                FIX,
+                "Use at most \"16777215TiB\"",
+            ),
+            (
+                "18446744073709551616B",
+                "cannot read the byte size \"18446744073709551616B\": expected a size \
+                 of at most 18446744073709551615B",
+                "Use at most \"18446744073709551615B\"",
             ),
         ]);
     }
@@ -207,13 +338,320 @@ mod tests {
         assert_eq!(size(&value).unwrap_err().span, None);
     }
 
+    mod names {
+        use super::*;
+
+        fn label(text: &str) -> Label {
+            Label {
+                text: text.into(),
+                span: Some(span()),
+            }
+        }
+
+        fn refused(message: &str, fix: &str) -> Result<Name, Diagnostic> {
+            Err(Diagnostic::new(
+                Code::new("document.bad-name"),
+                Some(span()),
+                message.into(),
+                fix.into(),
+            ))
+        }
+
+        #[test]
+        fn reads_a_label() {
+            assert_eq!(
+                name(&label("site_a.cell_1")),
+                Ok("site_a.cell_1".parse().unwrap())
+            );
+        }
+
+        #[test]
+        fn refuses_a_label_that_name_refuses() {
+            let long = "a".repeat(256);
+            for (text, message, fix) in [
+                (
+                    "site a",
+                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    "Use one or more ASCII letters, digits, `_`, and `-` in that \
+                     segment, and no other character",
+                ),
+                (
+                    "site_a.*",
+                    "\"site_a.*\" uses a wildcard where it cannot",
+                    "Use `*` and `**` only as whole segments of a pattern, never in a \
+                     name",
+                ),
+                (
+                    "",
+                    "a name or pattern is empty",
+                    "Write at least one segment",
+                ),
+                (
+                    long.as_str(),
+                    "a name or pattern is 256 bytes long, more than the limit of 255 \
+                     bytes",
+                    "Use fewer or shorter segments",
+                ),
+            ] {
+                assert_eq!(name(&label(text)), refused(message, fix), "{text:?}");
+            }
+        }
+
+        #[test]
+        fn puts_no_span_on_a_label_with_none() {
+            let label = Label {
+                text: "site a".into(),
+                span: None,
+            };
+            assert_eq!(name(&label).unwrap_err().span, None);
+        }
+
+        proptest! {
+            #[test]
+            fn reads_as_name_does(
+                text in prop_oneof![any::<String>(), "[a-z_.* @-]{0,8}"],
+            ) {
+                match (name(&label(&text)), text.parse::<Name>()) {
+                    (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
+                    (Err(diagnostic), Err(error)) => prop_assert_eq!(
+                        diagnostic,
+                        Diagnostic::new(
+                            Code::new("document.bad-name"),
+                            Some(span()),
+                            error.to_string(),
+                            error.fix().into(),
+                        )
+                    ),
+                    (read, parsed) => {
+                        prop_assert!(false, "{:?}: {:?} and {:?}", text, read, parsed);
+                    }
+                }
+            }
+        }
+    }
+
+    mod selectors {
+        use super::*;
+
+        /// A span that starts at `offset`, so each pattern in a list has its own.
+        fn at(offset: u32) -> Option<Span> {
+            let at = |offset| Position {
+                offset,
+                line: 0,
+                column: offset,
+            };
+            Span::new(Source(3), at(offset), at(offset.saturating_add(1)))
+        }
+
+        /// A list of the patterns, each at its index.
+        fn list(patterns: Vec<Kind>) -> Value {
+            let items = (0..)
+                .zip(patterns)
+                .map(|(i, kind)| Value { kind, span: at(i) });
+            value(Kind::List(items.collect()))
+        }
+
+        fn text(text: &str) -> Kind {
+            Kind::String(text.into())
+        }
+
+        fn reference(name: &str) -> Kind {
+            Kind::Reference(name.parse().unwrap())
+        }
+
+        fn refused(span: Option<Span>, message: &str, fix: &str) -> Diagnostic {
+            Diagnostic::new(
+                Code::new("document.bad-selector"),
+                span,
+                message.into(),
+                fix.into(),
+            )
+        }
+
+        const SEGMENT: &str = "Use one or more ASCII letters, digits, `_`, and `-` in \
+                               that segment, and no other character";
+        const NO_INCLUDE: &str = "Add a pattern without a leading `!`";
+
+        #[test]
+        fn reads_each_form() {
+            let expected =
+                |patterns: &[&str]| Ok(Selector::new(patterns.to_vec()).unwrap());
+            assert_eq!(selector(&string("site_a.*")), expected(&["site_a.*"]));
+            assert_eq!(
+                selector(&value(reference("site_a.plc_7"))),
+                expected(&["site_a.plc_7"])
+            );
+            assert_eq!(
+                selector(&list(vec![
+                    text("site_a.*"),
+                    text("!site_a.test"),
+                    reference("site_b.plc_7"),
+                ])),
+                expected(&["site_a.*", "!site_a.test", "site_b.plc_7"])
+            );
+        }
+
+        #[test]
+        fn refuses_a_list_that_includes_no_names() {
+            for patterns in [vec![], vec![text("!site_a.test")]] {
+                assert_eq!(
+                    selector(&list(patterns)),
+                    Err(refused(
+                        Some(span()),
+                        "a selector includes no names",
+                        NO_INCLUDE
+                    ))
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_pattern_at_the_pattern() {
+            assert_eq!(
+                selector(&list(vec![text("site_a.*"), text("site a"), text("a*b")])),
+                Err(refused(
+                    at(1),
+                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    SEGMENT
+                ))
+            );
+            assert_eq!(
+                selector(&list(vec![text("!site_a.test"), text("!")])),
+                Err(refused(
+                    at(1),
+                    "\"!\" has a segment that is not valid: \"\"",
+                    SEGMENT
+                ))
+            );
+            assert_eq!(
+                selector(&string("a*b")),
+                Err(refused(
+                    Some(span()),
+                    "\"a*b\" uses a wildcard where it cannot",
+                    "Use `*` and `**` only as whole segments of a pattern, never in a \
+                     name"
+                ))
+            );
+        }
+
+        #[test]
+        fn refuses_a_pattern_too_long_or_empty_at_the_pattern() {
+            let long = "a".repeat(256);
+            assert_eq!(
+                selector(&list(vec![text("site_a.*"), text(&long)])),
+                Err(refused(
+                    at(1),
+                    "a name or pattern is 256 bytes long, more than the limit of 255 \
+                     bytes",
+                    "Use fewer or shorter segments"
+                ))
+            );
+            assert_eq!(
+                selector(&list(vec![text("site_a.*"), text("")])),
+                Err(refused(
+                    at(1),
+                    "a name or pattern is empty",
+                    "Write at least one segment"
+                ))
+            );
+        }
+
+        #[test]
+        fn reads_an_exclusion_whose_pattern_is_at_the_limit() {
+            let exclusion = format!("!{}", "a".repeat(255));
+            assert_eq!(
+                selector(&list(vec![text("b"), text(&exclusion)])),
+                Ok(Selector::new(["b", exclusion.as_str()]).unwrap())
+            );
+        }
+
+        #[test]
+        fn refuses_the_first_problem_in_source_order() {
+            assert_eq!(
+                selector(&list(vec![text("site a"), Kind::Integer(7)])),
+                Err(refused(
+                    at(0),
+                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    SEGMENT
+                ))
+            );
+            assert_eq!(
+                selector(&list(vec![Kind::Integer(7), text("site a")])),
+                Err(refused(
+                    at(0),
+                    "a pattern is a string or a reference, not an integer",
+                    "Write a string such as \"site_a.*\""
+                ))
+            );
+        }
+
+        #[test]
+        fn refuses_a_value_that_is_not_a_pattern() {
+            let fix = "Write a string such as \"site_a.*\"";
+            assert_eq!(
+                selector(&value(Kind::Integer(7))),
+                Err(refused(
+                    Some(span()),
+                    "a pattern is a string or a reference, not an integer",
+                    fix
+                ))
+            );
+            assert_eq!(
+                selector(&list(vec![
+                    text("site_a.*"),
+                    Kind::List(vec![string("site_b.*")]),
+                ])),
+                Err(refused(
+                    at(1),
+                    "a pattern is a string or a reference, not a list",
+                    fix
+                ))
+            );
+        }
+
+        fn pattern() -> impl Strategy<Value = String> {
+            prop_oneof![
+                any::<String>(),
+                "!?[a-z_* @-]{0,3}(\\.[a-z_* @-]{0,3}){0,2}",
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn reads_as_selector_new_does(
+                texts in prop::collection::vec(pattern(), 0..4),
+            ) {
+                let read = selector(&list(texts.iter().map(|t| text(t)).collect()));
+                match (read, Selector::new(texts.iter().map(String::as_str))) {
+                    (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
+                    (Err(diagnostic), Err(error)) => {
+                        prop_assert_eq!(&diagnostic.message, &error.to_string());
+                        prop_assert_eq!(diagnostic.fix.as_str(), error.fix());
+                        // After an include, the first prefix of the list that
+                        // `Selector::new` refuses ends at the refused pattern.
+                        let mut prefix = vec!["x"];
+                        let refused_at = (0..).zip(&texts).find_map(|(i, text)| {
+                            prefix.push(text);
+                            Selector::new(prefix.iter().copied()).is_err().then_some(i)
+                        });
+                        let expected = refused_at.map_or(Some(span()), at);
+                        prop_assert_eq!(diagnostic.span, expected);
+                    }
+                    (read, parsed) => {
+                        prop_assert!(false, "{:?}: {:?} and {:?}", texts, read, parsed);
+                    }
+                }
+            }
+        }
+    }
+
     /// A text that is often close to a byte size.
     fn near() -> impl Strategy<Value = String> {
         prop_oneof![
             any::<String>(),
             concat!(
                 "[ \t\u{a0}]?[0-9]{0,22}[ .\t]{0,2}[0-9]{0,2}[ \t]?",
-                "(B|KiB|MiB|GiB|TiB|GB|gib|)[ \t]?",
+                "(B|KiB|MiB|GiB|TiB|GB|gib|gb|Gb|PiB|)[ \t]?",
             ),
         ]
     }
@@ -236,14 +674,22 @@ mod tests {
                         diagnostic.message,
                         format!("cannot read the byte size {text:?}: {error}")
                     );
-                    let written = diagnostic
+                    let likely = diagnostic
                         .fix
                         .strip_prefix("Write \"")
                         .and_then(|rest| rest.strip_suffix('"'));
-                    if let Some(written) = written {
-                        prop_assert!(size(&string(written)).is_ok(), "{:?}", text);
+                    if let Some(likely) = likely {
+                        prop_assert!(size(&string(likely)).is_ok(), "{:?}", text);
                     } else {
-                        prop_assert_eq!(diagnostic.fix, FIX);
+                        let fix = match error {
+                            byte::Error::Syntax => SYNTAX.into(),
+                            byte::Error::Unit { .. } => UNIT.into(),
+                            byte::Error::Fraction => FRACTION.into(),
+                            byte::Error::Range { largest } => {
+                                format!("Use at most \"{largest}\"")
+                            }
+                        };
+                        prop_assert_eq!(diagnostic.fix, fix, "{:?}", text);
                     }
                 }
                 (read, parsed) => {
