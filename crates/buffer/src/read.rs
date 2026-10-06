@@ -200,3 +200,65 @@ impl<'a> Reading<'a> {
         Ok(self.file.read_at(place + at, block).await?.freeze())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use block::{Block, Config, Heap, Pool};
+    use types::time::Stamp;
+
+    use super::Stored;
+
+    fn block(pool: &Pool, bytes: &[u8]) -> Block {
+        let mut unique = pool.alloc(bytes.len()).expect("the pool has room");
+        unique.copy_from_slice(bytes);
+        unique.freeze()
+    }
+
+    #[test]
+    fn stored_entries_differ_when_any_field_differs() {
+        let config = Config { budget: 1 << 20 };
+        let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
+        let base = Stored {
+            first: 1,
+            len: 2,
+            stored_at: Stamp::from_nanos(3),
+            last: Some(Stamp::from_nanos(4)),
+            tag: 5,
+            bytes: block(&pool, &[6, 7]),
+        };
+        let same = Stored {
+            bytes: block(&pool, &[6, 7]),
+            ..base.clone()
+        };
+        assert_eq!(same, base, "equal bytes in another block");
+        let changed = [
+            Stored {
+                first: 0,
+                ..base.clone()
+            },
+            Stored {
+                len: 0,
+                ..base.clone()
+            },
+            Stored {
+                stored_at: Stamp::from_nanos(0),
+                ..base.clone()
+            },
+            Stored {
+                last: None,
+                ..base.clone()
+            },
+            Stored {
+                tag: 0,
+                ..base.clone()
+            },
+            Stored {
+                bytes: block(&pool, &[6, 8]),
+                ..base.clone()
+            },
+        ];
+        for (field, stored) in changed.iter().enumerate() {
+            assert_ne!(*stored, base, "field {field}");
+        }
+    }
+}

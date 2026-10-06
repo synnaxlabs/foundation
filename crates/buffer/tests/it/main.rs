@@ -3198,6 +3198,9 @@ fn a_read_with_no_block_for_the_table_gives_the_pool_error() {
             available: 0,
         };
         assert_eq!(read, Err(Error::Pool(exhausted)));
+        let read = buffer.read(a, Path::Live, Mark::at(0), 0).await;
+        let empty = whole(Vec::new(), mark(0, 0));
+        assert_eq!(read, Ok(empty), "a budget of zero takes no block");
         drop(held);
         let read = buffer
             .read(a, Path::Live, Mark::at(0), usize::MAX)
