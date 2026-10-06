@@ -7,8 +7,12 @@ use types::time::{Interval, Monotonic, Span};
 use crate::{DRIFT, source};
 
 /// The words of the cell that [`Reader`]s read: a [`Discipline`] as its kind, a
-/// [`Slew`], a [`combine::Error`], and the first estimate.
-const WORDS: usize = 12;
+/// [`Slew`], and a [`combine::Error`].
+const WORDS: usize = 9;
+
+/// The words of the cell that holds the first slew: 1 when it is there, then the
+/// [`Slew`].
+const FIRST_WORDS: usize = 6;
 
 /// The mesh clock of one node. It lives on one shard, and [`Reader`]s read it from
 /// any.
@@ -18,9 +22,8 @@ pub struct Clock {
     sources: Map<source::Key, Filter>,
     next: u64,
     discipline: Discipline,
-    /// The target of the first slew.
-    first: Option<Measurement>,
     cell: ring::latest::Writer<WORDS>,
+    first: ring::latest::Writer<FIRST_WORDS>,
 }
 
 impl Clock {
@@ -30,18 +33,20 @@ impl Clock {
     #[must_use]
     pub fn new(monotonic: env::clock::Clock) -> (Self, Reader) {
         let discipline = Discipline::Unsynced(combine::Error::NoSources);
-        let (cell, cell_reader) = ring::latest::new(encode(discipline, None));
+        let (cell, cell_reader) = ring::latest::new(encode(discipline));
+        let (first, first_reader) = ring::latest::new(encode_first(None));
         let reader = Reader {
             monotonic: monotonic.clone(),
             cell: cell_reader,
+            first: first_reader,
         };
         let clock = Self {
             monotonic,
             sources: Map::default(),
             next: 0,
             discipline,
-            first: None,
             cell,
+            first,
         };
         (clock, reader)
     }
@@ -110,11 +115,15 @@ impl Clock {
         // A slew keeps mesh time from going back only against reads before its `now`,
         // so the clock reads inside the update.
         self.cell.update(|_| {
+            let old = self.discipline;
             self.discipline = change.at(self.monotonic.now(), DRIFT);
-            self.first = self
-                .first
-                .or(self.discipline.slew().map(|slew| slew.target));
-            encode(self.discipline, self.first)
+            let words = encode(self.discipline);
+            // Inside this update, so a read of `cell` that shows the first slew comes
+            // after it.
+            if let (None, Some(slew)) = (old.slew(), self.discipline.slew()) {
+                self.first.update(|_| encode_first(Some(slew)));
+            }
+            words
         });
     }
 }
@@ -140,13 +149,15 @@ pub enum Status {
 pub struct Reader {
     monotonic: env::clock::Clock,
     cell: ring::latest::Reader<WORDS>,
+    first: ring::latest::Reader<FIRST_WORDS>,
 }
 
 impl Reader {
     /// Mesh time now. The true time is inside the interval. Its midpoint is the
     /// clock's best guess, and it never goes back: a call that starts after another
-    /// returns gives a midpoint no earlier, while both edges fit a stamp (to 2162 with
-    /// an unknown error). `None` until a majority of the clock's sources first agree.
+    /// returns gives a midpoint no earlier, while both edges fit a stamp (from 1777 to
+    /// 2162 with an unknown error). `None` until a majority of the clock's sources
+    /// first agree.
     #[must_use]
     pub fn now(&self) -> Option<Interval> {
         self.cell.read(|words| {
@@ -175,18 +186,20 @@ impl Reader {
     /// clock: its offset, with its error grown by drift to `reading` (200 ppm, 0.72 s
     /// in one hour). Later estimates never change it. It stamps a reading taken
     /// before a call to [`Reader::now`] that gave `None`: its midpoint is then never
-    /// later than the midpoint of an interval from [`Reader::now`]. `None` until a
-    /// majority of the clock's sources first agree.
+    /// later than the midpoint of an interval from [`Reader::now`], while the edges
+    /// of both fit a stamp (from 1777 to 2162 with an unknown error). `None` until a
+    /// majority of the clock's sources first agree. A call that starts after
+    /// [`Reader::now`] gave an interval gives one.
     #[must_use]
     pub fn first(&self, reading: Monotonic) -> Option<Interval> {
-        let first = self.cell.read(decode_first)?;
-        Some(Slew::new(first).at(reading, DRIFT).interval())
+        let slew = self.first.read(decode_first)?;
+        Some(slew.at(reading, DRIFT).interval())
     }
 }
 
 // A push that slews changes only words 1 to 5, and an update stores only the words
 // that change.
-fn encode(discipline: Discipline, first: Option<Measurement>) -> [u64; WORDS] {
+fn encode(discipline: Discipline) -> [u64; WORDS] {
     let count = |n: usize| u64::try_from(n).expect("invariant: a count fits in u64");
     let (kind, slew, failure) = match discipline {
         Discipline::Unsynced(failure) => (0, None, Some(failure)),
@@ -197,8 +210,6 @@ fn encode(discipline: Discipline, first: Option<Measurement>) -> [u64; WORDS] {
         Discipline::Holdover(slew, Cause::UnknownEstimate) => (3, Some(slew), None),
     };
     let [start, from, at, offset, error] = slew.map_or([0; 5], encode_slew);
-    let [first_at, first_offset, first_error] =
-        first.map_or([0; 3], encode_measurement);
     let [sources, agreeing, empty] = match failure {
         Some(combine::Error::NoMajority {
             sources,
@@ -208,18 +219,7 @@ fn encode(discipline: Discipline, first: Option<Measurement>) -> [u64; WORDS] {
         Some(combine::Error::NoSources) | None => [0; 3],
     };
     [
-        kind,
-        start,
-        from,
-        at,
-        offset,
-        error,
-        sources,
-        agreeing,
-        empty,
-        first_at,
-        first_offset,
-        first_error,
+        kind, start, from, at, offset, error, sources, agreeing, empty,
     ]
 }
 
@@ -234,7 +234,6 @@ fn decode(words: [u64; WORDS]) -> Discipline {
         sources,
         agreeing,
         empty,
-        ..,
     ] = words;
     let slew = || decode_slew([start, from, at, offset, error]);
     let count =
@@ -257,46 +256,44 @@ fn decode(words: [u64; WORDS]) -> Discipline {
     }
 }
 
-/// The first estimate, which the cell holds from the first slew on.
-fn decode_first(words: [u64; WORDS]) -> Option<Measurement> {
-    let [.., at, offset, error] = words;
-    decode(words)
-        .slew()
-        .map(|_| decode_measurement([at, offset, error]))
+fn encode_first(first: Option<Slew>) -> [u64; FIRST_WORDS] {
+    let [start, from, at, offset, error] = first.map_or([0; 5], encode_slew);
+    [u64::from(first.is_some()), start, from, at, offset, error]
+}
+
+fn decode_first(words: [u64; FIRST_WORDS]) -> Option<Slew> {
+    let [present, slew @ ..] = words;
+    match present {
+        0 => None,
+        1 => Some(decode_slew(slew)),
+        _ => panic!("invariant: the first cell holds presence {present}"),
+    }
 }
 
 fn encode_slew(slew: Slew) -> [u64; 5] {
-    let [at, offset, error] = encode_measurement(slew.target);
+    let span = |span: Span| span.nanos().cast_unsigned();
+    let target = slew.target;
     [
         slew.start.0,
-        slew.from.nanos().cast_unsigned(),
-        at,
-        offset,
-        error,
+        span(slew.from),
+        target.at().0,
+        span(target.offset()),
+        span(target.error()),
     ]
 }
 
 fn decode_slew(words: [u64; 5]) -> Slew {
     let [start, from, at, offset, error] = words;
-    Slew {
-        start: Monotonic(start),
-        from: Span::from_nanos(from.cast_signed()),
-        target: decode_measurement([at, offset, error]),
-    }
-}
-
-fn encode_measurement(m: Measurement) -> [u64; 3] {
-    let span = |span: Span| span.nanos().cast_unsigned();
-    [m.at().0, span(m.offset()), span(m.error())]
-}
-
-fn decode_measurement(words: [u64; 3]) -> Measurement {
-    let [at, offset, error] = words;
     let span = |word: u64| Span::from_nanos(word.cast_signed());
-    let Some(m) = Measurement::new(Monotonic(at), span(offset), span(error)) else {
+    let Some(target) = Measurement::new(Monotonic(at), span(offset), span(error))
+    else {
         panic!("invariant: the cell holds a measurement");
     };
-    m
+    Slew {
+        start: Monotonic(start),
+        from: span(from),
+        target,
+    }
 }
 
 #[cfg(test)]
@@ -307,7 +304,7 @@ mod tests {
     use proptest::prelude::*;
     use types::time::{Monotonic, Span};
 
-    use super::{decode, decode_first, encode};
+    use super::{decode, decode_first, encode, encode_first};
 
     /// The largest error a measurement has.
     const UNKNOWN: Span = Measurement::unknown(Monotonic(0), Span::ZERO).error();
@@ -361,14 +358,15 @@ mod tests {
 
     proptest! {
         #[test]
-        fn a_discipline_and_the_first_estimate_round_trip_through_the_cell(
-            discipline in discipline(),
-            other in slew(),
+        fn a_discipline_round_trips_through_the_cell(discipline in discipline()) {
+            prop_assert_eq!(decode(encode(discipline)), discipline);
+        }
+
+        #[test]
+        fn the_first_slew_round_trips_through_its_cell(
+            first in prop::option::of(slew()),
         ) {
-            let first = discipline.slew().map(|_| other.target);
-            let words = encode(discipline, first);
-            prop_assert_eq!(decode(words), discipline);
-            prop_assert_eq!(decode_first(words), first);
+            prop_assert_eq!(decode_first(encode_first(first)), first);
         }
     }
 }

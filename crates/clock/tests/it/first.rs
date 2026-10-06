@@ -2,6 +2,8 @@ use std::iter;
 
 use clock::{Clock, Reader, Status};
 use estimate::Measurement;
+use estimate::combine::Error;
+use estimate::discipline::Cause;
 use proptest::prelude::*;
 use sim::node::Node;
 use types::time::{Interval, Monotonic, Span};
@@ -32,6 +34,14 @@ fn unsynced(node: &Node, reader: &Reader) -> Monotonic {
 /// Mesh time at `reading` with `offset` and `error`.
 fn at(reading: Monotonic, offset: Span, error: Span) -> Option<Interval> {
     Measurement::new(reading, offset, error).map(Measurement::interval)
+}
+
+/// Why the clock holds over, or `None` when it does not.
+fn holdover(reader: &Reader) -> Option<Cause> {
+    match reader.status() {
+        Status::Holdover(_, cause) => Some(cause),
+        Status::Unsynced(_) | Status::Synced(_) => None,
+    }
 }
 
 /// The midpoint of `interval`, in nanoseconds.
@@ -97,11 +107,16 @@ fn keeps_the_first_estimate_after_a_step_a_holdover_and_no_sources() {
     assert_eq!(reader.now(), stepped);
     assert_eq!(reader.first(reading), first);
     let other = clock.add();
-    assert!(matches!(reader.status(), Status::Holdover(..)));
+    let alone = Error::NoMajority {
+        sources: 2,
+        agreeing: 1,
+        empty: 1,
+    };
+    assert_eq!(holdover(&reader), Some(Cause::NoEstimate(alone)));
     assert_eq!(reader.first(reading), first);
     clock.remove(source);
     clock.remove(other);
-    assert!(matches!(reader.status(), Status::Holdover(..)));
+    assert_eq!(holdover(&reader), Some(Cause::NoEstimate(Error::NoSources)));
     assert_eq!(reader.first(reading), first);
 }
 
@@ -116,6 +131,38 @@ fn an_unknown_first_estimate_gives_unknown_time_at_the_reading() {
     let unknown = Measurement::unknown(reading, Span::HOUR);
     assert_eq!(unknown.error(), UNKNOWN);
     assert_eq!(reader.first(reading), Some(unknown.interval()));
+}
+
+/// Mesh time near each end of the range where an interval with an error near 100
+/// years fits a stamp. The clock moves from a source with such an estimate to one
+/// with a narrow estimate, and the other way.
+#[test]
+fn stamps_an_earlier_reading_before_mesh_time_from_1777_to_2162() {
+    let near = Span::from_nanos(UNKNOWN.nanos() - Span::DAY.nanos());
+    // About 1780 and 2160.
+    for offset in [-6_000_000_000_000_000_000, 6_000_000_000_000_000_000] {
+        let offset = Span::from_nanos(offset);
+        for wide in [UNKNOWN, near] {
+            for [before, after] in [[wide, ms(1)], [ms(1), wide]] {
+                let (mut sim, node) = node();
+                let (mut clock, reader) = Clock::new(node.clock());
+                let reading = unsynced(&node, &reader);
+                let old = clock.add();
+                sim.run_for(Span::SECOND).expect("the run ends");
+                clock.push(old, measure(&node, offset, before));
+                let mut centers = vec![center(reader.now().expect("synced"))];
+                let new = clock.add();
+                clock.push(new, measure(&node, offset, after));
+                clock.remove(old);
+                sim.run_for(Span::SECOND).expect("the run ends");
+                clock.push(new, measure(&node, offset, after));
+                centers.push(center(reader.now().expect("synced")));
+                let first = center(reader.first(reading).expect("synced"));
+                assert!(first <= centers[0], "{first} {centers:?}");
+                assert!(centers.is_sorted(), "{centers:?}");
+            }
+        }
+    }
 }
 
 fn gap() -> impl Strategy<Value = Span> {
