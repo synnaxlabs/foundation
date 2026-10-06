@@ -527,9 +527,9 @@ How to read this record:
   their order and padding are part of the disk and wire format version (C9d). A change
   to either needs a new version. The padding is at most 7 bytes for each present
   series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
-  (measured on #317). `frame::series` reads a body from `(entry, end)` pairs and panics
-  on ends that do not fit. Copy mode runs `frame::check` once where remote records
-  enter (X43). Decided by the coordinator (#306).
+  (measured on #317). `frame::split` cuts a body at its `(tag, end)` pairs and
+  panics on ends that do not fit. Copy mode runs `frame::check` once where remote
+  records enter (X43). Decided by the coordinator (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -2674,7 +2674,8 @@ Parameters and later choices, recorded and not asked:
   after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
   voter's state when it sent the answer.").
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
-  tree key `<label>.@<kind>` of a policy (#729).
+  tree key `<label>.@<kind>` of a policy (#729), and `frame::split`, which cuts a
+  frame body at its ends and gives each part (#632).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
