@@ -499,7 +499,7 @@ impl<'a> Iterator for Tokens<'a> {
     type Item = Token<'a>;
 
     /// Reads the next token. Each token but [`Kind::End`] and [`Kind::Error`] covers
-    /// one byte or more.
+    /// one byte or more, so a text has at most one token more than it has bytes.
     fn next(&mut self) -> Option<Token<'a>> {
         if self.ended {
             return None;
@@ -510,6 +510,12 @@ impl<'a> Iterator for Tokens<'a> {
             span: self.span(self.at),
         });
         self.ended = matches!(token.kind, Kind::End | Kind::Error(_));
+        assert!(
+            self.ended || !token.text.is_empty(),
+            "invariant: each token but the last covers a byte, not {:?} at {:?}",
+            token.kind,
+            token.span
+        );
         Some(token)
     }
 }
