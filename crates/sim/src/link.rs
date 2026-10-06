@@ -14,14 +14,17 @@ use crate::chance;
 pub struct Config {
     /// The one-way delay. Not negative.
     pub delay: Span,
-    /// The most extra delay, uniform per packet. It reorders packets. Not negative.
+    /// The most extra delay, uniform per packet. It reorders datagrams, but not the
+    /// segments of one direction of a TCP stream. Not negative.
     pub jitter: Span,
-    /// The chance, from 0 to 1, that a packet is lost. 1 cuts the link.
+    /// The chance, from 0 to 1, that a datagram is lost. 1 cuts the link. A TCP send
+    /// on a link with loss panics: sim does not simulate it yet.
     pub loss: f64,
     /// The chance, from 0 to 1, that a datagram arrives twice.
     pub duplication: f64,
     /// The largest IP packet in bytes. A datagram is lost when it is larger with its
-    /// headers: 28 bytes on IPv4, 48 on IPv6.
+    /// headers: 28 bytes on IPv4, 48 on IPv6. A TCP segment carries at most the MTU
+    /// less 40 bytes on IPv4, 60 on IPv6.
     pub mtu: usize,
 }
 

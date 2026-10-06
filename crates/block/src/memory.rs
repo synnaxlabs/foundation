@@ -1,6 +1,6 @@
 //! The address space a pool cuts its blocks from.
 
-use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::fmt;
 use std::ptr::NonNull;
 
@@ -69,18 +69,20 @@ impl Heap {
     #[must_use]
     pub fn new(len: usize) -> Self {
         assert!(len > 0, "heap memory must be more than 0 bytes");
+        let too_large =
+            || -> ! { panic!("heap memory of {len} bytes is too large to allocate") };
         // Std reaches `calloc`, which leaves the pages untouched, only at the
         // allocator's own alignment. At `ALIGN` it writes zero over every page.
         let Some(layout) = len
             .checked_add(ALIGN)
             .and_then(|size| Layout::from_size_align(size, 1).ok())
         else {
-            panic!("heap memory of {len} bytes is too large to allocate");
+            too_large()
         };
         // SAFETY: the layout has a size above 0.
         let allocation = unsafe { alloc_zeroed(layout) };
         let Some(allocation) = NonNull::new(allocation) else {
-            handle_alloc_error(layout)
+            too_large()
         };
         let addr = allocation.addr().get();
         let skew = addr.next_multiple_of(ALIGN) - addr;

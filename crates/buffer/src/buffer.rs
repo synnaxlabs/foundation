@@ -24,11 +24,11 @@ use types::frame::Path;
 use types::time::Span;
 
 use crate::entry::{self, ENTRIES_MAX, Entry};
-use crate::group::{self, Closed, Group, Limit, META_LEN, Sealed};
+use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
 use crate::log::{self, Logs, Tail};
 use crate::record::{self, ALIGN, AREA_START, Body};
-use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
+use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
 
 /// What one shard's buffer is given at open.
 #[derive(Debug)]
@@ -49,7 +49,8 @@ pub struct Config {
     /// The sizes of a new ring. An existing ring keeps the sizes in its header; a
     /// change takes effect at the next create.
     pub layout: Layout,
-    /// The longest time an entry waits for its group commit.
+    /// The longest time an entry waits for its group commit to start. An entry
+    /// queued during a commit longer than `commit` waits until that commit ends.
     pub commit: Span,
 }
 
@@ -216,9 +217,10 @@ impl From<header::Error> for Error {
 }
 
 /// One shard's logs. It lives on its shard: the commit task runs on the shard's
-/// `tasks`. The task idles while nothing is queued and nothing waits on a commit.
-/// A drop ends the task at once when it idles, else at its next deadline. Entries
-/// queued and not yet committed at the drop are not written.
+/// `tasks`. The task idles while nothing is queued. A drop ends the task at once
+/// when it idles, else at its next deadline, after it wrote the entries queued at
+/// the drop. A [`Commit`] held past the drop resolves once the task ended: await it
+/// before a reopen, and before the shard ends, which cancels the task.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -234,6 +236,16 @@ struct Shared {
     pool: Rc<Pool>,
     layout: Layout,
     state: RefCell<State>,
+}
+
+impl Shared {
+    /// Ends the task's idle span. The caller holds no borrow of `state`.
+    fn unpark(&self) {
+        let parked = self.state.borrow_mut().parked.take();
+        if let Some(waker) = parked {
+            waker.wake();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -254,16 +266,28 @@ struct State {
     wakers: Vec<Waker>,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
     parked: Option<Waker>,
-    /// Whether the handle dropped. The task ends when it next decides.
+    /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
+    /// Whether the task ended. A [`Commit`] held past the drop waits for it.
+    ended: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
 }
 
 impl State {
-    /// Whether nothing is queued and nothing waits on a commit.
+    /// Whether nothing is queued.
     fn idle(&self) -> bool {
-        self.open.is_empty() && self.queue.is_empty() && self.wakers.is_empty()
+        self.open.is_empty() && self.queue.is_empty()
+    }
+
+    /// The `commits` count at which every entry appended so far is durable. `taken`
+    /// counts a commit in flight, and a queued entry needs the next one.
+    fn durable_at(&self) -> u64 {
+        if self.idle() {
+            self.taken
+        } else {
+            self.taken + 1
+        }
     }
 
     /// Closes the open group into the queue and opens a spare.
@@ -290,13 +314,8 @@ impl State {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        let mut state = self.shared.state.borrow_mut();
-        state.closed = true;
-        let parked = state.parked.take();
-        drop(state);
-        if let Some(waker) = parked {
-            waker.wake();
-        }
+        self.shared.state.borrow_mut().closed = true;
+        self.shared.unpark();
     }
 }
 
@@ -365,6 +384,7 @@ impl Buffer {
                 wakers: Vec::new(),
                 parked: None,
                 closed: false,
+                ended: false,
                 failed: None,
             }),
         });
@@ -393,10 +413,11 @@ impl Buffer {
         self.shared.state.borrow().logs.durable(slot, path)
     }
 
-    /// How many group commits ended since the open, with or without entries. It
-    /// moves before the [`Commit`] futures that the commit resolves wake, and a
-    /// failed commit does not move it. A move does not make every entry durable: an
-    /// entry appended while a commit runs goes in the next one, so read
+    /// How many group commits ended since the open. It moves before the [`Commit`]
+    /// futures that the commit resolves wake, and a failed commit does not move it.
+    /// [`durable`](Self::durable) changes only at a commit that moves the count, and
+    /// before the count moves. A move does not make every entry durable: an entry
+    /// appended while a commit runs goes in the next one, so read
     /// [`durable`](Self::durable) after a move.
     #[must_use]
     pub fn commits(&self) -> u64 {
@@ -457,24 +478,24 @@ impl Buffer {
                 .append(slot, header)
                 .unwrap_or_else(|invalid| panic!("invariant: {invalid}"));
         }
-        if state.idle() {
-            return Ok(());
-        }
-        let parked = state.parked.take();
+        let idle = state.idle();
         drop(guard);
-        if let Some(waker) = parked {
-            waker.wake();
+        if !idle {
+            shared.unpark();
         }
         Ok(())
     }
 
-    /// Resolves at the end of the next group commit, when every entry appended
-    /// before the call is durable, or with the file error that ended the buffer.
+    /// Resolves when every entry appended before the call is durable: at once when
+    /// none waits, else at the end of the group commit that holds the last of them.
+    /// Gives the file error that ended the buffer when it ended before they were
+    /// durable. Held past the drop, it resolves once the task ended, after it wrote
+    /// the entries queued at the drop.
     #[must_use]
-    pub fn committed(&self) -> Commit<'_> {
+    pub fn committed(&self) -> Commit {
         Commit {
-            shared: &self.shared,
-            since: self.shared.state.borrow().taken,
+            shared: Rc::clone(&self.shared),
+            until: self.shared.state.borrow().durable_at(),
         }
     }
 }
@@ -620,11 +641,11 @@ fn small_record(
     Ok(block.freeze().skip(start))
 }
 
-/// The commit task. It parks while the state idles; a push that takes an entry, a
-/// `Commit` poll, or the drop wakes it. Each deadline takes the closed groups and
-/// the open one, seals them in order from `chain`, the value of the restart record,
-/// writes them, syncs once, and wakes the waiters. A failed file call or the drop
-/// ends the task.
+/// The commit task. It parks while the state idles; a push that takes an entry or
+/// the drop wakes it. Each deadline takes the closed groups and the open one, seals
+/// them in order from `chain`, the value of the restart record, writes them, syncs
+/// once, and wakes the waiters. A failed file call ends the task, and so does the
+/// drop once nothing is queued.
 async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
     let mut chain = chain;
     let mut taken: Vec<Closed> = Vec::new();
@@ -635,11 +656,11 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         let mut idled = false;
         let ended = poll_fn(|cx| {
             let mut state = shared.state.borrow_mut();
-            if state.closed {
-                return Poll::Ready(true);
-            }
             if !state.idle() {
                 return Poll::Ready(false);
+            }
+            if state.closed {
+                return Poll::Ready(true);
             }
             state.parked = Some(cx.waker().clone());
             idled = true;
@@ -647,6 +668,13 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         })
         .await;
         if ended {
+            let mut state = shared.state.borrow_mut();
+            state.ended = true;
+            woken.append(&mut state.wakers);
+            drop(state);
+            for waker in woken.drain(..) {
+                waker.wake();
+            }
             return;
         }
         // After an idle span a passed deadline restarts, so the first entry of a burst
@@ -658,9 +686,6 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         sleep.reset(clock.now() + commit);
         {
             let mut state = shared.state.borrow_mut();
-            if state.closed {
-                return;
-            }
             state.taken += 1;
             if !state.open.is_empty() {
                 state.close_open();
@@ -677,7 +702,10 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         let mut state = shared.state.borrow_mut();
         match result {
             Ok(()) => state.synced(sealed.drain(..)),
-            Err(error) => state.failed = Some(error),
+            Err(error) => {
+                state.failed = Some(error);
+                state.ended = true;
+            }
         }
         woken.append(&mut state.wakers);
         drop(state);
@@ -692,9 +720,6 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
 
 /// Writes each sealed group's records and syncs once.
 async fn write(shared: &Shared, sealed: &[Sealed]) -> Result<(), files::Error> {
-    if sealed.is_empty() {
-        return Ok(());
-    }
     for record in sealed {
         for (place, blocks) in record.writes() {
             shared.file.write_at(AREA_START + place, blocks).await?;
@@ -703,20 +728,22 @@ async fn write(shared: &Shared, sealed: &[Sealed]) -> Result<(), files::Error> {
     shared.file.sync().await
 }
 
-/// The future of [`Buffer::committed`].
+/// The future of [`Buffer::committed`]. It does not borrow the buffer, and it holds
+/// the ring open until it drops.
 #[derive(Debug)]
-pub struct Commit<'a> {
-    shared: &'a Shared,
-    since: u64,
+pub struct Commit {
+    shared: Rc<Shared>,
+    /// The count of `commits` that resolves it.
+    until: u64,
 }
 
-impl Future for Commit<'_> {
+impl Future for Commit {
     type Output = Result<(), files::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.shared.state.borrow_mut();
         // Before `failed`: a commit that synced stays well after a later sync fails.
-        if state.commits > self.since {
+        if state.commits >= self.until && (!state.closed || state.ended) {
             return Poll::Ready(Ok(()));
         }
         if let Some(error) = &state.failed {
@@ -724,11 +751,6 @@ impl Future for Commit<'_> {
         }
         if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
             state.wakers.push(cx.waker().clone());
-        }
-        let parked = state.parked.take();
-        drop(state);
-        if let Some(waker) = parked {
-            waker.wake();
         }
         Poll::Pending
     }

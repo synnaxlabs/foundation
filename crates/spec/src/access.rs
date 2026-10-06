@@ -4,8 +4,7 @@
 use std::fmt;
 
 use types::authority::Authority;
-
-use crate::patterns::Patterns;
+use types::name::Selector;
 
 /// What a subject may do on a name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -96,8 +95,8 @@ impl fmt::Debug for Actions {
 /// the matching policies allows, and nothing else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
-    subjects: Patterns,
-    select: Patterns,
+    subjects: Selector,
+    select: Selector,
     allow: Actions,
     authority: Authority,
 }
@@ -107,8 +106,8 @@ impl Policy {
     /// only when `allow` holds [`Action::Write`]; without it the authority is zero.
     #[must_use]
     pub fn new(
-        subjects: Patterns,
-        select: Patterns,
+        subjects: Selector,
+        select: Selector,
         allow: Actions,
         authority: Authority,
     ) -> Self {
@@ -127,13 +126,13 @@ impl Policy {
 
     /// The subjects the policy applies to.
     #[must_use]
-    pub const fn subjects(&self) -> &Patterns {
+    pub const fn subjects(&self) -> &Selector {
         &self.subjects
     }
 
     /// The names the policy applies to.
     #[must_use]
-    pub const fn select(&self) -> &Patterns {
+    pub const fn select(&self) -> &Selector {
         &self.select
     }
 
@@ -155,8 +154,8 @@ impl Policy {
 mod tests {
     use super::*;
 
-    fn patterns(texts: &[&str]) -> Patterns {
-        Patterns::new(texts.iter().copied()).unwrap()
+    fn selector(texts: &[&str]) -> Selector {
+        Selector::new(texts.iter().copied()).unwrap()
     }
 
     #[test]
@@ -200,8 +199,8 @@ mod tests {
     fn gives_an_authority_only_with_write() {
         let write = [Action::Write].into_iter().collect();
         let policy = Policy::new(
-            patterns(&["ops.*"]),
-            patterns(&["a.**"]),
+            selector(&["ops.*"]),
+            selector(&["a.**"]),
             write,
             Authority(7),
         );
@@ -209,15 +208,15 @@ mod tests {
 
         let read = [Action::Read].into_iter().collect();
         let policy = Policy::new(
-            patterns(&["ops.*"]),
-            patterns(&["a.**"]),
+            selector(&["ops.*"]),
+            selector(&["a.**"]),
             read,
             Authority(7),
         );
         assert_eq!(policy.authority(), None);
         let zero = Policy::new(
-            patterns(&["ops.*"]),
-            patterns(&["a.**"]),
+            selector(&["ops.*"]),
+            selector(&["a.**"]),
             read,
             Authority(0),
         );
