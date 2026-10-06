@@ -60,8 +60,8 @@ impl Shards {
         self.0.cores()
     }
 
-    /// Whether `start` can pin a shard to a core. It never changes. When `false`, a
-    /// set [`Config::core`] gives [`Error::Pin`], so set none.
+    /// Whether `start` can pin a shard to a core. It never changes. When `false`, set
+    /// no [`Config::core`].
     ///
     /// ```
     /// fn core(shards: &env::shards::Shards, core: usize) -> Option<usize> {
@@ -83,12 +83,12 @@ impl Shards {
     /// # Errors
     ///
     /// - [`Error::Start`] when the thread or its executor cannot start.
-    /// - [`Error::Pin`] when the thread cannot pin to `config.core`, or with reason
-    ///   `the node cannot pin a thread` when [`Shards::pinnable`] is `false`.
+    /// - [`Error::Pin`] when the thread cannot pin to `config.core`.
     ///
     /// # Panics
     ///
-    /// When `config.core` is not below [`Shards::cores`].
+    /// When `config.core` is set and is not below [`Shards::cores`], or
+    /// [`Shards::pinnable`] is `false`.
     ///
     /// ```
     /// use env::thread::{Error, Handle};
@@ -110,14 +110,11 @@ impl Shards {
             let cores = self.cores();
             let name = &config.name;
             assert!(core < cores.get(), "{name} asks for core {core} of {cores}");
-            if !self.pinnable() {
-                let reason = "the node cannot pin a thread".into();
-                return Err(Error::Pin {
-                    name: config.name,
-                    core,
-                    reason,
-                });
-            }
+            let pinnable = self.pinnable();
+            assert!(
+                pinnable,
+                "{name} asks for core {core} of a node that cannot pin"
+            );
         }
         self.0
             .start(config, Box::new(|tasks| Box::pin(main(tasks))))
@@ -141,7 +138,7 @@ pub struct Config {
     pub name: String,
     /// The core to pin the thread to, as an index below [`Shards::cores`] into the
     /// cores this node may use, never an OS CPU number; or `None` to let the OS place
-    /// it.
+    /// it. Set it only when [`Shards::pinnable`].
     pub core: Option<usize>,
 }
 
@@ -248,12 +245,8 @@ mod tests {
     }
 
     #[test]
-    fn a_core_on_a_node_that_cannot_pin_gives_a_pin_error() {
-        let pin = Error::Pin {
-            name: "shard-4".into(),
-            core: 2,
-            reason: "the node cannot pin a thread".into(),
-        };
-        assert_eq!(start(&shards(4, false), Some(2)), Err(pin));
+    #[should_panic(expected = "shard-4 asks for core 2 of a node that cannot pin")]
+    fn a_core_on_a_node_that_cannot_pin_panics() {
+        start(&shards(4, false), Some(2)).unwrap();
     }
 }

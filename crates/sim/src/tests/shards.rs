@@ -242,34 +242,48 @@ fn a_shard_fault_past_the_node_cores_panics() {
 }
 
 #[test]
-fn a_node_can_pin_by_default() {
+fn only_a_node_whose_config_says_so_cannot_pin() {
     let mut sim = sim(0);
-    assert!(sim.node(node::Config::default()).shards().pinnable());
+    let first = sim.node(node::Config::default());
+    let second = sim.node(node::Config {
+        unpinnable: true,
+        ..node::Config::default()
+    });
+    assert!(first.shards().pinnable());
+    assert!(!second.shards().pinnable());
 }
 
 #[test]
-fn a_node_that_cannot_pin_fails_a_start_with_a_core_and_starts_one_without() {
+fn a_node_that_cannot_pin_starts_a_shard_with_no_core() {
     let mut sim = sim(0);
-    let config = node::Config {
+    let node = sim.node(node::Config {
         unpinnable: true,
         ..node::Config::default()
-    };
-    let node = sim.node(config);
-    let shards = node.shards();
-    assert!(!shards.pinnable());
-    let e = shards
-        .start(pinned("shard-1", 1), |_| async {})
-        .unwrap_err();
-    assert_eq!(
-        e,
-        thread::Error::Pin {
-            name: "shard-1".into(),
-            core: 1,
-            reason: "the node cannot pin a thread".into(),
-        }
-    );
-    let free = shards.start(shard("free"), |_| async {});
+    });
+    let free = node.shards().start(shard("free"), |_| async {});
     assert_eq!(node.shard_starts(), vec![shard("free")]);
     sim.run().unwrap();
     free.unwrap().join().unwrap();
+}
+
+#[test]
+#[should_panic(expected = "shard-1 asks for core 1 of a node that cannot pin")]
+fn a_core_on_a_node_that_cannot_pin_panics() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        unpinnable: true,
+        ..node::Config::default()
+    });
+    drop(node.shards().start(pinned("shard-1", 1), |_| async {}));
+}
+
+#[test]
+#[should_panic(expected = "a shard fault aims at core 1 of a node that cannot pin")]
+fn a_shard_fault_on_a_node_that_cannot_pin_panics() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        unpinnable: true,
+        ..node::Config::default()
+    });
+    node.fail_shard(1, Fault::Start);
 }

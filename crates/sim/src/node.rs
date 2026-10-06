@@ -51,12 +51,18 @@ impl Node {
     ///
     /// # Panics
     ///
-    /// When `core` is not below [`Config::cores`].
+    /// When `core` is not below [`Config::cores`], or the node is
+    /// [`Config::unpinnable`]: no start on it has a core.
     pub fn fail_shard(&self, core: usize, fault: shard::Fault) {
         let cores = lock(&self.0.shared).cores(self.0.node);
         assert!(
             core < cores.get(),
             "a shard fault aims at core {core} of {cores}"
+        );
+        let pinnable = lock(&self.0.shared).pinnable(self.0.node);
+        assert!(
+            pinnable,
+            "a shard fault aims at core {core} of a node that cannot pin"
         );
         lock(&self.0.shared).shards(self.0.node).fail(core, fault);
     }
@@ -214,7 +220,7 @@ pub struct Config {
     /// The core count that [`env::shards::Shards::cores`] reports.
     pub cores: NonZeroUsize,
     /// The node cannot pin a shard to a core: [`env::shards::Shards::pinnable`] is
-    /// `false`, and `env` fails a start with a core before the node records it.
+    /// `false`.
     pub unpinnable: bool,
     /// The monotonic reading when the node is added.
     pub monotonic: Monotonic,
@@ -229,8 +235,8 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// Four cores that can pin, one hour after boot, at 2026-01-01T00:00:00Z, with a wall error
-    /// of 10 ms and a disk of 64 GiB.
+    /// Four cores that can pin, one hour after boot, at 2026-01-01T00:00:00Z, with a
+    /// wall error of 10 ms and a disk of 64 GiB.
     fn default() -> Self {
         Self {
             cores: NonZeroUsize::new(4).expect("four is not zero"),

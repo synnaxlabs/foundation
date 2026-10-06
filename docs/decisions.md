@@ -1608,14 +1608,16 @@ How to read this record:
   another thread panics.
 - **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
   to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
-  node config says `unpinnable`. When it is `false`, `Shards::start` gives
-  `thread::Error::Pin` for a set core and does not call the driver, and `node` sets no
-  core and logs that once at start. `Error::Pin` then means a real fault, such as a CPU
-  that went offline after the read, and carries the cause as a `reason`. This is the
-  advisor's choice A, narrowed from the set of cores that can pin to a bool: the
-  index map of ENV SEAMS makes that set always `0..cores()` or empty. Lost: each driver
-  gives the error itself, which puts one rule in each driver. Windows pinning waits
-  for the person (#477). Amends ENV SEAMS.
+  node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
+  once at start. `Shards::start` panics on a core then, as on a core past the count:
+  the answer never changes, so a core there is a bug in `node`. `Error::Pin` means
+  only a real fault, such as a CPU that went offline after the read, and carries the
+  cause as a `reason`. This is the advisor's choice A, narrowed from the set of cores
+  that can pin to a bool: the index map of ENV SEAMS makes that set always
+  `0..cores()` or empty. Lost: `Error::Pin` for a core on a node that cannot pin, which
+  gives two contracts for the same kind of bug, and a caller tells the bug from a
+  fault only by its `reason` text; each driver checks the core itself, which puts one
+  rule in each driver. Windows pinning waits for the person (#477). Amends ENV SEAMS.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
