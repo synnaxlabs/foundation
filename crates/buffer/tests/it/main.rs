@@ -1645,6 +1645,51 @@ fn an_open_after_a_failed_sync_of_a_long_record_reports_only_disk_records_durabl
     }
 }
 
+/// A process that opens a new ring whose first header sync failed, in the same
+/// boot, reports durable only what a power cut then keeps. The failed sync can
+/// leave the header in the cache only, where the open reads it.
+#[test]
+fn an_open_after_a_failed_sync_of_the_first_header_reports_only_disk_records_durable() {
+    for seed in 0..32 {
+        let (mut sim, node) = one_node(seed);
+        let failed = sim.run_on(&node, |node, tasks| async move {
+            node.fail_file(FilePath::new(RING), Operation::Sync);
+            let config = node_config(&node, tasks, DIR);
+            Buffer::open(config, &mut Slots::new()).await.map(drop)
+        });
+        let sync = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(failed, Ok(Err(Error::Files(sync))), "seed {seed}");
+        sim.crash(&node, sim::Crash::Process);
+        let reported = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the failed sync");
+            let a = slots.assign(key(1));
+            buffer
+                .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            buffer.durable(a, Path::Live)
+        });
+        let reported = reported.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        sim.crash(&node, sim::Crash::Power);
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the power cut");
+            buffer.tail(slots.assign(key(1)), Path::Live)
+        });
+        let recovered = recovered.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        assert_eq!(recovered, reported, "seed {seed}");
+    }
+}
+
 /// A power cut at any point of an open whose restart record goes over the one of
 /// an open with no data keeps the committed entry. The ring then takes the next
 /// entry, and it survives a power cut.

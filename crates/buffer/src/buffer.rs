@@ -327,8 +327,8 @@ impl Buffer {
     /// Opens the ring in `config.dir`, or creates it, makes the ring and its
     /// directory durable, and recovers the tail of every path from its records. Each
     /// recovered index gets its slot from `slots`. Starts the commit task. Each tail
-    /// it reports is durable. It reads the records from the ring's tail and writes
-    /// them again, so its time grows with them.
+    /// it reports is durable. It reads the header and the records from the ring's
+    /// tail and writes them again, so its time grows with the records.
     ///
     /// # Errors
     ///
@@ -585,8 +585,9 @@ fn random(entropy: &Entropy) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
-/// Reads the newer checkpoint. Two zero blocks are a ring made and not yet
-/// written: the first checkpoint goes to both blocks.
+/// Reads the newer checkpoint and writes both blocks again, as read, for the
+/// reason [`walk`] gives. Two zero blocks are a ring made and not yet written: the
+/// first checkpoint goes to both blocks.
 async fn read_header(
     file: &File,
     pool: &Pool,
@@ -613,6 +614,7 @@ async fn read_header(
         if found != header.layout.file_len() {
             return Err(length(header.layout));
         }
+        file.write_at(0, &[blocks.freeze()]).await?;
         return Ok(header);
     }
     if found != layout.file_len() {

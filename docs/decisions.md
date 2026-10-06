@@ -425,12 +425,13 @@ How to read this record:
   open, and so does an entry whose `first` is below the tail of its path or whose
   `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
   durable: a killed process may have written records that it never synced (#657). Before
-  that sync, the walk writes again, as read, each window up to the end of the chain. A
-  read can see, from the cache, writes that a failed sync of an earlier process in the
-  same boot lost, and the cache can drop them between two reads. So an open writes again
-  the bytes it walks, at most the area, and the first 52 KiB of each record over one
-  block twice (#698). Lost: a walk with direct I/O, which needs a new `env::files` read
-  mode in each driver and in `sim`. The restart record needs one free block: an open of
+  that sync, the open writes again, as read, the two header blocks and each window the
+  walk reads up to the end of the chain. A read can see, from the cache, writes that a
+  failed sync of an earlier process in the same boot lost, and the cache can drop them
+  between two reads. So an open writes again the header, 8 KiB, and the bytes it walks,
+  at most the area, and the first 52 KiB of each record over one block twice (#698).
+  Lost: a walk with direct I/O, which needs a new `env::files` read mode in each driver
+  and in `sim`. The restart record needs one free block: an open of
   a full ring first moves records at the tail to a segment. The walk holds one pool
   block at a time and reads a longer record in pieces of the pool's largest block, so
   the pool puts no bound on `body_max`. An open with no such block free fails with
