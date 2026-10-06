@@ -72,8 +72,8 @@ impl Clock {
     ///
     /// # Panics
     ///
-    /// Under `sim`, on a thread that the sim did not start or that runs another node.
-    /// Under `os`, on a thread with no Tokio runtime that has a timer.
+    /// A driver may panic on a thread that `env` did not start. `sim` panics on each
+    /// such thread, and on a thread of another node.
     ///
     /// ```
     /// async fn wait(clock: &env::clock::Clock, deadline: types::time::Monotonic) {
@@ -93,9 +93,9 @@ impl Clock {
     ///
     /// # Panics
     ///
-    /// Under `sim`, on a thread that the sim did not start or that runs another node.
-    /// Under `os`, on a thread with no Tokio runtime that has a timer.
-    /// When `now` plus `span` is past the end of `Monotonic`.
+    /// When `now` plus `span` is past the end of `Monotonic`. A driver may panic on a
+    /// thread that `env` did not start. `sim` panics on each such thread, and on a
+    /// thread of another node.
     ///
     /// ```
     /// async fn pause(clock: &env::clock::Clock) {
@@ -131,13 +131,13 @@ pub trait Driver: Send + Sync {
     /// The std [`Instant`] at `Monotonic(0)`. It never changes.
     fn epoch(&self) -> Instant;
 
-    /// Makes a timer bound to the executor of the calling thread. Call it only on a
-    /// thread that `env` started.
+    /// Makes a timer for the calling thread. Call it only on a thread that `env`
+    /// started.
     ///
     /// # Panics
     ///
-    /// Under `sim`, on a thread that the sim did not start or that runs another node.
-    /// Under `os`, on a thread with no Tokio runtime that has a timer.
+    /// A driver may panic on a thread that `env` did not start. `sim` panics on each
+    /// such thread, and on a thread of another node.
     fn timer(&self) -> Pin<Box<dyn Timer>>;
 }
 
