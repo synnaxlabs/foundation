@@ -1958,8 +1958,8 @@ pub(super) mod tests {
         }
 
         /// Checks each spend against the credit rules stated a second way: the limit is
-        /// the largest grant, the open's `first` among them, and the spent bytes are the
-        /// sum of the frames.
+        /// the largest grant, the open's `first` among them, and the spent bytes are
+        /// the sum of the frames.
         fn check_credit(first: u64, steps: Vec<Spending>) {
             let mut credit = Credit::new(first);
             let mut grants = vec![first];
