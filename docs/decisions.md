@@ -368,10 +368,10 @@ How to read this record:
   its body is a random `u32` and the chain continues from that value. A record never
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
-  is the offset modulo the area length. The area is at least twice the largest record
-  less one block, so an empty ring takes any record. A ring whose head reaches the
-  end of the offsets is full for good. A body is at most `u32::MAX` bytes and at
-  least the table of one entry.
+  is the offset modulo the area length. The area is at least twice the largest
+  record, so a ring that holds only its restart record takes any record (#637). A
+  ring whose head reaches the end of the offsets is full for good. A body is at most
+  `u32::MAX` bytes and at least the table of one entry.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
@@ -457,6 +457,15 @@ How to read this record:
   bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
   record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
+- **LARGE FRAME (#191)** The home refuses a write whose bodies no record of the ring or
+  no block of the shard's pool holds, on either path, with `Large`. No seq moves and the
+  home stores no part of the frame. The waiting handoffs of the frame's indexes are
+  still recorded (HANDOFF RECORD). The writer splits the frame by samples or by indexes
+  and writes each part. The home never splits a frame, because a frame applies whole
+  (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
+  size is checked only when the bodies are appended, after the handoffs: a frame whose
+  handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
+  is known. Decided by the `write-path` builder (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -526,7 +535,7 @@ How to read this record:
   and tries the commit again; after the last idle size the allocation fails with
   `Error::Refused`, a separate error from a full pool (the person on 2026-10-05: "I
   approve the separate error"). The carve counts do not change, the sizes given back
-  back, and a later allocation may succeed (#475, #542).
+  stay given back, and a later allocation may succeed (#475, #542).
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
@@ -639,7 +648,9 @@ How to read this record:
   approve", #479). The units are `B`, `KiB`, `MiB`, `GiB`, and `TiB`, with exact case:
   `GB` and `Gb` are errors, because they mean other sizes. Input takes no sign. Output
   uses the largest unit that divides the size, with no fraction: `1.5GiB` is written
-  `1536MiB`, and zero is `0B` (#505).
+  `1536MiB`, and zero is `0B` (#505). The reader's `byte::Error` gives the data for a
+  fix: where the unit starts, the unit a text likely means (`GiB` for `gib` or `GB`,
+  none for `Gb`), and the largest size in the text's unit (#650).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -664,10 +675,11 @@ How to read this record:
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
   a reader gets no mesh time. After it, when `combine` fails (no majority, or no sources
   after a remove), the clock holds over: it keeps its last estimate and its error grows
-  by drift. It never follows the largest group or one side of a tie.
-  `push` returns the status, `Reader::status` gives it on any shard, and `node`
-  publishes it. The next majority ends the holdover. Decided by the `time` builder
-  (#142). The coordinator approved `Reader::status` within it (#598).
+  by drift. It never follows the largest group or one side of a tie. `Reader::status`
+  gives the status on any shard, and `node` publishes it. `push` and `remove` do not
+  also return it: one value gets one way to read it (#634). The next majority ends the
+  holdover. Decided by the `time` builder (#142). The coordinator approved
+  `Reader::status` within it (#598).
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
   not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
@@ -2513,8 +2525,8 @@ Parameters and later choices, recorded and not asked:
 - Quality: X10 (ack quality on the ack's index), X19 (death record scope), R16-1 and
   R16-3 to R16-9 (r16 Rust guides).
 - Memory and performance: X8 (seq per index group), X30 (merge rule), X42 (interner),
-  S4 disk format starting point, r12 I4 (`buffer` driven, not self-running), `ring`
-  holds its own unsafe slot code (section 4).
+  S4 disk format starting point and its ring sizing (#637), r12 I4 (`buffer`
+  driven, not self-running), `ring` holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt), #352 item 1 (a reply from a node that is not a peer).
