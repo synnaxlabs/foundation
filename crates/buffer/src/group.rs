@@ -39,7 +39,7 @@ pub(crate) struct Group {
 /// Why a group did not take a batch. Nothing changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Rejected {
-    /// The batch alone is over `Limit`, so no record holds it.
+    /// The batch alone is over `Limit`, so no record or no pool block holds it.
     Large(Limit),
     /// The record with the batch and the group's entries would be over a
     /// [`Limit`] or past the room in the ring. The caller closes the group and
@@ -69,9 +69,10 @@ impl Group {
     }
 
     /// Takes every entry of `batch`, or none, when the record with them fits the
-    /// layout and the ring of `writer`; it sets each header's `bytes`, leaves
-    /// `batch` empty, and gives the positions of the entries it took, for
-    /// [`Group::entries`]. The first entry takes the group's blocks from `pool`.
+    /// layout and the ring of `writer`, and each entry fits a block of `pool`; it
+    /// sets each header's `bytes`, leaves `batch` empty, and gives the positions of
+    /// the entries it took, for [`Group::entries`]. The first entry takes the
+    /// group's blocks from `pool`.
     ///
     /// # Errors
     ///
@@ -92,6 +93,14 @@ impl Group {
         let len = batch.iter().map(|entry| entry.parts.bytes()).sum::<usize>();
         let layout = writer.layout();
         layout.check(count, parts, len).map_err(Rejected::Large)?;
+        let largest = pool.largest();
+        let over = batch
+            .iter()
+            .map(|entry| entry.parts.bytes())
+            .find(|&bytes| bytes > largest);
+        if let Some(len) = over {
+            return Err(Rejected::Large(Limit::Entry { len, max: largest }));
+        }
         layout
             .check(
                 start.saturating_add(count),
@@ -948,6 +957,34 @@ mod tests {
             limit.to_string(),
             "the batch has 1024 parts, and a record holds at most 1023"
         );
+    }
+
+    #[test]
+    fn an_entry_whose_joined_parts_no_pool_block_holds_is_large() {
+        let mut area = Area::with_body_max(60_000);
+        let half = vec![7; 29_000];
+        let fits = parts(&area.pool, &[&half, &half[..28_344]]);
+        let over = parts(&area.pool, &[&half, &half[..28_345]]);
+        area.pool = pool(1 << 16);
+        assert_eq!(area.pool.largest(), 57_344);
+        let batch = [
+            entry(header(1, Path::Live, 0), Parts::default()),
+            entry(header(2, Path::Live, 0), over),
+        ];
+        let limit = Limit::Entry {
+            len: 57_345,
+            max: 57_344,
+        };
+        assert_large(&mut area, &batch, limit);
+        assert_eq!(
+            limit.to_string(),
+            "an entry has 57345 bytes of parts, and a block of the pool holds at most \
+             57344"
+        );
+        let mut group = Group::default();
+        let mut batch = vec![entry(header(1, Path::Live, 0), fits)];
+        let pushed = group.push(&area.pool, &area.writer, &mut batch);
+        assert_eq!(pushed, Ok(0..1), "an entry at the largest block fits");
     }
 
     proptest! {

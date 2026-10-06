@@ -2297,12 +2297,16 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
-        let parts = Parts::from([shard.block(512 << 10), shard.block(60_000)]);
+        let first = Parts::from(shard.block(512 << 10));
+        let second = Parts::from(shard.block(60_000));
         buffer
-            .append([entry(1, a, Path::Live, 0, 1, Some(1), parts)])
+            .append([
+                entry(1, a, Path::Live, 0, 1, Some(1), first),
+                entry(1, a, Path::Live, 1, 1, Some(2), second),
+            ])
             .expect("queues");
         buffer.committed().await.expect("commits");
-        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        assert_eq!(buffer.durable(a, Path::Live), tail(2, Some(2)));
         drop(buffer);
         let held = shard.pool.alloc(150_000).expect("the pool has a block");
         let opened = shard.open(ring, &mut Slots::new()).await;
@@ -2315,7 +2319,46 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
         let mut slots = Slots::new();
         let opened = shard.open(ring, &mut slots).await;
         let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
-        assert_eq!(tails, Ok(tail(1, Some(1))));
+        assert_eq!(tails, Ok(tail(2, Some(2))));
+    });
+}
+
+/// `append` refuses an entry whose parts, joined, no block of the shard's pool
+/// holds, with `Limit::Entry`, and takes nothing. An entry of the largest block
+/// commits.
+#[test]
+fn an_entry_over_the_largest_pool_block_is_large() {
+    run(155, Memory::default(), |mut shard| async move {
+        let config = block::Config { budget: 640 << 10 };
+        shard.pool =
+            Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+        let largest = shard.pool.largest();
+        assert_eq!(largest, 512 << 10);
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(320 * BLOCK, 600_000), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let over = Parts::from([shard.block(largest), shard.block(1)]);
+        let large = buffer.append([entry(1, a, Path::Live, 0, 1, Some(1), over)]);
+        let limit = Limit::Entry {
+            len: largest + 1,
+            max: largest,
+        };
+        assert_eq!(large, Err(Rejected::Large(limit)));
+        assert_eq!(
+            Rejected::Large(limit).to_string(),
+            "an entry has 524289 bytes of parts, and a block of the pool holds at \
+             most 524288"
+        );
+        assert_eq!(buffer.tail(a, Path::Live), tail(0, None));
+        let fits = Parts::from(shard.block(largest));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), fits)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
     });
 }
 

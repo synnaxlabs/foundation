@@ -138,8 +138,8 @@ impl std::error::Error for Error {}
 /// the entries are dropped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rejected {
-    /// The batch alone is over a limit of one record, so it never fits this ring.
-    /// The limit is the first one it is over, in the order of [`Limit`].
+    /// The batch alone is over a [`Limit`], so this buffer never takes it. The
+    /// limit is the first one it is over, in the order of [`Limit`].
     Large(Limit),
     /// The ring has no room for the batch. Room returns only when records leave the
     /// ring at its tail, and never when the offsets left before their end are under
