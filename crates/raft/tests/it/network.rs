@@ -162,7 +162,7 @@ pub(crate) struct Network {
     pub(crate) refused: Vec<Error>,
     // A node refused a proof that fits its body but is no quorum of its
     // configuration: it is behind a configuration change. The known gap.
-    stale_refused: bool,
+    behind_refused: bool,
     crash: Vec<Option<Kept>>,
     flight: Vec<Message>,
     leaders: BTreeMap<Term, node::Key>,
@@ -213,7 +213,7 @@ impl Network {
             cut: vec![false; logs.len()],
             wiped: vec![false; logs.len()],
             refused: Vec::new(),
-            stale_refused: false,
+            behind_refused: false,
             crash: vec![None; logs.len()],
             flight: Vec::new(),
             leaders: BTreeMap::new(),
@@ -266,24 +266,20 @@ impl Network {
         }
     }
 
-    // The configuration `raft` counts as committed: the one in force once the node
-    // committed it, else the one before it, which the leader committed before it
-    // proposed the change. `applied` is the node's commit index after each `collect`.
+    // The configuration `raft` counts as committed: the last configuration entry the
+    // node committed, else the base. `applied` is the node's commit index after each
+    // `collect`.
     fn committed_voters(&self, node: usize) -> Voters {
         let disk = &self.disks[node];
-        let mut configs =
-            disk.entries
-                .iter()
-                .rev()
-                .filter_map(|entry| match &entry.data {
-                    Data::Voters(voters) => Some((entry.at.index, voters)),
-                    Data::Empty | Data::Bytes(_) => None,
-                });
-        let committed = match configs.next() {
-            Some((index, voters)) if index <= disk.applied => Some(voters),
-            Some(_) => configs.next().map(|(_, voters)| voters),
-            None => None,
-        };
+        let committed = disk
+            .entries
+            .iter()
+            .rev()
+            .filter(|entry| entry.at.index <= disk.applied)
+            .find_map(|entry| match &entry.data {
+                Data::Voters(voters) => Some(voters),
+                Data::Empty | Data::Bytes(_) => None,
+            });
         committed.map_or_else(|| self.base(), Voters::clone)
     }
 
@@ -298,11 +294,11 @@ impl Network {
         quorum(self.nodes[node].voters()) || quorum(&self.committed_voters(node))
     }
 
-    /// Whether `node` cannot prove `leader` in its term: no quorum of the
-    /// configuration `node` holds voted for it. The node refuses the leader until an
-    /// election it can prove. A known gap: the leader does not yet prove the change
-    /// that removed the voters `node` still counts.
-    pub(crate) fn stale(&self, node: usize, leader: usize) -> bool {
+    /// Whether `node` is behind `leader`: no quorum of the configuration `node`
+    /// holds voted for it, so `node` refuses the leader until an election it can
+    /// prove. A known gap: the leader does not yet prove the change that removed the
+    /// voters `node` still counts.
+    pub(crate) fn behind(&self, node: usize, leader: usize) -> bool {
         let key = Self::key(leader);
         let term = self.nodes[leader].term();
         let mut votes = self
@@ -342,7 +338,7 @@ impl Network {
 
     // A node refuses as unproven only a message whose proof is missing, does not fit
     // its body, or is no quorum of its configuration, and it stays in its term. In
-    // its own term, only a leader it did not prove needs a proof.
+    // its own term, only a leader needs a proof, and only while it knows none.
     fn check_unproven(&mut self, to: usize, before: Term, message: &Message) {
         let (body, term, from) = (&message.body, message.term, message.from);
         assert_eq!(
@@ -352,13 +348,10 @@ impl Network {
         );
         let grant = match (body, term == before) {
             (Body::Heartbeat { .. } | Body::Append { .. }, same) => {
-                if same {
-                    match self.disks[to].hard.leader {
-                        None => {}
-                        Some(led) if led != from => return,
-                        Some(_) => panic!("node {to} refuses the leader it knows"),
-                    }
-                }
+                assert!(
+                    !same || self.disks[to].hard.leader.is_none(),
+                    "node {to} refuses a leader in a term whose leader it knows"
+                );
                 Some(Grant::Vote)
             }
             (Body::Vote { .. }, false) => Some(Grant::PreVote),
@@ -385,7 +378,7 @@ impl Network {
             !self.quorum(to, &proof.voters),
             "node {to} refuses a proven {body:?} at {term:?} from {from:?}"
         );
-        self.stale_refused = true;
+        self.behind_refused = true;
     }
 
     /// Restarts `node` from a disk that lost each entry after the first `keep`, and
@@ -707,7 +700,7 @@ impl Network {
     }
 
     /// The leader and its term, when one node leads and every other node in its
-    /// configuration, except a `stale` one, follows it in its term. A node that a
+    /// configuration, except one `behind`, follows it in its term. A node that a
     /// change removed gets no more messages from the leader, so its term and leader
     /// can lag.
     pub(crate) fn agreed(&self) -> Option<(usize, Term)> {
@@ -718,7 +711,7 @@ impl Network {
         let leader = &self.nodes[at];
         let agreed =
             self.voters(at)
-                .filter(|&node| !self.stale(node, at))
+                .filter(|&node| !self.behind(node, at))
                 .all(|node| {
                     let node = &self.nodes[node];
                     node.term() == leader.term() && node.leader() == Some(leader.key())
@@ -761,7 +754,7 @@ impl Network {
                 return Ok(agreed);
             }
         }
-        if self.stale_refused {
+        if self.behind_refused {
             return Err(TestCaseError::reject(
                 "no leader: a voter behind a configuration change refused the group",
             ));

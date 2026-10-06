@@ -99,20 +99,20 @@ impl Log {
         self.voters().0.index <= self.committed
     }
 
-    // The last committed configuration: the one in force, or the one before it
-    // while that one is not committed yet.
+    // The last committed configuration: the last configuration entry at or below
+    // `committed`, or `base`.
     pub(crate) fn committed_voters(&self) -> &Voters {
-        let (at, voters) = self.voters();
-        if at.index <= self.committed {
-            voters
-        } else {
-            self.voters_before(at.index)
-        }
+        self.voters_through(self.committed)
     }
 
     // The configuration before `index`: `base` with no configuration entry before.
     fn voters_before(&self, index: u64) -> &Voters {
-        let end = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);
+        self.voters_through(index.saturating_sub(1))
+    }
+
+    // The last configuration entry at or below `index`, or `base`.
+    fn voters_through(&self, index: u64) -> &Voters {
+        let end = usize::try_from(index).unwrap_or(usize::MAX);
         let end = end.min(self.entries.len());
         self.entries[..end]
             .iter()
@@ -446,6 +446,20 @@ mod tests {
         assert_eq!(log.voters(), (position(1, 2), &voters(3)));
         let log = Log::new(voters(9), vec![entry(1, 1)], 0).unwrap();
         assert_eq!(log.voters(), (Position::default(), &voters(9)));
+    }
+
+    #[test]
+    fn the_committed_configuration_is_the_last_one_at_or_below_committed() {
+        let entries = [
+            entry(1, 1),
+            config(1, 2, 1),
+            config(1, 3, 2),
+            config(1, 4, 3),
+        ];
+        for (applied, id) in [(0, 9), (1, 9), (2, 1), (3, 2), (4, 3)] {
+            let log = Log::new(voters(9), entries.to_vec(), applied).unwrap();
+            assert_eq!(log.committed_voters(), &voters(id), "committed {applied}");
+        }
     }
 
     #[test]

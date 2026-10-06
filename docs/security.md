@@ -146,8 +146,9 @@ state on `main`.
   so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed `AppendReply` is
   #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
-  `Append` of a higher term, or a leader claim in the node's own term, needs a
-  quorum of votes for the sender, else `Error::Unproven` and nothing changes.
+  `Append` of a higher term, or of a term whose leader the node does not know yet,
+  needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.
+  A second leader of a term whose leader it knows is `Error::SecondLeader`.
   `raft` counts the keys of a proof; until `mesh` checks the signatures (the third
   PR of #750), a voter can forge the keys. `raft/tests/it/hostile.rs` pins the
   refusal.
@@ -156,7 +157,7 @@ state on `main`.
   are a quorum of what it holds. When a second node fails before that, the group
   waits for an operator: wipe the voter's state and start it with no configuration.
   The chain of proofs over configuration entries closes it (#881, a release
-  blocker). `raft/tests/it/stale.rs` pins both.
+  blocker). `raft/tests/it/behind.rs` pins both.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.

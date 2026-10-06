@@ -52,7 +52,7 @@ proptest! {
         let configuration = network.nodes[leader].voters().clone();
         prop_assert!(configuration.outgoing.is_empty(), "{configuration:?}");
         for &node in &voters {
-            if network.stale(node, leader) {
+            if network.behind(node, leader) {
                 continue;
             }
             prop_assert_eq!(network.nodes[node].voters(), &configuration);

@@ -28,11 +28,10 @@ pub enum Role {
 // Entries in one `Append`.
 const BATCH: usize = 64;
 
-// The leader's view of one other node: how much of the log it holds, whether the
-// next quorum check counts it (it answered since the last check, or a change just
-// added it), and whether it answered an append of this leader since it was last
-// silent through a quorum check. Only an append reply counts: the answer to a stale
-// heartbeat is the same `HeartbeatReply`.
+// The leader's view of one other node: its log progress, whether the next quorum
+// check counts it, and whether it answered an append since it was last silent
+// through a check. Only an append reply counts: a stale heartbeat gets the same
+// `HeartbeatReply`.
 #[derive(Debug)]
 struct Peer {
     progress: Progress,
@@ -103,7 +102,7 @@ pub struct Raft {
     heartbeat_ticks: u64,
     term: Term,
     vote: Option<node::Key>,
-    // The proof that moved this node to `term`. Set once per term change.
+    // The proof of `term`: see `Hard::proof`.
     proof: Option<Proof>,
     // The hard state that the last `Ready` gave.
     given: Hard,
@@ -371,7 +370,7 @@ impl Raft {
             to,
             term,
             body,
-            proof,
+            mut proof,
         } = message;
         if to != self.key {
             return Err(Error::Misrouted { to });
@@ -387,15 +386,22 @@ impl Raft {
             return Ok(());
         }
         let body = self.check(from, term, body, proof.as_ref())?;
-        if self.meet(from, term, &body, proof) {
-            self.handle(from, term, body);
+        if self.meet(from, term, &body, &mut proof) {
+            self.handle(from, term, body, proof);
         }
         Ok(())
     }
 
     // Applies a message that `check` and `meet` passed: one of this term, a PreVote
-    // for a later one, or a granted PreVoteReply for a later one.
-    fn handle(&mut self, from: node::Key, term: Term, body: Checked) {
+    // for a later one, or a granted PreVoteReply for a later one. `proof` is what
+    // the message carried, unless `meet` took it.
+    fn handle(
+        &mut self,
+        from: node::Key,
+        term: Term,
+        body: Checked,
+        proof: Option<Proof>,
+    ) {
         match body {
             Checked::PreVote { last } => {
                 let granted = (term > self.term || self.free_for(from))
@@ -434,7 +440,7 @@ impl Raft {
                 }
                 Role::Leader | Role::Follower | Role::PreCandidate => {}
             },
-            Checked::Heartbeat { commit } => self.heartbeat(from, commit),
+            Checked::Heartbeat { commit } => self.heartbeat(from, commit, proof),
             Checked::HeartbeatReply => {
                 let last = self.log.last().index;
                 let behind = self.heard_from(from).is_some_and(|peer| {
@@ -448,7 +454,7 @@ impl Raft {
                 }
             }
             Checked::Append { run, commit } => {
-                self.follow(from);
+                self.follow(from, proof);
                 self.append(from, run, commit);
             }
             Checked::AppendReply { last } => self.accepted(from, last),
@@ -472,6 +478,10 @@ impl Raft {
         body: Body,
         proof: Option<&Proof>,
     ) -> Result<Checked, Error> {
+        if body.leads() && term == self.term && self.led.is_some_and(|led| led != from)
+        {
+            return Err(Error::SecondLeader { term, from });
+        }
         if !self.proven(from, term, &body, proof) {
             return Err(Error::Unproven { term, from });
         }
@@ -505,8 +515,8 @@ impl Raft {
     }
 
     // Commits what the leader's heartbeat says and answers it.
-    fn heartbeat(&mut self, leader: node::Key, commit: Held) {
-        self.follow(leader);
+    fn heartbeat(&mut self, leader: node::Key, commit: Held, proof: Option<Proof>) {
+        self.follow(leader, proof);
         self.log.commit_to(commit.index());
         self.release_removed();
         self.send(leader, self.term, Body::HeartbeatReply, None);
@@ -728,7 +738,7 @@ impl Raft {
     // granted the term. A pre-vote and its grant claim no term. A leader's message
     // needs its votes; a vote request, its pre-votes; a reply, any proof of the term.
     // In this node's own term, only a leader's message needs a proof, and only while
-    // the node knows no leader: two quorums in one term cannot both hold.
+    // the node knows no leader: `check` refused every other sender as a second one.
     fn proven(
         &self,
         from: node::Key,
@@ -736,22 +746,12 @@ impl Raft {
         body: &Body,
         proof: Option<&Proof>,
     ) -> bool {
+        if term == self.term && (!body.leads() || self.led.is_some()) {
+            return true;
+        }
         let grant = match body {
             Body::PreVote { .. } | Body::PreVoteReply { granted: true } => return true,
-            Body::Heartbeat { .. } | Body::Append { .. } => match self.led {
-                Some(led) if term == self.term => return led == from,
-                Some(_) | None => Some(Grant::Vote),
-            },
-            Body::Vote { .. }
-            | Body::PreVoteReply { granted: false }
-            | Body::VoteReply { .. }
-            | Body::HeartbeatReply
-            | Body::AppendReply { .. }
-            | Body::AppendReject { .. }
-                if term == self.term =>
-            {
-                return true;
-            }
+            Body::Heartbeat { .. } | Body::Append { .. } => Some(Grant::Vote),
             Body::Vote { .. } => Some(Grant::PreVote),
             Body::PreVoteReply { granted: false }
             | Body::VoteReply { .. }
@@ -769,23 +769,16 @@ impl Raft {
     }
 
     // Steps down for a message of a higher term that `check` passed, except a PreVote
-    // or its grant. Returns false, so the message is dropped, only for a PreVote or
-    // Vote of a higher term while this node has a lease.
+    // or its grant, and takes its proof. Returns false, so the message is dropped,
+    // only for a PreVote or Vote of a higher term while this node has a lease.
     fn meet(
         &mut self,
         from: node::Key,
         term: Term,
         body: &Checked,
-        proof: Option<Proof>,
+        proof: &mut Option<Proof>,
     ) -> bool {
         if term <= self.term {
-            // A node that its log alone put in the term has no proof of it until it
-            // proves a leader: `check` passed the proof of a leader it did not know.
-            let proves =
-                matches!(body, Checked::Heartbeat { .. } | Checked::Append { .. });
-            if proves && self.led.is_none() && self.proof.is_none() {
-                self.proof = proof;
-            }
             return true;
         }
         let leader = match body {
@@ -807,7 +800,7 @@ impl Raft {
             | Checked::AppendReject { .. } => None,
         };
         self.become_follower(term, leader);
-        self.proof = proof;
+        self.proof = proof.take();
         true
     }
 
@@ -826,8 +819,7 @@ impl Raft {
             | Body::AppendReply { .. }
             | Body::AppendReject { .. } => return,
         };
-        // A refusal moves the sender only with a proof of this term. A node that its
-        // log alone put in the term has none until it proves a leader.
+        // A refusal moves the sender only with a proof of this term.
         let Some(proof) = self.proof.clone() else {
             return;
         };
@@ -865,9 +857,14 @@ impl Raft {
         }
     }
 
-    // Handles a heartbeat or an append from the leader of the node's own term.
-    fn follow(&mut self, leader: node::Key) {
+    // Handles a heartbeat or an append from the leader of the node's own term, with
+    // the proof the message carried.
+    fn follow(&mut self, leader: node::Key, proof: Option<Proof>) {
         self.led = Some(leader);
+        // A node that its log alone put in the term proves it by its leader's votes.
+        if self.proof.is_none() {
+            self.proof = proof;
+        }
         match self.role {
             Role::Leader => unreachable!(
                 "invariant: `check` refuses a second leader of term {}",
@@ -927,9 +924,8 @@ impl Raft {
         self.decide();
     }
 
-    // The PreVote arm sends a grant with the term asked for and a refusal with its
-    // own term. A grant of another term answers a pre-campaign of an earlier term,
-    // or comes from a faulty node.
+    // A grant carries the term the pre-campaign asked for, a refusal the voter's own
+    // term. A grant of this node's term from a voter came late to the campaign.
     fn pre_vote_reply(&mut self, from: node::Key, term: Term, granted: bool) {
         let asked = if granted {
             self.term.next()
@@ -1590,14 +1586,14 @@ mod tests {
                 .unwrap_err();
             assert_eq!(
                 err,
-                Error::Unproven {
+                Error::SecondLeader {
                     term: Term(1),
                     from: key(2)
                 }
             );
             assert_eq!(
                 err.to_string(),
-                "node 00000000000000000000000000000002 claims term 1 with no proof"
+                "node 00000000000000000000000000000002 also claims to lead term 1"
             );
             assert_eq!((raft.role(), raft.leader()), (Role::Leader, Some(key(1))));
             assert_eq!(sent(&mut raft), []);
@@ -1628,14 +1624,14 @@ mod tests {
                 let err = raft.step(message(3, 1, body)).unwrap_err();
                 assert_eq!(
                     err,
-                    Error::Unproven {
+                    Error::SecondLeader {
                         term: Term(1),
                         from: key(3)
                     }
                 );
                 assert_eq!(
                     err.to_string(),
-                    "node 00000000000000000000000000000003 claims term 1 with no proof"
+                    "node 00000000000000000000000000000003 also claims to lead term 1"
                 );
             }
             assert_eq!((raft.role(), raft.leader()), (Role::Follower, Some(key(2))));
@@ -1659,7 +1655,8 @@ mod tests {
             assert_eq!(err, expected);
             assert_eq!(
                 err.to_string(),
-                "node 00000000000000000000000000000003 claims term 1 with no proof"
+                "node 00000000000000000000000000000003 claims term 1 with no proof \
+                 this node accepts"
             );
             assert_eq!((raft.role(), raft.leader()), (Role::Follower, None));
             assert_eq!(raft.ready(), Ready::default());
@@ -1697,7 +1694,7 @@ mod tests {
             let err = raft
                 .step(message(3, 1, Body::Heartbeat { commit: 0 }))
                 .unwrap_err();
-            let expected = Error::Unproven {
+            let expected = Error::SecondLeader {
                 term: Term(1),
                 from: key(3),
             };
@@ -1715,14 +1712,14 @@ mod tests {
             let err = raft.step(message(2, 1, body)).unwrap_err();
             assert_eq!(
                 err,
-                Error::Unproven {
+                Error::SecondLeader {
                     term: Term(1),
                     from: key(2)
                 }
             );
             assert_eq!(
                 err.to_string(),
-                "node 00000000000000000000000000000002 claims term 1 with no proof"
+                "node 00000000000000000000000000000002 also claims to lead term 1"
             );
             assert_eq!((raft.role(), raft.leader()), (Role::Leader, Some(key(1))));
             assert_eq!(sent(&mut raft), []);
@@ -1798,7 +1795,7 @@ mod tests {
         fn refuses_a_pre_vote_for_a_later_term_from_a_shorter_log_without_a_proof() {
             let start = Start {
                 entries: entries(&[(1, 1)]),
-                ..start(&[1, 2, 3], proven(1))
+                ..start(&[1, 2, 3], with_proof(1))
             };
             let mut raft = Raft::new(CONFIG, start).unwrap();
             let last = Position::default();
@@ -1816,7 +1813,7 @@ mod tests {
 
         #[test]
         fn answers_a_heartbeat_from_a_lower_term_with_its_own_term() {
-            let mut raft = raft(&[1, 2, 3], proven(5));
+            let mut raft = raft(&[1, 2, 3], with_proof(5));
             raft.step(message(2, 4, Body::Heartbeat { commit: 0 }))
                 .unwrap();
             let reply = Message {
@@ -1824,7 +1821,7 @@ mod tests {
                 to: key(2),
                 term: Term(5),
                 body: Body::HeartbeatReply,
-                proof: proven(5).proof,
+                proof: with_proof(5).proof,
             };
             assert_eq!(sent(&mut raft), [reply]);
             assert_eq!(raft.leader(), None);
@@ -1907,7 +1904,7 @@ mod tests {
     }
 
     // The hard state of a node that a refusal from node 3 moved to `term`.
-    fn proven(term: u64) -> Hard {
+    fn with_proof(term: u64) -> Hard {
         Hard {
             proof: Some(proof(Grant::PreVote, 3, &[1, 3])),
             ..at_term(term)
@@ -2000,6 +1997,32 @@ mod tests {
             };
             assert_eq!(ready.hard, Some(hard));
             assert_eq!(raft.role(), Role::Candidate);
+        }
+
+        #[test]
+        fn a_late_pre_vote_from_a_node_that_is_not_a_voter_does_not_join() {
+            // Node 4 stays a peer while the leave that removes it is uncommitted.
+            let leave = Voters {
+                incoming: [1, 2, 3].into_iter().map(key).collect(),
+                ..Voters::default()
+            };
+            let start = Start {
+                entries: vec![Entry {
+                    at: position(1, 1),
+                    data: Data::Voters(leave),
+                }],
+                ..start(&[1, 2, 3, 4], at_term(1))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            raft.campaign();
+            let granted = Body::PreVoteReply { granted: true };
+            raft.step(message(2, 2, granted.clone())).unwrap();
+            assert_eq!(raft.role(), Role::Candidate);
+            sent(&mut raft);
+            raft.step(message(4, 2, granted)).unwrap();
+            assert_eq!(sent(&mut raft), []);
+            let expected = Some(proof(Grant::PreVote, 1, &[1, 2]));
+            assert_eq!(raft.hard().proof, expected);
         }
 
         #[test]
@@ -2203,7 +2226,7 @@ mod tests {
             let err = raft
                 .step(message(3, 1, Body::Heartbeat { commit: 0 }))
                 .unwrap_err();
-            let expected = Error::Unproven {
+            let expected = Error::SecondLeader {
                 term: Term(1),
                 from: key(3),
             };
@@ -2454,7 +2477,7 @@ mod tests {
             let err = raft
                 .step(message(3, 1, Body::Heartbeat { commit: 0 }))
                 .unwrap_err();
-            let expected = Error::Unproven {
+            let expected = Error::SecondLeader {
                 term: Term(1),
                 from: key(3),
             };
@@ -2619,7 +2642,7 @@ mod tests {
         // A message for a lower term is stale: its content is not read.
         #[test]
         fn drops_a_stale_message_without_a_check() {
-            let mut raft = raft(&[1, 2, 3], proven(3));
+            let mut raft = raft(&[1, 2, 3], with_proof(3));
             sent(&mut raft);
             raft.step(message(2, 1, Body::AppendReply { last: u64::MAX }))
                 .unwrap();
@@ -2630,7 +2653,7 @@ mod tests {
                 to: key(2),
                 term: Term(3),
                 body: Body::HeartbeatReply,
-                proof: proven(3).proof,
+                proof: with_proof(3).proof,
             };
             assert_eq!(sent(&mut raft), [reply]);
         }
@@ -2813,7 +2836,7 @@ mod tests {
 
         #[test]
         fn rejects_a_prevote_from_a_lower_term_with_its_own_term() {
-            let mut raft = raft(&[1, 2, 3], proven(5));
+            let mut raft = raft(&[1, 2, 3], with_proof(5));
             let prevote = Body::PreVote {
                 last: Position::default(),
             };
@@ -2823,7 +2846,7 @@ mod tests {
                 to: key(2),
                 term: Term(5),
                 body: Body::PreVoteReply { granted: false },
-                proof: proven(5).proof,
+                proof: with_proof(5).proof,
             };
             assert_eq!(sent(&mut raft), [reply]);
         }
@@ -2885,7 +2908,7 @@ mod tests {
                 commit: 0,
             };
             let err = raft.step(message(3, 1, append)).unwrap_err();
-            let expected = Error::Unproven {
+            let expected = Error::SecondLeader {
                 term: Term(1),
                 from: key(3),
             };
@@ -3145,7 +3168,7 @@ mod tests {
 
         #[test]
         fn answers_an_append_from_a_lower_term_with_its_own_term() {
-            let mut raft = raft(&[1, 2, 3], proven(5));
+            let mut raft = raft(&[1, 2, 3], with_proof(5));
             let body = append(Position::default(), entries(&[(4, 1)]), 1);
             raft.step(message(2, 4, body)).unwrap();
             let reply = Message {
@@ -3153,7 +3176,7 @@ mod tests {
                 to: key(2),
                 term: Term(5),
                 body: Body::HeartbeatReply,
-                proof: proven(5).proof,
+                proof: with_proof(5).proof,
             };
             assert_eq!(sent(&mut raft), [reply]);
             assert_eq!(raft.ready().entries, []);

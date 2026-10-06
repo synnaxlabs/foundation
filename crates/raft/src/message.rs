@@ -102,6 +102,11 @@ pub enum Body {
 }
 
 impl Body {
+    /// Whether only a leader sends this body.
+    pub(crate) fn leads(&self) -> bool {
+        matches!(self, Self::Heartbeat { .. } | Self::Append { .. })
+    }
+
     /// Whether this body answers a request.
     pub(crate) fn answers(&self) -> bool {
         match self {

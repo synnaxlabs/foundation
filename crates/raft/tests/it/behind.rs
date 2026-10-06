@@ -1,6 +1,6 @@
-//! A voter that is down through a configuration change holds the old configuration.
-//! It refuses a leader whose votes are no quorum of what it holds, until an election
-//! whose grants are. A known gap: no proof covers the change itself.
+//! A voter that is down through a configuration change is behind: it holds the old
+//! configuration and refuses a leader whose votes are no quorum of it, until an
+//! election whose grants are. A known gap: no proof covers the change itself.
 
 use raft::{Position, Role, Term};
 
@@ -25,7 +25,7 @@ fn shrink_behind_node_3(network: &mut Network) -> (usize, usize, u64, Term) {
     assert_eq!(network.disks[kept].applied, leave);
     network.apply(&Action::Restart { node: leader });
     let (next, _) = lead(network, term);
-    assert!(network.stale(3, next));
+    assert!(network.behind(3, next));
     (next, kept, leave, term)
 }
 
@@ -58,7 +58,7 @@ fn a_voter_down_through_a_shrink_rejoins_when_the_leader_restarts() {
 
     network.apply(&Action::Restart { node: leader });
     let (next, later) = lead(&mut network, term);
-    assert!(!network.stale(3, next));
+    assert!(!network.behind(3, next));
     network.apply_until(&[3], leave);
     let node = &network.nodes[3];
     assert_eq!(
@@ -69,10 +69,10 @@ fn a_voter_down_through_a_shrink_rejoins_when_the_leader_restarts() {
     assert!(network.disks[3].applied >= leave);
 }
 
-// The known gap: the stale voter cannot help the group once a second node fails,
+// The known gap: the voter behind cannot help the group once a second node fails,
 // because no election can reach a quorum of the configuration it holds.
 #[test]
-fn a_group_with_a_stale_voter_dies_when_a_second_node_fails() {
+fn a_group_with_a_voter_behind_dies_when_a_second_node_fails() {
     let mut network = Network::new(&[Position::default(); 4], 0);
     let (leader, kept, _, before) = shrink_behind_node_3(&mut network);
     network.apply(&Action::Mend);
@@ -82,5 +82,5 @@ fn a_group_with_a_stale_voter_dies_when_a_second_node_fails() {
     }
     assert!(network.nodes.iter().all(|node| node.role() != Role::Leader));
     assert_eq!(network.nodes[3].term(), before);
-    assert!(network.stale(3, leader));
+    assert!(network.behind(3, leader));
 }

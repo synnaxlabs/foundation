@@ -1,6 +1,7 @@
 //! What a message from a voter that does not lead does to another node.
 
 use raft::{Body, Data, Entry, Error, Message, Position, Raft, Role, Term, Voters};
+use types::node;
 
 use crate::network::{Action, ELECTION, Network};
 
@@ -39,11 +40,29 @@ fn forged_append(
     (append, entry)
 }
 
-// Checks that `node` refuses `append` as unproven, and keeps its state and its log.
-fn check_refused(node: &mut Raft, append: Message) {
+fn unproven(term: Term, from: node::Key) -> Error {
+    Error::Unproven { term, from }
+}
+
+// Checks that `node` refuses `append` with `refused`, and keeps its state and its log.
+fn check_refused(
+    node: &mut Raft,
+    append: Message,
+    refused: fn(Term, node::Key) -> Error,
+) {
     let before = (node.role(), node.term(), node.leader(), node.hard());
     let (term, from) = (append.term, append.from);
-    assert_eq!(node.step(append), Err(Error::Unproven { term, from }));
+    let err = node.step(append).unwrap_err();
+    assert_eq!(err, refused(term, from));
+    let from = format!("node {:032x}", from.as_u128());
+    let text = match err {
+        Error::SecondLeader { .. } => format!("{from} also claims to lead term {term}"),
+        Error::Unproven { .. } => {
+            format!("{from} claims term {term} with no proof this node accepts")
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(err.to_string(), text);
     assert_eq!(
         (node.role(), node.term(), node.leader(), node.hard()),
         before
@@ -58,7 +77,8 @@ fn a_voter_that_does_not_lead_cannot_make_a_follower_commit_alone_in_its_term() 
     let victim = (leader + 1) % 3;
     let sender = (leader + 2) % 3;
     let (append, _) = forged_append(&network, sender, victim, term);
-    check_refused(&mut network.nodes[victim], append);
+    let second = |term, from| Error::SecondLeader { term, from };
+    check_refused(&mut network.nodes[victim], append, second);
     network.apply(&Action::Campaign { node: victim });
     // The network checks log matching and state machine safety from here.
     network.propose(leader).unwrap();
@@ -74,7 +94,7 @@ fn a_voter_that_does_not_lead_cannot_make_a_follower_commit_alone_in_a_new_term(
     let victim = (leader + 1) % 3;
     let sender = (leader + 2) % 3;
     let (append, _) = forged_append(&network, sender, victim, Term(term.0 + 1));
-    check_refused(&mut network.nodes[victim], append);
+    check_refused(&mut network.nodes[victim], append, unproven);
     network.propose(leader).unwrap();
     for _ in 0..4 * ELECTION {
         network.round();
@@ -96,10 +116,9 @@ fn a_voter_that_does_not_lead_cannot_move_the_leader_to_a_new_term() {
     };
     let node = &mut network.nodes[leader];
     let from = Network::key(sender);
-    let unproven = Error::Unproven { term: forged, from };
-    assert_eq!(node.step(reply), Err(unproven));
+    assert_eq!(node.step(reply), Err(unproven(forged, from)));
     assert_eq!((node.role(), node.term()), (Role::Leader, term));
-    check_refused(node, append);
+    check_refused(node, append, unproven);
 }
 
 #[test]
@@ -110,7 +129,7 @@ fn a_voter_that_does_not_lead_cannot_take_the_group_over_in_a_new_term() {
     let sender = (leader + 2) % 5;
     let (append, entry) = forged_append(&network, sender, victim, Term(term.0 + 1));
     network.apply(&Action::Cut { node: sender });
-    check_refused(&mut network.nodes[victim], append);
+    check_refused(&mut network.nodes[victim], append, unproven);
     network.propose(leader).unwrap();
     for _ in 0..4 * ELECTION {
         network.round();

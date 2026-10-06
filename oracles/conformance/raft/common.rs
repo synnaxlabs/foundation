@@ -28,14 +28,14 @@ pub(crate) fn proof(grant: Grant, candidate: u8, ids: &[u8]) -> Proof {
     }
 }
 
-/// A node in `term` that heard its leader, with the proof of the term it answers a
+/// A node that a refusal from node 2 moved to `term`, with the proof it answers a
 /// stale message with.
 pub(crate) fn at_term(term: u64) -> Hard {
     Hard {
         term: Term(term),
         vote: None,
         leader: None,
-        proof: (term > 0).then(|| proof(Grant::Vote, 1, VOTERS)),
+        proof: (term > 0).then(|| proof(Grant::PreVote, 2, VOTERS)),
     }
 }
 
