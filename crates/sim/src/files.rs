@@ -349,10 +349,11 @@ impl Files {
 
     /// Crashes `node` by `crash` at true time `at`: each call, result, close, and
     /// hold of the node ends, a leaked one too. A call in flight ends as one whose
-    /// future dropped, in the order of its end time. After a `Power` crash only each
-    /// write takes effect, and the disk keeps what is durable. Returns the wakers of
-    /// the closes and the blocks of the calls, for the caller to drop after it
-    /// releases the lock.
+    /// future dropped, in the order of its end time: a write keeps any subset of its
+    /// sectors, and another call takes its effect or none by a coin. After a `Power`
+    /// crash the disk keeps only what is durable. Returns the wakers of the closes
+    /// and the blocks of the calls, for the caller to drop after it releases the
+    /// lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
@@ -373,7 +374,7 @@ impl Files {
             closes.extend(close.and_then(|key| self.closes.remove(&key)));
             let kind = mem::discriminant(&flight.call);
             let applied =
-                crash == Crash::Process || matches!(flight.call, Call::Write { .. });
+                matches!(flight.call, Call::Write { .. }) || self.rng.below(2) == 0;
             let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
                 (ended.result.is_ok(), ended.held)

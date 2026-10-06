@@ -1836,22 +1836,28 @@ How to read this record:
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
   device at run time lost (#569).
-- **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
-  between runs; a test restarts the node with new threads on the same disk. A `Process`
-  crash keeps each file call that ended, and ends each call in flight at the crash, so a
-  restart finds no file held (#392), not even by a leaked handle (#535). The blocks of
-  each file call of the node go back to their pools, those of a leaked call too (#763).
-  A crash of either kind closes each serial port of the node, a leaked one too, and a
-  socket or serial port from before the crash panics when it polls. A `Power` crash
-  keeps, for each 512-byte sector, its durable bytes or the bytes of any one write since
-  then, a write in flight too. A `sync` makes durable the writes that ended before it
-  started. A failed `sync` makes each sector keep its durable bytes or those of one such
-  write, at random. Where writes in flight at once overlap, a power cut or a failed
-  `sync` can keep a part of one of them in a sector (#580). A `sync_dir` makes durable
-  the entries at its end. A removed file takes space until the removal is durable. The
-  monotonic clock starts again and the wall runs on. `join` on a thread that a crash
-  ended panics, because no process joins its own threads after it dies. Built by
-  `simulation` in #114, #535, #580, and #763.
+- **SIM CRASH (2026-10-05, amended 2026-10-06)** `Sim::crash(&node, Crash)` ends each
+  thread of a node between runs; a test restarts the node with new threads on the same
+  disk. A `Process` crash keeps each file call that ended, and ends each call in flight
+  at the crash, so a restart finds no file held (#392), not even by a leaked handle
+  (#535). A call in flight takes its effect or none, at random: a write keeps any subset
+  of its sectors, and a create makes the whole file or none, as a real process death can
+  leave them (#857). The blocks of each file call of the node go back to their pools,
+  those of a leaked call too (#763). A crash of either kind closes each serial port of
+  the node, a leaked one too, and a socket or serial port from before the crash panics
+  when it polls. A `Power` crash is a `Process` crash and then the loss of what is not
+  durable, so an in-flight `sync` or `sync_dir` may take effect, as on a real disk; a
+  test pins that the states of a `Power` crash equal those of a `Process` crash followed
+  at once by a `Power` crash (#857, coordinator and advisor, delegated by the person). A
+  `Power` crash keeps, for each 512-byte sector, its durable bytes or the bytes of any
+  one write since then, a write in flight too. A `sync` makes durable the writes that
+  ended before it started. A failed `sync` makes each sector keep its durable bytes or
+  those of one such write, at random. Where writes in flight at once overlap, a power
+  cut or a failed `sync` can keep a part of one of them in a sector (#580). A `sync_dir`
+  makes durable the entries at its end. A removed file takes space until the removal is
+  durable. The monotonic clock starts again and the wall runs on. `join` on a thread
+  that a crash ended panics, because no process joins its own threads after it dies.
+  Built by `simulation` in #114, #535, #580, #763, and #857.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes

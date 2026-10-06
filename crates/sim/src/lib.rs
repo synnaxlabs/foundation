@@ -492,10 +492,13 @@ impl fmt::Debug for Sim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Crash {
     /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
-    /// keeps each call that ended. Each file call in flight takes effect at the
-    /// crash, as if its future dropped, so a write keeps any subset of its sectors.
+    /// keeps each call that ended. Each file call in flight ends at the crash, as
+    /// if its future dropped: a write keeps any subset of its sectors, and each
+    /// other call takes its effect or none, so a create makes the whole file or
+    /// none.
     Process,
-    /// The machine loses power and boots again.
+    /// The machine loses power and boots again: a `Process` crash, and then the
+    /// loss of what is not durable.
     ///
     /// - Each [`SECTOR`](env::files::SECTOR) of a file keeps the bytes that a sync
     ///   made durable, or its bytes after any one write on it since then, a write
@@ -503,7 +506,6 @@ pub enum Crash {
     ///   of one of them.
     /// - Each directory goes back to its entries when its last `sync_dir` ended,
     ///   and what those entries no longer reach is gone.
-    /// - Other file calls in flight have no effect.
     /// - The monotonic clock reads [`node::Config::monotonic`] again. The wall
     ///   clock runs on.
     Power,

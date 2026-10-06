@@ -11,8 +11,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
-use env::files::{Error, Mode, Operation};
+use block::Pool;
+use env::files::{Error, File, Files, Mode, Operation};
 use env::net::udp;
+use env::rng::Rng;
 use types::time::Span;
 
 use super::files::{KIB, MIB, block, create, io, pool, read, sectors};
@@ -380,7 +382,7 @@ fn sync_at_cut(seed: u64) -> (Sim, node::Node) {
 }
 
 #[test]
-fn a_sync_in_flight_at_a_power_cut_has_no_effect() {
+fn a_power_cut_with_a_sync_in_flight_keeps_any_write_in_each_sector() {
     let outcomes: BTreeSet<Vec<u8>> = (0..64)
         .map(|seed| {
             let (mut sim, node) = sync_at_cut(seed);
@@ -406,19 +408,22 @@ fn a_power_cut_frees_a_file_that_a_call_in_flight_held() {
 }
 
 #[test]
-fn a_sync_dir_in_flight_at_a_power_cut_has_no_effect() {
-    let (mut sim, node) = disk(0);
-    crash_after(&mut sim, &node, Crash::Power, |node| async move {
-        drop(create(&node, "a", 1_024).await);
-        until_crash(&node).await;
-        hang(node.files().sync_dir(Path::new(""))).await;
-    });
-    let names = sim
-        .run_on(&node, |node, _| async move {
-            node.files().list(Path::new("")).await.unwrap()
+fn a_sync_dir_in_flight_at_a_power_cut_takes_its_effect_or_none() {
+    let outcomes: BTreeSet<Vec<PathBuf>> = (0..32)
+        .map(|seed| {
+            let (mut sim, node) = disk(seed);
+            crash_after(&mut sim, &node, Crash::Power, |node| async move {
+                drop(create(&node, "a", 1_024).await);
+                until_crash(&node).await;
+                hang(node.files().sync_dir(Path::new(""))).await;
+            });
+            sim.run_on(&node, |node, _| async move {
+                node.files().list(Path::new("")).await.unwrap()
+            })
+            .unwrap()
         })
-        .unwrap();
-    assert_eq!(names, Vec::<PathBuf>::new());
+        .collect();
+    assert_eq!(outcomes, BTreeSet::from([vec![], vec![PathBuf::from("a")]]));
 }
 
 /// The digest of a run in which the power is cut during [`write_in_flight`].
@@ -560,20 +565,47 @@ fn a_process_crash_frees_a_file_that_a_write_open_in_flight_opens() {
 }
 
 #[test]
-fn a_process_crash_applies_a_create_dir_in_flight() {
-    for value in 0..16 {
-        let (mut sim, node) = disk(value);
-        crash_after(&mut sim, &node, Crash::Process, |node| async move {
-            until_crash(&node).await;
-            hang(node.files().create_dir(Path::new("d"))).await;
-        });
-        let names = sim
-            .run_on(&node, |node, _| async move {
+fn a_create_dir_in_flight_at_a_process_crash_takes_its_effect_or_none() {
+    let outcomes: BTreeSet<Vec<PathBuf>> = (0..32)
+        .map(|seed| {
+            let (mut sim, node) = disk(seed);
+            crash_after(&mut sim, &node, Crash::Process, |node| async move {
+                until_crash(&node).await;
+                hang(node.files().create_dir(Path::new("d"))).await;
+            });
+            sim.run_on(&node, |node, _| async move {
                 node.files().list(Path::new("")).await.unwrap()
             })
-            .unwrap();
-        assert_eq!(names, [PathBuf::from("d")], "value {value}");
-    }
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(outcomes, BTreeSet::from([vec![], vec![PathBuf::from("d")]]));
+}
+
+#[test]
+fn a_create_in_flight_at_a_process_crash_makes_the_whole_file_or_none() {
+    let outcomes: BTreeSet<(Option<Vec<u8>>, u64)> = (0..32)
+        .map(|seed| {
+            let (mut sim, node) = disk(seed);
+            crash_after(&mut sim, &node, Crash::Process, |node| async move {
+                until_crash(&node).await;
+                let mode = Mode::Create { len: 1_024 };
+                hang(node.files().open(Path::new("a"), mode)).await;
+            });
+            sim.run_on(&node, |node, _| async move {
+                let files = node.files();
+                let file = files.open(Path::new("a"), Mode::Read).await.ok();
+                let kept = match file {
+                    Some(file) => Some(sectors(&read(&file, &pool(), 0, 1_024).await)),
+                    None => None,
+                };
+                (kept, files.free().await.unwrap())
+            })
+            .unwrap()
+        })
+        .collect();
+    let whole = (Some(vec![0, 0]), MIB - KIB);
+    assert_eq!(outcomes, BTreeSet::from([(None, MIB), whole]));
 }
 
 /// The names in the data directory after a process crash with a remove of the
@@ -646,6 +678,141 @@ fn a_sync_dir_in_flight_at_a_process_crash_may_miss_a_create_in_flight() {
         (0..64).map(create_then_sync_dir_at_a_crash).collect();
     let both = BTreeSet::from([vec![], vec![PathBuf::from("a")]]);
     assert_eq!(outcomes, both);
+}
+
+/// The paths of the files of [`history`].
+const PATHS: [&str; 3] = ["a", "b", "d/c"];
+
+/// One file call of [`history`].
+#[derive(Clone, Copy)]
+struct Step {
+    /// The kind of call, below 6.
+    kind: u64,
+    /// The index of its file in [`PATHS`].
+    at: usize,
+    /// The offset of a write of 512 bytes.
+    offset: u64,
+    /// The value of each byte of a write.
+    value: u8,
+}
+
+impl Step {
+    fn new(rng: &mut Rng) -> Self {
+        Self {
+            kind: rng.below(6),
+            at: usize::try_from(rng.below(3)).unwrap(),
+            offset: 256 * rng.below(3),
+            value: rng.next_u64().to_le_bytes()[0],
+        }
+    }
+
+    /// Runs the call on `files`, and on the open file of its path in `handles`.
+    /// Returns the file that a create opens. A call that fails does nothing.
+    async fn run(
+        self,
+        files: &Files,
+        handles: &[Option<File>],
+        pool: &Pool,
+    ) -> Option<File> {
+        let (path, file) = (Path::new(PATHS[self.at]), handles[self.at].as_ref());
+        match (self.kind, file) {
+            (0, _) => return files.open(path, Mode::Create { len: KIB }).await.ok(),
+            (1, Some(file)) => {
+                let part = block(pool, &[self.value; 512]);
+                drop(file.write_at(self.offset, &[part]).await);
+            }
+            (2, Some(file)) => drop(file.sync().await),
+            (3, _) => drop(files.sync_dir(path.parent().unwrap()).await),
+            (4, _) => drop(files.remove(path).await),
+            (5, _) => drop(files.create_dir(Path::new("d")).await),
+            _ => {}
+        }
+        None
+    }
+}
+
+/// Runs 12 random file calls from `seed` to their ends on `node`, then starts 4
+/// more at the instant of the crash of [`crash_after`] and waits forever.
+async fn history(node: node::Node, seed: u64) {
+    let (files, pool, mut rng) = (node.files(), pool(), Rng::from_seed(seed));
+    let mut handles: [Option<File>; 3] = Default::default();
+    for _ in 0..12 {
+        let step = Step::new(&mut rng);
+        if let Some(file) = step.run(&files, &handles, &pool).await {
+            handles[step.at] = Some(file);
+        }
+    }
+    until_crash(&node).await;
+    let mut calls: Vec<_> = (0..4)
+        .map(|_| Box::pin(Step::new(&mut rng).run(&files, &handles, &pool)))
+        .collect();
+    poll_fn(|cx| {
+        for call in &mut calls {
+            drop(call.as_mut().poll(cx));
+        }
+        Poll::Ready(())
+    })
+    .await;
+    pending::<()>().await;
+}
+
+/// The disk of a node: each path with the bytes of its file or `None` for a
+/// directory, and the free bytes.
+type Contents = (Vec<(PathBuf, Option<Vec<u8>>)>, u64);
+
+/// The disk of `node`, read in a new run.
+fn contents(sim: &mut Sim, node: &node::Node) -> Contents {
+    sim.run_on(node, |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let (mut paths, mut dirs) = (Vec::new(), vec![PathBuf::new()]);
+        while let Some(dir) = dirs.pop() {
+            for name in files.list(&dir).await.unwrap() {
+                let path = dir.join(name);
+                if files.list(&path).await.is_ok() {
+                    dirs.push(path.clone());
+                    paths.push((path, None));
+                    continue;
+                }
+                let file = files.open(&path, Mode::Read).await.unwrap();
+                let bytes = read(&file, &pool, 0, 1_024).await;
+                paths.push((path, Some(bytes)));
+            }
+        }
+        (paths, files.free().await.unwrap())
+    })
+    .unwrap()
+}
+
+/// A run of [`history`] from `seed` that crashes its node by each of `crashes`, the
+/// first one with calls in flight and the others at once after it.
+fn crashed(seed: u64, crashes: &[Crash]) -> (Sim, node::Node) {
+    let (mut sim, node) = disk(seed);
+    let body = move |node| history(node, seed);
+    crash_after(&mut sim, &node, crashes[0], body);
+    for &crash in &crashes[1..] {
+        sim.crash(&node, crash);
+    }
+    (sim, node)
+}
+
+#[test]
+fn a_power_crash_makes_the_states_of_a_process_crash_and_then_a_power_crash() {
+    for seed in 0..128 {
+        let (mut sim, node) = crashed(seed, &[Crash::Power]);
+        let power = contents(&mut sim, &node);
+        let (mut sim, node) = crashed(seed, &[Crash::Process, Crash::Power]);
+        assert_eq!(power, contents(&mut sim, &node), "seed {seed}");
+    }
+}
+
+#[test]
+fn a_process_crash_replays_from_its_seed() {
+    let replay = |seed| {
+        let (mut sim, node) = crashed(seed, &[Crash::Process]);
+        (sim.digest(), contents(&mut sim, &node))
+    };
+    assert_eq!(replay(3), replay(3));
+    assert_ne!(replay(3).0, replay(4).0);
 }
 
 /// Whether a write open of the file `a` of `node` fails, in a new run.
