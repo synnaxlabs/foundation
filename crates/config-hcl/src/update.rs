@@ -13,9 +13,7 @@ use crate::{Error, Unwritable, read, write};
 /// its comments and blank lines. A changed value and a changed block on one line are
 /// written again, without the comments in them. A block that moves past another is
 /// cut and written again. A new attribute or block goes into its body, and a removed
-/// one is cut with its lines and the comments directly above it. New text takes the
-/// line end of the first line of `text`, and when that is `\r\n`, a new string is
-/// never a heredoc.
+/// one is cut with its lines and the comments directly above it.
 ///
 /// # Errors
 ///
@@ -671,22 +669,19 @@ mod tests {
         out
     }
 
-    /// The bytes of each heredoc in `text`.
+    /// Each heredoc of `text` as written, through the first error.
     fn heredocs(text: &str) -> Vec<&str> {
         let mut tokens = Tokens::new(Source(0), text).unwrap();
         let mut out = Vec::new();
-        loop {
+        for _ in 0..=text.len() {
             let token = tokens.next();
             match token.kind {
-                lex::Kind::End => return out,
-                lex::Kind::Heredoc(_) => {
-                    let (start, end) =
-                        (offset(token.span.start()), offset(token.span.end()));
-                    out.push(text.get(start..end).unwrap());
-                }
+                lex::Kind::End | lex::Kind::Error(_) => return out,
+                lex::Kind::Heredoc(_) => out.push(token.text),
                 _ => {}
             }
         }
+        panic!("more tokens than bytes in {text:?}")
     }
 
     /// Mixes `b` into `a`: keeps, cuts, or changes each attribute of `a` to a value of
@@ -793,9 +788,13 @@ mod tests {
             prop_assert_eq!(read(Source(0), &out), Ok(document), "{}\n{}", text, out);
             if text.contains('\r') {
                 prop_assert!(!out.replace("\r\n", "").contains('\n'), "{}", out);
-                // HCL keeps the `\r` in a heredoc, so each one is kept from `text`.
+                // HCL keeps the `\r` in a heredoc, and `read` does not, so the round
+                // trip cannot see a new heredoc. Each one is kept from `text`.
+                let mut kept = heredocs(&text);
                 for heredoc in heredocs(&out) {
-                    prop_assert!(text.contains(heredoc), "{}\n{}", text, out);
+                    let at = kept.iter().position(|kept| *kept == heredoc);
+                    let new = || TestCaseError::fail(format!("{text}\n{out}"));
+                    kept.swap_remove(at.ok_or_else(new)?);
                 }
             } else {
                 prop_assert!(!out.contains('\r'), "{}", out);
