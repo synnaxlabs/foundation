@@ -349,10 +349,12 @@ impl Shard {
         let place = self.place(slot);
         let index = &mut self.indexes[place];
         let (session, woken) = match mode {
-            Mode::Complete { limit_bytes } => (index.open_complete(limit_bytes), false),
+            Mode::Complete { limit_bytes } => {
+                (index.open_complete(limit_bytes).into(), false)
+            }
             Mode::Latest => {
                 let latest = index.readers.open_latest(None, mesh.latest);
-                (latest.key, latest.woken)
+                (latest.key.into(), latest.woken)
             }
         };
         let key = reader::Key { slot, session };
@@ -362,16 +364,21 @@ impl Shard {
         key
     }
 
-    /// Raises the credit of a complete reader to `limit_bytes` since it opened. A
-    /// limit that is not higher changes nothing, and so does a grant to a reader that
-    /// is not open: a grant can arrive after its reader closes.
+    /// Raises the credit of the complete reader `session` on the index at `slot` to
+    /// `limit_bytes` since it opened. A limit that is not higher changes nothing, and
+    /// so does a grant to a reader that is not open: a grant can arrive after its
+    /// reader closes.
     ///
     /// # Panics
     ///
-    /// If the shard does not carry the reader's index, or its readers never gave the
-    /// reader's session.
-    pub(crate) fn grant(&mut self, key: reader::Key, limit_bytes: u64) {
-        self.index(key).readers.grant(key.session, limit_bytes);
+    /// If the shard does not carry `slot`, or its readers never gave `session`.
+    pub(crate) fn grant(
+        &mut self,
+        slot: Slot,
+        session: delivery::complete::Key,
+        limit_bytes: u64,
+    ) {
+        self.index(slot).readers.grant(session, limit_bytes);
     }
 
     /// Takes the reader's next frame, or `None` when none waits.
@@ -380,7 +387,7 @@ impl Shard {
     ///
     /// If the reader is not open.
     pub(crate) fn take(&mut self, key: reader::Key) -> Option<Frame> {
-        self.index(key).readers.take(key.session)
+        self.index(key.slot).readers.take(key.session)
     }
 
     /// Closes the reader at mesh time `mesh`. Its waiting frames do not go out, and
@@ -390,7 +397,7 @@ impl Shard {
     ///
     /// If the reader is not open.
     pub(crate) fn close_reader(&mut self, key: reader::Key, mesh: Interval) {
-        self.index(key).readers.close(key.session, mesh.latest);
+        self.index(key.slot).readers.close(key.session, mesh.latest);
         self.wake.keys.retain(|&woken| woken != key);
     }
 
@@ -407,8 +414,8 @@ impl Shard {
         keys.dedup();
     }
 
-    fn index(&mut self, key: reader::Key) -> &mut Index {
-        let place = self.place(key.slot);
+    fn index(&mut self, slot: Slot) -> &mut Index {
+        let place = self.place(slot);
         &mut self.indexes[place]
     }
 
@@ -443,13 +450,14 @@ impl Shard {
 
 impl Wake {
     /// Adds the `sessions` of the index at `slot` to wake.
-    fn add(&mut self, slot: Slot, sessions: &[delivery::Key]) {
+    fn add<K: Copy + Into<delivery::Key>>(&mut self, slot: Slot, sessions: &[K]) {
         if sessions.is_empty() {
             return;
         }
-        let keys = sessions
-            .iter()
-            .map(|&session| reader::Key { slot, session });
+        let keys = sessions.iter().map(|&session| reader::Key {
+            slot,
+            session: session.into(),
+        });
         self.keys.extend(keys);
     }
 
@@ -1844,6 +1852,14 @@ mod tests {
                 .collect()
         }
 
+        /// Raises the credit of the complete reader `reader` to `limit_bytes`.
+        fn grant(shard: &mut Shard, reader: reader::Key, limit_bytes: u64) {
+            let delivery::Key::Complete(session) = reader.session else {
+                panic!("{reader:?} is not a complete reader");
+            };
+            shard.grant(reader.slot, session, limit_bytes);
+        }
+
         /// Writes a live frame of the index at slot 0 with `stamps`.
         fn write(test: &Test, shard: &mut Shard, a: writer::Key, stamps: &[i64]) {
             let set = two_indexes();
@@ -1980,7 +1996,7 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
-                shard.grant(reader, CREDIT);
+                grant(&mut shard, reader, CREDIT);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
@@ -2000,7 +2016,7 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
-                shard.grant(reader, CREDIT);
+                grant(&mut shard, reader, CREDIT);
                 write(&test, &mut shard, a, &[20]);
                 write(&test, &mut shard, a, &[30]);
                 shard.committed().await.expect("the commit ends");
@@ -2016,7 +2032,7 @@ mod tests {
                 let one = Mode::Complete { limit_bytes: 1 };
                 let reader = shard.open_reader(Slot::new(0), one, MESH);
                 shard.close_reader(reader, MESH);
-                shard.grant(reader, CREDIT);
+                grant(&mut shard, reader, CREDIT);
                 let after = shard.open_reader(Slot::new(0), one, MESH);
                 assert_ne!(after, reader);
             });

@@ -109,7 +109,10 @@ impl Index {
     }
 
     /// Opens a complete reader at the live tail, with a credit of `limit_bytes`.
-    pub(crate) fn open_complete(&mut self, limit_bytes: u64) -> delivery::Key {
+    pub(crate) fn open_complete(
+        &mut self,
+        limit_bytes: u64,
+    ) -> delivery::complete::Key {
         let live = self.order.tail(Path::Live).seq;
         let start = Start::At(Position {
             live,
@@ -126,7 +129,7 @@ impl Index {
     ///
     /// If either path moved, or the holder changed, after the check, or no frame was
     /// frozen.
-    pub(crate) fn advance(&mut self, accepted: Accepted) -> &[delivery::Key] {
+    pub(crate) fn advance(&mut self, accepted: Accepted) -> &[delivery::latest::Key] {
         let (path, seq, frame) = self.spend(accepted);
         let frame = frame.expect("invariant: a stored frame was frozen");
         match path {
@@ -145,7 +148,7 @@ impl Index {
     /// # Panics
     ///
     /// If either path moved, or the holder changed, after the check.
-    pub(crate) fn lose(&mut self, accepted: Accepted) -> &[delivery::Key] {
+    pub(crate) fn lose(&mut self, accepted: Accepted) -> &[delivery::latest::Key] {
         match self.spend(accepted) {
             (Path::Live, _, Some(frame)) => self.readers.put(frame),
             (Path::Live, _, None) | (Path::Backfill, ..) => &[],

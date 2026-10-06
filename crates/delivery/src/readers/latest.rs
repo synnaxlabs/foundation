@@ -159,7 +159,11 @@ mod tests {
         }
     }
 
-    fn complete(readers: &mut Readers, name: &str, position: Position) -> complete::Key {
+    fn complete(
+        readers: &mut Readers,
+        name: &str,
+        position: Position,
+    ) -> complete::Key {
         let reader = Reader::Named {
             name: self::name(name),
             hold: Span::from_nanos(10),
@@ -416,7 +420,9 @@ mod tests {
         fn panics_on_a_key_only_a_latest_session_had() {
             let mut readers = Readers::new(0);
             unnamed(&mut readers);
-            readers.ack(complete::Key(0), live(1)).expect("panics before");
+            readers
+                .ack(complete::Key(0), live(1))
+                .expect("panics before");
         }
     }
 
@@ -516,7 +522,11 @@ mod tests {
                 match input {
                     Input::Open => {
                         let latest = readers.open_latest(None, at(0));
-                        assert!(model.latest.insert(latest.key), "{} is new", latest.key);
+                        assert!(
+                            model.latest.insert(latest.key),
+                            "{} is new",
+                            latest.key
+                        );
                         assert_eq!(latest.woken, model.newest.is_some());
                         model.mailboxes.insert(latest.key, model.newest);
                     }

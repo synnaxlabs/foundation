@@ -4,8 +4,8 @@ pub mod complete;
 pub mod latest;
 
 use std::collections::{BTreeMap, VecDeque};
-use std::ops::Range;
 use std::iter;
+use std::ops::Range;
 
 use types::frame::Frame;
 use types::name::Name;
