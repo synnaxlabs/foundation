@@ -12,7 +12,7 @@ use env::rng::Rng;
 use types::time::Monotonic;
 
 use crate::disk::{self, Cause, Disk, Handle};
-use crate::{Crash, EIO};
+use crate::{Crash, EIO, chance};
 
 /// The count of call delays in nanoseconds: a call takes 0 to 100 us.
 const DELAYS: u64 = 100_001;
@@ -374,8 +374,8 @@ impl Files {
             let close = flight.call.handle().map(|handle| handle.key);
             closes.extend(close.and_then(|key| self.closes.remove(&key)));
             let kind = mem::discriminant(&flight.call);
-            let applied =
-                matches!(flight.call, Call::Write { .. }) || self.rng.below(2) == 0;
+            let applied = matches!(flight.call, Call::Write { .. })
+                || chance::coin(&mut self.rng);
             let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
                 (ended.result.is_ok(), ended.held)

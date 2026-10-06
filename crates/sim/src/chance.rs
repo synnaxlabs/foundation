@@ -7,6 +7,11 @@ pub(crate) fn valid(chance: f64) -> bool {
     (0.0..=1.0).contains(&chance)
 }
 
+/// Draws from `rng` a fair coin: `true` for half the draws.
+pub(crate) fn coin(rng: &mut Rng) -> bool {
+    rng.below(2) == 0
+}
+
 /// Draws from `rng`, and gives whether the draw falls under `chance`.
 pub(crate) fn roll(rng: &mut Rng, chance: f64) -> bool {
     let draw = u32::try_from(rng.next_u64() >> 32)

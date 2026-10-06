@@ -10,7 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use env::files::Mode;
 use env::rng::Rng;
 
-use crate::Crash;
+use crate::{Crash, chance};
 
 /// The key of the data directory.
 pub(crate) const ROOT: u64 = 0;
@@ -388,7 +388,7 @@ impl File {
         rng: &mut Rng,
     ) {
         for (sector, part) in sectors(&(offset..offset + len(bytes))) {
-            if dropped && rng.below(2) == 0 {
+            if dropped && chance::coin(rng) {
                 continue;
             }
             let zeros = || Sector {
