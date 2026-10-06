@@ -498,8 +498,9 @@ pub enum Crash {
     /// The machine loses power and boots again.
     ///
     /// - Each [`SECTOR`](env::files::SECTOR) of a file keeps the bytes that a sync
-    ///   made durable, or the bytes of any one write on it since then, a write in
-    ///   flight too.
+    ///   made durable, or its bytes after any one write on it since then, a write
+    ///   in flight too. Where writes in flight at once overlap, it can keep a part
+    ///   of one of them.
     /// - Each directory goes back to its entries when its last `sync_dir` ended,
     ///   and what those entries no longer reach is gone.
     /// - Other file calls in flight have no effect.
