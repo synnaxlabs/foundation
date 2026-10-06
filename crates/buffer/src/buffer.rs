@@ -269,7 +269,8 @@ impl Drop for Buffer {
 impl Buffer {
     /// Opens the ring in `config.dir`, or creates it, makes the ring and its
     /// directory durable, and recovers the tail of every path from its records. Each
-    /// recovered index gets its slot from `slots`. Starts the commit task.
+    /// recovered index gets its slot from `slots`. The recovered tails are on disk
+    /// when it returns. Starts the commit task.
     ///
     /// # Errors
     ///
@@ -310,18 +311,7 @@ impl Buffer {
         }
         files.sync_dir(&dir).await?;
         let header = read_header(&file, &pool, &entropy, layout).await?;
-        let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
-        let mut logs = Logs::default();
-        loop {
-            let Window { place, len } = cursor.window();
-            let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
-            let offset = cursor.offset();
-            match cursor.next(&bytes)? {
-                Step::Data(body) => recover(body, offset, slots, &mut logs)?,
-                Step::Moved | Step::More => {}
-                Step::End => break,
-            }
-        }
+        let (cursor, logs) = walk(&file, &pool, &header, slots).await?;
         let chain = random(&entropy);
         let (writer, sealed) = cursor.writer(header.tail.offset(), chain)?;
         write_restart(&file, &pool, sealed, chain).await?;
@@ -504,6 +494,38 @@ async fn read_header(
     file.write_at(0, &[block.clone(), block]).await?;
     file.sync().await?;
     Ok(header)
+}
+
+/// Recovers the tail of every path from the records after the tail of `header`,
+/// and syncs `file` when it read one, since a killed process may have written
+/// records that it never synced. Returns the cursor at the end of the walk and the
+/// logs.
+async fn walk(
+    file: &File,
+    pool: &Pool,
+    header: &Header,
+    slots: &mut Slots,
+) -> Result<(Cursor, Logs), Error> {
+    let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
+    let mut logs = Logs::default();
+    let mut recovered = false;
+    loop {
+        let Window { place, len } = cursor.window();
+        let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
+        let offset = cursor.offset();
+        match cursor.next(&bytes)? {
+            Step::Data(body) => {
+                recover(body, offset, slots, &mut logs)?;
+                recovered = true;
+            }
+            Step::Moved | Step::More => {}
+            Step::End => break,
+        }
+    }
+    if recovered {
+        file.sync().await?;
+    }
+    Ok((cursor, logs))
 }
 
 /// Feeds the logs the entries of a record body at `offset`, as appended and

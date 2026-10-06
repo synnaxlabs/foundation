@@ -228,7 +228,7 @@ fn a_new_ring_keeps_its_layout_across_opens() {
         let other = layout(2 * AREA, 2 * BODY_MAX);
         let buffer = shard.open(other, &mut Slots::new()).await.expect("reopens");
         assert_eq!(buffer.layout(), first);
-        assert_eq!(shard.memory.syncs(), 1, "a reopen syncs nothing");
+        assert_eq!(shard.memory.syncs(), 1, "a reopen with no data syncs nothing");
     });
     let bytes = memory.bytes(RING);
     assert_eq!(bytes.len(), to_usize(AREA_START + AREA));
@@ -637,6 +637,37 @@ fn a_failed_append_holds_no_part() {
     });
 }
 
+/// A reopen of a ring with data syncs the ring once before it reports the tails
+/// durable, and a failed sync fails the reopen.
+#[test]
+fn a_reopen_of_a_ring_with_data_syncs_it() {
+    run(26, Memory::default(), |shard| async move {
+        let ring = layout(AREA, BODY_MAX);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        drop(shard.open(ring, &mut Slots::new()).await.expect("reopens"));
+        assert_eq!(
+            shard.memory.syncs(),
+            3,
+            "the header, the commit, the reopen"
+        );
+        shard.memory.fail_syncs();
+        let reopened = shard.open(ring, &mut Slots::new()).await.map(drop);
+        let failed = Error::Files(FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        });
+        assert_eq!(reopened, Err(failed));
+    });
+}
+
 #[test]
 fn a_failed_sync_ends_the_buffer_with_its_error() {
     run(7, Memory::default(), |shard| async move {
@@ -970,7 +1001,7 @@ fn node_config(node: &sim::node::Node, tasks: Tasks, dir: &str) -> Config {
 }
 
 /// Calls `at` with each seed of `seeds` and each cut from 0 ns in steps of `step`
-/// ns, until `at` returns that the first open had ended at the cut.
+/// ns, until `at` returns that the work it cuts had ended at the cut.
 fn each_cut(seeds: Range<u64>, step: i64, mut at: impl FnMut(u64, i64) -> bool) {
     for seed in seeds {
         let mut cut = 0;
@@ -1085,6 +1116,67 @@ fn a_kill_during_the_first_open_keeps_the_commits_of_the_next() {
             tail(3, Some(30)),
             "seed {seed}, kill at {cut} ns"
         );
+        ended
+    });
+}
+
+/// Starts a new ring on a node with `seed`, appends one entry, and kills the
+/// process `cut` nanoseconds after a point at most 10 µs before the deadline of the
+/// first commit. Returns the sim, the node, and whether the commit had ended.
+fn kill_the_first_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, bool) {
+    let (mut sim, node) = one_node(seed);
+    let opened = Arc::new(AtomicBool::new(false));
+    let committed = Arc::new(AtomicBool::new(false));
+    let (open, commit) = (Arc::clone(&opened), Arc::clone(&committed));
+    let first = node.clone();
+    drop(on_node(&node, "first", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&first, tasks, DIR);
+        let buffer = Buffer::open(config, &mut slots)
+            .await
+            .expect("the first open ends well");
+        open.store(true, Ordering::Relaxed);
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        commit.store(true, Ordering::Relaxed);
+        std::future::pending::<()>().await;
+    }));
+    let step = 10_000;
+    while !opened.load(Ordering::Relaxed) {
+        sim.run_for(Span::from_nanos(step))
+            .expect("the run goes on");
+    }
+    let rest = Span::from_nanos(COMMIT.nanos() - step + cut);
+    sim.run_for(rest).expect("the run goes on");
+    sim.crash(&node, sim::Crash::Process);
+    (sim, node, committed.load(Ordering::Relaxed))
+}
+
+/// A process that opens a ring after a kill at any point of the first commit
+/// reports durable only what a power cut then keeps.
+#[test]
+fn a_tail_reported_durable_after_a_kill_survives_a_power_cut() {
+    each_cut(0..32, 10_000, |seed, cut| {
+        let (mut sim, node, ended) = kill_the_first_commit(seed, cut);
+        let reported = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer =
+                Buffer::open(node_config(&node, tasks, DIR), &mut slots).await?;
+            Ok::<_, Error>(buffer.durable(slots.assign(key(1)), Path::Live))
+        });
+        let reported = reported.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
+        sim.crash(&node, sim::Crash::Power);
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer =
+                Buffer::open(node_config(&node, tasks, DIR), &mut slots).await?;
+            Ok::<_, Error>(buffer.tail(slots.assign(key(1)), Path::Live))
+        });
+        let recovered = recovered.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
+        assert_eq!(recovered, reported, "seed {seed}, cut at {cut} ns");
         ended
     });
 }
