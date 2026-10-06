@@ -151,7 +151,10 @@ impl env::shards::Driver for Node {
                 let reason = "injected".into();
                 return Err(Error::Start { name, reason });
             }
-            Some((core, Fault::Pin)) => return Err(Error::Pin { name, core }),
+            Some((core, Fault::Pin)) => {
+                let reason = "injected".into();
+                return Err(Error::Pin { name, core, reason });
+            }
             Some((_, Fault::Panic)) => Box::new(|tasks: env::tasks::Tasks| -> Task {
                 tasks.spawn(async { panic!("injected") });
                 let main = main(tasks);
