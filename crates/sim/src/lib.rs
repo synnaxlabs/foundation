@@ -213,17 +213,20 @@ impl Sim {
     ///   those of the futures first, then those of the threads, each in start order.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
+        let wakers = lock(&self.shared).net().crash(node, crash);
         let panics = self.stop(|key| key == node);
+        drop(wakers);
         let ended = lock(&self.shared).crash(node, crash);
         drop(ended);
         assert!(panics.is_empty(), "{}", panics.join(THEN));
     }
 
-    /// A hash of every scheduler pick, every datagram event, every byte arrival on a
+    /// A hash of every scheduler pick, every packet event, every byte arrival on a
     /// line, and every end of a file call so far: the time, addresses, length, and
-    /// fate of a datagram, the time, end, and fate of a byte, and the time, kind,
-    /// and success of a call and whether it took effect at a crash, never the bytes.
-    /// In one build, the same seed and the same calls give the same digest.
+    /// fate of a packet, the kind of a TCP segment, the time, end, and fate of a
+    /// byte, and the time, kind, and success of a call and whether it took effect
+    /// at a crash, never the bytes. In one build, the same seed and the same calls
+    /// give the same digest.
     #[must_use]
     pub fn digest(&self) -> u64 {
         lock(&self.shared).digest()
@@ -241,6 +244,12 @@ impl Sim {
     /// - [`Error::Stuck`] when threads remain but nothing can run again: no task is
     ///   ready on a node that runs, and no timer, arrival, file call, or pause ends
     ///   before the end of true time.
+    ///
+    /// # Panics
+    ///
+    /// When a TCP segment, or the drop of a stream, meets a case that sim does not
+    /// simulate yet, as [`Node::net`](node::Node::net) lists. A case met between
+    /// runs, as in a drop or a crash, panics at the start of the next run.
     pub fn run(&mut self) -> Result<(), Error> {
         self.drive(None)
     }
@@ -313,7 +322,7 @@ impl Sim {
     ///
     /// # Panics
     ///
-    /// When `span` reaches past the end of true time.
+    /// When `span` reaches past the end of true time, and as [`Sim::run`].
     pub fn run_for(&mut self, span: Span) -> Result<(), Error> {
         let span = span.max(Span::ZERO);
         let end = lock(&self.shared).after(span);
@@ -328,7 +337,12 @@ impl Sim {
     fn drive(&mut self, end: Option<Monotonic>) -> Result<(), Error> {
         let mut steps = self.config.steps_max;
         loop {
-            let next = lock(&self.shared).next(end);
+            let mut state = lock(&self.shared);
+            let (yet, next) = (state.net().yet(), state.next(end));
+            drop(state);
+            if let Some(yet) = yet {
+                panic!("{yet}");
+            }
             let Some(next) = next else { break };
             steps = steps.checked_sub(1).ok_or(Error::Steps {
                 max: self.config.steps_max,
@@ -495,7 +509,7 @@ pub enum Crash {
     /// keeps each call that ended. Each file call in flight ends at the crash: a
     /// write keeps any subset of its sectors, as one whose future dropped, and each
     /// other call takes its effect or none, so a create makes the whole file or
-    /// none.
+    /// none. Each TCP stream and listener drops.
     Process,
     /// The machine loses power and boots again: a `Process` crash, and then the
     /// loss of what is not durable.
@@ -508,6 +522,8 @@ pub enum Crash {
     ///   and what those entries no longer reach is gone.
     /// - The monotonic clock reads [`node::Config::monotonic`] again. The wall
     ///   clock runs on.
+    /// - Each TCP stream and listener ends with no segment, so a peer gets an RST
+    ///   only when it sends.
     Power,
 }
 

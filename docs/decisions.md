@@ -243,7 +243,9 @@ How to read this record:
   accepted as is; the `buffer` read reports any gap (B2). Named readers write a position
   record at once when they open, close, or are taken over, and on the home's interval
   when the position changed. A session open at a crash restores as closed at the
-  restore. Supersedes the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
+  restore. Complete and latest sessions have separate key types, so a call in the
+  wrong mode does not compile (#725). Supersedes the B3 single position. Basis: A6,
+  A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -1875,6 +1877,20 @@ How to read this record:
   not run drops the same way, after the futures. A thread that a drop starts on the
   crashing node ends in the crash and never runs. Built by `simulation` in #548 and
   #666.
+- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
+  segment is never lost or duplicated. It arrives after the delay and a jitter draw of
+  its link, and never before an earlier segment in its direction, so each direction
+  keeps its order. A connect is ready after one round trip and its accept after one
+  and a half. The receive buffer sets the window, the send buffer holds the bytes that
+  the peer has not received, and a write waits while `unsent_bytes_max` bytes are not
+  sent. A drop before close, or with bytes unread, sends an RST; a drop after close
+  sends the bytes and the FIN. A process crash drops each stream. A power cut sends
+  nothing, so the peer gets an RST only when it sends. A case that `sim` does not
+  model panics with "sim does not simulate ... yet": a link with loss, `delayed`
+  sends, a connect to an address with no node, a full backlog, and a SYN to a live
+  stream. Rejected: retransmission over a lossy link (a full TCP state machine to
+  test before a carrier needs it), and a pipe of bytes with no segments (no window,
+  so no test of a writer that a slow reader stops). Built by `simulation` in #113.
 - **SIM DROP (2026-10-06)** The drop of a `Sim` drops each live future in its own
   `catch_unwind`. If any panicked, it then panics once with every message, the first
   one first, but only when the thread is not already panicking. This is the one
@@ -1905,6 +1921,18 @@ How to read this record:
   2026-10-05 ("Yeah taht's fine"), #461. `block::testing::{Scarce, Switch}`, behind
   the `sim` feature, is heap memory whose commits a test makes refuse, so a crate
   above `block` tests a refused commit through its production path (#591).
+- **SHARD POOLS (2026-10-06)** `Node::start` makes one `block::Pool` for each shard
+  and moves it into the shard, which drops it (M4). Each of `n` shards gets
+  `budget / n`, and shard 0 also gets the remainder, so the parts add up to the node's
+  budget (MEMORY BOUNDS). The memory comes from `node::Config::memory`, a closure that
+  `node` calls once per shard, in order of core: production passes
+  `os::memory::Memory::new`, and `sim` tests pass `block::Heap`. A shard with no memory
+  is a start failure: later shards do not start, the node stops, and `join` gives
+  `Error::Memory` with the core and the `os::memory::Error`. Lost: making the pool on
+  the shard's thread, which needs a second path for the error and a `Send + Sync`
+  seam. The purge timer and `reclaim` on each loop turn land with the first PR that
+  allocates from a pool, since no test can see either before then (#410). Proposed
+  by `ops` in #410; approved by the coordinator on #806.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -2144,7 +2172,7 @@ Storage classes used in the table:
 | Effective settings | Memory: a per-node cache of `spec::resolve` results | `mesh` | `home`, `transport`, `clock`, supervisor | `mesh` |
 | Document | Memory: made by a front end from files, or by SDK code | Front ends | `config`, kinds | `document` (X21) |
 | Diagnostic | Memory: made from a producer's error | Front ends, kinds, `document` | `config`, `ops` (text, `--json`, MCP) | `document` (DIAGNOSTICS) |
-| Selector | A value inside policies, readers, connectors, and access | Files, sessions | Every matcher | `types` (one matcher) |
+| Selector | A value inside policies, readers, connectors, and access, kept as written. Equality compares the texts in order, so equal selectors encode to equal bytes (#836) | Files, sessions | Every matcher | `types` (one matcher) |
 | Plan | A JSON artifact with stable change kinds | `ops plan` | `ops apply` (commits exactly it) | `config`, `ops` |
 
 ### 2.5 Connectors, time, status, and node-local state
@@ -2734,7 +2762,8 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 2 | `hub` | Is the one path for every read and write: sessions across homes, routing, live selectors, the server loop, authentication, encode and decode once, raw cursors for replicas, re-index stitching, and the layer-3 window. | `env`, `types`, `block`, `ring`, `codec`, `wire`, `spec`, `transport`, `clock`, `mesh`, `home` |
 | 3 | `secret` | Resolves a named secret on the node that runs a connector, through store adapters chosen by policy; `node` hands it the sealed ciphertexts it pulls from `mesh`. Seals a value to a node's seal key, and opens it. | layer 1 |
 | 3 | `connector` | Defines the kind contract (parse, check, discover, run), the thin supervisor, `ctx`, the component library, and the compositions. | layer 1, `hub`, `secret` |
-| 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags |
+| 3 | `connector-<kind>` | Translates one protocol, device family, store, or the calculation engine into channels. | layer 1, `hub`, `connector`; vendor libraries behind build flags, except a library loaded at run time, which links nothing |
+| 3 | `daqmx-stub` | Stands in for NI's `libnidaqmx.so` in the tests of `connector-ni`, built as a shared library and as a Rust library. A dev-dependency of `connector-ni` only. | none |
 | 4 | `config-hcl` | Reads and writes HCL files as Documents. | `types`, `document` |
 | 4 | `config` | Checks core definitions in Documents, expands templates, hands connector blocks to kinds, and computes plans, explains, and exports. | layer 1, `connector` |
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
@@ -2796,7 +2825,7 @@ conclusion together". Each one is listed below.
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
   and generated names as strings (#701).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
-  the STREAM WIRE hello (#55).
+  the STREAM WIRE hello (#55), a reader session key type per mode (#725).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
