@@ -73,8 +73,9 @@ pub struct Raft {
     voters: Voters,
     // Where the log holds `voters`: the zero position for `Start.voters`.
     in_force: Position,
-    // The voters in force, plus the nodes that the configuration in force removed,
-    // until a release, a quorum check, or the next configuration drops them.
+    // The other voters in force, plus the nodes that the configuration in force
+    // removed, until a release, a quorum check, or the next configuration drops them.
+    // Never this node.
     peers: BTreeMap<node::Key, Peer>,
     election_ticks: u64,
     heartbeat_ticks: u64,
@@ -133,6 +134,7 @@ impl Raft {
         let peers = log
             .nodes()
             .into_iter()
+            .filter(|&node| node != key)
             .map(|key| (key, Peer::new(last.index)))
             .collect();
         let (term, vote) = if hard.term < last.term {
@@ -484,7 +486,7 @@ impl Raft {
             .map(|(&key, _)| key)
             .collect();
         for key in removed {
-            if leader && key != self.key {
+            if leader {
                 self.send_heartbeat(key);
             }
             self.peers.remove(&key);
@@ -603,7 +605,8 @@ impl Raft {
         self.in_force = at;
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
-        let keep = self.log.nodes();
+        let mut keep = self.log.nodes();
+        keep.remove(&self.key);
         self.peers.retain(|key, _| keep.contains(key));
         for key in keep {
             let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
@@ -640,7 +643,7 @@ impl Raft {
         let commit = self.log.committed();
         let removed_end = self.removed_end();
         for (&to, peer) in self.peers.range_mut(range) {
-            if to == self.key || peer.progress.paused() {
+            if peer.progress.paused() {
                 continue;
             }
             let next = peer.progress.next();
@@ -740,9 +743,7 @@ impl Raft {
             self.heartbeat_elapsed = 0;
             let peers: Vec<node::Key> = self.peers.keys().copied().collect();
             for to in peers {
-                if to != self.key {
-                    self.send_heartbeat(to);
-                }
+                self.send_heartbeat(to);
             }
         }
     }
@@ -780,7 +781,7 @@ impl Raft {
                 last: self.log.last(),
             },
         );
-        self.poll(self.key, true);
+        self.count();
     }
 
     fn become_candidate(&mut self) {
@@ -797,7 +798,7 @@ impl Raft {
                 last: self.log.last(),
             },
         );
-        self.poll(self.key, true);
+        self.count();
     }
 
     fn become_leader(&mut self) {
@@ -846,7 +847,19 @@ impl Raft {
             return;
         };
         peer.vote.get_or_insert(granted);
-        match self.voters.tally(|key| self.peer(key).vote) {
+        self.count();
+    }
+
+    // Acts when the answers decide the current campaign. This node grants itself.
+    fn count(&mut self) {
+        let vote = |key| {
+            if key == self.key {
+                Some(true)
+            } else {
+                self.peer(key).vote
+            }
+        };
+        match self.voters.tally(vote) {
             Tally::Won => match self.role {
                 Role::PreCandidate => self.become_candidate(),
                 Role::Candidate => self.become_leader(),
@@ -884,14 +897,12 @@ impl Raft {
 
     fn broadcast(&mut self, term: Term, body: &Body) {
         for &to in self.peers.keys() {
-            if to != self.key {
-                self.outbox.push(Message {
-                    from: self.key,
-                    to,
-                    term,
-                    body: body.clone(),
-                });
-            }
+            self.outbox.push(Message {
+                from: self.key,
+                to,
+                term,
+                body: body.clone(),
+            });
         }
     }
 
@@ -2617,7 +2628,42 @@ mod tests {
             appended.step(append).unwrap();
             let peers = |raft: &Raft| raft.peers.keys().copied().collect::<Vec<_>>();
             assert_eq!(peers(&restarted), peers(&appended));
-            assert_eq!(peers(&restarted), [key(1), key(2), key(3)]);
+            assert_eq!(peers(&restarted), [key(1), key(2)]);
+        }
+
+        // The leave that removes node 1 is not committed, so node 1 may campaign. It
+        // has no vote of its own to count: 2 and 3 elect it.
+        #[test]
+        fn a_removed_leader_campaigns_with_no_peer_of_its_own() {
+            let mut raft = leader();
+            assert!(!raft.peers.contains_key(&key(1)));
+            raft.propose_voters(set(&[2, 3])).unwrap();
+            accept(&mut raft, &[2, 3], 2);
+            assert_eq!(raft.voters(), &voters(&[2, 3], &[]));
+            tick_times(&mut raft, 20);
+            assert_eq!(raft.role(), Role::Follower);
+            elect(&mut raft, &[2, 3]);
+            assert!(!raft.peers.contains_key(&key(1)));
+        }
+
+        // Node 1 is in neither `Start.voters` nor the change, which is not committed.
+        // It may campaign, and needs a quorum of the others.
+        #[test]
+        fn a_node_outside_both_configurations_campaigns_without_its_own_vote() {
+            let mut raft = raft(&[2, 3], Hard::default());
+            let joint = voters(&[2, 3, 4], &[2, 3]);
+            let change = append(Position::default(), vec![config(1, 1, joint)], 0);
+            raft.step(message(2, 1, change)).unwrap();
+            sent(&mut raft);
+            raft.campaign();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4)]);
+            let granted = Body::PreVoteReply { granted: true };
+            raft.step(message(2, 2, granted.clone())).unwrap();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            raft.step(message(3, 2, granted)).unwrap();
+            assert_eq!(raft.role(), Role::Candidate);
+            assert!(!raft.peers.contains_key(&key(1)));
         }
 
         // Node 1 restarts with the leave of node 4 applied: the leave is committed
