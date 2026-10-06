@@ -215,7 +215,7 @@ struct State {
     logs: Logs,
     /// How many deadlines took the groups to write.
     taken: u64,
-    /// How many deadlines synced what they took.
+    /// How many deadlines ended with no error.
     commits: u64,
     wakers: Vec<Waker>,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
@@ -239,8 +239,8 @@ impl State {
         self.queue.push(full.close(&mut self.writer));
     }
 
-    /// Moves the durable tails past the synced `sealed` groups and keeps their
-    /// records as spares.
+    /// Moves the durable tails past the synced `sealed` groups, keeps their records
+    /// as spares, and counts the commit.
     fn synced(&mut self, sealed: impl Iterator<Item = Sealed>) {
         for record in sealed {
             for (&slot, header) in record.slots().iter().zip(record.headers()) {
@@ -368,9 +368,11 @@ impl Buffer {
         self.shared.state.borrow().logs.durable(slot, path)
     }
 
-    /// How many group commits ended since the open. It grows by one at the end of
-    /// each commit, also one with nothing to write, before the [`Commit`] futures
-    /// that the commit resolves wake. A failed commit does not move it.
+    /// How many group commits ended since the open, with or without entries. It
+    /// moves before the [`Commit`] futures that the commit resolves wake, and a
+    /// failed commit does not move it. A move does not make every entry durable: an
+    /// entry appended while a commit runs goes in the next one, so read
+    /// [`durable`](Self::durable) after a move.
     #[must_use]
     pub fn commits(&self) -> u64 {
         self.shared.state.borrow().commits
