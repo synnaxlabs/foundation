@@ -127,9 +127,7 @@ fn to_usize(value: u64) -> usize {
     usize::try_from(value).expect("fits in usize")
 }
 
-/// `halves` half commit spans.
-/// `count` commit spans, where `count` is in halves: `commits(21)` is ten and a
-/// half.
+/// `halves` half commit spans: `commits(21)` is ten and a half.
 fn commits(halves: i64) -> Span {
     Span::from_nanos(COMMIT.nanos() / 2 * halves)
 }
@@ -941,11 +939,12 @@ fn a_drop_ends_the_commit_task() {
         buffer.committed().await.expect("commits");
         assert_eq!(shard.memory.syncs(), 3);
         buffer
-            .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
+            .append([entry(1, a, Path::Live, 3, 1, Some(31), Parts::default())])
             .expect("queues");
         drop(buffer);
         shard.clock.sleep(commits(10)).await;
-        assert_eq!(shard.memory.syncs(), 3, "no deadline runs after the drop");
+        assert_eq!(shard.memory.syncs(), 4, "one deadline runs after the drop");
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -953,8 +952,44 @@ fn a_drop_ends_the_commit_task() {
             .expect("reopens");
         assert_eq!(
             buffer.tail(slots.assign(key(1)), Path::Live),
-            tail(3, Some(30)),
-            "the entry queued at the drop was not written"
+            tail(4, Some(31)),
+            "the entry queued at the drop was written"
+        );
+    });
+}
+
+/// A `Commit` on an entry queued at the drop resolves when the deadline after the
+/// drop writes the entry.
+#[test]
+fn a_commit_on_an_entry_queued_at_the_drop_resolves_at_the_next_deadline() {
+    run(136, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let commit = buffer.committed();
+        drop(buffer);
+        let started = shard.clock.now();
+        assert_eq!(commit.await, Ok(()), "the deadline wrote the entry");
+        assert_eq!(shard.clock.now() - started, COMMIT, "at the next deadline");
+        assert_eq!(
+            shard.memory.open_files(),
+            0,
+            "the ring closed with the future"
+        );
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        assert_eq!(
+            buffer.tail(slots.assign(key(1)), Path::Live),
+            tail(1, Some(1))
         );
     });
 }
@@ -2026,7 +2061,7 @@ fn step() -> impl Strategy<Value = Step> {
 type Model = types::hash::Map<(u32, Path), Tail>;
 
 /// Runs the steps against a model: `tails` moves at each append, `durable` at each
-/// commit, and a reopen keeps only what was committed.
+/// commit and at the drop before a reopen.
 async fn follow(shard: Shard, steps: Vec<Step>) {
     let large = layout(256 * BLOCK, BODY_MAX);
     let mut slots = Slots::new();
@@ -2060,10 +2095,14 @@ async fn follow(shard: Shard, steps: Vec<Step>) {
                 durable.clone_from(&tails);
             }
             Step::Reopen => {
+                let ending = buffer.committed();
                 drop(buffer);
+                ending
+                    .await
+                    .expect("the task writes the queue before it ends");
+                durable.clone_from(&tails);
                 slots = Slots::new();
                 buffer = shard.open(large, &mut slots).await.expect("reopens");
-                tails.clone_from(&durable);
             }
         }
         for index in 0..3 {
@@ -2099,7 +2138,7 @@ proptest! {
 }
 
 #[test]
-fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_once() {
+fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_its_deadline() {
     run(40, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
@@ -2112,13 +2151,14 @@ fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_once() {
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         drop(buffer);
-        shard
-            .clock
-            .sleep(Span::from_nanos(COMMIT.nanos() / 4))
-            .await;
+        shard.clock.sleep(tenths(9)).await;
+        assert_eq!(shard.memory.syncs(), 2, "the entry waits for the deadline");
+        assert_eq!(shard.memory.open_files(), 1, "the task runs");
+        shard.clock.sleep(tenths(2)).await;
+        assert_eq!(shard.memory.syncs(), 3, "the deadline writes the entry");
         assert_eq!(shard.memory.open_files(), 0, "the task ended");
         shard.clock.sleep(commits(10)).await;
-        assert_eq!(shard.memory.syncs(), 2, "no deadline runs after the drop");
+        assert_eq!(shard.memory.syncs(), 3, "no later deadline runs");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -2126,14 +2166,14 @@ fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_once() {
             .expect("reopens");
         assert_eq!(
             buffer.tail(slots.assign(key(1)), Path::Live),
-            tail(0, None),
-            "the entry queued at the drop was not written"
+            tail(3, Some(30)),
+            "the entry queued at the drop was written"
         );
     });
 }
 
 #[test]
-fn a_drop_during_a_commit_ends_the_task_after_the_sync() {
+fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
     run(41, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
@@ -2160,13 +2200,11 @@ fn a_drop_during_a_commit_ends_the_task_after_the_sync() {
             "the task syncs the first entry"
         );
         shard.clock.sleep(sync).await;
-        assert_eq!(
-            shard.memory.open_files(),
-            0,
-            "the task ended after the sync"
-        );
+        assert_eq!(shard.memory.syncs(), 3, "the first sync ended");
+        assert_eq!(shard.memory.open_files(), 1, "the second entry waits");
         shard.clock.sleep(commits(10)).await;
-        assert_eq!(shard.memory.syncs(), 3, "no deadline runs after the drop");
+        assert_eq!(shard.memory.syncs(), 4, "the next deadline writes it");
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -2174,8 +2212,8 @@ fn a_drop_during_a_commit_ends_the_task_after_the_sync() {
             .expect("reopens");
         assert_eq!(
             buffer.tail(slots.assign(key(1)), Path::Live),
-            tail(1, Some(1)),
-            "the entry queued at the drop was not written"
+            tail(2, Some(2)),
+            "the entry queued at the drop was written"
         );
     });
 }
@@ -2413,5 +2451,194 @@ fn a_commit_held_across_two_later_commits_resolves_well() {
         shard.clock.sleep(commits(3)).await;
         assert_eq!(buffer.commits(), 3, "two commits ran after its own");
         assert_eq!(held.await, Ok(()), "its entries are durable");
+    });
+}
+
+/// A `Commit` does not borrow its buffer: the buffer moves and takes an append
+/// while the future is pending, and the future resolves with its entries durable.
+#[test]
+fn a_commit_outlives_the_borrow_of_its_buffer() {
+    run(133, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let commit = buffer.committed();
+        let moved = Box::new(buffer);
+        moved
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues while the future is pending");
+        assert_eq!(commit.await, Ok(()), "its entries are durable");
+        assert_eq!(moved.durable(a, Path::Live), tail(2, Some(2)));
+    });
+}
+
+/// A `Commit` held past the drop of its buffer during a sync resolves with the
+/// sync's result, and the ring closes when the future drops.
+#[test]
+fn a_commit_held_past_the_drop_during_a_sync_resolves_with_the_sync() {
+    run(134, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        let commit = buffer.committed();
+        drop(buffer);
+        shard.clock.sleep(tenths(4)).await;
+        assert_eq!(
+            shard.memory.open_files(),
+            1,
+            "the future holds the ring open"
+        );
+        assert_eq!(commit.await, Ok(()), "the sync made its entries durable");
+        assert_eq!(
+            shard.memory.open_files(),
+            0,
+            "the ring closed with the future"
+        );
+    });
+}
+
+/// A `Commit` held past the drop of its buffer during a failing sync resolves
+/// with the error that ended the buffer.
+#[test]
+fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
+    run(135, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(12)).await;
+        let commit = buffer.committed();
+        drop(buffer);
+        let ended = Err(FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        });
+        assert_eq!(commit.await, ended, "the sync failed");
+        assert_eq!(
+            shard.memory.open_files(),
+            0,
+            "the ring closed with the future"
+        );
+    });
+}
+
+/// A `Commit` taken before a later append and held past the drop resolves only when
+/// the task wrote that append and ended, so a reopen after it recovers everything.
+#[test]
+fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
+    run(137, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let commit = buffer.committed();
+        shard.clock.sleep(tenths(12)).await;
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues while the first sync runs");
+        drop(buffer);
+        let dropped = shard.clock.now();
+        assert_eq!(commit.await, Ok(()), "the task wrote both entries");
+        assert_eq!(
+            shard.clock.now() - dropped,
+            tenths(12),
+            "after the second sync"
+        );
+        assert_eq!(shard.memory.syncs(), 4);
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        assert_eq!(
+            buffer.tail(slots.assign(key(1)), Path::Live),
+            tail(2, Some(2))
+        );
+    });
+}
+
+/// A `Commit` on an entry queued at the drop resolves with the error of the write
+/// after the drop.
+#[test]
+fn a_commit_on_an_entry_queued_at_the_drop_resolves_with_a_failed_write() {
+    run(138, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let commit = buffer.committed();
+        drop(buffer);
+        let ended = Err(FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        });
+        assert_eq!(commit.await, ended, "the write after the drop failed");
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+    });
+}
+
+/// A synced `Commit` held past the drop resolves well when the write after the
+/// drop fails.
+#[test]
+fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
+    run(139, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let first = buffer.committed();
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues");
+        drop(buffer);
+        assert_eq!(
+            first.await,
+            Ok(()),
+            "its entries were durable before the drop"
+        );
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
     });
 }
