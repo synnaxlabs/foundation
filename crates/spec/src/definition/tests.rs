@@ -174,6 +174,18 @@ fn refuses_an_exclusion_flag_that_is_not_0_or_1() {
 }
 
 #[test]
+fn refuses_a_bad_flag_before_a_short_text() {
+    let mut bytes = vec![VERSION, ACCESS];
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.push(2);
+    bytes.extend_from_slice(&255_u64.to_le_bytes());
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::Excluded { at: 10, found: 2 })
+    );
+}
+
+#[test]
 fn refuses_an_included_pattern_that_starts_with_a_bang() {
     let mut bytes = vec![VERSION, ACCESS];
     bytes.extend_from_slice(&1_u64.to_le_bytes());
