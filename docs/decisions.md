@@ -1517,9 +1517,9 @@ How to read this record:
   person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
   binary larger is fine." "we should be careful about writing raw HTTP transports.",
   relayed by `advisor`; "Yes I approve", to the coordinator) (#341). A later yes to
-  `httparse` for a reader in `connector-influx` (#983) did not change this: asked
-  "Should connector drop `httparse` and use `hyper`?", the person said "Yes" on
-  2026-10-06. `httparse` comes in only as a dependency of `hyper`.
+  `httparse` for a reader in `connector-influx` (#213, used by #983) did not change
+  R7: asked "Should connector drop `httparse` and use `hyper`?", the person said "Yes"
+  on 2026-10-06. `httparse` comes in only as a dependency of `hyper`.
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
