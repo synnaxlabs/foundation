@@ -111,9 +111,9 @@ impl<const N: usize> Reader<N> {
     /// against the loads around it. A counter read is not a memory operation, so only
     /// the clock adapter can order it.
     ///
-    /// A read that returns the new value comes after the whole update: it sees each
-    /// write that the writer's thread made before the update ended, in the update's
-    /// closure or before it.
+    /// A read whose value has a word that the update changed comes after the whole
+    /// update: it sees each write that the writer's thread made before the update
+    /// ended, in its `f` or before it.
     pub fn read<R>(&self, mut f: impl FnMut([u64; N]) -> R) -> R {
         loop {
             let mut before = self.shared.seq.load(Acquire);
