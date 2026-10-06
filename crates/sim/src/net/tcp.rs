@@ -234,12 +234,12 @@ impl Lanes {
 pub(super) struct Sockets {
     ends: BTreeMap<u64, End>,
     /// The key of the end that takes the segments to each pair.
-    table: BTreeMap<Pair, u64>,
+    routes: BTreeMap<Pair, u64>,
     listeners: BTreeMap<u64, Listening>,
     /// The port of the last connect of each node.
     ports: BTreeMap<usize, u16>,
-    /// The last key of an end or a listener.
-    next: u64,
+    /// The last key given to an end or a listener.
+    last: u64,
     lanes: Lanes,
 }
 
@@ -249,18 +249,26 @@ impl Sockets {
         self.lanes.yet.take()
     }
 
+    /// A key that no end or listener has had.
+    fn key(&mut self) -> u64 {
+        self.last += 1;
+        self.last
+    }
+
     /// Adds `end`, which takes the segments to its pair, and gives its key.
     fn insert(&mut self, end: End) -> u64 {
-        self.next += 1;
-        self.table.insert(end.pair, self.next);
-        self.ends.insert(self.next, end);
-        self.next
+        let key = self.key();
+        let routed = self.routes.insert(end.pair, key);
+        assert!(routed.is_none(), "invariant: a pair has one end");
+        self.ends.insert(key, end);
+        key
     }
 
     /// Removes end `key`.
     fn remove(&mut self, key: u64) -> End {
         let end = (self.ends.remove(&key)).expect("invariant: the end lives");
-        self.table.remove(&end.pair);
+        let routed = self.routes.remove(&end.pair);
+        assert_eq!(routed, Some(key), "invariant: the end has its pair");
         end
     }
 }
@@ -307,19 +315,18 @@ impl<'a> Tcp<'a> {
             queue: VecDeque::new(),
             waker: None,
         };
-        self.sockets.next += 1;
-        let key = self.sockets.next;
-        self.sockets.listeners.insert(key, listening);
-        Ok((key, local))
+        let listener = self.sockets.key();
+        self.sockets.listeners.insert(listener, listening);
+        Ok((listener, local))
     }
 
-    /// Stops listener `key`, and resets the streams that it has not accepted. A
+    /// Stops `listener`, and resets the streams that it has not accepted. A
     /// listener that a power cut ended is gone already. Returns the waker of its
     /// accept, for the caller to drop after it releases the lock.
-    pub(crate) fn unlisten(&mut self, now: Monotonic, key: u64) -> Option<Waker> {
-        let listening = self.sockets.listeners.remove(&key)?;
-        for end in listening.queue {
-            let end = self.sockets.remove(end);
+    pub(crate) fn unlisten(&mut self, now: Monotonic, listener: u64) -> Option<Waker> {
+        let listening = self.sockets.listeners.remove(&listener)?;
+        for key in listening.queue {
+            let end = self.sockets.remove(key);
             if !end.reset {
                 self.sockets.lanes.send(self.wire, now, end.pair, Kind::Rst);
             }
@@ -327,27 +334,27 @@ impl<'a> Tcp<'a> {
         listening.waker
     }
 
-    /// Takes the next stream that listener `key` has, and gives the key and the pair
-    /// of its end, or keeps `waker`. A listener that a power cut ended never has one.
+    /// Takes the next stream that `listener` has, and gives the key and the pair of
+    /// its end, or keeps `waker`. A listener that a power cut ended never has one.
     /// Returns the old waker, for the caller to drop after it releases the lock.
     pub(crate) fn accept(
         &mut self,
-        key: u64,
+        listener: u64,
         waker: &Waker,
     ) -> (Poll<(u64, Pair)>, Option<Waker>) {
-        let Some(listening) = self.sockets.listeners.get_mut(&key) else {
+        let Some(listening) = self.sockets.listeners.get_mut(&listener) else {
             return (Poll::Pending, None);
         };
         let ends = &mut self.sockets.ends;
         let queued = (listening.queue.iter())
-            .position(|end| ends[end].phase == Phase::Queued(key));
+            .position(|key| ends[key].phase == Phase::Queued(listener));
         let Some(index) = queued else {
             return (Poll::Pending, listening.waker.replace(waker.clone()));
         };
-        let end = (listening.queue.remove(index)).expect("invariant: found");
-        let opened = (ends.get_mut(&end)).expect("invariant: queued");
-        opened.phase = Phase::Open;
-        (Poll::Ready((end, opened.pair)), None)
+        let key = (listening.queue.remove(index)).expect("invariant: found");
+        let end = (ends.get_mut(&key)).expect("invariant: queued");
+        end.phase = Phase::Open;
+        (Poll::Ready((key, end.pair)), None)
     }
 
     /// Connects from `node` to `remote`: sends a SYN from the next free port after
@@ -507,9 +514,7 @@ impl<'a> Tcp<'a> {
     /// unread, the peer gets an RST; after it, the end lives on as an orphan. Returns
     /// the end's wakers, for the caller to drop after it releases the lock.
     pub(crate) fn drop(&mut self, now: Monotonic, key: u64) -> [Option<Waker>; 2] {
-        let Some(end) = self.sockets.ends.get_mut(&key) else {
-            return [None, None];
-        };
+        let end = self.end(key);
         let wakers = [end.reading.take(), end.writing.take()];
         let open = end.phase == Phase::Open && !end.reset;
         if open && end.fin != Fin::Unwritten && end.inbox.is_empty() {
@@ -576,15 +581,15 @@ impl<'a> Tcp<'a> {
             local: destination,
             peer: source,
         };
-        let live = (self.sockets.table.get(&pair).copied())
-            .filter(|&key| self.end(key).live());
-        match (kind, live) {
+        let route = self.sockets.routes.get(&pair).copied();
+        let receiver = route.filter(|&key| self.end(key).live());
+        match (kind, receiver) {
             (Kind::Syn { edge }, _) => {
-                self.syn(at, pair, edge);
+                self.syn(at, pair, route, edge);
                 Vec::new()
             }
-            (Kind::SynAck { edge }, _) => self.syn_ack(at, pair, edge),
-            (Kind::Rst, _) => self.rst(pair),
+            (Kind::SynAck { edge }, _) => self.syn_ack(at, pair, route, edge),
+            (Kind::Rst, _) => route.map_or_else(Vec::new, |key| self.rst(key)),
             (_, None) => {
                 self.sockets.lanes.send(self.wire, at, pair, Kind::Rst);
                 Vec::new()
@@ -602,10 +607,10 @@ impl<'a> Tcp<'a> {
         }
     }
 
-    /// Takes a SYN to `pair` from its peer: a listener that receives it answers, and
-    /// otherwise an RST does.
-    fn syn(&mut self, at: Monotonic, pair: Pair, edge: usize) {
-        if self.sockets.table.contains_key(&pair) {
+    /// Takes a SYN to `pair` from its peer, which `route` has: a listener that
+    /// receives it answers, and otherwise an RST does.
+    fn syn(&mut self, at: Monotonic, pair: Pair, route: Option<u64>, edge: usize) {
+        if route.is_some() {
             self.sockets.lanes.yet.get_or_insert(REOPENED);
             return;
         }
@@ -630,11 +635,16 @@ impl<'a> Tcp<'a> {
             .send(self.wire, at, pair, Kind::SynAck { edge });
     }
 
-    /// Takes the SYN-ACK of the connect of `pair`. With no connect there, an RST
-    /// answers.
-    fn syn_ack(&mut self, at: Monotonic, pair: Pair, edge: usize) -> Vec<Waker> {
-        let key = (self.sockets.table.get(&pair).copied())
-            .filter(|&key| self.end(key).phase == Phase::Connecting);
+    /// Takes the SYN-ACK of the connect of `pair`, which `route` has. With no
+    /// connect there, an RST answers.
+    fn syn_ack(
+        &mut self,
+        at: Monotonic,
+        pair: Pair,
+        route: Option<u64>,
+        edge: usize,
+    ) -> Vec<Waker> {
+        let key = route.filter(|&key| self.end(key).phase == Phase::Connecting);
         let Some(key) = key else {
             self.sockets.lanes.send(self.wire, at, pair, Kind::Rst);
             return Vec::new();
@@ -646,11 +656,8 @@ impl<'a> Tcp<'a> {
         waker.into_iter().collect()
     }
 
-    /// Takes an RST to `pair`. An RST never gets an answer.
-    fn rst(&mut self, pair: Pair) -> Vec<Waker> {
-        let Some(&key) = self.sockets.table.get(&pair) else {
-            return Vec::new();
-        };
+    /// Takes an RST to `key`. An RST never gets an answer.
+    fn rst(&mut self, key: u64) -> Vec<Waker> {
         let end = self.end(key);
         match end.phase {
             Phase::Connecting => {
