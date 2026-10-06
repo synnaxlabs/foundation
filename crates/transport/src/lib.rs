@@ -46,6 +46,8 @@ mod message;
 mod quic;
 mod session;
 pub mod stream;
+#[cfg(test)]
+mod testing;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the TCP and QUIC carriers are the first users")
