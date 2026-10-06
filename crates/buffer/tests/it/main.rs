@@ -686,6 +686,60 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
     });
 }
 
+/// `append` refuses a batch with `Rejected::Large(limit)` exactly when
+/// `Layout::check` gives `Err(limit)` for its counts, so a caller can check a
+/// batch before it takes the blocks of its entries.
+#[test]
+fn an_append_is_large_exactly_when_the_layout_check_fails() {
+    run(141, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let max = buffer.layout().entry_max();
+        let cases = [
+            (1, 1, 0),
+            (1, 1, max),
+            (1, 1, max + 1),
+            (1, 2, max),
+            (2, 2, max - 51),
+            (2, 2, max - 50),
+            (1023, 0, 0),
+            (1024, 0, 0),
+            (512, 1024, 0),
+            (1023, 1023, 0),
+        ];
+        let mut next = 0;
+        for (entries, parts, bytes) in cases {
+            let batch: Vec<Entry> = (0..entries)
+                .map(|at| {
+                    let own = (parts * (at + 1)) / entries - (parts * at) / entries;
+                    let first = if at == 0 { bytes } else { 0 };
+                    let parts = match own {
+                        0 => Parts::default(),
+                        1 => Parts::from(shard.block(first)),
+                        _ => Parts::from([shard.block(first), shard.block(0)]),
+                    };
+                    let first = next + u64::try_from(at).expect("a count fits");
+                    entry(1, a, Path::Live, first, 1, None, parts)
+                })
+                .collect();
+            let checked = buffer.layout().check(entries, parts, bytes);
+            let appended = buffer.append(batch);
+            assert_eq!(
+                appended,
+                checked.map_err(Rejected::Large),
+                "{entries} entries, {parts} parts, {bytes} bytes"
+            );
+            if appended.is_ok() {
+                next += u64::try_from(entries).expect("a count fits");
+            }
+        }
+    });
+}
+
 /// A block of a size class only the test uses: two purges give its class back
 /// once the append dropped it. Two, because a purge frees a class that was idle
 /// at the purge before.
