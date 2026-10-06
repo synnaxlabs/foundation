@@ -981,7 +981,8 @@ fn crash_in_first_open(
         flag.store(true, Ordering::Relaxed);
         std::future::pending::<()>().await;
     }));
-    sim.run_for(Span::from_nanos(cut)).expect("the run goes on");
+    sim.run_for(Span::from_nanos(cut))
+        .unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
     sim.crash(&node, crash);
     (sim, node, ended.load(Ordering::Relaxed))
 }
@@ -1001,7 +1002,10 @@ fn open_after_a_cut(
         let buffer = Buffer::open(config, &mut Slots::new()).await;
         buffer.map(|buffer| buffer.layout())
     });
-    (ended, opened.expect("the run ends"))
+    (
+        ended,
+        opened.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}")),
+    )
 }
 
 /// A power cut at any point of the first open leaves a ring that opens again
@@ -1562,7 +1566,10 @@ fn commit_after_a_kill(
         let a = slots.assign(key(1));
         Ok((durable, reopened.tail(a, Path::Live)))
     });
-    (ended, tails.expect("the run ends"))
+    (
+        ended,
+        tails.unwrap_or_else(|e| panic!("kill at {cut} ns: {e}")),
+    )
 }
 
 /// A process kill at any time in the first open of a ring, with a restart at once,
