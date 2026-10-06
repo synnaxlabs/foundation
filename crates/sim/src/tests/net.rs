@@ -937,23 +937,23 @@ const EIO: Net = Net::Io { code: 5 };
 /// The results of receives into a buffer of 8 bytes.
 type Results = Arc<Mutex<Vec<Result<usize, Net>>>>;
 
-/// Starts a shard on `node` that receives from `receiver` into `results` until a
-/// receive fails.
-fn receive_all(node: &node::Node, mut receiver: Receiver, results: &Results) -> Handle {
+/// Starts a shard on `node` that receives from `receiver` into `results` three
+/// times, whatever each result.
+fn receive_three(
+    node: &node::Node,
+    mut receiver: Receiver,
+    results: &Results,
+) -> Handle {
     let results = Arc::clone(results);
     let handle = node.shards().start(shard("receive"), move |_| async move {
-        loop {
+        for _ in 0..3 {
             let (mut bytes, mut meta) = ([0; 8], [Meta::default()]);
             let result = poll_fn(|cx| {
                 let mut buffers = [IoSliceMut::new(&mut bytes)];
                 receiver.poll_recv(cx, &mut buffers, &mut meta)
             })
             .await;
-            let failed = result.is_err();
             results.lock().unwrap().push(result);
-            if failed {
-                break;
-            }
         }
     });
     handle.unwrap()
@@ -961,7 +961,7 @@ fn receive_all(node: &node::Node, mut receiver: Receiver, results: &Results) -> 
 
 /// Fails the socket of `b` on port 4433 `faults` times after three datagrams from
 /// `a` arrive at it, then gives the results of its receives.
-fn failed(faults: usize) -> Vec<Result<usize, Net>> {
+fn results_after(faults: usize) -> Vec<Result<usize, Net>> {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (sender, _a) = udp(&a, 4433);
     let (_b, receiver) = udp(&b, 4433);
@@ -971,20 +971,20 @@ fn failed(faults: usize) -> Vec<Result<usize, Net>> {
         b.fail_udp(at(&b, 4433));
     }
     let results = Results::default();
-    let _receive = receive_all(&b, receiver, &results);
+    let _receive = receive_three(&b, receiver, &results);
     sim.run_for(Span::SECOND).unwrap();
     results.lock().unwrap().clone()
 }
 
 #[test]
-fn a_receive_of_a_failed_socket_gives_eio_before_its_queue() {
-    assert_eq!(failed(0).first(), Some(&Ok(1)));
-    assert_eq!(failed(1), [Err(EIO)]);
+fn each_receive_of_a_failed_socket_gives_eio_and_never_its_queue() {
+    assert_eq!(results_after(0).first(), Some(&Ok(1)));
+    assert_eq!(results_after(1), [Err(EIO), Err(EIO), Err(EIO)]);
 }
 
 #[test]
 fn a_second_fault_does_nothing() {
-    assert_eq!(failed(2), [Err(EIO)]);
+    assert_eq!(results_after(2), [Err(EIO), Err(EIO), Err(EIO)]);
 }
 
 #[test]
@@ -992,11 +992,11 @@ fn a_receive_that_waits_wakes_with_the_fault() {
     let (mut sim, _a, b) = pair(0, link::Config::default());
     let (_b, receiver) = udp(&b, 4433);
     let results = Results::default();
-    let _receive = receive_all(&b, receiver, &results);
+    let _receive = receive_three(&b, receiver, &results);
     sim.run_for(millis(10)).unwrap();
     b.fail_udp(at(&b, 4433));
     sim.run_for(millis(10)).unwrap();
-    assert_eq!(*results.lock().unwrap(), [Err(EIO)]);
+    assert_eq!(*results.lock().unwrap(), [Err(EIO), Err(EIO), Err(EIO)]);
 }
 
 #[test]
@@ -1027,14 +1027,15 @@ fn a_socket_bound_after_a_failed_socket_drops_works() {
     assert_eq!(datagrams(&log), numbered(2));
 }
 
-/// The digest of a run that sends two datagrams from `a` to a socket of `b` that
-/// nothing reads, and that fails first when `faulted`.
-fn arriving(faulted: bool) -> u64 {
+/// The digest of a run that sends two datagrams from `a` to port 4433 of `b`, where
+/// `b` binds a socket that nothing reads at port `bound`, and fails it first when
+/// `faulted`.
+fn arrivals_digest(bound: u16, faulted: bool) -> u64 {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (sender, _a) = udp(&a, 4433);
-    let _b = udp(&b, 4433);
+    let _b = udp(&b, bound);
     if faulted {
-        b.fail_udp(at(&b, 4433));
+        b.fail_udp(at(&b, bound));
     }
     let _send = send(&a, sender, at(&b, 4433), numbered(2));
     sim.run_for(Span::SECOND).unwrap();
@@ -1042,10 +1043,10 @@ fn arriving(faulted: bool) -> u64 {
 }
 
 #[test]
-fn the_datagrams_that_arrive_at_a_failed_socket_are_lost() {
-    let lost = arriving(true);
-    assert_eq!(arriving(true), lost);
-    assert_ne!(arriving(false), lost);
+fn the_datagrams_that_arrive_at_a_failed_socket_drop_as_where_none_is_bound() {
+    let dropped = arrivals_digest(4434, false);
+    assert_eq!(arrivals_digest(4433, true), dropped);
+    assert_ne!(arrivals_digest(4433, false), dropped);
 }
 
 #[test]

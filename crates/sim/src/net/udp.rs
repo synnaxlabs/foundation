@@ -72,7 +72,8 @@ struct Binding {
     queued: usize,
     /// The waker of the last receive that found the queue empty.
     waker: Option<Waker>,
-    /// A fault made it fail.
+    /// From a fault until the socket drops: each receive gives `EIO`, and each
+    /// arrival drops.
     failed: bool,
 }
 
