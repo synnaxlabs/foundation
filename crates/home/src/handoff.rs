@@ -242,8 +242,8 @@ mod tests {
 
             #[test]
             #[should_panic(
-                expected = "the handoff subject is not a name: \"a..b\" has \
-                                       a segment that is not valid: \"\""
+                expected = "the handoff subject is not a name: a segment is not \
+                                       valid: \"\" in \"a..b\""
             )]
             fn panics_on_a_subject_that_is_not_a_name() {
                 read(b"\x07a..b");

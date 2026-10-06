@@ -371,13 +371,13 @@ mod tests {
             for (text, message, fix) in [
                 (
                     "site a",
-                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    "a segment is not valid: \"site a\" in \"site a\"",
                     "Use one or more ASCII letters, digits, `_`, and `-` in that \
-                     segment, and no other character",
+                     segment, after an optional leading `@`",
                 ),
                 (
                     "site_a.*",
-                    "\"site_a.*\" uses a wildcard where it cannot",
+                    "a wildcard is in a name or inside a segment: \"site_a.*\"",
                     "Use `*` and `**` only as whole segments of a pattern, never in a \
                      name",
                 ),
@@ -469,7 +469,7 @@ mod tests {
         }
 
         const SEGMENT: &str = "Use one or more ASCII letters, digits, `_`, and `-` in \
-                               that segment, and no other character";
+                               that segment, after an optional leading `@`";
         const NO_INCLUDE: &str = "Add a pattern without a leading `!`";
 
         #[test]
@@ -511,7 +511,7 @@ mod tests {
                 selector(&list(vec![text("site_a.*"), text("site a"), text("a*b")])),
                 Err(refused(
                     at(1),
-                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    "a segment is not valid: \"site a\" in \"site a\"",
                     SEGMENT
                 ))
             );
@@ -519,7 +519,7 @@ mod tests {
                 selector(&list(vec![text("!site_a.test"), text("!")])),
                 Err(refused(
                     at(1),
-                    "\"!\" has a segment that is not valid: \"\"",
+                    "a segment is not valid: \"\" in \"!\"",
                     SEGMENT
                 ))
             );
@@ -527,7 +527,7 @@ mod tests {
                 selector(&string("a*b")),
                 Err(refused(
                     Some(span()),
-                    "\"a*b\" uses a wildcard where it cannot",
+                    "a wildcard is in a name or inside a segment: \"a*b\"",
                     "Use `*` and `**` only as whole segments of a pattern, never in a \
                      name"
                 ))
@@ -571,7 +571,7 @@ mod tests {
                 selector(&list(vec![text("site a"), Kind::Integer(7)])),
                 Err(refused(
                     at(0),
-                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    "a segment is not valid: \"site a\" in \"site a\"",
                     SEGMENT
                 ))
             );

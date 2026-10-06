@@ -5,7 +5,7 @@
 //! [`Selector`]. No other crate matches names.
 
 use std::cmp::Reverse;
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::str::{FromStr, Split};
 
 /// A name: dot-separated segments of letters, digits, `_`, and `-`, at most
@@ -332,7 +332,7 @@ impl Error {
             Self::NoInclude => "Add a pattern without a leading `!`",
             Self::Segment { .. } => {
                 "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
-                 and no other character"
+                 after an optional leading `@`"
             }
             Self::Wildcard { .. } => {
                 "Use `*` and `**` only as whole segments of a pattern, never in a name"
@@ -352,17 +352,42 @@ impl fmt::Display for Error {
                 Name::MAX_BYTES
             ),
             Self::NoInclude => f.write_str("a selector includes no names"),
-            Self::Segment { input, segment } => {
-                write!(f, "{input:?} has a segment that is not valid: {segment:?}")
-            }
-            Self::Wildcard { input } => {
-                write!(f, "{input:?} uses a wildcard where it cannot")
-            }
+            Self::Segment { input, segment } => write!(
+                f,
+                "a segment is not valid: {} in {}",
+                Quoted(segment),
+                Quoted(input)
+            ),
+            Self::Wildcard { input } => write!(
+                f,
+                "a wildcard is in a name or inside a segment: {}",
+                Quoted(input)
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// Text in double quotes. Printable ASCII shows as written, with a `\` before each `"`
+/// and `\`. Each other character shows as its code point, such as `U+202E`, so no
+/// file syntax's escapes and no character that looks like an ASCII one reach the
+/// reader.
+struct Quoted<'a>(&'a str);
+
+impl fmt::Display for Quoted<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_char('"')?;
+        for c in self.0.chars() {
+            match c {
+                '"' | '\\' => write!(f, "\\{c}")?,
+                ' '..='~' => f.write_char(c)?,
+                _ => write!(f, "U+{:04X}", u32::from(c))?,
+            }
+        }
+        f.write_char('"')
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -387,6 +412,24 @@ mod tests {
     fn wildcard_error(input: &str) -> Error {
         Error::Wildcard {
             input: input.into(),
+        }
+    }
+
+    const SEGMENT_FIX: &str = "Use one or more ASCII letters, digits, `_`, and `-` in \
+                               that segment, after an optional leading `@`";
+    const WILDCARD_FIX: &str =
+        "Use `*` and `**` only as whole segments of a pattern, never in a name";
+
+    #[test]
+    fn states_each_problem_and_its_fix() {
+        for error in [
+            Error::Empty,
+            Error::Long { bytes: 256 },
+            Error::NoInclude,
+            segment_error("a.b c", "b c"),
+            wildcard_error("a.*"),
+        ] {
+            crate::common::assert_stated(&error.to_string(), error.fix());
         }
     }
 
@@ -456,21 +499,39 @@ mod tests {
             let error = "a.b c".parse::<Name>().unwrap_err();
             assert_eq!(
                 error.to_string(),
-                "\"a.b c\" has a segment that is not valid: \"b c\""
+                "a segment is not valid: \"b c\" in \"a.b c\""
             );
-            assert_eq!(
-                error.fix(),
-                "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
-                 and no other character"
-            );
+            assert_eq!(error.fix(), SEGMENT_FIX);
         }
 
         #[test]
-        fn escapes_the_text_in_the_message() {
-            assert_eq!(
-                "a.\"b".parse::<Name>().unwrap_err().to_string(),
-                r#""a.\"b" has a segment that is not valid: "\"b""#
-            );
+        fn escapes_quotes_and_backslashes_in_the_message() {
+            for (input, message) in [
+                ("a.\"b", r#"a segment is not valid: "\"b" in "a.\"b""#),
+                (r"a.b\c", r#"a segment is not valid: "b\\c" in "a.b\\c""#),
+            ] {
+                assert_eq!(input.parse::<Name>().unwrap_err().to_string(), message);
+            }
+        }
+
+        #[test]
+        fn shows_each_other_character_as_its_code_point() {
+            for (segment, shown) in [
+                ("\u{202e}", "U+202E"),
+                ("b\nc", "bU+000Ac"),
+                ("\u{7f}", "U+007F"),
+                ("é", "U+00E9"),
+                ("d\u{430}ta", "dU+0430ta"),
+                ("\u{1f600}", "U+1F600"),
+            ] {
+                assert_eq!(
+                    format!("plc.{segment}")
+                        .parse::<Name>()
+                        .unwrap_err()
+                        .to_string(),
+                    format!("a segment is not valid: \"{shown}\" in \"plc.{shown}\"")
+                );
+            }
         }
 
         #[test]
@@ -479,11 +540,11 @@ mod tests {
                 assert_eq!(input.parse::<Name>(), Err(wildcard_error(input)));
             }
             let error = wildcard_error("a.*");
-            assert_eq!(error.to_string(), "\"a.*\" uses a wildcard where it cannot");
             assert_eq!(
-                error.fix(),
-                "Use `*` and `**` only as whole segments of a pattern, never in a name"
+                error.to_string(),
+                "a wildcard is in a name or inside a segment: \"a.*\""
             );
+            assert_eq!(error.fix(), WILDCARD_FIX);
         }
 
         mod reserved {
@@ -501,10 +562,9 @@ mod tests {
                 for (input, segment) in
                     [("@", "@"), ("a.@", "@"), ("a@b", "a@b"), ("@@a", "@@a")]
                 {
-                    assert_eq!(
-                        input.parse::<Name>(),
-                        Err(segment_error(input, segment))
-                    );
+                    let error = input.parse::<Name>().unwrap_err();
+                    assert_eq!(error, segment_error(input, segment));
+                    assert_eq!(error.fix(), SEGMENT_FIX);
                 }
             }
         }
@@ -531,10 +591,7 @@ mod tests {
             for input in ["a*", "a.***", "a.**b", "*a.b"] {
                 assert_eq!(input.parse::<Pattern>(), Err(wildcard_error(input)));
             }
-            assert_eq!(
-                "a*".parse::<Pattern>().unwrap_err().fix(),
-                "Use `*` and `**` only as whole segments of a pattern, never in a name"
-            );
+            assert_eq!("a*".parse::<Pattern>().unwrap_err().fix(), WILDCARD_FIX);
         }
 
         #[test]
@@ -543,7 +600,7 @@ mod tests {
             assert_eq!(error, segment_error("site.*.t c", "t c"));
             assert_eq!(
                 error.to_string(),
-                "\"site.*.t c\" has a segment that is not valid: \"t c\""
+                "a segment is not valid: \"t c\" in \"site.*.t c\""
             );
         }
 
