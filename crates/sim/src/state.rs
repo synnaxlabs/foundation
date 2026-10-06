@@ -509,9 +509,14 @@ impl State {
 
     /// Ends the crash of `node` that [`State::stop`] began, and the file calls in
     /// flight of the node. After a `Power` crash, its monotonic clock reads its boot
-    /// value again, and its disk keeps what is durable. Returns the blocks of the
-    /// calls, for the caller to drop after it releases the lock.
-    pub(crate) fn crash(&mut self, node: usize, crash: Crash) -> Vec<Held> {
+    /// value again, and its disk keeps what is durable. Returns the wakers of the
+    /// closes and the blocks of the calls, for the caller to drop after it releases
+    /// the lock.
+    pub(crate) fn crash(
+        &mut self,
+        node: usize,
+        crash: Crash,
+    ) -> (Vec<Waker>, Vec<Held>) {
         self.nodes[node].crashing = false;
         let now = self.now;
         if crash == Crash::Power {

@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 983c44d11cddcd839d34b7ca3770aa251c6465c6156f8f1f89dbee81ba1fa676 # shrinks to old = NoSources, new = NoSources, now = 0, drift = Drift(0)
+cc 66f51ac62f826bc3a8d5b573cd11ce14cfe52de585f0def908fd11400111b732 # shrinks to cause = NoSources, m = Measurement { at: Monotonic(0), offset: Span(0), error: Span(0) }, now = 0, drift = Drift(0)
+cc 3f5a8f8cc03d5bdafd6ba1a9ceca424f0938f7a172ebea0b2ab633c7863bdd22 # shrinks to (old, slew) = (Synced(Slew { start: Monotonic(0), from: Span(0), target: Measurement { at: Monotonic(0), offset: Span(0), error: Span(0) } }), Slew { start: Monotonic(0), from: Span(0), target: Measurement { at: Monotonic(0), offset: Span(0), error: Span(0) } }), cause = NoSources, now = 0, drift = Drift(0)
+cc d450cda5a7e39e2a9e06829a86e5dd8c6c10bd844b0b19448144b02be7c3a4b4 # shrinks to (old, slew) = (Synced(Slew { start: Monotonic(0), from: Span(0), target: Measurement { at: Monotonic(0), offset: Span(0), error: Span(0) } }), Slew { start: Monotonic(0), from: Span(0), target: Measurement { at: Monotonic(0), offset: Span(0), error: Span(0) } }), m = Measurement { at: Monotonic(0), offset: Span(0), error: Span(0) }, now = 0, drift = Drift(0)
+cc e457871734ea5e4333567faa215f53c351fbd7d9e61fdaf37024ac57b85566d3 # shrinks to (old, slew) = (Holdover(Slew { start: Monotonic(0), from: Span(0), target: Measurement { at: Monotonic(0), offset: Span(0), error: Span(0) } }, NoSources), Slew { start: Monotonic(0), from: Span(0), target: Measurement { at: Monotonic(0), offset: Span(0), error: Span(0) } }), cause = NoSources, now = 0, drift = Drift(0)

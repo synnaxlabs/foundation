@@ -196,13 +196,14 @@ impl Sim {
         }
     }
 
-    /// Crashes `node` now, between runs. Each thread of the node ends at once: no
-    /// task of it polls again, its futures and its threads that have not run drop,
-    /// so its sockets and ports close and its timers stop, and
-    /// [`env::thread::Handle::join`] on one of them panics. A thread that one of
-    /// these drops starts on the node also ends in the crash and never runs. Each
-    /// file handle of the node closes, a leaked one too. The node keeps its disk and
-    /// its addresses: start new threads on it to restart it.
+    /// Crashes `node` now, between runs. Each thread of the node ends at once: no task
+    /// of it polls again, its futures and its threads that have not run drop, so its
+    /// sockets and ports close and its timers stop, and [`env::thread::Handle::join`]
+    /// on one of them panics. A thread that one of these drops starts on the node also
+    /// ends in the crash and never runs. Each file call of the node ends and each file
+    /// handle closes, leaked ones too, and the blocks of the calls go back to their
+    /// pools. The node keeps its disk and its addresses: start new threads on it to
+    /// restart it.
     ///
     /// # Panics
     ///
