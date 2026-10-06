@@ -306,7 +306,8 @@ fn a_child_with_a_key_not_above_its_sibling_is_named() {
 fn a_first_child_with_a_key_not_above_its_parents_sibling_is_named() {
     let mut chunks = Chunks::default();
     let b = raw(&mut chunks, 0, &[("b", b"v")]);
-    let ac = raw(&mut chunks, 0, &[("a", b"v"), ("c", b"v")]);
+    let long = vec![7; 17_000];
+    let ac = raw(&mut chunks, 0, &[("a", b"v"), ("c", &long)]);
     let d = raw(&mut chunks, 0, &[("d", b"v")]);
     let left = raw(&mut chunks, 1, &[("b", &b.0)]);
     let right = raw(&mut chunks, 1, &[("c", &ac.0), ("d", &d.0)]);
@@ -315,8 +316,20 @@ fn a_first_child_with_a_key_not_above_its_parents_sibling_is_named() {
     assert_eq!(diff(&chunks, empty(), root), Err(corrupt));
     let c = "c".parse().unwrap();
     assert_eq!(get(&chunks, root, &c), Err(corrupt));
-    let change = [Change::Set(c, vec![1])];
+    let change = [Change::Set("a".parse().unwrap(), vec![1])];
     assert_eq!(apply(&mut chunks, root, change), Err(corrupt));
+}
+
+#[test]
+fn a_child_that_becomes_the_root_is_checked() {
+    let mut chunks = Chunks::default();
+    let b = raw(&mut chunks, 0, &[("b", b"v")]);
+    let wrong = raw(&mut chunks, 1, &[("b", &b.0)]);
+    let c = raw(&mut chunks, 0, &[("c", b"v")]);
+    let right = raw(&mut chunks, 1, &[("c", &c.0)]);
+    let root = raw(&mut chunks, 2, &[("a", &wrong.0), ("c", &right.0)]);
+    let change = [Change::Delete("c".parse().unwrap())];
+    assert_eq!(apply(&mut chunks, root, change), Err(Error::Corrupt(wrong)));
 }
 
 #[test]

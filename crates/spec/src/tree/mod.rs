@@ -26,7 +26,7 @@ use std::fmt;
 use types::digest::Digest;
 use types::name::Name;
 
-use chunk::{Entry, Node};
+use chunk::Node;
 
 pub use apply::{Change, Update, apply};
 pub use diff::{Changed, Diff, diff};
@@ -90,20 +90,18 @@ impl Chunks {
     }
 
     // Reads the child that entry `index` of `parent` names, and checks that it fits
-    // there: one level down, with keys above its floor and up to the entry.
+    // there. The floor of a first child comes from the chunks above its parent.
     fn child<'a>(&'a self, parent: &Node<'a>, index: usize) -> Result<Node<'a>, Error> {
-        let entry = parent
-            .entries
-            .get(index)
-            .ok_or(Error::Corrupt(parent.digest))?;
+        let entry = parent.entries.get(index);
+        let entry = entry.expect("invariant: the index names an entry of the parent");
         let before = index.checked_sub(1).and_then(|at| parent.entries.get(at));
         let mut child = self.node(entry.child())?;
         child.floor = before.map(|before| before.key).or(parent.floor);
-        let above =
-            |first: &Entry<'_>| child.floor.is_none_or(|floor| floor < first.key);
+        // `None` sorts first, so a child with no entries fails and no floor passes.
+        let first = child.entries.first().map(|first| first.key);
         let fits = parent.level.checked_sub(1) == Some(child.level)
             && child.last_key() == Some(entry.key)
-            && child.entries.first().is_some_and(above);
+            && first > child.floor;
         if fits {
             Ok(child)
         } else {
