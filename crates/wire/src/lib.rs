@@ -8,6 +8,7 @@
     clippy::string_slice
 )]
 
+pub mod clock;
 pub mod header;
 
 /// The wire format version this node writes and reads. It covers every byte after the

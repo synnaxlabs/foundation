@@ -438,8 +438,10 @@ How to read this record:
   records. An open of a header with a smaller `body_max` fails with `Unfit` (#627).
   `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
   one entry, at least `Layout::ENTRY_MAX_MIN` (4032); a batch of more entries holds
-  less. An entry has no part, one, or two; `append` takes them owned and drops them
-  when it fails (#582).
+  less. `Layout::check` gives the `Limit` that `append` would refuse a batch with,
+  from its counts of entries, parts, and bytes, so the home checks a frame before it
+  takes the blocks of its entries (#795). An entry has no part, one, or two; `append`
+  takes them owned and drops them when it fails (#582).
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
@@ -849,6 +851,22 @@ How to read this record:
   (the format flag's flip reaches nodes at different times, so one session can carry
   streams of two versions) and a session per protocol (`transport` stays blind to
   protocols, and it costs five handshakes per peer pair).
+- **CLOCK WIRE (#865)** After the header, a clock datagram is one `wire::clock`
+  message: a kind byte, then little-endian fields of 8 bytes. A request (kind 1)
+  carries `sent`, the monotonic reading of the node that asks. An answer echoes `sent`,
+  so the node that asks keeps no open requests, and carries the peer's time (CLOCK
+  PEER ANSWER). Kind 2 is a known bound, with the interval when the request arrived
+  and the interval when the peer answered. Kind 3 is an unknown bound, with the
+  peer's best guess of the time when it answered. The offset of CLOCK PEER ANSWER is
+  this stamp less the asking node's own time, because the peer's offset has no
+  meaning without the peer's monotonic clock. A message has 9, 41, or 17 bytes, and
+  `decode` refuses each other length. `decode` does not check the order of an
+  interval, because `estimate::exchange::Exchange::measure` refuses a crossed one.
+  Lost: a request number, because the node that asks must then keep and remove open
+  requests and still needs the send time of a late answer; each message 41 bytes, as
+  the header has one length (a request then sends 32 zero bytes); `encode` into a
+  `&mut [u8]` that returns a length (a short buffer then needs an error); a second
+  byte for the kind of time (two checks where one kind byte does the work).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
   however many shards it runs, so each site's firewall needs one known port per
   conduit. Each QUIC connection belongs to one shard, and every connection ID a node
@@ -900,44 +918,50 @@ How to read this record:
   class share in turn. The priority is strict: a class sends nothing, resends too, while
   a higher class has bytes to send, so a steady higher class starves the lower ones. It
   orders only the bytes that QUIC holds. All classes share one QUIC send window, so a
-  message can wait for bytes of a lower class to be acknowledged (#797). `Complete` gets
-  a guaranteed minimum share in the class-ordered send budget, not in QUIC (#819, before
-  the alpha). The budget bounds what QUIC holds to `window_bytes`, so QUIC's strict
-  order acts only inside that bound. Lost: a connection per class, because four
-  handshakes and four congestion controllers compete on one path (#55). Settled by the
-  advisor and the coordinator under the person's delegation (#789). A node resets a
-  stream with the stop's code when the stop arrives. A peer breaks the protocol
-  when it sends another class byte, ends a stream inside a message, sends a message over
-  the limit, or resets or stops a stream with a code over 32 bits. The node then closes
-  the connection with application code 2^32 and the reason as text, and the caller gets
-  `Error::Broken`. Each connection keeps two budgets, which count the length of each
-  message. A sender starts a message only when the messages it started and the streams
-  have not taken in full stay within the peer's `window_bytes`; else the write waits for
-  `Writable`. A message starts only when it fits and no stream of its class or a higher
-  class waits for room. Room that frees goes to the waiting streams highest class first,
-  then oldest first, until the next one does not fit, and only those streams wake
-  (#611). A send that does not wait (`try_send`) starts a message only by the same rule
-  and when, after a flush, the stream holds no part of an earlier one; else it gives the
-  message back with no byte of it sent, and the stream does not wait for room (#597). A
-  receiver takes a block by the same rule, within `window_bytes` plus
-  `message_bytes_max`; else the read waits for `Readable` (#611). So bytes that wait for
-  a block never use up the credit that a started message needs, and a peer that breaks
-  the send rule holds at most the receive budget and stops only its own connection. Each
-  node's first one-way stream is its hello, with no class byte: (id, value) pairs, both
-  QUIC varints, ids strictly increasing, then the stream end. Id 0 is `window_bytes` and
-  id 1 is `message_bytes_max`; both are required. A node ignores an id it does not know,
-  so an advisory field needs no new ALPN; a field that the peer must understand needs
-  one. The acceptor sends its hello at 0.5-RTT, once it has the whole ClientHello and so
-  the peer's transport parameters, or at its `Connected` when a HelloRetryRequest holds
-  them back. The dialer sends at its `Connected`. So the hello adds no round trip. The
-  hello has its own one-way stream: a node lets the peer open `streams_max` + 1 one-way
-  streams, and does not give back the credit of the peer's hello stream when it ends,
-  so after the hello the peer has at most `streams_max` open. Until the peer's hello
-  arrives, a node opens and accepts no stream; the caller bounds that wait, with its
-  other limits before admission (#563). A sender obeys only the peer's values: each
-  message is at most the peer's `message_bytes_max`, and the send budget is the peer's
-  `window_bytes`. A value over what the node can count counts as the largest it can
-  count. A peer breaks the protocol when its hello ends inside a
+  message can wait for bytes of a lower class to be acknowledged (#797). The QUIC send
+  window, not the send budget, bounds what QUIC holds. A message that QUIC does not take
+  in full waits its turn, by class, then oldest first. Only the first sender in turn
+  writes, and only it wakes when QUIC has room. A write of a higher class than every
+  waiter goes first; any other write waits, and a `try_send` gives the message back.
+  Stream credit is twice the connection window, so a stream never waits on its own
+  credit while the connection has room. This relies on reader-granted credits (B3): a
+  node takes every byte it granted credit for. A peer that gives less stalls only its
+  own connection (#819). `Complete` gets a guaranteed minimum share of the turn (#819,
+  before the alpha). Lost: a connection per class, because four handshakes and four
+  congestion controllers compete on one path (#55). Settled by the advisor and the
+  coordinator under the person's delegation (#789). A node resets a stream with the
+  stop's code when the stop arrives. A peer breaks the protocol when it sends another
+  class byte, ends a stream inside a message, sends a message over the limit, or resets
+  or stops a stream with a code over 32 bits. The node then closes the connection with
+  application code 2^32 and the reason as text, and the caller gets `Error::Broken`.
+  Each connection keeps two budgets, which count
+  the length of each message. A sender starts a message only when the messages it
+  started and the streams have not taken in full stay within the peer's `window_bytes`;
+  else the write waits for `Writable`. A message starts only when it fits and no stream
+  of its class or a higher class waits for room. Room that frees goes to the waiting
+  streams highest class first, then oldest first, until the next one does not fit, and
+  only those streams wake (#611). A send that does not wait (`try_send`) starts a
+  message only by the same rule and when, after a flush, the stream holds no part of an
+  earlier one; else it gives the message back with no byte of it sent, and the stream
+  does not wait for room (#597). A receiver takes a block by the same rule, within
+  `window_bytes` plus `message_bytes_max`; else the read waits for `Readable` (#611). So
+  bytes that wait for a block never use up the credit that a started message needs, and
+  a peer that breaks the send rule holds at most the receive budget and stops only its
+  own connection. Each node's first one-way stream is its hello, with no class byte:
+  (id, value) pairs, both QUIC varints, ids strictly increasing, then the stream end. Id
+  0 is `window_bytes` and id 1 is `message_bytes_max`; both are required. A node ignores
+  an id it does not know, so an advisory field needs no new ALPN; a field that the peer
+  must understand needs one. The acceptor sends its hello at 0.5-RTT, once it has the
+  whole ClientHello and so the peer's transport parameters, or at its `Connected` when a
+  HelloRetryRequest holds them back. The dialer sends at its `Connected`. So the hello
+  adds no round trip. The hello has its own one-way stream: a node lets the peer open
+  `streams_max` + 1 one-way streams, and does not give back the credit of the peer's
+  hello stream when it ends, so after the hello the peer has at most `streams_max` open.
+  Until the peer's hello arrives, a node opens and accepts no stream; the caller bounds
+  that wait, with its other limits before admission (#563). A sender obeys only the
+  peer's values: each message is at most the peer's `message_bytes_max`, and the send
+  budget is the peer's `window_bytes`. A value over what the node can count counts as
+  the largest it can count. A peer breaks the protocol when its hello ends inside a
   pair, misses a required id, has an id out of order, is over 256 bytes, has a
   `message_bytes_max` of 0 or a `window_bytes` below it, or resets. A peer whose QUIC
   transport parameters cannot take this node's whole hello at once (no one-way stream,
@@ -1091,19 +1115,21 @@ How to read this record:
   its own voter list votes and follows, but never campaigns while that configuration
   is committed. `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
-  may send. A node that may send can stop a group for good with one message in term
-  `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
-  as it is. It trusts its voters: one that lies can already break safety, because a
-  false `AppendReply` counts as held, so a bound on the term would guard nothing. No
-  bound on a term jump spares an honest node that was down, either. Later: a sender
-  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
-  2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
-  `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
-  before its write, so no peer counted a vote or an answer that a lost `hard` held. The
-  caller writes `hard` and `entries` in any order, with no atomic write. Lost: the
-  `Ready` doc requires `hard` before `entries`, a patch that each caller must keep and
-  that shows only at a restart. The person decided on 2026-10-05 ("I approve long term
-  fix on 522"), #522.
+  may send. `step` drops a reply with no check when its sender is not in `voters()`,
+  unless the configuration in force removed the sender and the node still sends to it:
+  only `raft` knows whom it asked (#352). A node that may send can stop a group for good
+  with one message in term `u64::MAX`: each node writes that term, and none can
+  campaign. `raft` takes the term as it is. It trusts its voters: one that lies can
+  already break safety, because a false `AppendReply` counts as held, so a bound on the
+  term would guard nothing. No bound on a term jump spares an honest node that was down,
+  either. Later: a sender proves a term jump by a signed term, which needs `mesh`
+  (#750). The person decided on 2026-10-05 ("(a) is fine", #352 item 2). When the term
+  of the last entry is above `hard.term`, `Raft::new` starts at that term with no vote.
+  The node sends nothing before its write, so no peer counted a vote or an answer that a
+  lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
+  write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
+  caller must keep and that shows only at a restart. The person decided on 2026-10-05
+  ("I approve long term fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -1112,24 +1138,23 @@ How to read this record:
   (its hint for the next `prev`). `step` checks a message against the log before it
   changes state: entries that do not follow `prev` are `Error::EntryOutOfOrder`, and a
   heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
-  log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
-  be past the log of a node that is behind. An `Append` with an entry whose term is
-  above the message's term is `Error::TermBehindLog`: no leader sends one, so the
-  sender is faulty. The conformance oracle changed to match; the person decided on
-  2026-10-05 ("a is fine", #232). A heartbeat or an append of this node's term from a
-  node other than the leader it knows is `Error::Unproven` (RAFT SURFACE): one term
-  has one leader, and a node keeps the leader of its term until the term ends,
-  through a step-down and a campaign. A node that knows no leader of its term takes
-  the first that proves a quorum of votes; `Hard.leader` keeps it through a restart
-  (#750). The person approved it on 2026-10-05 ("Yeah that's fine", #391). A bad
-  message changes nothing. A voter that does not lead cannot make a node follow it:
-  a leader claim needs a quorum of grants (RAFT SURFACE, #750). A false
-  `AppendReply` still counts as held (#882). Lost: a lease that drops a heartbeat or
-  an `Append` of a higher term from a node
-  that is not the leader. A reply of a higher term ends any node's lease, and a
-  leader must step down on one; the lease also changed three etcd oracle tests. The
-  coordinator decided on 2026-10-06 under the person's delegation (#391). The person
-  may change it.
+  log is `Error::IndexPastLog`, unless `step` drops the reply (RAFT SURFACE). An
+  append's `prev` and `commit` and a vote's `last` can be past the log of a node that is
+  behind. An `Append` with an entry whose term is above the message's term is
+  `Error::TermBehindLog`: no leader sends one, so the sender is faulty. The conformance
+  oracle changed to match; the person decided on 2026-10-05 ("a is fine", #232). A
+  heartbeat or an append of this node's term from a node other than the leader it knows
+  is `Error::SecondLeader`: one term has one leader, and a node keeps the leader of its
+  term until the term ends, through a step-down and a campaign. A node that knows no
+  leader of its term takes the first that proves a quorum of votes; `Hard.leader` keeps
+  it through a restart (#750). The person approved it on 2026-10-05 ("Yeah that's fine",
+  #391). A bad message changes nothing. A voter that does not lead cannot make a node
+  follow it: a leader claim needs a quorum of grants (RAFT SURFACE, #750). A false
+  `AppendReply` still counts as held (#882). Lost: a lease that drops a heartbeat or an
+  `Append` of a higher term from a node that is not the leader. A reply of a higher term
+  ends any node's lease, and a leader must step down on one; the lease also changed
+  three etcd oracle tests. The coordinator decided on 2026-10-06 under the person's
+  delegation (#391). The person may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1177,9 +1202,12 @@ How to read this record:
   over a whole quorum check period is released at that check instead, and the next
   configuration releases any that is still a peer.
   A follower releases the removed nodes when the leave commits. A removed node that
-  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
+  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` request
   only from a voter of the newest configuration in this node's log, and a node whose
-  committed configuration lacks the sender answers `removed`. The removed node takes
+  committed configuration lacks the sender answers `removed`. A request is a PreVote, a
+  Vote, a heartbeat, or an append. The rule covers requests only, and `raft` decides
+  which replies count (RAFT SURFACE). The person approved this on 2026-10-06, and the
+  coordinator gives the person's words in its comment on #647. The removed node takes
   that answer only from a voter of its own region, and stops its `raft` group for that
   region. `raft` sends such a node no entries, only answers. A voter with a lease drops
   its campaign or refuses it with a `PreVoteReply { granted: false }` at the voter's
@@ -1787,6 +1815,13 @@ How to read this record:
   (C9b).
 - **T2** Oracles are person-owned: simulation invariants, P1 targets and baselines,
   conformance suites, fuzz inputs (agents add, never remove). Agents write most tests.
+- **BENCH BASELINES (2026-10-06)** The committed baselines and the CI bench job with
+  the 5% gate come with #715. Until then, a PR that touches a hot path gives its
+  benchmark results, with the machine named. When a result is near 5%, the
+  coordinator runs it again on a quiet Linux host. Once a day, the coordinator runs
+  the hot-path benchmarks on a quiet Linux host against a fixed commit, which finds a
+  slowdown that no PR expected. Patch; #715 is the long-term fix. The person decided
+  on 2026-10-06 ("I am ok with deferring #715").
 - **CANONICAL LIBRARY RULE (testing part)** Protocol simulators and HITL test C-backed
   connectors. Simulation replaces any connector through `hub`.
 - **R13 invariants (oracles)** The eight invariants in r13 section 9 become simulation
@@ -2836,7 +2871,8 @@ conclusion together". Each one is listed below.
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
-  voter's state when it sent the answer.").
+  voter's state when it sent the answer."), #352 item 1 (a reply from a node that is not
+  a peer).
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
   tree key `<label>.@<kind>` of a policy (#729), `frame::split`, which cuts a frame
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),

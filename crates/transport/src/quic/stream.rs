@@ -28,8 +28,8 @@ pub(crate) struct Key {
 
 /// The sending half of a stream. The caller gives it to each write call, and to
 /// [`Endpoint::reset`](super::Endpoint::reset) to end it. Dropping it does nothing to
-/// the stream: the message in hand keeps its send budget, or its place among the
-/// streams that wait for room, until the connection ends.
+/// the stream: the message in hand keeps its send budget and its turn, or its place
+/// among the streams that wait, until the connection ends.
 #[derive(Debug)]
 pub(crate) struct Sender {
     key: Key,
@@ -43,6 +43,8 @@ pub(crate) struct Sender {
     body: Bytes,
     /// The send budget of the message in hand.
     claim: Claim,
+    /// The sender waits its turn in [`Turns`].
+    waiting: bool,
     finished: bool,
     /// The peer's largest message.
     bytes_max: usize,
@@ -97,6 +99,8 @@ pub(super) struct Streams {
     /// They stay within the peer's window, so the peer's receive budget always has
     /// room for one more message. Empty until the peer's hello.
     sending: Budget,
+    /// The senders whose message noq-proto has not taken in full.
+    turns: Turns,
     /// The messages that hold a block and have not gone to the caller.
     receiving: Budget,
 }
@@ -144,6 +148,11 @@ enum State {
     Held(usize),
 }
 
+/// The senders that wait for noq-proto to take more of their message, by class rank,
+/// oldest first. Only the first in turn writes.
+#[derive(Debug, Default)]
+struct Turns([VecDeque<Key>; 4]);
+
 impl Sender {
     /// A sender for `key` that starts the stream with `class`'s byte, to a peer whose
     /// largest message is `bytes_max`.
@@ -167,6 +176,7 @@ impl Sender {
             unsent: 0..0,
             body: Bytes::new(),
             claim: Claim::new(class),
+            waiting: false,
             finished: false,
             bytes_max,
         }
@@ -369,6 +379,46 @@ impl Budget {
     }
 }
 
+impl Turns {
+    /// The first sender in turn, if any waits.
+    fn first(&self) -> Option<Key> {
+        self.0.iter().find_map(|queue| queue.front().copied())
+    }
+
+    /// Whether `sender` may write now: it is first in turn, or it does not wait and
+    /// no sender of its class or a higher class waits.
+    fn allows(&self, sender: &Sender) -> bool {
+        if sender.waiting {
+            self.first() == Some(sender.key)
+        } else {
+            let rank = sender.claim.class.rank();
+            self.0[..=rank].iter().all(VecDeque::is_empty)
+        }
+    }
+
+    /// Queues `sender` last in its class, unless it waits.
+    fn join(&mut self, sender: &mut Sender) {
+        if !sender.waiting {
+            self.0[sender.claim.class.rank()].push_back(sender.key);
+            sender.waiting = true;
+        }
+    }
+
+    /// Takes `sender` out of the queue, if it waits. Gives the new first sender when
+    /// `sender` was first.
+    #[expect(clippy::unwrap_in_result, reason = "a waiting sender is queued")]
+    fn leave(&mut self, sender: &mut Sender) -> Option<Key> {
+        if !mem::take(&mut sender.waiting) {
+            return None;
+        }
+        let first = self.first() == Some(sender.key);
+        let queue = &mut self.0[sender.claim.class.rank()];
+        let at = queue.iter().position(|&key| key == sender.key);
+        queue.remove(at.expect("invariant: a waiting sender is queued"));
+        first.then(|| self.first()).flatten()
+    }
+}
+
 impl Streams {
     /// The streams of a connection that refuses a message over `bytes_max`, with a
     /// window of `window_bytes`.
@@ -384,6 +434,7 @@ impl Streams {
             incoming: Default::default(),
             senders: Vec::new(),
             sending: Budget::new(0),
+            turns: Turns::default(),
             receiving: Budget::new(window_bytes.saturating_add(bytes_max)),
         }
     }
@@ -502,8 +553,8 @@ impl Streams {
                 self.unclassified.swap_remove(at);
                 Ok(self.classify(inner, id)?.then_some(Event::Incoming { key }))
             }
-            StreamEvent::Writable { id } => {
-                Ok(Some(Event::Writable { stream: stream(id) }))
+            StreamEvent::Writable { .. } => {
+                Ok(self.turns.first().map(|stream| Event::Writable { stream }))
             }
             StreamEvent::Stopped { id, error_code } => {
                 let code = reset_stopped(inner, id, error_code)?;
@@ -558,9 +609,9 @@ impl Streams {
     }
 
     /// Writes what `sender` holds to `inner`. `Ready` when the stream took all of it.
-    /// `Pending` when the stream takes no more now, or the message has no room in the
-    /// send budget. The senders that get the freed room get [`Event::Writable`] in
-    /// `events`.
+    /// `Pending` when the stream takes no more now, the message has no room in the
+    /// send budget, or it is not first in turn. The senders that get the freed room or
+    /// the turn get [`Event::Writable`] in `events`.
     ///
     /// # Errors
     ///
@@ -574,8 +625,7 @@ impl Streams {
     ) -> Result<Poll<()>, Error> {
         let flushed = self.push(inner, sender);
         if !matches!(flushed, Ok(Poll::Pending)) {
-            let woken = |stream| events.push_back(Event::Writable { stream });
-            self.sending.release(&mut sender.claim, woken);
+            self.release(sender, events);
         }
         flushed
     }
@@ -583,8 +633,8 @@ impl Streams {
     /// Takes the block out of `message` and puts it on `sender`'s stream of `inner`
     /// when the stream can take it now: after a flush, `sender` holds no part of an
     /// earlier message, the send budget has room, and no stream of its class or a
-    /// higher class waits for room. Else leaves it, and the stream does not wait for
-    /// room for it.
+    /// higher class waits for room or its turn. Else leaves it, and the stream does
+    /// not wait for room for it.
     ///
     /// # Errors
     ///
@@ -599,8 +649,10 @@ impl Streams {
         if sender.holds() && self.flush(inner, sender, events)?.is_pending() {
             return Ok(());
         }
-        let admitted =
-            |next: &mut Block| self.sending.admit(next.len(), &mut sender.claim);
+        let allowed = self.turns.allows(sender);
+        let admitted = |next: &mut Block| {
+            allowed && self.sending.admit(next.len(), &mut sender.claim)
+        };
         let Some(taken) = message.take_if(admitted) else {
             return match self.stopped(sender.key.id) {
                 Some(code) => Err(Error::Stopped { code }),
@@ -616,13 +668,13 @@ impl Streams {
         inner: &mut noq_proto::Connection,
         sender: &mut Sender,
     ) -> Result<Poll<()>, Error> {
+        if !sender.holds() {
+            return Ok(Poll::Ready(()));
+        }
         let id = sender.key.id;
         let bytes = sender.body.len();
-        let blocked = if sender.holds()
-            && !self.sending.charge(sender.key, bytes, &mut sender.claim)
-        {
-            true
-        } else {
+        let charged = self.sending.charge(sender.key, bytes, &mut sender.claim);
+        let blocked = if charged && self.turns.allows(sender) {
             let mut send = inner.send_stream(id);
             loop {
                 let written = if !sender.unsent.is_empty() {
@@ -643,6 +695,8 @@ impl Streams {
                     Err(WriteError::Stopped(_)) => panic!("{STOPPED}"),
                 }
             }
+        } else {
+            true
         };
         // Only a push that cannot go on looks for a stop, as the look scans `senders`.
         match (self.stopped(id), blocked) {
@@ -650,8 +704,25 @@ impl Streams {
                 (sender.unsent, sender.body) = (0..0, Bytes::new());
                 Err(Error::Stopped { code })
             }
-            (None, true) => Ok(Poll::Pending),
+            (None, true) => {
+                // A message that waits for budget does not hold back a write.
+                if charged {
+                    self.turns.join(sender);
+                }
+                Ok(Poll::Pending)
+            }
             (None, false) => panic!("{OPEN}"),
+        }
+    }
+
+    /// Ends the message that `sender` holds or waits for: gives back its send budget
+    /// and its turn. The senders that get the room or the turn get
+    /// [`Event::Writable`] in `events`.
+    fn release(&mut self, sender: &mut Sender, events: &mut VecDeque<Event>) {
+        let woken = |stream| events.push_back(Event::Writable { stream });
+        self.sending.release(&mut sender.claim, woken);
+        if let Some(stream) = self.turns.leave(sender) {
+            events.push_back(Event::Writable { stream });
         }
     }
 
@@ -682,8 +753,9 @@ impl Streams {
         }
     }
 
-    /// Resets `sender`'s stream of `inner` with `code`, and gives back its send budget.
-    /// The senders that get the freed room get [`Event::Writable`] in `events`.
+    /// Resets `sender`'s stream of `inner` with `code`, and gives back its send budget
+    /// and its turn. The senders that get the freed room or the turn get
+    /// [`Event::Writable`] in `events`.
     pub(super) fn reset(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -696,8 +768,7 @@ impl Streams {
             self.senders.swap_remove(at);
         }
         reset(inner, id, code);
-        let woken = |stream| events.push_back(Event::Writable { stream });
-        self.sending.release(&mut sender.claim, woken);
+        self.release(&mut sender, events);
     }
 
     /// Stops `receiver`'s stream of `inner` with `code`, drops the message in its
@@ -1594,6 +1665,8 @@ mod tests {
             pair.run(RUN);
             assert!(pair.server.endpoint.accept(key(&pair.server)).is_none());
             let (seen, now) = (pair.client.events.len(), pair.now());
+            let flushed = pair.client.endpoint.flush(now, &mut first);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
             let flushed = pair.client.endpoint.flush(now, &mut second);
             assert_eq!(flushed, Ok(Poll::Ready(())));
             pair.run(Duration::ZERO);
@@ -2897,7 +2970,7 @@ mod tests {
             pair.dial(tls::public(&pair::SERVER_KEY));
             pair.run(RUN);
             let mut first = open_sender(&mut pair, Class::Complete);
-            let mut second = open_sender(&mut pair, Class::Complete);
+            let mut second = open_sender(&mut pair, Class::Latest);
             let now = pair.now();
             // The second message waits for the peer's credit, so it holds 1,472
             // bytes of the send budget.
@@ -2951,8 +3024,8 @@ mod tests {
                 }
             }
             let block = shard.block(&vec![0xb; MESSAGE_MAX]);
-            let written = try_write(&mut pair.client, now, &mut latest[1], block);
-            assert_eq!(written, Ok(None));
+            let written = pair.client.endpoint.write(now, &mut latest[1], block);
+            assert_eq!(written, Ok(Poll::Pending));
             let mut command = open_sender(&mut pair, Class::Command);
             let message = shard.block(&vec![0xc; MESSAGE_MAX]);
             let written = pair.client.endpoint.write(now, &mut command, message);
@@ -2994,9 +3067,9 @@ mod tests {
             fill(&mut pair, shard, &mut first);
             let mut second = open_sender(&mut pair, Class::Complete);
             let now = pair.now();
-            let written =
-                try_write(&mut pair.client, now, &mut second, shard.block(&[0xb; 100]));
-            assert_eq!(written, Ok(None));
+            let message = shard.block(&[0xb; 100]);
+            let written = pair.client.endpoint.write(now, &mut second, message);
+            assert_eq!(written, Ok(Poll::Pending));
             let mut catch_up = open_sender(&mut pair, Class::CatchUp);
             let message = shard.block(&vec![0xc; MESSAGE_MAX]);
             let written = pair.client.endpoint.write(now, &mut catch_up, message);
@@ -3036,9 +3109,256 @@ mod tests {
             drain(&mut pair.server, now, &mut incoming.receiver);
             pair.run(RUN);
             let now = pair.now();
+            let flushed = pair.client.endpoint.flush(now, &mut first);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
             let flushed = pair.client.endpoint.flush(now, &mut empty);
             assert_eq!(flushed, Ok(Poll::Ready(())));
         });
+    }
+
+    #[test]
+    fn a_stream_whose_reader_lags_takes_all_the_room_the_peer_gives() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut other = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            let block = shard.block(&vec![1; MESSAGE_MAX]);
+            write(&mut pair.client, now, &mut other, &[block]);
+            let mut lagging = open_sender(&mut pair, Class::Complete);
+            let message = shard.block(&[2; NARROW / 32]);
+            for round in 0..3 {
+                let now = pair.now();
+                let mut written = pair.client.endpoint.flush(now, &mut lagging);
+                while written == Ok(Poll::Ready(())) {
+                    let message = message.clone();
+                    written = pair.client.endpoint.write(now, &mut lagging, message);
+                }
+                assert_eq!(written, Ok(Poll::Pending));
+                pair.run(RUN);
+                if round == 0 {
+                    let mut incoming = accept(&mut pair.server);
+                    let now = pair.now();
+                    drain(&mut pair.server, now, &mut incoming.receiver);
+                    // Under 1/8 of the window, so the peer gives no stream credit.
+                    let mut incoming = accept(&mut pair.server);
+                    for _ in 0..3 {
+                        let read = next(&mut pair.server, now, &mut incoming.receiver);
+                        assert!(matches!(read, Ok(Poll::Ready(Some(_)))), "{read:?}");
+                    }
+                    pair.run(RUN);
+                }
+            }
+            let connection = pair.client.connection();
+            let id = connection.streams().open(Dir::Uni).expect("a stream");
+            let written = connection.send_stream(id).write(&[0]);
+            assert_eq!(written, Err(WriteError::Blocked));
+        });
+    }
+
+    #[test]
+    fn a_write_behind_a_waiting_sender_of_its_class_waits_its_turn() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let [mut first, mut second] = hold(&mut pair, shard);
+            free(&mut pair);
+            let now = pair.now();
+            let flushed = pair.client.endpoint.flush(now, &mut second);
+            assert_eq!(flushed, Ok(Poll::Pending));
+            let flushed = pair.client.endpoint.flush(now, &mut first);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+            let flushed = pair.client.endpoint.flush(now, &mut second);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+        });
+    }
+
+    #[test]
+    fn a_write_that_does_not_wait_gives_back_a_message_behind_a_waiting_sender() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let mut complete = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            let written =
+                try_write(&mut pair.client, now, &mut complete, shard.block(b"c"));
+            assert_eq!(written, Ok(Some(b"c".to_vec())));
+            let mut latest = open_sender(&mut pair, Class::Latest);
+            let written =
+                try_write(&mut pair.client, now, &mut latest, shard.block(b"l"));
+            assert_eq!(written, Ok(None));
+            assert!(latest.holds());
+        });
+    }
+
+    #[test]
+    fn room_wakes_only_the_first_waiting_sender() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let [mut first, mut second] = hold(&mut pair, shard);
+            let seen = pair.client.events.len();
+            free(&mut pair);
+            let [first_writable, second_writable] =
+                [&first, &second].map(|sender| Event::Writable {
+                    stream: sender.key(),
+                });
+            assert!(got(&pair.client, seen, &first_writable));
+            assert!(!got(&pair.client, seen, &second_writable));
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            let flushed = pair.client.endpoint.flush(now, &mut first);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+            pair.run(Duration::ZERO);
+            assert!(got(&pair.client, seen, &second_writable));
+            let flushed = pair.client.endpoint.flush(now, &mut second);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+        });
+    }
+
+    #[test]
+    fn a_waiting_command_writes_ahead_of_waiting_catch_up() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut bulk = open_sender(&mut pair, Class::CatchUp);
+            fill(&mut pair, shard, &mut bulk);
+            let mut command = open_sender(&mut pair, Class::Command);
+            let now = pair.now();
+            let written =
+                pair.client
+                    .endpoint
+                    .write(now, &mut command, shard.block(b"go"));
+            assert_eq!(written, Ok(Poll::Pending));
+            let seen = pair.client.events.len();
+            free(&mut pair);
+            let [bulk_writable, command_writable] =
+                [&bulk, &command].map(|sender| Event::Writable {
+                    stream: sender.key(),
+                });
+            assert!(got(&pair.client, seen, &command_writable));
+            assert!(!got(&pair.client, seen, &bulk_writable));
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            let flushed = pair.client.endpoint.flush(now, &mut bulk);
+            assert_eq!(flushed, Ok(Poll::Pending));
+            let flushed = pair.client.endpoint.flush(now, &mut command);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+            pair.run(Duration::ZERO);
+            assert!(got(&pair.client, seen, &bulk_writable));
+            let flushed = pair.client.endpoint.flush(now, &mut bulk);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+        });
+    }
+
+    #[test]
+    fn a_reset_of_the_first_waiting_sender_wakes_the_next() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let [first, second] = hold(&mut pair, shard);
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            pair.client.endpoint.reset(now, first, Code(9));
+            pair.run(Duration::ZERO);
+            let writable = Event::Writable {
+                stream: second.key(),
+            };
+            assert!(got(&pair.client, seen, &writable));
+        });
+    }
+
+    #[test]
+    fn a_stop_of_the_first_waiting_sender_wakes_the_next_once_the_write_fails() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let [mut first, second] = hold(&mut pair, shard);
+            pair.run(RUN);
+            let id = accept(&mut pair.server).receiver.key().id;
+            assert_eq!(id, first.key().id);
+            let stopped = pair.server.connection().recv_stream(id).stop(7u32.into());
+            stopped.expect("stopped");
+            let seen = pair.client.events.len();
+            pair.run(RUN);
+            let writable = Event::Writable {
+                stream: second.key(),
+            };
+            assert!(!got(&pair.client, seen, &writable));
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            let flushed = pair.client.endpoint.flush(now, &mut first);
+            assert_eq!(flushed, Err(Error::Stopped { code: Code(7) }));
+            pair.run(Duration::ZERO);
+            assert!(got(&pair.client, seen, &writable));
+        });
+    }
+
+    #[test]
+    fn a_later_waiting_sender_that_leaves_wakes_no_sender_and_keeps_the_first() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut second = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut second, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let id = accept(&mut pair.server).receiver.key().id;
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let mut third = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            for (sender, message) in [(&mut second, b"b"), (&mut third, b"c")] {
+                let written =
+                    pair.client
+                        .endpoint
+                        .write(now, sender, shard.block(message));
+                assert_eq!(written, Ok(Poll::Pending));
+            }
+            let stopped = pair.server.connection().recv_stream(id).stop(7u32.into());
+            stopped.expect("stopped");
+            pair.run(RUN);
+            let (seen, now) = (pair.client.events.len(), pair.now());
+            let flushed = pair.client.endpoint.flush(now, &mut second);
+            assert_eq!(flushed, Err(Error::Stopped { code: Code(7) }));
+            pair.client.endpoint.reset(now, third, Code(9));
+            pair.run(Duration::ZERO);
+            assert_eq!(pair.client.events.len(), seen, "{:?}", pair.client.events);
+            free(&mut pair);
+            let now = pair.now();
+            let flushed = pair.client.endpoint.flush(now, &mut first);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
+        });
+    }
+
+    #[test]
+    fn writable_from_noq_proto_wakes_only_the_first_waiting_sender() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            let id = first.key().id;
+            assert_eq!(writable(&mut pair, id), []);
+            fill(&mut pair, shard, &mut first);
+            let second = open_sender(&mut pair, Class::Complete);
+            let woken = Event::Writable {
+                stream: first.key(),
+            };
+            assert_eq!(writable(&mut pair, second.key().id), [woken]);
+        });
+    }
+
+    /// Has the server read the first stream that the client's connection opened,
+    /// which gives the client room again.
+    fn free(pair: &mut Pair) {
+        pair.run(RUN);
+        let mut incoming = accept(&mut pair.server);
+        let now = pair.now();
+        drain(&mut pair.server, now, &mut incoming.receiver);
+        pair.run(RUN);
+    }
+
+    /// The events that the client's streams give for a noq-proto `Writable` of
+    /// stream `id`.
+    fn writable(pair: &mut Pair, id: StreamId) -> VecDeque<Event> {
+        let key = key(&pair.client);
+        let connection = super::super::find(&mut pair.client.endpoint.connections, key);
+        let connection = connection.expect("a connection");
+        let mut events = VecDeque::new();
+        let event = StreamEvent::Writable { id };
+        let inner = &mut connection.inner;
+        let translated = connection.streams.event(inner, key, &event, &mut events);
+        translated.expect("no fault");
+        events
     }
 
     /// A message that needs more than one datagram.

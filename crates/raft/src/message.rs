@@ -100,3 +100,20 @@ pub enum Body {
         hint: u64,
     },
 }
+
+impl Body {
+    /// Whether this body answers a request.
+    pub(crate) fn answers(&self) -> bool {
+        match self {
+            Self::PreVote { .. }
+            | Self::Vote { .. }
+            | Self::Heartbeat { .. }
+            | Self::Append { .. } => false,
+            Self::PreVoteReply { .. }
+            | Self::VoteReply { .. }
+            | Self::HeartbeatReply
+            | Self::AppendReply { .. }
+            | Self::AppendReject { .. } => true,
+        }
+    }
+}

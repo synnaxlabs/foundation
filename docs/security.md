@@ -133,16 +133,18 @@ state on `main`.
   append's term. A node that a change removed and that missed its release can win
   an election once no voter has a lease, and lead until it commits the leave
   (#483).
-- `raft` counts a reply only from a voter. It takes a higher term only with a proof
-  that a quorum of its configuration granted the sender, in every message but a
-  `PreVote` and a granted `PreVoteReply` (RAFT SURFACE, #750). A refusal of a lower
-  term carries the proof of the refuser's term, so a node that is behind catches up.
+- `raft` drops a reply from a node that is not a voter, unless a change removed the node
+  and `raft` still sends to it (#352). It takes a higher term only with a proof that a
+  quorum of its configuration granted the sender, in every message but a `PreVote` and a
+  granted `PreVoteReply` (RAFT SURFACE, #750). A refusal of a lower term carries the
+  proof of the refuser's term, so a node that is behind catches up.
 - A node that may send to a group and lies could stop the group for good with one
-  message in term `u64::MAX`. Now that message needs a quorum of grants (#750).
-  `mesh` also admits a `raft` message only from a voter of the newest configuration
-  (RAFT VOTERS, #654). Not built (`mesh`). A voter that lies can still break safety,
-  because a false `AppendReply` counts as held, so `raft` trusts its voters (RAFT
-  SURFACE, #352 item 2). A signed `AppendReply` is #882.
+  message in term `u64::MAX`. Now that message needs a quorum of grants (#750). `mesh`
+  also admits a `raft` request only from a voter of the newest configuration (RAFT
+  VOTERS, #654), and `raft` drops a reply from any other node. Not built (`mesh`). A
+  voter that lies can still break safety, because a false `AppendReply` counts as held,
+  so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A signed `AppendReply` is
+  #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or a leader claim in the node's own term, needs a
   quorum of votes for the sender, else `Error::Unproven` and nothing changes.
@@ -282,6 +284,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
+| `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
@@ -303,5 +306,6 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
-(#64), `types::time::Rate`, and each connector's protocol parser.
+and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
+messages (their encoding is in `mesh`), `spec` tree chunks (#64),
+`types::time::Rate`, and each connector's protocol parser.
