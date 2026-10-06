@@ -80,7 +80,8 @@ struct Binding {
     /// The bytes that the send buffer takes: those of each datagram that has not left
     /// its link.
     unsent: usize,
-    /// The wakers of the sends that found the send buffer full.
+    /// The wakers of the sends that found the send buffer full, no two of which wake
+    /// one task, so a send polled again while it waits adds none.
     senders: Vec<Waker>,
     /// The most bytes that `queue` takes.
     recv_capacity: usize,
@@ -172,7 +173,9 @@ impl<'a> Udp<'a> {
             node,
             local,
             recv_batch_max,
-            send_capacity: config.send_buffer_bytes,
+            // Linux raises a small send buffer to its least size, so an empty one
+            // takes a send.
+            send_capacity: config.send_buffer_bytes.max(1),
             unsent: 0,
             senders: Vec::new(),
             recv_capacity: config.recv_buffer_bytes,
@@ -215,7 +218,8 @@ impl<'a> Udp<'a> {
 
     /// Sends the datagrams of `transmit` from socket `key` at true time `now`, or keeps
     /// `waker` when the send buffer is full. As on Linux, the send buffer is full when
-    /// it takes `send_buffer_bytes` or more, so the datagrams of a send may go past it.
+    /// it is not empty and takes `send_buffer_bytes` or more, so the datagrams of a
+    /// send may go past it.
     pub(crate) fn send(
         &mut self,
         now: Monotonic,
@@ -274,7 +278,7 @@ impl<'a> Udp<'a> {
 
     /// Frees the send buffers of the datagrams that leave their links by true time
     /// `at`. Returns the wakers of the sends that then find room.
-    pub(super) fn depart(&mut self, at: Monotonic) -> Vec<Waker> {
+    pub(super) fn free(&mut self, at: Monotonic) -> Vec<Waker> {
         let mut wakers = Vec::new();
         while let Some(departure) = self.sockets.departures.first_entry() {
             if departure.key().0 > at {
@@ -289,6 +293,22 @@ impl<'a> Udp<'a> {
             }
         }
         wakers
+    }
+
+    /// Drops the departures of the datagrams of `node`, which have not left their
+    /// links, when its power is cut. Its sockets never send again, so their send
+    /// buffers stay as they are.
+    pub(super) fn cut_power(&mut self, node: usize) {
+        let Sockets {
+            bindings,
+            departures,
+            ..
+        } = &mut *self.sockets;
+        departures.retain(|&(_, key), _| {
+            let binding = (bindings.get(&key))
+                .expect("invariant: a socket that closes drops its departures");
+            binding.node != node
+        });
     }
 
     /// Queues `datagram`, which arrives at true time `at`, at the socket that

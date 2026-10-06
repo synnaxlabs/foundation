@@ -99,8 +99,8 @@ impl Node {
     /// - A datagram takes its length plus 768 bytes of its socket's send buffer until
     ///   it leaves its link: at once when the link has no
     ///   [`rate`](crate::link::Config::rate) and no packet waits on it. A send is
-    ///   pending while the send buffer takes `send_buffer_bytes` or more, so the
-    ///   datagrams of one send may go past it.
+    ///   pending while the send buffer is not empty and takes `send_buffer_bytes` or
+    ///   more, so the datagrams of one send may go past it.
     /// - A TCP segment is never lost or duplicated, and each direction of a stream
     ///   keeps its order. A connect is ready after one round trip, and its accept
     ///   after one and a half. A connect takes the next free port after the node's

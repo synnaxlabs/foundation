@@ -172,6 +172,7 @@ impl Network {
             Crash::Process => Vec::new(),
             Crash::Power => {
                 self.wire.cut(now, node);
+                self.udp().cut_power(node);
                 self.tcp().cut_power(node)
             }
         }
@@ -192,7 +193,7 @@ impl Network {
     /// of the datagrams that leave by then. Returns the wakers of the ends that receive
     /// and of the sends that find room.
     pub(crate) fn deliver(&mut self, at: Monotonic) -> Vec<Waker> {
-        let mut wakers = self.udp().depart(at);
+        let mut wakers = self.udp().free(at);
         while let Some(packet) = self.wire.pop(at) {
             match packet {
                 Packet::Datagram(datagram) => {
