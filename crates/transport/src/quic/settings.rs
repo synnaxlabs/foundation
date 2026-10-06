@@ -17,7 +17,7 @@ use noq_proto::{
 use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
-use super::cid;
+use super::{cid, hello};
 use crate::tls::{Epoch, Tls};
 use crate::{Config, PAYLOAD_IPV4};
 
@@ -42,6 +42,11 @@ const _: () = assert!(
     "noq-proto refuses a datagram over the queue, so it must hold the path's largest"
 );
 
+const _: () = assert!(
+    PAYLOAD_IPV4 as usize >= hello::BYTES_MAX,
+    "a stream window of at least message_bytes_max must take the peer's whole hello"
+);
+
 /// What each dial from one shard needs.
 pub(super) struct Settings {
     transport: Arc<TransportConfig>,
@@ -57,7 +62,28 @@ impl Settings {
     ///
     /// When `config.idle` is not positive.
     pub(super) fn new(config: &Config, shard: u8) -> (Self, Endpoint) {
-        let transport = Arc::new(transport(config));
+        Self::with(config, shard, transport(config))
+    }
+
+    /// As [`Settings::new`], with `change` made to the transport parameters, for a
+    /// peer that is not a Foundation node.
+    #[cfg(test)]
+    pub(super) fn foreign(
+        config: &Config,
+        shard: u8,
+        change: impl FnOnce(&mut TransportConfig),
+    ) -> (Self, Endpoint) {
+        let mut transport = transport(config);
+        change(&mut transport);
+        Self::with(config, shard, transport)
+    }
+
+    fn with(
+        config: &Config,
+        shard: u8,
+        transport: TransportConfig,
+    ) -> (Self, Endpoint) {
+        let transport = Arc::new(transport);
         let tls = Tls::new(&config.private_key);
         let server = Arc::new(server(&tls, Arc::clone(&transport)));
         // `true`: `env::net` sets don't-fragment, so MTU discovery may run.
@@ -387,7 +413,9 @@ mod tests {
                         .map_while(|_| streams.open(dir))
                         .count();
                     let max = usize::try_from(testing::STREAMS_MAX).expect("fits");
-                    assert_eq!(opened, max, "{dir:?}");
+                    // The hello took the first one-way stream.
+                    let hello = usize::from(dir == Dir::Uni);
+                    assert_eq!(opened + hello, max, "{dir:?}");
                 }
             });
         }

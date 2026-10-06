@@ -131,9 +131,15 @@ impl Connection {
                     matches!(self.state, State::Dialing { .. } | State::Accepting),
                     "invariant: noq-proto connects a connection once, before it ends"
                 );
+                let dialed = matches!(self.state, State::Dialing { .. });
                 self.state = State::Open;
                 let peer = self.peer();
                 events.push_back(Event::Connected { key, peer });
+                if dialed
+                    && let Err(Fault(reason)) = self.streams.greet(&mut self.inner)
+                {
+                    events.extend(self.fault(now, reason));
+                }
             }
             noq_proto::Event::ConnectionLost { reason } => {
                 let expected = match self.end() {
@@ -149,12 +155,9 @@ impl Connection {
                     self.connected(),
                     "invariant: noq-proto gives stream events only after it connects"
                 );
-                // A stream event repeats once for each frame, so the same one in a
-                // row merges.
-                match self.streams.event(&mut self.inner, key, &event) {
-                    Ok(Some(event)) if events.back() == Some(&event) => {}
-                    Ok(event) => events.extend(event),
-                    Err(Fault(reason)) => events.push_back(self.fault(now, reason)),
+                let streamed = self.streams.event(&mut self.inner, key, &event, events);
+                if let Err(Fault(reason)) = streamed {
+                    events.extend(self.fault(now, reason));
                 }
             }
             noq_proto::Event::DatagramReceived => {
@@ -165,6 +168,16 @@ impl Connection {
                     "invariant: noq-proto gives datagrams only on an open connection"
                 );
                 self.datagrams.pull(&mut self.inner, pool, key, events);
+            }
+            // An acceptor has the whole ClientHello here, so it knows the peer's
+            // transport parameters and can send at 0.5-RTT. A dialer knows them only
+            // at `Connected`.
+            noq_proto::Event::HandshakeDataReady
+                if matches!(self.state, State::Accepting) =>
+            {
+                if let Err(Fault(reason)) = self.streams.greet(&mut self.inner) {
+                    events.extend(self.fault(now, reason));
+                }
             }
             noq_proto::Event::HandshakeDataReady
             | noq_proto::Event::HandshakeConfirmed
@@ -186,23 +199,26 @@ impl Connection {
     }
 
     /// Closes the connection on a fault of the peer's, with code 2^32 and `reason`,
-    /// and gives its [`Event::Closed`] with [`Error::Broken`].
+    /// and gives its [`Event::Closed`] with [`Error::Broken`] when the caller has the
+    /// key.
     ///
     /// # Panics
     ///
-    /// When the connection is not open.
-    pub(super) fn fault(&mut self, now: Instant, reason: String) -> Event {
-        let state = self.end();
-        assert!(
-            matches!(state, State::Open),
-            "invariant: a fault is found on an open connection"
-        );
+    /// When the connection is a dial still in its handshake, or ended.
+    pub(super) fn fault(&mut self, now: Instant, reason: String) -> Option<Event> {
+        let open = match self.end() {
+            State::Open => true,
+            State::Accepting => false,
+            State::Dialing { .. } | State::Ended => {
+                panic!("invariant: a fault is found on an accept or an open connection")
+            }
+        };
         let code = VarInt::from_u64(1 << 32).expect("invariant: 2^32 is a varint");
         self.inner.close(now, code, Bytes::from(reason.clone()));
-        Event::Closed {
+        open.then_some(Event::Closed {
             key: self.key,
             error: Error::Broken { reason },
-        }
+        })
     }
 
     /// Closes the connection with `code`, and gives its [`Event::Closed`] unless it
