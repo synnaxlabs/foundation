@@ -1393,13 +1393,17 @@ How to read this record:
 
 ### 1.12 Access, identity, and secrets
 
-- **C8** A subject is anything that reads or writes (person, agent, program,
-  connector), named in the tree and governed by its region. People, agents, and
-  programs authenticate with keys; a node vouches for its connectors. Access is
-  allow-only, default deny, with no conflicts: `access { subjects, select, allow,
-  authority }`. Actions: read, write, plan, apply, secret, admin. No groups or roles; a
-  group is a selector over subject names. A connector may write channels under its own
-  name by default. `plan` lists access changes separately. SSO comes later.
+- **C8** A subject is anything that reads or writes (person, agent, program, connector),
+  named in the tree and governed by its region. People, agents, and programs
+  authenticate with keys; a node vouches for its connectors. Access is allow-only,
+  default deny, with no conflicts:
+  `access "<name>" { subjects, select, allow, authority }`. Every access policy has a
+  name: it is unique among access policies, it decides the governing region, and the
+  tree key is `<name>.@access` (for example `site_a.operators.@access`). The person
+  approved the name on 2026-10-06 ("Yes I confirm", #729). Actions: read, write, plan,
+  apply, secret, admin. No groups or roles; a group is a selector over subject names. A
+  connector may write channels under its own name by default. `plan` lists access
+  changes separately. SSO comes later.
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -2529,7 +2533,8 @@ Parameters and later choices, recorded and not asked:
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
-- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52.
+- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
+  tree key `<label>.@<kind>` of a policy (#729).
 - Delivery and wire internals: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
