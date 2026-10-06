@@ -19,7 +19,6 @@ types = { path = "../types" }
 [dev-dependencies]
 proptest = { workspace = true }
 sim = { path = "../sim" }
-types = { path = "../types" }
 
 [target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
