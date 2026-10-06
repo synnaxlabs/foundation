@@ -38,8 +38,8 @@ pub(crate) struct Shard {
 /// The readers to wake, and the indexes whose live frames wait for a commit.
 #[derive(Debug, Default)]
 struct Wake {
-    /// The slot and place of each index with live frames for complete readers that
-    /// may not be on disk, each once.
+    /// The slot and place of each index whose readers may be
+    /// [pending](delivery::Readers::pending), each once.
     pending: Vec<(Slot, usize)>,
     /// Whether `pending` holds the index, by place. A place past the end is not.
     listed: Vec<bool>,
@@ -399,20 +399,14 @@ impl Shard {
     /// Replaces `keys` with the readers to wake since the last call, sorted, each
     /// once. Complete readers first get the live frames now on disk. A key is a hint:
     /// take from each until [`take`](Self::take) gives `None`. Call it after each
-    /// write and each commit. When a commit ended since the last call, it takes time
-    /// linear in the indexes with live frames not yet on disk; else constant time.
+    /// write and each commit. When a commit ended since the last call, it reads each
+    /// index with live frames queued for complete readers; else it reads none.
     pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.wake.settle(&self.buffer, &mut self.indexes);
         keys.clear();
         mem::swap(keys, &mut self.wake.keys);
         keys.sort_unstable();
         keys.dedup();
-    }
-
-    /// Whether a complete reader waits for a live frame not yet released. While one
-    /// does, await [`committed`](Self::committed), then call [`woken`](Self::woken).
-    pub(crate) fn waiting(&self) -> bool {
-        !self.wake.pending.is_empty()
     }
 
     fn index(&mut self, key: reader::Key) -> &mut Index {
@@ -461,7 +455,7 @@ impl Wake {
         self.keys.extend(keys);
     }
 
-    /// Lists the index at `slot` and `place`, which queued a live frame, once.
+    /// Lists the index at `slot` and `place`, whose readers are pending, once.
     fn list(&mut self, slot: Slot, place: usize) {
         if place >= self.listed.len() {
             self.listed.resize(place + 1, false);
@@ -480,11 +474,10 @@ impl Wake {
         }
         let mut pending = mem::take(&mut self.pending);
         pending.retain(|&(slot, place)| {
-            let durable = buffer.durable(slot, Path::Live).seq;
-            self.add(slot, indexes[place].readers.release(durable));
-            let listed = buffer.tail(slot, Path::Live).seq > durable;
-            self.listed[place] = listed;
-            listed
+            let readers = &mut indexes[place].readers;
+            self.add(slot, readers.release(buffer.durable(slot, Path::Live).seq));
+            self.listed[place] = readers.pending();
+            self.listed[place]
         });
         self.pending = pending;
     }
@@ -589,9 +582,8 @@ fn spend<'a>(
         out.push(match checked {
             Ok(accepted) if room => {
                 let range = range(&accepted);
-                let (queued, woken) = index.advance(accepted);
-                wake.add(slot, woken);
-                if queued {
+                wake.add(slot, index.advance(accepted));
+                if index.readers.pending() {
                     wake.list(slot, claim.place);
                 }
                 Outcome::Applied { slot, range }
@@ -2198,18 +2190,63 @@ mod tests {
         }
 
         #[test]
-        fn waits_only_while_a_complete_reader_waits_for_a_live_frame() {
+        fn releases_a_frame_listed_after_a_settle_at_the_next_commit() {
             run(51, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
-                assert!(!shard.waiting());
                 let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 write(&test, &mut shard, a, &[10]);
-                assert!(shard.waiting());
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
-                assert!(!shard.waiting());
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(shard.wake.pending, Vec::new());
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(woken(&mut shard), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn lists_no_index_for_a_live_frame_with_no_complete_reader() {
+            run(49, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                assert_eq!(shard.wake.pending, Vec::new());
+                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                write(&test, &mut shard, a, &[20]);
+                let place = shard.place(Slot::new(0));
+                assert_eq!(shard.wake.pending, [(Slot::new(0), place)]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn unlists_an_index_at_the_commit_after_its_last_complete_reader_closes() {
+            run(52, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                write(&test, &mut shard, a, &[20]);
+                shard.close_reader(reader, MESH);
+                write(&test, &mut shard, a, &[30]);
+                let place = shard.place(Slot::new(0));
+                assert_eq!(woken(&mut shard), []);
+                let listed = [(Slot::new(0), place)];
+                assert_eq!(shard.wake.pending, listed, "no commit ended");
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(shard.wake.pending, Vec::new());
             });
         }
 
