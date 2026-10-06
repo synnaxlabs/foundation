@@ -97,6 +97,12 @@ mod tests {
     }
 
     #[test]
+    fn packages_are_the_crates_that_name_unsafe_code() {
+        let metadata = crate::metadata(&crate::fixture()).unwrap();
+        assert_eq!(packages(&metadata), Ok(vec!["model".to_owned()]));
+    }
+
+    #[test]
     fn tests_ran_is_zero_with_no_tests() {
         assert_eq!(tests_ran("\nrunning 0 tests\n\ntest result: ok.\n"), 0);
     }
