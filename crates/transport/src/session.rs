@@ -143,8 +143,9 @@ impl Session {
     }
 
     /// Closes the session with `code` now. Data not yet delivered drops, streams on
-    /// it end, and the peer sees [`Error::PeerClosed`]. It does not wait. Closing an
-    /// ended session does nothing.
+    /// it end, and the peer sees [`Error::PeerClosed`], or [`Error::Broken`] or
+    /// [`Error::TimedOut`] when the close is lost. It does not wait. Closing an ended
+    /// session does nothing.
     ///
     /// ```
     /// fn leave(session: &transport::Session) {
