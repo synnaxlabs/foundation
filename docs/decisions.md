@@ -905,19 +905,20 @@ How to read this record:
   message can wait for bytes of a lower class to be acknowledged (#797). The QUIC send
   window, not the send budget, bounds what QUIC holds. A message that QUIC does not take
   in full waits its turn, by class, then oldest first. Only the first sender in turn
-  writes, and only it wakes when QUIC has room; a write behind it waits, and a
-  `try_send` behind it gives the message back. Stream credit is twice the connection
-  window, so a stream never waits on its own credit while the connection has room. This
-  relies on reader-granted credits (B3): a node takes every byte it granted credit for.
-  A peer that gives less stalls only its own connection (#819). `Complete` gets a
-  guaranteed minimum share of the turn (#819, before the alpha). Lost: a connection per
-  class, because four handshakes and four congestion controllers compete on one path
-  (#55). Settled by the advisor and the coordinator under the person's delegation
-  (#789). A node resets a stream with the stop's code when the stop arrives. A peer
-  breaks the protocol when it sends another class byte, ends a stream inside a message,
-  sends a message over the limit, or resets or stops a stream with a code over 32 bits.
-  The node then closes the connection with application code 2^32 and the reason as text,
-  and the caller gets `Error::Broken`. Each connection keeps two budgets, which count
+  writes, and only it wakes when QUIC has room. A write of a higher class than every
+  waiter goes first; any other write waits, and a `try_send` gives the message back.
+  Stream credit is twice the connection window, so a stream never waits on its own
+  credit while the connection has room. This relies on reader-granted credits (B3): a
+  node takes every byte it granted credit for. A peer that gives less stalls only its
+  own connection (#819). `Complete` gets a guaranteed minimum share of the turn (#819,
+  before the alpha). Lost: a connection per class, because four handshakes and four
+  congestion controllers compete on one path (#55). Settled by the advisor and the
+  coordinator under the person's delegation (#789). A node resets a stream with the
+  stop's code when the stop arrives. A peer breaks the protocol when it sends another
+  class byte, ends a stream inside a message, sends a message over the limit, or resets
+  or stops a stream with a code over 32 bits. The node then closes the connection with
+  application code 2^32 and the reason as text, and the caller gets `Error::Broken`.
+  Each connection keeps two budgets, which count
   the length of each message. A sender starts a message only when the messages it
   started and the streams have not taken in full stay within the peer's `window_bytes`;
   else the write waits for `Writable`. A message starts only when it fits and no stream

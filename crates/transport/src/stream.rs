@@ -140,7 +140,9 @@ impl Sender {
 }
 
 /// The receiving half of a stream. Dropping it before the end stops the stream with
-/// `Code(0)`; dropping it after the end sends nothing.
+/// `Code(0)`; dropping it after the end sends nothing. Messages that arrived and are
+/// not received hold the session's window, so a receiver that lags holds back every
+/// stream of the session from the peer.
 ///
 /// ```
 /// use transport::{Error, stream::Receiver};

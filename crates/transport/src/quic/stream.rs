@@ -99,6 +99,7 @@ pub(super) struct Streams {
     /// They stay within the peer's window, so the peer's receive budget always has
     /// room for one more message. Empty until the peer's hello.
     sending: Budget,
+    /// The senders whose message noq-proto has not taken in full.
     turns: Turns,
     /// The messages that hold a block and have not gone to the caller.
     receiving: Budget,
@@ -386,7 +387,7 @@ impl Turns {
 
     /// Whether `sender` may write now: it is first in turn, or it does not wait and
     /// no sender of its class or a higher class waits.
-    fn open(&self, sender: &Sender) -> bool {
+    fn allows(&self, sender: &Sender) -> bool {
         if sender.waiting {
             self.first() == Some(sender.key)
         } else {
@@ -648,9 +649,9 @@ impl Streams {
         if sender.holds() && self.flush(inner, sender, events)?.is_pending() {
             return Ok(());
         }
-        let open = self.turns.open(sender);
+        let allowed = self.turns.allows(sender);
         let admitted = |next: &mut Block| {
-            open && self.sending.admit(next.len(), &mut sender.claim)
+            allowed && self.sending.admit(next.len(), &mut sender.claim)
         };
         let Some(taken) = message.take_if(admitted) else {
             return match self.stopped(sender.key.id) {
@@ -673,7 +674,7 @@ impl Streams {
         let id = sender.key.id;
         let bytes = sender.body.len();
         let charged = self.sending.charge(sender.key, bytes, &mut sender.claim);
-        let blocked = if charged && self.turns.open(sender) {
+        let blocked = if charged && self.turns.allows(sender) {
             let mut send = inner.send_stream(id);
             loop {
                 let written = if !sender.unsent.is_empty() {
@@ -3285,7 +3286,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stop_or_reset_of_a_later_waiting_sender_wakes_no_sender() {
+    fn a_later_waiting_sender_that_leaves_wakes_no_sender_and_keeps_the_first() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
             let mut second = open_sender(&mut pair, Class::Complete);
@@ -3313,6 +3314,10 @@ mod tests {
             pair.client.endpoint.reset(now, third, Code(9));
             pair.run(Duration::ZERO);
             assert_eq!(pair.client.events.len(), seen, "{:?}", pair.client.events);
+            free(&mut pair);
+            let now = pair.now();
+            let flushed = pair.client.endpoint.flush(now, &mut first);
+            assert_eq!(flushed, Ok(Poll::Ready(())));
         });
     }
 
