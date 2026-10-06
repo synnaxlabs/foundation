@@ -1728,15 +1728,16 @@ How to read this record:
   change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
   #342. The `config` builder added the label and the bound above zero (#474).
 - **POLICY NAMES (2026-10-05)** The label of a policy is a name (A3), unique among the
-  policies of its kind. A policy name can equal a channel name. A policy belongs to the
-  region that governs its name (X2: the longest region prefix that contains it), and it
-  may select only names in that region and its descendants (X26). When a `region` block
-  is added or removed, `plan` checks X26 again for each policy whose region changes,
-  lists each policy that moves to other voters, and refuses one whose reach fails. Lost:
-  the region from the selector (a wider pattern would move the policy to other voters
-  silently, and X26 could never fail), and the region from the directory (K2 makes the
-  layout a default only; r3 rejected a `region =` attribute). The advisor approved it on
-  2026-10-05, #474.
+  policies of its kind. Its tree key `<label>.@<kind>` is a name too, so a label holds
+  at most 255 bytes less the suffix (240 for `node_settings`). A policy name can equal a
+  channel name. A policy belongs to the region that governs its name (X2: the longest
+  region prefix that contains it), and it may select only names in that region and its
+  descendants (X26). When a `region` block is added or removed, `plan` checks X26 again
+  for each policy whose region changes, lists each policy that moves to other voters,
+  and refuses one whose reach fails. Lost: the region from the selector (a wider pattern
+  would move the policy to other voters silently, and X26 could never fail), and the
+  region from the directory (K2 makes the layout a default only; r3 rejected a
+  `region =` attribute). The advisor approved it on 2026-10-05, #474.
 
 ### 1.12 Access, identity, and secrets
 

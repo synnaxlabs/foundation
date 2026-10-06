@@ -3,36 +3,38 @@
 
 mod node_settings;
 
-use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, btree_map};
 
 use document::diagnostic::{Code, Diagnostic, Note};
-use document::{Attribute, Block, Document, Label, read};
+use document::{Attribute, Block, Document, Label, Span, read};
 use types::name::Name;
-
-pub use node_settings::NodeSettings;
 
 const UNKNOWN_BLOCK: Code = Code::new("config.unknown-block");
 const UNKNOWN_ATTRIBUTE: Code = Code::new("config.unknown-attribute");
 const LABEL_COUNT: Code = Code::new("config.label-count");
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
+const LONG_NAME: Code = Code::new("config.long-name");
 
-/// The definitions that a mesh's files give, checked.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// A checked definition and the label that names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Definitions {
-    /// The `node_settings` policies, in the order of the files, then of the blocks.
-    pub node_settings: Vec<NodeSettings>,
+pub struct Entry {
+    /// The definition, as the spec tree stores it.
+    pub definition: spec::definition::Definition,
+    /// The label that names it, for `explain`.
+    pub span: Option<Span>,
 }
 
-/// Checks the definitions in a mesh's Documents, one Document for each file.
+/// Checks the definitions in a mesh's Documents, one Document for each file, and
+/// gives each by its tree key, `<label>.@<kind>`.
 ///
 /// # Errors
 ///
 /// Every problem in the Documents, in the order of `documents`, then in source order.
-/// A value that a reader refuses gives only its first problem.
-pub fn check(documents: &[Document]) -> Result<Definitions, Vec<Diagnostic>> {
+/// A value that a reader or a definition refuses gives only its first problem. A
+/// policy's budgets are checked only after all its attributes read.
+pub fn check(documents: &[Document]) -> Result<BTreeMap<Name, Entry>, Vec<Diagnostic>> {
     let mut check = Check::default();
     for document in documents {
         let start = check.diagnostics.len();
@@ -59,7 +61,7 @@ pub fn check(documents: &[Document]) -> Result<Definitions, Vec<Diagnostic>> {
             .sort_by_key(|diagnostic| diagnostic.span.map(|span| span.start().offset));
     }
     if check.diagnostics.is_empty() {
-        Ok(check.definitions)
+        Ok(check.entries)
     } else {
         Err(check.diagnostics)
     }
@@ -68,7 +70,7 @@ pub fn check(documents: &[Document]) -> Result<Definitions, Vec<Diagnostic>> {
 /// What `check` has found so far.
 #[derive(Debug, Default)]
 struct Check<'a> {
-    definitions: Definitions,
+    entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
     /// The label of each policy name so far, by block keyword and the name in
     /// lowercase, so that names that differ only in case collide.
@@ -77,25 +79,10 @@ struct Check<'a> {
 
 impl<'a> Check<'a> {
     /// Reads the one label of a policy block as its name, unique among the policies
-    /// of its kind.
-    fn name(&mut self, block: &'a Block) -> Option<Name> {
+    /// of its kind, and gives the tree key and the label's span.
+    fn key(&mut self, block: &'a Block) -> Option<(Name, Option<Span>)> {
         let keyword = &*block.keyword;
-        let [label] = block.labels.as_slice() else {
-            let at = block
-                .labels
-                .get(1)
-                .map_or(block.keyword_span, |label| label.span);
-            self.diagnostics.push(Diagnostic::new(
-                LABEL_COUNT,
-                at,
-                format!(
-                    "a `{keyword}` block has {} labels, and it needs one, its name",
-                    block.labels.len()
-                ),
-                format!("Write one label, such as `{keyword} \"site_a.budget\"`"),
-            ));
-            return None;
-        };
+        let label = self.label(block)?;
         let name = self.report(read::name(label))?;
         if name.reserved() {
             self.diagnostics.push(Diagnostic::new(
@@ -109,12 +96,31 @@ impl<'a> Check<'a> {
             ));
             return None;
         }
+        let suffix = format!(".@{keyword}");
+        let most = Name::MAX_BYTES - suffix.len();
+        let bytes = name.as_str().len();
+        if bytes > most {
+            self.diagnostics.push(Diagnostic::new(
+                LONG_NAME,
+                label.span,
+                format!(
+                    "the name {:?} is {bytes} bytes, and a `{keyword}` name holds at \
+                     most {most}",
+                    name.as_str()
+                ),
+                format!("Shorten the name to at most {most} bytes"),
+            ));
+            return None;
+        }
         let folded = name.as_str().to_ascii_lowercase().into();
         let first = match self.names.entry((keyword, folded)) {
-            Entry::Occupied(first) => *first.get(),
-            Entry::Vacant(entry) => {
+            btree_map::Entry::Occupied(first) => *first.get(),
+            btree_map::Entry::Vacant(entry) => {
                 entry.insert(label);
-                return Some(name);
+                let key = format!("{name}{suffix}").parse();
+                let key =
+                    key.expect("a name and a reserved keyword segment make a name");
+                return Some((key, label.span));
             }
         };
         let mut diagnostic = Diagnostic::new(
@@ -135,6 +141,28 @@ impl<'a> Check<'a> {
         }));
         self.diagnostics.push(diagnostic);
         None
+    }
+
+    /// The one label of a policy block.
+    fn label(&mut self, block: &'a Block) -> Option<&'a Label> {
+        let keyword = &*block.keyword;
+        let [label] = block.labels.as_slice() else {
+            let at = block
+                .labels
+                .get(1)
+                .map_or(block.keyword_span, |label| label.span);
+            self.diagnostics.push(Diagnostic::new(
+                LABEL_COUNT,
+                at,
+                format!(
+                    "a `{keyword}` block has {} labels, and it needs one, its name",
+                    block.labels.len()
+                ),
+                format!("Write one label, such as `{keyword} \"site_a.budget\"`"),
+            ));
+            return None;
+        };
+        Some(label)
     }
 
     /// The value that a reader gives, or `None` after it reports the reader's
@@ -176,8 +204,9 @@ impl<'a> Check<'a> {
 #[cfg(test)]
 mod tests {
     use document::value::{Kind, Value};
-    use document::{Map, Position, Source, Span};
+    use document::{Map, Position, Source};
     use proptest::prelude::*;
+    use spec::node_settings::Policy;
     use types::byte;
     use types::name::Selector;
 
@@ -270,8 +299,26 @@ mod tests {
         byte::Size::from_bytes(count << 30)
     }
 
+    /// The entry of a `node_settings` policy, labeled at `span`.
+    fn entry(
+        select: &[&str],
+        disk: Option<byte::Size>,
+        pool: Option<byte::Size>,
+        span: Option<Span>,
+    ) -> Entry {
+        let policy = Policy::new(selector(select), disk, pool).unwrap();
+        Entry {
+            definition: spec::definition::Definition::NodeSettings(policy),
+            span,
+        }
+    }
+
+    fn key(text: &str) -> Name {
+        text.parse().unwrap()
+    }
+
     #[test]
-    fn reads_node_settings() {
+    fn takes_the_key_from_the_label() {
         let block = settings(
             0,
             0,
@@ -282,52 +329,51 @@ mod tests {
                 ("pool", string("8GiB")),
             ],
         );
-        let span = block.span;
         assert_eq!(
             check(&[document(vec![block])]),
-            Ok(Definitions {
-                node_settings: vec![NodeSettings {
-                    name: "site_a.budget".parse().unwrap(),
-                    select: selector(&["site_a.*"]),
-                    disk: Some(gib(200)),
-                    pool: Some(gib(8)),
-                    span,
-                }],
-            })
+            Ok(BTreeMap::from([(
+                key("site_a.budget.@node_settings"),
+                entry(&["site_a.*"], Some(gib(200)), Some(gib(8)), at(0, 1)),
+            )]))
         );
     }
 
     #[test]
-    fn reads_no_disk_and_no_pool() {
+    fn reads_one_budget() {
         let select = Kind::List(vec![Value {
             kind: string("site_a.*"),
             span: None,
         }]);
-        let block = settings(0, 0, "site_a.budget", &[("select", select)]);
-        let definitions = check(&[document(vec![block])]).unwrap();
-        let [policy] = definitions.node_settings.as_slice() else {
-            panic!("{definitions:?}");
-        };
-        assert_eq!((policy.disk, policy.pool), (None, None));
+        let attributes = [("select", select), ("pool", string("8GiB"))];
+        let block = settings(0, 0, "site_a.budget", &attributes);
+        assert_eq!(
+            check(&[document(vec![block])]),
+            Ok(BTreeMap::from([(
+                key("site_a.budget.@node_settings"),
+                entry(&["site_a.*"], None, Some(gib(8)), at(0, 1)),
+            )]))
+        );
     }
 
     #[test]
-    fn reads_policies_in_file_then_block_order() {
-        let select = [("select", string("site_a.*"))];
+    fn reads_policies_from_every_file() {
+        let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
         let documents = [
             document(vec![
-                settings(0, 0, "b", &select),
-                settings(0, 100, "a", &select),
+                settings(0, 0, "b", &policy),
+                settings(0, 100, "a", &policy),
             ]),
-            document(vec![settings(1, 0, "c", &select)]),
+            document(vec![settings(1, 0, "c", &policy)]),
         ];
-        let names: Vec<String> = check(&documents)
+        let keys: Vec<String> = check(&documents)
             .unwrap()
-            .node_settings
-            .iter()
-            .map(|policy| policy.name.to_string())
+            .keys()
+            .map(ToString::to_string)
             .collect();
-        assert_eq!(names, ["b", "a", "c"]);
+        assert_eq!(
+            keys,
+            ["a.@node_settings", "b.@node_settings", "c.@node_settings"]
+        );
     }
 
     #[test]
@@ -371,11 +417,11 @@ mod tests {
 
     #[test]
     fn refuses_a_policy_without_one_label() {
-        let select = [("select", string("site_a.*"))];
+        let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
         let fix = "Write one label, such as `node_settings \"site_a.budget\"`";
         let documents = [document(vec![
-            block(0, 0, "node_settings", &[], &select),
-            block(0, 100, "node_settings", &["a", "b", "c"], &select),
+            block(0, 0, "node_settings", &[], &policy),
+            block(0, 100, "node_settings", &["a", "b", "c"], &policy),
         ])];
         assert_eq!(
             check(&documents),
@@ -398,12 +444,12 @@ mod tests {
 
     #[test]
     fn refuses_a_name_that_repeats_in_another_file() {
-        let select = [("select", string("site_a.*"))];
+        let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
         let documents = [
-            document(vec![settings(0, 0, "site_a.budget", &select)]),
+            document(vec![settings(0, 0, "site_a.budget", &policy)]),
             document(vec![
-                settings(1, 0, "site_a.other", &select),
-                settings(1, 100, "site_a.budget", &select),
+                settings(1, 0, "site_a.other", &policy),
+                settings(1, 100, "site_a.budget", &policy),
             ]),
         ];
         let mut repeat = refused(
@@ -422,10 +468,10 @@ mod tests {
 
     #[test]
     fn refuses_a_name_that_repeats_in_other_case() {
-        let select = [("select", string("site_a.*"))];
+        let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
         let documents = [
-            document(vec![settings(0, 0, "site_a.budget", &select)]),
-            document(vec![settings(1, 0, "Site_A.budget", &select)]),
+            document(vec![settings(0, 0, "site_a.budget", &policy)]),
+            document(vec![settings(1, 0, "Site_A.budget", &policy)]),
         ];
         let mut repeat = refused(
             "config.duplicate-name",
@@ -443,8 +489,8 @@ mod tests {
 
     #[test]
     fn refuses_a_reserved_name() {
-        let select = [("select", string("site_a.*"))];
-        let documents = [document(vec![settings(0, 0, "site_a.@changes", &select)])];
+        let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
+        let documents = [document(vec![settings(0, 0, "site_a.@changes", &policy)])];
         assert_eq!(
             check(&documents),
             Err(vec![refused(
@@ -505,7 +551,56 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_zero_budget() {
+    fn refuses_a_name_too_long_for_its_key() {
+        // `.@node_settings` is 15 bytes, so a 240-byte name makes a 255-byte key.
+        let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
+        let fits = format!("a.{}", "b".repeat(238));
+        let long = format!("{fits}c");
+        let documents = [document(vec![
+            settings(0, 0, &fits, &policy),
+            settings(0, 100, &long, &policy),
+        ])];
+        assert_eq!(
+            check(&documents),
+            Err(vec![refused(
+                "config.long-name",
+                at(0, 101),
+                &format!(
+                    "the name {long:?} is 241 bytes, and a `node_settings` name holds \
+                     at most 240"
+                ),
+                "Shorten the name to at most 240 bytes",
+            )])
+        );
+        let documents = [document(vec![settings(0, 0, &fits, &policy)])];
+        let keys = check(&documents).unwrap().into_keys();
+        assert_eq!(
+            keys.map(|key| key.as_str().len()).collect::<Vec<_>>(),
+            [255]
+        );
+    }
+
+    #[test]
+    fn refuses_a_policy_with_no_budget() {
+        let documents = [document(vec![settings(
+            0,
+            0,
+            "a",
+            &[("select", string("site_a.*"))],
+        )])];
+        assert_eq!(
+            check(&documents),
+            Err(vec![refused(
+                "config.missing-attribute",
+                at(0, 0),
+                "the `node_settings` block has no `disk` or `pool`",
+                "Add `disk`, `pool`, or both, such as `disk = \"10GiB\"`",
+            )])
+        );
+    }
+
+    #[test]
+    fn refuses_a_zero_disk_first() {
         let attributes = [
             ("select", string("site_a.*")),
             ("disk", string("0B")),
@@ -514,20 +609,46 @@ mod tests {
         let documents = [document(vec![settings(0, 0, "a", &attributes)])];
         assert_eq!(
             check(&documents),
-            Err(vec![
-                refused(
-                    "config.zero-size",
-                    at(0, 13),
-                    "the `disk` budget is zero",
-                    "Write a size above zero, or remove `disk`",
-                ),
-                refused(
-                    "config.zero-size",
-                    at(0, 15),
-                    "the `pool` budget is zero",
-                    "Write a size above zero, or remove `pool`",
-                ),
-            ])
+            Err(vec![refused(
+                "config.zero-size",
+                at(0, 13),
+                "the `disk` budget is zero",
+                "Write a size above zero, or remove `disk`",
+            )])
+        );
+    }
+
+    #[test]
+    fn refuses_a_zero_pool() {
+        let attributes = [
+            ("select", string("site_a.*")),
+            ("disk", string("1GiB")),
+            ("pool", string("0GiB")),
+        ];
+        let documents = [document(vec![settings(0, 0, "a", &attributes)])];
+        assert_eq!(
+            check(&documents),
+            Err(vec![refused(
+                "config.zero-size",
+                at(0, 15),
+                "the `pool` budget is zero",
+                "Write a size above zero, or remove `pool`",
+            )])
+        );
+    }
+
+    #[test]
+    fn gives_only_the_size_diagnostic() {
+        let attributes = [("select", string("site_a.*")), ("disk", Kind::Integer(1))];
+        let documents = [document(vec![settings(0, 0, "a", &attributes)])];
+        assert_eq!(
+            check(&documents),
+            Err(vec![refused(
+                "document.bad-size",
+                at(0, 13),
+                "a byte size is a string, not an integer",
+                "Write a string such as \"200GiB\"",
+            )])
         );
     }
 
@@ -592,7 +713,7 @@ mod tests {
     }
 
     /// Policies with unique names, each a name and the text of its pattern, disk, and
-    /// pool.
+    /// pool, with at least one budget.
     fn policies()
     -> impl Strategy<Value = Vec<(String, String, Option<u64>, Option<u64>)>> {
         let size = prop::option::of(1..=u64::MAX);
@@ -603,7 +724,10 @@ mod tests {
                 "[a-z]{1,3}\\.(\\*|\\*\\*|[a-z]{1,3})",
                 size.clone(),
                 size.clone(),
-            );
+            )
+                .prop_filter("a policy sets a budget", |(_, disk, pool)| {
+                    disk.is_some() || pool.is_some()
+                });
             let each = prop::collection::vec(policy, names.len());
             (Just(names), each).prop_map(|(names, each)| {
                 let each = names.into_iter().zip(each);
@@ -617,7 +741,7 @@ mod tests {
         #[test]
         fn reads_back_each_policy(policies in policies(), files in 1..4u32) {
             let mut documents = vec![document(Vec::new()); files as usize];
-            let mut expected = Vec::new();
+            let mut expected = BTreeMap::new();
             for (i, (name, select, disk, pool)) in (0..).zip(&policies) {
                 let file = i % files;
                 let size = |bytes: Option<u64>| bytes.map(byte::Size::from_bytes);
@@ -628,18 +752,12 @@ mod tests {
                     }
                 }
                 let block = settings(file, i * 100, name, &attributes);
-                expected.push((file, NodeSettings {
-                    name: name.parse().unwrap(),
-                    select: selector(&[select]),
-                    disk: size(*disk),
-                    pool: size(*pool),
-                    span: block.span,
-                }));
+                expected.insert(
+                    key(&format!("{name}.@node_settings")),
+                    entry(&[select], size(*disk), size(*pool), at(file, i * 100 + 1)),
+                );
                 documents[file as usize].blocks.push(block);
             }
-            expected.sort_by_key(|(file, _)| *file);
-            let expected = expected.into_iter().map(|(_, policy)| policy).collect();
-            let expected = Definitions { node_settings: expected };
             prop_assert_eq!(check(&documents), Ok(expected));
         }
     }
