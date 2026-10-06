@@ -865,6 +865,50 @@ fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
     });
 }
 
+/// `durable` changes only at a commit that moves `commits`, and before the count
+/// moves: two reads with one count see one `durable`, and a read that shows a new
+/// count sees the entries of that commit durable.
+#[test]
+fn durable_changes_only_at_a_commit_that_moves_commits() {
+    run(132, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let b = slots.assign(key(2));
+        let tenths = |count: i64| Span::from_nanos(COMMIT.nanos() / 10 * count);
+        let read = |buffer: &Buffer| {
+            (
+                buffer.commits(),
+                buffer.durable(a, Path::Live),
+                buffer.durable(b, Path::Live),
+            )
+        };
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let empty = read(&buffer);
+        shard.clock.sleep(tenths(12)).await;
+        assert_eq!(read(&buffer), empty, "the first sync runs");
+        buffer
+            .append([entry(2, b, Path::Live, 0, 1, Some(2), Parts::default())])
+            .expect("queues during the sync");
+        shard.clock.sleep(tenths(1)).await;
+        assert_eq!(read(&buffer), empty, "an append moves nothing");
+        shard.clock.sleep(tenths(3)).await;
+        let first = (1, tail(1, Some(1)), empty.2);
+        assert_eq!(read(&buffer), first, "the count shows the commit durable");
+        shard.clock.sleep(tenths(6)).await;
+        assert_eq!(read(&buffer), first, "the second sync runs");
+        shard.clock.sleep(tenths(4)).await;
+        let second = (2, tail(1, Some(1)), tail(1, Some(2)));
+        assert_eq!(read(&buffer), second, "the count shows the commit durable");
+    });
+}
+
 #[test]
 fn a_drop_ends_the_commit_task() {
     run(8, Memory::default(), |shard| async move {
