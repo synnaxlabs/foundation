@@ -62,7 +62,8 @@ impl Scratch {
     ///
     /// # Panics
     ///
-    /// If `draft` is not of `set`, or holds a series whose type `codec` does not take.
+    /// If `draft` is not of `set`, or holds a series whose type the home does not
+    /// write.
     pub(crate) fn split<'a>(
         &'a mut self,
         set: &'a KeySet,
@@ -140,9 +141,8 @@ impl Scratch {
                     })
                 }
                 Form::Encoded if index => decode(&mut self.stamps, count, bytes),
-                Form::Encoded => {
-                    codec::validate(scalar, count, bytes).map(|_| bytes.len())
-                }
+                Form::Encoded => codec::validate(Type::Scalar(scalar), count, bytes)
+                    .map(|_| bytes.len()),
             };
             match checked {
                 Ok(len) => {
@@ -276,11 +276,11 @@ impl Split<'_> {
 ///
 /// # Panics
 ///
-/// If `codec` does not take `data_type`.
+/// If the home does not write a series of `data_type`.
 fn scalar(data_type: Type) -> Scalar {
     match data_type {
         Type::Scalar(scalar) => scalar,
-        other => panic!("codec does not take a series of {other:?} yet"),
+        other => panic!("home does not write a series of {other:?} yet"),
     }
 }
 
@@ -293,9 +293,10 @@ fn encode(
     values: &[u8],
 ) -> Result<usize, codec::Error> {
     let start = bytes.len();
-    bytes.resize(start + codec::max_len(scalar, values.len()), 0);
+    let data_type = Type::Scalar(scalar);
+    bytes.resize(start + codec::max_len(data_type, values.len()), 0);
     let written =
-        codec::Encoder::new(scalar).encode(count, values, &mut bytes[start..]);
+        codec::Encoder::new(data_type).encode(count, values, &mut bytes[start..]);
     bytes.truncate(start + written.as_ref().copied().unwrap_or(0));
     written
 }
@@ -310,7 +311,7 @@ fn decode(
     let start = stamps.len();
     stamps.resize(start + count, [0; 8]);
     let out = stamps[start..].as_flattened_mut();
-    let decoded = codec::decode(Scalar::Stamp, count, encoded, out);
+    let decoded = codec::decode(Type::Scalar(Scalar::Stamp), count, encoded, out);
     if decoded.is_err() {
         stamps.truncate(start);
     }
@@ -398,9 +399,9 @@ mod tests {
     /// `values` encoded as a series of `entry`, with as many samples as they hold.
     fn encoded(set: &KeySet, entry: usize, values: &[u8]) -> Vec<u8> {
         let scalar = scalar_of(set, entry);
-        let mut out = vec![0; codec::max_len(scalar, values.len())];
+        let mut out = vec![0; codec::max_len(Type::Scalar(scalar), values.len())];
         let count = values.len() / scalar.width();
-        let len = codec::Encoder::new(scalar)
+        let len = codec::Encoder::new(Type::Scalar(scalar))
             .encode(count, values, &mut out)
             .expect("values that fit the count");
         out.truncate(len);
@@ -411,7 +412,8 @@ mod tests {
         let scalar = scalar_of(set, entry);
         let count = usize::try_from(count).expect("a small count");
         let mut out = vec![0; count * scalar.width()];
-        codec::decode(scalar, count, bytes, &mut out).expect("an encoded series");
+        codec::decode(Type::Scalar(scalar), count, bytes, &mut out)
+            .expect("an encoded series");
         out
     }
 
@@ -873,8 +875,8 @@ mod tests {
             }
 
             #[test]
-            #[should_panic(expected = "codec does not take a series of String yet")]
-            fn on_a_series_of_a_type_codec_does_not_take() {
+            #[should_panic(expected = "home does not write a series of String yet")]
+            fn on_a_series_of_a_type_the_home_does_not_write() {
                 let set = interner().intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[(key(Slot::new(2)), Type::String)],

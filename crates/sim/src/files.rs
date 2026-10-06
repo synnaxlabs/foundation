@@ -11,13 +11,11 @@ use env::files::{Error, Mode, Operation};
 use env::rng::Rng;
 use types::time::Monotonic;
 
-use crate::Crash;
 use crate::disk::{self, Cause, Disk, Handle};
+use crate::{Crash, EIO};
 
 /// The count of call delays in nanoseconds: a call takes 0 to 100 us.
 const DELAYS: u64 = 100_001;
-/// The Linux code for an I/O error (`EIO`), which a fault gives.
-const IO: i32 = 5;
 
 /// One file call, as a driver starts it.
 pub(crate) enum Call {
@@ -258,9 +256,9 @@ impl Files {
         let result = match &call {
             Call::Sync { handle } if failed => {
                 disk.file(handle.inode).tear(key, &mut self.rng);
-                Err(Cause::Code(IO))
+                Err(Cause::Code(EIO))
             }
-            _ if failed => Err(Cause::Code(IO)),
+            _ if failed => Err(Cause::Code(EIO)),
             Call::Open(mode) => disk
                 .open(key, &path, *mode)
                 .map(|(handle, len)| Done::Open { handle, len }),
@@ -352,11 +350,12 @@ impl Files {
         ended.held
     }
 
-    /// Crashes `node` by `crash` at true time `at`, whose calls in flight have all
-    /// dropped. Each call ends now, in the order of its end time: after a `Process`
-    /// crash each takes effect, and after a `Power` crash only each write does, and
-    /// the disk keeps what is durable. Returns the blocks of the calls, for the
-    /// caller to drop after it releases the lock.
+    /// Crashes `node` by `crash` at true time `at`. Each call in flight of the node
+    /// ends now as one whose future dropped, a leaked one too, in the order of its
+    /// end time: after a `Process` crash each takes effect, and after a `Power` crash
+    /// only each write does, and the disk keeps what is durable. Then each file of
+    /// the node loses its holds, those of leaked descriptors too. Returns the blocks
+    /// of the calls, for the caller to drop after it releases the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
@@ -370,26 +369,22 @@ impl Files {
         self.queue = queue;
         let mut orphans = Vec::new();
         for (_, key) in cut {
-            let flight = (self.flights.remove(&key))
+            let mut flight = (self.flights.remove(&key))
                 .expect("invariant: a queued call is in flight");
+            flight.dropped = true;
             let kind = mem::discriminant(&flight.call);
             let applied =
                 crash == Crash::Process || matches!(flight.call, Call::Write { .. });
             let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
-                (ended.result.is_ok(), self.discard(node, ended))
+                (ended.result.is_ok(), ended.held)
             } else {
-                if let Some(handle) = flight.call.handle() {
-                    self.disks[node].release(handle);
-                }
                 (false, flight.held)
             };
             (at, key, kind, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
-        if crash == Crash::Power {
-            self.disks[node].cut_power(&mut self.rng);
-        }
+        self.disks[node].crash(crash, &mut self.rng);
         orphans
     }
 
