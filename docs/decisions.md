@@ -240,12 +240,14 @@ How to read this record:
   `buffer` trims below it, past retention (by store time), and under disk pressure. A
   resume takes, per path, the position the reader's `hub` presents, then the position at
   this home, then the home's fallback. A position below the floor or past the head is
-  accepted as is; the `buffer` read reports any gap (B2). Named readers write a position
-  record at once when they open, close, or are taken over, and on the home's interval
-  when the position changed. A session open at a crash restores as closed at the
-  restore. Complete and latest sessions have separate key types, so a call in the
-  wrong mode does not compile (#725). Supersedes the B3 single position. Basis: A6,
-  A8, B2, B3, S10, X14, #41.
+  accepted as is; the `buffer` read reports any gap (B2). A resume starts a `buffer`
+  read at `Mark::at(position)`, so the entries with no samples at the position come
+  again. Between reads, the caller keeps the mark the last read gave, in memory
+  (#510). Named readers write a position record at once when they open, close, or are
+  taken over, and on the home's interval when the position changed. A session open at
+  a crash restores as closed at the restore. Complete and latest sessions have
+  separate key types, so a call in the wrong mode does not compile (#725). Supersedes
+  the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -401,10 +403,17 @@ How to read this record:
   over 1023, an unknown path or presence byte, or bytes after the last entry is a
   wrong shape.
   For each path, memory holds one run per data record with an entry of it: the
-  `first` of the path's first entry in the record and the record's offset, oldest
-  first, 16 bytes per record and path in a deque that doubles, so at most 32/51
-  of the area. The recovery walk and each sync feed the runs in ring order; a
-  read starts from them (#510).
+  mark before the path's first entry in the record and the record's offset, oldest
+  first, 24 bytes per record and path in a deque that doubles, so at most 48/51
+  of the area. A mark is a seq and the count of entries with no samples at it
+  already given, so a read resumes between two such entries. The recovery walk
+  and each sync feed the runs in ring order; a read starts from them. A read does
+  not check the record CRC: the open's walk checked each record, and a record
+  this process wrote is read as written. A read's budget counts the pool bytes
+  that its entries' blocks take (`block::footprint`), so an entry with no bytes
+  still costs its block. A read holds no record while it waits for a file read,
+  so a change that frees ring space must first hold the records of each read in
+  progress (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
@@ -1136,9 +1145,9 @@ How to read this record:
   its voter got a lease back still counts, and costs one needless election; safety
   holds. etcd/raft counts such a grant too. Lost: a round number in `PreVote`, which
   changes the message format and closes only the case of two pre-campaigns. Decided by
-  the advisor under the failover delegation on 2026-10-05 (#719). A node that is not in
-  its own voter list votes and follows, but never campaigns while that configuration
-  is committed. `step` does not check that a sender is a voter (a voter can learn late
+  the advisor under the failover delegation on 2026-10-05 (#719). A node that may not
+  campaign (RAFT VOTERS) still votes and follows.
+  `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
   may send. `step` drops a reply with no check when its sender is not in `voters()`,
   unless the configuration in force removed the sender and the node still sends to it:
@@ -1245,9 +1254,22 @@ How to read this record:
   decided on 2026-10-05 ("(a)"), #482. Readmit in
   `raft` (#414) lost: it sent the log to a sender that `raft` cannot check. The person
   decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set
-  sends the commit and steps down. A node outside an uncommitted configuration still
-  campaigns: the entry may be truncated, and a removed leader that lost its lead before
-  the leave reached a peer is the only node that can win the election that commits it.
+  sends the commit and steps down. A node may campaign when it is a voter, incoming or
+  outgoing, of the configuration in force, or, while that configuration is not
+  committed, of the configuration before it. No other node campaigns. The rule is
+  exact: a leader appends a configuration entry only after the last one commits, so
+  by Log Matching only the last configuration entry in a log can be truncated, and
+  the one before it is committed. The fallback keeps two cases: a truncation gives
+  the configuration before back, and a removed leader that lost its lead before the
+  leave reached a peer is the only node that can win the election that commits it. A
+  follower whose commit index lags lets the configuration before campaign for
+  longer, which costs liveness, never safety. The `mesh` admission check stays
+  beside this rule: `promotable` decides whether an honest node campaigns, and `mesh`
+  checks a sender that may lie, because `raft` never checks senders (RAFT SURFACE).
+  Neither is a second guard for the other. Decided by the coordinator and the
+  advisor on 2026-10-06 (#659). After compaction a snapshot carries the
+  configuration in force at its index, so the configuration before the last entry
+  stays known (#253).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
   files `log-0`, `log-1`, and so on of one directory; any other file there is
   `Error::Stray`. One write of `raft` is one record: a header, then the body. The header
@@ -1434,6 +1456,15 @@ How to read this record:
   runtime-loaded bindings, NI functions declared by hand. Codecs: built. Crypto: rustls
   with aws-lc-rs and blake3. Tooling: clap, schemars, toml_edit, tracing. Our own thin
   MCP server, Prometheus text output, and InfluxDB line protocol. FIPS build later.
+  HTTP: one client for all connectors, on `hyper` (HTTP/1.1 and HTTP/2) over the `env`
+  network seam with `rustls`, in the connector component library. InfluxDB, a general
+  HTTP connector, alarms, webhooks, and remote write use it. No HTTP parser of our own.
+  Every clock read and name lookup of the client goes through `env`, and no Tokio
+  feature of `hyper` or `hyper-util` is on. TLS takes a configured CA, and no setting
+  turns verification off. Lost: a sans-I/O HTTP/1.1 module in `connector-influx`. The
+  person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
+  binary larger is fine." "we should be careful about writing raw HTTP transports.",
+  relayed by `advisor`; "Yes I approve", to the coordinator) (#341).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -1645,10 +1676,12 @@ How to read this record:
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
-  default. The data directory is node-local: a start argument of `foundation`, with a
-  default, because the spec is stored in it. Node-local config for the budgets lost:
-  `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
-  decided on 2026-10-05 ("Yeah mesh node"), #342.
+  default. A policy that sets no budget is a user mistake, refused as normal
+  validation with the fix in the message (#869). The data directory is node-local:
+  a start argument of `foundation`, with a default, because the spec is stored in it.
+  Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
+  change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
+  #342.
 
 ### 1.12 Access, identity, and secrets
 
@@ -1940,7 +1973,12 @@ How to read this record:
   the entries at its end. A removed file takes space until the removal is durable. The
   monotonic clock starts again and the wall runs on. `join` on a thread that a crash
   ended panics, because no process joins its own threads after it dies. Built by
-  `simulation` in #114, #535, #580, and #763.
+  `simulation` in #114, #535, #580, and #763. Amended (2026-10-06, #876): a failed
+  `sync` covers each write up to the last one that ended before it started, in the
+  order of the writes. As on Linux, these writes stay in the cache, clean: a read sees
+  them, and a later write goes over them. A power cut drops them, and at each read or
+  write of their sector the cache may drop them, by a coin. A sector with a write that
+  no `sync` covered is dirty, and the cache keeps it.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
@@ -1961,20 +1999,27 @@ How to read this record:
   run drops the same way, after the futures. A thread that a drop starts on the
   crashing node ends in the crash and never runs. Built by `simulation` in #548, #666,
   and #870.
-- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
-  segment is never lost or duplicated. It arrives after the delay and a jitter draw of
-  its link, and never before an earlier segment in its direction, so each direction
-  keeps its order. A connect is ready after one round trip and its accept after one
-  and a half. The receive buffer sets the window, the send buffer holds the bytes that
-  the peer has not received, and a write waits while `unsent_bytes_max` bytes are not
-  sent. A drop before close, or with bytes unread, sends an RST; a drop after close
-  sends the bytes and the FIN. A process crash drops each stream. A power cut sends
-  nothing, so the peer gets an RST only when it sends. A case that `sim` does not
-  model panics with "sim does not simulate ... yet": a link with loss, `delayed`
-  sends, a connect to an address with no node, a full backlog, and a SYN to a live
-  stream. Rejected: retransmission over a lossy link (a full TCP state machine to
-  test before a carrier needs it), and a pipe of bytes with no segments (no window,
-  so no test of a writer that a slow reader stops). Built by `simulation` in #113.
+- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A segment
+  is never lost or duplicated. It arrives after the delay and a jitter draw of its link,
+  and never before an earlier segment in its direction, so each direction keeps its
+  order. Each segment carries the key of its stream, and only the end of that stream
+  takes it, so a late segment of an older stream on the same pair meets a closed port. A
+  connect is ready after one round trip and its accept after one and a half. The receive
+  buffer sets the window, the send buffer holds the bytes that the peer has not
+  received, and a write waits while `unsent_bytes_max` bytes are not sent. A drop before
+  close, or with bytes unread, sends an RST; a drop after close sends the bytes and the
+  FIN. A stream is done when an RST arrived, or each FIN arrived and its own is acked. A
+  drop of it sends nothing. An end that is done leaves its pair, as a Linux socket
+  leaves its table: a segment to the pair then meets a closed port, a SYN opens a new
+  stream, and a connect may take its port, also while a driver holds the old end. A
+  process crash drops each stream. A power cut sends nothing, so the peer gets an RST
+  only when it sends. A case that `sim` does not model panics with "sim does not
+  simulate ... yet": a link with loss, `delayed` sends, a connect to an address with no
+  node, a full backlog, and a SYN to a live stream. Rejected: retransmission over a
+  lossy link (a full TCP state machine to test before a carrier needs it), and a pipe of
+  bytes with no segments (no window, so no test of a writer that a slow reader stops).
+  Built by `simulation` in #113 and #944. Amended (2026-10-06, #874): a stream that is
+  done sends no RST at its drop and leaves its pair.
 - **SIM DROP (2026-10-06)** The drop of a `Sim` drops each live future in its own
   `catch_unwind`. If any panicked, it then panics once with every message, the first
   one first, but only when the thread is not already panicking. This is the one
@@ -2558,7 +2603,13 @@ Conflict: BQ2 makes `spec::resolve` "the ONE policy resolver" with most-specific
 and S12 lists access as one of those policies. C8 makes access allow-only with no
 conflicts (a union of allows).
 Resolution: `spec::resolve` applies most-specific-wins to setting policies (retention,
-placement, transmission, compression, reduction, time, secret store). Access is
+placement, transmission, compression, reduction, time, secret store, node settings).
+For node settings, each budget resolves on its own: a policy that leaves a budget unset
+gives that budget to a less specific policy. Two policies of equal specificity that
+both set the same budget for one node are a plan error; two that set different budgets
+do not conflict. Per-budget resolution holds only because `disk` and `pool` are
+independent. It does not extend to kinds whose fields go together (such as placement),
+where values from different policies could make a combination nobody wrote. Access is
 evaluated only in `access`, as the union of matching allows; the authority cap is the
 highest authority among matching allows that grant `write`. Both use the one selector
 matcher in `types`. Basis: C8, SRP PASS (`access` split).
@@ -2571,10 +2622,10 @@ makes placement select connectors. r3 K2 forbids a policy from selecting outside
 region; r4 lets a root policy apply inside child regions.
 Resolution: each policy kind states its target: retention, transmission, and
 compression select indexes; placement selects connectors and indexes; reduction selects
-data channels; time selects nodes; access selects names (plus subjects anywhere);
-secret store selects secret names. A policy may select only names in its own region
-and that region's descendants; a descendant applies it as of the last parent version
-it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
+data channels; time and node settings select nodes; access selects names (plus
+subjects anywhere); secret store selects secret names. A policy may select only names
+in its own region and that region's descendants; a descendant applies it as of the
+last parent version it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
 
 **X27. Built-in channels have no spec definitions.**
 Conflict: S8 puts node status under the node's name, and S9 adds the changes channel.

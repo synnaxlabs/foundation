@@ -19,11 +19,11 @@ use crate::{Error, Expected, Form, Number};
 /// past the limit stops reading, so it is the last one.
 pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut tokens = Tokens::new(source, text).map_err(|error| vec![error])?;
-    let token = tokens.next();
+    let token = next(&mut tokens, Newlines::Kept);
     let mut parser = Parser {
         tokens,
         token,
-        newlines_skipped: false,
+        newlines: Newlines::Kept,
         errors: Vec::new(),
         len: text.len(),
     };
@@ -63,9 +63,9 @@ struct Parser<'a> {
     tokens: Tokens<'a>,
     /// The next token, not yet taken.
     token: Token<'a>,
-    /// Inside `[` or `(`, where HCL skips new lines, so `take` never returns one.
-    /// Only [`Parser::enclosed`] sets it.
-    newlines_skipped: bool,
+    /// [`Newlines::Skipped`] inside `[` or `(`, as HCL reads them. Only
+    /// [`Parser::enclosed`] sets it.
+    newlines: Newlines,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
     /// The length of the text in bytes. Each token but the last has one or more, so
@@ -401,9 +401,9 @@ impl<'a> Parser<'a> {
             return false;
         }
         let mut ahead = self.tokens.clone();
-        match ahead.next_past_lines().kind {
+        match next(&mut ahead, Newlines::Skipped).kind {
             lex::Kind::String(_) | lex::Kind::Heredoc(_) => {
-                ahead.next_past_lines().kind == lex::Kind::CloseBracket
+                next(&mut ahead, Newlines::Skipped).kind == lex::Kind::CloseBracket
             }
             lex::Kind::Error(Error::Form {
                 form: Form::Template,
@@ -476,17 +476,17 @@ impl<'a> Parser<'a> {
         start: Span,
         inner: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<(T, Span), Error> {
-        let skipped = match self.token.kind {
-            lex::Kind::OpenBracket | lex::Kind::OpenParenthesis => true,
-            lex::Kind::OpenBrace => false,
+        let newlines = match self.token.kind {
+            lex::Kind::OpenBracket | lex::Kind::OpenParenthesis => Newlines::Skipped,
+            lex::Kind::OpenBrace => Newlines::Kept,
             ref kind => unreachable!("invariant: {kind:?} opens nothing"),
         };
         // The mode changes before each bracket is taken, because `take` reads the
         // token after it.
-        let outer = std::mem::replace(&mut self.newlines_skipped, skipped);
+        let outer = std::mem::replace(&mut self.newlines, newlines);
         self.take()?;
         let inside = inner(self)?;
-        self.newlines_skipped = outer;
+        self.newlines = outer;
         let close = self.take()?;
         Ok((inside, join(start, close.span)))
     }
@@ -687,23 +687,26 @@ impl<'a> Parser<'a> {
         if let lex::Kind::Error(error) = &self.token.kind {
             return Err(error.clone());
         }
-        assert!(
-            self.token.kind != lex::Kind::End,
-            "invariant: no rule takes the end, at {:?}",
-            self.token.span
-        );
-        let token = next(&mut self.tokens, self.newlines_skipped);
+        let token = next(&mut self.tokens, self.newlines);
         Ok(std::mem::replace(&mut self.token, token))
     }
 
     /// The token after the next one, as [`Parser::take`] reads it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the next token is the end or an error.
     fn second(&self) -> Token<'a> {
-        next(&mut self.tokens.clone(), self.newlines_skipped)
+        next(&mut self.tokens.clone(), self.newlines)
     }
 
     /// The first token after the next one that is not a new line.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the next token is the end or an error.
     fn second_past_lines(&self) -> Token<'a> {
-        self.tokens.clone().next_past_lines()
+        next(&mut self.tokens.clone(), Newlines::Skipped)
     }
 
     /// The problem at the next token: the lexer's error, or `expected`.
@@ -718,13 +721,22 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// The next token of `tokens`, past new lines when `newlines_skipped` holds.
-fn next<'a>(tokens: &mut Tokens<'a>, newlines_skipped: bool) -> Token<'a> {
-    if newlines_skipped {
-        tokens.next_past_lines()
-    } else {
-        tokens.next()
-    }
+/// Whether reading the next token passes new lines.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Newlines {
+    Kept,
+    Skipped,
+}
+
+/// The next token of `tokens`, past new lines when they are [`Newlines::Skipped`].
+///
+/// # Panics
+///
+/// Panics after the tokens end, which no rule reads past.
+fn next<'a>(tokens: &mut Tokens<'a>, newlines: Newlines) -> Token<'a> {
+    tokens
+        .find(|token| newlines == Newlines::Kept || token.kind != lex::Kind::Newline)
+        .expect("invariant: no rule reads past the end or an error")
 }
 
 /// An identifier that reads as a value, not as a reference.
@@ -1821,7 +1833,7 @@ c = "°C # not a comment"
         fn bad_segment(message: &str) -> String {
             format!(
                 "{message}. Use one or more ASCII letters, digits, `_`, and `-` in \
-                 that segment, and no other character"
+                 that segment, after an optional leading `@`"
             )
         }
 
@@ -2322,17 +2334,17 @@ c = "°C # not a comment"
                     (
                         name("x.température", span(at(4, 0, 4), at(18, 0, 17))),
                         &bad_segment(
-                            "\"x.température\" has a segment that is not valid: \
-                             \"température\"",
+                            "a segment is not valid: \"température\" in \
+                             \"x.température\"",
                         ),
                     ),
                     (
                         name("é", span(at(24, 1, 5), at(26, 1, 6))),
-                        &bad_segment(r#""é" has a segment that is not valid: "é""#),
+                        &bad_segment(r#"a segment is not valid: "é" in "é""#),
                     ),
                     (
                         name("x.é", span(at(34, 2, 6), at(38, 2, 9))),
-                        &bad_segment(r#""x.é" has a segment that is not valid: "é""#),
+                        &bad_segment(r#"a segment is not valid: "é" in "x.é""#),
                     ),
                 ],
             );
@@ -2344,21 +2356,20 @@ c = "°C # not a comment"
                 span,
                 error: text.parse::<Name>().unwrap_err(),
             };
-            let wildcard = "\"plc.*\" uses a wildcard where it cannot. Use `*` and \
-                            `**` only as whole segments of a pattern, never in a name";
+            let wildcard = "a wildcard is out of place: \"plc.*\". \
+                            Use `*` and `**` only as whole segments of a pattern, \
+                            never in a name";
             check(
                 "a = plc[\"\"]\nb = plc[\"*\"]\nc = plc[<<EOT\nx\nEOT\n]\n",
                 &[
                     (
                         name("plc.", on(4, 11)),
-                        &bad_segment(r#""plc." has a segment that is not valid: """#),
+                        &bad_segment(r#"a segment is not valid: "" in "plc.""#),
                     ),
                     (name("plc.*", span(at(16, 1, 4), at(24, 1, 12))), wildcard),
                     (
                         name("plc.x\n", span(at(29, 2, 4), at(46, 5, 1))),
-                        &bad_segment(
-                            r#""plc.x\n" has a segment that is not valid: "x\n""#,
-                        ),
+                        &bad_segment(r#"a segment is not valid: "x\n" in "plc.x\n""#),
                     ),
                 ],
             );
@@ -2583,10 +2594,7 @@ c = "°C # not a comment"
                 &[
                     (Error::Document(repeat), REPEAT),
                     (null, NULL),
-                    (
-                        name,
-                        &bad_segment(r#""é" has a segment that is not valid: "é""#),
-                    ),
+                    (name, &bad_segment(r#"a segment is not valid: "é" in "é""#)),
                     (value, &needs("a value")),
                 ],
             );

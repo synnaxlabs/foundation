@@ -183,7 +183,8 @@ impl Files {
         if let Some(handle) = call.handle() {
             disk.hold(handle);
             if let Call::Read { offset, len, .. } = call {
-                before = disk.file(handle.inode).bytes(offset..offset + len);
+                let range = offset..offset + len;
+                before = disk.file(handle.inode).start_read(range, &mut self.rng);
             }
         }
         let at = Monotonic(now.0.saturating_add(delay));

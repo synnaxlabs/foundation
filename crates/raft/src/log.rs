@@ -106,7 +106,7 @@ impl Log {
     }
 
     // The configuration before `index`: `base` with no configuration entry before.
-    fn voters_before(&self, index: u64) -> &Voters {
+    pub(crate) fn voters_before(&self, index: u64) -> &Voters {
         self.voters_through(index.saturating_sub(1))
     }
 
