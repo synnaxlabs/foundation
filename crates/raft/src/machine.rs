@@ -27,13 +27,12 @@ pub enum Role {
 // Entries in one `Append`.
 const BATCH: usize = 64;
 
-// One voter: the leader's view of its log, its answer to the current campaign, and
-// whether the next quorum check counts it (it answered since the last check, or a
-// change just added it).
+// The leader's view of one other node: how much of the log it holds, and whether
+// the next quorum check counts it (it answered since the last check, or a change
+// just added it).
 #[derive(Debug)]
 struct Peer {
     progress: Progress,
-    vote: Option<bool>,
     active: bool,
 }
 
@@ -41,7 +40,6 @@ impl Peer {
     fn new(last: u64) -> Self {
         Self {
             progress: Progress::new(last),
-            vote: None,
             active: false,
         }
     }
@@ -77,6 +75,8 @@ pub struct Raft {
     // removed, until a release, a quorum check, or the next configuration drops them.
     // Never this node.
     peers: BTreeMap<node::Key, Peer>,
+    // The first answer of each other voter to the current campaign.
+    answers: BTreeMap<node::Key, bool>,
     election_ticks: u64,
     heartbeat_ticks: u64,
     term: Term,
@@ -131,10 +131,8 @@ impl Raft {
         let last = log.last();
         let (in_force, voters) = log.voters();
         let voters = voters.clone();
-        let peers = log
-            .nodes()
+        let peers = others(&log, key)
             .into_iter()
-            .filter(|&node| node != key)
             .map(|key| (key, Peer::new(last.index)))
             .collect();
         let (term, vote) = if hard.term < last.term {
@@ -147,6 +145,7 @@ impl Raft {
             voters,
             in_force,
             peers,
+            answers: BTreeMap::new(),
             outbox: Vec::new(),
             election_ticks: u64::from(election_ticks),
             heartbeat_ticks: u64::from(heartbeat_ticks),
@@ -605,8 +604,7 @@ impl Raft {
         self.in_force = at;
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
-        let mut keep = self.log.nodes();
-        keep.remove(&self.key);
+        let keep = others(&self.log, self.key);
         self.peers.retain(|key, _| keep.contains(key));
         for key in keep {
             let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
@@ -770,9 +768,7 @@ impl Raft {
         let Some(next) = self.term.next() else {
             return;
         };
-        for peer in self.peers.values_mut() {
-            peer.vote = None;
-        }
+        self.answers.clear();
         self.leader = None;
         self.role = Role::PreCandidate;
         self.broadcast(
@@ -781,7 +777,7 @@ impl Raft {
                 last: self.log.last(),
             },
         );
-        self.count();
+        self.decide();
     }
 
     fn become_candidate(&mut self) {
@@ -798,7 +794,7 @@ impl Raft {
                 last: self.log.last(),
             },
         );
-        self.count();
+        self.decide();
     }
 
     fn become_leader(&mut self) {
@@ -834,32 +830,31 @@ impl Raft {
         self.election_elapsed = 0;
         self.heartbeat_elapsed = 0;
         self.timeout = None;
+        self.answers.clear();
         for peer in self.peers.values_mut() {
-            peer.vote = None;
             peer.active = false;
         }
     }
 
     // Records one answer to the current campaign and acts when the answers decide it.
-    // The first answer of a voter counts.
+    // An answer from a node that is not a voter has no effect.
     fn poll(&mut self, from: node::Key, granted: bool) {
-        let Some(peer) = self.peers.get_mut(&from) else {
-            return;
-        };
-        peer.vote.get_or_insert(granted);
-        self.count();
+        if self.voters.contains(from) {
+            self.answers.entry(from).or_insert(granted);
+            self.decide();
+        }
     }
 
     // Acts when the answers decide the current campaign. This node grants itself.
-    fn count(&mut self) {
-        let vote = |key| {
+    fn decide(&mut self) {
+        let answer = |key| {
             if key == self.key {
                 Some(true)
             } else {
-                self.peer(key).vote
+                self.answers.get(&key).copied()
             }
         };
-        match self.voters.tally(vote) {
+        match self.voters.tally(answer) {
             Tally::Won => match self.role {
                 Role::PreCandidate => self.become_candidate(),
                 Role::Candidate => self.become_leader(),
@@ -892,7 +887,7 @@ impl Raft {
     fn peer(&self, key: node::Key) -> &Peer {
         self.peers
             .get(&key)
-            .expect("invariant: every voter has a peer")
+            .expect("invariant: every other voter has a peer")
     }
 
     fn broadcast(&mut self, term: Term, body: &Body) {
@@ -914,6 +909,13 @@ impl Raft {
             body,
         });
     }
+}
+
+// The nodes that `log` keeps a peer for on node `key`: every node but `key`.
+fn others(log: &Log, key: node::Key) -> BTreeSet<node::Key> {
+    let mut nodes = log.nodes();
+    nodes.remove(&key);
+    nodes
 }
 
 #[cfg(test)]
@@ -1734,6 +1736,19 @@ mod tests {
             let granted = Body::VoteReply { granted: true };
             raft.step(message(2, 1, granted.clone())).unwrap();
             assert_eq!((raft.role(), raft.term()), (Role::PreCandidate, Term(1)));
+        }
+
+        // The answers stay as few as the voters, whatever nodes reply.
+        #[test]
+        fn keeps_no_answer_from_a_node_that_is_not_a_voter() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.campaign();
+            let granted = Body::PreVoteReply { granted: true };
+            raft.step(message(9, 1, granted.clone())).unwrap();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            assert!(raft.answers.is_empty());
+            raft.step(message(2, 1, granted)).unwrap();
+            assert_eq!(raft.role(), Role::Candidate);
         }
 
         #[test]
