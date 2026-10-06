@@ -1935,7 +1935,13 @@ How to read this record:
   session under the architecture delegation. `Node::fail_udp` makes a UDP socket fail
   as when the OS breaks it, until the socket drops: each receive gives `EIO`, the
   datagrams that arrive at it are lost, and a send still works. Approved by the
-  coordinator on #907. Built by `simulation` in #926.
+  coordinator on #907. Built by `simulation` in #926. Amended (2026-10-06, #943):
+  `link::Config::rate` limits a link to that many bytes per second, headers included.
+  Each direction of a link sends one packet at a time: a packet starts when it is sent
+  or when the packet before it has left, whichever is later, and leaves after its bytes
+  at the rate. Then it takes the delay and the jitter. With no rate, a link adds no
+  events and no draws, so the digest of a run does not change. Approved by the
+  coordinator.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the

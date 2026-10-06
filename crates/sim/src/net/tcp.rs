@@ -202,7 +202,10 @@ impl Lanes {
         let (source, destination) = (from.local, from.peer);
         let tag = mem::discriminant(&kind);
         wire.record((now, source, destination, tag, kind.len(), Fate::Sent));
-        let Some(at) = wire.draw(now, &link) else {
+        let bytes = kind.len() + header(destination);
+        let departure = wire.depart(now, node, destination.ip(), &link, bytes);
+        let Some(at) = departure.and_then(|departure| wire.draw(departure, &link))
+        else {
             return;
         };
         let floor = self.floors.entry((source, destination)).or_insert((at, 0));
@@ -282,13 +285,17 @@ pub(crate) struct Tcp<'a> {
 /// The largest data segment from `from` on its link.
 fn mss(wire: &Wire, from: Pair) -> usize {
     let node = node(from.local.ip()).expect("invariant: an end is on a node");
-    let header = if from.peer.is_ipv4() {
+    let mtu = wire.path(node, from.peer.ip()).mtu;
+    mtu.saturating_sub(header(from.peer)).max(MSS_MIN)
+}
+
+/// The bytes of the IP and TCP headers of a segment to `peer`.
+fn header(peer: SocketAddr) -> usize {
+    if peer.is_ipv4() {
         V4_HEADERS
     } else {
         V6_HEADERS
-    };
-    let mtu = wire.path(node, from.peer.ip()).mtu;
-    mtu.saturating_sub(header).max(MSS_MIN)
+    }
 }
 
 impl<'a> Tcp<'a> {

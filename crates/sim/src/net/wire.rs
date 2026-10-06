@@ -25,6 +25,9 @@ pub(super) struct Wire {
     /// The link of each ordered pair of nodes that has no link of its own.
     default: link::Config,
     links: BTreeMap<(usize, usize), link::Config>,
+    /// The true time at which the last packet sent on each link with a rate leaves
+    /// it, by the node that sends and the node it goes to.
+    transmitters: BTreeMap<(usize, Option<usize>), Monotonic>,
     /// Packets by true arrival time, then by a key in the order they were sent.
     flights: BTreeMap<(Monotonic, u64), Packet>,
     rng: Rng,
@@ -38,6 +41,7 @@ impl Wire {
         Self {
             default,
             links: BTreeMap::new(),
+            transmitters: BTreeMap::new(),
             flights: BTreeMap::new(),
             rng,
             next: 0,
@@ -54,6 +58,29 @@ impl Wire {
     pub(super) fn path(&self, from: usize, ip: IpAddr) -> link::Config {
         let to = node(ip);
         *(to.and_then(|to| self.links.get(&(from, to)))).unwrap_or(&self.default)
+    }
+
+    /// The true time at which a packet of `bytes` that node `from` sends to `ip` on
+    /// `link` at true time `now` leaves the link: at the link's rate, after the
+    /// packets sent on it before. `None` past `u64` nanoseconds, where it never
+    /// leaves.
+    pub(super) fn depart(
+        &mut self,
+        now: Monotonic,
+        from: usize,
+        ip: IpAddr,
+        link: &link::Config,
+        bytes: usize,
+    ) -> Option<Monotonic> {
+        let Some(rate) = link.rate else {
+            return Some(now);
+        };
+        let nanos = (u128::try_from(bytes).ok()? * 1_000_000_000)
+            .div_ceil(u128::from(rate.get()));
+        let transmit = Span::from_nanos(i64::try_from(nanos).ok()?);
+        let free = self.transmitters.entry((from, node(ip))).or_insert(now);
+        *free = (*free).max(now).checked_add(transmit)?;
+        Some(*free)
     }
 
     /// The network's stream of the seed, for the draws of each protocol.

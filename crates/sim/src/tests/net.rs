@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -146,6 +146,67 @@ fn a_datagram_arrives_after_the_delay_of_its_link() {
         *log.lock().unwrap(),
         [(after(delay()), meta, b"abc".to_vec())]
     );
+}
+
+/// A link that carries 1,000 bytes in a millisecond.
+fn rated() -> link::Config {
+    link::Config {
+        rate: NonZeroU64::new(1_000_000),
+        ..link::Config::default()
+    }
+}
+
+#[test]
+fn a_link_with_a_rate_carries_datagrams_sent_at_once_one_after_another() {
+    // With its 28 header bytes, each datagram takes 1,000 bytes of the link.
+    let (_sim, log) = exchange(0, rated(), vec![vec![1; 972], vec![2; 972]]);
+    let left = |n| after(delay()) + millis(n);
+    assert_eq!(times(&log), [left(1), left(2)]);
+    assert_eq!(datagrams(&log), [vec![1; 972], vec![2; 972]]);
+}
+
+#[test]
+fn each_link_of_a_node_has_its_own_rate() {
+    let (mut sim, a, b) = pair(0, rated());
+    let c = sim.node(node::Config::default());
+    let (logs, mut sockets) = ([Log::default(), Log::default()], Vec::new());
+    for (node, log) in [&b, &c].into_iter().zip(&logs) {
+        let (sender, receiver) = udp(node, 4433);
+        sockets.push((sender, receive(node, receiver, log)));
+    }
+    let (sender, _a) = udp(&a, 4433);
+    let to = [at(&b, 4433), at(&c, 4433)];
+    let _send = a.shards().start(shard("send"), move |_| async move {
+        let mut sender = sender;
+        for destination in to {
+            let transmit = transmit(destination, &[0; 972]);
+            poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+        }
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    for log in &logs {
+        assert_eq!(times(log), [after(delay()) + millis(1)]);
+    }
+}
+
+#[test]
+fn a_datagram_sent_on_an_idle_link_with_a_rate_waits_only_for_its_own_transmit() {
+    let (mut sim, a, b) = pair(0, rated());
+    let log = Log::default();
+    let (mut sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let _receive = receive(&b, receiver, &log);
+    let (clock, to) = (a.clock(), at(&b, 4433));
+    let _send = a.shards().start(shard("send"), move |_| async move {
+        for contents in [[1; 972], [2; 972]] {
+            let transmit = transmit(to, &contents);
+            poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+            clock.sleep(millis(10)).await;
+        }
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    let left = |n| after(delay()) + millis(n);
+    assert_eq!(times(&log), [left(1), left(11)]);
 }
 
 #[test]
@@ -704,6 +765,12 @@ fn the_same_seed_gives_the_same_digest() {
     assert_eq!(digest(3), digest(3));
     assert_ne!(digest(3), digest(4));
     assert_ne!(Sim::new(Config::default()).digest(), digest(3));
+}
+
+#[test]
+fn a_link_with_no_rate_keeps_the_digest_that_it_had_before_rates() {
+    // `DefaultHasher` makes the digest, so a new toolchain can change this value.
+    assert_eq!(digest(3), 15_790_775_888_564_560_557);
 }
 
 /// The digest of a run that sends `contents` twice from `a` over a link with `loss`

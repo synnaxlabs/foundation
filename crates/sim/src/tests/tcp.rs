@@ -3,6 +3,7 @@
 use std::future::{pending, poll_fn};
 use std::io::IoSlice;
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -163,6 +164,24 @@ fn a_connect_is_ready_after_one_round_trip_and_its_accept_after_one_and_a_half()
     assert_eq!(take(&accepted), (legs(3), remote, client));
 }
 
+#[test]
+fn a_connect_on_a_link_with_a_rate_waits_for_the_transmit_of_each_leg() {
+    // A SYN and a SYN-ACK each take 40 header bytes: a millisecond.
+    let link = link::Config {
+        rate: NonZeroU64::new(40_000),
+        ..link::Config::default()
+    };
+    let (mut sim, a, b) = pair(0, link);
+    let _listener = listen(&b, 4433);
+    let remote = at(&b, 4433);
+    let connected = start(&a, "client", move |node| async move {
+        connect(&node, remote, options()).await.unwrap();
+        node.clock().now()
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&connected), legs(2) + millis(2));
+}
+
 /// When a connect from `a` to port 4433 of `b` ends, and what it gives. `before` runs
 /// on `b` first, and its listener lives through the run.
 fn refused(
@@ -239,6 +258,16 @@ fn one_seed_gives_one_digest() {
     let digest = send(3, link, 1 << 20).0;
     assert_eq!(send(3, link, 1 << 20).0, digest);
     assert_ne!(send(4, link, 1 << 20).0, digest);
+}
+
+#[test]
+fn a_link_with_no_rate_keeps_the_digest_that_it_had_before_rates() {
+    // `DefaultHasher` makes the digest, so a new toolchain can change this value.
+    let link = link::Config {
+        jitter: delay(),
+        ..link::Config::default()
+    };
+    assert_eq!(send(3, link, 1 << 20).0, 429_794_580_224_682_417);
 }
 
 #[test]

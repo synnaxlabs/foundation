@@ -198,7 +198,8 @@ impl<'a> Udp<'a> {
     ) -> Result<(), Error> {
         let binding = &self.sockets.bindings[&key];
         let (source, destination) = route(binding.node, binding.local, transmit)?;
-        let link = self.wire.path(binding.node, destination.ip());
+        let node = binding.node;
+        let link = self.wire.path(node, destination.ip());
         let header = if destination.is_ipv4() {
             V4_HEADERS
         } else {
@@ -215,10 +216,13 @@ impl<'a> Udp<'a> {
                 ecn: transmit.ecn,
                 contents: part.to_vec(),
             };
-            let fate = if part.len() + header > link.mtu {
-                Fate::Lost
-            } else {
-                self.wire.fly(now, &link, datagram)
+            let bytes = part.len() + header;
+            let departure = (bytes <= link.mtu)
+                .then(|| self.wire.depart(now, node, destination.ip(), &link, bytes))
+                .flatten();
+            let fate = match departure {
+                Some(departure) => self.wire.fly(departure, &link, datagram),
+                None => Fate::Lost,
             };
             (self.wire).record((now, source, destination, part.len(), fate));
         }
