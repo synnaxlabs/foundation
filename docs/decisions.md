@@ -496,10 +496,14 @@ How to read this record:
   clocks in its `Config`, in each call that needs them. Before the node first has mesh
   time, it opens no writer and no reader, with `Unsynced`. A write needs an open writer,
   so it never meets that case. This is a patch: #523 decides where samples wait before
-  the first estimate (CLOCK PEER ANSWER), and removes or keeps `Unsynced`. `committed`
-  does not borrow the shard, so writes go on while a commit runs. Lost: time as
-  arguments of each call, because each caller repeats the same two reads and can pass
-  an old one. Approved by the coordinator on 2026-10-05 (#191).
+  the first estimate (CLOCK PEER ANSWER), and removes or keeps `Unsynced`. Lost: time as
+  arguments of each call, because each caller repeats the same two reads and can pass an
+  old one. Approved by the coordinator on 2026-10-05 (#191). Mesh time in the home (the
+  ahead limit and the stamp of each entry) is the midpoint of `clock::Reader::now`,
+  which never goes back. Lost: the latest edge, because it goes back when the error
+  shrinks, and with an unknown error (OS CLOCK BOUND) it is 36500 days ahead, so the
+  ahead limit stops nothing and one bad stamp makes each later true stamp `Backwards`
+  (#952 review, 2026-10-06).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps

@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use control::{Gate, Handoff, Permit};
 use types::frame::{Draft, Frame, Path};
-use types::time::{Interval, Monotonic, Stamp};
+use types::time::{Monotonic, Stamp};
 
 use crate::order::{self, Order, Tail};
 use crate::{Refusal, split};
@@ -75,7 +75,7 @@ impl Index {
         path: Path,
         stamps: Result<split::Stamps<'_>, split::Error>,
         now: Monotonic,
-        mesh: Interval,
+        mesh: Stamp,
     ) -> Result<Accepted, Refusal> {
         let permit = self.gate.check(key, now).map_err(Refusal::Control)?;
         let mut stamps = stamps.map_err(Refusal::Codec)?;
@@ -192,11 +192,8 @@ mod tests {
     }
 
     /// Mesh time in the tests: the latest stamp accepted is `s(61)`.
-    fn mesh() -> Interval {
-        Interval {
-            earliest: s(59),
-            latest: s(60),
-        }
+    fn mesh() -> Stamp {
+        s(60)
     }
 
     fn index() -> Index {

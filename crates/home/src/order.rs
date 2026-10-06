@@ -4,15 +4,15 @@ use std::fmt;
 use std::ops::Range;
 
 use types::frame::Path;
-use types::time::{Interval, Span, Stamp};
+use types::time::{Span, Stamp};
 
 /// The stamps an index accepts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
     /// The earliest stamp accepted. A clock that was never set reads near 1970.
-    pub earliest: Stamp,
-    /// How far past the latest edge of mesh time a stamp may be.
-    pub ahead: Span,
+    pub(crate) earliest: Stamp,
+    /// How far past mesh time a stamp may be.
+    pub(crate) ahead: Span,
 }
 
 /// A frame whose stamps passed a [`Check`] on one path.
@@ -60,10 +60,9 @@ impl Order {
     /// [`Check::push`] takes the series in order, in chunks of any length, and
     /// [`Check::end`] gives the seq its samples take. Changes nothing:
     /// [`Order::advance`] spends the seq.
-    pub(crate) fn check(&self, path: Path, now: Interval) -> Check<'_> {
-        let latest = Stamp::from_nanos(
-            now.latest.nanos().saturating_add(self.limits.ahead.nanos()),
-        );
+    pub(crate) fn check(&self, path: Path, now: Stamp) -> Check<'_> {
+        let latest =
+            Stamp::from_nanos(now.nanos().saturating_add(self.limits.ahead.nanos()));
         Check {
             order: self,
             path,
@@ -236,7 +235,7 @@ fn stamp(bytes: [u8; 8]) -> Stamp {
 
 /// A frame's stamps break a rule. The frame is rejected whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     /// A stamp is not after the stamp before it on its path.
     Backwards {
         /// The path of the frame.
@@ -257,7 +256,7 @@ pub enum Error {
     Ahead {
         /// The stamp.
         stamp: Stamp,
-        /// The latest edge of mesh time plus the limit.
+        /// Mesh time plus the limit.
         latest: Stamp,
     },
     /// A stamp is on the wrong side of the other path: backfill ends before the newest
@@ -354,11 +353,8 @@ mod tests {
     }
 
     /// Mesh time in the unit tests: the latest stamp accepted is `s(61)`.
-    fn now() -> Interval {
-        Interval {
-            earliest: s(59),
-            latest: s(60),
-        }
+    fn now() -> Stamp {
+        s(60)
     }
 
     /// Checks a frame and spends its seq, as the home does after a stored frame.
@@ -366,7 +362,7 @@ mod tests {
         order: &mut Order,
         path: Path,
         stamps: &[[u8; 8]],
-        now: Interval,
+        now: Stamp,
     ) -> Result<Range<u64>, Error> {
         accept_in(order, path, stamps, usize::MAX, now)
     }
@@ -377,7 +373,7 @@ mod tests {
         path: Path,
         stamps: &[[u8; 8]],
         size: usize,
-        now: Interval,
+        now: Stamp,
     ) -> Result<Range<u64>, Error> {
         let mut check = order.check(path, now);
         for chunk in stamps.chunks(size) {
@@ -686,10 +682,7 @@ mod tests {
                 accept(&mut order, Path::Live, &stamps(&[1]), now()),
                 Ok(0..1)
             );
-            let epoch = Interval {
-                earliest: Stamp::EPOCH,
-                latest: Stamp::EPOCH,
-            };
+            let epoch = Stamp::EPOCH;
             assert_eq!(accept(&mut order, Path::Live, &[], epoch), Ok(1..1));
             assert_eq!(order.tail(Path::Live), tail(1, 1));
         }
@@ -727,10 +720,7 @@ mod tests {
 
         #[test]
         fn saturates_the_latest_stamp_at_both_ends() {
-            let at = |nanos| Interval {
-                earliest: Stamp::from_nanos(nanos),
-                latest: Stamp::from_nanos(nanos),
-            };
+            let at = Stamp::from_nanos;
             let limits = Limits {
                 earliest: Stamp::from_nanos(i64::MIN),
                 ahead: Span::SECOND,
@@ -809,12 +799,12 @@ mod tests {
                 &mut self,
                 path: Path,
                 stamps: &[Stamp],
-                now: Interval,
+                now: Stamp,
             ) -> Result<Range<u64>, Error> {
                 let p = index(path);
                 let earliest = self.limits.earliest;
-                let limit = i128::from(now.latest.nanos())
-                    + i128::from(self.limits.ahead.nanos());
+                let limit =
+                    i128::from(now.nanos()) + i128::from(self.limits.ahead.nanos());
                 let latest =
                     Stamp::from_nanos(i64::try_from(limit).unwrap_or(if limit > 0 {
                         i64::MAX
@@ -881,7 +871,7 @@ mod tests {
 
         /// One frame: its path, its stamps, the length of the chunks it is checked in,
         /// and mesh time.
-        type Frame = (Path, Vec<Stamp>, usize, Interval);
+        type Frame = (Path, Vec<Stamp>, usize, Stamp);
 
         fn check(limits: Limits, start: [Tail; 2], frames: Vec<Frame>) {
             let mut order = Order::new(limits, start[0], start[1]);
@@ -931,20 +921,15 @@ mod tests {
                 proptest::collection::vec(-2..12_i64, 0..5),
                 1..6_usize,
                 prop_oneof![8 => 0..240_i64, 1 => Just(i64::MIN), 1 => Just(i64::MAX)],
-                0..20_i64,
             )
-                .prop_map(|(path, first, steps, size, latest, width)| {
+                .prop_map(|(path, first, steps, size, now)| {
                     let mut stamp = first;
                     let mut stamps = vec![Stamp::from_nanos(first)];
                     for step in steps {
                         stamp += step;
                         stamps.push(Stamp::from_nanos(stamp));
                     }
-                    let now = Interval {
-                        earliest: Stamp::from_nanos(latest.saturating_sub(width)),
-                        latest: Stamp::from_nanos(latest),
-                    };
-                    (path, stamps, size, now)
+                    (path, stamps, size, Stamp::from_nanos(now))
                 })
         }
 
@@ -968,11 +953,7 @@ mod tests {
                 };
                 let mut frames = frames;
                 if empty {
-                    let epoch = Interval {
-                        earliest: Stamp::EPOCH,
-                        latest: Stamp::EPOCH,
-                    };
-                    frames.push((Path::Live, Vec::new(), 1, epoch));
+                    frames.push((Path::Live, Vec::new(), 1, Stamp::EPOCH));
                 }
                 check(limits, [live, backfill], frames);
             }

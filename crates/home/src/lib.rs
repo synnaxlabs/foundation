@@ -5,28 +5,39 @@ use std::fmt;
 
 #[cfg(test)]
 mod common;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "restore at open is the first reader")
-)]
+#[cfg_attr(not(test), expect(dead_code, reason = "the shard is the first user"))]
 mod handoff;
-mod index;
-pub mod order;
-pub mod reader;
-mod shard;
-pub mod split;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "catch-up from disk is the first reader")
+    expect(dead_code, reason = "the frame path is the first user")
+)]
+mod index;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the frame path is the first user")
+)]
+mod order;
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
+mod reader;
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
+mod shard;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the frame path is the first user")
+)]
+mod split;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the frame path is the first user")
 )]
 mod stored;
-pub mod writer;
-
-pub use shard::{Config, Error, Outcome, Shard};
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
+mod writer;
 
 /// Why the home refused a group of a writer's frame.
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Refusal {
+enum Refusal {
     /// The gate refused the write.
     Control(control::Error),
     /// A stamp broke a rule.

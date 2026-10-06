@@ -7,15 +7,15 @@ use types::frame::key_set::KeySet;
 
 /// What a writer opens with: its control, its lease, and the key set of its frames.
 #[derive(Clone, Debug)]
-pub struct Writer {
+pub(crate) struct Writer {
     /// The subject and its authority, already capped by access.
-    pub control: control::Writer,
+    pub(crate) control: control::Writer,
     /// The control lease, if the writer set one.
-    pub lease: Option<control::Lease>,
+    pub(crate) lease: Option<control::Lease>,
     /// The key set of every frame the writer writes.
-    pub set: Arc<KeySet>,
+    pub(crate) set: Arc<KeySet>,
 }
 
 /// An open writer on its shard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Key(pub(crate) u64);
+pub(crate) struct Key(pub(crate) u64);

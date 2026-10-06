@@ -11,7 +11,7 @@ use types::channel::Slot;
 use types::frame::key_set::{self, KeySet};
 use types::frame::{self, Draft, Frame, Label, Path};
 use types::hash;
-use types::time::{Interval, Stamp};
+use types::time::Stamp;
 
 use crate::Refusal;
 use crate::index::{Accepted, Index};
@@ -23,7 +23,7 @@ use crate::{handoff, order, split, stored};
 /// The indexes of one shard, with their writers and readers. It is not `Send`: each
 /// call is on the shard's thread.
 #[derive(Debug)]
-pub struct Shard {
+pub(crate) struct Shard {
     buffer: Buffer,
     pool: Rc<block::Pool>,
     monotonic: env::clock::Clock,
@@ -41,18 +41,18 @@ pub struct Shard {
 
 /// What a shard is built from.
 #[derive(Debug)]
-pub struct Config {
+pub(crate) struct Config {
     /// The shard's buffer.
-    pub buffer: Buffer,
+    pub(crate) buffer: Buffer,
     /// The pool of `buffer`. Index frames, stored headers, and handoff bodies come
     /// from it.
-    pub pool: Rc<block::Pool>,
+    pub(crate) pool: Rc<block::Pool>,
     /// The node's monotonic clock. Control leases expire on it.
-    pub monotonic: env::clock::Clock,
+    pub(crate) monotonic: env::clock::Clock,
     /// Mesh time. Stamp checks, handoffs, stored entries, and readers read it.
-    pub mesh: clock::Reader,
+    pub(crate) mesh: clock::Reader,
     /// The stamps each index accepts.
-    pub limits: order::Limits,
+    pub(crate) limits: order::Limits,
 }
 
 /// The shard's state for an open writer.
@@ -86,7 +86,7 @@ struct Scratch {
 
 /// What became of one group of a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// Queued for the next group commit.
     Applied {
         /// The slot of the group's index.
@@ -113,7 +113,7 @@ pub enum Outcome {
 
 /// Why a call on the shard failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     /// The node has no mesh time yet, so the shard opens no session. Open it again
     /// later.
     Unsynced,
@@ -152,8 +152,7 @@ impl std::error::Error for Error {}
 
 impl Shard {
     /// A shard over `config.buffer` that carries no index yet.
-    #[must_use]
-    pub fn new(config: Config) -> Self {
+    pub(crate) fn new(config: Config) -> Self {
         let Config {
             buffer,
             pool,
@@ -182,7 +181,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard carries `slot` already.
-    pub fn carry(&mut self, slot: Slot) {
+    pub(crate) fn carry(&mut self, slot: Slot) {
         let tail = |path| {
             let tail = self.buffer.tail(slot, path);
             order::Tail {
@@ -210,8 +209,8 @@ impl Shard {
     /// # Panics
     ///
     /// If an index of the key set is not carried.
-    pub fn open_writer(&mut self, writer: Writer) -> Result<writer::Key, Error> {
-        let mesh = self.mesh.now().ok_or(Error::Unsynced)?;
+    pub(crate) fn open_writer(&mut self, writer: Writer) -> Result<writer::Key, Error> {
+        let mesh = self.synced().ok_or(Error::Unsynced)?;
         let now = self.monotonic.now();
         let Writer {
             control,
@@ -239,12 +238,12 @@ impl Shard {
     /// # Panics
     ///
     /// If the writer is not open.
-    pub fn close_writer(&mut self, key: writer::Key) {
-        let now = self.monotonic.now();
-        let mesh = self.mesh();
+    pub(crate) fn close_writer(&mut self, key: writer::Key) {
         let Some(session) = self.writers.remove(&key) else {
             panic!("writer {} is not open", key.0);
         };
+        let now = self.monotonic.now();
+        let mesh = self.mesh();
         for claim in &session.claims {
             self.indexes[claim.place].gate.close(claim.key, now);
         }
@@ -267,7 +266,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the writer is not open, or the frame is not of the writer's key set.
-    pub fn write(
+    pub(crate) fn write(
         &mut self,
         key: writer::Key,
         label: Label,
@@ -276,11 +275,11 @@ impl Shard {
         let Label::Path(path) = label else {
             return Err(Error::Resend);
         };
-        let now = self.monotonic.now();
-        let mesh = self.mesh();
         let Some(session) = self.writers.get(&key) else {
             panic!("writer {} is not open", key.0);
         };
+        let now = self.monotonic.now();
+        let mesh = self.mesh();
         let scratch = &mut self.scratch;
         let mut split = scratch.split.split(&session.set, frame);
         while let Some((group, stamps)) = split.next() {
@@ -305,7 +304,7 @@ impl Shard {
             &mut split,
             &session.set,
             &mut scratch.checks,
-            mesh.latest,
+            mesh,
         );
         drop(split);
         // Made also when a handoff found no room: freezing gives a lost live frame to
@@ -348,18 +347,14 @@ impl Shard {
     /// none waits, else at the end of the group commit that holds the last of them.
     /// Commits run without this future, so a caller may drop it. Call
     /// [`woken`](Self::woken) after it resolves.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Disk`] when the buffer ended before they were on disk.
-    pub fn committed(&self) -> impl Future<Output = Result<(), Error>> + 'static {
-        let commit = self.buffer.committed();
-        async move { commit.await.map_err(Error::Disk) }
+    /// Gives the error that ended the buffer when it ended before they were on disk.
+    pub(crate) fn committed(&self) -> buffer::Commit {
+        self.buffer.committed()
     }
 
     /// The first seq on `path` of the index at `slot` that is not on disk. A writer's
     /// range is stored when this passes its end.
-    pub fn stored(&self, slot: Slot, path: Path) -> u64 {
+    pub(crate) fn stored(&self, slot: Slot, path: Path) -> u64 {
         self.buffer.durable(slot, path).seq
     }
 
@@ -374,13 +369,13 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard does not carry `slot`.
-    pub fn open_complete(
+    pub(crate) fn open_complete(
         &mut self,
         slot: Slot,
         limit_bytes: u64,
     ) -> Result<delivery::complete::Key, Error> {
         // Its close reads mesh time.
-        if self.mesh.now().is_none() {
+        if self.synced().is_none() {
             return Err(Error::Unsynced);
         }
         let place = self.place(slot);
@@ -398,9 +393,12 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard does not carry `slot`.
-    pub fn open_latest(&mut self, slot: Slot) -> Result<delivery::latest::Key, Error> {
-        let mesh = self.mesh.now().ok_or(Error::Unsynced)?;
-        Ok(self.readers.open_latest(self.place(slot), mesh.latest))
+    pub(crate) fn open_latest(
+        &mut self,
+        slot: Slot,
+    ) -> Result<delivery::latest::Key, Error> {
+        let mesh = self.synced().ok_or(Error::Unsynced)?;
+        Ok(self.readers.open_latest(self.place(slot), mesh))
     }
 
     /// Raises the credit of the complete reader `session` on the index at `slot` to
@@ -411,7 +409,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the shard does not carry `slot`, or its readers never gave `session`.
-    pub fn grant(
+    pub(crate) fn grant(
         &mut self,
         slot: Slot,
         session: delivery::complete::Key,
@@ -426,7 +424,7 @@ impl Shard {
     /// # Panics
     ///
     /// If the reader is not open.
-    pub fn take(&mut self, slot: Slot, session: delivery::Key) -> Option<Frame> {
+    pub(crate) fn take(&mut self, slot: Slot, session: delivery::Key) -> Option<Frame> {
         self.readers.take(self.place(slot), session)
     }
 
@@ -436,9 +434,9 @@ impl Shard {
     /// # Panics
     ///
     /// If the reader is not open.
-    pub fn close_reader(&mut self, slot: Slot, session: delivery::Key) {
+    pub(crate) fn close_reader(&mut self, slot: Slot, session: delivery::Key) {
         let mesh = self.mesh();
-        self.readers.close(self.place(slot), session, mesh.latest);
+        self.readers.close(self.place(slot), session, mesh);
     }
 
     /// Replaces `keys` with the readers to wake since the last call, each once, in slot
@@ -449,18 +447,27 @@ impl Shard {
     /// queued for complete readers; else it reads none. Pass the same `keys` each
     /// time: the shard swaps it for its own, so neither allocates once both are large
     /// enough.
-    pub fn woken(&mut self, keys: &mut Vec<reader::Key>) {
+    pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.readers.woken(&self.buffer, keys);
     }
 
-    /// Mesh time now.
+    /// Mesh time now: the midpoint of the clock's interval, which never goes back.
+    /// The latest edge can go back as the error shrinks, and is a century out while
+    /// the error is unknown. `None` before the node first has mesh time.
+    fn synced(&self) -> Option<Stamp> {
+        let now = self.mesh.now()?;
+        let midpoint = now.earliest.nanos().midpoint(now.latest.nanos());
+        Some(Stamp::from_nanos(midpoint))
+    }
+
+    /// Mesh time now, as [`synced`](Self::synced) gives it.
     ///
     /// # Panics
     ///
     /// Before the node first has mesh time. No session opens before it, and mesh time
     /// stays once known.
-    fn mesh(&self) -> Interval {
-        let mesh = self.mesh.now();
+    fn mesh(&self) -> Stamp {
+        let mesh = self.synced();
         mesh.expect("invariant: a session opened with mesh time, which stays")
     }
 
@@ -477,7 +484,7 @@ impl Shard {
     }
 
     /// Appends the unrecorded handoff of each index of `session`.
-    fn record_all(&mut self, session: &Session, mesh: Interval) {
+    fn record_all(&mut self, session: &Session, mesh: Stamp) {
         let groups = (0..session.claims.len()).map(|group| {
             u32::try_from(group).expect("invariant: a key set has u32 groups")
         });
@@ -543,7 +550,7 @@ fn record(
     indexes: &mut [Index],
     session: &Session,
     groups: impl Iterator<Item = u32>,
-    mesh: Interval,
+    mesh: Stamp,
 ) -> Result<bool, Error> {
     let mut all = true;
     for group in groups {
@@ -552,7 +559,7 @@ fn record(
         let Some((handoff, first)) = index.handoff() else {
             continue;
         };
-        let appended = match handoff::entry(pool, handoff, entry, first, mesh.latest) {
+        let appended = match handoff::entry(pool, handoff, entry, first, mesh) {
             Ok(handoff) => buffer.append([handoff]),
             Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
                 all = false;
@@ -732,9 +739,10 @@ mod tests {
             })
         }
 
-        /// Mesh time now.
-        fn now(&self) -> Interval {
-            self.mesh.now().expect("the node has mesh time")
+        /// Mesh time now: the midpoint of the clock's interval.
+        fn now(&self) -> Stamp {
+            let now = self.mesh.now().expect("the node has mesh time");
+            Stamp::from_nanos(now.earliest.nanos().midpoint(now.latest.nanos()))
         }
 
         /// The ring of the node, made with `area` bytes and bodies of `body_max` when
@@ -1617,10 +1625,11 @@ mod tests {
     }
 
     #[test]
-    fn stamps_each_entry_with_the_latest_mesh_time() {
+    fn stamps_each_entry_with_the_midpoint_of_mesh_time() {
         run(14, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
+            let edges = test.mesh.now().expect("the node has mesh time");
             let mesh = test.now();
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
@@ -1628,8 +1637,9 @@ mod tests {
             shard.committed().await.expect("the commit ends");
             let ring = test.ring().await;
             let count = |stamp: Stamp| find(&ring, &stamp.nanos().to_le_bytes()).len();
-            assert_eq!(count(mesh.latest), 4, "two handoffs and two bodies");
-            assert_eq!(count(mesh.earliest), 0);
+            assert_eq!(count(mesh), 4, "two handoffs and two bodies");
+            assert_eq!(count(edges.earliest), 0);
+            assert_eq!(count(edges.latest), 0);
         });
     }
 
@@ -1735,8 +1745,8 @@ mod tests {
                 operation: Operation::Sync,
                 code: 5,
             };
+            assert_eq!(shard.committed().await, Err(failed.clone()));
             let disk = Error::Disk(failed);
-            assert_eq!(shard.committed().await, Err(disk.clone()));
             assert_eq!(
                 disk.to_string(),
                 "a commit failed: sync of shard-0/ring failed with OS error 5"
@@ -1768,6 +1778,7 @@ mod tests {
                 limits: LIMITS,
             });
             shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
             let set = two_indexes();
             let a = shard.open_writer(writer("a", 1, &set));
             let complete = shard.open_complete(Slot::new(0), 1);
@@ -1788,7 +1799,7 @@ mod tests {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
-            let latest = test.now().latest.nanos() + LIMITS.ahead.nanos();
+            let latest = test.now().nanos() + LIMITS.ahead.nanos();
             let edge = frame(&test.pool, &set, &[(2, &[latest])]);
             assert_eq!(shard.write(a, LIVE, edge), Ok(&[applied(2, 0, 1)][..]));
             let past = frame(&test.pool, &set, &[(2, &[latest + 1])]);
@@ -1944,7 +1955,7 @@ mod tests {
             let zero = key(Slot::new(0)).as_u128();
             let two = key(Slot::new(2)).as_u128();
             assert_eq!(
-                headers(&test.ring().await, marked.latest),
+                headers(&test.ring().await, marked),
                 [
                     (zero, 0, 0, 0, 1),
                     (two, 0, 0, 0, 1),
@@ -1971,7 +1982,7 @@ mod tests {
             shard.committed().await.expect("the commit ends");
             let two = key(Slot::new(2)).as_u128();
             assert_eq!(
-                headers(&test.ring().await, marked.latest),
+                headers(&test.ring().await, marked),
                 [(two, 0, 0, 0, 1), (two, 0, 0, 2, 0)]
             );
         });
@@ -1998,7 +2009,7 @@ mod tests {
             shard.committed().await.expect("the commit ends");
             let zero = key(Slot::new(0)).as_u128();
             assert_eq!(
-                headers(&test.ring().await, marked.latest),
+                headers(&test.ring().await, marked),
                 [(zero, 0, 2, 0, 1), (zero, 1, 0, 1, 0)]
             );
         });
@@ -2016,7 +2027,7 @@ mod tests {
             shard.write(a, LIVE, write).expect("written");
             shard.committed().await.expect("the commit ends");
             let ring = test.ring().await;
-            let data: Vec<_> = bodies(&ring, marked.latest)
+            let data: Vec<_> = bodies(&ring, marked)
                 .into_iter()
                 .filter(|(tag, _)| *tag == 0)
                 .collect();
@@ -2535,5 +2546,138 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn starts_a_lease_at_the_open_of_its_writer() {
+        run(64, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let lease = control::Lease::new(Span::from_nanos(10)).expect("a lease");
+            let a = Writer {
+                lease: Some(lease),
+                ..writer("a", 1, &set)
+            };
+            let a = shard.open_writer(a).expect("synced");
+            let write = frame(&test.pool, &set, &[(2, &[10])]);
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
+        });
+    }
+
+    #[test]
+    fn starts_the_lease_of_a_waiter_when_it_takes_control_at_a_close() {
+        run(65, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 2, &set)).expect("synced");
+            let lease = control::Lease::new(Span::from_nanos(10)).expect("a lease");
+            let b = Writer {
+                lease: Some(lease),
+                ..writer("b", 1, &set)
+            };
+            let b = shard.open_writer(b).expect("synced");
+            shard.close_writer(a);
+            let write = frame(&test.pool, &set, &[(2, &[10])]);
+            assert_eq!(shard.write(b, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
+        });
+    }
+
+    #[test]
+    fn stamps_a_handoff_at_close_with_mesh_time_at_the_close() {
+        run(66, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 2, &set)).expect("synced");
+            shard.open_writer(writer("b", 1, &set)).expect("synced");
+            test.clock.sleep(Span::from_nanos(1)).await;
+            let marked = test.now();
+            shard.close_writer(a);
+            shard.committed().await.expect("the commit ends");
+            let zero = key(Slot::new(0)).as_u128();
+            let two = key(Slot::new(2)).as_u128();
+            assert_eq!(
+                headers(&test.ring().await, marked),
+                [(zero, 0, 0, 0, 1), (two, 0, 0, 0, 1)]
+            );
+        });
+    }
+
+    #[test]
+    fn takes_a_write_while_a_commit_future_waits() {
+        run(67, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            shard.write(a, LIVE, first).expect("written");
+            let commit = shard.committed();
+            let second = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            assert_eq!(shard.write(a, LIVE, second), Ok(&[applied(0, 1, 1)][..]));
+            commit.await.expect("the commit ends");
+            assert_eq!(shard.stored(Slot::new(0), Path::Live), 2);
+        });
+    }
+
+    #[test]
+    fn leaves_each_gate_as_it_was_after_an_unsynced_open() {
+        run(68, |test| async move {
+            let buffer = test.buffer(AREA, BODY_MAX, 4).await;
+            let (clock, mesh) = clock::Clock::new(test.clock.clone());
+            let mut shard = Shard::new(Config {
+                buffer,
+                pool: Rc::clone(&test.pool),
+                monotonic: test.clock.clone(),
+                mesh: mesh.clone(),
+                limits: LIMITS,
+            });
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
+            let set = two_indexes();
+            assert_eq!(
+                shard.open_writer(writer("a", 1, &set)),
+                Err(Error::Unsynced)
+            );
+            let wall = test.node.wall();
+            test.tasks.spawn(async move { clock.run(wall).await });
+            while mesh.now().is_none() {
+                test.clock.sleep(Span::from_nanos(1)).await;
+            }
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let write = frame(&test.pool, &set, &[(2, &[10])]);
+            assert_eq!(shard.write(b, LIVE, write), Ok(&[applied(2, 0, 1)][..]));
+        });
+    }
+
+    #[test]
+    fn refuses_a_stamp_years_ahead_when_the_os_clock_has_no_bound() {
+        let mut sim = sim::Sim::new(sim::Config {
+            seed: 69,
+            ..sim::Config::default()
+        });
+        // With no bound on the OS clock, mesh time is a century wide.
+        let node = sim.node(sim::node::Config {
+            wall_error: None,
+            ..sim::node::Config::default()
+        });
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let now = test.now();
+            let far: Stamp = "2036-01-01T00:00:00Z".parse().expect("a valid stamp");
+            let ahead = order::Error::Ahead {
+                stamp: far,
+                latest: Stamp::from_nanos(now.nanos() + LIMITS.ahead.nanos()),
+            };
+            let bad = frame(&test.pool, &set, &[(2, &[far.nanos()])]);
+            assert_eq!(
+                shard.write(a, LIVE, bad),
+                Ok(&[refused(2, Refusal::Order(ahead))][..])
+            );
+            let good = frame(&test.pool, &set, &[(2, &[now.nanos()])]);
+            assert_eq!(shard.write(a, LIVE, good), Ok(&[applied(2, 0, 1)][..]));
+        })
+        .expect("the run ends");
     }
 }
