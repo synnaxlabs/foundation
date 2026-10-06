@@ -1910,8 +1910,6 @@ mod tests {
     }
 
     mod read {
-        use std::iter;
-
         use super::*;
         use crate::reader::Mode;
 
