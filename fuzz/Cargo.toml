@@ -23,6 +23,7 @@ libfuzzer-sys = "0.4.13"
 ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
 sim = { path = "../crates/sim" }
+spec = { path = "../crates/spec" }
 types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
 
@@ -97,6 +98,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "spec_definition"
+path = "fuzz_targets/spec_definition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "types_byte_size"
 path = "fuzz_targets/types_byte_size.rs"
 test = false
@@ -106,6 +114,13 @@ bench = false
 [[bin]]
 name = "secret_sealed"
 path = "fuzz_targets/secret_sealed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spec_tree"
+path = "fuzz_targets/spec_tree.rs"
 test = false
 doc = false
 bench = false
@@ -148,6 +163,13 @@ bench = false
 [[bin]]
 name = "types_stamp"
 path = "fuzz_targets/types_stamp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_clock"
+path = "fuzz_targets/wire_clock.rs"
 test = false
 doc = false
 bench = false

@@ -20,10 +20,29 @@ use crate::stop::Stop;
 
 /// The seams a node runs on. `node`'s entry point builds the real ones from `os`;
 /// tests and `acceptance` pass simulated ones from `sim`.
-#[derive(Debug)]
-pub struct Config {
+pub struct Config<M> {
     /// Where shards run. One shard starts per core.
     pub shards: env::shards::Shards,
+    /// The monotonic clock. Mesh time runs on it.
+    pub clock: env::clock::Clock,
+    /// The OS clock, a source of mesh time.
+    pub wall: env::wall::Wall,
+    /// The most bytes the node's pools may commit, split evenly across its shards.
+    pub budget: usize,
+    /// Reserves `len` bytes of address space for one shard's pool. `node` calls it
+    /// once for each shard, in order of core.
+    pub memory: Box<dyn FnMut(usize) -> Result<M, os::memory::Error>>,
+}
+
+impl<M> fmt::Debug for Config<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("shards", &self.shards)
+            .field("clock", &self.clock)
+            .field("wall", &self.wall)
+            .field("budget", &self.budget)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A running node. Call [`Node::stop`] to end it, then [`Node::join`].
@@ -31,33 +50,71 @@ pub struct Config {
 pub struct Node {
     stop: Stop,
     handles: Vec<Handle>,
-    failed: Option<env::thread::Error>,
+    failed: Option<Error>,
 }
 
 impl Node {
-    /// Starts one shard per core, named `shard-<i>` and pinned to core `i`. Returns
-    /// once each shard runs or one has failed to start. A failed start stops the
-    /// node, and [`Node::join`] returns its error.
+    /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
+    /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
+    /// Each shard owns a `block::Pool` with an even part of the budget; shard 0 also
+    /// takes the remainder. Returns once each shard runs or one has failed to start. A
+    /// failed start, or a shard with no memory, stops the node, and [`Node::join`]
+    /// returns its error.
+    ///
+    /// # Panics
+    ///
+    /// If a shard's part of the budget needs more address space than a `usize` holds.
     #[must_use = "a dropped Node leaves its shards running"]
-    pub fn start(config: Config) -> Self {
-        let Config { shards } = config;
+    pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
+        let Config {
+            shards,
+            clock: monotonic,
+            wall,
+            budget,
+            mut memory,
+        } = config;
+        let (mesh, _reader) = clock::Clock::new(monotonic);
+        let mut mesh = Some((mesh, wall));
         let stop = Stop::default();
         let mut node = Self {
             stop: stop.clone(),
             handles: Vec::new(),
             failed: None,
         };
-        for core in 0..shards.cores().get() {
+        let pinnable = shards.pinnable();
+        let cores = shards.cores().get();
+        for core in 0..cores {
+            let budget = budget / cores + if core == 0 { budget % cores } else { 0 };
+            let config = block::Config { budget };
+            let pool = match memory(config.reservation()) {
+                Ok(m) => block::Pool::new(config, m),
+                Err(error) => {
+                    node.failed = Some(Error::Memory { core, error });
+                    stop.set();
+                    break;
+                }
+            };
             let shard = env::shards::Config {
                 name: format!("shard-{core}"),
-                core: Some(core),
+                core: pinnable.then_some(core),
             };
+            // Only the first shard gets the mesh clock.
+            let mesh = mesh.take();
             let guard = stop.guard();
-            match shards.start(shard, move |_tasks| guard) {
+            let main = move |tasks: env::tasks::Tasks| {
+                if let Some((mesh, wall)) = mesh {
+                    tasks.spawn(async { mesh.run(wall).await });
+                }
+                async move {
+                    guard.await;
+                    drop(pool);
+                }
+            };
+            match shards.start(shard, main) {
                 Ok(handle) => node.handles.push(handle),
                 Err(e) => {
                     // The driver dropped `main` and its guard, which stopped the node.
-                    node.failed = Some(e);
+                    node.failed = Some(Error::Start(e));
                     break;
                 }
             }
@@ -76,10 +133,10 @@ impl Node {
     /// # Errors
     ///
     /// The first failure: [`Error::Start`] for a shard that could not start or pin,
-    /// else [`Error::Panicked`] for the first shard by core that panicked. Any
-    /// failed shard stops the node.
+    /// or [`Error::Memory`] for a shard with no memory, else [`Error::Panicked`] for
+    /// the first shard by core that panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
-        let mut first = self.failed.map(Error::Start);
+        let mut first = self.failed;
         for handle in self.handles {
             if let Err(e) = handle.join() {
                 first.get_or_insert(Error::Panicked(e));
@@ -96,6 +153,13 @@ pub enum Error {
     Start(env::thread::Error),
     /// A shard panicked.
     Panicked(env::thread::Panicked),
+    /// The OS gave no memory for the pool of the shard on `core`.
+    Memory {
+        /// The core of the shard.
+        core: usize,
+        /// Why the OS gave none.
+        error: os::memory::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -103,6 +167,9 @@ impl fmt::Display for Error {
         match self {
             Self::Start(e) => write!(f, "{e}"),
             Self::Panicked(e) => write!(f, "{e}"),
+            Self::Memory { core, error } => {
+                write!(f, "no memory for the pool of shard-{core}: {error}")
+            }
         }
     }
 }

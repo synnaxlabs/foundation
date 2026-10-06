@@ -11,19 +11,25 @@ use crate::state::lock;
 
 impl env::serial::Driver for Node {
     fn open<'a>(&'a self, config: &'a Config) -> Open<'a> {
-        let end = lock(&self.shared).serial().open(self.node, config);
+        let (life, end) = {
+            let mut state = lock(&self.shared);
+            (
+                state.life(self.node),
+                state.serial().open(self.node, config),
+            )
+        };
         let port = end.map(|end| -> Box<dyn port::Driver> {
             Box::new(Port {
                 node: self.clone(),
                 end,
-                owner: Owner::new("a serial port"),
+                owner: Owner::new("a serial port", life),
             })
         });
         Box::pin(ready(port))
     }
 }
 
-/// One open end of a line. A drop closes it.
+/// One open end of a line. A drop closes it, unless a crash of its node did.
 struct Port {
     node: Node,
     end: End,
@@ -64,7 +70,11 @@ impl port::Driver for Port {
 
 impl Drop for Port {
     fn drop(&mut self) {
-        let wakers = lock(&self.node.shared).serial().close(self.end);
+        let wakers = {
+            let mut state = lock(&self.node.shared);
+            let current = self.owner.current(&state, self.node.node);
+            current.then(|| state.serial().close(self.end))
+        };
         drop(wakers);
     }
 }

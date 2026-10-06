@@ -8,12 +8,24 @@ publish.workspace = true
 [dependencies]
 block = { path = "../block" }
 env = { path = "../env" }
-rustix = { workspace = true }
+getrandom = { workspace = true }
+libc = { workspace = true }
+rustix = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 types = { path = "../types" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["thread"] }
+
 [dev-dependencies]
+divan = { workspace = true }
+proptest = { workspace = true }
 rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["rt", "time"] }
+
+[[bench]]
+name = "clock"
+harness = false
 
 [lints]
 workspace = true

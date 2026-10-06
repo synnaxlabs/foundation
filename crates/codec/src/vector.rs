@@ -21,7 +21,7 @@ use crate::{Error, Layout, VECTOR_LEN, bits, word};
 pub(crate) const RAW: u8 = 0;
 pub(crate) const FFOR: u8 = 1;
 pub(crate) const DELTA: u8 = 2;
-const RLE: u8 = 3;
+pub(crate) const RLE: u8 = 3;
 
 /// The codec of one vector and its header values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,9 +317,23 @@ impl Vector<'_> {
                     *sample = *value;
                 }
             }
+            Plan::Ffor { reference, bits: 0 } => {
+                samples.into_slice().fill(word::store(reference));
+            }
             Plan::Ffor { reference, bits } => {
                 for (sample, residual) in samples.zip(bits::unpack(body, bits)) {
                     *sample = word::store(reference.wrapping_add(residual));
+                }
+            }
+            Plan::Delta {
+                first,
+                base,
+                bits: 0,
+            } => {
+                let mut value = first;
+                for sample in samples {
+                    *sample = word::store(value);
+                    value = value.wrapping_add(base);
                 }
             }
             Plan::Delta { first, base, bits } => {

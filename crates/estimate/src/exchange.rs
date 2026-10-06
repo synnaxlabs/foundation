@@ -1,10 +1,7 @@
 //! Measurements from round trips to another clock.
 
-use std::fmt;
+use types::time::{Interval, Monotonic};
 
-use types::time::{Interval, Monotonic, Span};
-
-use crate::measurement::MAX_ERROR;
 use crate::{Drift, Measurement};
 
 /// One reading of another clock's mesh time, taken between two readings of the local
@@ -25,10 +22,9 @@ use crate::{Drift, Measurement};
 ///     answered: peer(6_150),
 ///     returned: Monotonic(1_250),
 /// };
-/// let m = exchange.measure(Drift::from_ppb(0).expect("at most 10%"))?;
+/// let m = exchange.measure(Drift::from_ppb(0).expect("at most 10%"));
 /// let ns = Span::from_nanos;
-/// assert_eq!((m.offset(), m.error()), (ns(5_000), ns(110)));
-/// # Ok::<(), estimate::exchange::Error>(())
+/// assert_eq!(m.map(|m| (m.offset(), m.error())), Some((ns(5_000), ns(110))));
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Exchange {
@@ -46,67 +42,35 @@ impl Exchange {
     /// The offset of the local monotonic clock at `returned`, for a clock that drifts
     /// from mesh time by at most `drift`. When both intervals hold the other clock's
     /// true mesh time, it holds the true offset whatever the delay in each direction.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::Crossed`] when the exchange allows no offset.
-    /// - [`Error::Bound`] when the error is more than 36500 days.
-    pub fn measure(self, drift: Drift) -> Result<Measurement, Error> {
+    /// An error over 36500 days gives an unknown measurement
+    /// ([`Measurement::unknown`]), centered between the edges or at the nearest span.
+    /// `None` when the exchange allows no offset: an interval is inverted, the other
+    /// clock goes back, the local clock drifts more than the drift bound, or `sent` is
+    /// after `returned`.
+    #[must_use]
+    pub fn measure(self, drift: Drift) -> Option<Measurement> {
         let (received, answered) = (self.received, self.answered);
         let inverted = |i: Interval| i.earliest > i.latest;
         let back = received.earliest > answered.latest;
         if inverted(received) || inverted(answered) || back {
-            return Err(Error::Crossed);
+            return None;
         }
         let earliest = received.earliest.max(answered.earliest);
         let latest = received.latest.min(answered.latest);
-        let round_trip = self.returned.0.checked_sub(self.sent.0);
-        let round_trip = round_trip.ok_or(Error::Crossed)?;
+        let round_trip = self.returned.0.checked_sub(self.sent.0)?;
         let offset = |mesh: i64, local: u64| i128::from(mesh) - i128::from(local);
         let low = offset(earliest.nanos(), self.returned.0);
         let high =
             offset(latest.nanos(), self.sent.0) + i128::from(drift.over(round_trip));
-        if low > high {
-            return Err(Error::Crossed);
-        }
-        Measurement::checked_between(self.returned, low, high)
-            .map_err(|error| Error::Bound { error })
+        (low <= high).then(|| Measurement::between(self.returned, low, high))
     }
 }
-
-/// Why an [`Exchange`] gave no measurement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Error {
-    /// The exchange allows no offset: an interval is inverted, the other clock goes
-    /// back, the local clock drifts more than the drift bound, or `sent` is after
-    /// `returned`.
-    Crossed,
-    /// The error is more than 36500 days, as when the other clock does not know mesh
-    /// time.
-    Bound {
-        /// The error bound, or the largest span when the bound is wider.
-        error: Span,
-    },
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Crossed => f.write_str("exchange allows no offset"),
-            Self::Bound { error } => {
-                write!(f, "error bound {error} is more than {MAX_ERROR}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
-    use types::time::{Interval, Monotonic, Span, Stamp};
+    use types::time::{Interval, Monotonic, Stamp};
 
-    use super::{Error, Exchange};
+    use super::Exchange;
     use crate::Drift;
     use crate::measurement::MAX_ERROR;
 
@@ -120,6 +84,10 @@ mod tests {
         }
     }
 
+    fn drift(ppb: u32) -> Drift {
+        Drift::from_ppb(ppb).expect("valid")
+    }
+
     /// The exchange as `(offset, error)`, with `ppb` of drift.
     fn check(
         ppb: u32,
@@ -127,15 +95,15 @@ mod tests {
         received: Interval,
         answered: Interval,
         returned: u64,
-    ) -> Result<(i64, i64), Error> {
+    ) -> Option<(i64, i64)> {
         let exchange = Exchange {
             sent: Monotonic(sent),
             received,
             answered,
             returned: Monotonic(returned),
         };
-        let m = exchange.measure(Drift::from_ppb(ppb).expect("valid"))?;
-        Ok((m.offset().nanos(), m.error().nanos()))
+        let m = exchange.measure(drift(ppb));
+        m.map(|m| (m.offset().nanos(), m.error().nanos()))
     }
 
     mod known_exchanges {
@@ -144,74 +112,84 @@ mod tests {
         #[test]
         fn halves_a_symmetric_round_trip() {
             let (received, answered) = (peer(6_100, 6_100), peer(6_150, 6_150));
-            assert_eq!(check(0, 1_000, received, answered, 1_250), Ok((5_000, 100)));
+            assert_eq!(
+                check(0, 1_000, received, answered, 1_250),
+                Some((5_000, 100))
+            );
         }
 
         #[test]
         fn covers_an_asymmetric_round_trip() {
             let (received, answered) = (peer(6_010, 6_010), peer(6_060, 6_060));
-            assert_eq!(check(0, 1_000, received, answered, 1_250), Ok((4_910, 100)));
+            assert_eq!(
+                check(0, 1_000, received, answered, 1_250),
+                Some((4_910, 100))
+            );
         }
 
         #[test]
         fn uses_the_late_edge_of_arrival_and_the_early_edge_of_answer() {
             let (received, answered) = (peer(6_000, 6_120), peer(6_140, 6_400));
-            assert_eq!(check(0, 1_000, received, answered, 1_250), Ok((5_005, 115)));
+            assert_eq!(
+                check(0, 1_000, received, answered, 1_250),
+                Some((5_005, 115))
+            );
         }
 
         #[test]
         fn bounds_each_edge_by_both_intervals() {
             let (wide, narrow) = (peer(5_000, 7_000), peer(6_150, 6_150));
-            assert_eq!(check(0, 1_000, wide, narrow, 1_250), Ok((5_025, 125)));
+            assert_eq!(check(0, 1_000, wide, narrow, 1_250), Some((5_025, 125)));
             let narrow = peer(6_100, 6_100);
-            assert_eq!(check(0, 1_000, narrow, wide, 1_250), Ok((4_975, 125)));
+            assert_eq!(check(0, 1_000, narrow, wide, 1_250), Some((4_975, 125)));
         }
 
         #[test]
         fn gives_the_peer_interval_for_a_zero_round_trip() {
             let interval = peer(5_990, 6_010);
-            assert_eq!(check(0, 1_000, interval, interval, 1_000), Ok((5_000, 10)));
+            assert_eq!(
+                check(0, 1_000, interval, interval, 1_000),
+                Some((5_000, 10))
+            );
         }
 
         #[test]
         fn widens_only_the_high_edge_by_drift() {
             let (instant, returned) = (peer(0, 0), 2 * SECOND_NS);
             let exact = check(0, SECOND_NS, instant, instant, returned);
-            assert_eq!(exact, Ok((-1_500_000_000, 500_000_000)));
+            assert_eq!(exact, Some((-1_500_000_000, 500_000_000)));
             let drifted = check(1_000, SECOND_NS, instant, instant, returned);
-            assert_eq!(drifted, Ok((-1_499_999_500, 500_000_500)));
+            assert_eq!(drifted, Some((-1_499_999_500, 500_000_500)));
         }
 
         #[test]
-        fn fails_when_the_error_passes_36500_days() {
+        fn is_unknown_when_the_error_passes_36500_days() {
             let widest = MAX_ERROR.nanos();
-            let interval = peer(-widest - 1, widest + 1);
-            let error = Span::from_nanos(widest + 1);
-            assert_eq!(
-                check(0, 0, interval, interval, 0),
-                Err(Error::Bound { error })
-            );
-            assert_eq!(
-                Error::Bound { error }.to_string(),
-                "error bound 3153600000.000000001s is more than 36500d"
-            );
+            let interval = peer(-widest, widest);
+            assert_eq!(check(0, 0, interval, interval, 0), Some((0, widest)));
+            let interval = peer(-widest - 5, widest + 1);
+            assert_eq!(check(0, 0, interval, interval, 0), Some((-2, widest)));
         }
 
         #[test]
-        fn fails_when_the_round_trip_passes_36500_days() {
+        fn is_unknown_when_the_round_trip_passes_36500_days() {
             let widest = MAX_ERROR.nanos();
             let interval = peer(-widest, widest - 2);
-            assert_eq!(check(0, 0, interval, interval, 2), Ok((-2, widest)));
-            let error = Span::from_nanos(widest + 1);
-            let err = check(0, 0, interval, interval, 3);
-            assert_eq!(err, Err(Error::Bound { error }));
+            assert_eq!(check(0, 0, interval, interval, 2), Some((-2, widest)));
+            assert_eq!(check(0, 0, interval, interval, 7), Some((-5, widest)));
         }
 
         #[test]
-        fn saturates_an_error_wider_than_a_span() {
+        fn is_unknown_when_the_error_passes_a_span() {
             let widest = peer(i64::MIN, i64::MAX);
-            let error = Span::from_nanos(i64::MAX);
-            assert_eq!(check(0, 0, widest, widest, 0), Err(Error::Bound { error }));
+            let unknown = (-1, MAX_ERROR.nanos());
+            assert_eq!(check(0, 0, widest, widest, 0), Some(unknown));
+        }
+
+        #[test]
+        fn stops_the_offset_at_the_last_span_and_covers_the_cut() {
+            let instant = peer(i64::MIN, i64::MIN);
+            assert_eq!(check(0, 7, instant, instant, 7), Some((i64::MIN, 7)));
         }
     }
 
@@ -221,48 +199,42 @@ mod tests {
         #[test]
         fn fails_when_the_peer_answers_too_late() {
             let (received, answered) = (peer(6_100, 6_100), peer(6_351, 6_351));
-            let err = check(0, 1_000, received, answered, 1_250);
-            assert_eq!(err, Err(Error::Crossed));
-            assert_eq!(Error::Crossed.to_string(), "exchange allows no offset");
+            assert_eq!(check(0, 1_000, received, answered, 1_250), None);
             let most = peer(6_350, 6_350);
             let ok = check(0, 1_000, received, most, 1_250);
-            assert_eq!(ok, Ok((5_100, 0)));
+            assert_eq!(ok, Some((5_100, 0)));
         }
 
         #[test]
         fn fails_when_drift_cannot_cover_the_gap() {
             let received = peer(0, 0);
             let most = peer(1_000_001_000, 1_000_001_000);
-            assert_eq!(check(1_000, 0, received, most, SECOND_NS), Ok((1_000, 0)));
+            assert_eq!(check(1_000, 0, received, most, SECOND_NS), Some((1_000, 0)));
             let past = peer(1_000_001_001, 1_000_001_001);
-            let err = check(1_000, 0, received, past, SECOND_NS);
-            assert_eq!(err, Err(Error::Crossed));
+            assert_eq!(check(1_000, 0, received, past, SECOND_NS), None);
         }
 
         #[test]
         fn fails_when_a_peer_interval_is_inverted() {
             let (honest, inverted) = (peer(6_150, 6_150), peer(6_100, 5_900));
-            let err = check(0, 1_000, inverted, honest, 1_250);
-            assert_eq!(err, Err(Error::Crossed));
+            assert_eq!(check(0, 1_000, inverted, honest, 1_250), None);
             let (honest, inverted) = (peer(6_000, 6_250), peer(6_250, 6_000));
-            let err = check(0, 1_000, honest, inverted, 1_250);
-            assert_eq!(err, Err(Error::Crossed));
+            assert_eq!(check(0, 1_000, honest, inverted, 1_250), None);
         }
 
         #[test]
         fn fails_when_peer_time_goes_back() {
             let received = peer(6_100, 6_100);
-            let err = check(0, 1_000, received, peer(6_099, 6_099), 1_250);
-            assert_eq!(err, Err(Error::Crossed));
+            let back = check(0, 1_000, received, peer(6_099, 6_099), 1_250);
+            assert_eq!(back, None);
             let ok = check(0, 1_000, received, peer(6_100, 6_100), 1_250);
-            assert_eq!(ok, Ok((4_975, 125)));
+            assert_eq!(ok, Some((4_975, 125)));
         }
 
         #[test]
         fn fails_when_sent_is_after_returned() {
             let interval = peer(-100, 100);
-            let err = check(0, 1_001, interval, interval, 1_000);
-            assert_eq!(err, Err(Error::Crossed));
+            assert_eq!(check(0, 1_001, interval, interval, 1_000), None);
         }
     }
 
@@ -313,7 +285,7 @@ mod tests {
             }
 
             #[test]
-            fn holds_the_truth_or_fails_for_wide_intervals(
+            fn holds_the_truth_or_is_unknown_for_wide_intervals(
                 w in world(),
                 sent in 0..TIME_NS,
                 delays in uniform3(0..TIME_NS),
@@ -324,16 +296,19 @@ mod tests {
             ) {
                 let exchange = exchange(w, sent, delays, widths);
                 let at = exchange.returned.0;
-                match exchange.measure(w.drift) {
-                    Ok(m) => {
-                        prop_assert!(
-                            w.holds_truth_at(m, at),
-                            "{m:?} misses {}",
-                            w.truth(at)
-                        );
-                    }
-                    Err(Error::Bound { error }) => prop_assert!(error > MAX_ERROR),
-                    Err(e) => prop_assert!(false, "unexpected {e}"),
+                let m = exchange.measure(w.drift).expect("an honest exchange");
+                let truth = w.truth(at);
+                if m.error() < MAX_ERROR {
+                    prop_assert!(w.holds_truth_at(m, at), "{m:?} misses {truth}");
+                } else {
+                    // At the center of edges that hold the truth, which are at most
+                    // the narrower interval, the round trip, and drift apart.
+                    let width = |a: i64, b: i64| i128::from(a) + i128::from(b);
+                    let narrowest =
+                        width(widths[0], widths[1]).min(width(widths[2], widths[3]));
+                    let reach = narrowest / 2 + i128::from(at - sent) + 1;
+                    let miss = i128::from(m.offset().nanos()) - truth;
+                    prop_assert!(miss.abs() <= reach, "{m:?} is {miss} from the truth");
                 }
             }
 
@@ -349,12 +324,9 @@ mod tests {
                     answered: peer(mesh[2], mesh[3]),
                     returned: Monotonic(local[1]),
                 };
-                match exchange.measure(Drift::from_ppb(ppb).expect("valid")) {
-                    Ok(m) => {
-                        prop_assert_eq!(m.at(), Monotonic(local[1]));
-                        prop_assert!(m.error() <= MAX_ERROR);
-                    }
-                    Err(Error::Crossed | Error::Bound { .. }) => {}
+                if let Some(m) = exchange.measure(drift(ppb)) {
+                    prop_assert_eq!(m.at(), Monotonic(local[1]));
+                    prop_assert!(m.error() <= MAX_ERROR);
                 }
             }
         }

@@ -23,7 +23,8 @@ use crate::{drivers, net, shard};
 pub struct Node(pub(crate) drivers::Node);
 
 impl Node {
-    /// The node's monotonic clock. A sleep on it panics outside the node's threads.
+    /// The node's monotonic clock. A sleep on it panics outside the node's threads,
+    /// and stops when its thread ends, a leaked one too.
     #[must_use]
     pub fn clock(&self) -> env::clock::Clock {
         env::clock::Clock::new(self.0.clone())
@@ -81,12 +82,11 @@ impl Node {
         env::threads::Threads::new(self.0.clone())
     }
 
-    /// The node's network, on its [`Node::addresses`]. UDP only: `connect` and
-    /// `listen` panic.
+    /// The node's network, on its [`Node::addresses`].
     ///
-    /// - A bind or a send from an address that is not the node's gives `Error::Io`
-    ///   with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free port from
-    ///   49152.
+    /// - A bind, a listen, or a send from an address that is not the node's gives
+    ///   `Error::Io` with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free
+    ///   port from 49152.
     /// - A socket on IPv6 takes `::ffff:a.b.c.d` as `a.b.c.d`, in the destination and
     ///   the source of a send. A send to the other family than the socket's gives
     ///   `Error::Unreachable` with the destination as given.
@@ -96,7 +96,17 @@ impl Node {
     ///   destination, or when its receive queue takes more than `recv_buffer_bytes`,
     ///   in which each datagram takes its length plus 768 bytes. The send buffer
     ///   never fills.
-    /// - A socket half panics when it polls outside the node's threads.
+    /// - A TCP segment is never lost or duplicated, and each direction of a stream
+    ///   keeps its order. A connect is ready after one round trip, and its accept
+    ///   after one and a half. A connect takes the next free port after the node's
+    ///   last connect, from 49152. A listen conflicts only with other listens.
+    /// - A peer sends at most `recv_buffer_bytes` past the bytes read, and a stream
+    ///   holds at most `send_buffer_bytes` that its peer has not received. A write
+    ///   after `poll_close` gives `Error::Io` with code 32 (`EPIPE`).
+    /// - TCP panics on a link with loss, on `delayed` sends, on a connect to an
+    ///   address that no node has, and on a connect to a full backlog.
+    /// - A socket half, a stream, or a listener panics when it polls outside the
+    ///   node's threads or after a crash of the node.
     #[must_use]
     pub fn net(&self) -> env::net::Net {
         env::net::Net::new(self.0.clone())
@@ -111,7 +121,8 @@ impl Node {
     ///   most 4 KiB of bytes not read, and loses the bytes past that.
     /// - A byte that arrives at an end that is not open is lost, and so are the
     ///   bytes in flight from a port that drops.
-    /// - A port panics when it polls outside the node's threads.
+    /// - A port panics when it polls outside the node's threads or after a crash of
+    ///   the node.
     #[must_use]
     pub fn serial(&self) -> env::serial::Serial {
         env::serial::Serial::new(self.0.clone())
@@ -144,10 +155,12 @@ impl Node {
     /// - A directory takes 4 KiB. A file takes its length until it is removed, a
     ///   `sync_dir` makes the removal durable, and no descriptor or call in flight
     ///   uses it.
-    /// - Where calls in flight at the same time overlap, each 512-byte sector of a
-    ///   read gives the old bytes or the bytes of one of the writes, and each sector
-    ///   keeps the bytes of one write. A write whose future dropped still ends, with
-    ///   any subset of its sectors.
+    /// - Where calls in flight at the same time overlap, a read gives, in each
+    ///   512-byte sector, the old bytes, the bytes of one of the writes, or the bytes
+    ///   of one of these over a part of the sector and of another over the rest.
+    ///   Writes go on each sector in an order that their times allow, and a write
+    ///   that overlaps another can go in up to three parts, each at its own place.
+    ///   A write whose future dropped still ends, with any subset of its sectors.
     /// - A failure gives the code that Linux gives: 20 (`ENOTDIR`) for a path
     ///   through a file, 21 (`EISDIR`) for a file call on a directory, and 17
     ///   (`EEXIST`) for `create_dir` on a file.
@@ -159,9 +172,9 @@ impl Node {
     /// Makes the next call of `operation` on `path` on the node fail with
     /// `Error::Io` and code 5 (`EIO`). Faults on one path and operation fire in
     /// turn, one per call. The call does not touch the disk, except a sync: each
-    /// sector keeps its durable bytes or the bytes of one write that the sync
-    /// covers. These bytes are then durable, and a read sees them unless a later
-    /// write covers the sector.
+    /// sector keeps its durable bytes, or its bytes after one write that the sync
+    /// covers or a part of one. These bytes are then durable, and a read sees them
+    /// unless a later write covers the sector.
     ///
     /// # Panics
     ///

@@ -3,12 +3,12 @@
 //! etcd source: `README.md` lists each source and the changes.
 
 use raft::{
-    Body, Data, Entry, Error, Hard, Message, Position, Raft, Ready, Role, Term,
+    Body, Data, Entry, Error, Grant, Hard, Message, Position, Raft, Ready, Role, Term,
 };
 
 use crate::common::{
-    Disk, ELECTION, Network, accept, accept_all, at_term, count, elect, key, leader,
-    noop, position, reply, start,
+    Disk, ELECTION, Network, VOTERS, accept, accept_all, at_term, count, elect, key,
+    leader, noop, position, proof, reply, start,
 };
 
 /// A log with one entry per term in `terms`, from index 1, with no data.
@@ -39,9 +39,16 @@ fn commit_noop(raft: &mut Raft, disk: &mut Disk) {
     disk.store(raft.ready());
 }
 
+/// Node 2 leads: its message carries its votes.
+fn led(term: u64, body: Body) -> Message {
+    Message {
+        proof: Some(proof(Grant::Vote, 2, VOTERS)),
+        ..reply(2, term, body)
+    }
+}
+
 fn append(term: u64, prev: Position, entries: Vec<Entry>, commit: u64) -> Message {
-    reply(
-        2,
+    led(
         term,
         Body::Append {
             prev,
@@ -73,6 +80,7 @@ fn leader_start_replication() {
                 entries: vec![entry(1, li + 1, b"some data")],
                 commit: li,
             },
+            proof: None,
         })
         .to_vec();
     assert_eq!(messages, expected);
@@ -198,6 +206,7 @@ fn follower_check_msg_app() {
             to: key(2),
             term: Term(2),
             body,
+            proof: None,
         };
         assert_eq!(disk.store(raft.ready()), [expected], "#{i}");
     }
@@ -239,6 +248,7 @@ fn follower_append_entries() {
             to: key(2),
             term: Term(term),
             body: Body::AppendReply { last },
+            proof: None,
         };
         assert_eq!(disk.store(ready), [answer], "#{i}");
         assert_eq!(disk.hard.term, Term(term), "#{i}");
@@ -288,6 +298,7 @@ fn leader_sync_follower_log() {
             to: key(1),
             term: Term(term + 1),
             body,
+            proof: None,
         };
         network.send(from_3(Body::PreVoteReply { granted: true }));
         network.send(from_3(Body::VoteReply { granted: true }));
@@ -342,8 +353,7 @@ fn handle_heartbeat() {
     {
         let (mut raft, mut disk) =
             start(1, &[1, 2], 5, at_term(3), log(&[1, 2, 3]), commit);
-        raft.step(reply(2, 3, Body::Heartbeat { commit: sent }))
-            .unwrap();
+        raft.step(led(3, Body::Heartbeat { commit: sent })).unwrap();
         let messages = disk.store(raft.ready());
         assert_eq!(disk.committed(), expected, "#{i}");
         let [message] = &messages[..] else {
@@ -420,7 +430,7 @@ fn log_replication() {
     for (i, (second_leader, committed)) in
         [(false, 2), (true, 4)].into_iter().enumerate()
     {
-        let mut network = Network::of(3, &[1, 2, 3], Hard::default());
+        let mut network = Network::of(3, &[1, 2, 3], &Hard::default());
         network.campaign(&[1]);
         network.propose(1, b"somedata");
         let mut proposed = vec![b"somedata".to_vec()];

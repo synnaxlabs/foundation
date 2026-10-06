@@ -7,9 +7,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::Poll;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 
 use env::files::{Error, Mode, Operation};
 use env::net::udp;
@@ -718,5 +718,145 @@ fn a_crash_frees_a_removed_file_that_a_leaked_handle_holds() {
             })
             .unwrap();
         assert_eq!(free, MIB, "{crash:?}");
+    }
+}
+
+#[test]
+fn a_crash_gives_back_the_block_of_a_leaked_read_that_ended() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        let pool = Arc::new(Mutex::new(pool()));
+        let lender = Arc::clone(&pool);
+        crash_after(&mut sim, &node, crash, move |node| async move {
+            let file = Box::leak(Box::new(create_synced(&node).await));
+            let into = lender.lock().unwrap().alloc(1_024).unwrap();
+            let read = Box::leak(Box::new(Box::pin(file.read_at(0, into))));
+            poll_fn(|cx| {
+                assert!(read.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            // The read ends, and nothing takes its block.
+            node.clock().sleep(Span::MILLISECOND).await;
+        });
+        let pool = pool.lock().unwrap();
+        // A size gives back its pages at the second purge after its last block returns.
+        pool.purge();
+        pool.purge();
+        assert_eq!(pool.committed(), 0, "{crash:?}");
+    }
+}
+
+/// A waker that does nothing, so that a test can count its clones.
+struct Idle;
+
+#[expect(clippy::manual_noop_waker, reason = "a test counts the clones")]
+impl Wake for Idle {
+    fn wake(self: Arc<Self>) {}
+}
+
+#[test]
+fn a_crash_drops_the_waker_of_a_leaked_close() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        let idle = Arc::new(Idle);
+        let waker = Waker::from(Arc::clone(&idle));
+        crash_after(&mut sim, &node, crash, move |node| async move {
+            let (file, pool) = (create_synced(&node).await, pool());
+            until_crash(&node).await;
+            let parts = [block(&pool, &[9; 1_024])];
+            let mut write = Box::pin(file.write_at(0, &parts));
+            poll_fn(|cx| {
+                assert!(write.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(write);
+            // The close waits for the write, which is in flight at the crash.
+            let close = Box::leak(Box::new(Box::pin(file.close())));
+            let mut cx = Context::from_waker(&waker);
+            assert!(close.as_mut().poll(&mut cx).is_pending());
+        });
+        assert_eq!(Arc::strong_count(&idle), 1, "{crash:?}");
+    }
+}
+
+/// A run with two nodes, each with a disk of 1 MiB.
+fn disks(seed: u64) -> (Sim, node::Node, node::Node) {
+    let mut sim = sim(seed);
+    let config = node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    };
+    let a = sim.node(config);
+    let b = sim.node(config);
+    (sim, a, b)
+}
+
+#[test]
+fn a_crash_keeps_the_ended_call_of_another_node() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, a, b) = disks(0);
+        let own = b.clone();
+        let other = b.shards().start(shard("b"), move |_| async move {
+            let (file, pool) = (create_synced(&own).await, pool());
+            let mut read = Box::pin(file.read_at(0, pool.alloc(1_024).unwrap()));
+            poll_fn(|cx| {
+                assert!(read.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            // The read ends before the crash of `a`, and its result waits past it.
+            until_crash(&own).await;
+            own.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(&read.await.unwrap()[..], &[1; 1_024][..]);
+        });
+        crash_after(&mut sim, &a, crash, |_| async {});
+        sim.run().unwrap();
+        other.unwrap().join().unwrap();
+    }
+}
+
+#[test]
+fn a_crash_keeps_the_close_of_another_node_waiting() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, a, b) = disks(0);
+        let own = b.clone();
+        let other = b.shards().start(shard("b"), move |_| async move {
+            let (file, pool) = (create_synced(&own).await, pool());
+            until_crash(&own).await;
+            let parts = [block(&pool, &[9; 1_024])];
+            let mut write = Box::pin(file.write_at(0, &parts));
+            poll_fn(|cx| {
+                assert!(write.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(write);
+            // The close waits for the write, which is in flight at the crash of `a`.
+            file.close().await;
+        });
+        crash_after(&mut sim, &a, crash, |_| async {});
+        sim.run().unwrap();
+        other.unwrap().join().unwrap();
+    }
+}
+
+#[test]
+fn a_crash_stops_a_leaked_timer() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        crash_after(&mut sim, &node, crash, |node| async move {
+            let clock = node.clock();
+            let sleep = Box::leak(Box::new(Box::pin(clock.sleep(Span::SECOND))));
+            poll_fn(|cx| {
+                assert!(sleep.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+        });
+        let before = node.clock().now();
+        sim.run().unwrap();
+        assert_eq!(node.clock().now(), before, "{crash:?}");
     }
 }

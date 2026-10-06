@@ -2,7 +2,6 @@
 
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use std::fmt;
 use std::iter;
 use std::ops::Range;
 use std::slice;
@@ -10,9 +9,9 @@ use std::slice;
 use block::{Block, Pool, Unique};
 use types::channel::Slot;
 
-use crate::entry::{self, ENTRIES_MAX, Entry, Header};
+use crate::entry::{self, Entry, Header};
 use crate::record;
-use crate::wal::{Full, Plan, Writer};
+use crate::wal::{Full, Limit, Plan, Writer};
 
 /// Bytes of the block that holds a record header and the largest entry table: one
 /// block of the pool's 64 KiB class.
@@ -37,58 +36,14 @@ pub(crate) struct Group {
     wrap: Option<Unique>,
 }
 
-/// A limit of one record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Limit {
-    /// More entries than one record holds.
-    Entries {
-        /// The entries of the batch.
-        count: usize,
-    },
-    /// More parts, in all the entries together, than one record holds.
-    Parts {
-        /// The parts of the batch.
-        count: usize,
-    },
-    /// A record body, the entry table and the parts, over the layout's `body_max`.
-    Body {
-        /// Bytes of the body.
-        len: usize,
-        /// The layout's `body_max`.
-        max: usize,
-    },
-}
-
-impl fmt::Display for Limit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Entries { count } => write!(
-                f,
-                "the batch has {count} entries, and a record holds at most \
-                 {ENTRIES_MAX}"
-            ),
-            Self::Parts { count } => write!(
-                f,
-                "the batch has {count} parts, and a record holds at most {ENTRIES_MAX}"
-            ),
-            Self::Body { len, max } => write!(
-                f,
-                "the batch needs a record body of {len} bytes, and a record of this \
-                 ring holds at most {max}"
-            ),
-        }
-    }
-}
-
 /// Why a group did not take a batch. Nothing changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Rejected {
     /// The batch alone is over `Limit`, so no record holds it.
     Large(Limit),
-    /// The record with the batch and the group's entries would be over the
-    /// layout's maximum body, over [`ENTRIES_MAX`] entries or parts, or past the
-    /// room in the ring. The caller closes the group and pushes the batch into the
-    /// next one.
+    /// The record with the batch and the group's entries would be over a
+    /// [`Limit`] or past the room in the ring. The caller closes the group and
+    /// pushes the batch into the next one.
     Record,
     /// The ring has no room for the batch's own record. The group is empty.
     Ring(Full),
@@ -135,27 +90,16 @@ impl Group {
         }
         let parts = batch.iter().map(|entry| entry.parts.len()).sum::<usize>();
         let len = batch.iter().map(|entry| entry.parts.bytes()).sum::<usize>();
-        if count > ENTRIES_MAX {
-            return Err(Rejected::Large(Limit::Entries { count }));
-        }
-        if parts > ENTRIES_MAX {
-            return Err(Rejected::Large(Limit::Parts { count: parts }));
-        }
-        let max = writer.body_max();
-        let alone = entry::table_len(count)
-            .checked_add(len)
-            .expect("invariant: a body fits in usize");
-        if alone > max {
-            return Err(Rejected::Large(Limit::Body { len: alone, max }));
-        }
+        let layout = writer.layout();
+        layout.check(count, parts, len).map_err(Rejected::Large)?;
+        layout
+            .check(
+                start.saturating_add(count),
+                self.writes.len().saturating_add(parts),
+                self.bytes.saturating_add(len),
+            )
+            .map_err(|_over: Limit| Rejected::Record)?;
         let body = self.body_len_with(count, len);
-        let over = |have: usize, more: usize| have.saturating_add(more) > ENTRIES_MAX;
-        if body > max
-            || over(self.headers.len(), count)
-            || over(self.writes.len(), parts)
-        {
-            return Err(Rejected::Record);
-        }
         if let Err(full) = writer.fits(body) {
             return Err(if self.is_empty() {
                 Rejected::Ring(full)
@@ -361,7 +305,7 @@ mod tests {
     use types::hash;
     use types::time::Stamp;
 
-    use crate::entry::{Parts, table_len};
+    use crate::entry::{ENTRIES_MAX, Parts, table_len};
     use crate::record::HEADER_LEN;
     use crate::wal::{self, Cursor, Layout, Position, Step, Window};
 
@@ -1044,6 +988,13 @@ mod tests {
             let mut group = Group::default();
             prop_assert_eq!(group.push(&area.pool, &area.writer, &mut batch), expected.clone());
             prop_assert_eq!(group.is_empty(), expected.is_err());
+            let checked = area.layout.check(count, count_of_parts, len);
+            prop_assert_eq!(checked.map(|()| 0..count), expected.map_err(|rejected| {
+                match rejected {
+                    Rejected::Large(limit) => limit,
+                    other => panic!("push gave {other:?}, not a limit"),
+                }
+            }));
         }
 
         /// One entry alone takes `entry_max` bytes of parts, and is large with one
