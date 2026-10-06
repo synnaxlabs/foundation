@@ -1979,7 +1979,9 @@ How to read this record:
 - **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
   segment is never lost or duplicated. It arrives after the delay and a jitter draw of
   its link, and never before an earlier segment in its direction, so each direction
-  keeps its order. A connect is ready after one round trip and its accept after one
+  keeps its order. Each segment carries the key of its stream, and only the end of
+  that stream takes it, so a late segment of an older stream on the same pair meets a
+  closed port. A connect is ready after one round trip and its accept after one
   and a half. The receive buffer sets the window, the send buffer holds the bytes that
   the peer has not received, and a write waits while `unsent_bytes_max` bytes are not
   sent. A drop before close, or with bytes unread, sends an RST; a drop after close
@@ -1989,7 +1991,8 @@ How to read this record:
   sends, a connect to an address with no node, a full backlog, and a SYN to a live
   stream. Rejected: retransmission over a lossy link (a full TCP state machine to
   test before a carrier needs it), and a pipe of bytes with no segments (no window,
-  so no test of a writer that a slow reader stops). Built by `simulation` in #113.
+  so no test of a writer that a slow reader stops). Built by `simulation` in #113
+  and #944.
 - **SIM DROP (2026-10-06)** The drop of a `Sim` drops each live future in its own
   `catch_unwind`. If any panicked, it then panics once with every message, the first
   one first, but only when the thread is not already panicking. This is the one
