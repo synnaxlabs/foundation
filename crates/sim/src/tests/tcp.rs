@@ -760,6 +760,29 @@ fn a_process_crash_resets_the_peer() {
 }
 
 #[test]
+fn a_power_cut_resets_the_peer_of_a_stream_that_outlives_it() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(
+        &b,
+        "server",
+        move |_| async move { accept(&mut listener).await },
+    );
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        write_all(&mut tcp, &[1]).await.unwrap();
+        read(&mut tcp, 1).await
+    });
+    sim.run_for(millis(5)).unwrap();
+    let _held = take(&server);
+    sim.crash(&b, Crash::Power);
+    sim.run().unwrap();
+    assert_eq!(take(&client), Err(Net::Reset { remote }));
+}
+
+#[test]
 fn a_power_cut_leaves_the_listeners_of_other_nodes() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let c = sim.node(node::Config::default());
