@@ -404,8 +404,10 @@ How to read this record:
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
-  `first + len` passes `u64::MAX`. The restart record needs one free block: an open
-  of a full ring first moves records at the tail to a segment.
+  `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
+  durable: a killed process may have written records that it never synced (#657). The
+  restart record needs one free block: an open of a full ring first moves records at
+  the tail to a segment.
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and
@@ -698,7 +700,8 @@ How to read this record:
   gives the status on any shard, and `node` publishes it. `push` and `remove` do not
   also return it: one value gets one way to read it (#634). The next majority ends the
   holdover. Decided by the `time` builder (#142). The coordinator approved
-  `Reader::status` within it (#598).
+  `Reader::status` within it (#598). `estimate::discipline` chooses what mesh time
+  follows, and `clock` writes it, so the decision logic is in layer 1 (#635).
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
   not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
@@ -879,8 +882,18 @@ How to read this record:
   first message. A stream that ends or resets before its class byte drops: the peer
   never accepts it, and resets the reply half of a two-way stream with code 0. Each
   message is a QUIC varint length, then that many bytes, at most the receiver's
-  `message_bytes_max`. A node accepts the waiting streams highest class first. A node
-  resets a stream with the stop's code when the stop arrives. A peer breaks the protocol
+  `message_bytes_max`. A node accepts the waiting streams highest class first. Each
+  stream sends at the QUIC priority of its class, `Command` first, and streams of one
+  class share in turn. The priority is strict: a class sends nothing, resends too, while
+  a higher class has bytes to send, so a steady higher class starves the lower ones. It
+  orders only the bytes that QUIC holds. All classes share one QUIC send window, so a
+  message can wait for bytes of a lower class to be acknowledged (#797). `Complete` gets
+  a guaranteed minimum share in the class-ordered send budget, not in QUIC (#819, before
+  the alpha). The budget bounds what QUIC holds to `window_bytes`, so QUIC's strict
+  order acts only inside that bound. Lost: a connection per class, because four
+  handshakes and four congestion controllers compete on one path (#55). Settled by the
+  advisor and the coordinator under the person's delegation (#789). A node resets a
+  stream with the stop's code when the stop arrives. A peer breaks the protocol
   when it sends another class byte, ends a stream inside a message, sends a message over
   the limit, or resets or stops a stream with a code over 32 bits. The node then closes
   the connection with application code 2^32 and the reason as text, and the caller gets
@@ -1794,14 +1807,16 @@ How to read this record:
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
-  restart finds no file held (#392), not even by a leaked handle (#535). A `Power` crash
-  keeps, for each 512-byte sector, its durable bytes or the bytes of any one write since
-  then, a write in flight too. A `sync` makes durable the writes that ended before it
-  started. A failed `sync` makes each sector keep its durable bytes or those of one such
-  write, at random. A `sync_dir` makes durable the entries at its end. A removed file
-  takes space until the removal is durable. The monotonic clock starts again and the
-  wall runs on. `join` on a thread that a crash ended panics, because no process joins
-  its own threads after it dies. Built by `simulation` in #114 and #535.
+  restart finds no file held (#392), not even by a leaked handle (#535). The blocks of
+  each file call of the node go back to their pools, those of a leaked call too (#763).
+  A `Power` crash keeps, for each 512-byte sector, its durable bytes or the bytes of any
+  one write since then, a write in flight too. A `sync` makes durable the writes that
+  ended before it started. A failed `sync` makes each sector keep its durable bytes or
+  those of one such write, at random. A `sync_dir` makes durable the entries at its end.
+  A removed file takes space until the removal is durable. The monotonic clock starts
+  again and the wall runs on. `join` on a thread that a crash ended panics, because no
+  process joins its own threads after it dies. Built by `simulation` in #114, #535, and
+  #763.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
@@ -2350,10 +2365,10 @@ an opaque document in `spec` (layer 1). KINDS OWN THEIR CONFIG gives kinds (laye
 shared Document reader with positions, name and unit parsing, and diagnostics. KINDS
 OWN also says "`config` parses files to Documents", but K1 says front ends parse.
 Resolution: a layer-1 crate `document` holds the Document, source positions,
-diagnostics, and readers for durations, rates, and byte sizes. Channel unit names live
-in `spec::unit`, name syntax in `types::name`. Front ends (`config-hcl`) parse files;
-`config` reads only Documents. Basis: K1, BQ2, KINDS OWN, "decide the best
-architecture".
+diagnostics, and readers for durations, rates, byte sizes, names, and selectors.
+Channel unit names live in `spec::unit`, name syntax in `types::name`. Front ends
+(`config-hcl`) parse files; `config` reads only Documents. Basis: K1, BQ2, KINDS OWN,
+"decide the best architecture".
 
 **X22. Where a connector runs: the connector's `node` vs placement.**
 Conflict: C3 and C5 SHAPE give each connector a `node` attribute. BQ10 says a placement
@@ -2659,7 +2674,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
-| 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits, and slews mesh time. | `types` |
+| 1 | `estimate` | Computes clock offset and error bounds from measurements, the peer exchange, and device oscillator fits, slews mesh time, and chooses what mesh time follows. | `types` |
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
 | 1 | `delivery` | Keeps each reader's state per index: positions, credits, live frames for complete readers, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
