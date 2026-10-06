@@ -65,8 +65,8 @@ impl Progress {
         }
     }
 
-    // Records that the follower holds every entry up to `index`. Returns whether
-    // that is news.
+    // Records that the follower holds every entry up to `index`, which is at most the
+    // leader's last index. Returns whether that is news.
     pub(crate) fn accepted(&mut self, index: u64) -> bool {
         let news = index > self.matched;
         if news {
