@@ -2870,6 +2870,65 @@ mod tests {
     }
 
     #[test]
+    fn a_two_way_stream_sends_at_the_priority_of_its_class() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.client));
+            let mut latest = open_sender(&mut pair, Class::Latest);
+            let opened = pair.client.endpoint.open(now, key, Class::Command);
+            let (mut command, _receiver) = opened.expect("a stream");
+            let bulk = shard.block(&[0; BULK]);
+            write(&mut pair.client, now, &mut latest, slice::from_ref(&bulk));
+            write(&mut pair.client, now, &mut command, &[bulk]);
+            let whole = arrivals(&mut pair.client, &mut pair.server, now, Vec::new());
+            assert_eq!(whole, [[Class::Command], [Class::Latest]]);
+        });
+    }
+
+    #[test]
+    fn streams_of_one_class_share_in_turn() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let now = pair.now();
+            let mut first = open_sender(&mut pair, Class::CatchUp);
+            let mut second = open_sender(&mut pair, Class::CatchUp);
+            write(
+                &mut pair.client,
+                now,
+                &mut first,
+                &[shard.block(&[1; 4 * BULK])],
+            );
+            write(&mut pair.client, now, &mut second, &[shard.block(b"b")]);
+            assert!(step(&mut pair.client, &mut pair.server, now));
+            assert!(step(&mut pair.client, &mut pair.server, now));
+            let key = key(&pair.server);
+            let accepted = iter::from_fn(|| pair.server.endpoint.accept(key));
+            let ids: Vec<_> = accepted
+                .map(|incoming| incoming.receiver.key().id)
+                .collect();
+            assert_eq!(ids, [first.key().id, second.key().id]);
+        });
+    }
+
+    // The priority orders only the bytes that noq-proto holds. A full send window
+    // makes a `Command` wait for `CatchUp` bytes to be acknowledged (#797).
+    #[test]
+    fn a_command_written_after_bulk_that_fills_the_window_waits() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut bulk = open_sender(&mut pair, Class::CatchUp);
+            fill(&mut pair, shard, &mut bulk);
+            let mut command = open_sender(&mut pair, Class::Command);
+            let now = pair.now();
+            let written =
+                pair.client
+                    .endpoint
+                    .write(now, &mut command, shard.block(b"go"));
+            assert_eq!(written, Ok(Poll::Pending));
+        });
+    }
+
+    #[test]
     fn a_reply_sends_at_the_priority_of_its_class() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
@@ -2889,6 +2948,29 @@ mod tests {
             let receivers = vec![(Class::Command, receiver)];
             let whole = arrivals(&mut pair.server, &mut pair.client, now, receivers);
             assert_eq!(whole, [[Class::Command], [Class::Latest]]);
+        });
+    }
+
+    #[test]
+    fn a_catch_up_reply_waits_for_a_complete_stream() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.client));
+            let opened = pair.client.endpoint.open(now, key, Class::CatchUp);
+            let (mut sender, receiver) = opened.expect("a stream");
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let incoming = accept(&mut pair.server);
+            let mut reply = incoming.sender.expect("a two-way stream");
+            let (now, key) = (pair.now(), self::key(&pair.server));
+            let complete = pair.server.endpoint.open_sender(now, key, Class::Complete);
+            let mut complete = complete.expect("a stream");
+            let bulk = shard.block(&[0; BULK]);
+            write(&mut pair.server, now, &mut reply, slice::from_ref(&bulk));
+            write(&mut pair.server, now, &mut complete, &[bulk]);
+            let receivers = vec![(Class::CatchUp, receiver)];
+            let whole = arrivals(&mut pair.server, &mut pair.client, now, receivers);
+            assert_eq!(whole, [[Class::Complete], [Class::CatchUp]]);
         });
     }
 
