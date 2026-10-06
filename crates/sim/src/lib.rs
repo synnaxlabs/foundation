@@ -431,6 +431,9 @@ fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
         .collect()
 }
 
+/// The Linux code for an I/O error (`EIO`), which a fault of a file or a port gives.
+const EIO: i32 = 5;
+
 /// What joins the messages of two panics.
 const THEN: &str = ", then a drop panicked: ";
 

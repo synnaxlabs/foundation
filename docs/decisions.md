@@ -996,7 +996,12 @@ How to read this record:
   only delays the next round trip. A candidate counts its own vote at once because
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
   enters only through `tick`: a node draws its election timeout on the first tick
-  after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
+  after a reset. PreVote and CheckQuorum have no off switch. A PreVote answer, grant or
+  refusal, shows the voter's state when it sent the answer. A grant that arrives after
+  its voter got a lease back still counts, and costs one needless election; safety
+  holds. etcd/raft counts such a grant too. Lost: a round number in `PreVote`, which
+  changes the message format and closes only the case of two pre-campaigns. Decided by
+  the advisor under the failover delegation on 2026-10-05 (#719). A node that is not in
   its own voter list votes and follows, but never campaigns while that configuration
   is committed. `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
@@ -1004,8 +1009,8 @@ How to read this record:
   `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
   as it is. It trusts its voters: one that lies can already break safety, because a
   false `AppendReply` counts as held, so a bound on the term would guard nothing. No
-  bound on a term jump spares an honest node that was down, either. Lost: a sender
-  proves a term jump with a signed term, which needs `mesh`. The person decided on
+  bound on a term jump spares an honest node that was down, either. Later: a sender
+  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
   2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
   `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
   before its write, so no peer counted a vote or an answer that a lost `hard` held. The
@@ -1030,7 +1035,17 @@ How to read this record:
   leader, and a node keeps the leader of its term until the term ends, through a
   step-down and a campaign. A node that knows no leader of its term, after a restart or
   its vote, takes the first. The person approved it on 2026-10-05 ("Yeah that's fine",
-  #391). A bad message changes nothing.
+  #391). A bad message changes nothing. A forged message that passes these checks
+  does, until a leader proves its election (#750). After a heartbeat or an `Append`
+  of a higher term from a voter that does not lead, or a reply of a higher term and
+  then either, a node follows the sender and writes and commits what it sends. So
+  two nodes can apply different entries at one index, and a forged voter set can
+  take the group over. The first leader after a restart or a vote is the same gap.
+  Tests pin it. Lost: a lease that drops a heartbeat or an `Append` of a higher term
+  from a node that is not the leader. A reply of a higher term ends any node's
+  lease, and a leader must step down on one; the lease also changed three etcd
+  oracle tests. The coordinator decided on 2026-10-06 under the person's delegation
+  (#391). The person may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1695,6 +1710,18 @@ How to read this record:
   differently on `os` and `sim`. A socket, listener, or port may move to another thread
   before its first poll. The first poll binds it to its thread, and a poll on another
   thread panics.
+- **SHARD PIN (#718, 2026-10-05)** `Shards::pinnable()` says whether a shard can pin
+  to a core: `true` on Linux, `false` on other OSes, and `true` in `sim` unless the
+  node config says `unpinnable`. `node` sets no core when it is `false`, and logs that
+  once at start. `Shards::start` panics on a core then, as on a core past the count:
+  the answer never changes, so a core there is a bug in `node`. `Error::Pin` means
+  only a real fault, such as a CPU that went offline after the read, and carries the
+  cause as a `reason`. This is the advisor's choice A, narrowed from the set of cores
+  that can pin to a bool: the index map of ENV SEAMS makes that set always
+  `0..cores()` or empty. Lost: `Error::Pin` for a core on a node that cannot pin, which
+  gives two contracts for the same kind of bug, and a caller tells the bug from a
+  fault only by its `reason` text; each driver checks the core itself, which puts one
+  rule in each driver. Windows pinning waits for the person (#477). Amends ENV SEAMS.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -1724,8 +1751,9 @@ How to read this record:
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
   from its own stream as each byte is sent, so a change of the line acts only on the
   bytes sent after it. A flip with parity on is lost. Each port holds 4 KiB to send
-  and 4 KiB to read, as a Linux TTY does. An open ends at once. Built by `simulation`
-  in #431.
+  and 4 KiB to read, as a Linux TTY does. An open ends at once. `Node::fail_serial`
+  makes a port fail as a pulled USB adapter does: each read and write gives `EIO`
+  until the port drops. Built by `simulation` in #431 and #690.
 - **SIM PANICS (2026-10-05)** A panic in a poll or in the drop of a future ends the
   thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
   future drops in its own `catch_unwind`, so a second panic never aborts the process.
@@ -1809,6 +1837,16 @@ How to read this record:
   long as our systems are designed to cross compile i'm ok wiht only testing against
   linux for an alpha. as long as the system is designed for cross os deployment"
   (#574).
+- **CI PACE (2026-10-06)** The ARM pool must not hold up the agents. The ARM workflow
+  runs no loom step: loom is a software model, so the x86 `loom` job gives the same
+  result. A PR run is cancelled by a newer push. A run on main is never cancelled while
+  it runs; of the commits that merge during it, only the newest runs next. Each runner
+  keeps its build in `$HOME/target/<runner>`, outside the workspace, and deletes it
+  past 25 GiB. Dependencies build at opt-level 2 in the dev profile; workspace crates
+  stay at opt-level 0 with their checks. A PR tests only the changed crates and their
+  reverse dependencies (`cargo xtask affected`); main tests the whole workspace.
+  Decided by the advisor (#782). The person said: "We need to make the agentic
+  engineering the bottleneck, not CI".
 
 ### 1.15 Releases
 
@@ -2630,14 +2668,15 @@ Parameters and later choices, recorded and not asked:
   driven, not self-running), `ring` holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
-  after sync vs on receipt).
+  after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
+  voter's state when it sent the answer.").
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
   tree key `<label>.@<kind>` of a policy (#729).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
-  connector.
+  connector; SHARD PIN (#718), the advisor's choice A narrowed to a bool.
 
 ### 5.3 Parameters for experiment
 

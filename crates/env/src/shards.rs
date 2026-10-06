@@ -24,7 +24,8 @@ pub type Main = Box<dyn FnOnce(Tasks) -> Task + Send>;
 ///     (0..shards.cores().get())
 ///         .map(|core| {
 ///             let name = format!("shard-{core}");
-///             let config = env::shards::Config { name, core: Some(core) };
+///             let core = shards.pinnable().then_some(core);
+///             let config = env::shards::Config { name, core };
 ///             shards.start(config, |tasks| async move {
 ///                 tasks.spawn(async {});
 ///             })
@@ -59,6 +60,19 @@ impl Shards {
         self.0.cores()
     }
 
+    /// Whether `start` can pin a shard to a core. It never changes. When `false`, set
+    /// no [`Config::core`].
+    ///
+    /// ```
+    /// fn core(shards: &env::shards::Shards, core: usize) -> Option<usize> {
+    ///     shards.pinnable().then_some(core)
+    /// }
+    /// ```
+    #[must_use]
+    pub fn pinnable(&self) -> bool {
+        self.0.pinnable()
+    }
+
     /// Starts a shard. `main` runs on the new thread and gets the shard's [`Tasks`].
     /// It returns when the thread runs, is pinned, and has its executor.
     ///
@@ -73,7 +87,8 @@ impl Shards {
     ///
     /// # Panics
     ///
-    /// When `config.core` is not below [`Shards::cores`].
+    /// When `config.core` is set and is not below [`Shards::cores`], or
+    /// [`Shards::pinnable`] is `false`.
     ///
     /// ```
     /// use env::thread::{Error, Handle};
@@ -95,6 +110,11 @@ impl Shards {
             let cores = self.cores();
             let name = &config.name;
             assert!(core < cores.get(), "{name} asks for core {core} of {cores}");
+            let pinnable = self.pinnable();
+            assert!(
+                pinnable,
+                "{name} asks for core {core} of a node that cannot pin"
+            );
         }
         self.0
             .start(config, Box::new(|tasks| Box::pin(main(tasks))))
@@ -118,7 +138,7 @@ pub struct Config {
     pub name: String,
     /// The core to pin the thread to, as an index below [`Shards::cores`] into the
     /// cores this node may use, never an OS CPU number; or `None` to let the OS place
-    /// it.
+    /// it. Set it only when [`Shards::pinnable`].
     pub core: Option<usize>,
 }
 
@@ -133,12 +153,15 @@ pub trait Driver: Send + Sync {
     /// The number of cores this node may use. It never changes.
     fn cores(&self) -> NonZeroUsize;
 
+    /// Whether this driver can pin a shard to a core. It never changes.
+    fn pinnable(&self) -> bool;
+
     /// Starts a thread with a task executor, makes [`Tasks`] for it, and runs
     /// `main(tasks)` on it, with the rules of [`Shards::start`]. `config.name` may hold
     /// any character; `os` gives the OS the part before the first NUL byte.
-    /// `config.core`, when set, is below [`Driver::cores`]: [`Shards::start`] checks
-    /// it. Dropping the shard drops every task, also one that holds a clone of its
-    /// [`Tasks`].
+    /// `config.core`, when set, is below [`Driver::cores`] and the driver is
+    /// pinnable: [`Shards::start`] checks both. Dropping the shard drops every task,
+    /// also one that holds a clone of its [`Tasks`].
     ///
     /// # Errors
     ///
@@ -152,11 +175,18 @@ mod tests {
     use super::*;
 
     /// A node with this many cores, whose shards end at once.
-    struct Cores(NonZeroUsize);
+    struct Cores {
+        count: NonZeroUsize,
+        pinnable: bool,
+    }
 
     impl Driver for Cores {
         fn cores(&self) -> NonZeroUsize {
-            self.0
+            self.count
+        }
+
+        fn pinnable(&self) -> bool {
+            self.pinnable
         }
 
         fn start(&self, _: Config, _: Main) -> Result<Handle, Error> {
@@ -164,13 +194,16 @@ mod tests {
         }
     }
 
-    fn start(cores: usize, core: Option<usize>) -> Result<(), Error> {
-        let cores = NonZeroUsize::new(cores).expect("a test asks for cores");
+    fn shards(cores: usize, pinnable: bool) -> Shards {
+        let count = NonZeroUsize::new(cores).expect("a test asks for cores");
+        Shards::new(Cores { count, pinnable })
+    }
+
+    fn start(shards: &Shards, core: Option<usize>) -> Result<(), Error> {
         let config = Config {
             name: "shard-4".into(),
             core,
         };
-        let shards = Shards::new(Cores(cores));
         let started = shards.start(config, |_| async {});
         started.map(|handle| handle.join().expect("a shard of Cores ends at once"))
     }
@@ -178,8 +211,9 @@ mod tests {
     #[test]
     fn each_core_below_the_count_starts() {
         for cores in 1..=8 {
+            let shards = shards(cores, true);
             for core in 0..cores {
-                assert_eq!(start(cores, Some(core)), Ok(()), "{core} of {cores}");
+                assert_eq!(start(&shards, Some(core)), Ok(()), "{core} of {cores}");
             }
         }
     }
@@ -187,12 +221,32 @@ mod tests {
     #[test]
     #[should_panic(expected = "shard-4 asks for core 4 of 4")]
     fn the_core_at_the_count_panics() {
-        start(4, Some(4)).unwrap();
+        start(&shards(4, true), Some(4)).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "shard-4 asks for core 4 of 4")]
+    fn the_core_at_the_count_panics_on_a_node_that_cannot_pin() {
+        start(&shards(4, false), Some(4)).unwrap();
     }
 
     #[test]
     fn no_core_starts_on_any_count() {
-        assert_eq!(start(1, None), Ok(()));
-        assert_eq!(start(8, None), Ok(()));
+        for pinnable in [true, false] {
+            assert_eq!(start(&shards(1, pinnable), None), Ok(()));
+            assert_eq!(start(&shards(8, pinnable), None), Ok(()));
+        }
+    }
+
+    #[test]
+    fn pinnable_is_the_drivers() {
+        assert!(shards(4, true).pinnable());
+        assert!(!shards(4, false).pinnable());
+    }
+
+    #[test]
+    #[should_panic(expected = "shard-4 asks for core 2 of a node that cannot pin")]
+    fn a_core_on_a_node_that_cannot_pin_panics() {
+        start(&shards(4, false), Some(2)).unwrap();
     }
 }

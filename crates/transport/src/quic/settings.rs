@@ -18,8 +18,8 @@ use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
 use super::cid;
-use crate::Config;
 use crate::tls::{Epoch, Tls};
+use crate::{Config, PAYLOAD_IPV4};
 
 const QUIC_V1: u32 = 1;
 
@@ -29,10 +29,6 @@ pub(super) const VERSIONS: [u32; 1] = [QUIC_V1];
 /// The smallest datagram QUIC allows. Every datagram is this size until MTU
 /// discovery finds a larger one.
 pub(super) const MTU_MIN: u16 = 1200;
-
-/// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
-/// node takes.
-pub(super) const PAYLOAD_IPV4: u16 = 1472;
 
 /// Ethernet's 1500 bytes less the IPv6 and UDP headers: the largest datagram MTU
 /// discovery tries, so it fits both IP versions.
@@ -198,7 +194,7 @@ fn idle_ms(idle: Span) -> u64 {
     let nanos = u64::try_from(idle.nanos())
         .ok()
         .filter(|&nanos| nanos > 0)
-        .expect("invariant: Transport::new refuses a non-positive idle");
+        .expect("invariant: `Config::check` refuses a non-positive idle");
     nanos.div_ceil(1_000_000)
 }
 
@@ -629,7 +625,7 @@ mod tests {
 
         #[test]
         #[should_panic(
-            expected = "invariant: Transport::new refuses a non-positive idle"
+            expected = "invariant: `Config::check` refuses a non-positive idle"
         )]
         fn panics_when_not_positive() {
             idle_ms(Span::from_nanos(0));
