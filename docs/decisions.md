@@ -506,6 +506,18 @@ How to read this record:
   size is checked only when the bodies are appended, after the handoffs: a frame whose
   handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
   is known. Decided by the `write-path` builder (#191).
+- **HOME CLOCKS (#191)** A shard reads monotonic time and mesh time itself, from the
+  clocks in its `Config`, in each call that needs them. Before the node first has mesh
+  time, it opens no writer and no reader, with `Unsynced`. A write needs an open writer,
+  so it never meets that case. This is a patch: #523 decides where samples wait before
+  the first estimate (CLOCK PEER ANSWER), and removes or keeps `Unsynced`. Lost: time as
+  arguments of each call, because each caller repeats the same two reads and can pass an
+  old one. Approved by the coordinator on 2026-10-05 (#191). Mesh time in the home (the
+  ahead limit and the stamp of each entry) is the midpoint of `clock::Reader::now`,
+  which never goes back. Lost: the latest edge, because it goes back when the error
+  shrinks, and with an unknown error (OS CLOCK BOUND) it is 36500 days ahead, so the
+  ahead limit stops nothing and one bad stamp makes each later true stamp `Backwards`
+  (#952 review, 2026-10-06).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -662,8 +674,8 @@ How to read this record:
   at `now`, given or grown by drift, votes only when no bound is known. A vote for it
   lost: it turned a peer split into a wide estimate that no peer gave. The person chose
   this (OS CLOCK BOUND); counting a grown bound is from the `time` builder, approved by
-  the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
-  Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
+  the coordinator (#314). A known bound votes at any width, so a wide one (a Linux
+  bound of 15 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. When only unknown bounds vote, the estimate
   is unknown too, at the center of the same hull. Approved by the coordinator (#437),
   with the hull of #344. When drift grows unknown bounds so that this hull spans more
@@ -768,7 +780,7 @@ How to read this record:
   fires when both bounds hold.
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
-  `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
+  `ntp_gettime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
   `clock` reads that as `Measurement::unknown` (36500 days): a node alone with no known
   estimate (CLOCK HOLDOVER) still gets OS time, with an error that says "unknown", and
   beside a known bound the reading does not vote (ESTIMATE COMBINE). A fixed invented
@@ -796,7 +808,11 @@ How to read this record:
   gives a false bound until its operator installs chrony. Lost: the Linux bound always
   unknown, because it also drops the good bound from chrony and ntpd; detecting
   timesyncd, because it reaches outside `env::wall` and is a guess. The person decided
-  on 2026-10-06 ("A is still fine"), #689.
+  on 2026-10-06 ("A is still fine"), #689. `os` also gives `None` in clock state
+  `TIME_ERROR`, and for a negative `maxerror` or one past the end of a `Span`, because
+  root can set any value. `os::wall()` reads once and returns `Error::Wall` when the OS
+  refuses the call, as a seccomp filter or systemd's `ProtectClock` can. A later
+  refusal panics (#117).
 - **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its OS
   reading and its OS bound. Cold nodes then vote with each other's OS clocks, and each
   waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown bound
@@ -834,7 +850,15 @@ How to read this record:
   is not hit: no daemon slews `mach_continuous_time`. Lost: `CLOCK_BOOTTIME` with a
   rule that the daemon slews within a limit, because a node cannot check it;
   `CLOCK_BOOTTIME` with a bound that can fail in a fast slew. The person decided on
-  2026-10-06 ("yes"), #688.
+  2026-10-06 ("yes"), #688. On macOS `os` reads `CLOCK_MONOTONIC_RAW`, which is
+  `mach_continuous_time`. Each `os::clock()` call starts a new clock at 0, so `node`
+  calls it once. Tokio's timer stops in a suspend on macOS and slews on Linux, so `os`
+  arms it for at most 1 s at a time: a sleep across a suspend completes up to 1 s late.
+  The vDSO and the macOS commpage read the counter with no fence that waits for earlier
+  stores or holds back later loads, so `os` adds them to give the order that
+  `env::clock` requires (#458): `mfence; lfence` before the read and `lfence` after on
+  x86-64, `dsb ish; isb` before and `isb` after on arm64. Other architectures do not
+  build. Cost: 38 ns against 16 ns for one read without the fences (M3 Max) (#117).
 - **CLOCK RUN (2026-10-05)** Within TIME ADAPTERS. `clock::Clock::run` runs all time
   sources of one clock in one task on the clock's shard. `node` builds the source table
   and passes it to `run`. Today the table is the OS clock. Each adapter keeps its own
@@ -2890,7 +2914,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY). | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
