@@ -658,6 +658,21 @@ mod tests {
             assert_eq!(Selector::new(["a", "!b*"]), Err(wildcard_error("!b*")));
             assert_eq!(Selector::new(["a", "!"]), Err(segment_error("!", "")));
         }
+
+        #[test]
+        fn counts_the_pattern_after_the_bang_of_an_exclusion() {
+            let body = "b".repeat(Name::MAX_BYTES);
+            let s = Selector::new(["**", &format!("!{body}")]).unwrap();
+            assert_eq!(s.matches(&name(&body)), None);
+            assert_eq!(
+                Selector::new(["a", &format!("!b{body}")]),
+                Err(Error::Long { bytes: 256 })
+            );
+            assert_eq!(
+                Selector::new(["a", &format!("!{}", "b".repeat(300))]),
+                Err(Error::Long { bytes: 300 })
+            );
+        }
     }
 
     /// Matches by trying every split, as the definition reads.
