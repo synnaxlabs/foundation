@@ -137,12 +137,13 @@ state on `main`.
   node and `raft` still sends to it (#352). But it takes a higher term from any
   sender of a request but a `PreVote`, or a `Vote` to a node with a lease, and from
   any reply it keeps but a granted `PreVoteReply`.
-- A node that may send to a group and lies can stop the group for good with one
-  message in term `u64::MAX`: each node writes that term to disk, and none can
-  campaign. Only a voter can: `mesh` admits a `raft` message only from a voter of the
-  newest configuration (RAFT VOTERS, #654). Not built (`mesh`). A voter that lies can
-  also break safety, because a false `AppendReply` counts as held, so `raft` trusts
-  its voters. No change in `raft` (RAFT SURFACE, #352 item 2).
+- A node that may send to a group and lies can stop the group for good with one message
+  in term `u64::MAX`: each node writes that term to disk, and none can campaign. Only a
+  voter, or a removed node that `raft` still sends to, can: `mesh` admits a `raft`
+  request only from a voter of the newest configuration (RAFT VOTERS, #654), and `raft`
+  drops a reply from any other node. Not built (`mesh`). A voter that lies can also
+  break safety, because a false `AppendReply` counts as held, so `raft` trusts its
+  voters. No change in `raft` (RAFT SURFACE, #352 item 2).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.

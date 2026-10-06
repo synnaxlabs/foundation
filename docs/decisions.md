@@ -1043,9 +1043,12 @@ How to read this record:
   over a whole quorum check period is released at that check instead, and the next
   configuration releases any that is still a peer.
   A follower releases the removed nodes when the leave commits. A removed node that
-  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
+  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` request
   only from a voter of the newest configuration in this node's log, and a node whose
-  committed configuration lacks the sender answers `removed`. The removed node takes
+  committed configuration lacks the sender answers `removed`. A request is a PreVote, a
+  Vote, a heartbeat, or an append. The rule covers requests only, and `raft` decides
+  which replies count (RAFT SURFACE). The person approved this on 2026-10-06, and the
+  coordinator gives the person's words in its comment on #647. The removed node takes
   that answer only from a voter of its own region, and stops its `raft` group for that
   region. `raft` sends such a node no entries, only answers. A voter with a lease drops
   its campaign or refuses it with a `PreVoteReply { granted: false }` at the voter's
