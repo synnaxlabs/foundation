@@ -16,7 +16,9 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new(name: &str) -> Self {
         let name = format!("foundation-os-files-{}-{name}", std::process::id());
-        Self(std::env::temp_dir().join(name))
+        let dir = std::env::temp_dir().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        Self(dir)
     }
 }
 
@@ -28,15 +30,22 @@ impl Drop for Scratch {
     }
 }
 
+/// The files of `dir`, on an I/O thread named `name`, and the handle of the thread.
+fn files(dir: &Path, name: &str) -> (Files, env::thread::Handle) {
+    let (disk, thread) = os::files(dir, &os::threads().unwrap(), name).unwrap();
+    (Files::new(disk), thread)
+}
+
 /// Runs `body` with the files of a scratch directory of its own and the path of
 /// their data directory.
-fn run<F: Future>(name: &str, body: impl FnOnce(Files, PathBuf) -> F) -> F::Output {
+fn run<F: Future<Output = ()>>(name: &str, body: impl FnOnce(Files, PathBuf) -> F) {
     let scratch = Scratch::new(name);
-    let files = os::files(&scratch.0).unwrap();
+    let (files, thread) = files(&scratch.0, "files");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    runtime.block_on(body(files, scratch.0.join("data")))
+    runtime.block_on(body(files, scratch.0.join("data")));
+    thread.join().unwrap();
 }
 
 fn pool() -> Pool {
@@ -188,7 +197,7 @@ fn an_open_of_a_missing_file_gives_not_found() {
 fn a_write_open_of_a_held_file_gives_busy_and_a_read_open_does_not() {
     run("busy", |files, data| async move {
         let held = create(&files, "a", 4 * KIB).await;
-        let other = os::files(data.parent().unwrap()).unwrap();
+        let (other, thread) = self::files(data.parent().unwrap(), "other");
         for files in [&files, &other] {
             for mode in [Mode::Write, Mode::Create { len: 4 * KIB }] {
                 let found = files.open(Path::new("a"), mode).await.unwrap_err();
@@ -196,7 +205,8 @@ fn a_write_open_of_a_held_file_gives_busy_and_a_read_open_does_not() {
             }
             files.open(Path::new("a"), Mode::Read).await.unwrap();
         }
-        drop(held);
+        drop((held, other));
+        thread.join().unwrap();
     });
 }
 
@@ -306,24 +316,42 @@ fn a_sync_after_a_write_succeeds() {
 }
 
 #[test]
-fn free_gives_the_bytes_free_on_the_disk() {
-    run("free", |files, data| async move {
-        let stat = rustix::fs::statvfs(&data).unwrap();
-        let expected = stat.f_bavail * stat.f_frsize;
-        let found = files.free().await.unwrap();
-        assert!(
-            found.abs_diff(expected) < 64 << 20,
-            "{found} is not {expected}"
-        );
+fn free_drops_by_the_bytes_of_a_synced_write() {
+    const LEN: u64 = 64 << 20;
+    run("free", |files, _| async move {
+        let pool = pool();
+        let part = block(&pool, &vec![1; 512 << 10]);
+        let before = files.free().await.unwrap();
+        let file = create(&files, "a", LEN).await;
+        file.write_at(0, &vec![part; 128]).await.unwrap();
+        file.sync().await.unwrap();
+        let taken = before.saturating_sub(files.free().await.unwrap());
+        assert!(taken.abs_diff(LEN) < LEN / 4, "{taken} is not {LEN}");
     });
+}
+
+/// The error of `os::files` on `dir`.
+fn dir_error(dir: &Path) -> os::Error {
+    os::files(dir, &os::threads().unwrap(), "files").unwrap_err()
+}
+
+#[test]
+fn files_of_a_missing_dir_gives_dir_and_makes_nothing() {
+    let scratch = Scratch::new("missing");
+    let found = dir_error(&scratch.0.join("a"));
+    assert_eq!(
+        found.to_string(),
+        "cannot open the data directory: No such file or directory (os error 2)"
+    );
+    assert!(matches!(found, os::Error::Dir(_)));
+    assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 0);
 }
 
 #[test]
 fn files_in_a_directory_under_a_file_gives_dir() {
     let scratch = Scratch::new("not-dir");
-    std::fs::create_dir_all(&scratch.0).unwrap();
     std::fs::write(scratch.0.join("a"), b"").unwrap();
-    let found = os::files(&scratch.0.join("a")).unwrap_err();
+    let found = dir_error(&scratch.0.join("a"));
     assert_eq!(
         found.to_string(),
         "cannot open the data directory: Not a directory (os error 20)"

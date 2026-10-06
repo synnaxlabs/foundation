@@ -1,17 +1,19 @@
 //! The `env::files` driver on the real disk. One I/O thread runs every call of a
-//! handle, its clones, and their files, in the order of the calls.
+//! disk and its files, in the order they reach its queue.
 
 use std::ffi::OsStr;
+use std::fmt;
 use std::io::IoSlice;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::thread;
 
 use block::{Block, Unique};
 use env::files::{Descriptor, Error, Mode, Operation, Request};
+use env::thread::Handle;
+use env::threads::Threads;
 use rustix::fs::{self, AtFlags, FallocateFlags, FileType, FlockOperation, OFlags};
 use rustix::io::{self, Errno};
 use tokio::sync::{mpsc, oneshot};
@@ -29,97 +31,104 @@ const FILE: fs::Mode = fs::Mode::from_raw_mode(0o644);
 /// The permissions of a new directory.
 const DIR: fs::Mode = fs::Mode::from_raw_mode(0o755);
 
-/// The flags that open a directory.
-const DIRECTORY: OFlags = OFlags::RDONLY
+/// The flags that open a directory to read.
+const READ_DIR: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::CLOEXEC);
 
-/// The `env::files` driver of one handle and its clones.
-pub(crate) struct Driver {
+/// The real disk under one data directory: the [`env::files::Driver`] that
+/// [`files`](crate::files) gives. It is `Send`, so one thread can make it and another
+/// wrap it with [`env::files::Files::new`].
+pub struct Disk {
     /// The data directory.
     data: Arc<OwnedFd>,
-    thread: Thread,
+    queue: Queue,
 }
 
-impl Driver {
-    /// Opens or makes `dir/data` and starts the I/O thread.
-    pub(crate) fn new(dir: &Path) -> Result<Self, crate::Error> {
-        let path = dir.join("data");
-        std::fs::create_dir_all(&path).map_err(crate::Error::Dir)?;
-        let open = |path| fs::open(path, DIRECTORY, fs::Mode::empty());
-        // A `data` made here is not durable until `dir` syncs.
-        let data = open(dir)
-            .and_then(|dir| sync_all(&dir))
-            .and_then(|()| open(&path))
-            .map_err(|errno| crate::Error::Dir(errno.into()))?;
-        Ok(Self {
+impl Disk {
+    /// Opens or makes `dir/data` and starts I/O thread `name`.
+    pub(crate) fn new(
+        dir: &Path,
+        threads: &Threads,
+        name: &str,
+    ) -> Result<(Self, Handle), crate::Error> {
+        let data = data(dir).map_err(|errno| crate::Error::Dir(errno.into()))?;
+        let (queue, thread) =
+            Queue::start(threads, name).map_err(crate::Error::Thread)?;
+        let disk = Self {
             data: Arc::new(data),
-            thread: Thread::start().map_err(crate::Error::Thread)?,
-        })
+            queue,
+        };
+        Ok((disk, thread))
     }
 
-    /// Runs `call` on the data directory and `path` on the I/O thread.
+    /// Runs `call` on the data directory and `path` on the I/O thread, as
+    /// `operation`.
     fn call<T: Send + 'static>(
         &self,
         path: &Path,
-        call: impl FnOnce(&OwnedFd, &Path) -> Result<T, Error> + Send + 'static,
+        operation: Operation,
+        call: impl FnOnce(&OwnedFd, &Path) -> io::Result<T> + Send + 'static,
     ) -> Request<'_, T> {
         let (data, path) = (Arc::clone(&self.data), path.to_path_buf());
-        Box::pin(self.thread.run(move || call(&data, &path)))
+        Box::pin(
+            self.queue
+                .run(move || call(&data, &path).map_err(fail(&path, operation))),
+        )
     }
 }
 
-impl env::files::Driver for Driver {
+impl fmt::Debug for Disk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Disk").finish_non_exhaustive()
+    }
+}
+
+impl env::files::Driver for Disk {
     fn open<'a>(
         &'a self,
         path: &'a Path,
         mode: Mode,
     ) -> Request<'a, Box<dyn Descriptor>> {
-        let opened = self.call(path, move |data, path| open(data, path, mode));
-        let (thread, path) = (self.thread.clone(), Arc::from(path));
+        let (data, owned) = (Arc::clone(&self.data), path.to_path_buf());
+        let opened = self.queue.run(move || open(&data, &owned, mode));
+        let (queue, path) = (self.queue.clone(), Arc::from(path));
         Box::pin(async move {
             let (fd, len) = opened.await?;
             let file: Box<dyn Descriptor> = Box::new(File {
                 fd: Arc::new(fd),
                 len,
                 path,
-                thread,
+                queue,
             });
             Ok(file)
         })
     }
 
     fn list<'a>(&'a self, dir: &'a Path) -> Request<'a, Vec<PathBuf>> {
-        self.call(dir, |data, dir| {
-            list(data, dir).map_err(fail(dir, Operation::List))
-        })
+        self.call(dir, Operation::List, list)
     }
 
     fn create_dir<'a>(&'a self, dir: &'a Path) -> Request<'a, ()> {
-        self.call(dir, |data, dir| {
-            create_dir(data, dir).map_err(fail(dir, Operation::CreateDir))
-        })
+        self.call(dir, Operation::CreateDir, create_dir)
     }
 
     fn remove<'a>(&'a self, path: &'a Path) -> Request<'a, ()> {
-        self.call(path, |data, path| {
+        self.call(path, Operation::Remove, |data, path| {
             fs::unlinkat(data, path, AtFlags::empty())
-                .map_err(fail(path, Operation::Remove))
         })
     }
 
     fn sync_dir<'a>(&'a self, dir: &'a Path) -> Request<'a, ()> {
-        self.call(dir, |data, dir| {
-            fs::openat(data, at(dir), DIRECTORY, fs::Mode::empty())
+        self.call(dir, Operation::SyncDir, |data, dir| {
+            fs::openat(data, at(dir), READ_DIR, fs::Mode::empty())
                 .and_then(|fd| sync_all(&fd))
-                .map_err(fail(dir, Operation::SyncDir))
         })
     }
 
     fn free(&self) -> Request<'_, u64> {
-        self.call(Path::new(""), |data, path| {
-            let stat = fs::fstatvfs(data).map_err(fail(path, Operation::Free))?;
-            Ok(stat.f_bavail * stat.f_frsize)
+        self.call(Path::new(""), Operation::Free, |data, _| {
+            fs::fstatvfs(data).map(|stat| stat.f_bavail * stat.f_frsize)
         })
     }
 }
@@ -129,7 +138,7 @@ struct File {
     fd: Arc<OwnedFd>,
     len: u64,
     path: Arc<Path>,
-    thread: Thread,
+    queue: Queue,
 }
 
 impl File {
@@ -141,7 +150,7 @@ impl File {
     ) -> Request<'_, T> {
         let (fd, path) = (Arc::clone(&self.fd), Arc::clone(&self.path));
         Box::pin(
-            self.thread
+            self.queue
                 .run(move || call(&fd).map_err(fail(&path, operation))),
         )
     }
@@ -170,33 +179,37 @@ impl Descriptor for File {
     }
 
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
-        let Self { fd, thread, .. } = *self;
+        let Self { fd, queue, .. } = *self;
         // The calls before this one have ended, so this drop closes the file.
-        Box::pin(async move { thread.run(move || drop(fd)).await })
+        Box::pin(async move { queue.run(move || drop(fd)).await })
     }
 }
 
 /// A call that the I/O thread runs.
 type Job = Box<dyn FnOnce() + Send>;
 
-/// The I/O thread of one handle. It ends after its last sender drops.
+/// The queue of one I/O thread, which ends after the last clone drops.
 #[derive(Clone)]
-struct Thread(mpsc::Sender<Job>);
+struct Queue(mpsc::Sender<Job>);
 
-impl Thread {
-    #[expect(clippy::disallowed_methods, reason = "os starts threads")]
-    fn start() -> std::io::Result<Self> {
-        let (jobs, mut received) = mpsc::channel::<Job>(DEPTH);
-        thread::Builder::new().name("files".into()).spawn(move || {
-            while let Some(job) = received.blocking_recv() {
+impl Queue {
+    /// Starts I/O thread `name` and gives its queue and its handle.
+    fn start(
+        threads: &Threads,
+        name: &str,
+    ) -> Result<(Self, Handle), env::thread::Error> {
+        let (jobs, mut queued) = mpsc::channel::<Job>(DEPTH);
+        let thread = threads.start(name, move || async move {
+            while let Some(job) = queued.recv().await {
                 job();
             }
         })?;
-        Ok(Self(jobs))
+        Ok((Self(jobs), thread))
     }
 
-    /// Runs `call` after every call sent before it. The future first waits for room
-    /// in the queue; after that, `call` runs also when the future drops.
+    /// Runs `call` after every call that reached the queue before it. The future
+    /// first waits for room in the queue; after that, `call` runs also when the
+    /// future drops.
     ///
     /// # Panics
     ///
@@ -241,7 +254,8 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
     }
     let found = stat.st_size.cast_unsigned();
     match mode {
-        // An empty file is one that a crash stopped before its allocation.
+        // Not atomic: a crash before the allocation leaves an empty file, which this
+        // allocates.
         Mode::Create { len } if found == 0 && len != 0 => {
             fs::fallocate(&fd, FallocateFlags::empty(), 0, len)
                 .and_then(|()| sync_all(&fd))
@@ -252,9 +266,21 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
     }
 }
 
+/// Opens `dir/data`, and first makes it when it is not there.
+fn data(dir: &Path) -> io::Result<OwnedFd> {
+    let dir = fs::open(dir, READ_DIR, fs::Mode::empty())?;
+    match fs::mkdirat(&dir, "data", DIR) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(errno) => return Err(errno),
+    }
+    // A `data` made by this or an earlier start is not durable until `dir` syncs.
+    sync_all(&dir)?;
+    fs::openat(&dir, "data", READ_DIR, fs::Mode::empty())
+}
+
 /// The names in `dir`, without `.` and `..`.
 fn list(data: &OwnedFd, dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let fd = fs::openat(data, at(dir), DIRECTORY, fs::Mode::empty())?;
+    let fd = fs::openat(data, at(dir), READ_DIR, fs::Mode::empty())?;
     let mut names = Vec::new();
     for entry in fs::Dir::new(fd)? {
         let entry = entry?;
@@ -331,13 +357,18 @@ fn at(path: &Path) -> &Path {
     }
 }
 
-/// The error of `operation` on `path` for an OS error code.
+/// The error of `operation` on `path` for an OS error code. Only an operation that
+/// takes space gives `Full`.
 fn fail(path: &Path, operation: Operation) -> impl Fn(Errno) -> Error + '_ {
+    let grows = matches!(
+        operation,
+        Operation::Open | Operation::CreateDir | Operation::WriteAt
+    );
     move |errno| match errno {
         Errno::NOENT => Error::NotFound {
             path: path.to_path_buf(),
         },
-        Errno::NOSPC | Errno::DQUOT => Error::Full {
+        Errno::NOSPC | Errno::DQUOT if grows => Error::Full {
             path: path.to_path_buf(),
         },
         _ => Error::Io {
@@ -351,7 +382,10 @@ fn fail(path: &Path, operation: Operation) -> impl Fn(Errno) -> Error + '_ {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::Sender;
     use std::task::{Context, Waker};
+
+    use env::files::Driver as _;
 
     use super::*;
 
@@ -360,6 +394,28 @@ mod tests {
     const PIPE: Errno = Errno::INVAL;
     #[cfg(target_os = "macos")]
     const PIPE: Errno = Errno::BADF;
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+    }
+
+    /// Queues a call that holds the I/O thread. Gives its future after the thread
+    /// starts it, and the sender that ends it.
+    #[expect(clippy::disallowed_methods, reason = "the test holds the I/O thread")]
+    fn hold(queue: &Queue) -> (Pin<Box<impl Future<Output = ()>>>, Sender<()>) {
+        let mut context = Context::from_waker(Waker::noop());
+        let (started, running) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let mut call = Box::pin(queue.run(move || {
+            started.send(()).unwrap();
+            released.recv().unwrap();
+        }));
+        assert!(call.as_mut().poll(&mut context).is_pending());
+        running.recv().unwrap();
+        (call, release)
+    }
 
     #[test]
     fn a_sync_reaches_the_os() {
@@ -370,38 +426,36 @@ mod tests {
     }
 
     #[test]
-    fn a_full_disk_gives_full_and_another_code_gives_io() {
-        let fail = fail(Path::new("a"), Operation::WriteAt);
+    fn a_full_disk_gives_full_where_an_operation_takes_space() {
         let full = Error::Full { path: "a".into() };
-        assert_eq!(fail(Errno::NOSPC), full);
-        assert_eq!(fail(Errno::DQUOT), full);
-        assert_eq!(fail(Errno::NOENT), Error::NotFound { path: "a".into() });
-        let io = Error::Io {
+        for operation in [Operation::Open, Operation::CreateDir, Operation::WriteAt] {
+            let fail = fail(Path::new("a"), operation);
+            assert_eq!(fail(Errno::NOSPC), full);
+            assert_eq!(fail(Errno::DQUOT), full);
+        }
+        let fail = fail(Path::new("a"), Operation::Sync);
+        let io = |code| Error::Io {
             path: "a".into(),
-            operation: Operation::WriteAt,
-            code: 5,
+            operation: Operation::Sync,
+            code,
         };
-        assert_eq!(fail(Errno::IO), io);
+        assert_eq!(fail(Errno::NOSPC), io(Errno::NOSPC.raw_os_error()));
+        assert_eq!(fail(Errno::DQUOT), io(Errno::DQUOT.raw_os_error()));
+        assert_eq!(fail(Errno::NOENT), Error::NotFound { path: "a".into() });
+        assert_eq!(fail(Errno::IO), io(5));
     }
 
     #[test]
-    #[expect(clippy::disallowed_methods, reason = "the test holds the I/O thread")]
     fn a_call_past_the_depth_waits_outside_the_queue() {
-        let thread = Thread::start().unwrap();
+        let (queue, thread) =
+            Queue::start(&crate::threads().unwrap(), "files").unwrap();
         let mut context = Context::from_waker(Waker::noop());
-        let (started, running) = std::sync::mpsc::channel();
-        let (release, held) = std::sync::mpsc::channel::<()>();
-        let mut first = Box::pin(thread.run(move || {
-            started.send(()).unwrap();
-            held.recv().unwrap();
-        }));
-        assert!(first.as_mut().poll(&mut context).is_pending());
-        running.recv().unwrap();
+        let (held, release) = hold(&queue);
         let ran = Arc::new(AtomicUsize::new(0));
         let mut calls: Vec<_> = (0..=DEPTH)
             .map(|_| {
                 let ran = Arc::clone(&ran);
-                Box::pin(thread.run(move || ran.fetch_add(1, Ordering::Relaxed)))
+                Box::pin(queue.run(move || ran.fetch_add(1, Ordering::Relaxed)))
             })
             .collect();
         for call in &mut calls {
@@ -409,13 +463,44 @@ mod tests {
         }
         drop(calls);
         release.send(()).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            first.await;
-            thread.run(|| ()).await;
+        runtime().block_on(async {
+            held.await;
+            queue.run(|| ()).await;
         });
         assert_eq!(ran.load(Ordering::Relaxed), DEPTH);
+        drop(queue);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn close_ends_after_the_queued_calls_and_closes_the_file() {
+        let dir = std::env::temp_dir()
+            .join(format!("foundation-os-files-close-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let threads = crate::threads().unwrap();
+        let (disk, thread) = Disk::new(&dir, &threads, "files").unwrap();
+        let runtime = runtime();
+        let file = runtime
+            .block_on(disk.open(Path::new("a"), Mode::Create { len: 4_096 }))
+            .unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let (held, release) = hold(&disk.queue);
+        let parts: [Block; 0] = [];
+        let mut write = file.write_at(0, &parts);
+        assert!(write.as_mut().poll(&mut context).is_pending());
+        drop(write);
+        let mut close = file.close();
+        assert!(close.as_mut().poll(&mut context).is_pending());
+        release.send(()).unwrap();
+        runtime.block_on(async {
+            held.await;
+            close.await;
+        });
+        let other = fs::open(dir.join("data/a"), OFlags::RDWR, fs::Mode::empty());
+        let lock = FlockOperation::NonBlockingLockExclusive;
+        fs::flock(other.unwrap(), lock).unwrap();
+        drop(disk);
+        thread.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
