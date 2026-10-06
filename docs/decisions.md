@@ -675,10 +675,11 @@ How to read this record:
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
   a reader gets no mesh time. After it, when `combine` fails (no majority, or no sources
   after a remove), the clock holds over: it keeps its last estimate and its error grows
-  by drift. It never follows the largest group or one side of a tie.
-  `push` returns the status, `Reader::status` gives it on any shard, and `node`
-  publishes it. The next majority ends the holdover. Decided by the `time` builder
-  (#142). The coordinator approved `Reader::status` within it (#598).
+  by drift. It never follows the largest group or one side of a tie. `Reader::status`
+  gives the status on any shard, and `node` publishes it. `push` and `remove` do not
+  also return it: one value gets one way to read it (#634). The next majority ends the
+  holdover. Decided by the `time` builder (#142). The coordinator approved
+  `Reader::status` within it (#598).
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
   not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
