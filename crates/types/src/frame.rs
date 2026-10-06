@@ -272,20 +272,20 @@ impl<'a> Layout<'a> {
     /// Bytes of the block that [`Layout::draft`] takes: the header, the ranges, the
     /// descriptors, and the series. Saturates at `usize::MAX`, which no pool holds.
     #[must_use]
-    pub fn block(&self) -> usize {
+    pub fn block_len(&self) -> usize {
         body_start(self.groups, self.series.len()).saturating_add(self.body)
     }
 
     /// Bytes of [`Frame::body`]: the series, with the padding between them.
     /// Saturates at `usize::MAX`.
     #[must_use]
-    pub fn body(&self) -> usize {
+    pub fn body_len(&self) -> usize {
         self.body
     }
 
-    /// Takes a block of [`Layout::block`] bytes from `pool`, and writes the header,
-    /// ranges, and descriptors. Each range starts at zero, and series bytes are not
-    /// cleared.
+    /// Takes a block of [`Layout::block_len`] bytes from `pool`, and writes the
+    /// header, ranges, and descriptors. Each range starts at zero, and series bytes
+    /// are not cleared.
     ///
     /// # Errors
     ///
@@ -297,7 +297,7 @@ impl<'a> Layout<'a> {
             groups,
             ..
         } = self;
-        let mut block = pool.alloc(self.block())?;
+        let mut block = pool.alloc(self.block_len())?;
         let head = &mut block[..HEAD];
         head.fill(0);
         put(head, at::KEY_SET, &set.key().get().to_le_bytes());
@@ -1326,7 +1326,7 @@ mod tests {
         set: &KeySet,
         series: &[(usize, usize)],
     ) -> Result<(usize, usize), Error> {
-        Layout::new(set, series).map(|layout| (layout.block(), layout.body()))
+        Layout::new(set, series).map(|layout| (layout.block_len(), layout.body_len()))
     }
 
     #[test]
