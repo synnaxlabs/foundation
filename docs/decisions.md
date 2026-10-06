@@ -535,7 +535,7 @@ How to read this record:
   and tries the commit again; after the last idle size the allocation fails with
   `Error::Refused`, a separate error from a full pool (the person on 2026-10-05: "I
   approve the separate error"). The carve counts do not change, the sizes given back
-  back, and a later allocation may succeed (#475, #542).
+  stay given back, and a later allocation may succeed (#475, #542).
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
