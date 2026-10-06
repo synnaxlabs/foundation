@@ -292,7 +292,7 @@ impl Draft {
 
     /// Each present group and its range, in group order. Time is linear in the
     /// number of present groups.
-    pub fn ranges(&self) -> impl Iterator<Item = (u32, Range)> + '_ {
+    pub fn ranges(&self) -> impl Iterator<Item = (u32, Range)> {
         let (ranges, ..) = parts(&self.0);
         ranges
             .iter()
@@ -1289,6 +1289,21 @@ mod tests {
         draft.set_seq(1, 7);
         let ranges: Vec<_> = draft.ranges().collect();
         assert_eq!(ranges, [(1, Range { seq: 7, count: 1 })]);
+    }
+
+    #[test]
+    fn gives_a_present_range_without_samples() {
+        let pool = pool(1 << 16);
+        let series = [(0, 8), (2, 0)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        let ranges: Vec<_> = draft.ranges().collect();
+        assert_eq!(ranges, [(0, Range::default()), (1, Range::default())]);
+        draft.set_seq(1, 5);
+        let ranges: Vec<_> = draft.ranges().collect();
+        assert_eq!(
+            ranges,
+            [(0, Range::default()), (1, Range { seq: 5, count: 0 })]
+        );
     }
 
     #[test]
