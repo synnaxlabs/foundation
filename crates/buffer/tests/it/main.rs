@@ -7,8 +7,8 @@ mod memory;
 
 use std::path::{Path as FilePath, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use block::{Block, Heap, Pool};
 use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Parts, Tail, Unfit};
@@ -944,22 +944,22 @@ fn node_config(node: &sim::node::Node, tasks: Tasks, layout: Layout) -> Config {
     }
 }
 
-/// Cuts the power `cut` nanoseconds into the first open of a ring on a node
-/// with `seed`, then opens the ring again. Returns whether the first open had
-/// ended at the cut, and what the second open gave.
-fn open_after_a_cut(
+/// Crashes `crash` the node `cut` nanoseconds into the first open of a ring on a
+/// node with `seed`. Returns the run, its node, and whether the first open had
+/// ended at the crash.
+fn crash_in_first_open(
     seed: u64,
     cut: i64,
     ring: Layout,
-) -> (bool, Result<Layout, String>) {
+    crash: sim::Crash,
+) -> (sim::Sim, sim::node::Node, bool) {
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
     });
     let node = sim.node(sim::node::Config::default());
-    let made = node.clone();
-    let handle = on_node(&node, "dir", move |_| async move {
-        let files = made.files();
+    sim.run_on(&node, |node, _| async move {
+        let files = node.files();
         files
             .create_dir(FilePath::new(DIR))
             .await
@@ -968,9 +968,8 @@ fn open_after_a_cut(
             .sync_dir(FilePath::new(""))
             .await
             .expect("the dir is synced");
-    });
-    sim.run().expect("the run ends");
-    handle.join().expect("the shard ended");
+    })
+    .expect("the run ends");
     let ended = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&ended);
     let first = node.clone();
@@ -983,24 +982,26 @@ fn open_after_a_cut(
         std::future::pending::<()>().await;
     }));
     sim.run_for(Span::from_nanos(cut)).expect("the run goes on");
-    sim.crash(&node, sim::Crash::Power);
-    let opened = Arc::new(Mutex::new(None));
-    let slot = Arc::clone(&opened);
-    let second = node.clone();
-    let handle = on_node(&node, "second", move |tasks| async move {
-        let config = node_config(&second, tasks, ring);
+    sim.crash(&node, crash);
+    (sim, node, ended.load(Ordering::Relaxed))
+}
+
+/// Cuts the power `cut` nanoseconds into the first open of a ring on a node
+/// with `seed`, then opens the ring again. Returns whether the first open had
+/// ended at the cut, and what the second open gave.
+fn open_after_a_cut(
+    seed: u64,
+    cut: i64,
+    ring: Layout,
+) -> (bool, Result<Layout, Error>) {
+    let (mut sim, node, ended) =
+        crash_in_first_open(seed, cut, ring, sim::Crash::Power);
+    let opened = sim.run_on(&node, move |node, tasks| async move {
+        let config = node_config(&node, tasks, ring);
         let buffer = Buffer::open(config, &mut Slots::new()).await;
-        let layout = buffer.map(|buffer| buffer.layout());
-        *slot.lock().expect("no panic held the lock") =
-            Some(layout.map_err(|error| error.to_string()));
+        buffer.map(|buffer| buffer.layout())
     });
-    sim.run().expect("the run ends");
-    handle.join().expect("the shard ended");
-    let opened = opened.lock().expect("no panic held the lock").take();
-    (
-        ended.load(Ordering::Relaxed),
-        opened.expect("the second open ended"),
-    )
+    (ended, opened.expect("the run ends"))
 }
 
 /// A power cut at any point of the first open leaves a ring that opens again
@@ -1537,67 +1538,31 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
 
 /// Kills the process `cut` nanoseconds into the first open of a ring on a node
 /// with `seed`. A new process opens the ring at once, commits one entry, and opens
-/// the ring again. Returns the tail that `committed` reported durable and the tail
-/// the reopen gave.
-fn commit_after_a_kill(seed: u64, cut: i64, ring: Layout) -> (Tail, Tail) {
-    let mut sim = sim::Sim::new(sim::Config {
-        seed,
-        ..sim::Config::default()
-    });
-    let node = sim.node(sim::node::Config::default());
-    let made = node.clone();
-    let handle = on_node(&node, "dir", move |_| async move {
-        let files = made.files();
-        files
-            .create_dir(FilePath::new(DIR))
-            .await
-            .expect("the dir is made");
-        files
-            .sync_dir(FilePath::new(""))
-            .await
-            .expect("the dir is synced");
-    });
-    sim.run().expect("the run ends");
-    handle.join().expect("the shard ended");
-    let first = node.clone();
-    drop(on_node(&node, "first", move |tasks| async move {
-        let config = node_config(&first, tasks, ring);
-        let _buffer = Buffer::open(config, &mut Slots::new())
-            .await
-            .expect("the first open ends well");
-        std::future::pending::<()>().await;
-    }));
-    sim.run_for(Span::from_nanos(cut)).expect("the run goes on");
-    sim.crash(&node, sim::Crash::Process);
-    let result = Arc::new(Mutex::new(None));
-    let slot = Arc::clone(&result);
-    let second = node.clone();
-    let handle = on_node(&node, "second", move |tasks| async move {
+/// the ring again. Returns whether the first open had ended at the kill, and the
+/// tail that `committed` reported durable with the tail the reopen gave.
+fn commit_after_a_kill(
+    seed: u64,
+    cut: i64,
+    ring: Layout,
+) -> (bool, Result<(Tail, Tail), Error>) {
+    let (mut sim, node, ended) =
+        crash_in_first_open(seed, cut, ring, sim::Crash::Process);
+    let tails = sim.run_on(&node, move |node, tasks| async move {
         let mut slots = Slots::new();
-        let config = node_config(&second, tasks.clone(), ring);
-        let buffer = Buffer::open(config, &mut slots)
-            .await
-            .expect("the ring opens after the kill");
+        let config = node_config(&node, tasks.clone(), ring);
+        let buffer = Buffer::open(config, &mut slots).await?;
         let a = slots.assign(key(1));
-        buffer
-            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
-            .expect("queues");
-        buffer.committed().await.expect("commits");
+        buffer.append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])?;
+        buffer.committed().await?;
         let durable = buffer.durable(a, Path::Live);
         drop(buffer);
         let mut slots = Slots::new();
-        let config = node_config(&second, tasks, ring);
-        let reopened = Buffer::open(config, &mut slots)
-            .await
-            .expect("the ring opens again");
+        let reopened =
+            Buffer::open(node_config(&node, tasks, ring), &mut slots).await?;
         let a = slots.assign(key(1));
-        *slot.lock().expect("no panic held the lock") =
-            Some((durable, reopened.tail(a, Path::Live)));
+        Ok((durable, reopened.tail(a, Path::Live)))
     });
-    sim.run().expect("the run ends");
-    handle.join().expect("the shard ended");
-    let result = result.lock().expect("no panic held the lock").take();
-    result.expect("the second shard ended")
+    (ended, tails.expect("the run ends"))
 }
 
 /// A process kill at any time in the first open of a ring, with a restart at once,
@@ -1606,11 +1571,20 @@ fn commit_after_a_kill(seed: u64, cut: i64, ring: Layout) -> (Tail, Tail) {
 #[test]
 fn a_kill_at_any_time_in_the_first_open_loses_no_commit_of_the_next_process() {
     let ring = layout(AREA, BODY_MAX);
+    let committed = tail(3, Some(30));
     for seed in 0..32 {
-        for cut in (10_000..=600_000).step_by(10_000) {
-            let (durable, recovered) = commit_after_a_kill(seed, cut, ring);
-            assert_eq!(durable, tail(3, Some(30)), "seed {seed}, kill at {cut} ns");
-            assert_eq!(recovered, durable, "seed {seed}, kill at {cut} ns");
+        let mut cut = 0;
+        loop {
+            let (ended, tails) = commit_after_a_kill(seed, cut, ring);
+            assert_eq!(
+                tails,
+                Ok((committed, committed)),
+                "seed {seed}, kill at {cut} ns"
+            );
+            if ended {
+                break;
+            }
+            cut += 10_000;
         }
     }
 }
