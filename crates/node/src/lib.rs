@@ -54,9 +54,10 @@ pub struct Node {
 }
 
 impl Node {
-    /// Starts one shard per core, named `shard-<i>` and pinned to core `i`. Each
-    /// shard owns a `block::Pool` with an even part of the budget; shard 0 also takes
-    /// the remainder. Returns once each shard runs or one has failed to start. A
+    /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
+    /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
+    /// Each shard owns a `block::Pool` with an even part of the budget; shard 0 also
+    /// takes the remainder. Returns once each shard runs or one has failed to start. A
     /// failed start, or a shard with no memory, stops the node, and [`Node::join`]
     /// returns its error.
     ///
@@ -80,6 +81,7 @@ impl Node {
             handles: Vec::new(),
             failed: None,
         };
+        let pinnable = shards.pinnable();
         let cores = shards.cores().get();
         for core in 0..cores {
             let budget = budget / cores + if core == 0 { budget % cores } else { 0 };
@@ -94,7 +96,7 @@ impl Node {
             };
             let shard = env::shards::Config {
                 name: format!("shard-{core}"),
-                core: Some(core),
+                core: pinnable.then_some(core),
             };
             // Only the first shard gets the mesh clock.
             let mesh = mesh.take();

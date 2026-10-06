@@ -9,8 +9,6 @@ publish.workspace = true
 block = { path = "../block" }
 env = { path = "../env" }
 rustix = { workspace = true }
-# `sync` works around a tokio 1.53 bug: under `cfg(loom)`, `task/local.rs` imports
-# `sync::AtomicWaker`, which exists only with `sync`.
 tokio = { workspace = true, features = ["rt", "sync"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

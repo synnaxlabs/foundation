@@ -1,5 +1,5 @@
 use estimate::combine::{self, combine};
-use estimate::discipline::Discipline;
+use estimate::discipline::{Cause, Discipline};
 use estimate::{Filter, Measurement, Slew};
 use types::hash::Map;
 use types::time::{Interval, Monotonic, Span};
@@ -101,7 +101,7 @@ impl Clock {
     fn steer(&mut self) {
         let estimate = combine(self.monotonic.now(), DRIFT, self.sources.values());
         // A write that changes nothing makes the reads that overlap it run again.
-        let Some(change) = self.discipline.next(estimate) else {
+        let Some(change) = self.discipline.next(estimate, DRIFT) else {
             return;
         };
         // A slew keeps mesh time from going back only against reads before its `now`,
@@ -124,9 +124,9 @@ pub enum Status {
     /// monotonic clock with its error. The error can be unknown
     /// ([`Measurement::unknown`]).
     Synced(Measurement),
-    /// No majority agrees now, or no source is left. Mesh time keeps its slew, and the
-    /// error of the slew's target grows by drift. Holds mesh time now and why.
-    Holdover(Measurement, combine::Error),
+    /// Mesh time keeps its slew, and the error of the slew's target grows by drift.
+    /// Holds mesh time now and why.
+    Holdover(Measurement, Cause),
 }
 
 /// Reads mesh time from any thread with no lock. Clones read the same clock.
@@ -158,9 +158,9 @@ impl Reader {
         self.cell.read(|words| {
             let at = |slew: Slew| slew.at(self.monotonic.now(), DRIFT);
             match decode(words) {
-                Discipline::Unsynced(e) => Status::Unsynced(e),
+                Discipline::Unsynced(error) => Status::Unsynced(error),
                 Discipline::Synced(slew) => Status::Synced(at(slew)),
-                Discipline::Holdover(slew, e) => Status::Holdover(at(slew), e),
+                Discipline::Holdover(slew, cause) => Status::Holdover(at(slew), cause),
             }
         })
     }
@@ -170,13 +170,16 @@ impl Reader {
 // that change.
 fn encode(discipline: Discipline) -> [u64; WORDS] {
     let count = |n: usize| u64::try_from(n).expect("invariant: a count fits in u64");
-    let (kind, slew, cause) = match discipline {
-        Discipline::Unsynced(cause) => (0, None, Some(cause)),
+    let (kind, slew, failure) = match discipline {
+        Discipline::Unsynced(failure) => (0, None, Some(failure)),
         Discipline::Synced(slew) => (1, Some(slew), None),
-        Discipline::Holdover(slew, cause) => (2, Some(slew), Some(cause)),
+        Discipline::Holdover(slew, Cause::NoEstimate(failure)) => {
+            (2, Some(slew), Some(failure))
+        }
+        Discipline::Holdover(slew, Cause::UnknownEstimate) => (3, Some(slew), None),
     };
     let [start, from, at, offset, error] = slew.map_or([0; 5], encode_slew);
-    let [sources, agreeing, empty] = match cause {
+    let [sources, agreeing, empty] = match failure {
         Some(combine::Error::NoMajority {
             sources,
             agreeing,
@@ -205,7 +208,7 @@ fn decode(words: [u64; WORDS]) -> Discipline {
     let count =
         |word: u64| usize::try_from(word).expect("invariant: a count from a usize");
     // `NoMajority` has at least 1 source.
-    let cause = || match sources {
+    let failure = || match sources {
         0 => combine::Error::NoSources,
         _ => combine::Error::NoMajority {
             sources: count(sources),
@@ -214,9 +217,10 @@ fn decode(words: [u64; WORDS]) -> Discipline {
         },
     };
     match kind {
-        0 => Discipline::Unsynced(cause()),
+        0 => Discipline::Unsynced(failure()),
         1 => Discipline::Synced(slew()),
-        2 => Discipline::Holdover(slew(), cause()),
+        2 => Discipline::Holdover(slew(), Cause::NoEstimate(failure())),
+        3 => Discipline::Holdover(slew(), Cause::UnknownEstimate),
         _ => panic!("invariant: the cell holds discipline {kind}"),
     }
 }
@@ -250,7 +254,7 @@ fn decode_slew(words: [u64; 5]) -> Slew {
 #[cfg(test)]
 mod tests {
     use estimate::combine::Error;
-    use estimate::discipline::Discipline;
+    use estimate::discipline::{Cause, Discipline};
     use estimate::{Measurement, Slew};
     use proptest::prelude::*;
     use types::time::{Monotonic, Span};
@@ -280,7 +284,7 @@ mod tests {
         })
     }
 
-    fn cause() -> impl Strategy<Value = Error> {
+    fn error() -> impl Strategy<Value = Error> {
         let counts = (1..=usize::MAX, any::<usize>(), any::<usize>());
         prop_oneof![
             Just(Error::NoSources),
@@ -293,11 +297,14 @@ mod tests {
     }
 
     fn discipline() -> impl Strategy<Value = Discipline> {
+        let cause = prop_oneof![
+            error().prop_map(Cause::NoEstimate),
+            Just(Cause::UnknownEstimate)
+        ];
         prop_oneof![
-            cause().prop_map(Discipline::Unsynced),
+            error().prop_map(Discipline::Unsynced),
             slew().prop_map(Discipline::Synced),
-            (slew(), cause())
-                .prop_map(|(slew, cause)| Discipline::Holdover(slew, cause)),
+            (slew(), cause).prop_map(|(slew, cause)| Discipline::Holdover(slew, cause)),
         ]
     }
 
