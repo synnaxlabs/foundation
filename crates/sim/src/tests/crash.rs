@@ -264,10 +264,14 @@ fn torn(seed: u64) -> (Vec<u8>, Vec<u8>) {
 }
 
 #[test]
-fn a_failed_sync_keeps_its_lost_writes_in_the_cache_clean() {
-    let outcomes: BTreeSet<(Vec<u8>, Vec<u8>)> = (0..64).map(torn).collect();
-    let all = [vec![1, 1], vec![1, 2], vec![2, 1], vec![2, 2]];
-    assert_eq!(outcomes, BTreeSet::from(all.map(|kept| (vec![2, 2], kept))));
+fn a_read_after_a_failed_sync_sees_its_lost_writes_until_the_cache_drops_them() {
+    let outcomes: BTreeSet<(u8, u8)> = (0..64)
+        .flat_map(|seed| {
+            let (shown, kept) = torn(seed);
+            shown.into_iter().zip(kept)
+        })
+        .collect();
+    assert_eq!(outcomes, BTreeSet::from([(1, 1), (2, 1), (2, 2)]));
 }
 
 /// The bytes of the file of [`create_torn`] after a write of one 3 at its start, a
@@ -290,22 +294,27 @@ fn rewritten(seed: u64) -> Vec<u8> {
 
 #[test]
 fn a_sync_after_a_write_on_a_sector_that_a_failed_sync_lost_makes_it_durable() {
-    for seed in 0..64 {
-        let bytes = rewritten(seed);
-        let expected = [[3].as_slice(), &[2; 511]].concat();
-        assert_eq!(bytes[..512], expected, "seed {seed}");
-    }
+    let kept: BTreeSet<Vec<u8>> = (0..64)
+        .map(|seed| rewritten(seed)[..512].to_vec())
+        .collect();
+    let over = |byte| [[3].as_slice(), &[byte; 511]].concat();
+    assert_eq!(kept, BTreeSet::from([over(1), over(2)]));
 }
 
 #[test]
 fn a_process_crash_keeps_the_writes_that_a_failed_sync_lost() {
-    for seed in 0..16 {
-        let (mut sim, node) = disk(seed);
-        crash_after(&mut sim, &node, Crash::Process, |node| async move {
-            drop(create_torn(&node).await);
-        });
-        assert_eq!(sectors_of(&mut sim, &node), [2, 2], "seed {seed}");
-    }
+    let outcomes: BTreeSet<(u8, u8)> = (0..64)
+        .flat_map(|seed| {
+            let (mut sim, node) = disk(seed);
+            crash_after(&mut sim, &node, Crash::Process, |node| async move {
+                drop(create_torn(&node).await);
+            });
+            let shown = sectors_of(&mut sim, &node);
+            sim.crash(&node, Crash::Power);
+            shown.into_iter().zip(sectors_of(&mut sim, &node))
+        })
+        .collect();
+    assert_eq!(outcomes, BTreeSet::from([(1, 1), (2, 1), (2, 2)]));
 }
 
 /// Sleeps until the instant of the crash of [`crash_after`].

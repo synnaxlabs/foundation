@@ -192,8 +192,9 @@ impl Node {
     /// turn, one per call. The call does not touch the disk, except a sync: each
     /// sector keeps its durable bytes, or its bytes after one write that the sync
     /// covers or a part of one. These bytes are then durable. As on Linux, the writes
-    /// that the sync covers stay in the cache, clean, until a power cut: a read sees
-    /// them, and only a later write on their sector makes a sync write them.
+    /// that the sync covers stay in the cache, clean: a read sees them, and a later
+    /// write goes over them. A power cut drops them, and at each read or write of
+    /// their sector the cache may drop them, by a coin.
     ///
     /// # Panics
     ///
