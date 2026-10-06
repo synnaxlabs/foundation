@@ -144,6 +144,10 @@ impl env::shards::Driver for Node {
         lock(&self.shared).cores(self.node)
     }
 
+    fn pinnable(&self) -> bool {
+        lock(&self.shared).pinnable(self.node)
+    }
+
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error> {
         let fault = lock(&self.shared).shards(self.node).record(&config);
         let name = config.name;

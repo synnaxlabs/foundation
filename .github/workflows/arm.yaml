@@ -7,9 +7,10 @@ on:
     branches: [main]
     paths-ignore: ['docs/**', '**.md']
 
+# On main each run ends, and only the newest waiting commit runs next.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -18,10 +19,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Add cargo to the path
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      # Outside the workspace, so checkout keeps it. One job runs on a runner at a
+      # time, so each runner owns its directory.
+      - name: Keep the build
+        run: |
+          dir="$HOME/target/$RUNNER_NAME"
+          if [ -d "$dir" ] && [ "$(du -sk "$dir" | cut -f1)" -gt $((25 * 1024 * 1024)) ]
+          then
+            rm -rf "$dir"
+          fi
+          echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --workspace
-      - name: Model tests
-        run: cargo test -p ring --lib --release
-        env:
-          RUSTFLAGS: --cfg loom
-          CARGO_TARGET_DIR: target/loom

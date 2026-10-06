@@ -279,9 +279,8 @@ async fn edit(file: &File, pool: &Rc<Pool>, edits: &[Edit]) {
 /// Opens the changed ring. With no edits, it must give the tails the build left.
 /// When it opens, one commit on it must survive a reopen.
 ///
-/// The commit is one entry of `CHECK_PART` bytes at each tail. A header edit can
-/// shrink `body_max` under that batch, and a record edit can put a tail at
-/// `u64::MAX`; both are preconditions of `append`, so such a ring is not checked.
+/// The commit is one entry of `CHECK_PART` bytes at each tail. A record edit can put a
+/// tail at `u64::MAX`, a precondition of `append`, so such a ring is not checked.
 async fn check(
     node: &sim::node::Node,
     tasks: &Tasks,
@@ -303,9 +302,6 @@ async fn check(
             built,
             "an open lost what the build wrote"
         );
-    }
-    if buffer.layout().body_max() < BODY_MAX {
-        return;
     }
     let mut entries = Vec::new();
     for (index, slot) in slot_of.iter().enumerate() {

@@ -67,6 +67,7 @@ struct Node {
     /// pause never ends.
     resumes: Option<Monotonic>,
     cores: NonZeroUsize,
+    unpinnable: bool,
     entropy: Rng,
     shards: shard::Starts,
     /// The monotonic reading at boot.
@@ -171,6 +172,7 @@ impl State {
             wall_error: config.wall_error,
             resumes: Some(self.now),
             cores: config.cores,
+            unpinnable: config.unpinnable,
             entropy,
             shards: shard::Starts::default(),
             boot: config.monotonic,
@@ -218,6 +220,10 @@ impl State {
 
     pub(crate) fn cores(&self, node: usize) -> NonZeroUsize {
         self.nodes[node].cores
+    }
+
+    pub(crate) fn pinnable(&self, node: usize) -> bool {
+        !self.nodes[node].unpinnable
     }
 
     pub(crate) fn shards(&mut self, node: usize) -> &mut shard::Starts {
