@@ -64,7 +64,7 @@ struct Parser<'a> {
     /// The next token, not yet taken.
     token: Token<'a>,
     /// Inside `[` or `(`, where HCL skips new lines, so `take` never returns one.
-    /// Only [`Parser::level`] sets it.
+    /// Only [`Parser::enclosed`] sets it.
     newlines_skipped: bool,
     /// Problems that do not stop reading.
     errors: Vec<Error>,
@@ -352,15 +352,31 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Reads a reference from its first part: each `.` and identifier after it.
+    /// Reads a reference from its first part: each `.` and identifier after it, and
+    /// each index that is a string, which reads as more segments.
     fn reference(&mut self, first: &Token<'a>) -> Result<Option<Value>, Error> {
         let mut text = String::from(first.text);
         let mut span = first.span;
-        // Each pass takes two tokens or returns.
+        // Each pass takes two tokens or more, or returns.
         for _ in 0..=self.len {
-            if self.token.kind != lex::Kind::Dot
-                || self.second().kind != lex::Kind::Identifier
+            if self.token.kind == lex::Kind::Dot
+                && self.second().kind == lex::Kind::Identifier
             {
+                self.take()?;
+                let part = self.take()?;
+                text.push('.');
+                text.push_str(part.text);
+                span = join(span, part.span);
+            } else if self.string_index() {
+                let (part, whole) =
+                    self.enclosed(span, |parser| match parser.take()?.kind {
+                        lex::Kind::String(part) | lex::Kind::Heredoc(part) => Ok(part),
+                        kind => unreachable!("invariant: the index is not {kind:?}"),
+                    })?;
+                text.push('.');
+                text.push_str(&part);
+                span = whole;
+            } else {
                 return match text.parse::<Name>() {
                     Ok(name) => Ok(Some(Value {
                         kind: value::Kind::Reference(name),
@@ -372,13 +388,30 @@ impl<'a> Parser<'a> {
                     }
                 };
             }
-            self.take()?;
-            let part = self.take()?;
-            text.push('.');
-            text.push_str(part.text);
-            span = join(span, part.span);
         }
-        unreachable!("invariant: each pass takes two tokens")
+        unreachable!("invariant: each pass takes two tokens or more")
+    }
+
+    /// Reports whether the next tokens are `[`, a string or a heredoc, and `]`: an
+    /// index that HCL reads as a step of a reference, not as an expression. It also
+    /// reports a lexer error after `[`, so that error is the only one, except a
+    /// template, which HCL reads as an expression.
+    fn string_index(&self) -> bool {
+        if self.token.kind != lex::Kind::OpenBracket {
+            return false;
+        }
+        let mut ahead = self.tokens.clone();
+        match ahead.next_past_lines().kind {
+            lex::Kind::String(_) | lex::Kind::Heredoc(_) => {
+                ahead.next_past_lines().kind == lex::Kind::CloseBracket
+            }
+            lex::Kind::Error(Error::Form {
+                form: Form::Template,
+                ..
+            }) => false,
+            lex::Kind::Error(_) => true,
+            _ => false,
+        }
     }
 
     /// Reads a number, after its minus sign if `minus` holds the sign's span. Returns
@@ -421,12 +454,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Reads one level of nesting that starts at `start`, the keyword, function name,
-    /// or open bracket before the open bracket: takes the open bracket, reads the
-    /// inside with `inner` at the depth inside, and takes the close. Inside `[` or `(`,
-    /// `take` skips new lines. Returns what `inner` read and the span from `start` to
-    /// the close, or [`Error::TooDeep`] at `start` when the level is past
-    /// [`DEPTH_MAX`].
+    /// Reads one level of nesting that starts at `start`, as [`Parser::enclosed`]
+    /// does, with `inner` at the depth inside. Returns [`Error::TooDeep`] at `start`
+    /// when the level is past [`DEPTH_MAX`].
     fn level<T>(
         &mut self,
         start: Span,
@@ -434,6 +464,18 @@ impl<'a> Parser<'a> {
         inner: impl FnOnce(&mut Self, usize) -> Result<T, Error>,
     ) -> Result<(T, Span), Error> {
         let depth = enter(depth).ok_or(Error::TooDeep { span: start })?;
+        self.enclosed(start, |parser| inner(parser, depth))
+    }
+
+    /// Takes the open bracket, reads the inside with `inner`, and takes the close.
+    /// `start` is the keyword, function name, reference, or open bracket before the
+    /// open bracket. Inside `[` or `(`, `take` skips new lines. Returns what `inner`
+    /// read and the span from `start` to the close.
+    fn enclosed<T>(
+        &mut self,
+        start: Span,
+        inner: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<(T, Span), Error> {
         let skipped = match self.token.kind {
             lex::Kind::OpenBracket | lex::Kind::OpenParenthesis => true,
             lex::Kind::OpenBrace => false,
@@ -443,7 +485,7 @@ impl<'a> Parser<'a> {
         // token after it.
         let outer = std::mem::replace(&mut self.newlines_skipped, skipped);
         self.take()?;
-        let inside = inner(self, depth)?;
+        let inside = inner(self)?;
         self.newlines_skipped = outer;
         let close = self.take()?;
         Ok((inside, join(start, close.span)))
@@ -697,14 +739,12 @@ pub(crate) fn opens_for(identifier: &str) -> bool {
     identifier == "for"
 }
 
-/// Reports whether HCL reads `name`, as written, as one reference: each segment is an
-/// identifier, and the first is not a literal.
-pub(crate) fn reference(name: &Name) -> bool {
-    let mut segments = name.segments();
-    segments
+/// Reports whether HCL reads the first segment of `name` as the root of a reference:
+/// an identifier that is not a literal.
+pub(crate) fn rooted(name: &Name) -> bool {
+    name.segments()
         .next()
-        .is_some_and(|first| literal(first).is_none())
-        && name.segments().all(lex::identifier)
+        .is_some_and(|first| lex::identifier(first) && literal(first).is_none())
 }
 
 /// The value that `identifier` reads as by itself, or `None` for a reference.
@@ -1043,6 +1083,28 @@ c = "°C # not a comment"
             for (text, span) in cases {
                 let value = first(ok(text));
                 assert_eq!(value.kind, reference("x.b"), "{text:?}");
+                assert_eq!(value.span, Some(span), "{text:?}");
+            }
+        }
+
+        #[test]
+        fn reads_a_string_index_as_a_segment() {
+            let cases = [
+                ("a = plc[\"40001\"]\n", "plc.40001", on(4, 16)),
+                ("a = plc.a[\"-1\"].x\n", "plc.a.-1.x", on(4, 17)),
+                ("a = a[\"b\"]\n", "a.b", on(4, 10)),
+                ("a = site_a[\"@changes\"]\n", "site_a.@changes", on(4, 22)),
+                ("a = plc[\"a.b\"]\n", "plc.a.b", on(4, 14)),
+                ("a = plc [ \"1\" ] [\"2\"]\n", "plc.1.2", on(4, 21)),
+                (
+                    "a = plc[\n\"1\"\n]\n",
+                    "plc.1",
+                    span(at(4, 0, 4), at(14, 2, 1)),
+                ),
+            ];
+            for (text, name, span) in cases {
+                let value = ok(text).attributes.iter().next().unwrap().value.clone();
+                assert_eq!(value.kind, reference(name), "{text:?}");
                 assert_eq!(value.span, Some(span), "{text:?}");
             }
         }
@@ -1878,6 +1940,14 @@ c = "°C # not a comment"
                 ("a = b.0c\n", on(5, 6), Form::Index),
                 ("a = [kf1.5true]\n", on(8, 9), Form::Index),
                 ("a = b.c[0]\n", on(7, 8), Form::Index),
+                ("a = plc[0]\n", on(7, 8), Form::Index),
+                ("a = plc[true]\n", on(7, 8), Form::Index),
+                ("a = plc[x]\n", on(7, 8), Form::Index),
+                ("a = plc[\"a\" + \"b\"]\n", on(7, 8), Form::Index),
+                ("a = plc[\"a\"][0]\n", on(12, 13), Form::Index),
+                ("a = plc[\"a\"].0\n", on(12, 13), Form::Index),
+                ("a = true[\"x\"]\n", on(8, 9), Form::Index),
+                ("a = f(1)[\"a\"]\n", on(8, 9), Form::Index),
                 ("a = b.c.*\n", on(7, 8), Form::Splat),
             ];
             for (text, span, form) in cases {
@@ -2246,6 +2316,51 @@ c = "°C # not a comment"
                     name("é", span(at(24, 1, 5), at(26, 1, 6))),
                     name("x.é", span(at(34, 2, 6), at(38, 2, 9))),
                 ],
+            );
+        }
+
+        #[test]
+        fn refuses_a_string_index_that_is_not_a_segment() {
+            let name = |text: &str, span| {
+                let error = text.parse::<Name>().unwrap_err();
+                (Error::Name { span, error }, NAME)
+            };
+            check(
+                "a = plc[\"\"]\nb = plc[\"*\"]\nc = plc[<<EOT\nx\nEOT\n]\n",
+                &[
+                    name("plc.", on(4, 11)),
+                    name("plc.*", span(at(16, 1, 4), at(24, 1, 12))),
+                    name("plc.x\n", span(at(29, 2, 4), at(46, 5, 1))),
+                ],
+            );
+            let index = Error::Form {
+                span: on(7, 8),
+                form: Form::Index,
+            };
+            let template = Error::Form {
+                span: on(9, 11),
+                form: Form::Template,
+            };
+            check(
+                "a = plc[\"${x}\"]\n",
+                &[(index, &refused(Form::Index)), (template, TEMPLATE)],
+            );
+        }
+
+        #[test]
+        fn gives_only_the_string_error_in_a_string_index() {
+            check(
+                "a = plc[\"\\q\"]\n",
+                &[(Error::Escape { span: on(9, 11) }, ESCAPE)],
+            );
+            let unclosed = Error::Unclosed {
+                span: on(12, 12),
+                opener: on(8, 9),
+                part: Unclosed::String,
+            };
+            check(
+                "a = plc[\"abc",
+                &[(unclosed, &needs("`\"` to end the string"))],
             );
         }
 

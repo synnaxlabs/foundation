@@ -2,12 +2,9 @@
 //!
 //! An entry has one byte form: [`decode`] takes only what [`encode`] gives.
 
-use std::collections::BTreeSet;
-
 use raft::{Data, Entry, Voters};
-use types::node;
 
-use crate::bytes::{put_key, put_position, take, take_key, take_position};
+use crate::bytes::{put_keys, put_position, take, take_keys, take_position};
 
 const EMPTY: u8 = 0;
 const BYTES: u8 = 1;
@@ -25,12 +22,8 @@ pub(crate) fn encode(entry: &Entry, out: &mut Vec<u8>) {
         }
         Data::Voters(voters) => {
             out.push(VOTERS);
-            for keys in [&voters.incoming, &voters.outgoing] {
-                out.extend(wide(keys.len()).to_le_bytes());
-                for &key in keys {
-                    put_key(key, out);
-                }
-            }
+            put_keys(&voters.incoming, out);
+            put_keys(&voters.outgoing, out);
         }
     }
 }
@@ -48,8 +41,8 @@ pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Entry> {
             Data::Bytes(data.to_vec())
         }
         VOTERS => Data::Voters(Voters {
-            incoming: keys(bytes)?,
-            outgoing: keys(bytes)?,
+            incoming: take_keys(bytes)?,
+            outgoing: take_keys(bytes)?,
         }),
         _ => return None,
     };
@@ -58,18 +51,4 @@ pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Entry> {
 
 fn wide(len: usize) -> u64 {
     u64::try_from(len).expect("invariant: a length fits in 64 bits")
-}
-
-// A count, then the keys in rising order.
-fn keys(bytes: &mut &[u8]) -> Option<BTreeSet<node::Key>> {
-    let count = u64::from_le_bytes(take(bytes)?);
-    let mut keys = BTreeSet::new();
-    for _ in 0..count {
-        let key = take_key(bytes)?;
-        if keys.last().is_some_and(|last| *last >= key) {
-            return None;
-        }
-        keys.insert(key);
-    }
-    Some(keys)
 }
