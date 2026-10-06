@@ -421,14 +421,14 @@ How to read this record:
   durable: a killed process may have written records that it never synced (#657). Before
   that sync, the walk writes again, as read, each window up to the end of the chain. A
   read can see, from the cache, writes that a failed sync of an earlier process in the
-  same boot lost, and the cache can drop them between two reads. So an open writes the
-  records it walks once more, and the start of each record over one block twice (#698).
-  Lost: a walk with direct I/O, which needs a new `env::files` read mode in each driver
-  and in `sim`. The restart record needs one free block: an open of a full ring first
-  moves records at the tail to a segment. The walk holds one pool block at a time and
-  reads a longer record in pieces of the pool's largest block, so the pool puts no bound
-  on `body_max`. An open with no such block free fails with `Pool`, and the next open
-  recovers the record (#440, #572).
+  same boot lost, and the cache can drop them between two reads. So an open writes again
+  the bytes it walks, at most the area, and the first 52 KiB of each record over one
+  block twice (#698). Lost: a walk with direct I/O, which needs a new `env::files` read
+  mode in each driver and in `sim`. The restart record needs one free block: an open of
+  a full ring first moves records at the tail to a segment. The walk holds one pool
+  block at a time and reads a longer record in pieces of the pool's largest block, so
+  the pool puts no bound on `body_max`. An open with no such block free fails with
+  `Pool`, and the next open recovers the record (#440, #572).
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
   magic `FNDNRING`, version 1. The CRC is at offset 42, right after the fields, and

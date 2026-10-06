@@ -511,8 +511,9 @@ enum Phase {
 
 /// Walks the records of a ring from its tail at each open. Loop: read the bytes of
 /// [`window`](Self::window) from the area, give them to [`next`](Self::next), and
-/// stop at [`Step::End`]. Then [`writer`](Self::writer) continues the ring. It
-/// ends within one lap of the area on any bytes.
+/// stop at [`Step::End`]. Each place must read the same each time, so the caller
+/// writes back each window it reads. Then [`writer`](Self::writer) continues the
+/// ring. It ends within one lap of the area on any bytes.
 ///
 /// A window is one block, or a piece of a record longer than one block, at most
 /// `piece` bytes. The cursor reads such a record in three parts: its first block,
@@ -612,8 +613,8 @@ impl Cursor {
     /// # Panics
     ///
     /// When `bytes` is not the window, or when the start of a record reads
-    /// differently the second time: no writer runs during a walk, so the bytes
-    /// the CRC covered must come back.
+    /// differently the second time: the caller writes back each window it reads,
+    /// so the bytes the CRC covered must come back.
     pub(crate) fn next<'a>(&mut self, bytes: &'a [u8]) -> Result<Step<'a>, Invalid> {
         let Window { place, len } = self.window();
         assert!(

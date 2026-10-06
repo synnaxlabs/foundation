@@ -324,8 +324,9 @@ impl Drop for Buffer {
 impl Buffer {
     /// Opens the ring in `config.dir`, or creates it, makes the ring and its
     /// directory durable, and recovers the tail of every path from its records. Each
-    /// recovered index gets its slot from `slots`. Starts the commit task. It writes
-    /// each record it recovers again, so each tail it reports is durable.
+    /// recovered index gets its slot from `slots`. Starts the commit task. Each tail
+    /// it reports is durable. It reads the records from the ring's tail and writes
+    /// them again, so its time grows with them.
     ///
     /// # Errors
     ///
