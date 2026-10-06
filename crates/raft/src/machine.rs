@@ -1851,6 +1851,7 @@ mod tests {
             assert!(raft.answers.is_empty());
             raft.step(message(2, 1, granted)).unwrap();
             assert_eq!(raft.role(), Role::Candidate);
+        }
 
         // A grant of term 1 answers a pre-campaign from term 0. No node asks for 3.
         #[test]
