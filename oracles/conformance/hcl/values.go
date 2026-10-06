@@ -1,11 +1,11 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -104,11 +104,12 @@ func number(src []byte, literal *hclsyntax.LiteralValueExpr, negative bool) stri
 		return i.String()
 	}
 	// HCL holds a 512-bit value, and rounding it again to a float64 can miss the
-	// nearest float64.
-	f, err := strconv.ParseFloat(string(literal.Range().SliceBytes(src)), 64)
-	if err != nil && !errors.Is(err, strconv.ErrRange) {
-		log.Fatalf("%s", err)
+	// nearest float64. strconv.ParseFloat stops reading a long exponent.
+	exact, ok := new(big.Rat).SetString(string(literal.Range().SliceBytes(src)))
+	if !ok {
+		log.Fatalf("big.Rat refuses %s", literal.Range())
 	}
+	f, _ := exact.Float64()
 	if negative {
 		f = -f
 	}
