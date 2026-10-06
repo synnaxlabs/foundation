@@ -1629,6 +1629,53 @@ fn an_open_while_a_commit_of_a_dropped_buffer_is_held_fails_with_busy() {
     assert_eq!(run, Ok(tail(1, Some(1))));
 }
 
+/// A failed sync leaves the record of entry 2 clean in the cache and not durable. A
+/// reopen in the same process reports it durable and commits entry 3 after it, so a
+/// power cut keeps both.
+#[test]
+fn a_reopen_after_a_failed_sync_keeps_what_it_reports_across_a_power_cut() {
+    for seed in 0..16 {
+        let (mut sim, node) = one_node(seed);
+        let reported = sim.run_on(&node, |node, tasks| async move {
+            let config = || node_config(&node, tasks.clone(), DIR);
+            let mut slots = Slots::new();
+            let first = Buffer::open(config(), &mut slots).await.expect("opens");
+            let a = slots.assign(key(1));
+            first
+                .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+                .expect("queues");
+            first.committed().await.expect("commits");
+            node.fail_file(FilePath::new(RING), Operation::Sync);
+            first
+                .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+                .expect("queues");
+            let failed = FileError::Io {
+                path: PathBuf::from(RING),
+                operation: Operation::Sync,
+                code: 5,
+            };
+            assert_eq!(first.committed().await, Err(failed));
+            drop(first);
+            let second = Buffer::open(config(), &mut slots).await.expect("reopens");
+            second
+                .append([entry(1, a, Path::Live, 2, 1, Some(3), Parts::default())])
+                .expect("queues");
+            second.committed().await.expect("commits");
+            second.durable(a, Path::Live)
+        });
+        assert_eq!(reported, Ok(tail(3, Some(3))), "seed {seed}");
+        sim.crash(&node, sim::Crash::Power);
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the power cut");
+            buffer.tail(slots.assign(key(1)), Path::Live)
+        });
+        assert_eq!(recovered, Ok(tail(3, Some(3))), "seed {seed}");
+    }
+}
+
 /// A ring of 64 blocks with records of up to 60,000 bytes, on the files of `node`.
 fn long_config(node: &sim::node::Node, tasks: Tasks) -> Config {
     Config {
