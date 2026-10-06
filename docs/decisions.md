@@ -930,27 +930,27 @@ How to read this record:
   hello has its own one-way stream: a node lets the peer open `streams_max` + 1 one-way
   streams, and lowers the limit to `streams_max` when it accepts the peer's hello
   stream. Until the peer's hello arrives, a node opens and accepts no stream; the caller
-  bounds that wait (#563). A sender obeys only the peer's values: each message is at
-  most the peer's `message_bytes_max`, and the send budget is the peer's
-  `window_bytes`. A value over what the node can count counts as the largest it can
-  count. A peer breaks the protocol when its hello ends inside a pair, misses a required
-  id, has an id out of order, is over 256 bytes, has a `message_bytes_max` of 0 or a
-  `window_bytes` below it, or resets. A peer whose QUIC transport parameters cannot take
-  this node's whole hello at once (no one-way stream, or a stream or connection window
-  under the hello) also breaks it, with the reason `a peer with no room for the hello`.
-  A dial that breaks so gets `Error::Broken` with no `Connected` before it, and an
-  accept gives the caller no event. Before the handshake is confirmed, QUIC gives the
-  peer no reason, only APPLICATION_ERROR. A Foundation node always has room:
-  `streams_max` is at least 1, and `window_bytes` is at least `message_bytes_max`, which
-  is at least 1472. A compile-time assertion holds 1472 at or above the hello limit, so
-  only a foreign peer gets this. Lost: send the hello later when credit comes, because
-  `open` then needs a second gate and a state that only a foreign peer reaches.
-  `Endpoint::write` gives `Error::TooLarge` for a message over the peer's limit; a
-  caller that forwards a writer's frame gives the writer `Large`, and the writer splits
-  the frame (LARGE FRAME). Proposed by `network` in #55; approved by the coordinator on
-  PR #407. The budgets: proposed by `network` in #228. The room order: approved by the
-  advisor on #611. The hello: proposed by `network` in #55; settled by the advisor and
-  the coordinator under the person's delegation (#55).
+  bounds that wait, with its other limits before admission (#563). A sender obeys only
+  the peer's values: each message is at most the peer's `message_bytes_max`, and the
+  send budget is the peer's `window_bytes`. A value over what the node can count counts
+  as the largest it can count. A peer breaks the protocol when its hello ends inside a
+  pair, misses a required id, has an id out of order, is over 256 bytes, has a
+  `message_bytes_max` of 0 or a `window_bytes` below it, or resets. A peer whose QUIC
+  transport parameters cannot take this node's whole hello at once (no one-way stream,
+  or a stream or connection window under the hello) also breaks it, with the reason `a
+  peer with no room for the hello`. A dial that breaks so gets `Error::Broken` with no
+  `Connected` before it, and an accept gives the caller no event. Before the handshake
+  is confirmed, QUIC gives the peer no reason, only APPLICATION_ERROR. A Foundation node
+  always has room: `streams_max` is at least 1, and `window_bytes` is at least
+  `message_bytes_max`, which is at least 1472. A compile-time assertion holds 1472 at or
+  above the hello limit, so only a foreign peer gets this. Lost: send the hello later
+  when credit comes, because `open` then needs a second gate and a state that only a
+  foreign peer reaches. `Endpoint::write` gives `Error::TooLarge` for a message over the
+  peer's limit; a caller that forwards a writer's frame gives the writer `Large`, and
+  the writer splits the frame (LARGE FRAME). Proposed by `network` in #55; approved by
+  the coordinator on PR #407. The budgets: proposed by `network` in #228. The room
+  order: approved by the advisor on #611. The hello: proposed by `network` in #55;
+  settled by the advisor and the coordinator under the person's delegation (#55).
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
   message itself starts with the STREAM DISPATCH header, which the caller writes. A node
