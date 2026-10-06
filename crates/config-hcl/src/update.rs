@@ -879,6 +879,7 @@ mod tests {
     fn leaves_no_blank_line_at_the_edges_of_a_body() {
         assert_eq!(updated("a = 1\n\nb = 2\n\n", "a = 1"), "a = 1\n");
         assert_eq!(updated("a = 1\nb = 2\n\n", "a = 1"), "a = 1\n");
+        assert_eq!(updated("a {}\nb {}\n\n", "a {}"), "a {}\n");
         assert_eq!(updated("\n\na = 1\n\nb = 2\n", "b = 2"), "b = 2\n");
         assert_eq!(
             updated("x {\n  a = 1\n  b = 2\n\n}\n", "x { a = 1 }"),
