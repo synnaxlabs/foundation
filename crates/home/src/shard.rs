@@ -5,7 +5,6 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use block::Block;
 use buffer::{Buffer, Entry};
 use types::channel::Slot;
 use types::frame::key_set::{self, KeySet};
@@ -55,24 +54,10 @@ struct Scratch {
     split: split::Scratch,
     /// The check of each present group, in group order.
     checks: Vec<(u32, Result<Accepted, Refusal>)>,
-    batch: Batch,
+    /// The stored entry of each accepted group, in group order. Empty between
+    /// appends.
+    entries: Vec<Entry>,
     outcomes: Vec<Outcome>,
-}
-
-/// The stored bodies of one frame's append. Empty between appends.
-#[derive(Debug, Default)]
-struct Batch {
-    /// The stored body of each accepted group, in group order.
-    bodies: Vec<Body>,
-}
-
-/// The stored body of one accepted group.
-#[derive(Debug)]
-struct Body {
-    group: u32,
-    range: frame::Range,
-    last: Option<Stamp>,
-    parts: [Block; 2],
 }
 
 /// What became of one group of a frame.
@@ -107,8 +92,9 @@ pub(crate) enum Outcome {
 pub(crate) enum Error {
     /// The frame is labeled resend, which the home does not take yet.
     Resend,
-    /// A backfill frame found no room in the ring or the pool. No seq moves, and the
-    /// writer writes the frame again later.
+    /// A backfill frame found no room in the ring or the pool. No seq moves. The pool
+    /// has room again when commits end and readers take their frames. The ring has
+    /// room again only when records leave it, which no write does.
     Full,
     /// The frame is too large for one write. Nothing is spent: the writer splits the
     /// frame by samples or by indexes and writes each part.
@@ -292,21 +278,27 @@ impl Shard {
             groups,
             mesh,
         );
-        let batch = &mut scratch.batch;
-        let made =
-            batch.bodies(&self.pool, &mut split, &session.set, &mut scratch.checks);
+        let entries = &mut scratch.entries;
+        let made = store(
+            entries,
+            &self.pool,
+            &mut split,
+            &session.set,
+            &mut scratch.checks,
+            mesh.latest,
+        );
         drop(split);
         // Made also when a handoff found no room: freezing gives a lost live frame to
         // latest readers.
         let ready = made.is_ok() && recorded == Ok(true);
         if !ready {
-            batch.clear();
+            entries.clear();
         }
         let appended = match made {
             Err(block::Error::TooLarge { .. }) if recorded == Ok(true) => {
                 Err(Error::Large)
             }
-            _ => batch.append(&self.buffer, session, path, mesh),
+            _ => room(self.buffer.append(entries.drain(..))),
         };
         let room =
             recorded
@@ -367,66 +359,29 @@ impl Session {
     }
 }
 
-impl Batch {
-    /// Adds the stored body of each accepted group of `checks`, in group order, with
-    /// its index frame from `split`.
-    fn bodies(
-        &mut self,
-        pool: &block::Pool,
-        split: &mut Split<'_>,
-        set: &KeySet,
-        checks: &mut [(u32, Result<Accepted, Refusal>)],
-    ) -> Result<(), block::Error> {
-        for (group, checked) in checks {
-            if let Ok(accepted) = checked {
-                let draft = split.frame(pool, *group)?;
-                let parts = stored::body(pool, accepted.freeze(draft, *group), set)?;
-                self.bodies.push(Body {
-                    group: *group,
-                    range: range(accepted),
-                    last: accepted.last(),
-                    parts,
-                });
-            }
+/// Pushes onto `entries` the stored entry of each accepted group of `checks`, in group
+/// order, with its index frame from `split`, at mesh time `stored_at`.
+///
+/// # Errors
+///
+/// [`block::Error`] when `pool` has no block for an index frame or a header.
+fn store(
+    entries: &mut Vec<Entry>,
+    pool: &block::Pool,
+    split: &mut Split<'_>,
+    set: &KeySet,
+    checks: &mut [(u32, Result<Accepted, Refusal>)],
+    stored_at: Stamp,
+) -> Result<(), block::Error> {
+    for (group, checked) in checks {
+        if let Ok(accepted) = checked {
+            let draft = split.frame(pool, *group)?;
+            let last = accepted.last();
+            let frame = accepted.freeze(draft, *group);
+            entries.push(stored::entry(pool, frame, set, last, stored_at)?);
         }
-        Ok(())
     }
-
-    /// Appends the batch as one record on `path` at mesh time `mesh`, and empties
-    /// it. Returns whether it found room. An empty batch appends nothing.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Large`] when no record holds the batch. [`Error::Disk`] after a failed
-    /// commit, also for an empty batch.
-    fn append(
-        &mut self,
-        buffer: &Buffer,
-        session: &Session,
-        path: Path,
-        mesh: Interval,
-    ) -> Result<bool, Error> {
-        let bodies = self.bodies.drain(..).map(|body| {
-            let (_, entry) = session.claim(body.group);
-            Entry {
-                index: entry.key,
-                slot: entry.slot,
-                path,
-                first: body.range.seq,
-                len: body.range.count,
-                stored_at: mesh.latest,
-                last: body.last,
-                tag: stored::TAG,
-                parts: body.parts.into(),
-            }
-        });
-        room(buffer.append(bodies))
-    }
-
-    /// Empties the batch.
-    fn clear(&mut self) {
-        self.bodies.clear();
-    }
+    Ok(())
 }
 
 /// Appends the unrecorded handoff of the index of each of `groups` of `session`, each
@@ -452,8 +407,8 @@ fn record(
         let Some((handoff, first)) = index.handoff() else {
             continue;
         };
-        let parts = match handoff::body(pool, handoff) {
-            Ok(parts) => parts,
+        let appended = match handoff::entry(pool, handoff, entry, first, mesh.latest) {
+            Ok(entry) => buffer.append([entry]),
             Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
                 all = false;
                 continue;
@@ -462,17 +417,6 @@ fn record(
                 panic!("invariant: the pool of the ring holds a handoff: {error}")
             }
         };
-        let appended = buffer.append([Entry {
-            index: entry.key,
-            slot: entry.slot,
-            path: Path::Live,
-            first,
-            len: 0,
-            stored_at: mesh.latest,
-            last: None,
-            tag: handoff::TAG,
-            parts: parts.into(),
-        }]);
         if let Err(buffer::Error::Large(limit)) = appended {
             panic!("invariant: a record holds one handoff: {limit}");
         }
