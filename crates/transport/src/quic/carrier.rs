@@ -953,12 +953,13 @@ mod tests {
             let session = carrier.accept().await.expect("a session");
             assert_eq!(session.closed().await, Error::TimedOut);
         });
-        start(&client, CLIENT, move |carrier, _| async move {
+        start(&client, CLIENT, move |carrier, node| async move {
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
-            let error = env::net::Error::Io { code: 5 };
-            carrier.0.borrow_mut().fail(error.clone());
-            let network = Error::Network { error };
+            node.fail_udp(address(&node));
+            let network = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
             assert_eq!(session.closed().await, network);
             let dialed = carrier.connect(public(&SERVER), at).await;
             assert_eq!(dialed.err(), Some(network.clone()));
