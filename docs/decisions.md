@@ -1887,8 +1887,10 @@ How to read this record:
   simulated network with loss, delay, reorder, duplication, and partitions. `sim` does
   not depend on `transport`. `transport` owns the carriers and the session model, and
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
-  `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
-  session under the architecture delegation.
+  `Monotonic(0)` for libraries that take a std `Instant`. `Node::fail_udp` makes a UDP
+  socket fail as when the OS breaks it: each receive gives `EIO`, the datagrams that
+  arrive at it are lost, and a send still works (#907). Decided by the design session
+  under the architecture delegation.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
