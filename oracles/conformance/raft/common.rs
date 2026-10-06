@@ -20,6 +20,8 @@ pub(crate) fn at_term(term: u64) -> Hard {
     Hard {
         term: Term(term),
         vote: None,
+        leader: None,
+        proof: None,
     }
 }
 
@@ -105,7 +107,7 @@ pub(crate) fn start(
         heartbeat_ticks: 1,
     };
     let start = Start {
-        hard,
+        hard: hard.clone(),
         voters: Voters {
             incoming: voters.iter().copied().map(key).collect(),
             ..Voters::default()
@@ -146,12 +148,12 @@ impl Network {
     }
 
     /// `size` voters, all with the stored state `hard`. Only `present` have a peer.
-    pub(crate) fn of(size: u8, present: &[u8], hard: Hard) -> Self {
+    pub(crate) fn of(size: u8, present: &[u8], hard: &Hard) -> Self {
         let voters: Vec<u8> = (1..=size).collect();
         Self::new(
-            present
-                .iter()
-                .map(|&id| build(id, &voters, ELECTION, hard, Position::default())),
+            present.iter().map(|&id| {
+                build(id, &voters, ELECTION, hard.clone(), Position::default())
+            }),
         )
     }
 
@@ -247,6 +249,7 @@ pub(crate) fn heartbeat(from: u8, to: u8, term: Term) -> Message {
         to: key(to),
         term,
         body: Body::Heartbeat { commit: 0 },
+        proof: None,
     }
 }
 
@@ -275,6 +278,7 @@ pub(crate) fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
                 to: key(1),
                 term,
                 body: granted.clone(),
+                proof: None,
             })
             .unwrap();
         }
@@ -306,6 +310,7 @@ pub(crate) fn accept(message: &Message) -> Message {
         body: Body::AppendReply {
             last: prev.index + count(entries.len()),
         },
+        proof: None,
     }
 }
 
@@ -332,6 +337,7 @@ pub(crate) fn reply(from: u8, term: u64, body: Body) -> Message {
         to: key(1),
         term: Term(term),
         body,
+        proof: None,
     }
 }
 

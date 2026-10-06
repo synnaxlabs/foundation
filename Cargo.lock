@@ -983,7 +983,9 @@ name = "os"
 version = "0.0.0"
 dependencies = [
  "block",
+ "env",
  "rustix",
+ "tokio",
 ]
 
 [[package]]
