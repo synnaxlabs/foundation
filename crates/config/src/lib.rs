@@ -4,6 +4,7 @@
 mod node_settings;
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::{Attribute, Block, Document, Span, read};
@@ -96,25 +97,28 @@ impl<'a> Check<'a> {
             return None;
         };
         let name = self.report(read::name(label))?;
-        if let Some(&first) = self.names.get(&(keyword, name.clone())) {
-            let mut diagnostic = Diagnostic::new(
-                DUPLICATE_NAME,
-                label.span,
-                format!(
-                    "the name {:?} repeats an earlier `{keyword}` name",
-                    name.as_str()
-                ),
-                format!("Give each `{keyword}` block its own name"),
-            );
-            diagnostic.notes.extend(first.map(|span| Note {
-                span,
-                text: "the earlier name".into(),
-            }));
-            self.diagnostics.push(diagnostic);
-            return None;
-        }
-        self.names.insert((keyword, name.clone()), label.span);
-        Some(name)
+        let first = match self.names.entry((keyword, name.clone())) {
+            Entry::Occupied(first) => *first.get(),
+            Entry::Vacant(entry) => {
+                entry.insert(label.span);
+                return Some(name);
+            }
+        };
+        let mut diagnostic = Diagnostic::new(
+            DUPLICATE_NAME,
+            label.span,
+            format!(
+                "the name {:?} repeats an earlier `{keyword}` name",
+                name.as_str()
+            ),
+            format!("Give each `{keyword}` block its own name"),
+        );
+        diagnostic.notes.extend(first.map(|span| Note {
+            span,
+            text: "the earlier name".into(),
+        }));
+        self.diagnostics.push(diagnostic);
+        None
     }
 
     /// The value that a reader gives, or `None` after it reports the reader's
