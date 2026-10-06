@@ -155,9 +155,9 @@ func forms(name string, src []byte, node hclsyntax.Node) []string {
 	return nil
 }
 
-// key is the code for an object key: none for a name, a string, or parentheses, the
-// code of rounded for a number with or without a `-`, and hcl.key for any other
-// expression. The walk finds the forms inside the key.
+// key is the code for an object key: none for a name, a string, or parentheses,
+// the code of rounded for a number with or without a `-`, and hcl.expression-key
+// for any other expression. The walk finds the forms inside the key.
 func key(src []byte, node *hclsyntax.ObjectConsKeyExpr) []string {
 	switch wrapped := node.Wrapped.(type) {
 	case *hclsyntax.ParenthesesExpr, *hclsyntax.TemplateExpr,
@@ -175,7 +175,7 @@ func key(src []byte, node *hclsyntax.ObjectConsKeyExpr) []string {
 			return rounded(src, literal)
 		}
 	}
-	return []string{"hcl.key"}
+	return []string{"hcl.expression-key"}
 }
 
 // index is hcl.index for an index into source, or none when source is the item of a

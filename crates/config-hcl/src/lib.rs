@@ -175,7 +175,7 @@ const PARENTHESES: Code = Code::new("hcl.parentheses");
 const NAMESPACE: Code = Code::new("hcl.namespace");
 const EXPANSION: Code = Code::new("hcl.expansion");
 const NUMBER_KEY: Code = Code::new("hcl.number-key");
-const KEY: Code = Code::new("hcl.key");
+const EXPRESSION_KEY: Code = Code::new("hcl.expression-key");
 const NAME: Code = Code::new("hcl.name");
 const NUMBER: Code = Code::new("hcl.number");
 const ESCAPE: Code = Code::new("hcl.escape");
@@ -235,7 +235,7 @@ pub enum Form {
     NumberKey,
     /// An object key that is an expression, such as `{ f() = 1 }`, which HCL
     /// evaluates.
-    Key,
+    ExpressionKey,
 }
 
 impl Form {
@@ -298,8 +298,8 @@ impl Form {
                  digits do not exist in Foundation files",
                 "Write the key as a quoted string",
             ),
-            Self::Key => (
-                KEY,
+            Self::ExpressionKey => (
+                EXPRESSION_KEY,
                 "an object key here is an expression",
                 "Write the key as a name or a quoted string",
             ),
@@ -664,8 +664,8 @@ mod tests {
             "Write the key as a quoted string",
         ),
         (
-            Form::Key,
-            "hcl.key",
+            Form::ExpressionKey,
+            "hcl.expression-key",
             "an object key here is an expression",
             "Write the key as a name or a quoted string",
         ),
@@ -687,7 +687,7 @@ mod tests {
                 | Form::Namespace
                 | Form::Expansion
                 | Form::NumberKey
-                | Form::Key => {}
+                | Form::ExpressionKey => {}
             }
             let error = Error::Form {
                 span: span(7),
