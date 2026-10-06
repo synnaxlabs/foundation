@@ -799,32 +799,37 @@ How to read this record:
   of TLS over TCP. The person decided on 2026-10-05: "QUIC" (#10). Streams carry whole
   messages in pool blocks, not bytes; the QUIC carrier benchmark decides whether decode
   reads chunks in place instead. A stream reaches the peer with its first message, and a
-  `Sender` dropped without `finish` resets it. Each stream has a `Class` (`Command`,
-  `Latest`, `Complete`, `CatchUp`) that sets its priority and preferred carrier. A peer
-  is a node key or a `Client` (an SDK, proved by its signed hello above). Callers admit
-  peers, dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on
-  SIM NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
+  `Sender` dropped without `finish` resets it. A `Sender` can also send without waiting
+  (`try_send`): it gives the message back whole when the stream cannot take it now, and
+  it never resets the stream. Each stream has a `Class` (`Command`, `Latest`,
+  `Complete`, `CatchUp`) that sets its priority and preferred carrier. A peer is a node
+  key or a `Client` (an SDK, proved by its signed hello above). Callers admit peers,
+  dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM
+  NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
   class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
-  `CatchUp`. The byte goes with the first message, so a stream reaches the peer with
-  its first message. A stream that ends or resets before its class byte drops: the
-  peer never accepts it, and resets the reply half of a two-way stream with code 0.
-  Each message is a QUIC varint length, then that many bytes, at most
-  `message_bytes_max`. A node accepts the waiting streams highest class first. A node
-  resets a stream with the stop's code when the stop arrives. A peer breaks the
-  protocol when it sends another class byte, ends a stream inside a message, sends a
-  message over the limit, or resets or stops a stream with a code over 32 bits. The
-  node then closes the connection with application code 2^32 and the reason as text,
-  and the caller gets `Error::Broken`. Each connection keeps two budgets, which count
-  the length of each message. A sender starts a message only when the messages it
-  started and the streams have not taken in full stay within the peer's
-  `window_bytes`; else the write waits for `Writable`. A receiver takes a block only
-  when the messages that hold one stay within `window_bytes` plus
-  `message_bytes_max`; else the read waits for `Readable`. So bytes that wait for a
-  block never use up the credit that a started message needs, and a peer that breaks
-  the send rule holds at most the receive budget and stops only its own connection.
-  Until the hello carries the peer's window, a sender uses its own. Proposed by
-  `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
+  `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
+  first message. A stream that ends or resets before its class byte drops: the peer
+  never accepts it, and resets the reply half of a two-way stream with code 0. Each
+  message is a QUIC varint length, then that many bytes, at most `message_bytes_max`. A
+  node accepts the waiting streams highest class first. A node resets a stream with the
+  stop's code when the stop arrives. A peer breaks the protocol when it sends another
+  class byte, ends a stream inside a message, sends a message over the limit, or resets
+  or stops a stream with a code over 32 bits. The node then closes the connection with
+  application code 2^32 and the reason as text, and the caller gets `Error::Broken`.
+  Each connection keeps two budgets, which count the length of each message. A sender
+  starts a message only when the messages it started and the streams have not taken in
+  full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
+  message that fits starts at once, ahead of streams that wait for room, whatever their
+  class (#611). A send that does not wait (`try_send`) starts a message only by the same
+  rule and when, after a flush, the stream holds no part of an earlier one; else it
+  gives the message back with no byte of it sent, and the stream does not wait for room
+  (#597). A receiver takes a block only when the messages that hold one stay within
+  `window_bytes` plus `message_bytes_max`; else the read waits for `Readable`. So bytes
+  that wait for a block never use up the credit that a started message needs, and a peer
+  that breaks the send rule holds at most the receive budget and stops only its own
+  connection. Until the hello carries the peer's window, a sender uses its own. Proposed
+  by `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
   `network` in #228.
 - **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
   DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
@@ -868,14 +873,14 @@ How to read this record:
   drops it and adds its samples and stamps to one pending gap for each index. When the
   stream can take a message again, `hub` sends the pending gap first, and the home
   records it and warns. The writer gets the same answer as for a frame the home
-  dropped, and never resends it (B7). Backfill waits. This needs a send that does not
-  wait and gives the message back; `network` sets it in #68. `block` gets no wake when
-  a block returns until simulation shows that the resume latency matters; then
-  `memory` proposes one wake, which home backfill shares. Until then, home backfill
-  also retries on a timer. Rejected: each caller retries (each caller writes the same
-  timer, and the pool's states leak into `hub`), and the stream ends (memory pressure
-  becomes stream churn and lost messages, and `Command` streams drop first). Decided
-  by the advisor under the delivery and wire internals delegation.
+  dropped, and never resends it (B7). Backfill waits. The live send is
+  `stream::Sender::try_send` (#597). `block` gets no wake when a block returns until
+  simulation shows that the resume latency matters; then `memory` proposes one wake,
+  which home backfill shares. Until then, home backfill also retries on a timer.
+  Rejected: each caller retries (each caller writes the same timer, and the pool's
+  states leak into `hub`), and the stream ends (memory pressure becomes stream churn and
+  lost messages, and `Command` streams drop first). Decided by the advisor under the
+  delivery and wire internals delegation.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
