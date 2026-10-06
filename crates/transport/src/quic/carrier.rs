@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::poll_fn;
 use std::io::IoSliceMut;
-use std::mem;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -26,10 +25,9 @@ use crate::{Code, Config, Error, PAYLOAD_IPV4, Peer};
 const BATCHES: usize = 8;
 
 /// One shard's QUIC endpoint on a UDP socket. A task on the shard moves its
-/// datagrams and runs its timers until the socket breaks, or until every clone and
+/// datagrams and runs its timers until the socket breaks, or until the carrier and
 /// every [`Session`] dropped and it sent their closes. It stays on the thread that
 /// made it.
-#[derive(Clone)]
 pub(crate) struct Carrier(Rc<RefCell<State>>);
 
 impl Carrier {
@@ -50,7 +48,7 @@ impl Carrier {
             clock: config.clock.clone(),
             task: None,
             sessions: BTreeMap::new(),
-            accepted: VecDeque::new(),
+            accepted: Some(VecDeque::new()),
             accepting: Vec::new(),
             failed: None,
         }));
@@ -107,7 +105,7 @@ impl Carrier {
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<Result<Session, Error>> {
         let mut state = self.0.borrow_mut();
-        if let Some(key) = state.accepted.pop_front() {
+        if let Some(key) = state.accepted.as_mut().and_then(VecDeque::pop_front) {
             return Poll::Ready(Ok(self.session(key)));
         }
         if let Some(error) = &state.failed {
@@ -121,19 +119,23 @@ impl Carrier {
 
     fn session(&self, key: connection::Key) -> Session {
         Session {
-            carrier: self.clone(),
+            state: Rc::clone(&self.0),
             key,
         }
     }
 }
 
 impl Drop for Carrier {
-    /// Wakes the task when it holds the last other reference, so it closes what is
-    /// left and ends.
+    /// Refuses each later dial from a peer, and closes each session that no caller
+    /// accepted with code 0.
     fn drop(&mut self) {
-        if Rc::strong_count(&self.0) == 2 {
-            self.0.borrow().wake();
+        let mut state = self.0.borrow_mut();
+        state.endpoint.refuse();
+        for key in state.accepted.take().into_iter().flatten() {
+            state.sessions.remove(&key);
+            state.close(key, Code(0));
         }
+        state.wake();
     }
 }
 
@@ -146,8 +148,8 @@ struct State {
     /// Each connection that a [`Session`] holds or that no caller accepted yet.
     sessions: BTreeMap<connection::Key, Slot>,
     /// The connections peers dialed, in the order they connected, for
-    /// [`Carrier::accept`].
-    accepted: VecDeque<connection::Key>,
+    /// [`Carrier::accept`]. `None` once the carrier dropped.
+    accepted: Option<VecDeque<connection::Key>>,
     /// The wakers of the [`Carrier::accept`] calls that wait.
     accepting: Vec<Waker>,
     /// What broke the socket.
@@ -159,6 +161,12 @@ impl State {
         if let Some(task) = &self.task {
             task.wake_by_ref();
         }
+    }
+
+    fn close(&mut self, key: connection::Key, code: Code) {
+        let now = self.clock.now();
+        self.endpoint.close(now, key, code);
+        self.wake();
     }
 
     fn slot(&mut self, key: connection::Key) -> &mut Slot {
@@ -176,12 +184,16 @@ impl State {
                     slot.wake();
                     return;
                 }
+                let Some(accepted) = &mut self.accepted else {
+                    self.close(key, Code(0));
+                    return;
+                };
+                accepted.push_back(key);
                 let slot = Slot {
                     peer: Some(peer),
                     ..Slot::default()
                 };
                 self.sessions.insert(key, slot);
-                self.accepted.push_back(key);
                 self.accepting.drain(..).for_each(Waker::wake);
             }
             Event::Closed { key, error } => self.end(key, error),
@@ -236,14 +248,14 @@ impl Slot {
 /// A connection to one peer on a [`Carrier`]. Dropping it closes the connection
 /// with code 0.
 pub(crate) struct Session {
-    carrier: Carrier,
+    state: Rc<RefCell<State>>,
     key: connection::Key,
 }
 
 impl Session {
     /// The peer: a node that proved its key, or a client with no key.
     pub(crate) fn peer(&self) -> Peer {
-        let mut state = self.carrier.0.borrow_mut();
+        let mut state = self.state.borrow_mut();
         state
             .slot(self.key)
             .peer
@@ -253,16 +265,13 @@ impl Session {
     /// Closes the session with `code`, which the peer gets as
     /// [`Error::PeerClosed`]. Does nothing when the session ended.
     pub(crate) fn close(&self, code: Code) {
-        let mut state = self.carrier.0.borrow_mut();
-        let now = state.clock.now();
-        state.endpoint.close(now, self.key, code);
-        state.wake();
+        self.state.borrow_mut().close(self.key, code);
     }
 
     /// Waits until the session ends, and gives why.
     pub(crate) async fn closed(&self) -> Error {
         poll_fn(|cx| {
-            let mut state = self.carrier.0.borrow_mut();
+            let mut state = self.state.borrow_mut();
             let slot = state.slot(self.key);
             if let Some(error) = &slot.end {
                 return Poll::Ready(error.clone());
@@ -275,7 +284,7 @@ impl Session {
 
     /// Ready when the handshake finished, or with why the dial ended.
     fn poll_connected(&self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        let mut state = self.carrier.0.borrow_mut();
+        let mut state = self.state.borrow_mut();
         let slot = state.slot(self.key);
         if slot.peer.is_some() {
             return Poll::Ready(Ok(()));
@@ -290,13 +299,11 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let mut state = self.carrier.0.borrow_mut();
+        let mut state = self.state.borrow_mut();
         let slot = state.sessions.remove(&self.key);
         let slot = slot.expect("invariant: a session keeps its slot until it drops");
         if slot.end.is_none() {
-            let now = state.clock.now();
-            state.endpoint.close(now, self.key, Code(0));
-            state.wake();
+            state.close(self.key, Code(0));
         }
     }
 }
@@ -352,17 +359,12 @@ impl Task {
         while let Some(event) = state.endpoint.poll() {
             state.dispatch(event);
         }
-        // Every carrier and session dropped. A handshake that connects later gets a
-        // slot in `dispatch`, and its close on the next poll.
-        if Rc::strong_count(&self.state) == 1 {
-            state.endpoint.refuse();
-            for key in mem::take(&mut state.sessions).into_keys() {
-                state.endpoint.close(now, key, Code(0));
-            }
-            self.socket.send(cx, &mut state.endpoint, now);
-            if state.endpoint.drained() && self.socket.held.is_none() {
-                return Poll::Ready(());
-            }
+        // Only the task holds the state: the carrier and each session dropped.
+        if Rc::strong_count(&self.state) == 1
+            && state.endpoint.drained()
+            && self.socket.held.is_none()
+        {
+            return Poll::Ready(());
         }
         // Each poll of the sleep arms the timer again.
         if let Some(deadline) = state.endpoint.deadline()
@@ -794,6 +796,68 @@ mod tests {
     }
 
     #[test]
+    fn a_dial_after_the_carrier_drops_is_refused_while_a_session_lives() {
+        let (mut sim, client, server) = nodes(0);
+        let late = sim.node(sim::node::Config::default());
+        let at = address(&server);
+        start(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            drop(carrier);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+        });
+        start(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            node.clock().sleep(spans(IDLE, 3)).await;
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        start(&late, CLIENT, move |carrier, node| async move {
+            node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let reason =
+                "aborted by peer: the server refused to accept a new connection";
+            let reason = String::from(reason);
+            assert_eq!(dialed.err(), Some(Error::Broken { reason }));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_handshake_that_finishes_after_the_carrier_drops_closes_with_code_0() {
+        let (mut sim, client, server) = nodes(0);
+        let late = sim.node(sim::node::Config::default());
+        link(&mut sim, &late, &server, slow());
+        let at = address(&server);
+        start(&server, SERVER, |carrier, node| async move {
+            let session = carrier.accept().await.expect("a session");
+            // The handshake of `late` starts at 150 ms and finishes at 250 ms.
+            node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
+            drop(carrier);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+        });
+        start(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            node.clock().sleep(spans(IDLE, 3)).await;
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        start(&late, CLIENT, move |carrier, node| async move {
+            node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+            let before = node.clock().now();
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+            assert!(node.clock().now() - before < IDLE);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_timer_due_in_a_pause_runs_when_it_ends() {
         let (mut sim, client, server) = nodes(0);
         let at = address(&server);
@@ -837,15 +901,27 @@ mod tests {
     }
 
     #[test]
-    fn the_last_drop_closes_each_session_no_caller_accepted() {
+    fn a_carrier_drop_closes_each_session_no_caller_accepted_and_frees_its_slot() {
         let (mut sim, client, server) = nodes(0);
+        let held = sim.node(sim::node::Config::default());
         let at = address(&server);
         start(&server, SERVER, |carrier, node| async move {
+            let session = carrier.accept().await.expect("a session");
             node.clock().sleep(spans(Span::MILLISECOND, 5)).await;
             drop(carrier);
-            node.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(session.state.borrow().sessions.len(), 1);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, _| async move {
+        start(&held, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        start(&client, CLIENT, move |carrier, node| async move {
+            node.clock().sleep(spans(Span::MILLISECOND, 2)).await;
             let dialed = carrier.connect(public(&SERVER), at).await;
             let session = dialed.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
