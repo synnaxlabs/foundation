@@ -333,6 +333,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-influx"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+ "types",
+]
+
+[[package]]
 name = "connector-modbus"
 version = "0.0.0"
 dependencies = [
@@ -1455,6 +1463,7 @@ checksum = "ea06cc588e43c632923a55450401b8f25e628131571d4e1baea1bdfdb2b5ed06"
 name = "spec"
 version = "0.0.0"
 dependencies = [
+ "document",
  "proptest",
  "types",
 ]
