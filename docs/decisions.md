@@ -1007,8 +1007,8 @@ How to read this record:
   `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
   as it is. It trusts its voters: one that lies can already break safety, because a
   false `AppendReply` counts as held, so a bound on the term would guard nothing. No
-  bound on a term jump spares an honest node that was down, either. Lost: a sender
-  proves a term jump with a signed term, which needs `mesh`. The person decided on
+  bound on a term jump spares an honest node that was down, either. Later: a sender
+  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
   2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
   `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
   before its write, so no peer counted a vote or an answer that a lost `hard` held. The
@@ -1033,7 +1033,17 @@ How to read this record:
   leader, and a node keeps the leader of its term until the term ends, through a
   step-down and a campaign. A node that knows no leader of its term, after a restart or
   its vote, takes the first. The person approved it on 2026-10-05 ("Yeah that's fine",
-  #391). A bad message changes nothing.
+  #391). A bad message changes nothing. A forged message that passes these checks
+  does, until a leader proves its election (#750). After a heartbeat or an `Append`
+  of a higher term from a voter that does not lead, or a reply of a higher term and
+  then either, a node follows the sender and writes and commits what it sends. So
+  two nodes can apply different entries at one index, and a forged voter set can
+  take the group over. The first leader after a restart or a vote is the same gap.
+  Tests pin it. Lost: a lease that drops a heartbeat or an `Append` of a higher term
+  from a node that is not the leader. A reply of a higher term ends any node's
+  lease, and a leader must step down on one; the lease also changed three etcd
+  oracle tests. The coordinator decided on 2026-10-06 under the person's delegation
+  (#391). The person may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last

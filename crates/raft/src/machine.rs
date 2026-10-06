@@ -1422,7 +1422,7 @@ mod tests {
             );
         }
 
-        // The restart dropped the leader of the term: a known gap of #391.
+        // The restart dropped the leader of the term: a known gap until #750.
         #[test]
         fn follows_the_first_leader_of_a_term_it_is_in() {
             let mut raft = raft(&[1, 2, 3], at_term(1));
@@ -1431,7 +1431,7 @@ mod tests {
             assert_eq!((raft.role(), raft.leader()), (Role::Follower, Some(key(3))));
         }
 
-        // A vote names a candidate, not the leader: a known gap of #391.
+        // A vote names a candidate, not the leader: a known gap until #750.
         #[test]
         fn follows_the_first_leader_of_a_term_it_voted_in() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
