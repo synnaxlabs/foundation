@@ -154,12 +154,14 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   outside input needs a keyed hasher with its key from `env` randomness (r16 43).
 - Hash iteration order never decides behavior. Sort, or use a `BTreeMap` (r16 44).
 - Never print a pointer. Addresses change from run to run (r16 45).
-- No mutable globals: no `thread_local!` and no `static` with interior mutability
-  (r16 46). The one exception is `#[global_allocator] static ALLOCATOR:
+- No globals: no `thread_local!` and no `static` item; a constant is a `const`
+  (r16 46, #645). The one exception is `#[global_allocator] static ALLOCATOR:
   counting::Allocator` in a test or benchmark binary, never in a library or the
   `node` binary. Clippy refuses `global_allocator`, and only a crate-level
   `#![expect(clippy::disallowed_macros)]` lifts it. `cargo xtask globals` refuses
-  that lift outside a test or benchmark root.
+  that lift outside the root file of a test or benchmark target, and refuses each
+  `static` that does not come right after `#[global_allocator]`, in every Rust file
+  but `xtask`.
 
 ## Async and threads
 
