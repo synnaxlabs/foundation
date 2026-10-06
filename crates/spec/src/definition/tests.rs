@@ -154,8 +154,7 @@ fn refuses_patterns_that_do_not_read() {
     assert_eq!(Definition::decode(&bytes), Err(error));
     assert_eq!(
         Definition::decode(&bytes).unwrap_err().to_string(),
-        "the patterns at byte 20 do not read: a selector includes no names. Add a \
-         pattern without a leading `!`"
+        "the patterns at byte 20 do not read: a selector includes no names"
     );
     let bytes = access(&[b"a*"], &[b"b"], 1, 0);
     let error = Error::Pattern {
