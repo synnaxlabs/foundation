@@ -413,7 +413,7 @@ mod tests {
 
     mod when_a_bound_is_unknown {
         use super::*;
-        use crate::exchange::{self, Exchange};
+        use crate::exchange::Exchange;
 
         fn unknown(offset: i64) -> Measurement {
             Measurement::unknown(Monotonic(0), Span::from_nanos(offset))
@@ -578,11 +578,9 @@ mod tests {
                 answered: m.interval(),
                 returned: Monotonic(10),
             };
-            let error = Span::from_nanos(MAX_ERROR.nanos() + 5);
-            assert_eq!(
-                exchange.measure(drift(0)),
-                Err(exchange::Error::Bound { error })
-            );
+            let unknown =
+                Measurement::unknown(Monotonic(10), Span::from_nanos(499_999_995));
+            assert_eq!(exchange.measure(drift(0)), Some(unknown));
         }
     }
 

@@ -652,13 +652,15 @@ How to read this record:
   bounds. Decided by the `time` builder (#344). `Measurement::unknown(at, offset)` gives
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
-  (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
-  whose readings allow one before drift gives `None`: a stopped bound stored as a
-  measurement could miss the true offset. Decided by the `time` builder (#258). Each
-  function returns only the errors it can give: one `Error` per module (`exchange`,
-  `overlap`, `combine`), and `Option` where a caller does the same for each cause
-  (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the coordinator
-  (#272).
+  (#144). An overlap whose readings allow an error over 36500 days before drift gives
+  `None`: a stopped bound stored as a measurement could miss the true offset. Decided
+  by the `time` builder (#258). An exchange with an error over 36500 days gives an
+  unknown measurement, centered between its edges, so each caller does not map a
+  failure to one. It cuts no known bound, because an unknown bound votes only when no
+  bound is known. Decided by the `time` builder (#903). Each function returns only
+  the errors it can give: one `Error` per module (`overlap`, `combine`), and `Option`
+  where a caller does the same for each cause (`Drift::from_ppb`, `Measurement::new`,
+  `Overlap::at`, `Exchange::measure`). Decided by the coordinator (#272).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
