@@ -368,6 +368,14 @@ impl Buffer {
         self.shared.state.borrow().logs.durable(slot, path)
     }
 
+    /// How many group commits ended since the open. It grows by one at the end of
+    /// each commit, also one with nothing to write, before the [`Commit`] futures
+    /// that the commit resolves wake. A failed commit does not move it.
+    #[must_use]
+    pub fn commits(&self) -> u64 {
+        self.shared.state.borrow().commits
+    }
+
     /// Queues every entry of `entries` for the next group commit, or none, and
     /// returns at once with no I/O. The entries are durable when a later
     /// [`committed`](Self::committed) resolves. They go in one record, in order. A
