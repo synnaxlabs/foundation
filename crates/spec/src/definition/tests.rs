@@ -1,5 +1,6 @@
 use proptest::prelude::*;
 use proptest::sample::Index;
+use types::name::Name;
 
 use super::*;
 
@@ -17,7 +18,10 @@ fn policy() -> Definition {
     ))
 }
 
+/// Writes a pattern as a file writes it: a leading `!` is the exclusion flag.
 fn text(bytes: &mut Vec<u8>, text: &[u8]) {
+    let (excluded, text) = text.strip_prefix(b"!").map_or((0, text), |t| (1, t));
+    bytes.push(excluded);
     bytes.extend_from_slice(&u64::try_from(text.len()).unwrap().to_le_bytes());
     bytes.extend_from_slice(text);
 }
@@ -133,10 +137,10 @@ fn refuses_more_patterns_than_the_bytes_left_can_hold() {
 #[test]
 fn refuses_a_pattern_that_is_not_utf8() {
     let bytes = access(&[b"ab\xff"], &[b"b"], 1, 0);
-    assert_eq!(Definition::decode(&bytes), Err(Error::Utf8 { at: 20 }));
+    assert_eq!(Definition::decode(&bytes), Err(Error::Utf8 { at: 21 }));
     assert_eq!(
-        Error::Utf8 { at: 20 }.to_string(),
-        "a pattern is not UTF-8 at byte 20"
+        Error::Utf8 { at: 21 }.to_string(),
+        "a pattern is not UTF-8 at byte 21"
     );
 }
 
@@ -144,13 +148,13 @@ fn refuses_a_pattern_that_is_not_utf8() {
 fn refuses_patterns_that_do_not_read() {
     let bytes = access(&[b"a"], &[b"!b"], 1, 0);
     let error = Error::Pattern {
-        at: 19,
+        at: 20,
         error: name::Error::NoInclude,
     };
     assert_eq!(Definition::decode(&bytes), Err(error));
     assert_eq!(
         Definition::decode(&bytes).unwrap_err().to_string(),
-        "the patterns at byte 19 do not read: a selector includes no names. Add a \
+        "the patterns at byte 20 do not read: a selector includes no names. Add a \
          pattern without a leading `!`"
     );
     let bytes = access(&[b"a*"], &[b"b"], 1, 0);
@@ -162,16 +166,62 @@ fn refuses_patterns_that_do_not_read() {
 }
 
 #[test]
+fn refuses_an_exclusion_flag_that_is_not_0_or_1() {
+    let mut bytes = access(&[b"a"], &[b"b"], 1, 0);
+    bytes[10] = 2;
+    let error = Error::Excluded { at: 10, found: 2 };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the exclusion flag 2 at byte 10 is not 0 or 1"
+    );
+}
+
+#[test]
+fn refuses_an_included_pattern_that_starts_with_a_bang() {
+    let mut bytes = vec![VERSION, ACCESS];
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&2_u64.to_le_bytes());
+    bytes.extend_from_slice(b"!a");
+    let error = Error::Include { at: 19 };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the included pattern at byte 19 starts with `!`"
+    );
+}
+
+#[test]
+fn stores_an_exclusion_of_the_longest_name() {
+    let longest = "a".repeat(Name::MAX_BYTES);
+    let excluded = format!("!{longest}");
+    let select = Patterns::new(["**", excluded.as_str()]).unwrap();
+    let policy = Policy::new(patterns(&["a"]), select, Actions::NONE, Authority(0));
+    let definition = Definition::Access(policy);
+    let bytes = definition.encode();
+    let stored = [
+        &[1][..],
+        &255_u64.to_le_bytes(),
+        longest.as_bytes(),
+        &[0, 0],
+    ]
+    .concat();
+    assert!(bytes.ends_with(&stored));
+    assert_eq!(Definition::decode(&bytes), Ok(definition));
+}
+
+#[test]
 fn refuses_bits_that_name_no_action() {
     let bytes = access(&[b"a"], &[b"b"], 0b100_0001, 0);
     let error = Error::Actions {
-        at: 36,
+        at: 38,
         bits: 0b100_0001,
     };
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        "the actions 0b01000001 at byte 36 name no action"
+        "the actions 0b01000001 at byte 38 name no action"
     );
 }
 
@@ -179,13 +229,13 @@ fn refuses_bits_that_name_no_action() {
 fn refuses_an_authority_without_write() {
     let bytes = access(&[b"a"], &[b"b"], 0b1, 3);
     let error = Error::Authority {
-        at: 37,
+        at: 39,
         found: Authority(3),
     };
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        "authority 3 at byte 37 is on a policy without write"
+        "authority 3 at byte 39 is on a policy without write"
     );
 }
 

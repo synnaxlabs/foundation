@@ -7,9 +7,12 @@
 //! ```text
 //! definition := version:u8 tag:u8 body
 //! access     := subjects:patterns select:patterns allow:u8 authority:u8   tag 1
-//! patterns   := count:u64 text*
-//! text       := length:u64 UTF-8 bytes
+//! patterns   := count:u64 pattern*
+//! pattern    := excluded:u8 length:u64 UTF-8 bytes
 //! ```
+//!
+//! `excluded` is 1 for an exclusion, which a file writes with a leading `!`, and 0
+//! otherwise. The stored text has no `!`.
 //!
 //! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
 //! admin 5. `authority` is zero when `allow` does not hold write.
@@ -31,8 +34,8 @@ use crate::patterns::Patterns;
 
 const VERSION: u8 = 1;
 const ACCESS: u8 = 1;
-/// The fewest bytes a pattern text takes: its length.
-const TEXT_MIN: usize = 8;
+/// The fewest bytes a pattern takes: its flag and its length.
+const PATTERN_MIN: usize = 9;
 
 /// One definition: the value of one name in the spec tree. The name is the tree key,
 /// so it is not part of the definition.
@@ -91,8 +94,10 @@ impl Definition {
 fn patterns(out: &mut Vec<u8>, patterns: &Patterns) {
     count(out, patterns.texts().len());
     for text in patterns.texts() {
-        count(out, text.len());
-        out.extend_from_slice(text.as_bytes());
+        let (excluded, body) = text.strip_prefix('!').map_or((0, text), |b| (1, b));
+        out.push(excluded);
+        count(out, body.len());
+        out.extend_from_slice(body.as_bytes());
     }
 }
 
@@ -147,9 +152,15 @@ impl<'a> Reader<'a> {
 
     fn patterns(&mut self) -> Result<Patterns, Error> {
         let at = self.at();
-        let n = self.count(TEXT_MIN)?;
+        let n = self.count(PATTERN_MIN)?;
         let mut texts = Vec::with_capacity(n);
         for _ in 0..n {
+            let flag = self.at();
+            let excluded = match self.byte()? {
+                0 => false,
+                1 => true,
+                found => return Err(Error::Excluded { at: flag, found }),
+            };
             let len = self.count(1)?;
             let start = self.at();
             let bytes = self.take(len)?;
@@ -158,9 +169,16 @@ impl<'a> Reader<'a> {
                     .checked_add(e.valid_up_to())
                     .expect("invariant: an offset into the input fits in usize"),
             })?;
-            texts.push(text);
+            if excluded {
+                texts.push(format!("!{text}"));
+            } else if text.starts_with('!') {
+                return Err(Error::Include { at: start });
+            } else {
+                texts.push(text.to_owned());
+            }
         }
-        Patterns::new(texts).map_err(|error| Error::Pattern { at, error })
+        Patterns::new(texts.iter().map(|t| &**t))
+            .map_err(|error| Error::Pattern { at, error })
     }
 
     fn access(&mut self) -> Result<Policy, Error> {
@@ -220,6 +238,18 @@ pub enum Error {
         /// The first byte that is not UTF-8.
         at: usize,
     },
+    /// A pattern's exclusion flag is not 0 or 1.
+    Excluded {
+        /// Where the flag is.
+        at: usize,
+        /// The flag.
+        found: u8,
+    },
+    /// A pattern that is not an exclusion starts with `!`.
+    Include {
+        /// Where the text starts.
+        at: usize,
+    },
     /// The patterns do not read as a selector.
     Pattern {
         /// Where the patterns start.
@@ -266,6 +296,12 @@ impl fmt::Display for Error {
                 write!(f, "tag {tag} at byte {at} names no kind of definition")
             }
             Self::Utf8 { at } => write!(f, "a pattern is not UTF-8 at byte {at}"),
+            Self::Excluded { at, found } => {
+                write!(f, "the exclusion flag {found} at byte {at} is not 0 or 1")
+            }
+            Self::Include { at } => {
+                write!(f, "the included pattern at byte {at} starts with `!`")
+            }
             Self::Pattern { at, error } => {
                 write!(f, "the patterns at byte {at} do not read: {error}")
             }
