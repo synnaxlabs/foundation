@@ -1,6 +1,7 @@
+use document::value::{Kind, Value};
+use document::{Attribute, Document, Map};
 use proptest::prelude::*;
 use proptest::sample::Index;
-use types::name::Name;
 
 use super::*;
 
@@ -83,16 +84,12 @@ fn refuses_a_newer_or_unknown_version() {
 
 #[test]
 fn refuses_an_unknown_kind() {
-    let bytes = [VERSION, 0];
-    assert_eq!(
-        Definition::decode(&bytes),
-        Err(Error::Kind { at: 1, tag: 0 })
-    );
-    let bytes = [VERSION, 2];
-    assert_eq!(
-        Definition::decode(&bytes),
-        Err(Error::Kind { at: 1, tag: 2 })
-    );
+    for tag in (0..=u8::MAX).filter(|t| ![ACCESS, CONNECTOR, REGION].contains(t)) {
+        assert_eq!(
+            Definition::decode(&[VERSION, tag]),
+            Err(Error::Kind { at: 1, tag })
+        );
+    }
 }
 
 #[test]
@@ -140,7 +137,7 @@ fn refuses_a_pattern_that_is_not_utf8() {
     assert_eq!(Definition::decode(&bytes), Err(Error::Utf8 { at: 21 }));
     assert_eq!(
         Error::Utf8 { at: 21 }.to_string(),
-        "a pattern is not UTF-8 at byte 21"
+        "a text is not UTF-8 at byte 21"
     );
 }
 
@@ -238,6 +235,167 @@ fn refuses_an_authority_without_write() {
     );
 }
 
+fn name(text: &str) -> Name {
+    text.parse().unwrap()
+}
+
+/// A config with one attribute per pair.
+fn config(pairs: &[(&str, i128)]) -> Document {
+    let attributes = pairs.iter().map(|&(key, n)| Attribute {
+        key: key.into(),
+        key_span: None,
+        value: Value {
+            kind: Kind::Integer(n),
+            span: None,
+        },
+    });
+    Document {
+        attributes: Map::new(attributes.collect()).unwrap(),
+        blocks: Vec::new(),
+    }
+}
+
+fn connector() -> Definition {
+    let config = config(&[("port", 502)]);
+    Definition::Connector(Connector::new(name("modbus"), name("gw_1"), config).unwrap())
+}
+
+fn length(bytes: &mut Vec<u8>, n: usize) {
+    bytes.extend_from_slice(&u64::try_from(n).unwrap().to_le_bytes());
+}
+
+/// The bytes of a connector, from its parts.
+fn connector_bytes(kind: &[u8], node: &[u8], config: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![VERSION, CONNECTOR];
+    for part in [kind, node, config] {
+        length(&mut bytes, part.len());
+        bytes.extend_from_slice(part);
+    }
+    bytes
+}
+
+/// The bytes of a region record, from its parts.
+fn region_bytes(epoch: u64, voters: &[&[u8]]) -> Vec<u8> {
+    let mut bytes = vec![VERSION, REGION];
+    bytes.extend_from_slice(&epoch.to_le_bytes());
+    length(&mut bytes, voters.len());
+    for voter in voters {
+        length(&mut bytes, voter.len());
+        bytes.extend_from_slice(voter);
+    }
+    bytes
+}
+
+fn region() -> Definition {
+    let voters = [name("n_3"), name("n_1"), name("n_2"), name("n_1")];
+    Definition::Region(Delegation::new(7, voters).unwrap())
+}
+
+#[test]
+fn writes_the_documented_connector_layout() {
+    let config = encoding::encode(&config(&[("port", 502)])).unwrap();
+    let expected = connector_bytes(b"modbus", b"gw_1", &config);
+    assert_eq!(connector().encode(), expected);
+    assert_eq!(Definition::decode(&expected), Ok(connector()));
+}
+
+#[test]
+fn writes_the_documented_region_layout_with_voters_in_order() {
+    let expected = region_bytes(7, &[b"n_1", b"n_2", b"n_3"]);
+    assert_eq!(region().encode(), expected);
+    assert_eq!(Definition::decode(&expected), Ok(region()));
+}
+
+#[test]
+fn refuses_a_name_that_does_not_read() {
+    let config = encoding::encode(&Document::default()).unwrap();
+    let bytes = connector_bytes(b"modbus", b"gw 1", &config);
+    let error = Error::Name {
+        at: 16,
+        error: name::Error::Segment {
+            input: "gw 1".into(),
+            segment: "gw 1".into(),
+        },
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the name at byte 16 does not read: \"gw 1\" has a segment that is not valid: \
+         \"gw 1\""
+    );
+    let bytes = region_bytes(1, &[b"n.*"]);
+    let error = Error::Name {
+        at: 18,
+        error: name::Error::Wildcard {
+            input: "n.*".into(),
+        },
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error));
+}
+
+#[test]
+fn refuses_a_config_that_is_not_a_document() {
+    let bytes = connector_bytes(b"modbus", b"gw_1", &[9]);
+    let error = Error::Config {
+        at: 36,
+        error: encoding::Error::Newer { found: 9 },
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the connector config at byte 36 does not read: the document has format \
+         version 9, and this node reads only version 1. Upgrade the node"
+    );
+    let mut config = encoding::encode(&Document::default()).unwrap();
+    config.push(0);
+    let bytes = connector_bytes(b"modbus", b"gw_1", &config);
+    let at = config.len() - 1;
+    let error = Error::Config {
+        at: 36,
+        error: encoding::Error::TrailingBytes { at },
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error));
+}
+
+#[test]
+fn refuses_a_config_that_runs_past_the_end() {
+    let mut bytes = connector_bytes(b"modbus", b"gw_1", &[]);
+    let at = bytes.len() - 8;
+    bytes.truncate(at);
+    length(&mut bytes, 1);
+    assert_eq!(Definition::decode(&bytes), Err(Error::Truncated { at }));
+}
+
+#[test]
+fn refuses_voters_out_of_order_or_repeated() {
+    let bytes = region_bytes(1, &[b"n_2", b"n_1"]);
+    let error = Error::Order { at: 29 };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the voter at byte 29 is not after the voter before it"
+    );
+    let bytes = region_bytes(1, &[b"n_1", b"n_1"]);
+    assert_eq!(Definition::decode(&bytes), Err(error));
+}
+
+#[test]
+fn refuses_a_region_with_no_voter() {
+    let bytes = region_bytes(1, &[]);
+    let error = Error::NoVoters { at: 10 };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(error.to_string(), "the region at byte 10 has no voter");
+}
+
+#[test]
+fn refuses_more_voters_than_the_bytes_left_can_hold() {
+    let mut bytes = region_bytes(1, &[]);
+    bytes.truncate(10);
+    length(&mut bytes, 2);
+    bytes.extend_from_slice(&[0; 15]);
+    assert_eq!(Definition::decode(&bytes), Err(Error::Truncated { at: 10 }));
+}
+
 fn pattern() -> impl Strategy<Value = String> {
     let segment = prop_oneof![
         Just("*".to_owned()),
@@ -258,7 +416,7 @@ fn selectors() -> impl Strategy<Value = Selector> {
     })
 }
 
-fn definition() -> impl Strategy<Value = Definition> {
+fn policy_strategy() -> impl Strategy<Value = Definition> {
     (
         selectors(),
         selectors(),
@@ -274,6 +432,32 @@ fn definition() -> impl Strategy<Value = Definition> {
                 Authority(authority),
             ))
         })
+}
+
+fn name_strategy() -> impl Strategy<Value = Name> {
+    "[a-c]{1,2}(\\.@?[a-c]{1,2}){0,2}".prop_map(|text| text.parse().unwrap())
+}
+
+fn connector_strategy() -> impl Strategy<Value = Definition> {
+    let pairs = prop::collection::btree_map("[a-z]{1,4}", any::<i64>(), 0..4);
+    (name_strategy(), name_strategy(), pairs).prop_map(|(kind, node, pairs)| {
+        let pairs = pairs
+            .iter()
+            .map(|(k, &v)| (k.as_str(), i128::from(v)))
+            .collect::<Vec<_>>();
+        Definition::Connector(Connector::new(kind, node, config(&pairs)).unwrap())
+    })
+}
+
+fn region_strategy() -> impl Strategy<Value = Definition> {
+    let voters = prop::collection::vec(name_strategy(), 1..5);
+    (any::<u64>(), voters).prop_map(|(epoch, voters)| {
+        Definition::Region(Delegation::new(epoch, voters).unwrap())
+    })
+}
+
+fn definition() -> impl Strategy<Value = Definition> {
+    prop_oneof![policy_strategy(), connector_strategy(), region_strategy()]
 }
 
 proptest! {

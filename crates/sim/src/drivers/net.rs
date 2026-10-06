@@ -240,7 +240,7 @@ impl udp::Driver for Socket {
             meta,
         );
         drop(unused);
-        poll.map(Ok)
+        poll
     }
 }
 

@@ -1,12 +1,11 @@
 [package]
-name = "spec"
+name = "connector-influx"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-document = { path = "../document" }
 types = { path = "../types" }
 
 [dev-dependencies]
