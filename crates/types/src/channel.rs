@@ -54,13 +54,13 @@ impl fmt::Display for Key {
 }
 
 impl FromStr for Key {
-    type Err = crate::ParseError;
+    type Err = crate::uuid::Error;
 
     /// Reads a hyphenated UUID string, in either case.
     ///
     /// # Errors
     ///
-    /// [`crate::ParseError`] when `s` is not 8-4-4-4-12 hex digits with hyphens.
+    /// [`crate::uuid::Error`] when `s` is not 8-4-4-4-12 hex digits with hyphens.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         crate::uuid::read(s).map(Self)
     }
@@ -116,9 +116,6 @@ mod tests {
     use super::*;
     use crate::time::{Span, Stamp};
     use proptest::prelude::*;
-
-    const EXPECTED: &str =
-        "a hyphenated UUID such as 0192540a-6f00-7000-8000-000000000000";
 
     /// The UUIDv7 example in RFC 9562, appendix A.6.
     const EXAMPLE_MILLIS: i64 = 0x017f_22e2_79b0;
@@ -225,14 +222,7 @@ mod tests {
                 "{17f22e2-79b0-7cc3-98c4-dc0c0c0739}",
                 "017f22e2-79b0-7cc3-98c4-dc0c0c0739\u{e9}",
             ] {
-                assert_eq!(
-                    text.parse::<Key>(),
-                    Err(crate::ParseError {
-                        input: text.into(),
-                        expected: EXPECTED,
-                    }),
-                    "{text}"
-                );
+                assert_eq!(text.parse::<Key>(), Err(crate::uuid::Error), "{text}");
             }
         }
 

@@ -1,0 +1,7 @@
+# Not a member. It shares its name with `crates/a`, as the `ring` of the workspace
+# shares its name with the `ring` that TLS uses, so `-p a` is ambiguous.
+[package]
+name = "a"
+version = "0.1.0"
+edition = "2024"
+publish = false

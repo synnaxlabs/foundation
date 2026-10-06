@@ -1,4 +1,5 @@
-//! `codec::validate` and `codec::decode` never panic and give the same result.
+//! `codec::validate`, `codec::decode`, and `codec::Decoder` never panic and give the
+//! same result.
 //!
 //! Input: one byte picks the scalar, then a little-endian `u16` sample count, then
 //! the encoded series.
@@ -22,4 +23,18 @@ fuzz_target!(|bytes: &[u8]| {
     }
     let decoded = codec::decode(data_type, count, series, &mut out);
     assert_eq!(validated.map(|_| ()), decoded, "validate and decode disagree");
+    let mut decoder = codec::Decoder::new(scalar, count, series);
+    let mut vector = vec![0; codec::VECTOR_LEN * scalar.width()];
+    let mut joined = Vec::new();
+    let streamed = loop {
+        match decoder.next(&mut vector) {
+            Some(Ok(samples)) => joined.extend_from_slice(samples),
+            Some(Err(error)) => break Err(error),
+            None => break Ok(()),
+        }
+    };
+    assert_eq!(streamed, decoded, "Decoder and decode disagree");
+    if streamed.is_ok() {
+        assert_eq!(joined, out, "Decoder gives other samples");
+    }
 });

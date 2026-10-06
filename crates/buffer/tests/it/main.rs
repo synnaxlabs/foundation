@@ -363,8 +363,10 @@ fn empty_appends_wake_no_task() {
     assert_eq!(idle_with_wakes(2), idle_with_wakes(0));
 }
 
+/// A `committed` with nothing appended before it waits on nothing: it resolves at
+/// once, and the task syncs nothing for it.
 #[test]
-fn committed_on_an_idle_buffer_resolves_after_one_commit() {
+fn committed_on_an_idle_buffer_resolves_at_once() {
     run(21, Memory::default(), |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
@@ -373,8 +375,12 @@ fn committed_on_an_idle_buffer_resolves_after_one_commit() {
             .expect("opens");
         shard.clock.sleep(commits(21)).await;
         let before = shard.clock.now();
-        buffer.committed().await.expect("commits");
-        assert_eq!(shard.clock.now() - before, COMMIT);
+        let mut commit = pin!(buffer.committed());
+        let polled = poll_fn(|cx| Poll::Ready(commit.as_mut().poll(cx))).await;
+        assert_eq!(polled, Poll::Ready(Ok(())), "the first poll resolves");
+        shard.clock.sleep(commits(4)).await;
+        assert_eq!(shard.memory.syncs(), 2, "the header and the open only");
+        assert_eq!(shard.clock.now() - before, commits(4), "no deadline ran");
     });
 }
 
@@ -788,8 +794,8 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
     });
 }
 
-/// `commits` counts the commits that ended: each one that a `committed` future
-/// waited on, and one with nothing to write. A failed commit does not count.
+/// `commits` counts the commits that ended. A `committed` with nothing pending
+/// makes no commit, and a failed commit does not count.
 #[test]
 fn commits_counts_the_commits_that_ended() {
     run(29, Memory::default(), |shard| async move {
@@ -816,8 +822,8 @@ fn commits_counts_the_commits_that_ended() {
             assert_eq!(buffer.commits(), count);
         }
         let syncs = shard.memory.syncs();
-        buffer.committed().await.expect("commits nothing");
-        assert_eq!(buffer.commits(), 3, "a commit with nothing to write ended");
+        buffer.committed().await.expect("nothing pending");
+        assert_eq!(buffer.commits(), 2, "nothing pending made no commit");
         assert_eq!(shard.memory.syncs(), syncs, "it synced nothing");
         shard.memory.fail_syncs();
         buffer
@@ -829,7 +835,7 @@ fn commits_counts_the_commits_that_ended() {
             code: 5,
         });
         assert_eq!(buffer.committed().await, failed);
-        assert_eq!(buffer.commits(), 3, "the failed commit did not count");
+        assert_eq!(buffer.commits(), 2, "the failed commit did not count");
     });
 }
 
@@ -2208,5 +2214,149 @@ fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
         });
         assert_eq!(buffer.committed().await, ended, "the buffer ended");
         assert_eq!(first.await, Ok(()), "its entries are durable");
+    });
+}
+
+/// A resolved `Commit` leaves no waker behind, so the buffer idles after it and a
+/// drop ends the task at once.
+#[test]
+fn a_drop_after_an_abandoned_commit_ends_the_task_at_once() {
+    run(123, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        shard.clock.sleep(commits(21)).await;
+        {
+            let mut commit = pin!(buffer.committed());
+            let polled = poll_fn(|cx| Poll::Ready(commit.as_mut().poll(cx))).await;
+            assert_eq!(polled, Poll::Ready(Ok(())), "nothing waits");
+        }
+        shard
+            .clock
+            .sleep(Span::from_nanos(COMMIT.nanos() / 10))
+            .await;
+        drop(buffer);
+        shard
+            .clock
+            .sleep(Span::from_nanos(COMMIT.nanos() / 4))
+            .await;
+        assert_eq!(shard.memory.open_files(), 0, "the task holds the ring open");
+    });
+}
+
+/// Two futures see the same durable entries: one made before the commit that
+/// synced them, one made after it with nothing pending. A later commit fails.
+/// Both resolve well: every entry appended before each call is durable.
+#[test]
+fn a_commit_made_after_its_entries_synced_resolves_well_after_a_later_failure() {
+    run(122, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let before = buffer.committed();
+        shard.clock.sleep(commits(3)).await;
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
+        let after = buffer.committed();
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(commits(3)).await;
+        assert_eq!(shard.memory.syncs(), 4, "the second commit failed its sync");
+        assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
+        assert_eq!(before.await, Ok(()), "its entries are durable");
+        assert_eq!(after.await, Ok(()), "the same entries are durable");
+    });
+}
+
+/// A `committed` called while a sync runs, with nothing appended since, waits for
+/// that sync only: it resolves when the sync ends, not one commit span later.
+#[test]
+fn a_commit_awaited_during_a_slow_sync_resolves_when_the_sync_ends() {
+    run(124, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let tenth = COMMIT.nanos() / 10;
+        shard
+            .memory
+            .slow_syncs(shard.clock.clone(), Span::from_nanos(tenth * 15));
+        let opened = shard.clock.now();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(Span::from_nanos(tenth * 12)).await;
+        buffer.committed().await.expect("commits");
+        assert_eq!(shard.clock.now() - opened, Span::from_nanos(tenth * 25));
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+    });
+}
+
+/// A commit future made while a deadline is in flight, with nothing open or queued,
+/// resolves well when that deadline syncs, also when the next one fails.
+#[test]
+fn a_commit_made_during_a_sync_resolves_with_that_sync() {
+    run(131, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let sync = Span::from_nanos(COMMIT.nanos() * 4 / 10);
+        shard.memory.slow_syncs(shard.clock.clone(), sync);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let half = Span::from_nanos(COMMIT.nanos() + sync.nanos() / 2);
+        shard.clock.sleep(half).await;
+        let first = buffer.committed();
+        shard.clock.sleep(commits(1)).await;
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(commits(3)).await;
+        assert_eq!(shard.memory.syncs(), 4, "the second commit failed its sync");
+        assert_eq!(first.await, Ok(()), "its entries synced");
+    });
+}
+
+/// A `Commit` held across two commits after the one that synced its entries still
+/// resolves well: `commits` passed its target, it did not land on it.
+#[test]
+fn a_commit_held_across_two_later_commits_resolves_well() {
+    run(125, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let held = buffer.committed();
+        for seq in 1..3 {
+            shard.clock.sleep(commits(3)).await;
+            buffer
+                .append([entry(1, a, Path::Live, seq, 1, None, Parts::default())])
+                .expect("queues");
+        }
+        shard.clock.sleep(commits(3)).await;
+        assert_eq!(buffer.commits(), 3, "two commits ran after its own");
+        assert_eq!(held.await, Ok(()), "its entries are durable");
     });
 }
