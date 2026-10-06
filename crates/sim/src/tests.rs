@@ -690,6 +690,60 @@ fn a_leaked_sleep_stops_at_the_end_of_its_thread() {
 }
 
 #[test]
+fn a_leaked_sleep_polled_in_a_drop_at_the_end_of_its_thread_stops() {
+    /// Polls its sleep as it drops.
+    struct Poller(&'static mut env::clock::Sleep);
+    impl Drop for Poller {
+        fn drop(&mut self) {
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            assert!(Pin::new(&mut *self.0).poll(&mut cx).is_pending());
+        }
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum Ending {
+        Finish,
+        Panic,
+        Crash,
+    }
+    for ending in [Ending::Finish, Ending::Panic, Ending::Crash] {
+        let mut sim = sim(0);
+        let node = sim.node(node::Config::default());
+        let clock = node.clock();
+        let _handle = node
+            .shards()
+            .start(shard("shard-0"), move |tasks| async move {
+                let poller = Poller(Box::leak(Box::new(clock.sleep(Span::SECOND))));
+                tasks.spawn(async move {
+                    let _poller = poller;
+                    pending::<()>().await;
+                });
+                yield_now().await;
+                match ending {
+                    Ending::Finish => {}
+                    Ending::Panic => panic!("boom"),
+                    Ending::Crash => pending().await,
+                }
+            });
+        let start = node.clock().now();
+        let ran = sim.run();
+        match ending {
+            Ending::Finish => assert_eq!(ran, Ok(())),
+            Ending::Panic => assert_eq!(ran, Err(panicked("shard-0", "boom"))),
+            Ending::Crash => {
+                let stuck = Error::Stuck {
+                    threads: vec!["shard-0".into()],
+                    seed: 0,
+                };
+                assert_eq!(ran, Err(stuck));
+                sim.crash(&node, crate::Crash::Process);
+            }
+        }
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.clock().now(), start, "{ending:?}");
+    }
+}
+
+#[test]
 #[should_panic(expected = "a sleep needs a thread that the sim started")]
 fn a_sleep_outside_the_sim_panics_after_a_run() {
     let mut sim = sim(0);

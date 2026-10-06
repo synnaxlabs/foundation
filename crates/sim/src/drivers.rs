@@ -218,7 +218,7 @@ struct Timer {
     /// The thread that made it, the only one that can poll it: a sleep is not `Send`.
     thread: u64,
     key: u64,
-    /// The true deadline it armed last, until it disarms.
+    /// The true deadline it asked to arm last, until it disarms.
     due: Option<Monotonic>,
 }
 
@@ -235,9 +235,8 @@ impl env::clock::Timer for Timer {
         let (poll, unused) = match state.due(this.node, deadline) {
             Due::Passed => (Poll::Ready(()), Some(waker)),
             Due::At(at) => {
-                state.arm(this.thread, at, this.key, waker);
                 this.due = Some(at);
-                (Poll::Pending, None)
+                (Poll::Pending, state.arm(this.thread, at, this.key, waker))
             }
             Due::Never => (Poll::Pending, Some(waker)),
         };
