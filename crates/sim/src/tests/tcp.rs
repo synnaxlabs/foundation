@@ -164,13 +164,13 @@ fn a_connect_is_ready_after_one_round_trip_and_its_accept_after_one_and_a_half()
     assert_eq!(take(&accepted), (legs(3), remote, client));
 }
 
-/// When a connect from `a` to a port of `b` that `listened` once ends, and what it
-/// gives.
-fn refused(listened: bool) -> ((Monotonic, Option<Net>), SocketAddr) {
+/// When a connect from `a` to port 4433 of `b` ends, and what it gives. `before` runs
+/// on `b` first, and its listener lives through the run.
+fn refused(
+    before: fn(&node::Node) -> Option<Listener>,
+) -> ((Monotonic, Option<Net>), SocketAddr) {
     let (mut sim, a, b) = pair(0, link::Config::default());
-    if listened {
-        drop(listen(&b, 4433));
-    }
+    let _listener = before(&b);
     let remote = at(&b, 4433);
     let end = start(&a, "client", move |node| async move {
         let error = connect(&node, remote, options()).await.err();
@@ -182,15 +182,27 @@ fn refused(listened: bool) -> ((Monotonic, Option<Net>), SocketAddr) {
 
 #[test]
 fn a_connect_to_a_port_with_no_listener_is_refused_after_one_round_trip() {
-    for listened in [false, true] {
-        let (end, remote) = refused(listened);
-        assert_eq!(end, (legs(2), Some(Net::Refused { remote })), "{listened}");
+    let befores: [fn(&node::Node) -> Option<Listener>; 3] = [
+        |_| None,
+        |b| {
+            drop(listen(b, 4433));
+            None
+        },
+        |b| Some(listen(b, 4434)),
+    ];
+    for (i, before) in befores.into_iter().enumerate() {
+        let (end, remote) = refused(before);
+        assert_eq!(end, (legs(2), Some(Net::Refused { remote })), "{i}");
     }
 }
 
-/// Sends 1 MiB from `a` to `b` on `link`, then closes, and gives the run's digest
-/// and what `b` read.
-fn send_mebibyte(seed: u64, link: link::Config) -> (u64, (Vec<u8>, Result<(), Net>)) {
+/// Sends `len` bytes from `a` to `b` on `link`, then closes, and gives the run's
+/// digest and what `b` read.
+fn send(
+    seed: u64,
+    link: link::Config,
+    len: usize,
+) -> (u64, (Vec<u8>, Result<(), Net>)) {
     let (mut sim, a, b) = pair(seed, link);
     let mut listener = listen(&b, 4433);
     let received = start(&b, "server", move |_| async move {
@@ -200,7 +212,7 @@ fn send_mebibyte(seed: u64, link: link::Config) -> (u64, (Vec<u8>, Result<(), Ne
     let remote = at(&b, 4433);
     start(&a, "client", move |node| async move {
         let mut tcp = connect(&node, remote, options()).await.unwrap();
-        write_all(&mut tcp, &pattern(1 << 20)).await.unwrap();
+        write_all(&mut tcp, &pattern(len)).await.unwrap();
         close(&mut tcp).await.unwrap();
     });
     sim.run().unwrap();
@@ -214,7 +226,7 @@ fn a_mebibyte_arrives_in_order_over_a_link_whose_jitter_is_its_delay() {
         ..link::Config::default()
     };
     for seed in 0..4 {
-        let (_, received) = send_mebibyte(seed, link);
+        let (_, received) = send(seed, link, 1 << 20);
         assert_eq!(received, (pattern(1 << 20), Ok(())), "seed {seed}");
     }
 }
@@ -225,9 +237,42 @@ fn one_seed_gives_one_digest() {
         jitter: delay(),
         ..link::Config::default()
     };
-    let digest = send_mebibyte(3, link).0;
-    assert_eq!(send_mebibyte(3, link).0, digest);
-    assert_ne!(send_mebibyte(4, link).0, digest);
+    let digest = send(3, link, 1 << 20).0;
+    assert_eq!(send(3, link, 1 << 20).0, digest);
+    assert_ne!(send(4, link, 1 << 20).0, digest);
+}
+
+#[test]
+fn one_more_byte_gives_another_digest() {
+    let link = link::Config::default();
+    assert_ne!(send(0, link, 2).0, send(0, link, 1).0);
+}
+
+#[test]
+fn bytes_written_over_time_arrive_in_order_over_a_link_whose_jitter_is_40_delays() {
+    let link = link::Config {
+        jitter: millis(10),
+        ..link::Config::default()
+    };
+    for seed in 0..4 {
+        let (mut sim, a, b) = pair(seed, link);
+        let mut listener = listen(&b, 4433);
+        let received = start(&b, "server", move |_| async move {
+            let mut tcp = accept(&mut listener).await;
+            read_all(&mut tcp).await
+        });
+        let remote = at(&b, 4433);
+        start(&a, "client", move |node| async move {
+            let mut tcp = connect(&node, remote, options()).await.unwrap();
+            for chunk in pattern(100_000).chunks(1_000) {
+                write_all(&mut tcp, chunk).await.unwrap();
+                node.clock().sleep(Span::from_nanos(100_000)).await;
+            }
+            close(&mut tcp).await.unwrap();
+        });
+        sim.run().unwrap();
+        assert_eq!(take(&received), (pattern(100_000), Ok(())), "seed {seed}");
+    }
 }
 
 /// Writes 256 KiB from `a` with `options` to a reader on `b` that reads nothing for
@@ -282,6 +327,91 @@ fn a_write_is_pending_while_the_unsent_bytes_reach_their_most() {
 }
 
 #[test]
+fn a_write_is_pending_while_the_send_buffer_is_full() {
+    let options = tcp::Options {
+        send_buffer_bytes: 1 << 14,
+        ..options()
+    };
+    let unsent = tcp::Options {
+        unsent_bytes_max: 1 << 20,
+        ..options
+    };
+    assert_eq!(stalled(unsent), ((1 << 16) + (1 << 14), 1 << 18));
+}
+
+#[test]
+fn a_write_takes_no_more_bytes_than_the_send_buffer_has_room_for() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let _listener = listen(&b, 4433);
+    let remote = at(&b, 4433);
+    let small = tcp::Options {
+        send_buffer_bytes: 1 << 14,
+        ..options()
+    };
+    let wrote = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, small).await.unwrap();
+        let (one, two) = (vec![1; 12_288], vec![2; 12_288]);
+        let parts = [IoSlice::new(&one), IoSlice::new(&two)];
+        poll_fn(|cx| tcp.poll_write(cx, &parts)).await
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&wrote), Ok(1 << 14));
+}
+
+/// Fills the receive buffer of `recv` bytes of a reader on `b`, which then reads up
+/// to `size` bytes. Gives the bytes of that read, and the bytes that the writer on
+/// `a` could write next.
+fn opened(recv: usize, size: usize) -> (usize, usize) {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let written = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&written);
+    let reader = tcp::Options {
+        recv_buffer_bytes: recv,
+        ..options()
+    };
+    let mut listener = listen_on(&b, at(&b, 4433), reader);
+    let server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        node.clock().sleep(millis(10)).await;
+        let before = count.load(Ordering::Relaxed);
+        let got = read(&mut tcp, size).await.unwrap().len();
+        node.clock().sleep(millis(10)).await;
+        let more = count.load(Ordering::Relaxed) - before;
+        read_all(&mut tcp).await.1.unwrap();
+        (got, more)
+    });
+    let remote = at(&b, 4433);
+    let writer = tcp::Options {
+        send_buffer_bytes: 1 << 14,
+        ..options()
+    };
+    start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, writer).await.unwrap();
+        write_counted(&mut tcp, &pattern(1 << 18), &written)
+            .await
+            .unwrap();
+        close(&mut tcp).await.unwrap();
+    });
+    sim.run().unwrap();
+    take(&server)
+}
+
+#[test]
+fn a_read_opens_the_window_once_it_frees_a_segment_or_half_the_buffer() {
+    let cases = [
+        ((1 << 16, 1), (1, 0)),
+        ((1 << 16, 1_459), (1_459, 0)),
+        ((1 << 16, 1_460), (1_460, 1_460)),
+        ((1_000, 499), (499, 0)),
+        ((1_000, 500), (500, 500)),
+        ((2_000, 4_096), (2_000, 2_000)),
+    ];
+    for ((recv, size), opens) in cases {
+        assert_eq!(opened(recv, size), opens, "{recv} {size}");
+    }
+}
+
+#[test]
 fn a_close_sends_its_end_after_the_bytes_and_leaves_reads_open() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let mut listener = listen(&b, 4433);
@@ -305,6 +435,27 @@ fn a_close_sends_its_end_after_the_bytes_and_leaves_reads_open() {
     assert_eq!(take(&server), ((pattern(100_000), Ok(())), Ok(Vec::new())));
     let late = Err(Net::Io { code: 32 });
     assert_eq!(take(&client), (late, (b"bye".to_vec(), Ok(()))));
+}
+
+#[test]
+fn a_stream_whose_acceptor_closed_first_ends_with_no_reset() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        close(&mut tcp).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        read_all(&mut tcp).await
+    });
+    let remote = at(&b, 4433);
+    start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        read_all(&mut tcp).await.1.unwrap();
+        write_all(&mut tcp, b"late").await.unwrap();
+        close(&mut tcp).await.unwrap();
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&server), (b"late".to_vec(), Ok(())));
 }
 
 #[test]
@@ -469,6 +620,87 @@ fn port_0_listens_on_the_lowest_free_port_from_49152() {
     assert_eq!(ports, [49_153, 49_152]);
 }
 
+#[test]
+fn a_listener_on_the_unspecified_address_holds_its_port_on_each_address() {
+    let (_sim, a, _b) = pair(0, link::Config::default());
+    let (unspecified, specific) =
+        (SocketAddr::from(([0, 0, 0, 0], 4433)), at(&a, 4433));
+    for (first, second) in [(unspecified, specific), (specific, unspecified)] {
+        let _first = listen_on(&a, first, options());
+        let listen = tcp::Listen {
+            local: second,
+            backlog: 4,
+            options: options(),
+        };
+        let in_use = Net::AddressInUse { local: second };
+        assert_eq!(a.net().listen(&listen).err(), Some(in_use), "{first}");
+    }
+}
+
+#[test]
+fn two_listeners_of_one_node_each_accept_their_own_streams() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listeners = [listen(&b, 4433), listen(&b, 4434)];
+    let server = start(&b, "server", move |_| async move {
+        let mut locals = Vec::new();
+        for listener in &mut listeners {
+            locals.push(accept(listener).await.local());
+        }
+        locals
+    });
+    let remotes = [at(&b, 4433), at(&b, 4434)];
+    start(&a, "client", move |node| async move {
+        let mut streams = Vec::new();
+        for remote in remotes {
+            streams.push(connect(&node, remote, options()).await.unwrap());
+        }
+        node.clock().sleep(millis(1)).await;
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&server), remotes);
+}
+
+#[test]
+fn a_connect_skips_the_ports_of_the_streams_and_listeners_of_its_node() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let _listeners = [listen(&b, 49_152), listen(&a, 4433), listen(&a, 49_153)];
+    let remote = at(&b, 49_152);
+    let ports = start(&a, "client", move |node| async move {
+        let first = connect(&node, remote, options()).await.unwrap();
+        let second = connect(&node, remote, options()).await.unwrap();
+        [first, second].map(|tcp| tcp.local().port())
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&ports), [49_152, 49_154]);
+}
+
+#[test]
+fn a_finished_stream_frees_its_port_for_a_connect_after_the_ports_wrap() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |_| async move {
+        let mut tcp = accept(&mut listener).await;
+        read_all(&mut tcp).await.1.unwrap();
+        close(&mut tcp).await.unwrap();
+        drop(tcp);
+        accept(&mut listener).await.peer()
+    });
+    let (remote, closed) = (at(&b, 4433), at(&b, 9));
+    start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        close(&mut tcp).await.unwrap();
+        drop(tcp);
+        node.clock().sleep(millis(10)).await;
+        for _ in 49_153..=u16::MAX {
+            assert!(poll_once(connect(&node, closed, options())).await.is_none());
+        }
+        let _tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(1)).await;
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&server), at(&a, 49_152));
+}
+
 /// Crashes `a` by `crash` 10 ms into a stream to `b`. Gives what `b` then got: a
 /// read polled once at 20 ms, a write of one byte, and a read 10 ms later. Also
 /// gives the address of `a`'s end.
@@ -520,6 +752,25 @@ fn a_process_crash_resets_the_peer() {
         got,
         (Some(Err(reset.clone())), Err(reset.clone()), Err(reset))
     );
+}
+
+#[test]
+fn a_power_cut_leaves_the_listeners_of_other_nodes() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let c = sim.node(node::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |_| async move {
+        accept(&mut listener).await.peer()
+    });
+    sim.run_for(millis(1)).unwrap();
+    sim.crash(&a, Crash::Power);
+    let remote = at(&b, 4433);
+    start(&c, "client", move |node| async move {
+        let _tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(1)).await;
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&server), at(&c, 49_152));
 }
 
 /// The error of a run in which a shard of `a` calls `call` on a link of `link`.

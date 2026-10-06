@@ -575,13 +575,13 @@ impl<'a> Tcp<'a> {
             local: destination,
             peer: source,
         };
-        if let Kind::Syn { edge } = kind {
-            self.syn(at, key, edge);
-            return Vec::new();
-        }
         let live = self.sockets.ends.get(&key).is_some_and(End::live);
         match kind {
-            Kind::SynAck { edge } if !live => self.syn_ack(at, key, edge),
+            Kind::Syn { edge } => {
+                self.syn(at, key, edge);
+                Vec::new()
+            }
+            Kind::SynAck { edge } => self.syn_ack(at, key, edge),
             Kind::Rst => self.rst(key),
             _ if !live => {
                 self.sockets.lanes.send(self.wire, at, key, Kind::Rst);
@@ -594,9 +594,6 @@ impl<'a> Tcp<'a> {
             } => self.ack(at, key, received, edge, fin),
             Kind::Data(bytes) => self.data(at, key, bytes),
             Kind::Fin => self.fin(at, key),
-            Kind::Syn { .. } | Kind::SynAck { .. } => {
-                unreachable!("invariant: one SYN gets one answer")
-            }
         }
     }
 
@@ -754,5 +751,27 @@ impl<'a> Tcp<'a> {
 
     fn end(&mut self, key: Key) -> &mut End {
         (self.sockets.ends.get_mut(&key)).expect("invariant: the end lives")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use env::rng::Rng;
+
+    use super::*;
+    use crate::link;
+
+    #[test]
+    fn a_direction_keeps_its_floor_only_while_a_segment_is_in_flight() {
+        let mut wire = Wire::new(link::Config::default(), Rng::from_seed(0));
+        let mut lanes = Lanes::default();
+        let [local, peer] = [0, 1].map(|node| SocketAddr::new(addresses(node)[0], 1));
+        for _ in 0..2 {
+            lanes.send(&mut wire, Monotonic(0), Key { local, peer }, Kind::Fin);
+        }
+        lanes.arrive(local, peer);
+        assert_eq!(lanes.floors.len(), 1);
+        lanes.arrive(local, peer);
+        assert!(lanes.floors.is_empty());
     }
 }
