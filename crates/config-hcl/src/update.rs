@@ -68,8 +68,7 @@ struct Mark {
     newline: bool,
 }
 
-/// Text to put in place of a range of the old text. An empty range inserts, and
-/// empty text cuts.
+/// Text to put in place of a range of the old text. An empty range inserts lines.
 struct Edit {
     range: Range<usize>,
     text: String,
@@ -175,10 +174,13 @@ impl<'a> File<'a> {
     }
 
     /// The end of the line at `at` when only spaces are between `at` and the line
-    /// end. `None` at the end of a text with no line end.
+    /// end, or the end of the text when the last line has no line end. `None` at the
+    /// end of the text.
     fn blank_below(&self, at: usize) -> Option<usize> {
         let mark = self.mark(self.token(at));
-        (mark.newline && self.blank(at, mark.start)).then_some(mark.end)
+        // Only the end token starts at the end of the text.
+        let last = mark.start == self.text.len() && at < mark.start;
+        ((mark.newline || last) && self.blank(at, mark.start)).then_some(mark.end)
     }
 
     /// The start of the line that ends at `end` when that line is blank.
@@ -254,6 +256,10 @@ impl<'a> File<'a> {
         for Edit { range, text, .. } in edits {
             let kept = self.text.get(at..range.start);
             out.push_str(kept.expect("invariant: edits do not overlap"));
+            // Only the end of a text can leave a line with no line end.
+            if range.is_empty() && out.len() > self.floor && !out.ends_with('\n') {
+                out.push_str(if self.crlf { "\r\n" } else { "\n" });
+            }
             out.push_str(&text);
             at = range.end;
         }
@@ -327,10 +333,9 @@ impl Diff<'_, '_> {
                 self.block(was, block);
             }
         }
-        // `place` reads the cuts.
-        self.cut(cuts, body);
         let at = pending.anchor.unwrap_or(body.end);
         self.place(body, &mut pending, at, false);
+        self.cut(cuts, body);
     }
 
     /// Puts the waiting items after the anchor, or else before the kept item at
@@ -357,9 +362,6 @@ impl Diff<'_, '_> {
             return;
         }
         let mut writer = Writer::new(&body.margin, 0, self.file.crlf);
-        if self.unended(at) {
-            writer.end_line();
-        }
         let (attributes, blocks) =
             (pending.attributes.drain(..), pending.blocks.drain(..));
         writer.body(attributes, blocks, 0, pending.ends.contains(&at));
@@ -371,21 +373,6 @@ impl Diff<'_, '_> {
             text: written(writer),
             below: pending.anchor != Some(at),
         });
-    }
-
-    /// Reports whether the text kept before `at` ends in a line with no line end, so
-    /// new text at `at` first ends that line. Only one insert may go there. A cut
-    /// that ends at `at` starts at a line start or the floor, so the kept text before
-    /// it needs no line end.
-    fn unended(&self, at: usize) -> bool {
-        let text = self.file.text;
-        at == text.len()
-            && at > self.file.floor
-            && !text.ends_with('\n')
-            && !self
-                .edits
-                .iter()
-                .any(|edit| edit.text.is_empty() && edit.range.end == at)
     }
 
     /// Cuts the lines of removed items, as runs that merge across blank lines.
@@ -410,7 +397,8 @@ impl Diff<'_, '_> {
     fn value(&mut self, old: &Attribute, new: &Attribute) {
         let file = self.file;
         let (start, end) = offsets(old.value.span);
-        let after = if file.blank_below(end).is_some() {
+        let mark = file.mark(file.token(end));
+        let after = if mark.newline && file.blank(end, mark.start) {
             After::Line
         } else {
             After::Other
@@ -639,8 +627,8 @@ mod tests {
                 out.push_str(" # t");
             }
             out.push('\n');
-            let lines = ["", "", "\n", "# c\n", "  // c\n", "/* c\nc */\n"];
-            let line = lines.get(usize::from(picks.pick(6))).unwrap();
+            let lines = ["", "", "\n", "  \n", "# c\n", "  // c\n", "/* c\nc */\n"];
+            let line = lines.get(usize::from(picks.pick(7))).unwrap();
             out.push_str(line);
             ends_at_closer = heredoc && line.is_empty();
             at = end;
@@ -816,26 +804,21 @@ mod tests {
 
         #[test]
         fn updates_an_unended_text_as_the_ended_text(
-            a in document(),
+            a in document().prop_filter("a text with a last line", |a| {
+                a.attributes.iter().len() > 0 || !a.blocks.is_empty()
+            }),
             b in document(),
             picks in prop::collection::vec(any::<u8>(), 0..256),
             attributes_last in any::<bool>(),
         ) {
             let mut picks = Picks(picks.into_iter());
-            let ended = annotate(&text_of(&a, attributes_last), &mut picks);
-            let line_end = if ended.ends_with("\r\n") { "\r\n" } else { "\n" };
-            let Some(text) = ended.strip_suffix(line_end) else {
-                return Ok(());
-            };
-            // `update` takes the line end of the first line, which a one-line text
-            // loses with its line end.
-            let first_line_kept = text.contains('\n') || line_end == "\n";
-            if text.ends_with('\n')
-                || !first_line_kept
-                || read(Source(0), text) != Ok(a.clone())
-            {
-                return Ok(());
-            }
+            let annotated = annotate(&text_of(&a, attributes_last), &mut picks);
+            let text = annotated.trim_end_matches(['\r', '\n']);
+            // `update` takes the line end of the first line.
+            let line_end = if text.contains("\r\n") { "\r\n" } else { "\n" };
+            let ended = format!("{text}{line_end}");
+            // A heredoc needs the line end after its closer.
+            prop_assume!(read(Source(0), text) == Ok(a.clone()));
             let document = mix(&a, &b, &mut picks);
             let out = update(Source(0), text, &document).unwrap();
             let want = update(Source(0), &ended, &document).unwrap();
@@ -1041,6 +1024,10 @@ mod tests {
 
     #[test]
     fn starts_no_blank_line_when_the_last_line_is_cut() {
+        assert_eq!(updated("a = 1\n  ", "b = 2"), "b = 2\n");
+        assert_eq!(updated("a = 1\r\n\t", "b = 2"), "b = 2\r\n");
+        assert_eq!(updated("x {}\n  ", "y {}"), "y {}\n");
+        assert_eq!(updated("a = 1\n  ", ""), "");
         assert_eq!(updated("a = 1\r\nb = 2\r\n", "c = 3"), "c = 3\r\n");
         assert_eq!(updated("a = 1\r\nb = 2", "c = 3"), "c = 3\r\n");
         assert_eq!(updated("a = 1", "b = 2"), "b = 2\n");
