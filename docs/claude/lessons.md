@@ -74,8 +74,10 @@ uses two narrow calls into the home, not a reader inside `hub`.
 
 Judge a build-or-use choice by every user the part will have, not by its first caller.
 Crate count and binary size are cheap, and they never tip the trade. Never hand-write a
-protocol, parser, or transport when a mature library lets us inject I/O and time. Our
-own code goes in the adapters, not in the protocol.
+protocol, parser, or transport when a mature library meets our needs and lets us inject
+I/O and time. Our own build needs evidence that the library fails, as HCL READER has:
+`hcl-edit` overflowed the stack on deep nesting and misread a number (#85). When a
+library fits, our own code goes in the adapters, not in the protocol.
 
 Name the future users, and count only the ones on record: an entry in
 `docs/decisions.md`, an open issue, or a Synnax feature. The future scope picks the part
