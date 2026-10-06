@@ -14,14 +14,15 @@ const WORDS: usize = 9;
 /// [`Slew`].
 const FIRST_WORDS: usize = 6;
 
-/// Makes the cells with `discipline`.
-pub(crate) fn new(discipline: Discipline) -> (Writer, Reader) {
-    let first = discipline.slew();
-    let (discipline, discipline_reader) = ring::latest::new(encode(discipline));
-    let (first_writer, first_reader) = ring::latest::new(encode_first(first));
+/// Makes the cells, with no sources and no first slew.
+pub(crate) fn new() -> (Writer, Reader) {
+    let discipline = Discipline::Unsynced(combine::Error::NoSources);
+    let (cell, discipline_reader) = ring::latest::new(encode(discipline));
+    let (first, first_reader) = ring::latest::new(encode_first(None));
     let writer = Writer {
         discipline,
-        first: first.is_none().then_some(first_writer),
+        cell,
+        first: Some(first),
     };
     let reader = Reader {
         discipline: discipline_reader,
@@ -33,27 +34,37 @@ pub(crate) fn new(discipline: Discipline) -> (Writer, Reader) {
 /// The one writer of the cells.
 #[derive(Debug)]
 pub(crate) struct Writer {
-    discipline: ring::latest::Writer<WORDS>,
+    discipline: Discipline,
+    cell: ring::latest::Writer<WORDS>,
     /// `None` once it holds the first slew.
     first: Option<ring::latest::Writer<FIRST_WORDS>>,
 }
 
 impl Writer {
+    /// The discipline the last update stored.
+    pub(crate) fn discipline(&self) -> Discipline {
+        self.discipline
+    }
+
     /// Stores the discipline that `next` gives. `next` runs inside the update, as `f`
     /// does in [`ring::latest::Writer::update`]. The slew of the first discipline with
     /// one goes into the first cell inside the same update, so a read of a discipline
     /// with that slew comes after the write of the first cell.
     pub(crate) fn update(&mut self, next: impl FnOnce() -> Discipline) {
-        let first = &mut self.first;
-        self.discipline.update(|_| {
-            let discipline = next();
+        let Self {
+            discipline,
+            cell,
+            first,
+        } = self;
+        cell.update(|_| {
+            *discipline = next();
             if let Some(cell) = first.as_mut()
                 && let Some(slew) = discipline.slew()
             {
                 cell.update(|_| encode_first(Some(slew)));
                 *first = None;
             }
-            encode(discipline)
+            encode(*discipline)
         });
     }
 }
@@ -185,7 +196,7 @@ mod tests {
     use proptest::prelude::*;
     use types::time::{Monotonic, Span};
 
-    use super::{decode, decode_first, encode, encode_first};
+    use super::{decode, decode_first, encode, encode_first, new};
 
     /// The largest error a measurement has.
     const UNKNOWN: Span = Measurement::unknown(Monotonic(0), Span::ZERO).error();
@@ -248,6 +259,22 @@ mod tests {
             first in prop::option::of(slew()),
         ) {
             prop_assert_eq!(decode_first(encode_first(first)), first);
+        }
+
+        #[test]
+        fn keeps_the_last_discipline_and_the_first_slew(
+            disciplines in prop::collection::vec(discipline(), 0..8),
+        ) {
+            let (mut writer, reader) = new();
+            for &discipline in &disciplines {
+                writer.update(|| discipline);
+            }
+            let last = disciplines.last().copied();
+            let last = last.unwrap_or(Discipline::Unsynced(Error::NoSources));
+            prop_assert_eq!(writer.discipline(), last);
+            prop_assert_eq!(reader.read(|discipline| discipline), last);
+            let first = disciplines.iter().find_map(|discipline| discipline.slew());
+            prop_assert_eq!(reader.first(), first);
         }
     }
 }

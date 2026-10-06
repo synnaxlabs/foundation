@@ -13,7 +13,6 @@ pub struct Clock {
     monotonic: env::clock::Clock,
     sources: Map<source::Key, Filter>,
     next: u64,
-    discipline: Discipline,
     cell: cell::Writer,
 }
 
@@ -23,8 +22,7 @@ impl Clock {
     /// of the sources first agree.
     #[must_use]
     pub fn new(monotonic: env::clock::Clock) -> (Self, Reader) {
-        let discipline = Discipline::Unsynced(combine::Error::NoSources);
-        let (cell, cell_reader) = cell::new(discipline);
+        let (cell, cell_reader) = cell::new();
         let reader = Reader {
             monotonic: monotonic.clone(),
             cell: cell_reader,
@@ -33,7 +31,6 @@ impl Clock {
             monotonic,
             sources: Map::default(),
             next: 0,
-            discipline,
             cell,
         };
         (clock, reader)
@@ -97,15 +94,12 @@ impl Clock {
     fn steer(&mut self) {
         let estimate = combine(self.monotonic.now(), DRIFT, self.sources.values());
         // A write that changes nothing makes the reads that overlap it run again.
-        let Some(change) = self.discipline.next(estimate, DRIFT) else {
+        let Some(change) = self.cell.discipline().next(estimate, DRIFT) else {
             return;
         };
         // A slew keeps mesh time from going back only against reads before its `now`,
         // so the clock reads inside the update.
-        self.cell.update(|| {
-            self.discipline = change.at(self.monotonic.now(), DRIFT);
-            self.discipline
-        });
+        self.cell.update(|| change.at(self.monotonic.now(), DRIFT));
     }
 }
 
