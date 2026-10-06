@@ -1048,3 +1048,22 @@ fn a_crash_keeps_the_close_of_another_node_waiting() {
         other.unwrap().join().unwrap();
     }
 }
+
+#[test]
+fn a_crash_stops_a_leaked_timer() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        crash_after(&mut sim, &node, crash, |node| async move {
+            let clock = node.clock();
+            let sleep = Box::leak(Box::new(Box::pin(clock.sleep(Span::SECOND))));
+            poll_fn(|cx| {
+                assert!(sleep.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+        });
+        let before = node.clock().now();
+        sim.run().unwrap();
+        assert_eq!(node.clock().now(), before, "{crash:?}");
+    }
+}

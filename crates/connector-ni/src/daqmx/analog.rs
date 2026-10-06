@@ -5,8 +5,8 @@ use std::ptr;
 
 use types::time::Span;
 
-use super::ffi::{BY_SCAN, CONTINUOUS, DEFAULT, RISING, VOLTS};
-use super::{Error, Library, Task, scans, seconds, size, text, values};
+use super::ffi::{BY_SCAN, DEFAULT, VOLTS};
+use super::{Error, Library, Read, Task, Written, scans, seconds, size, text, values};
 
 /// A task that reads voltages. Dropping it clears it in the driver.
 #[derive(Debug)]
@@ -53,7 +53,7 @@ impl Input {
                 ptr::null(),
             )
         };
-        task.check(code)
+        task.library.check(code)
     }
 
     /// Samples each channel `rate` times a second without end, on the device's own
@@ -63,19 +63,7 @@ impl Input {
     ///
     /// [`Error::Daqmx`] when the driver refuses, as for a rate the device cannot do.
     pub fn clock(&mut self, rate: f64, buffer: u64) -> Result<(), Error> {
-        let task = &self.0;
-        // SAFETY: a live handle and a NUL-terminated string.
-        let code = unsafe {
-            (task.functions().clock)(
-                task.handle,
-                c"".as_ptr(),
-                rate,
-                RISING,
-                CONTINUOUS,
-                buffer,
-            )
-        };
-        task.check(code)
+        self.0.clock(rate, buffer)
     }
 
     /// Starts sampling.
@@ -97,8 +85,8 @@ impl Input {
     }
 
     /// Reads into `out` by scan (each channel of the first sample, then each channel of
-    /// the next), and gives the number of values read. It waits up to `timeout`, cut to
-    /// whole milliseconds, for `out` to fill. A driver warning reads as success.
+    /// the next), and gives the number of values read and the driver's warning. It
+    /// waits up to `timeout`, cut to whole milliseconds, for `out` to fill.
     ///
     /// # Errors
     ///
@@ -109,7 +97,7 @@ impl Input {
     ///
     /// When `out` does not hold a whole number of samples of each channel, more than
     /// `i32::MAX` samples of each channel, or more than `u32::MAX` values.
-    pub fn read(&mut self, out: &mut [f64], timeout: Span) -> Result<usize, Error> {
+    pub fn read(&mut self, out: &mut [f64], timeout: Span) -> Result<Read, Error> {
         let task = &self.0;
         let channels = task.channels()?;
         let per_channel = scans(out.len(), channels);
@@ -129,8 +117,11 @@ impl Input {
                 &raw mut reserved,
             )
         };
-        task.check(code)?;
-        Ok(values(read, channels))
+        let warning = task.library.outcome(code)?;
+        Ok(Read {
+            count: values(read, channels),
+            warning,
+        })
     }
 }
 
@@ -178,7 +169,7 @@ impl Output {
                 ptr::null(),
             )
         };
-        task.check(code)
+        task.library.check(code)
     }
 
     /// Starts the task, so writes reach the device.
@@ -200,8 +191,8 @@ impl Output {
     }
 
     /// Writes `values` by scan (each channel of the first sample, then each channel of
-    /// the next). It waits up to `timeout`, cut to whole milliseconds, for room in the
-    /// driver's buffer. A driver warning reads as success.
+    /// the next), and gives the driver's warning. It waits up to `timeout`, cut to
+    /// whole milliseconds, for room in the driver's buffer.
     ///
     /// # Errors
     ///
@@ -212,7 +203,7 @@ impl Output {
     ///
     /// When `values` does not hold a whole number of samples of each channel, or holds
     /// more than `i32::MAX` samples of each channel.
-    pub fn write(&mut self, values: &[f64], timeout: Span) -> Result<(), Error> {
+    pub fn write(&mut self, values: &[f64], timeout: Span) -> Result<Written, Error> {
         let task = &self.0;
         let per_channel = scans(values.len(), task.channels()?);
         let (mut written, mut reserved) = (0, 0);
@@ -230,8 +221,8 @@ impl Output {
                 &raw mut reserved,
             )
         };
-        task.check(code)?;
+        let warning = task.library.outcome(code)?;
         assert_eq!(written, per_channel, "the driver wrote every sample");
-        Ok(())
+        Ok(Written { warning })
     }
 }

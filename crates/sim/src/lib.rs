@@ -42,7 +42,7 @@ use crate::files::Files;
 use crate::net::Network;
 use crate::node::Node;
 use crate::serial::Serial;
-use crate::state::{Futures, Next, Outcome, Shared, Start, State, lock};
+use crate::state::{Ended, Futures, Next, Outcome, Shared, Start, State, lock};
 
 /// Settings for one run. Build it with `..Config::default()`: fields get added.
 ///
@@ -374,7 +374,7 @@ impl Sim {
                 return Vec::new();
             }
             let done = lock(&self.shared).finish(task, thread);
-            self.drop_futures(&done)
+            self.drop_ended(done)
         }));
         lock(&self.shared).release();
         let mut panics = run.unwrap_or_else(|payload| vec![message(&*payload)]);
@@ -383,8 +383,8 @@ impl Sim {
         }
         let name = lock(&self.shared).name(thread);
         let panicked = env::thread::Panicked { name: name.clone() };
-        let tasks = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
-        panics.extend(self.drop_futures(&tasks));
+        let ended = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
+        panics.extend(self.drop_ended(ended));
         Err(Error::Panicked {
             thread: name,
             message: panics.join(THEN),
@@ -441,16 +441,18 @@ impl Sim {
     /// started, outside the lock. Returns the message of each drop that panicked, in
     /// order.
     fn stop(&self, stopped: impl Fn(usize) -> bool) -> Vec<String> {
-        let (tasks, starts) = lock(&self.shared).stop(stopped);
-        let mut panics = self.drop_futures(&tasks);
+        let (ended, starts) = lock(&self.shared).stop(stopped);
+        let mut panics = self.drop_ended(ended);
         panics.extend(drop_each(starts));
         panics
     }
 
-    /// Drops the futures of `tasks`, outside the borrow, since a drop may spawn.
-    /// Returns the message of each drop that panicked, in order.
-    fn drop_futures(&self, tasks: &[u64]) -> Vec<String> {
-        let futures = self.futures.borrow_mut().remove(tasks);
+    /// Drops the timer wakers of `ended`, and the futures of its tasks outside the
+    /// borrow, since a drop may spawn. Returns the message of each drop that panicked,
+    /// in order.
+    fn drop_ended(&self, ended: Ended) -> Vec<String> {
+        drop(ended.timers);
+        let futures = self.futures.borrow_mut().remove(&ended.tasks);
         drop_each(futures)
     }
 }

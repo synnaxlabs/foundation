@@ -25,13 +25,28 @@ fn linked() -> Library {
         clock: stub::DAQmxCfgSampClkTiming,
         read_analog: stub::DAQmxReadAnalogF64,
         write_analog: stub::DAQmxWriteAnalogF64,
+        digital_in: stub::DAQmxCreateDIChan,
+        digital_out: stub::DAQmxCreateDOChan,
+        read_digital: stub::DAQmxReadDigitalLines,
+        write_digital: stub::DAQmxWriteDigitalLines,
         error: stub::DAQmxGetExtendedErrorInfo,
+        describe: stub::DAQmxGetErrorString,
     };
     Library(Arc::new(Loaded {
         functions,
         _library: None,
     }))
 }
+
+/// A read of `values` values with no warning.
+fn clean(count: usize) -> Read {
+    Read {
+        count,
+        warning: None,
+    }
+}
+
+const WRITTEN: Result<Written, Error> = Ok(Written { warning: None });
 
 fn refused(code: i32) -> Error {
     Error::Daqmx {
@@ -62,9 +77,9 @@ fn reads_a_ramp(library: &Library) {
     task.clock(1000.0, 100).unwrap();
     task.start().unwrap();
     let mut out = [0.0; 6];
-    assert_eq!(task.read(&mut out, SECOND), Ok(6));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(6)));
     assert_eq!(out, [0.0, 1000.0, 2000.0, 1.0, 1001.0, 2001.0]);
-    assert_eq!(task.read(&mut out[..3], SECOND), Ok(3));
+    assert_eq!(task.read(&mut out[..3], SECOND), Ok(clean(3)));
     assert_eq!(out[..3], [2.0, 1002.0, 2002.0]);
 }
 
@@ -77,16 +92,49 @@ fn reads_each_channel_by_scan() {
 fn gives_the_values_of_a_short_read() {
     let mut task = input(&linked(), "short/ai0:1");
     let mut out = [0.0; 4];
-    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(2)));
     assert_eq!(out[..2], [0.0, 1000.0]);
 }
 
-#[test]
-fn reads_through_a_warning() {
-    let mut task = input(&linked(), "warn/ai0");
+fn warning() -> Warning {
+    Warning {
+        code: stub::WARN,
+        message: "the stub warns".into(),
+    }
+}
+
+fn warns(library: &Library) {
+    // `input` starts the task, and a start that warns succeeds.
+    let mut task = input(library, "warn/ai0");
     let mut out = [0.0; 2];
-    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    let read = Read {
+        count: 2,
+        warning: Some(warning()),
+    };
+    assert_eq!(task.read(&mut out, SECOND), Ok(read.clone()));
     assert_eq!(out, [0.0, 1.0]);
+    let mut task = output(library, "warn/ao0");
+    let written = Written {
+        warning: Some(warning()),
+    };
+    assert_eq!(task.write(&[1.0], SECOND), Ok(written.clone()));
+    let mut task = digital::Input::create(library, "lines").unwrap();
+    task.add("warn/port0/line0").unwrap();
+    task.start().unwrap();
+    assert_eq!(task.read(&mut [9; 2], SECOND), Ok(read));
+    let mut task = digital::Output::create(library, "lines").unwrap();
+    task.add("warn/port0/line0").unwrap();
+    task.start().unwrap();
+    assert_eq!(task.write(&[true], SECOND), Ok(written));
+}
+
+#[test]
+fn gives_the_warning_of_a_read_or_a_write() {
+    warns(&linked());
+    assert_eq!(
+        warning().to_string(),
+        "NI-DAQmx warning 201000: the stub warns"
+    );
 }
 
 #[test]
@@ -97,7 +145,7 @@ fn counts_the_channels_a_failed_add_left() {
     assert_eq!(task.add("fail/ai1", -10.0, 10.0), Err(refused(stub::FAIL)));
     task.start().unwrap();
     let mut out = [0.0; 2];
-    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(2)));
     assert_eq!(out, [0.0, 1.0]);
 }
 
@@ -133,8 +181,14 @@ fn refuses_a_clock_the_device_cannot_do() {
 #[test]
 fn writes_each_channel_within_its_range() {
     let mut task = output(&linked(), "Dev1/ao0:1");
-    task.write(&[1.0, 2.0, 3.0, 4.0], SECOND).unwrap();
+    assert_eq!(task.write(&[1.0, 2.0, 3.0, 4.0], SECOND), WRITTEN);
     assert_eq!(task.write(&[1.0, 5.5], SECOND), Err(refused(stub::RANGE)));
+}
+
+#[test]
+#[should_panic(expected = "the driver wrote every sample")]
+fn panics_on_a_short_write() {
+    drop(output(&linked(), "short/ao0").write(&[1.0, 2.0], SECOND));
 }
 
 #[test]
@@ -177,13 +231,15 @@ fn a_task_outlives_its_library() {
     let mut task = input(&library, "Dev1/ai0");
     drop(library);
     let mut out = [0.0];
-    assert_eq!(task.read(&mut out, SECOND), Ok(1));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(1)));
 }
 
 const _: () = {
     const fn send<T: Send>() {}
     send::<Input>();
     send::<Output>();
+    send::<digital::Input>();
+    send::<digital::Output>();
     send::<Library>();
 };
 
@@ -203,6 +259,96 @@ fn panics_on_a_name_with_a_nul() {
     drop(Input::create(&linked(), "a\0b"));
 }
 
+fn reads_digital_lines(library: &Library) {
+    let mut task = digital::Input::create(library, "lines").unwrap();
+    task.add("Dev1/port0/line0:1").unwrap();
+    task.add("Dev1/port0/line2").unwrap();
+    task.start().unwrap();
+    let mut out = [9; 6];
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(6)));
+    assert_eq!(out, [0, 1, 0, 1, 0, 1]);
+    assert_eq!(task.read(&mut out[..3], SECOND), Ok(clean(3)));
+    assert_eq!(out[..3], [0, 1, 0]);
+}
+
+#[test]
+fn reads_each_line_by_scan_with_no_clock() {
+    reads_digital_lines(&linked());
+}
+
+#[test]
+fn reads_digital_lines_on_a_clock() {
+    let library = linked();
+    let mut task = digital::Input::create(&library, "clocked").unwrap();
+    task.add("short/port0/line0").unwrap();
+    task.clock(1000.0, 100).unwrap();
+    assert_eq!(task.clock(-1.0, 100), Err(refused(stub::ARGUMENT)));
+    task.start().unwrap();
+    let mut out = [9; 4];
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(2)));
+    assert_eq!(out, [0, 1, 9, 9]);
+}
+
+#[test]
+fn counts_the_lines_a_failed_add_left() {
+    let library = linked();
+    let mut task = digital::Input::create(&library, "partial").unwrap();
+    task.add("Dev1/port0/line0").unwrap();
+    assert_eq!(task.add("fail/port0/line1"), Err(refused(stub::FAIL)));
+    task.start().unwrap();
+    let mut out = [9; 2];
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(2)));
+    assert_eq!(out, [0, 1]);
+}
+
+#[test]
+fn writes_each_line() {
+    let library = linked();
+    let mut task = digital::Output::create(&library, "write").unwrap();
+    task.add("Dev1/port0/line0:1").unwrap();
+    assert_eq!(
+        task.write(&[false, true], SECOND),
+        Err(refused(stub::STOPPED))
+    );
+    task.start().unwrap();
+    assert_eq!(task.write(&[false, true, true, false], SECOND), WRITTEN);
+}
+
+#[test]
+fn refuses_digital_reads_and_writes_after_a_stop() {
+    let library = linked();
+    let mut input = digital::Input::create(&library, "in").unwrap();
+    input.add("Dev1/port0/line0").unwrap();
+    input.start().unwrap();
+    input.stop().unwrap();
+    assert_eq!(input.read(&mut [0], SECOND), Err(refused(stub::STOPPED)));
+    let mut output = digital::Output::create(&library, "out").unwrap();
+    output.add("Dev1/port0/line1").unwrap();
+    output.start().unwrap();
+    output.stop().unwrap();
+    assert_eq!(output.write(&[true], SECOND), Err(refused(stub::STOPPED)));
+}
+
+#[test]
+#[should_panic(expected = "the driver wrote every sample")]
+fn panics_on_a_short_write_of_lines() {
+    let library = linked();
+    let mut task = digital::Output::create(&library, "short").unwrap();
+    task.add("short/port0/line0").unwrap();
+    task.start().unwrap();
+    drop(task.write(&[false, true], SECOND));
+}
+
+#[test]
+#[should_panic(expected = "3 values do not fill 2 channels")]
+fn panics_on_lines_that_do_not_fill_the_channels() {
+    let library = linked();
+    let mut task = digital::Output::create(&library, "panic").unwrap();
+    task.add("Dev1/port0/line0:1").unwrap();
+    task.start().unwrap();
+    drop(task.write(&[false, true, false], SECOND));
+}
+
 /// The stub built as a shared library, which Cargo puts next to the test binary.
 fn stub_path() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
@@ -219,6 +365,8 @@ fn reads_through_the_loaded_driver() {
     // SAFETY: the stub has NI's functions and signatures.
     let library = unsafe { Library::open(Some(&stub_path())) }.unwrap();
     reads_a_ramp(&library);
+    reads_digital_lines(&library);
+    warns(&library);
 }
 
 #[test]

@@ -1,4 +1,5 @@
-//! NI's driver, loaded at run time, and its tasks.
+//! NI's driver, loaded at run time, and its tasks. A read or a write gives the
+//! driver's [`Warning`]; every other call treats a warning as success.
 
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -9,6 +10,7 @@ use std::sync::Arc;
 use types::time::Span;
 
 pub mod analog;
+pub mod digital;
 mod ffi;
 
 use ffi::{Functions, Handle};
@@ -72,12 +74,32 @@ impl Library {
     /// The driver's description of the last error on this thread.
     fn message(&self) -> String {
         let mut message = [0_u8; MESSAGE];
-        let size = u32::try_from(MESSAGE).expect("the message size fits a u32");
-        // SAFETY: `message` holds `size` bytes.
-        unsafe { (self.functions().error)(message.as_mut_ptr().cast(), size) };
-        CStr::from_bytes_until_nul(&message)
-            .map(|message| message.to_string_lossy().into_owned())
-            .unwrap_or_default()
+        // SAFETY: `message` holds `MESSAGE` bytes.
+        unsafe { (self.functions().error)(message.as_mut_ptr().cast(), size(MESSAGE)) };
+        utf8(&message)
+    }
+
+    /// The driver's description of `code`.
+    fn describe(&self, code: i32) -> String {
+        let mut message = [0_u8; MESSAGE];
+        // SAFETY: `message` holds `MESSAGE` bytes.
+        unsafe {
+            (self.functions().describe)(
+                code,
+                message.as_mut_ptr().cast(),
+                size(MESSAGE),
+            )
+        };
+        utf8(&message)
+    }
+
+    /// As [`Library::check`], and gives the driver's warning for a code above zero.
+    fn outcome(&self, code: i32) -> Result<Option<Warning>, Error> {
+        self.check(code)?;
+        Ok((code > 0).then(|| Warning {
+            code,
+            message: self.describe(code),
+        }))
     }
 
     /// Gives `Ok` for a code of zero or above (success or a warning), and the
@@ -91,8 +113,8 @@ impl Library {
     }
 }
 
-/// A task of the driver, which [`analog`] wraps by direction. Dropping it clears it
-/// in the driver.
+/// A task of the driver, which each public task type wraps. Dropping it clears it in
+/// the driver.
 #[derive(Debug)]
 struct Task {
     library: Library,
@@ -122,18 +144,40 @@ impl Task {
         self.library.functions()
     }
 
-    fn check(&self, code: i32) -> Result<(), Error> {
+    fn start(&mut self) -> Result<(), Error> {
+        // SAFETY: a live handle.
+        self.library
+            .check(unsafe { (self.functions().start_task)(self.handle) })
+    }
+
+    fn clock(&mut self, rate: f64, buffer: u64) -> Result<(), Error> {
+        // SAFETY: a live handle and a NUL-terminated string.
+        let code = unsafe {
+            (self.functions().clock)(
+                self.handle,
+                c"".as_ptr(),
+                rate,
+                ffi::RISING,
+                ffi::CONTINUOUS,
+                buffer,
+            )
+        };
         self.library.check(code)
     }
 
-    fn start(&mut self) -> Result<(), Error> {
-        // SAFETY: a live handle.
-        self.check(unsafe { (self.functions().start_task)(self.handle) })
+    /// Adds the lines `lines` names with `create`, one channel for each line.
+    fn lines(&self, create: ffi::Lines, lines: &str) -> Result<(), Error> {
+        let lines = text(lines);
+        // SAFETY: a live handle and NUL-terminated strings.
+        let code =
+            unsafe { create(self.handle, lines.as_ptr(), c"".as_ptr(), ffi::PER_LINE) };
+        self.library.check(code)
     }
 
     fn stop(&mut self) -> Result<(), Error> {
         // SAFETY: a live handle.
-        self.check(unsafe { (self.functions().stop_task)(self.handle) })
+        self.library
+            .check(unsafe { (self.functions().stop_task)(self.handle) })
     }
 
     /// Gives the number of channels in the task, from the driver, so a failed add
@@ -141,7 +185,7 @@ impl Task {
     fn channels(&self) -> Result<u32, Error> {
         let mut channels = 0;
         // SAFETY: a live handle, and `channels` is valid for one write.
-        self.check(unsafe {
+        self.library.check(unsafe {
             (self.functions().channels)(self.handle, &raw mut channels)
         })?;
         Ok(channels)
@@ -193,6 +237,13 @@ fn size(len: usize) -> u32 {
     u32::try_from(len).expect("at most u32::MAX values")
 }
 
+/// The NUL-terminated text at the start of `buffer`, or nothing when it has no NUL.
+fn utf8(buffer: &[u8]) -> String {
+    CStr::from_bytes_until_nul(buffer)
+        .map(|text| text.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// `text` as a C string.
 ///
 /// # Panics
@@ -207,6 +258,40 @@ fn text(text: &str) -> CString {
 fn seconds(span: Span) -> f64 {
     let millis = span.nanos().max(0).checked_div(1_000_000).unwrap_or(0);
     f64::from(u32::try_from(millis).unwrap_or(u32::MAX)) / 1000.0
+}
+
+/// A warning from NI's driver: the call did its work and reports a problem, such as
+/// samples lost to a buffer overwrite.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Warning {
+    /// NI's warning code, above zero.
+    pub code: i32,
+    /// NI's description of the warning.
+    pub message: String,
+}
+
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NI-DAQmx warning {}: {}", self.code, self.message)
+    }
+}
+
+/// What a read gave.
+#[must_use]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Read {
+    /// The number of values read into the buffer.
+    pub count: usize,
+    /// The driver's warning, when it gave one.
+    pub warning: Option<Warning>,
+}
+
+/// What a write gave.
+#[must_use]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Written {
+    /// The driver's warning, when it gave one.
+    pub warning: Option<Warning>,
 }
 
 /// Why a call to NI's driver failed.
