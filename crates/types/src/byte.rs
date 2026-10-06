@@ -120,12 +120,12 @@ impl Error {
     #[must_use]
     pub fn fix(&self) -> String {
         match self {
-            Self::Syntax => "Write a size such as \"200GiB\" or \"1.5GiB\"".into(),
+            Self::Syntax => "Write a size such as 200GiB or 1.5GiB".into(),
             Self::Unit { .. } => {
                 "Use a unit such as `MiB` or `GiB`, with exact case".into()
             }
             Self::Fraction => "Round the size to whole bytes".into(),
-            Self::Range { largest } => format!("Use at most \"{largest}\""),
+            Self::Range { largest } => format!("Use at most {largest}"),
         }
     }
 }
@@ -399,7 +399,7 @@ mod tests {
             (
                 Error::Syntax,
                 "expected a number and a unit, such as 1023B, 1.5GiB, or 200GiB",
-                "Write a size such as \"200GiB\" or \"1.5GiB\"",
+                "Write a size such as 200GiB or 1.5GiB",
             ),
             (
                 Error::Unit {
@@ -427,7 +427,7 @@ mod tests {
                     largest: Size::from_bytes(u64::MAX / (1 << 40) * (1 << 40)),
                 },
                 "expected a size of at most 16777215TiB",
-                "Use at most \"16777215TiB\"",
+                "Use at most 16777215TiB",
             ),
         ] {
             assert_eq!(error.to_string(), message);

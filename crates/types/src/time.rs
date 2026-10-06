@@ -647,8 +647,8 @@ impl FromStr for Rate {
 pub enum Error {
     /// The text is not RFC 3339 with an offset and up to nine fraction digits.
     Stamp,
-    /// The text is RFC 3339, but its date or time does not exist, such as
-    /// `2026-02-30` or a leap second.
+    /// The text is RFC 3339, but its date does not exist, such as `2026-02-30`, or a
+    /// field is past its limit, such as the leap second `23:59:60`.
     Date,
     /// The time is before 1677-09-21T00:12:43.145224192Z or after
     /// 2262-04-11T23:47:16.854775807Z, which a [`Stamp`] cannot hold.
@@ -687,8 +687,8 @@ impl Error {
             Self::Long => "Use a span from -106751d to 106751d",
             Self::Range => "Write a range as `<start>/<end>`",
             Self::Reversed => "Put the earlier time first",
-            Self::Zero => "Use a rate above zero",
-            Self::Period => "Use a rate from one sample in 106751d to 1 GHz",
+            Self::Zero => "Use a numerator and a denominator above zero",
+            Self::Period => "Use a rate from one sample in 106751d to 1000MHz",
         }
     }
 }
@@ -699,7 +699,7 @@ impl fmt::Display for Error {
             Self::Stamp => {
                 "a time is not RFC 3339 with an offset and up to nine fraction digits"
             }
-            Self::Date => "a date or time does not exist",
+            Self::Date => "a date does not exist, or a field is past its limit",
             Self::Era => "a time is outside the range of a stamp",
             Self::Span => "a span is not a number and a unit",
             Self::Fraction => "a span is not a whole number of nanoseconds",
@@ -735,7 +735,7 @@ mod tests {
             ),
             (
                 Error::Date,
-                "a date or time does not exist",
+                "a date does not exist, or a field is past its limit",
                 "Use a date that exists, an hour to 23, and minutes and seconds to 59",
             ),
             (
@@ -772,12 +772,12 @@ mod tests {
             (
                 Error::Zero,
                 "a rate has a zero numerator or denominator",
-                "Use a rate above zero",
+                "Use a numerator and a denominator above zero",
             ),
             (
                 Error::Period,
                 "the sample period of a rate is under 1 ns or longer than a span",
-                "Use a rate from one sample in 106751d to 1 GHz",
+                "Use a rate from one sample in 106751d to 1000MHz",
             ),
         ] {
             assert_eq!(error.to_string(), message);
@@ -1063,6 +1063,8 @@ mod tests {
                 "-9223372036.854775809s",
                 "106752d",
                 "999999999999999999999999999999999999999999d",
+                "1000000000000000000000000000000d",
+                "200000000000000000000000000000000000000ns",
             ] {
                 assert_eq!(text.parse::<Span>(), Err(Error::Long), "{text}");
             }
