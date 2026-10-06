@@ -131,15 +131,14 @@ impl<'a> View<'a> {
     /// O(m log(n/m)) for the smaller m and larger n of the frame's series and the
     /// mask's entries.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &'a [u8])> + use<'a> {
-        let (_, descriptors, body) = split(&self.frame.0);
-        let (every, entries) = match &self.mask.held {
-            Held::Every => (descriptors.len(), &[][..]),
-            Held::Listed { entries, .. } => (0, &entries[..]),
+        let Held::Listed { entries, .. } = &self.mask.held else {
+            return Series::Every(self.frame.iter());
         };
-        (0..every).chain(join(descriptors, entries)).map(move |n| {
+        let (_, descriptors, body) = split(&self.frame.0);
+        Series::Listed(join(descriptors, entries).map(move |n| {
             let (start, end) = bounds(descriptors, n);
             (to_usize(lead(&descriptors[n])), &body[start..end])
-        })
+        }))
     }
 
     /// The charge of a frame of only the view's series (CREDIT RULES): what a remote
@@ -160,6 +159,30 @@ impl<'a> View<'a> {
             bytes = next_end(bytes, end - start);
         }
         charge_of(body_start(ranges, series) + bytes)
+    }
+}
+
+/// The series of a view: those of the whole frame, or those of the listed entries.
+enum Series<E, L> {
+    Every(E),
+    Listed(L),
+}
+
+impl<T, E: Iterator<Item = T>, L: Iterator<Item = T>> Iterator for Series<E, L> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        match self {
+            Self::Every(series) => series.next(),
+            Self::Listed(series) => series.next(),
+        }
+    }
+
+    fn fold<B, F: FnMut(B, T) -> B>(self, init: B, f: F) -> B {
+        match self {
+            Self::Every(series) => series.fold(init, f),
+            Self::Listed(series) => series.fold(init, f),
+        }
     }
 }
 
@@ -324,6 +347,12 @@ mod tests {
         let frame = draft.freeze(Path::Live);
         let mask = Mask::new(&first, [Slot::new(1)]);
         let _view = View::new(&frame, &mask);
+    }
+
+    #[test]
+    fn a_view_goes_to_another_thread() {
+        fn sendable<T: Send>() {}
+        sendable::<View<'static>>();
     }
 
     #[test]

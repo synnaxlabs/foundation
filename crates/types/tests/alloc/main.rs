@@ -98,13 +98,21 @@ fn read_a_view(pool: &block::Pool, set: &KeySet) {
     let frame = Draft::new(pool, set, Form::Raw, &SERIES)
         .expect("the pool holds the frame")
         .freeze(Path::Live);
-    let mask = Mask::new(set, [set.entries()[2].slot]);
+    let narrow = Mask::new(set, [set.entries()[2].slot]);
+    let full = Mask::new(set, set.entries().iter().map(|entry| entry.slot));
     let (read, allocations) = ALLOCATOR.count(|| {
-        let view = View::new(&frame, &mask);
+        let view = View::new(&frame, &narrow);
         let read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
         assert_eq!(view.charge(), 192, "the view charges both series");
-        read
+        let view = View::new(&frame, &full);
+        let full_read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
+        assert_eq!(
+            view.charge(),
+            frame.charge(),
+            "a full view charges the frame"
+        );
+        (read, full_read)
     });
     assert_eq!(allocations, 0, "the view allocated");
-    assert_eq!(read, 32, "the view reads the index and key 3");
+    assert_eq!(read, (32, 32), "each view reads the index and key 3");
 }
