@@ -1942,7 +1942,9 @@ How to read this record:
   the entries at its end. A removed file takes space until the removal is durable. The
   monotonic clock starts again and the wall runs on. `join` on a thread that a crash
   ended panics, because no process joins its own threads after it dies. Built by
-  `simulation` in #114, #535, #580, and #763.
+  `simulation` in #114, #535, #580, and #763. Amended (2026-10-06, #876): as on Linux,
+  the writes that a failed `sync` covers stay in the cache, clean, until a power cut.
+  A read sees them, and only a later write on their sector makes a `sync` write them.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes

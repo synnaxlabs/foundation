@@ -69,7 +69,7 @@ pub(crate) struct File {
     len: u64,
     /// The sectors written, by index. A missing sector holds zeros.
     sectors: BTreeMap<u64, Sector>,
-    /// The sectors with more than one version.
+    /// The sectors with writes that are not durable.
     dirty: BTreeSet<u64>,
     /// The descriptors and the calls in flight that use the file.
     holds: u64,
@@ -81,11 +81,14 @@ pub(crate) struct File {
     durable: bool,
 }
 
-/// The durable bytes of a sector, and the writes on it since then in one order that
-/// the times of their calls allow. A write that overlapped another in flight can be
-/// in the order as up to three parts, each at its own place.
+/// The durable bytes of a sector, its clean bytes in the cache, and the writes on it
+/// since then in one order that the times of their calls allow. A write that
+/// overlapped another in flight can be in the order as up to three parts, each at its
+/// own place.
 struct Sector {
     durable: [u8; env::files::SECTOR],
+    /// Differs from `durable` only after a sync that failed.
+    cached: [u8; env::files::SECTOR],
     writes: Vec<Write>,
 }
 
@@ -278,7 +281,7 @@ impl Disk {
     /// that held the files, and each file that only a hold kept is freed. After a
     /// `Power` crash, each directory goes back to its durable entries, what they no
     /// longer reach is freed, and each sector keeps its durable bytes or its bytes
-    /// after one write since then, by `rng`.
+    /// after one write that no sync covered, by `rng`.
     pub(crate) fn crash(&mut self, crash: Crash, rng: &mut Rng) {
         let inodes: Vec<u64> = self.inodes.keys().copied().collect();
         for inode in inodes {
@@ -340,7 +343,7 @@ impl Disk {
             }
             if let Inode::File(file) = &mut inode {
                 file.linked = true;
-                file.settle(u64::MAX, |count| rng.below(count));
+                file.cut_power(rng);
             }
             self.inodes.insert(key, inode);
         }
@@ -393,6 +396,7 @@ impl File {
             }
             let zeros = || Sector {
                 durable: [0; env::files::SECTOR],
+                cached: [0; env::files::SECTOR],
                 writes: Vec::new(),
             };
             let found = self.sectors.entry(sector).or_insert_with(zeros);
@@ -446,14 +450,24 @@ impl File {
 
     /// Makes durable, in each sector, the writes before a random place up to the last
     /// write that ended before tick `started`, by `rng`, as a sync that fails. The
-    /// writes past that place that ended before tick `started` are lost.
+    /// writes past that place up to there stay in the cache, clean: a read sees them,
+    /// and only a later write on their sector makes a sync write them.
     pub(crate) fn tear(&mut self, started: u64, rng: &mut Rng) {
         self.settle(started, |count| rng.below(count));
     }
 
+    /// Keeps in each sector its durable bytes or its bytes after one write that no
+    /// sync covered, by `rng`, and empties the cache, as a power cut does.
+    fn cut_power(&mut self, rng: &mut Rng) {
+        self.settle(u64::MAX, |count| rng.below(count));
+        for sector in self.sectors.values_mut() {
+            sector.cached = sector.durable;
+        }
+    }
+
     /// In each sector, makes durable the first writes up to the last that ended
     /// before tick `started`, as many as `pick` gives for the count of choices, and
-    /// drops the others up to there that ended before tick `started`.
+    /// leaves the cache with each write up to there.
     fn settle(&mut self, started: u64, mut pick: impl FnMut(u64) -> u64) {
         for sector in mem::take(&mut self.dirty) {
             let found = (self.sectors.get_mut(&sector))
@@ -465,13 +479,9 @@ impl File {
                 if let Some(durable) = kept.checked_sub(1) {
                     found.durable = writes[durable].after;
                 }
-                *writes = (mem::take(writes).into_iter().enumerate())
-                    .filter(|(at, write)| {
-                        *at > last || (*at >= kept && write.written >= started)
-                    })
-                    .map(|(_, write)| write)
-                    .collect();
-                found.replay(0);
+                // The writes left were put over these bytes, so need no replay.
+                found.cached = writes[last].after;
+                writes.drain(..=last);
             }
             if !found.writes.is_empty() {
                 self.dirty.insert(sector);
@@ -531,14 +541,14 @@ impl Sector {
     fn last(&self) -> &[u8; env::files::SECTOR] {
         self.writes
             .last()
-            .map_or(&self.durable, |write| &write.after)
+            .map_or(&self.cached, |write| &write.after)
     }
 
     /// Puts each write from place `from` on over the sector before it.
     fn replay(&mut self, from: usize) {
         for at in from..self.writes.len() {
             let (before, rest) = self.writes.split_at_mut(at);
-            let mut after = before.last().map_or(self.durable, |write| write.after);
+            let mut after = before.last().map_or(self.cached, |write| write.after);
             let write = &mut rest[0];
             after[write.covered.clone()].copy_from_slice(&write.bytes);
             write.after = after;
@@ -628,8 +638,7 @@ mod tests {
                 let mut file = file();
                 file.write(0, &[1; 512], 1, 2, false, &mut rng);
                 file.sync(2);
-                // As at a power cut: keep one version that is still in play.
-                file.tear(u64::MAX, &mut rng);
+                file.cut_power(&mut rng);
                 file.bytes(0..SECTOR)
             })
             .collect();
@@ -654,19 +663,16 @@ mod tests {
     }
 
     #[test]
-    fn a_sync_that_fails_keeps_each_write_that_ended_after_it_started() {
-        let kept: BTreeSet<Vec<u8>> = (0..64)
-            .map(|seed| {
-                let mut rng = Rng::from_seed(seed);
-                let mut file = file();
-                file.write(256, &[1; 256], 2, 3, false, &mut rng);
-                file.write(0, &[2; 256], 1, 5, false, &mut rng);
-                file.tear(4, &mut rng);
-                file.bytes(0..SECTOR)
-            })
-            .collect();
-        let expected = [[[2; 256], [0; 256]].concat(), [[2; 256], [1; 256]].concat()];
-        assert_eq!(kept, BTreeSet::from(expected));
+    fn a_read_after_a_sync_that_fails_sees_each_write() {
+        for seed in 0..64 {
+            let mut rng = Rng::from_seed(seed);
+            let mut file = file();
+            file.write(256, &[1; 256], 2, 3, false, &mut rng);
+            file.write(0, &[2; 256], 1, 5, false, &mut rng);
+            file.tear(4, &mut rng);
+            let expected = [[2; 256], [1; 256]].concat();
+            assert_eq!(file.bytes(0..SECTOR), expected, "seed {seed}");
+        }
     }
 
     #[test]
@@ -692,7 +698,7 @@ mod tests {
                 let mut file = file();
                 file.write(0, &[2; 512], 1, 2, false, &mut rng);
                 file.write(0, &[1; 512], 1, 3, false, &mut rng);
-                file.tear(u64::MAX, &mut rng);
+                file.cut_power(&mut rng);
                 file.bytes(0..SECTOR)
             })
             .collect();
