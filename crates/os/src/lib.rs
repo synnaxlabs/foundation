@@ -3,8 +3,11 @@
 //! allowed to call them.
 
 use std::fmt;
+use std::path::Path;
 
 mod cores;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod files;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[expect(unsafe_code, reason = "a pool's memory is an OS mapping")]
 pub mod memory;
@@ -12,6 +15,9 @@ mod shards;
 mod thread;
 mod threads;
 mod unwind;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use files::Disk;
 
 /// Shards on OS threads, each with its own Tokio runtime. The core count is read once
 /// from the thread that calls this. On Linux it is the size of the affinity set, and
@@ -46,17 +52,42 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
     Ok(env::threads::Threads::new(threads::Driver::new(cores)))
 }
 
+/// The real disk under `dir/data`, which it makes when it is not there, and the
+/// handle of its I/O thread. `os` keeps its own entries in `dir`, so give it a
+/// directory that nothing else uses. `threads` starts I/O thread `name`, which runs
+/// each call of the disk and of its files in the order they reach it, and ends after
+/// the disk and its files drop. Give each shard a disk of its own.
+///
+/// # Errors
+///
+/// - [`Error::Dir`] when the OS cannot open `dir`, or open or make `dir/data`.
+/// - [`Error::Thread`] when the I/O thread cannot start.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn files(
+    dir: &Path,
+    threads: &env::threads::Threads,
+    name: &str,
+) -> Result<(Disk, env::thread::Handle), Error> {
+    Disk::new(dir, threads, name)
+}
+
 /// Why `os` could not build a seam.
 #[derive(Debug)]
 pub enum Error {
     /// The OS could not give the cores of the calling thread.
     Cores(std::io::Error),
+    /// The OS could not open or make the data directory.
+    Dir(std::io::Error),
+    /// The I/O thread could not start.
+    Thread(env::thread::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cores(e) => write!(f, "cannot read the cores of this thread: {e}"),
+            Self::Dir(e) => write!(f, "cannot open the data directory: {e}"),
+            Self::Thread(e) => write!(f, "{e}"),
         }
     }
 }
@@ -64,7 +95,8 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Cores(e) => Some(e),
+            Self::Cores(e) | Self::Dir(e) => Some(e),
+            Self::Thread(e) => std::error::Error::source(e),
         }
     }
 }
@@ -82,5 +114,14 @@ mod tests {
         );
         let source = std::error::Error::source(&e).map(ToString::to_string);
         assert_eq!(source.as_deref(), Some("no affinity"));
+    }
+
+    #[test]
+    fn a_thread_error_shows_as_itself() {
+        let name = "files".into();
+        let reason = "no memory".into();
+        let e = Error::Thread(env::thread::Error::Start { name, reason });
+        assert_eq!(e.to_string(), "cannot start thread files: no memory");
+        assert!(std::error::Error::source(&e).is_none());
     }
 }

@@ -4,7 +4,7 @@
 use types::time::Span;
 
 use super::ffi::BY_SCAN;
-use super::{Error, Library, Task, scans, seconds, size, values};
+use super::{Error, Library, Read, Task, Written, scans, seconds, size, values};
 
 /// A task that reads digital lines. Dropping it clears it in the driver.
 #[derive(Debug)]
@@ -70,9 +70,9 @@ impl Input {
     }
 
     /// Reads into `out` by scan (each line of the first sample, then each line of the
-    /// next), 0 for low and 1 for high, and gives the number of values read. It waits
-    /// up to `timeout`, cut to whole milliseconds, for `out` to fill. A driver warning
-    /// reads as success.
+    /// next), 0 for low and 1 for high, and gives the number of values read and the
+    /// driver's warning. It waits up to `timeout`, cut to whole milliseconds, for `out`
+    /// to fill.
     ///
     /// # Errors
     ///
@@ -83,7 +83,7 @@ impl Input {
     ///
     /// When `out` does not hold a whole number of samples of each line, more than
     /// `i32::MAX` samples of each line, or more than `u32::MAX` values.
-    pub fn read(&mut self, out: &mut [u8], timeout: Span) -> Result<usize, Error> {
+    pub fn read(&mut self, out: &mut [u8], timeout: Span) -> Result<Read, Error> {
         let task = &self.0;
         let channels = task.channels()?;
         let per_channel = scans(out.len(), channels);
@@ -104,8 +104,11 @@ impl Input {
                 &raw mut reserved,
             )
         };
-        task.check(code)?;
-        Ok(values(read, channels))
+        let warning = task.library.outcome(code)?;
+        Ok(Read {
+            count: values(read, channels),
+            warning,
+        })
     }
 }
 
@@ -161,9 +164,8 @@ impl Output {
     }
 
     /// Writes `values` by scan (each line of the first sample, then each line of the
-    /// next): `true` sets a line high. It waits up to `timeout`, cut to
-    /// whole milliseconds, for room in the driver's buffer. A driver warning reads as
-    /// success.
+    /// next): `true` sets a line high. It gives the driver's warning. It waits up to
+    /// `timeout`, cut to whole milliseconds, for room in the driver's buffer.
     ///
     /// # Errors
     ///
@@ -173,7 +175,7 @@ impl Output {
     ///
     /// When `values` does not hold a whole number of samples of each line, or holds
     /// more than `i32::MAX` samples of each line.
-    pub fn write(&mut self, values: &[bool], timeout: Span) -> Result<(), Error> {
+    pub fn write(&mut self, values: &[bool], timeout: Span) -> Result<Written, Error> {
         let task = &self.0;
         let per_channel = scans(values.len(), task.channels()?);
         let (mut written, mut reserved) = (0, 0);
@@ -191,8 +193,8 @@ impl Output {
                 &raw mut reserved,
             )
         };
-        task.check(code)?;
+        let warning = task.library.outcome(code)?;
         assert_eq!(written, per_channel, "the driver wrote every sample");
-        Ok(())
+        Ok(Written { warning })
     }
 }
