@@ -258,9 +258,9 @@ impl Endpoint {
         key: connection::Key,
         class: Class,
     ) -> Option<(Sender, Receiver)> {
-        let stream = self.start(now, key, Dir::Bi, class)?;
-        let receiver = Receiver::new(stream, class, self.message_bytes_max);
-        Some((Sender::new(stream, class), receiver))
+        let sender = self.start(now, key, Dir::Bi, class)?;
+        let receiver = Receiver::new(sender.key(), class, self.message_bytes_max);
+        Some((sender, receiver))
     }
 
     /// As [`Endpoint::open`], for a stream that only this side sends on.
@@ -270,8 +270,7 @@ impl Endpoint {
         key: connection::Key,
         class: Class,
     ) -> Option<Sender> {
-        let stream = self.start(now, key, Dir::Uni, class)?;
-        Some(Sender::new(stream, class))
+        self.start(now, key, Dir::Uni, class)
     }
 
     /// The next stream the peer opened on `key`'s connection, highest class first.
@@ -279,10 +278,7 @@ impl Endpoint {
     /// connection ended.
     pub(crate) fn accept(&mut self, key: connection::Key) -> Option<Incoming> {
         let connection = find(&mut self.connections, key).filter(|c| c.live())?;
-        let inner = &mut connection.inner;
-        connection
-            .streams
-            .accept(inner, key, self.message_bytes_max)
+        connection.streams.accept(key, self.message_bytes_max)
     }
 
     /// Puts `message` on the stream after the messages before it. `Ready` when the
@@ -485,21 +481,21 @@ impl Endpoint {
         self.epoch + Duration::from_nanos(now.0)
     }
 
-    /// Opens a stream of `class` in `dir` on the connection of `key`, unless it ended.
+    /// Opens a stream of `class` in `dir` on the connection of `key`, unless it ended,
+    /// and gives its sender.
     fn start(
         &mut self,
         now: Monotonic,
         key: connection::Key,
         dir: Dir,
         class: Class,
-    ) -> Option<stream::Key> {
+    ) -> Option<Sender> {
         let connection = find(&mut self.connections, key).filter(|c| c.live())?;
-        let id = connection.streams.open(&mut connection.inner, dir, class);
+        let sender = connection
+            .streams
+            .open(&mut connection.inner, key, dir, class);
         self.drive(key.handle, self.instant(now));
-        Some(stream::Key {
-            connection: key,
-            id: id?,
-        })
+        sender
     }
 
     /// Runs `call` on the streams of `key`'s connection with the pool and the event
