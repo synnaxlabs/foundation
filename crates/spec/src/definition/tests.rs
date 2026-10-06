@@ -84,7 +84,9 @@ fn refuses_a_newer_or_unknown_version() {
 
 #[test]
 fn refuses_an_unknown_kind() {
-    for tag in (0..=u8::MAX).filter(|t| ![ACCESS, CONNECTOR, REGION].contains(t)) {
+    for tag in (0..=u8::MAX)
+        .filter(|t| ![ACCESS, CONNECTOR, REGION, NODE_SETTINGS].contains(t))
+    {
         assert_eq!(
             Definition::decode(&[VERSION, tag]),
             Err(Error::Kind { at: 1, tag })
@@ -396,6 +398,78 @@ fn refuses_more_voters_than_the_bytes_left_can_hold() {
     assert_eq!(Definition::decode(&bytes), Err(Error::Truncated { at: 10 }));
 }
 
+fn settings(disk: Option<u64>, pool: Option<u64>) -> Definition {
+    let size = |b: Option<u64>| b.map(byte::Size::from_bytes);
+    let policy = node_settings::Policy::new(
+        selector(&["site_a.**", "!site_a.gw"]),
+        size(disk),
+        size(pool),
+    );
+    Definition::NodeSettings(policy.unwrap())
+}
+
+/// The bytes of a node settings policy, from its parts.
+fn settings_bytes(disk: u64, pool: u64) -> Vec<u8> {
+    let mut bytes = vec![VERSION, NODE_SETTINGS];
+    bytes.extend_from_slice(&2_u64.to_le_bytes());
+    text(&mut bytes, b"site_a.**");
+    text(&mut bytes, b"!site_a.gw");
+    bytes.extend_from_slice(&disk.to_le_bytes());
+    bytes.extend_from_slice(&pool.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn writes_the_documented_node_settings_layout() {
+    let both = settings(Some(1 << 30), Some(1 << 20));
+    assert_eq!(both.encode(), settings_bytes(1 << 30, 1 << 20));
+    assert_eq!(Definition::decode(&both.encode()), Ok(both));
+}
+
+#[test]
+fn writes_and_reads_no_budget_as_zero() {
+    let disk = settings(Some(7), None);
+    assert_eq!(disk.encode(), settings_bytes(7, 0));
+    assert_eq!(Definition::decode(&settings_bytes(7, 0)), Ok(disk));
+    let extremes = settings(Some(1), Some(u64::MAX));
+    assert_eq!(extremes.encode(), settings_bytes(1, u64::MAX));
+    assert_eq!(
+        Definition::decode(&settings_bytes(1, u64::MAX)),
+        Ok(extremes)
+    );
+}
+
+#[test]
+fn refuses_node_settings_with_no_budget() {
+    let bytes = settings_bytes(0, 0);
+    let error = Definition::decode(&bytes).unwrap_err();
+    let at = bytes.len() - 16;
+    assert_eq!(
+        error,
+        Error::Budget {
+            at,
+            error: node_settings::Error::NoBudget
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the budgets at byte {at}: {}",
+            node_settings::Error::NoBudget
+        )
+    );
+}
+
+#[test]
+fn refuses_node_settings_that_end_early() {
+    let bytes = settings_bytes(7, 9);
+    let end = bytes.len();
+    assert_eq!(
+        Definition::decode(&bytes[..end - 1]),
+        Err(Error::Truncated { at: end - 8 })
+    );
+}
+
 fn pattern() -> impl Strategy<Value = String> {
     let segment = prop_oneof![
         Just("*".to_owned()),
@@ -416,7 +490,19 @@ fn selectors() -> impl Strategy<Value = Selector> {
     })
 }
 
-fn policy_strategy() -> impl Strategy<Value = Definition> {
+fn settings_strategy() -> impl Strategy<Value = Definition> {
+    let budget = prop::option::of(prop_oneof![Just(0), Just(1), any::<u64>()]);
+    (selectors(), budget.clone(), budget).prop_filter_map(
+        "a policy refuses a zero budget or none",
+        |(select, disk, pool)| {
+            let size = |b: Option<u64>| b.map(byte::Size::from_bytes);
+            let policy = node_settings::Policy::new(select, size(disk), size(pool));
+            policy.ok().map(Definition::NodeSettings)
+        },
+    )
+}
+
+fn access_strategy() -> impl Strategy<Value = Definition> {
     (
         selectors(),
         selectors(),
@@ -457,7 +543,12 @@ fn region_strategy() -> impl Strategy<Value = Definition> {
 }
 
 fn definition() -> impl Strategy<Value = Definition> {
-    prop_oneof![policy_strategy(), connector_strategy(), region_strategy()]
+    prop_oneof![
+        access_strategy(),
+        connector_strategy(),
+        region_strategy(),
+        settings_strategy()
+    ]
 }
 
 proptest! {
