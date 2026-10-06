@@ -67,11 +67,13 @@ impl Clock {
     }
 
     /// Returns a future that completes at `deadline` or later, never before. A
-    /// deadline that has passed completes at once.
+    /// deadline that has passed completes at once. Make and poll the future on one
+    /// thread that `env` started.
     ///
     /// # Panics
     ///
-    /// On a thread that `env` did not start. Make and poll the future on one thread.
+    /// Under `sim`, on a thread that the sim did not start or that runs another node.
+    /// Under `os`, on a thread with no Tokio runtime that has a timer.
     ///
     /// ```
     /// async fn wait(clock: &env::clock::Clock, deadline: types::time::Monotonic) {
@@ -87,11 +89,12 @@ impl Clock {
     }
 
     /// Returns a future that completes when `span` has passed. A span of zero or less
-    /// completes at once.
+    /// completes at once. Make and poll the future on one thread that `env` started.
     ///
     /// # Panics
     ///
-    /// On a thread that `env` did not start. Make and poll the future on one thread.
+    /// Under `sim`, on a thread that the sim did not start or that runs another node.
+    /// Under `os`, on a thread with no Tokio runtime that has a timer.
     /// When `now` plus `span` is past the end of `Monotonic`.
     ///
     /// ```
@@ -128,11 +131,13 @@ pub trait Driver: Send + Sync {
     /// The std [`Instant`] at `Monotonic(0)`. It never changes.
     fn epoch(&self) -> Instant;
 
-    /// Makes a timer bound to the executor of the calling thread.
+    /// Makes a timer bound to the executor of the calling thread. Call it only on a
+    /// thread that `env` started.
     ///
     /// # Panics
     ///
-    /// On a thread that `env` did not start, in every driver.
+    /// Under `sim`, on a thread that the sim did not start or that runs another node.
+    /// Under `os`, on a thread with no Tokio runtime that has a timer.
     fn timer(&self) -> Pin<Box<dyn Timer>>;
 }
 
