@@ -11,7 +11,6 @@
 //! region        := epoch:u64 count:u64 text*                                tag 3
 //! node_settings := select:patterns disk:u64 pool:u64                       tag 4
 //! compression   := select:patterns mode:u8                                  tag 5
-//! reduction     := select:patterns deadband:u64                             tag 6
 //! patterns      := count:u64 pattern*
 //! pattern       := excluded:u8 length:u64 UTF-8 bytes
 //! text          := length:u64 UTF-8 bytes
@@ -31,8 +30,7 @@
 //! A node settings budget of 0 bytes is no budget, because a policy cannot hold zero.
 //! A policy sets at least one budget.
 //!
-//! A compression `mode` is 0 auto, 1 raw, or 2 max. A `deadband` is the bits of an
-//! `f64`, finite and above zero.
+//! A compression `mode` is 0 auto, 1 raw, or 2 max.
 
 #![deny(
     clippy::indexing_slicing,
@@ -52,7 +50,6 @@ use crate::access::{Action, Actions, Policy};
 use crate::compression::{self, Mode};
 use crate::connector::Connector;
 use crate::node_settings;
-use crate::reduction::{self, Deadband};
 use crate::region::{Delegation, NoVoters};
 
 const VERSION: u8 = 1;
@@ -61,7 +58,6 @@ const CONNECTOR: u8 = 2;
 const REGION: u8 = 3;
 const NODE_SETTINGS: u8 = 4;
 const COMPRESSION: u8 = 5;
-const REDUCTION: u8 = 6;
 /// The fewest bytes a text takes: its length.
 const TEXT_MIN: usize = 8;
 /// The fewest bytes a pattern takes: its flag and its length.
@@ -81,8 +77,6 @@ pub enum Definition {
     NodeSettings(node_settings::Policy),
     /// A compression policy.
     Compression(compression::Policy),
-    /// A reduction policy.
-    Reduction(reduction::Policy),
 }
 
 impl Definition {
@@ -129,17 +123,8 @@ impl Definition {
             }
             Self::Compression(policy) => {
                 out.push(COMPRESSION);
-                patterns(&mut out, policy.select());
-                out.push(match policy.mode() {
-                    Mode::Auto => 0,
-                    Mode::Raw => 1,
-                    Mode::Max => 2,
-                });
-            }
-            Self::Reduction(policy) => {
-                out.push(REDUCTION);
-                patterns(&mut out, policy.select());
-                out.extend_from_slice(&policy.deadband().to_bits().to_le_bytes());
+                patterns(&mut out, &policy.select);
+                out.push(mode_byte(policy.mode));
             }
         }
         out
@@ -169,13 +154,24 @@ impl Definition {
             REGION => Self::Region(reader.region()?),
             NODE_SETTINGS => Self::NodeSettings(reader.node_settings()?),
             COMPRESSION => Self::Compression(reader.compression()?),
-            REDUCTION => Self::Reduction(reader.reduction()?),
             tag => return Err(Error::Kind { at, tag }),
         };
         if !reader.rest.is_empty() {
             return Err(Error::TrailingBytes { at: reader.at() });
         }
         Ok(definition)
+    }
+}
+
+/// Every compression mode, for decoding by [`mode_byte`].
+const MODES: [Mode; 3] = [Mode::Auto, Mode::Raw, Mode::Max];
+
+/// The byte that encodes `mode`.
+const fn mode_byte(mode: Mode) -> u8 {
+    match mode {
+        Mode::Auto => 0,
+        Mode::Raw => 1,
+        Mode::Max => 2,
     }
 }
 
@@ -342,21 +338,12 @@ impl<'a> Reader<'a> {
     fn compression(&mut self) -> Result<compression::Policy, Error> {
         let select = self.patterns()?;
         let at = self.at();
-        let mode = match self.byte()? {
-            0 => Mode::Auto,
-            1 => Mode::Raw,
-            2 => Mode::Max,
-            found => return Err(Error::Mode { at, found }),
-        };
-        Ok(compression::Policy::new(select, mode))
-    }
-
-    fn reduction(&mut self) -> Result<reduction::Policy, Error> {
-        let select = self.patterns()?;
-        let at = self.at();
-        let bits = self.u64()?;
-        reduction::Policy::new(select, f64::from_bits(bits))
-            .map_err(|Deadband(_)| Error::Deadband { at, bits })
+        let found = self.byte()?;
+        let mode = MODES
+            .into_iter()
+            .find(|mode| mode_byte(*mode) == found)
+            .ok_or(Error::Mode { at, found })?;
+        Ok(compression::Policy { select, mode })
     }
 
     fn access(&mut self) -> Result<Policy, Error> {
@@ -466,19 +453,12 @@ pub enum Error {
         /// Where the count of voters is.
         at: usize,
     },
-    /// A compression mode is not 0, 1, or 2.
+    /// A compression mode byte names no mode.
     Mode {
         /// Where the mode is.
         at: usize,
         /// The mode byte.
         found: u8,
-    },
-    /// A deadband is not a finite number above zero.
-    Deadband {
-        /// Where the deadband is.
-        at: usize,
-        /// The bits of the deadband, as `f64::to_bits` gives them.
-        bits: u64,
     },
     /// An access policy that does not allow `write` has an authority.
     Authority {
@@ -553,11 +533,10 @@ impl fmt::Display for Error {
                 write!(f, "the budgets at byte {at}: {error}")
             }
             Self::Mode { at, found } => {
-                write!(f, "compression mode {found} at byte {at} is not 0, 1, or 2")
-            }
-            Self::Deadband { at, bits } => {
-                let deadband = Deadband(f64::from_bits(*bits));
-                write!(f, "the reduction at byte {at}: {deadband}")
+                write!(
+                    f,
+                    "compression mode {found} at byte {at} is not a known mode"
+                )
             }
         }
     }

@@ -1438,9 +1438,7 @@ How to read this record:
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
   calculation with its own index. Raw and reduced data live side by side through
-  retention. A deadband is a finite number above zero; a sample is sent when it moves
-  by more than the deadband from the last sample sent. Anything else is refused as a
-  user mistake (#759).
+  retention.
 - **QUARANTINE** An out connector that gets a permanent rejection moves the frame to its
   quarantine (a hold on the original data plus an error record) and moves on.
   Operations list, retry, and drop it. Its size is a status channel. It is a library

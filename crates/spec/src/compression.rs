@@ -2,38 +2,21 @@
 
 use types::name::Selector;
 
-/// Sets the compression mode of the indexes that `select` matches.
+/// Sets the compression mode of the indexes that `select` matches. Every selector and
+/// mode make a valid policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
-    select: Selector,
-    mode: Mode,
-}
-
-impl Policy {
-    /// Makes a policy.
-    #[must_use]
-    pub const fn new(select: Selector, mode: Mode) -> Self {
-        Self { select, mode }
-    }
-
     /// The indexes the policy applies to.
-    #[must_use]
-    pub const fn select(&self) -> &Selector {
-        &self.select
-    }
-
+    pub select: Selector,
     /// The compression mode.
-    #[must_use]
-    pub const fn mode(&self) -> Mode {
-        self.mode
-    }
+    pub mode: Mode,
 }
 
-/// Which codecs the encoder may pick from. In each mode it still picks per vector,
-/// and raw is always a candidate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Which codecs the encoder may use for the selected indexes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Mode {
     /// The default codecs.
+    #[default]
     Auto,
     /// No compression.
     Raw,

@@ -7,6 +7,5 @@ pub mod compression;
 pub mod connector;
 pub mod definition;
 pub mod node_settings;
-pub mod reduction;
 pub mod region;
 pub mod tree;

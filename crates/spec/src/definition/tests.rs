@@ -85,15 +85,7 @@ fn refuses_a_newer_or_unknown_version() {
 #[test]
 fn refuses_an_unknown_kind() {
     for tag in (0..=u8::MAX).filter(|t| {
-        ![
-            ACCESS,
-            CONNECTOR,
-            REGION,
-            NODE_SETTINGS,
-            COMPRESSION,
-            REDUCTION,
-        ]
-        .contains(t)
+        ![ACCESS, CONNECTOR, REGION, NODE_SETTINGS, COMPRESSION].contains(t)
     }) {
         assert_eq!(
             Definition::decode(&[VERSION, tag]),
@@ -495,8 +487,10 @@ fn select() -> Selector {
 #[test]
 fn writes_the_documented_compression_layout() {
     for (mode, byte) in [(Mode::Auto, 0), (Mode::Raw, 1), (Mode::Max, 2)] {
-        let definition =
-            Definition::Compression(compression::Policy::new(select(), mode));
+        let definition = Definition::Compression(compression::Policy {
+            select: select(),
+            mode,
+        });
         let expected = select_bytes(COMPRESSION, &[byte]);
         assert_eq!(definition.encode(), expected);
         assert_eq!(Definition::decode(&expected), Ok(definition));
@@ -511,50 +505,22 @@ fn refuses_an_unknown_compression_mode() {
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        format!("compression mode 3 at byte {at} is not 0, 1, or 2")
+        format!("compression mode 3 at byte {at} is not a known mode")
     );
 }
 
 #[test]
-fn writes_the_documented_reduction_layout() {
-    let policy = reduction::Policy::new(select(), 0.5).unwrap();
-    let definition = Definition::Reduction(policy);
-    let expected = select_bytes(REDUCTION, &0.5_f64.to_bits().to_le_bytes());
-    assert_eq!(definition.encode(), expected);
-    assert_eq!(Definition::decode(&expected), Ok(definition));
-}
-
-#[test]
-fn refuses_a_deadband_that_is_not_finite_and_above_zero() {
-    for deadband in [0.0, -0.0, -2.0, f64::NAN, f64::INFINITY] {
-        let bits = deadband.to_bits();
-        let bytes = select_bytes(REDUCTION, &bits.to_le_bytes());
-        let at = bytes.len() - 8;
-        let error = Error::Deadband { at, bits };
-        assert_eq!(Definition::decode(&bytes), Err(error.clone()));
-        assert_eq!(
-            error.to_string(),
-            format!("the reduction at byte {at}: {}", Deadband(deadband))
-        );
-    }
+fn refuses_a_compression_that_ends_early() {
+    let bytes = select_bytes(COMPRESSION, &[]);
     assert_eq!(
-        Error::Deadband {
-            at: 9,
-            bits: (-2.0_f64).to_bits()
-        }
-        .to_string(),
-        "the reduction at byte 9: the deadband -2 is not a finite number above zero"
+        Definition::decode(&bytes),
+        Err(Error::Truncated { at: bytes.len() })
     );
 }
 
 #[test]
-fn refuses_a_reduction_that_ends_early() {
-    let bytes = select_bytes(REDUCTION, &1.0_f64.to_bits().to_le_bytes());
-    let end = bytes.len();
-    assert_eq!(
-        Definition::decode(&bytes[..end - 1]),
-        Err(Error::Truncated { at: end - 8 })
-    );
+fn defaults_to_the_auto_mode() {
+    assert_eq!(Mode::default(), Mode::Auto);
 }
 
 fn pattern() -> impl Strategy<Value = String> {
@@ -632,19 +598,7 @@ fn region_strategy() -> impl Strategy<Value = Definition> {
 fn compression_strategy() -> impl Strategy<Value = Definition> {
     let mode = prop_oneof![Just(Mode::Auto), Just(Mode::Raw), Just(Mode::Max)];
     (selectors(), mode).prop_map(|(select, mode)| {
-        Definition::Compression(compression::Policy::new(select, mode))
-    })
-}
-
-fn reduction_strategy() -> impl Strategy<Value = Definition> {
-    use prop::num::f64::{NORMAL, POSITIVE, SUBNORMAL};
-    let deadband = prop_oneof![
-        Just(f64::MIN_POSITIVE),
-        Just(f64::MAX),
-        POSITIVE | NORMAL | SUBNORMAL
-    ];
-    (selectors(), deadband).prop_map(|(select, deadband)| {
-        Definition::Reduction(reduction::Policy::new(select, deadband).unwrap())
+        Definition::Compression(compression::Policy { select, mode })
     })
 }
 
@@ -655,7 +609,6 @@ fn definition() -> impl Strategy<Value = Definition> {
         region_strategy(),
         settings_strategy(),
         compression_strategy(),
-        reduction_strategy(),
     ]
 }
 
