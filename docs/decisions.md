@@ -368,10 +368,10 @@ How to read this record:
   its body is a random `u32` and the chain continues from that value. A record never
   crosses the end of the area. Kind 0 is never valid.
   Offsets count bytes since the ring was made and never wrap; the place in the area
-  is the offset modulo the area length. The area is at least twice the largest record
-  less one block, so an empty ring takes any record. A ring whose head reaches the
-  end of the offsets is full for good. A body is at most `u32::MAX` bytes and at
-  least the table of one entry.
+  is the offset modulo the area length. The area is at least twice the largest
+  record, so a ring that holds only its restart record takes any record (#637). A
+  ring whose head reaches the end of the offsets is full for good. A body is at most
+  `u32::MAX` bytes and at least the table of one entry.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
@@ -415,9 +415,12 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. An entry has no part, one, or two; `append` takes them owned and drops
-  them when it fails (#582). A new ring has the same block at `seq` 0 in
-  both places, with the tail at offset 0 and a random chain value.
+  records. `Layout::entry_max` is the most bytes of parts that `append` takes in a
+  batch of one entry; a batch of more entries holds less. A user that appends an
+  entry alone checks at open that its largest one fits (#627). An entry has no
+  part, one, or two; `append` takes them owned and drops them when it fails (#582).
+  A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
+  and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later
@@ -454,6 +457,15 @@ How to read this record:
   bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
   record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
+- **LARGE FRAME (#191)** The home refuses a write whose bodies no record of the ring or
+  no block of the shard's pool holds, on either path, with `Large`. No seq moves and the
+  home stores no part of the frame. The waiting handoffs of the frame's indexes are
+  still recorded (HANDOFF RECORD). The writer splits the frame by samples or by indexes
+  and writes each part. The home never splits a frame, because a frame applies whole
+  (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
+  size is checked only when the bodies are appended, after the handoffs: a frame whose
+  handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
+  is known. Decided by the `write-path` builder (#191).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -523,7 +535,7 @@ How to read this record:
   and tries the commit again; after the last idle size the allocation fails with
   `Error::Refused`, a separate error from a full pool (the person on 2026-10-05: "I
   approve the separate error"). The carve counts do not change, the sizes given back
-  back, and a later allocation may succeed (#475, #542).
+  stay given back, and a later allocation may succeed (#475, #542).
 - **R9-D9** Atomic refcount. `Unique` is writable; `Block` is immutable after freeze. No
   copy-on-write.
 - **Performance rulebook** Rules 1 to 14 bind every implementing agent, the performance
@@ -544,7 +556,8 @@ How to read this record:
   are in mesh time; connectors convert device time. Each node publishes
   `<node>.clock.offset` and `<node>.clock.error`. Zero time config by default: sources
   are detected, and the clock follows the smallest measured bound, with no fixed
-  ranking. Supersedes: C6 fixed source choice (X36).
+  ranking. Supersedes: C6 fixed source choice (X36). Amended by ESTIMATE COMBINE: the
+  clock follows more than half of the bounds, not the smallest one (#344).
 - **R6 TIME LOCKED** Own sans-I/O estimator over our transport. The bound is half the
   round trip. Keep the fastest exchange per source, combine sources, widen the bound
   with drift, slew only. Sources are read directly: mesh peers, GPS, PPS with NMEA, the
@@ -566,17 +579,23 @@ How to read this record:
   its last 8 measurements and offers the one with the smallest bound now. This reads R6
   TIME LOCKED's "keep the fastest exchange" with drift: an old fast exchange loses to a
   fresh slower one. `combine` takes one `Filter` per source and returns the hull of the
-  offsets inside the most bounds (Marzullo). It fails when no offset is inside the
-  bounds of more than half of the sources that vote. This reads C6's "follows the
-  smallest measured bound": when sources agree, the result is never wider than the
-  narrowest. The result holds the true offset when the bounds that hold it are a
-  majority of the sources that vote, and every other bound that votes misses them.
-  Decided by the `time` builder (#49). Each
-  source votes: a source with no measurement agrees with no offset, and it votes beside
-  the known bounds, or beside the unknown bounds when no bound is known. So before its
-  first estimate a clock waits until more than half of its sources agree, and one
-  source that answers first cannot set mesh time. The person decided on 2026-10-05
-  ("clock question si approved at whatever path you think"), #488. A device's readings
+  offsets inside more than half of the bounds that vote. A known result holds the true
+  offset when more than half of the bounds that vote hold it, whatever the other bounds
+  are. It can be wider than the narrowest bound, so C6's "follows the smallest measured
+  bound" no longer holds. Cost: PPS at ±100 ns beside two peers at ±1 ms, all centered
+  on the true offset, gives ±1 ms, not ±100 ns. Lost: the hull of the offsets inside the
+  most bounds (Marzullo), and NTP's selection, which first tries the offsets inside
+  every bound. When one lying source of three put a small bound inside the honest
+  overlap, each followed the liar. A threshold that also counts the sources with no
+  measurement lost too: beside two of them, it needs all three bounds of that case. The
+  person decided on 2026-10-05 ("a is fine"), #344. Amends C6 and X36. `combine` fails
+  when no offset is inside the bounds of more than half of the sources that vote.
+  Decided by the `time` builder (#49). Each source votes: a source with no measurement
+  agrees with no offset, and it votes beside the known bounds, or beside the unknown
+  bounds when no bound is known. So before its first estimate a clock waits until more
+  than half of its sources agree, and one source that answers first cannot set mesh
+  time. The person decided on 2026-10-05 ("clock question si approved at whatever path
+  you think"), #488. A device's readings
   go to the oscillator fit (`Overlap`), never to `combine`. Node
   sources keep `Filter`, not `Overlap`: a network exchange puts the true offset at about
   the same place in each bracket, so an overlap gains little, and a broken drift bound
@@ -594,8 +613,11 @@ How to read this record:
   the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
   Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. When only unknown bounds vote, the estimate
-  is unknown too, at the center of the offsets inside the most of them. Approved by the
-  coordinator (#437). `Measurement::unknown(at, offset)` gives
+  is unknown too, at the center of the same hull. Approved by the coordinator (#437),
+  with the hull of #344. When drift grows unknown bounds so that this hull spans more
+  than 73000 days, no unknown estimate holds it, and its center can miss an offset that
+  every bound holds. The estimate is then at the center of the offsets inside the most
+  bounds. Decided by the `time` builder (#344). `Measurement::unknown(at, offset)` gives
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
   (#144). An exchange with an error over 36500 days fails with `Bound`, and an overlap
@@ -626,7 +648,9 @@ How to read this record:
   approve", #479). The units are `B`, `KiB`, `MiB`, `GiB`, and `TiB`, with exact case:
   `GB` and `Gb` are errors, because they mean other sizes. Input takes no sign. Output
   uses the largest unit that divides the size, with no fraction: `1.5GiB` is written
-  `1536MiB`, and zero is `0B` (#505).
+  `1536MiB`, and zero is `0B` (#505). The reader's `byte::Error` gives the data for a
+  fix: where the unit starts, the unit a text likely means (`GiB` for `gib` or `GB`,
+  none for `Gb`), and the largest size in the text's unit (#650).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
@@ -651,10 +675,11 @@ How to read this record:
 - **CLOCK HOLDOVER (2026-10-05)** Before its first estimate, the clock is unsynced and
   a reader gets no mesh time. After it, when `combine` fails (no majority, or no sources
   after a remove), the clock holds over: it keeps its last estimate and its error grows
-  by drift. It never follows the largest group or one side of a tie.
-  `push` returns the status, `Reader::status` gives it on any shard, and `node`
-  publishes it. The next majority ends the holdover. Decided by the `time` builder
-  (#142). The coordinator approved `Reader::status` within it (#598).
+  by drift. It never follows the largest group or one side of a tie. `Reader::status`
+  gives the status on any shard, and `node` publishes it. `push` and `remove` do not
+  also return it: one value gets one way to read it (#634). The next majority ends the
+  holdover. Decided by the `time` builder (#142). The coordinator approved
+  `Reader::status` within it (#598).
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
   not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
@@ -690,7 +715,14 @@ How to read this record:
   the OS bound to the error of its own read, so the error is never less than the OS
   bound. An error over 36500 days reads as unknown, the same as no bound (the
   coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
-  lint denies it elsewhere (BQ20).
+  lint denies it elsewhere (BQ20). On Linux the bound is the kernel's `maxerror`, and
+  only chrony and ntpd compute it. `systemd-timesyncd` sets it to 0 at each update,
+  while the clock can still be 0.4 s off. So a known OS bound on Linux needs chrony or
+  ntpd, and the operator docs must say so. A host with timesyncd (the default on Debian)
+  gives a false bound until its operator installs chrony. Lost: the Linux bound always
+  unknown, because it also drops the good bound from chrony and ntpd; detecting
+  timesyncd, because it reaches outside `env::wall` and is a guess. The person decided
+  on 2026-10-06 ("A is still fine"), #689.
 - **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its
   OS reading and its OS bound. Cold nodes then vote with each other's OS clocks, and
   each waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown
@@ -937,15 +969,21 @@ How to read this record:
   enters only through `tick`: a node draws its election timeout on the first tick
   after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
   its own voter list votes and follows, but never campaigns while that configuration
-  is committed. `step` does not check
-  that a sender is a voter (a voter can learn late that a peer joined), so the caller
-  authenticates the sender and decides which nodes may send. When the term of the
-  last entry is above `hard.term`, `Raft::new` starts at that term with no vote. The
-  node sends nothing before its write, so no peer counted a vote or an answer that a
-  lost `hard` held. The caller writes `hard` and `entries` in any order, with no
-  atomic write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that
-  each caller must keep and that shows only at a restart. The person decided on
-  2026-10-05 ("I approve long term fix on 522"), #522.
+  is committed. `step` does not check that a sender is a voter (a voter can learn late
+  that a peer joined), so the caller authenticates the sender and decides which nodes
+  may send. A node that may send can stop a group for good with one message in term
+  `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
+  as it is. It trusts its voters: one that lies can already break safety, because a
+  false `AppendReply` counts as held, so a bound on the term would guard nothing. No
+  bound on a term jump spares an honest node that was down, either. Lost: a sender
+  proves a term jump with a signed term, which needs `mesh`. The person decided on
+  2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
+  `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
+  before its write, so no peer counted a vote or an answer that a lost `hard` held. The
+  caller writes `hard` and `entries` in any order, with no atomic write. Lost: the
+  `Ready` doc requires `hard` before `entries`, a patch that each caller must keep and
+  that shows only at a restart. The person decided on 2026-10-05 ("I approve long term
+  fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -958,7 +996,12 @@ How to read this record:
   be past the log of a node that is behind. An `Append` with an entry whose term is
   above the message's term is `Error::TermBehindLog`: no leader sends one, so the
   sender is faulty. The conformance oracle changed to match; the person decided on
-  2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  2026-10-05 ("a is fine", #232). A heartbeat or an append of this node's term from a
+  node other than the leader it knows is `Error::SecondLeader`: one term has one
+  leader, and a node keeps the leader of its term until the term ends, through a
+  step-down and a campaign. A node that knows no leader of its term, after a restart or
+  its vote, takes the first. The person approved it on 2026-10-05 ("Yeah that's fine",
+  #391). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -966,6 +1009,19 @@ How to read this record:
   written. Batch size (64 entries) and the number of appends in flight per follower
   (8) are constants, not `Config` fields: nothing measured asks for a knob. `Message`
   and `Body` are `Clone`, not `Copy`, because an append carries entries.
+- **RAFT DURABILITY (#352)** `raft` is safe only when a disk keeps what it synced. The
+  disk owns that (`env::files`); `mesh` writes each `Ready` there. `raft` does not
+  find a loss. When a follower's disk lost synced entries, and what it applied of
+  them, the leader still counts them. While the leader's commit is below the
+  follower's last entry, the follower follows, and the leader can commit an entry
+  that fewer than a quorum hold. Once the commit passes that entry, each heartbeat
+  gives the follower `Error::IndexPastLog`; an append to it fails with no error. A
+  loss that keeps `applied` fails at `Raft::new` with `Error::AppliedPastLog`. `node`
+  shows the error in its status (#648). Lost: the leader sends again from below what
+  it counted, which lowers its count under a commit that a quorum may no longer
+  hold. The person left the choice to the coordinator on 2026-10-05 ("your choice",
+  #352 item 3), and the coordinator chose this. Later, at low priority: the leader
+  learns the follower's real last index and stops counting lost entries (#663).
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
@@ -1347,13 +1403,17 @@ How to read this record:
 
 ### 1.12 Access, identity, and secrets
 
-- **C8** A subject is anything that reads or writes (person, agent, program,
-  connector), named in the tree and governed by its region. People, agents, and
-  programs authenticate with keys; a node vouches for its connectors. Access is
-  allow-only, default deny, with no conflicts: `access { subjects, select, allow,
-  authority }`. Actions: read, write, plan, apply, secret, admin. No groups or roles; a
-  group is a selector over subject names. A connector may write channels under its own
-  name by default. `plan` lists access changes separately. SSO comes later.
+- **C8** A subject is anything that reads or writes (person, agent, program, connector),
+  named in the tree and governed by its region. People, agents, and programs
+  authenticate with keys; a node vouches for its connectors. Access is allow-only,
+  default deny, with no conflicts:
+  `access "<name>" { subjects, select, allow, authority }`. Every access policy has a
+  name: it is unique among access policies, it decides the governing region, and the
+  tree key is `<name>.@access` (for example `site_a.operators.@access`). The person
+  approved the name on 2026-10-06 ("Yes I confirm", #729). Actions: read, write, plan,
+  apply, secret, admin. No groups or roles; a group is a selector over subject names. A
+  connector may write channels under its own name by default. `plan` lists access
+  changes separately. SSO comes later.
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -1563,15 +1623,16 @@ How to read this record:
   scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
   (#37) gives files under one data directory, with owned blocks and a sync that
   poisons the file on failure (S4). One handle at a time holds a file open to write,
-  until it drops and its calls end; another write open fails with `Busy` (#392). Each
-  `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP sockets
-  that move GSO and GRO batches with ECN and the local address, TCP streams, and
+  until it drops and its calls end; another write open fails with `Busy` (#392).
+  `File::close` ends after the calls of its handle end; a drop closes without a wait
+  (#516). Each `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP
+  sockets that move GSO and GRO batches with ECN and the local address, TCP streams, and
   listeners. `env::serial` (#431) gives serial ports that move bytes at the line rate,
   with 8 data bits, a parity, and stop bits. Framing belongs to the protocol: a USB
   adapter hides the gap between frames, so a seam that split frames would act
-  differently on `os` and `sim`. A socket, listener, or port may move to another
-  thread before its first poll. The first poll binds it to its thread, and a poll on
-  another thread panics.
+  differently on `os` and `sim`. A socket, listener, or port may move to another thread
+  before its first poll. The first poll binds it to its thread, and a poll on another
+  thread panics.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -1608,7 +1669,10 @@ How to read this record:
   future drops in its own `catch_unwind`, so a second panic never aborts the process.
   The error gives every panic, the first one first: a drop that panics is a defect of
   its own, even when an earlier panic caused the drop. `Sim::crash` panics with the
-  same messages after the crash ends. Built by `simulation` in #548.
+  same messages after the crash ends. At a crash, the start of each thread that has
+  not run drops the same way, after the futures. A thread that a drop starts on the
+  crashing node ends in the crash and never runs. Built by `simulation` in #548 and
+  #666.
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
@@ -2245,7 +2309,8 @@ follows the smallest measured bound with no fixed ranking and detects sources.
 Resolution: the time policy lists only the peer nodes a node may use as mesh
 references (default: its region's voters). Local hardware sources are found
 automatically. The estimator always follows the smallest bound. Basis: R6 TIME LOCKED,
-TIME ADAPTERS.
+TIME ADAPTERS. Amended by ESTIMATE COMBINE: the estimator follows more than half of the
+bounds, not the smallest one (#344).
 
 **X37. Bootstrap peers and relays.**
 Conflict: D7 puts bootstrap peers in the file and lets any public node relay. R5 drops
@@ -2474,13 +2539,14 @@ Parameters and later choices, recorded and not asked:
 - Quality: X10 (ack quality on the ack's index), X19 (death record scope), R16-1 and
   R16-3 to R16-9 (r16 Rust guides).
 - Memory and performance: X8 (seq per index group), X30 (merge rule), X42 (interner),
-  S4 disk format starting point, r12 I4 (`buffer` driven, not self-running), `ring`
-  holds its own unsafe slot code (section 4).
+  S4 disk format starting point and its ring sizing (#637), r12 I4 (`buffer`
+  driven, not self-running), `ring` holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
-- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, and
-  `frame::split`, which cuts a frame body at its ends and gives each part (#632).
+- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
+  tree key `<label>.@<kind>` of a policy (#729), and `frame::split`, which cuts a
+  frame body at its ends and gives each part (#632).
 - Delivery and wire internals: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,

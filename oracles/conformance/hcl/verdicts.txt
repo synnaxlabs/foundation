@@ -48,6 +48,7 @@ for-namespace refused
 for-nested refused
 for-object accepted hcl.for
 for-quoted-key accepted
+heredoc-closer-at-end refused
 heredoc-indented-written accepted
 heredoc-indented accepted
 heredoc accepted
@@ -90,26 +91,37 @@ number-malformed refused
 number-zero-written accepted
 object-bool-key-string-written accepted
 object-bool-key-string accepted
+object-call-key accepted hcl.expression-key
 object-colon accepted
 object-duplicate-key accepted
+object-fraction-operator-key accepted hcl.expression-key hcl.operator
+object-heredoc-key refused
+object-index-key accepted hcl.expression-key hcl.index
 object-integer-key-154-written accepted
 object-integer-key-154 accepted
 object-key-155-digits accepted
 object-key-leading-zeros accepted
+object-key-traversal accepted hcl.expression-key
 object-keyword-keys-written accepted
 object-keyword-keys accepted
 object-lines accepted
+object-list-key accepted hcl.expression-key
 object-long-integer-key accepted hcl.number-key
 object-negative-fraction-key accepted hcl.number-key
 object-negative-key-written accepted
 object-negative-key accepted
+object-not-key accepted hcl.expression-key hcl.operator
 object-null-key-parentheses accepted hcl.null hcl.parentheses
 object-number-key-written accepted
 object-number-key accepted
+object-object-key accepted hcl.expression-key
 object-one-line accepted
+object-operator-key accepted hcl.expression-key hcl.operator
 object-parentheses-key accepted hcl.parentheses
+object-string-call-key refused
 object-template-key accepted hcl.template
 object-template-wrap-key accepted hcl.template
+object-two-names-key refused
 object-written accepted
 object accepted
 operator-negate-reference accepted hcl.operator
