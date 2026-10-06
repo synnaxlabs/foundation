@@ -1093,19 +1093,21 @@ How to read this record:
   its own voter list votes and follows, but never campaigns while that configuration
   is committed. `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
-  may send. A node that may send can stop a group for good with one message in term
-  `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
-  as it is. It trusts its voters: one that lies can already break safety, because a
-  false `AppendReply` counts as held, so a bound on the term would guard nothing. No
-  bound on a term jump spares an honest node that was down, either. Later: a sender
-  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
-  2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
-  `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
-  before its write, so no peer counted a vote or an answer that a lost `hard` held. The
-  caller writes `hard` and `entries` in any order, with no atomic write. Lost: the
-  `Ready` doc requires `hard` before `entries`, a patch that each caller must keep and
-  that shows only at a restart. The person decided on 2026-10-05 ("I approve long term
-  fix on 522"), #522.
+  may send. `step` drops a reply with no check when its sender is not in `voters()`,
+  unless the configuration in force removed the sender and the node still sends to it:
+  only `raft` knows whom it asked (#352). A node that may send can stop a group for good
+  with one message in term `u64::MAX`: each node writes that term, and none can
+  campaign. `raft` takes the term as it is. It trusts its voters: one that lies can
+  already break safety, because a false `AppendReply` counts as held, so a bound on the
+  term would guard nothing. No bound on a term jump spares an honest node that was down,
+  either. Later: a sender proves a term jump by a signed term, which needs `mesh`
+  (#750). The person decided on 2026-10-05 ("(a) is fine", #352 item 2). When the term
+  of the last entry is above `hard.term`, `Raft::new` starts at that term with no vote.
+  The node sends nothing before its write, so no peer counted a vote or an answer that a
+  lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
+  write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
+  caller must keep and that shows only at a restart. The person decided on 2026-10-05
+  ("I approve long term fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -1114,27 +1116,26 @@ How to read this record:
   (its hint for the next `prev`). `step` checks a message against the log before it
   changes state: entries that do not follow `prev` are `Error::EntryOutOfOrder`, and a
   heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
-  log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
-  be past the log of a node that is behind. An `Append` with an entry whose term is
-  above the message's term is `Error::TermBehindLog`: no leader sends one, so the
-  sender is faulty. The conformance oracle changed to match; the person decided on
-  2026-10-05 ("a is fine", #232). A heartbeat or an append of this node's term from a
-  node other than the leader it knows is `Error::SecondLeader`: one term has one
-  leader, and a node keeps the leader of its term until the term ends, through a
-  step-down and a campaign. A node that knows no leader of its term, after its vote,
-  takes the first; `Hard.leader` keeps it through a restart (#750). The person approved
-  it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing. A forged
-  message that passes these checks
-  does, until a leader proves its election (#750). After a heartbeat or an `Append`
-  of a higher term from a voter that does not lead, or a reply of a higher term and
-  then either, a node follows the sender and writes and commits what it sends. So
-  two nodes can apply different entries at one index, and a forged voter set can
-  take the group over. The first leader after a vote is the same gap. Tests pin it.
-  Lost: a lease that drops a heartbeat or an `Append` of a higher term from a node
-  that is not the leader. A reply of a higher term ends any node's lease, and a
-  leader must step down on one; the lease also changed three etcd oracle tests. The
-  coordinator decided on 2026-10-06 under the person's delegation (#391). The person
-  may change it.
+  log is `Error::IndexPastLog`, unless `step` drops the reply (RAFT SURFACE). An
+  append's `prev` and `commit` and a vote's `last` can be past the log of a node that is
+  behind. An `Append` with an entry whose term is above the message's term is
+  `Error::TermBehindLog`: no leader sends one, so the sender is faulty. The conformance
+  oracle changed to match; the person decided on 2026-10-05 ("a is fine", #232). A
+  heartbeat or an append of this node's term from a node other than the leader it knows
+  is `Error::SecondLeader`: one term has one leader, and a node keeps the leader of its
+  term until the term ends, through a step-down and a campaign. A node that knows no
+  leader of its term, after its vote, takes the first; `Hard.leader` keeps it through a
+  restart (#750). The person approved it on 2026-10-05 ("Yeah that's fine", #391). A bad
+  message changes nothing. A forged message that passes these checks does, until a
+  leader proves its election (#750). After a heartbeat or an `Append` of a higher term
+  from a voter that does not lead, or a reply of a higher term and then either, a node
+  follows the sender and writes and commits what it sends. So two nodes can apply
+  different entries at one index, and a forged voter set can take the group over. The
+  first leader after a vote is the same gap. Tests pin it. Lost: a lease that drops a
+  heartbeat or an `Append` of a higher term from a node that is not the leader. A reply
+  of a higher term ends any node's lease, and a leader must step down on one; the lease
+  also changed three etcd oracle tests. The coordinator decided on 2026-10-06 under the
+  person's delegation (#391). The person may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1182,9 +1183,12 @@ How to read this record:
   over a whole quorum check period is released at that check instead, and the next
   configuration releases any that is still a peer.
   A follower releases the removed nodes when the leave commits. A removed node that
-  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` message
+  missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft` request
   only from a voter of the newest configuration in this node's log, and a node whose
-  committed configuration lacks the sender answers `removed`. The removed node takes
+  committed configuration lacks the sender answers `removed`. A request is a PreVote, a
+  Vote, a heartbeat, or an append. The rule covers requests only, and `raft` decides
+  which replies count (RAFT SURFACE). The person approved this on 2026-10-06, and the
+  coordinator gives the person's words in its comment on #647. The removed node takes
   that answer only from a voter of its own region, and stops its `raft` group for that
   region. `raft` sends such a node no entries, only answers. A voter with a lease drops
   its campaign or refuses it with a `PreVoteReply { granted: false }` at the voter's
@@ -2848,7 +2852,8 @@ conclusion together". Each one is listed below.
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
-  voter's state when it sent the answer.").
+  voter's state when it sent the answer."), #352 item 1 (a reply from a node that is not
+  a peer).
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
   tree key `<label>.@<kind>` of a policy (#729), `frame::split`, which cuts a frame
   body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
