@@ -219,7 +219,7 @@ pub struct Selector {
 pub enum Written<'a> {
     /// A pattern that includes names.
     Include(&'a str),
-    /// A pattern that excludes names: the text after the `!`.
+    /// A pattern that excludes names.
     Exclude(&'a str),
 }
 
@@ -234,15 +234,15 @@ impl Selector {
         Self::from_written(patterns.into_iter().map(written))
     }
 
-    /// Reads a selector from its patterns, each by what it does. It keeps the texts
-    /// that [`Selector::new`] reads for the same patterns, so equality, hashing, and
-    /// `Debug` do not depend on which of the two made it.
+    /// Reads a selector from its patterns, each by what it does. It equals the
+    /// selector that [`Selector::new`] reads from the same patterns, each exclusion
+    /// written with a leading `!`.
     ///
     /// # Errors
     ///
     /// The first pattern that does not read, or [`Error::NoInclude`] when no pattern
-    /// includes names. An include that starts with `!` gives [`Error::Segment`],
-    /// because `!` is not a segment character.
+    /// includes names. An include that starts with `!` does not read, because `!` is
+    /// not a segment character: `Include("!a")` gives [`Error::Segment`].
     pub fn from_written<'a>(
         patterns: impl IntoIterator<Item = Written<'a>>,
     ) -> Result<Self, Error> {
@@ -862,9 +862,17 @@ mod tests {
                 r#""!a" has a segment that is not valid: "!a""#
             );
             assert_eq!(
-                Selector::from_written([Written::Include("a"), Written::Exclude("")]),
-                Selector::new(["a", "!"])
+                Selector::from_written([Written::Include("!*")]),
+                Err(wildcard_error("!*"))
             );
+        }
+
+        #[test]
+        fn refuses_an_empty_exclusion_as_new_does() {
+            let read =
+                Selector::from_written([Written::Include("a"), Written::Exclude("")]);
+            assert_eq!(read, Err(segment_error("!", "")));
+            assert_eq!(read, Selector::new(["a", "!"]));
         }
 
         proptest! {
