@@ -8,7 +8,7 @@ use std::fmt;
 use codec::{Encoder, VECTOR_LEN, max_len};
 use divan::Bencher;
 use divan::counter::ItemsCount;
-use types::sample::Scalar;
+use types::sample::{Scalar, Type};
 
 fn main() {
     for shape in &SHAPES {
@@ -31,16 +31,23 @@ const T0: i64 = 1_790_000_000_000_000_000;
 /// A kind of series, the same on each run.
 struct Shape {
     name: &'static str,
-    scalar: Scalar,
-    /// Creates `LEN` samples, each cut to the scalar's width.
-    create: fn() -> Vec<i64>,
+    data_type: Type,
+    create: Create,
     /// The least ratio of raw to encoded bytes for `LEN` samples.
     ratio: f64,
     /// The series lengths to time.
     lens: &'static [usize],
 }
 
-const SHAPES: [Shape; 23] = [
+/// Creates `LEN` samples.
+#[derive(Clone, Copy)]
+enum Create {
+    /// Each cut to the scalar's width.
+    Scalar(fn() -> Vec<i64>),
+    Strings(fn() -> Vec<&'static str>),
+}
+
+const SHAPES: [Shape; 24] = [
     Shape::new("adc16.s1", Scalar::I16, create_adc16_s1, 3.933, EVERY),
     Shape::new("adc16.s256", Scalar::I16, create_adc16_s256, 1.352, FULL),
     Shape::new("adc16.white", Scalar::I16, create_adc16_white, 0.994, FULL),
@@ -64,6 +71,7 @@ const SHAPES: [Shape; 23] = [
     Shape::new("u64.ffor1", Scalar::U64, create_uniform::<1>, 56.6, FULL),
     Shape::new("u64.ffor32", Scalar::U64, create_uniform::<32>, 1.982, FULL),
     Shape::new("u64.ffor55", Scalar::U64, create_uniform::<55>, 1.155, FULL),
+    Shape::strings("str.state", create_state_names, 2.842, EVERY),
 ];
 
 impl Shape {
@@ -76,8 +84,23 @@ impl Shape {
     ) -> Self {
         Self {
             name,
-            scalar,
-            create,
+            data_type: Type::Scalar(scalar),
+            create: Create::Scalar(create),
+            ratio,
+            lens,
+        }
+    }
+
+    const fn strings(
+        name: &'static str,
+        create: fn() -> Vec<&'static str>,
+        ratio: f64,
+        lens: &'static [usize],
+    ) -> Self {
+        Self {
+            name,
+            data_type: Type::String,
+            create: Create::Strings(create),
             ratio,
             lens,
         }
@@ -87,7 +110,7 @@ impl Shape {
     ///
     /// If the full series compresses worse than `self.ratio`.
     fn check_ratio(&self) {
-        let raw = LEN * self.scalar.width();
+        let raw = self.values(LEN).len();
         #[expect(clippy::cast_precision_loss, reason = "both lengths are under 2^53")]
         let ratio = raw as f64 / self.encoded(LEN).len() as f64;
         assert!(
@@ -98,14 +121,28 @@ impl Shape {
         );
     }
 
-    /// The first `len` samples, little-endian.
+    /// The raw bytes of the first `len` samples.
     fn values(&self, len: usize) -> Vec<u8> {
-        let width = self.scalar.width();
-        (self.create)()
-            .into_iter()
-            .take(len)
-            .flat_map(|sample| sample.to_le_bytes().into_iter().take(width))
-            .collect()
+        match self.create {
+            Create::Scalar(create) => {
+                let width = self.data_type.width().expect("a scalar has a width");
+                create()
+                    .into_iter()
+                    .take(len)
+                    .flat_map(|sample| sample.to_le_bytes().into_iter().take(width))
+                    .collect()
+            }
+            Create::Strings(create) => {
+                let strings = &create()[..len];
+                let ends = strings.iter().scan(0_u32, |end, string| {
+                    *end += u32::try_from(string.len()).expect("a short string");
+                    Some(*end)
+                });
+                let mut values: Vec<u8> = ends.flat_map(u32::to_le_bytes).collect();
+                values.extend(strings.iter().flat_map(|string| string.bytes()));
+                values
+            }
+        }
     }
 
     /// The first `len` samples, encoded.
@@ -115,15 +152,15 @@ impl Shape {
     /// If the encoding does not validate or decode to the samples.
     fn encoded(&self, len: usize) -> Vec<u8> {
         let values = self.values(len);
-        let mut out = vec![0; max_len(self.scalar, values.len())];
-        let written = Encoder::new(self.scalar)
+        let mut out = vec![0; max_len(self.data_type, values.len())];
+        let written = Encoder::new(self.data_type)
             .encode(len, &values, &mut out)
             .expect("the values fit the count");
         out.truncate(written);
         let mut decoded = vec![0; values.len()];
-        let valid = codec::validate(self.scalar, len, &out);
+        let valid = codec::validate(self.data_type, len, &out);
         assert_eq!(valid, Ok(values.len()), "{}", self.name);
-        let result = codec::decode(self.scalar, len, &out, &mut decoded);
+        let result = codec::decode(self.data_type, len, &out, &mut decoded);
         assert_eq!(result, Ok(()), "{}", self.name);
         assert!(decoded == values, "{} decodes to other samples", self.name);
         out
@@ -245,6 +282,13 @@ fn create_state() -> Vec<i64> {
         .collect()
 }
 
+/// The name of each state of [`create_state`].
+fn create_state_names() -> Vec<&'static str> {
+    let names = ["idle", "running", "fault", "stopped"];
+    let state = |state: i64| names[usize::try_from(state).expect("a state")];
+    create_state().into_iter().map(state).collect()
+}
+
 /// A timestamp every 1 ms.
 fn create_ts_fixed() -> Vec<i64> {
     (0..).take(LEN).map(|i| T0 + i * 1_000_000).collect()
@@ -282,8 +326,8 @@ fn create_uniform<const BITS: u32>() -> Vec<i64> {
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn encode(bencher: Bencher<'_, '_>, case: Case) {
     let values = case.shape.values(case.len);
-    let mut out = vec![0; max_len(case.shape.scalar, values.len())];
-    let mut encoder = Encoder::new(case.shape.scalar);
+    let mut out = vec![0; max_len(case.shape.data_type, values.len())];
+    let mut encoder = Encoder::new(case.shape.data_type);
     bencher.counter(ItemsCount::new(case.len)).bench_local(|| {
         encoder.encode(
             divan::black_box(case.len),
@@ -296,21 +340,22 @@ fn encode(bencher: Bencher<'_, '_>, case: Case) {
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn validate(bencher: Bencher<'_, '_>, case: Case) {
     let bytes = case.shape.encoded(case.len);
-    let scalar = case.shape.scalar;
+    let data_type = case.shape.data_type;
     bencher.counter(ItemsCount::new(case.len)).bench_local(|| {
-        codec::validate(scalar, divan::black_box(case.len), divan::black_box(&bytes))
+        let len = divan::black_box(case.len);
+        codec::validate(data_type, len, divan::black_box(&bytes))
     });
 }
 
 #[divan::bench(args = cases(), sample_count = 1000)]
 fn decode(bencher: Bencher<'_, '_>, case: Case) {
     let bytes = case.shape.encoded(case.len);
-    let scalar = case.shape.scalar;
-    let mut out = vec![0; case.len * scalar.width()];
+    let data_type = case.shape.data_type;
+    let mut out = vec![0; case.shape.values(case.len).len()];
     bencher.counter(ItemsCount::new(case.len)).bench_local(|| {
         let len = divan::black_box(case.len);
         codec::decode(
-            scalar,
+            data_type,
             len,
             divan::black_box(&bytes),
             divan::black_box(&mut out),

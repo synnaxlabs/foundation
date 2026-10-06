@@ -5,13 +5,9 @@ use types::time::{Interval, Monotonic, Span};
 
 use crate::{DRIFT, source};
 
-/// The words of the cell that [`Reader::now`] reads: a flag for a [`Slew`], then the
-/// slew.
-const TIME: usize = 6;
-
-/// The words of the cell that [`Reader::status`] reads: a [`State`] as its kind, a
-/// [`Slew`], and a [`combine::Error`].
-const STATUS: usize = 9;
+/// The words of the cell that [`Reader`]s read: a [`State`] as its kind, a [`Slew`],
+/// and a [`combine::Error`].
+const WORDS: usize = 9;
 
 /// The mesh clock of one node. It lives on one shard, and [`Reader`]s read it from
 /// any.
@@ -21,8 +17,7 @@ pub struct Clock {
     sources: Map<source::Key, Filter>,
     next: u64,
     state: State,
-    time: ring::latest::Writer<TIME>,
-    status: ring::latest::Writer<STATUS>,
+    cell: ring::latest::Writer<WORDS>,
 }
 
 impl Clock {
@@ -32,20 +27,17 @@ impl Clock {
     #[must_use]
     pub fn new(monotonic: env::clock::Clock) -> (Self, Reader) {
         let state = State::Unsynced(combine::Error::NoSources);
-        let (time, time_reader) = ring::latest::new(encode_time(state.slew()));
-        let (status, status_reader) = ring::latest::new(encode(state));
+        let (cell, cell_reader) = ring::latest::new(encode(state));
         let reader = Reader {
             monotonic: monotonic.clone(),
-            time: time_reader,
-            status: status_reader,
+            cell: cell_reader,
         };
         let clock = Self {
             monotonic,
             sources: Map::default(),
             next: 0,
             state,
-            time,
-            status,
+            cell,
         };
         (clock, reader)
     }
@@ -110,23 +102,23 @@ impl Clock {
         let state = match (self.state.slew(), estimate) {
             (None, Err(e)) => State::Unsynced(e),
             (Some(slew), Err(e)) => State::Holdover(slew, e),
-            (old, Ok(estimate)) => {
-                // Before the first estimate, readers have no time that could go back.
-                let mut slew = Slew::new(estimate);
-                self.time.update(|_| {
-                    // `toward` keeps mesh time from going back only against reads
-                    // before its `now`, so the clock reads inside the update.
-                    if let Some(old) = old {
-                        slew = old.toward(self.monotonic.now(), DRIFT, estimate);
-                    }
-                    encode_time(Some(slew))
+            // Before the first estimate, readers have no time that could go back.
+            (None, Ok(estimate)) => State::Synced(Slew::new(estimate)),
+            // `toward` keeps mesh time from going back only against reads before its
+            // `now`, so the clock reads inside the update.
+            (Some(old), Ok(estimate)) => {
+                self.cell.update(|_| {
+                    let slew = old.toward(self.monotonic.now(), DRIFT, estimate);
+                    self.state = State::Synced(slew);
+                    encode(self.state)
                 });
-                State::Synced(slew)
+                self.state
             }
         };
+        // A write that changes nothing makes the reads that overlap it run again.
         if state != self.state {
-            self.status.update(|_| encode(state));
             self.state = state;
+            self.cell.update(|_| encode(state));
         }
     }
 }
@@ -176,8 +168,7 @@ pub enum Status {
 #[derive(Clone, Debug)]
 pub struct Reader {
     monotonic: env::clock::Clock,
-    time: ring::latest::Reader<TIME>,
-    status: ring::latest::Reader<STATUS>,
+    cell: ring::latest::Reader<WORDS>,
 }
 
 impl Reader {
@@ -187,33 +178,24 @@ impl Reader {
     /// an unknown error). `None` until a majority of the clock's sources first agree.
     #[must_use]
     pub fn now(&self) -> Option<Interval> {
-        self.time.read(|words| {
-            let slew = decode_time(words)?;
+        self.cell.read(|words| {
+            let slew = decode(words).slew()?;
             Some(slew.at(self.monotonic.now(), DRIFT).interval())
         })
     }
 
     /// What the clock follows now, with mesh time at the call. It holds the result of
-    /// the last [`Clock::add`], [`Clock::remove`], or [`Clock::push`] to return.
+    /// the last [`Clock::add`], [`Clock::remove`], or [`Clock::push`] to return. That
+    /// mesh time is the one [`Reader::now`] gives, so it never goes back.
     /// [`Status::Unsynced`] until a majority of the sources first agree.
     #[must_use]
     pub fn status(&self) -> Status {
-        self.status
+        self.cell
             .read(|words| decode(words).at(self.monotonic.now()))
     }
 }
 
-fn encode_time(slew: Option<Slew>) -> [u64; TIME] {
-    let [start, from, at, offset, error] = slew.map_or([0; 5], encode_slew);
-    [u64::from(slew.is_some()), start, from, at, offset, error]
-}
-
-fn decode_time(words: [u64; TIME]) -> Option<Slew> {
-    let [time, slew @ ..] = words;
-    (time != 0).then(|| decode_slew(slew))
-}
-
-fn encode(state: State) -> [u64; STATUS] {
+fn encode(state: State) -> [u64; WORDS] {
     let count = |n: usize| u64::try_from(n).expect("invariant: a count fits in u64");
     let (kind, cause) = match state {
         State::Unsynced(cause) => (0, Some(cause)),
@@ -234,7 +216,7 @@ fn encode(state: State) -> [u64; STATUS] {
     ]
 }
 
-fn decode(words: [u64; STATUS]) -> State {
+fn decode(words: [u64; WORDS]) -> State {
     let [
         kind,
         start,
@@ -299,7 +281,7 @@ mod tests {
     use proptest::prelude::*;
     use types::time::{Monotonic, Span};
 
-    use super::{State, decode, decode_time, encode, encode_time};
+    use super::{State, decode, encode};
 
     fn slew() -> impl Strategy<Value = Slew> {
         let error = 0..=36_500 * Span::DAY.nanos();
@@ -346,14 +328,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn a_slew_round_trips_through_the_time_cell(
-            slew in proptest::option::of(slew()),
-        ) {
-            prop_assert_eq!(decode_time(encode_time(slew)), slew);
-        }
-
-        #[test]
-        fn a_state_round_trips_through_the_status_cell(state in state()) {
+        fn a_state_round_trips_through_the_cell(state in state()) {
             prop_assert_eq!(decode(encode(state)), state);
         }
     }

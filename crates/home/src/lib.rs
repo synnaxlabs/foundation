@@ -18,6 +18,8 @@ mod index;
 )]
 mod order;
 #[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
+mod reader;
+#[cfg_attr(not(test), expect(dead_code, reason = "node is the first user"))]
 mod shard;
 #[cfg_attr(
     not(test),

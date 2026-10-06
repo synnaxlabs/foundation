@@ -215,7 +215,7 @@ struct State {
     logs: Logs,
     /// How many deadlines took the groups to write.
     taken: u64,
-    /// How many deadlines synced what they took.
+    /// How many deadlines ended with no error.
     commits: u64,
     wakers: Vec<Waker>,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
@@ -239,8 +239,8 @@ impl State {
         self.queue.push(full.close(&mut self.writer));
     }
 
-    /// Moves the durable tails past the synced `sealed` groups and keeps their
-    /// records as spares.
+    /// Moves the durable tails past the synced `sealed` groups, keeps their records
+    /// as spares, and counts the commit.
     fn synced(&mut self, sealed: impl Iterator<Item = Sealed>) {
         for record in sealed {
             for (&slot, header) in record.slots().iter().zip(record.headers()) {
@@ -368,6 +368,16 @@ impl Buffer {
         self.shared.state.borrow().logs.durable(slot, path)
     }
 
+    /// How many group commits ended since the open, with or without entries. It
+    /// moves before the [`Commit`] futures that the commit resolves wake, and a
+    /// failed commit does not move it. A move does not make every entry durable: an
+    /// entry appended while a commit runs goes in the next one, so read
+    /// [`durable`](Self::durable) after a move.
+    #[must_use]
+    pub fn commits(&self) -> u64 {
+        self.shared.state.borrow().commits
+    }
+
     /// Queues every entry of `entries` for the next group commit, or none, and
     /// returns at once with no I/O. The entries are durable when a later
     /// [`committed`](Self::committed) resolves. They go in one record, in order. A
@@ -425,6 +435,9 @@ impl Buffer {
                 .logs
                 .append(slot, header)
                 .unwrap_or_else(|invalid| panic!("invariant: {invalid}"));
+        }
+        if state.idle() {
+            return Ok(());
         }
         let parked = state.parked.take();
         drop(guard);
@@ -560,11 +573,11 @@ fn small_record(
     Ok(block.freeze().skip(start))
 }
 
-/// The commit task. It parks while the state idles; a push, a `Commit` poll, or
-/// the drop wakes it. Each deadline takes the closed groups and the open one,
-/// seals them in order from `chain`, the value of the restart record, writes
-/// them, syncs once, and wakes the waiters. A failed file call or the drop ends
-/// the task.
+/// The commit task. It parks while the state idles; a push that takes an entry, a
+/// `Commit` poll, or the drop wakes it. Each deadline takes the closed groups and
+/// the open one, seals them in order from `chain`, the value of the restart record,
+/// writes them, syncs once, and wakes the waiters. A failed file call or the drop
+/// ends the task.
 async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
     let mut chain = chain;
     let mut taken: Vec<Closed> = Vec::new();
