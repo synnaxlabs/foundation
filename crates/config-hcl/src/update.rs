@@ -156,16 +156,17 @@ impl<'a> File<'a> {
     }
 
     /// Widens a run of cut lines to take the blank lines after it when it starts
-    /// the body or a blank line is above it, or else the blank lines above it when it
-    /// ends the body. So one blank line stays between the items left.
+    /// the body or a blank line is above it. Then, when the run ends the body, it
+    /// takes the blank lines above it. So one blank line stays between the items left,
+    /// and none at the end of the body.
     fn widen(&self, run: Range<usize>, body: &Body) -> Range<usize> {
         let Range { mut start, mut end } = run;
-        let opens = start == body.start || self.blank_above(start).is_some();
-        if opens && self.blank_below(end).is_some() {
+        if start == body.start || self.blank_above(start).is_some() {
             while let Some(below) = self.blank_below(end) {
                 end = below;
             }
-        } else if end == body.end {
+        }
+        if end == body.end {
             while let Some(above) = self.blank_above(start) {
                 start = above;
             }
@@ -872,6 +873,22 @@ mod tests {
         assert_eq!(updated(text, "b {}\nc {}\nd {}"), "b {}\n\nc {}\n\nd {}\n");
         assert_eq!(updated(text, "a = 1"), "a = 1\n");
         assert_eq!(updated(text, ""), "");
+    }
+
+    #[test]
+    fn leaves_no_blank_line_at_the_end_of_a_body() {
+        assert_eq!(updated("a = 1\n\nb = 2\n\n", "a = 1"), "a = 1\n");
+        assert_eq!(updated("a {}\n\nb {}\n\n", "a {}"), "a {}\n");
+        assert_eq!(updated("a = 1\n\nb = 2\n", "a = 1"), "a = 1\n");
+        assert_eq!(updated("a = 1\r\n\r\nb = 2\r\n\r\n", "a = 1"), "a = 1\r\n");
+        assert_eq!(
+            updated("x {\n  a = 1\n\n  b = 2\n\n}\n", "x { a = 1 }"),
+            "x {\n  a = 1\n}\n"
+        );
+        assert_eq!(
+            updated("a = 1\n\nb = 2\n\n# c\n", "a = 1"),
+            "a = 1\n\n# c\n"
+        );
     }
 
     #[test]
