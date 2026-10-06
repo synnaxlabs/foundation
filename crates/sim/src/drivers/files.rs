@@ -119,8 +119,7 @@ impl Future for Wait {
 impl Drop for Wait {
     fn drop(&mut self) {
         if !self.taken {
-            let (node, key) = (self.node.node, self.key);
-            let unused = lock(&self.node.shared).files().abandon(node, key);
+            let unused = lock(&self.node.shared).files().abandon(self.key);
             drop(unused);
         }
     }

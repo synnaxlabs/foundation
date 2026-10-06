@@ -125,7 +125,7 @@ mod tests {
             name: self::name(name),
             hold: Span::from_nanos(10),
         };
-        readers.open(reader, Start::At(position)).key
+        readers.open(reader, Start::At(position), 0).key
     }
 
     fn unnamed(readers: &mut Readers) -> Key {
@@ -226,7 +226,7 @@ mod tests {
                 presented: None,
                 otherwise: live(0),
             };
-            let opened = readers.open(reader, resume);
+            let opened = readers.open(reader, resume, 0);
             assert_eq!(opened.replaced, Some(latest));
             assert_eq!(opened.position, live(5));
         }
@@ -455,7 +455,8 @@ mod tests {
                         model.mailboxes.insert(latest.key, model.newest);
                     }
                     Input::Complete => {
-                        let key = readers.open(Reader::Unnamed, Start::At(live(0))).key;
+                        let key =
+                            readers.open(Reader::Unnamed, Start::At(live(0)), 0).key;
                         assert!(model.fresh(key), "{key} is new");
                         model.complete.insert(key);
                     }
