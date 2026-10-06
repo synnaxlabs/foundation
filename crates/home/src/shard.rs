@@ -128,28 +128,24 @@ impl std::error::Error for Error {}
 
 impl Shard {
     /// A shard over `buffer` that carries no index yet. Index frames, stored headers,
-    /// and handoff bodies come from `pool`.
+    /// and handoff bodies come from `pool`, the pool of `buffer`.
     ///
     /// # Panics
     ///
-    /// If one entry alone in a record of `buffer`, or the largest block of `pool`,
-    /// holds less than the largest handoff body.
+    /// If one entry alone in a record of `buffer` holds less than the largest handoff
+    /// body.
     pub(crate) fn new(
         buffer: Buffer,
         pool: Rc<block::Pool>,
         limits: order::Config,
     ) -> Self {
-        let entry_max = buffer.layout().entry_max();
+        let layout = buffer.layout();
+        let entry_max = layout.entry_max();
         assert!(
-            entry_max >= handoff::LARGEST,
-            "a record holds {entry_max} bytes of one entry, and a handoff takes up to {}",
-            handoff::LARGEST
-        );
-        let largest = pool.largest();
-        assert!(
-            largest >= handoff::LARGEST,
-            "the largest block holds {largest} bytes, and a handoff takes up to {}",
-            handoff::LARGEST
+            entry_max >= handoff::MAX_BYTES,
+            "the ring's body_max of {} is under {}, the least that holds a handoff",
+            layout.body_max(),
+            layout.body_max() - entry_max + handoff::MAX_BYTES
         );
         Self {
             buffer,
@@ -443,9 +439,15 @@ fn record(
         let Some((handoff, first)) = index.handoff() else {
             continue;
         };
-        let Ok(parts) = handoff::body(pool, handoff) else {
-            all = false;
-            continue;
+        let parts = match handoff::body(pool, handoff) {
+            Ok(parts) => parts,
+            Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
+                all = false;
+                continue;
+            }
+            Err(error @ block::Error::TooLarge { .. }) => {
+                panic!("invariant: the pool of the ring holds a handoff: {error}")
+            }
         };
         let appended = buffer.append([Entry {
             index: entry.key,
@@ -546,7 +548,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{interner, key, pool};
+    use crate::common::{interner, key};
 
     const DIR: &str = "shard-0";
     const RING: &str = "shard-0/ring";
@@ -1464,22 +1466,10 @@ mod tests {
         len + BODY_MAX - layout.entry_max()
     }
 
-    /// A shard over `buffer` and `pool` that carries slot 0, and the key set of slot
-    /// 0 alone.
-    fn one_index(buffer: Buffer, pool: Rc<Pool>) -> (Shard, Arc<KeySet>) {
-        let mut shard = Shard::new(buffer, pool, LIMITS);
-        shard.carry(Slot::new(0));
-        let set = interner().intern(&[Group {
-            index: key(Slot::new(0)),
-            data: &[],
-        }]);
-        (shard, set)
-    }
-
     #[test]
     fn panics_at_new_when_one_entry_of_a_record_holds_less_than_a_handoff() {
         let (mut sim, _handle) = start(41, |test| async move {
-            let buffer = test.buffer(AREA, body_max(handoff::LARGEST - 1), 1).await;
+            let buffer = test.buffer(AREA, body_max(handoff::MAX_BYTES - 1), 1).await;
             Shard::new(buffer, Rc::clone(&test.pool), LIMITS);
         });
         assert_eq!(
@@ -1487,8 +1477,8 @@ mod tests {
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
                 message:
-                    "a record holds 255 bytes of one entry, and a handoff takes up \
-                          to 256"
+                    "the ring's body_max of 310 is under 311, the least that holds \
+                          a handoff"
                         .into(),
                 seed: 41,
             })
@@ -1498,42 +1488,14 @@ mod tests {
     #[test]
     fn records_the_largest_handoff_when_one_entry_of_a_record_holds_it() {
         run(42, |test| async move {
-            let buffer = test.buffer(AREA, body_max(handoff::LARGEST), 1).await;
-            let (mut shard, set) = one_index(buffer, Rc::clone(&test.pool));
-            let long = "b".repeat(Name::MAX_BYTES);
-            shard.open_writer(writer(&long, 1, &set), NOW, MESH);
-            shard.committed().await.expect("the commit ends");
-            let waiting = shard.indexes[0].handoff().is_some();
-            let handoffs = find(&test.ring().await, &handoff_to(&long));
-            assert_eq!((waiting, handoffs.len()), (false, 1));
-        });
-    }
-
-    #[test]
-    fn panics_at_new_when_the_largest_block_holds_less_than_a_handoff() {
-        let (mut sim, _handle) = start(43, |test| async move {
-            let buffer = test.buffer(AREA, BODY_MAX, 1).await;
-            Shard::new(buffer, Rc::new(pool(319)), LIMITS);
-        });
-        assert_eq!(
-            sim.run(),
-            Err(sim::Error::Panicked {
-                thread: DIR.into(),
-                message:
-                    "the largest block holds 192 bytes, and a handoff takes up to 256"
-                        .into(),
-                seed: 43,
-            })
-        );
-    }
-
-    #[test]
-    fn records_the_largest_handoff_when_the_largest_block_holds_it() {
-        run(44, |test| async move {
-            let small = Rc::new(pool(320));
-            assert_eq!(small.largest(), handoff::LARGEST);
-            let buffer = test.buffer(AREA, BODY_MAX, 1).await;
-            let (mut shard, set) = one_index(buffer, small);
+            let buffer = test.buffer(AREA, body_max(handoff::MAX_BYTES), 1).await;
+            assert_eq!(buffer.layout().entry_max(), handoff::MAX_BYTES);
+            let mut shard = Shard::new(buffer, Rc::clone(&test.pool), LIMITS);
+            shard.carry(Slot::new(0));
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(0)),
+                data: &[],
+            }]);
             let long = "b".repeat(Name::MAX_BYTES);
             shard.open_writer(writer(&long, 1, &set), NOW, MESH);
             shard.committed().await.expect("the commit ends");
