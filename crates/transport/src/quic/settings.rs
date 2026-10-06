@@ -1,11 +1,13 @@
 //! What noq-proto gets from a [`Config`]. Every option that changes behavior is set
 //! by name, and every random value outside TLS comes from `Entropy`.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use aws_lc_rs::{hkdf, hmac};
 use env::entropy::Entropy;
+use env::net::udp::TRANSMIT_BYTES_MAX;
 use noq_proto::congestion::CubicConfig;
 use noq_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use noq_proto::crypto::{CryptoError, HandshakeTokenKey};
@@ -33,6 +35,15 @@ pub(super) const MTU_MIN: u16 = 1200;
 /// Ethernet's 1500 bytes less the IPv6 and UDP headers: the largest datagram MTU
 /// discovery tries, so it fits both IP versions.
 const PAYLOAD_IPV6: u16 = 1452;
+const _: () = assert!(
+    MTU_MIN <= PAYLOAD_IPV6,
+    "no datagram this node sends may pass PAYLOAD_IPV6, which sets BATCH_MAX"
+);
+
+/// The most datagrams in one transmit: as many of the largest this node sends as one
+/// send takes. noq-proto bounds a batch only by its count.
+pub(super) const BATCH_MAX: NonZeroUsize =
+    NonZeroUsize::new(TRANSMIT_BYTES_MAX / PAYLOAD_IPV6 as usize).expect("not zero");
 
 /// The most bytes of QUIC datagrams that wait to be sent on one connection. When a
 /// new one does not fit, the oldest drops.

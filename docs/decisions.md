@@ -653,19 +653,19 @@ How to read this record:
   the "unknown" error, so a source never writes 36500 days itself: 1 ns less is a known
   bound, and it votes until drift grows it to 36500 days. Approved by the coordinator
   (#144). An exchange with an error over 36500 days gives an unknown measurement,
-  centered between its edges or at the nearest span, so no caller maps a failure to
-  one. It cuts no known bound, because an unknown bound votes only when no bound is
-  known. An exchange can still give a known bound from two unknown readings whose
-  centers move apart by more than the round trip, so the node that asks makes an
-  unknown answer unknown itself (CLOCK PEER ANSWER). An overlap whose readings allow
-  an error over 36500 days before drift gives `None`, as an overlap with no edge
-  does, because no caller needs an unknown device measurement yet. A device source
-  can ask for one when it calls `Overlap::at`. Decided by the `time` builder (#258),
-  and for the exchange approved by the coordinator (#903). Each function returns only
-  the errors it can give: one `Error` per module (`overlap`, `combine`), and `Option`
-  where a caller does the same for each cause (`Drift::from_ppb`, `Measurement::new`,
-  `Overlap::at`). Decided by the coordinator (#272). `Exchange::measure` has one cause
-  left, so it gives `Option` (#903).
+  centered between its edges or at the nearest span, so no caller maps a failure to one.
+  It cuts no known bound, because an unknown bound votes only when no bound is known. An
+  unknown reading (`exchange::Reading::Unknown`) gives an unknown measurement, because
+  two unknown readings sent as intervals whose centers move apart by more than the round
+  trip, or one interval clamped at the end of the stamp range, can give a known bound
+  (#930). An overlap whose readings allow an error over 36500 days before drift gives
+  `None`, as an overlap with no edge does, because no caller needs an unknown device
+  measurement yet. A device source can ask for one when it calls `Overlap::at`. Decided
+  by the `time` builder (#258), and for the exchange approved by the coordinator (#903).
+  Each function returns only the errors it can give: one `Error` per module (`overlap`,
+  `combine`), and `Option` where a caller does the same for each cause
+  (`Drift::from_ppb`, `Measurement::new`, `Overlap::at`). Decided by the coordinator
+  (#272). `Exchange::measure` has one cause left, so it gives `Option` (#903).
 - **BQ20** Wall time comes only from `clock`. Clippy `disallowed-methods` and the
   architecture agent enforce it.
 - **R9-D13** The layer-2 crate is `clock`. `types::time` holds `Stamp`, `Span`, and
@@ -774,8 +774,8 @@ How to read this record:
   reading and its OS bound. Cold nodes then vote with each other's OS clocks, and each
   waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown bound
   (an unknown estimate, or an OS clock with no bound) says "unknown" and carries its
-  offset. The asking node pushes a `Measurement::unknown` that it builds itself, so the
-  answer cannot narrow into a known bound. A node answers from one read of its clock,
+  offset. The asking node measures it as `exchange::Reading::Unknown`, so the answer
+  cannot narrow into a known bound (#930). A node answers from one read of its clock,
   sent as both intervals, because two reads can straddle a sync and pair a known
   interval with an unknown one. The read is after the request arrived and before the
   answer left, so it bounds both ends of the exchange. An unknown answer carries
@@ -871,16 +871,16 @@ How to read this record:
   so the node that asks keeps no open requests, and carries the peer's time (CLOCK
   PEER ANSWER). Kind 2 is a known bound, with an interval read after the request
   arrived and one read before the answer left. Kind 3 is an unknown bound, with the
-  peer's best guess of the time when it answered. The offset of CLOCK PEER ANSWER is
-  this stamp less the asking node's own time, because the peer's offset has no
-  meaning without the peer's monotonic clock. A message has 9, 41, or 17 bytes, and
-  `decode` refuses each other length. `decode` does not check the order of an
-  interval, because `estimate::exchange::Exchange::measure` refuses a crossed one.
+  peer's best guess, read after the request arrived and before the answer left. The
+  offset of CLOCK PEER ANSWER is this stamp less the asking node's own time, because the
+  peer's offset has no meaning without the peer's monotonic clock. A message has 9, 41,
+  or 17 bytes, and `decode` refuses each other length. `decode` does not check the order
+  of an interval, because `estimate::exchange::Exchange::measure` refuses a crossed one.
   Lost: a request number, because the node that asks must then keep and remove open
-  requests and still needs the send time of a late answer; each message 41 bytes, as
-  the header has one length (a request then sends 32 zero bytes); `encode` into a
-  `&mut [u8]` that returns a length (a short buffer then needs an error); a second
-  byte for the kind of time (two checks where one kind byte does the work).
+  requests and still needs the send time of a late answer; each message 41 bytes, as the
+  header has one length (a request then sends 32 zero bytes); `encode` into a
+  `&mut [u8]` that returns a length (a short buffer then needs an error); a second byte
+  for the kind of time (two checks where one kind byte does the work).
 - **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
   however many shards it runs, so each site's firewall needs one known port per
   conduit. Each QUIC connection belongs to one shard, and every connection ID a node
@@ -1092,11 +1092,25 @@ How to read this record:
   candidate included; `raft` counts the keys, and `mesh` holds and checks the
   signatures. `Message.proof` carries one: a `Vote` carries the candidate's
   pre-votes; a leader's `Heartbeat` or `Append` carries its votes until the receiver
-  answers once in the term, and a late vote joins them; an answer to a message of a
-  lower term carries the sender's hard proof. The rules that check a proof, and
-  `Error::Unproven`, follow in the second PR of #750; until then a received proof is
-  stored, not checked. The advisor required a proof on every message and on each
-  refusal, signatures only, and the proof in the hard state (#750, 2026-10-05).
+  answers an append, and again after the receiver is silent through a quorum check;
+  an answer to a message of a lower term carries the sender's hard proof, and a node
+  with no proof of its term sends no refusal. `step` checks a proof before anything
+  changes. A `PreVote`, or a granted `PreVoteReply`, of a higher term needs none.
+  Every other message of a higher term needs a proof that fits its body (a `Vote`
+  the sender's pre-votes, a `Heartbeat` or `Append` the sender's votes, a reply any
+  proof of the term) whose voters are a quorum of this node's configuration in
+  force or last committed; else `Error::Unproven`, and nothing changes or is sent. A
+  leader claim in this node's own term follows RAFT LOG. A late pre-vote or vote of
+  the term joins the proof its candidate carries. The known gap: a voter that was
+  down through a change holds the old configuration and refuses a leader whose votes
+  are no quorum of it until an election whose grants are. When a second node fails
+  first, the group waits for an operator, who wipes the voter and starts it with no
+  configuration (a node with no voters proves anything). The chain of proofs over
+  configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
+  pins both, and the random runs skip exactly such a voter until #881. The advisor
+  required a proof on every message and on each refusal, signatures only, and the
+  proof in the hard state (#750, 2026-10-05). The signatures follow in the third PR
+  of #750.
   `Raft` takes `tick(random)`,
   `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
   when it changed), `entries` to write, `committed` entries to apply, and `messages`
@@ -1144,18 +1158,16 @@ How to read this record:
   heartbeat or an append of this node's term from a node other than the leader it knows
   is `Error::SecondLeader`: one term has one leader, and a node keeps the leader of its
   term until the term ends, through a step-down and a campaign. A node that knows no
-  leader of its term, after its vote, takes the first; `Hard.leader` keeps it through a
-  restart (#750). The person approved it on 2026-10-05 ("Yeah that's fine", #391). A bad
-  message changes nothing. A forged message that passes these checks does, until a
-  leader proves its election (#750). After a heartbeat or an `Append` of a higher term
-  from a voter that does not lead, or a reply of a higher term and then either, a node
-  follows the sender and writes and commits what it sends. So two nodes can apply
-  different entries at one index, and a forged voter set can take the group over. The
-  first leader after a vote is the same gap. Tests pin it. Lost: a lease that drops a
-  heartbeat or an `Append` of a higher term from a node that is not the leader. A reply
-  of a higher term ends any node's lease, and a leader must step down on one; the lease
-  also changed three etcd oracle tests. The coordinator decided on 2026-10-06 under the
-  person's delegation (#391). The person may change it.
+  leader of its term takes the first that proves a quorum of its votes, else
+  `Error::Unproven`; `Hard.leader` keeps it through a restart (#750). The person
+  approved it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing.
+  A voter that does not lead cannot make a node follow it: a leader claim needs a
+  quorum of grants (RAFT SURFACE, #750). A false `AppendReply` still counts as held
+  (#882). Lost: a lease that drops a heartbeat or an `Append` of a higher term from a
+  node that is not the leader. A reply of a higher term ends any node's lease, and a
+  leader must step down on one; the lease also changed three etcd oracle tests. The
+  coordinator decided on 2026-10-06 under the person's delegation (#391). The person
+  may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1925,11 +1937,14 @@ How to read this record:
   thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
   future drops in its own `catch_unwind`, so a second panic never aborts the process.
   The error gives every panic, the first one first: a drop that panics is a defect of
-  its own, even when an earlier panic caused the drop. `Sim::crash` panics with the
-  same messages after the crash ends. At a crash, the start of each thread that has
-  not run drops the same way, after the futures. A thread that a drop starts on the
-  crashing node ends in the crash and never runs. Built by `simulation` in #548 and
-  #666.
+  its own, even when an earlier panic caused the drop. A panic in the drop of a panic
+  payload is one more panic. At most 16 payloads of one chain drop, and the payload
+  past them is forgotten, so that a drop that always panics cannot hang the run. `os`
+  drops panic payloads with the same bound. `Sim::crash` panics with the same
+  messages after the crash ends. At a crash, the start of each thread that has not
+  run drops the same way, after the futures. A thread that a drop starts on the
+  crashing node ends in the crash and never runs. Built by `simulation` in #548, #666,
+  and #870.
 - **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
   segment is never lost or duplicated. It arrives after the delay and a jitter draw of
   its link, and never before an earlier segment in its direction, so each direction

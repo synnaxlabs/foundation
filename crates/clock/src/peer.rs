@@ -2,8 +2,8 @@
 //! that an answer gives the node that asks.
 
 use estimate::Measurement;
-use estimate::exchange::Exchange;
-use types::time::{Interval, Monotonic};
+use estimate::exchange::{Exchange, Reading};
+use types::time::Monotonic;
 use wire::clock::{Answer, Request, Time};
 
 use crate::{DRIFT, Reader, Status, source};
@@ -42,39 +42,28 @@ pub(crate) fn answer(reader: &Reader, os: &source::Wall, request: Request) -> An
 /// answer allows no offset: an interval is inverted, the peer's time goes back or moves
 /// on more than the round trip allows, or `sent` is after `returned`.
 pub(crate) fn measure(answer: Answer, returned: Monotonic) -> Option<Measurement> {
-    let exchange = |received, answered| Exchange {
+    let reading = match answer.time {
+        Time::Known { received, answered } => Reading::Known { received, answered },
+        Time::Unknown { answered } => Reading::Unknown(answered),
+    };
+    let exchange = Exchange {
         sent: answer.sent,
-        received,
-        answered,
+        reading,
         returned,
     };
-    match answer.time {
-        Time::Known { received, answered } => {
-            exchange(received, answered).measure(DRIFT)
-        }
-        // As one instant, the guess gives a narrow bound that is not true.
-        Time::Unknown { answered } => {
-            let guess = Interval {
-                earliest: answered,
-                latest: answered,
-            };
-            let m = exchange(guess, guess).measure(DRIFT)?;
-            Some(Measurement::unknown(m.at(), m.offset()))
-        }
-    }
+    exchange.measure(DRIFT)
 }
 
 #[cfg(test)]
 mod tests {
     use estimate::Measurement;
-    use estimate::exchange::Exchange;
     use proptest::prelude::*;
     use sim::node::{self, Node};
     use types::time::{Interval, Monotonic, Span, Stamp};
     use wire::clock::{Answer, Request, Time};
 
     use super::{answer, measure};
-    use crate::{Clock, DRIFT, Reader, source};
+    use crate::{Clock, Reader, source};
 
     /// The error of an unknown measurement.
     const UNKNOWN: Span = Measurement::unknown(Monotonic(0), Span::ZERO).error();
@@ -234,27 +223,6 @@ mod tests {
             let offset = Span::from_nanos(TODAY - 1_000_000 + 500_100);
             let unknown = Measurement::unknown(Monotonic(1_000_000), offset);
             assert_eq!(m, Some(unknown));
-        }
-
-        /// Two readings of an unknown estimate whose guesses move apart by more than
-        /// the round trip give an exchange a known bound, so an unknown answer
-        /// carries one guess and the node that asks makes it unknown.
-        #[test]
-        fn is_unknown_where_two_unknown_readings_give_a_known_bound() {
-            let guess = |ns| Measurement::unknown(Monotonic(0), Span::from_nanos(ns));
-            let (round_trip, apart) = (1_000_000, 2_000_000);
-            let exchange = Exchange {
-                sent: Monotonic(0),
-                received: guess(TODAY).interval(),
-                answered: guess(TODAY + apart).interval(),
-                returned: Monotonic(round_trip),
-            };
-            let bounded = exchange.measure(DRIFT).expect("an offset");
-            assert!(bounded.known(), "{bounded:?}");
-            let answer = unknown_answer(0, TODAY + apart);
-            let offset = Span::from_nanos(TODAY + apart - 1_000_000 + 500_100);
-            let unknown = Measurement::unknown(Monotonic(round_trip), offset);
-            assert_eq!(measure(answer, Monotonic(round_trip)), Some(unknown));
         }
 
         #[test]
