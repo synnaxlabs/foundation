@@ -17,14 +17,14 @@ const FIRST_WORDS: usize = 6;
 /// Makes the cells with `discipline`.
 pub(crate) fn new(discipline: Discipline) -> (Writer, Reader) {
     let first = discipline.slew();
-    let (cell, cell_reader) = ring::latest::new(encode(discipline));
-    let (first_cell, first_reader) = ring::latest::new(encode_first(first));
+    let (discipline, discipline_reader) = ring::latest::new(encode(discipline));
+    let (first_writer, first_reader) = ring::latest::new(encode_first(first));
     let writer = Writer {
-        cell,
-        first: first.is_none().then_some(first_cell),
+        discipline,
+        first: first.is_none().then_some(first_writer),
     };
     let reader = Reader {
-        cell: cell_reader,
+        discipline: discipline_reader,
         first: first_reader,
     };
     (writer, reader)
@@ -33,19 +33,19 @@ pub(crate) fn new(discipline: Discipline) -> (Writer, Reader) {
 /// The one writer of the cells.
 #[derive(Debug)]
 pub(crate) struct Writer {
-    cell: ring::latest::Writer<WORDS>,
+    discipline: ring::latest::Writer<WORDS>,
     /// `None` once it holds the first slew.
     first: Option<ring::latest::Writer<FIRST_WORDS>>,
 }
 
 impl Writer {
     /// Stores the discipline that `next` gives. `next` runs inside the update, as `f`
-    /// does in [`ring::latest::Writer::update`]. The first discipline with a slew also
-    /// goes into the first cell, inside the same update, so a read that shows it
-    /// comes after that write.
+    /// does in [`ring::latest::Writer::update`]. The slew of the first discipline with
+    /// one goes into the first cell inside the same update, so a read of a discipline
+    /// with that slew comes after the write of the first cell.
     pub(crate) fn update(&mut self, next: impl FnOnce() -> Discipline) {
         let first = &mut self.first;
-        self.cell.update(|_| {
+        self.discipline.update(|_| {
             let discipline = next();
             if let Some(cell) = first.as_mut()
                 && let Some(slew) = discipline.slew()
@@ -61,7 +61,7 @@ impl Writer {
 /// Reads the cells from any thread with no lock.
 #[derive(Clone, Debug)]
 pub(crate) struct Reader {
-    cell: ring::latest::Reader<WORDS>,
+    discipline: ring::latest::Reader<WORDS>,
     first: ring::latest::Reader<FIRST_WORDS>,
 }
 
@@ -69,7 +69,7 @@ impl Reader {
     /// Runs `f` on the newest discipline, as [`ring::latest::Reader::read`] runs it
     /// on the newest value.
     pub(crate) fn read<R>(&self, mut f: impl FnMut(Discipline) -> R) -> R {
-        self.cell.read(|words| f(decode(words)))
+        self.discipline.read(|words| f(decode(words)))
     }
 
     /// The first slew, or `None` before the first discipline with one.
