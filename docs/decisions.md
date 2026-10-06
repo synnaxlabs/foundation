@@ -1402,8 +1402,10 @@ How to read this record:
   of a front end, a core crate, or a kind. No two producers share a name. A producer
   declares each code as a `const` item, so a bad code fails the build. A code never
   changes between releases. Each producer maps its own errors with `From<&Error>`
-  beside them, so `config`, `ops`, and `node` never match a producer's variants.
-  `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new` breaks
+  beside them, so `config`, `ops`, and `node` never match a producer's variants. An
+  error from a crate below `document` gives its message with `Display` and its fix
+  with `fix()`; each producer adds its own code and span. `Diagnostic` is
+  `#[non_exhaustive]`, so a new field with a default in `new` breaks
   no producer. No severity field: the warnings in K2 and R13-10 belong to plan output.
   `ops` operation error codes use `Code` too, so the grammar has one home. A code
   crosses the wire as text, and no reader makes a `Code` from it. Lost: a `Diagnose`
@@ -2591,7 +2593,8 @@ Parameters and later choices, recorded and not asked:
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
-  connector.
+  connector; errors below `document` (DIAGNOSTICS) have `Display` and `fix()` and no
+  `Code`, and the grammar of a value has one home, in `types` (advisor, #328).
 
 ### 5.3 Parameters for experiment
 

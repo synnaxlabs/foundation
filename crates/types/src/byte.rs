@@ -89,7 +89,8 @@ impl FromStr for Size {
     }
 }
 
-/// Why a text is not a byte size.
+/// Why a text is not a byte size. `Display` gives the message, a lower-case clause
+/// with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The text is not digits, an optional `.` and digits, then a unit of ASCII
@@ -112,6 +113,21 @@ pub enum Error {
         /// `16777215TiB`.
         largest: Size,
     },
+}
+
+impl Error {
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub fn fix(&self) -> String {
+        match self {
+            Self::Syntax => "Write a size such as \"200GiB\" or \"1.5GiB\"".into(),
+            Self::Unit { .. } => {
+                "Use a unit such as `MiB` or `GiB`, with exact case".into()
+            }
+            Self::Fraction => "Round the size to whole bytes".into(),
+            Self::Range { largest } => format!("Use at most \"{largest}\""),
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -377,11 +393,13 @@ mod tests {
     }
 
     #[test]
-    fn displays_what_each_error_expected() {
-        for (error, text) in [
+    fn states_each_problem_and_its_fix() {
+        const UNIT: &str = "Use a unit such as `MiB` or `GiB`, with exact case";
+        for (error, message, fix) in [
             (
                 Error::Syntax,
                 "expected a number and a unit, such as 1023B, 1.5GiB, or 200GiB",
+                "Write a size such as \"200GiB\" or \"1.5GiB\"",
             ),
             (
                 Error::Unit {
@@ -389,6 +407,7 @@ mod tests {
                     meant: Some("GiB"),
                 },
                 "expected the unit GiB",
+                UNIT,
             ),
             (
                 Error::Unit {
@@ -396,16 +415,24 @@ mod tests {
                     meant: None,
                 },
                 "expected the unit B, KiB, MiB, GiB, or TiB",
+                UNIT,
             ),
-            (Error::Fraction, "expected a whole number of bytes"),
+            (
+                Error::Fraction,
+                "expected a whole number of bytes",
+                "Round the size to whole bytes",
+            ),
             (
                 Error::Range {
                     largest: Size::from_bytes(u64::MAX / (1 << 40) * (1 << 40)),
                 },
                 "expected a size of at most 16777215TiB",
+                "Use at most \"16777215TiB\"",
             ),
         ] {
-            assert_eq!(error.to_string(), text);
+            assert_eq!(error.to_string(), message);
+            assert_eq!(error.fix(), fix, "{error:?}");
+            crate::common::assert_stated(message, fix);
         }
     }
 }
