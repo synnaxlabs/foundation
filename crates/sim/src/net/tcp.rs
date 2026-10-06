@@ -453,7 +453,9 @@ impl<'a> Tcp<'a> {
         end.read += n;
         let recv = end.options.recv_buffer_bytes;
         let edge = end.read.saturating_add(recv);
-        if !end.reset && edge - end.advertised >= mss.min(recv / 2) {
+        // As on Linux, no update follows the peer's FIN, because no byte can.
+        let open = !end.reset && !end.peer_closed;
+        if open && edge - end.advertised >= mss.min(recv / 2) {
             end.advertised = edge;
             let ack = end.ack();
             self.sockets.lanes.send(self.wire, now, end.pair, ack);
