@@ -245,6 +245,75 @@ fn trailing(rest: &[u8]) -> Result<(), Error> {
     }
 }
 
+/// Decodes an encoded series one vector at a time, so that the caller needs room for
+/// only [`VECTOR_LEN`] samples.
+#[derive(Debug)]
+pub struct Decoder<'a> {
+    layout: Layout,
+    /// The samples of the vectors not yet read.
+    left: usize,
+    /// The index of the next vector.
+    index: usize,
+    /// The bytes after the vectors read.
+    rest: &'a [u8],
+}
+
+impl<'a> Decoder<'a> {
+    /// A decoder of `bytes`, an encoded series of `count` samples of `scalar`.
+    #[must_use]
+    pub fn new(scalar: Scalar, count: usize, bytes: &'a [u8]) -> Self {
+        Self {
+            layout: Layout::of(scalar),
+            left: count,
+            index: 0,
+            rest: bytes,
+        }
+    }
+
+    /// Decodes the next vector into the front of `out` and returns its samples.
+    /// Returns `None` after the last vector and after an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the vector it reads, as [`validate`] gives it, or
+    /// [`Error::Trailing`] after the last vector. It never gives
+    /// [`Error::Overflow`], because it needs no room for all the samples: for a
+    /// count whose bytes pass `usize::MAX`, it gives the error of the vector where the
+    /// bytes end.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `out` holds fewer than [`VECTOR_LEN`] samples, whatever the next
+    /// vector holds.
+    #[must_use = "the result holds the error of the vector"]
+    pub fn next<'o>(&mut self, out: &'o mut [u8]) -> Option<Result<&'o [u8], Error>> {
+        let width = self.layout.width();
+        assert!(
+            out.len() >= VECTOR_LEN.strict_mul(width),
+            "out holds {} bytes, fewer than {VECTOR_LEN} samples of {width} bytes",
+            out.len()
+        );
+        if self.left == 0 {
+            return trailing(mem::take(&mut self.rest)).err().map(Err);
+        }
+        let count = self.left.min(VECTOR_LEN);
+        let (vector, rest) =
+            match vector::read(self.rest, self.layout, count, self.index) {
+                Ok(read) => read,
+                Err(error) => {
+                    (self.left, self.rest) = (0, &[]);
+                    return Some(Err(error));
+                }
+            };
+        self.left = self.left.strict_sub(count);
+        self.index = self.index.strict_add(1);
+        self.rest = rest;
+        let samples = out.split_at_mut(count.strict_mul(width)).0;
+        self.layout.decode(&vector, samples);
+        Some(Ok(samples))
+    }
+}
+
 /// The elements of `count` samples of `len` elements.
 fn elements(count: usize, len: usize) -> Result<usize, Error> {
     count.checked_mul(len).ok_or(Error::Overflow)
@@ -331,12 +400,12 @@ impl Shape {
                 Ok((&[], values))
             }
             Self::Variable { element, max } => {
+                let start = element.start(count)?;
                 let ends_len = Layout::END.raw_len(count)?;
                 let (ends, _) =
                     values.split_at_checked(ends_len).ok_or(length(ends_len))?;
                 let mut check = Ends::new(max);
                 check.check(ends)?;
-                let start = element.start(count)?;
                 let expected = start
                     .checked_add(element.raw_len(check.elements())?)
                     .ok_or(Error::Overflow)?;
@@ -1539,6 +1608,161 @@ mod tests {
         }
     }
 
+    mod decoder {
+        use proptest::option::weighted;
+        use proptest::sample::{Index, select};
+
+        use super::*;
+
+        /// The vectors that `Decoder` gives for a series, joined, or its first error.
+        /// Checks that it then ends.
+        fn joined(
+            scalar: Scalar,
+            count: usize,
+            bytes: &[u8],
+        ) -> Result<Vec<u8>, Error> {
+            let mut decoder = Decoder::new(scalar, count, bytes);
+            let mut out = vec![0; VECTOR_LEN * scalar.width()];
+            let mut samples = Vec::new();
+            let result = loop {
+                match decoder.next(&mut out) {
+                    Some(Ok(vector)) => samples.extend_from_slice(vector),
+                    Some(Err(error)) => break Err(error),
+                    None => break Ok(samples),
+                }
+            };
+            assert_eq!(
+                decoder.next(&mut out),
+                None,
+                "the decoder goes on after it ends"
+            );
+            result
+        }
+
+        #[test]
+        fn gives_one_vector_at_a_time() {
+            let values = bytes(2, 0..2_100);
+            let series = encode(Scalar::U16, &values);
+            let mut decoder = Decoder::new(Scalar::U16, 2_100, &series);
+            let mut out = [0; VECTOR_LEN * 2];
+            for chunk in values.chunks(VECTOR_LEN * 2) {
+                assert_eq!(decoder.next(&mut out), Some(Ok(chunk)));
+            }
+            assert_eq!(decoder.next(&mut out), None);
+        }
+
+        #[test]
+        fn ends_after_an_error() {
+            let mut decoder = Decoder::new(Scalar::U8, 1, &[9, 0]);
+            let mut out = [0; VECTOR_LEN];
+            assert_eq!(
+                decoder.next(&mut out),
+                Some(Err(Error::Tag { vector: 0, tag: 9 }))
+            );
+            assert_eq!(decoder.next(&mut out), None);
+        }
+
+        #[test]
+        fn refuses_bytes_after_the_last_vector_once() {
+            let mut decoder = Decoder::new(Scalar::U8, 0, &[0, 0]);
+            let mut out = [0; VECTOR_LEN];
+            assert_eq!(
+                decoder.next(&mut out),
+                Some(Err(Error::Trailing { extra: 2 }))
+            );
+            assert_eq!(decoder.next(&mut out), None);
+        }
+
+        #[test]
+        fn decodes_u32_max_samples_with_room_for_one_vector() {
+            let count = usize::try_from(u32::MAX).expect("usize holds a u32");
+            let runs = |len: usize| bytes(1, (0..len).map(|n| i128::from(n >= 512)));
+            let full = encode(Scalar::U8, &runs(VECTOR_LEN));
+            let last = encode(Scalar::U8, &runs(count % VECTOR_LEN));
+            assert_eq!([full[0], last[0]], [vector::RLE; 2]);
+            let series = [full.repeat(count / VECTOR_LEN), last].concat();
+            let mut decoder = Decoder::new(Scalar::U8, count, &series);
+            let expected = runs(VECTOR_LEN);
+            let mut out = [0; VECTOR_LEN];
+            let mut samples = 0;
+            while let Some(vector) = decoder.next(&mut out) {
+                let vector = vector.expect("the series is valid");
+                assert_eq!(vector, &expected[..vector.len()]);
+                samples += vector.len();
+            }
+            assert_eq!(samples, count);
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "out holds 2047 bytes, fewer than 1024 samples of 2 bytes"
+        )]
+        fn panics_when_out_holds_less_than_a_vector() {
+            let _vector = Decoder::new(Scalar::U16, 1, &[]).next(&mut [0; 2_047]);
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "out holds 1023 bytes, fewer than 1024 samples of 1 bytes"
+        )]
+        fn panics_when_out_holds_less_than_a_vector_after_the_last() {
+            let _vector = Decoder::new(Scalar::U8, 0, &[]).next(&mut [0; 1_023]);
+        }
+
+        #[test]
+        fn gives_the_vector_error_for_a_count_past_usize_bytes() {
+            let mut decoder = Decoder::new(Scalar::U64, usize::MAX, &[]);
+            assert_eq!(
+                validate(Type::Scalar(Scalar::U64), usize::MAX, &[]),
+                Err(Error::Overflow)
+            );
+            assert_eq!(
+                decoder.next(&mut [0; VECTOR_LEN * 8]),
+                Some(Err(Error::Truncated {
+                    vector: 0,
+                    needed: 2,
+                    available: 0
+                }))
+            );
+        }
+
+        proptest! {
+            #[test]
+            fn gives_what_decode_and_validate_give(
+                scalar in prop_oneof![select(&INTS), select(&OTHERS)],
+                values in proptest::collection::vec(0..4_u8, 0..2_100 * 8),
+                skew in prop_oneof![3 => Just(0_isize), 1 => -2..=2_isize],
+                change in weighted(0.25, (any::<Index>(), any::<u8>())),
+                cut in weighted(0.25, any::<Index>()),
+                extra in weighted(0.25, any::<u8>()),
+            ) {
+                let width = scalar.width();
+                let values = &values[..values.len() / width * width];
+                let mut series = encode(scalar, values);
+                if let Some((at, byte)) = change
+                    && !series.is_empty()
+                {
+                    let index = at.index(series.len());
+                    series[index] = byte;
+                }
+                if let Some(at) = cut {
+                    series.truncate(at.index(series.len() + 1));
+                }
+                series.extend(extra);
+                let count = (values.len() / width).saturating_add_signed(skew);
+
+                let mut out = vec![0; count * width];
+                let decoded = decode(Type::Scalar(scalar), count, &series, &mut out)
+                    .map(|()| out);
+                prop_assert_eq!(
+                    validate(Type::Scalar(scalar), count, &series),
+                    decoded.as_ref().map(Vec::len).map_err(Clone::clone)
+                );
+                prop_assert_eq!(joined(scalar, count, &series), decoded);
+            }
+        }
+    }
+
     mod array {
         use super::*;
 
@@ -1806,6 +2030,16 @@ mod tests {
             assert_eq!(encoded, Err(Error::Overflow));
             assert_eq!(validate(Type::Bytes, usize::MAX, &[]), Err(Error::Overflow));
             assert_eq!(decode(LIST, usize::MAX, &[], &mut []), Err(Error::Overflow));
+        }
+
+        /// The ends fit in a `usize`, but not once padded to 8 bytes.
+        #[test]
+        fn refuses_padded_ends_past_usize() {
+            let count = usize::MAX / 4;
+            let encoded = Encoder::new(LIST_8).encode(count, &[], &mut []);
+            assert_eq!(encoded, Err(Error::Overflow));
+            assert_eq!(validate(LIST_8, count, &[]), Err(Error::Overflow));
+            assert_eq!(decode(LIST_8, count, &[], &mut []), Err(Error::Overflow));
         }
     }
 

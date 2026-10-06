@@ -65,7 +65,7 @@ impl Index {
         }
     }
 
-    /// Checks a frame from `key` whose index series on `path` is `stamps`, or the
+    /// Checks a frame from `key` whose index series on `path` gives `stamps`, or the
     /// error of its first series that does not fit, at monotonic time `now` and mesh
     /// time `mesh`. Only the gate changes: a lease that ran out by `now` hands
     /// control on.
@@ -83,20 +83,18 @@ impl Index {
         &mut self,
         key: control::Key,
         path: Path,
-        stamps: Result<&[[u8; 8]], split::Error>,
+        stamps: Result<split::Stamps<'_>, split::Error>,
         now: Monotonic,
         mesh: Interval,
     ) -> Result<Accepted, Refusal> {
         let permit = self.gate.check(key, now).map_err(Refusal::Control)?;
-        let stamps = stamps.map_err(Refusal::Codec)?;
-        let order = self
-            .order
-            .check(path, mesh)
-            .push(stamps)
-            .map_err(Refusal::Order)?
-            .end();
+        let mut stamps = stamps.map_err(Refusal::Codec)?;
+        let mut order = self.order.check(path, mesh);
+        while let Some(vector) = stamps.next() {
+            order = order.push(vector).map_err(Refusal::Order)?;
+        }
         Ok(Accepted {
-            order,
+            order: order.end(),
             permit,
             frame: None,
         })
@@ -109,35 +107,35 @@ impl Index {
     }
 
     /// Opens a complete reader at the live tail, with a credit of `limit_bytes`.
-    pub(crate) fn open_complete(&mut self, limit_bytes: u64) -> delivery::Key {
+    pub(crate) fn open_complete(
+        &mut self,
+        limit_bytes: u64,
+    ) -> delivery::complete::Key {
         let live = self.order.tail(Path::Live).seq;
         let start = Start::At(Position {
             live,
             backfill: None,
         });
-        let key = self.readers.open(Reader::Unnamed, start).key;
-        self.readers.grant(key, limit_bytes);
-        key
+        self.readers.open(Reader::Unnamed, start, limit_bytes).key
     }
 
     /// Spends the seq of `accepted`, whose frame is in the buffer, and renews the
     /// writer's control lease. A live frame becomes the newest frame, and is queued for
-    /// complete readers until it is on disk. Returns whether the frame was queued, and
-    /// the latest sessions to wake.
+    /// complete readers until it is on disk. Returns the latest sessions to wake.
     ///
     /// # Panics
     ///
     /// If either path moved, or the holder changed, after the check, or no frame was
     /// frozen.
-    pub(crate) fn advance(&mut self, accepted: Accepted) -> (bool, &[delivery::Key]) {
+    pub(crate) fn advance(&mut self, accepted: Accepted) -> &[delivery::latest::Key] {
         let (path, seq, frame) = self.spend(accepted);
         let frame = frame.expect("invariant: a stored frame was frozen");
         match path {
             Path::Live => {
                 self.readers.queue(&frame, seq);
-                (true, self.readers.put(frame))
+                self.readers.put(frame)
             }
-            Path::Backfill => (false, &[]),
+            Path::Backfill => &[],
         }
     }
 
@@ -148,7 +146,7 @@ impl Index {
     /// # Panics
     ///
     /// If either path moved, or the holder changed, after the check.
-    pub(crate) fn lose(&mut self, accepted: Accepted) -> &[delivery::Key] {
+    pub(crate) fn lose(&mut self, accepted: Accepted) -> &[delivery::latest::Key] {
         match self.spend(accepted) {
             (Path::Live, _, Some(frame)) => self.readers.put(frame),
             (Path::Live, _, None) | (Path::Backfill, ..) => &[],
@@ -232,6 +230,22 @@ mod tests {
             .collect()
     }
 
+    /// Checks a frame on `path` from `key` at `now`, whose index series holds
+    /// `seconds`.
+    fn check(
+        index: &mut Index,
+        key: control::Key,
+        path: Path,
+        seconds: &[i64],
+        now: Monotonic,
+    ) -> Result<Accepted, Refusal> {
+        let frames = Frames::new();
+        let mut scratch = split::Scratch::default();
+        let mut split = scratch.split(&frames.set, frames.draft(&stamps(seconds)));
+        let (_, stamps) = split.next().expect("the group of the index");
+        index.check(key, path, stamps, now, mesh())
+    }
+
     /// Mesh time in the tests: the latest stamp accepted is `s(61)`.
     fn mesh() -> Interval {
         Interval {
@@ -264,8 +278,7 @@ mod tests {
         seconds: &[i64],
         now: Monotonic,
     ) -> Result<Range<u64>, Refusal> {
-        let accepted =
-            index.check(key, Path::Live, Ok(&stamps(seconds)), now, mesh())?;
+        let accepted = check(index, key, Path::Live, seconds, now)?;
         let seq = accepted.seq();
         let _ = index.lose(accepted);
         Ok(seq)
@@ -332,9 +345,8 @@ mod tests {
         fn spends_no_seq_until_advance() {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
-            let series = stamps(&[1, 2]);
-            let first = index.check(key, Path::Live, Ok(&series), at(1), mesh());
-            let again = index.check(key, Path::Live, Ok(&series), at(2), mesh());
+            let first = check(&mut index, key, Path::Live, &[1, 2], at(1));
+            let again = check(&mut index, key, Path::Live, &[1, 2], at(2));
             assert_eq!(first.map(|accepted| accepted.seq()), Ok(0..2));
             assert_eq!(again.map(|accepted| accepted.seq()), Ok(0..2));
         }
@@ -370,8 +382,7 @@ mod tests {
             let mut index = index();
             let holder = index.gate.open(writer("a", 10), Some(lease(10)), at(0));
             let series = stamps(&[1]);
-            let mut accepted = index
-                .check(holder, Path::Live, Ok(&series), at(8), mesh())
+            let mut accepted = check(&mut index, holder, Path::Live, &[1], at(8))
                 .expect("a holder's frame in order");
             let _ = accepted.freeze(frames.draft(&series), 0);
             assert_eq!(index.gate.deadline(), Some(at(10)));
@@ -402,12 +413,15 @@ mod tests {
             let session = index.readers.open_latest(None, s(0)).key;
             let series = stamps(&[2, 3]);
             assert_eq!(write(&mut index, key, &[1], at(1)), Ok(0..1));
-            let mut accepted = index
-                .check(key, Path::Live, Ok(&series), at(2), mesh())
+            let mut accepted = check(&mut index, key, Path::Live, &[2, 3], at(2))
                 .expect("a holder's frame in order");
             let frame = accepted.freeze(frames.draft(&series), 0).clone();
-            assert_eq!(index.advance(accepted), (true, &[session][..]));
-            let taken = index.readers.take(session).expect("the newest frame");
+            assert_eq!(index.advance(accepted), &[session]);
+            assert!(!index.readers.pending());
+            let taken = index
+                .readers
+                .take(session.into())
+                .expect("the newest frame");
             assert_eq!(taken.path(), Path::Live);
             assert_eq!(taken.range(0), Some(frame::Range { seq: 1, count: 2 }));
             assert_eq!(taken.series(0), frame.series(0));
@@ -420,14 +434,13 @@ mod tests {
             let key = index.gate.open(writer("a", 10), None, at(0));
             let session = index.readers.open_latest(None, s(0)).key;
             let series = stamps(&[1, 2]);
-            let mut accepted = index
-                .check(key, Path::Backfill, Ok(&series), at(1), mesh())
+            let mut accepted = check(&mut index, key, Path::Backfill, &[1, 2], at(1))
                 .expect("a holder's frame in order");
             let frame = accepted.freeze(frames.draft(&series), 0);
             assert_eq!(frame.path(), Path::Backfill);
             assert_eq!(frame.range(0), Some(frame::Range { seq: 0, count: 2 }));
-            assert_eq!(index.advance(accepted), (false, &[][..]));
-            assert!(index.readers.take(session).is_none());
+            assert_eq!(index.advance(accepted), &[]);
+            assert!(index.readers.take(session.into()).is_none());
             assert_eq!(write(&mut index, key, &[3], at(2)), Ok(0..1));
         }
 
@@ -440,17 +453,19 @@ mod tests {
                 live: 0,
                 backfill: None,
             });
-            let session = index.readers.open(Reader::Unnamed, start).key;
-            index.readers.grant(session, u64::MAX);
+            let session = index.readers.open(Reader::Unnamed, start, u64::MAX).key;
             let series = stamps(&[1, 2]);
-            let mut accepted = index
-                .check(key, Path::Live, Ok(&series), at(1), mesh())
+            let mut accepted = check(&mut index, key, Path::Live, &[1, 2], at(1))
                 .expect("a holder's frame in order");
             let _ = accepted.freeze(frames.draft(&series), 0);
-            assert_eq!(index.advance(accepted), (true, &[][..]));
+            assert_eq!(index.advance(accepted), &[]);
+            assert!(index.readers.pending());
             assert_eq!(index.readers.release(1), &[]);
             assert_eq!(index.readers.release(2), &[session]);
-            let taken = index.readers.take(session).expect("the stored frame");
+            let taken = index
+                .readers
+                .take(session.into())
+                .expect("the stored frame");
             assert_eq!(taken.range(0), Some(frame::Range { seq: 0, count: 2 }));
         }
 
@@ -459,8 +474,7 @@ mod tests {
         fn panics_when_a_stored_frame_was_not_frozen() {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
-            let accepted =
-                index.check(key, Path::Live, Ok(&stamps(&[1])), at(1), mesh());
+            let accepted = check(&mut index, key, Path::Live, &[1], at(1));
             let _ = index.advance(accepted.expect("a holder's frame in order"));
         }
 
@@ -469,7 +483,7 @@ mod tests {
         fn panics_when_the_path_moved_after_the_check() {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
-            let first = index.check(key, Path::Live, Ok(&stamps(&[1])), at(1), mesh());
+            let first = check(&mut index, key, Path::Live, &[1], at(1));
             let first = first.expect("a holder's frame in order");
             // At the same time, so the gate still takes the first permit.
             assert_eq!(write(&mut index, key, &[1], at(1)), Ok(0..1));
@@ -483,7 +497,7 @@ mod tests {
         fn panics_when_the_holder_changed_after_the_check() {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
-            let first = index.check(key, Path::Live, Ok(&stamps(&[1])), at(1), mesh());
+            let first = check(&mut index, key, Path::Live, &[1], at(1));
             let first = first.expect("a holder's frame in order");
             let _ = index.gate.open(writer("b", 20), None, at(1));
             let _ = index.advance(first);
@@ -496,8 +510,7 @@ mod tests {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
             let series = stamps(&[1]);
-            let mut accepted = index
-                .check(key, Path::Live, Ok(&series), at(1), mesh())
+            let mut accepted = check(&mut index, key, Path::Live, &[1], at(1))
                 .expect("a holder's frame in order");
             let _ = accepted.freeze(frames.draft(&series), 0);
             let _ = accepted.freeze(frames.draft(&series), 0);
@@ -517,15 +530,13 @@ mod tests {
                 live: 0,
                 backfill: None,
             });
-            let complete = index.readers.open(Reader::Unnamed, start).key;
-            index.readers.grant(complete, u64::MAX);
+            index.readers.open(Reader::Unnamed, start, u64::MAX);
             let series = stamps(&[1, 2]);
-            let mut accepted = index
-                .check(key, Path::Live, Ok(&series), at(1), mesh())
+            let mut accepted = check(&mut index, key, Path::Live, &[1, 2], at(1))
                 .expect("a holder's frame in order");
             let _ = accepted.freeze(frames.draft(&series), 0);
             assert_eq!(index.lose(accepted), &[latest]);
-            let taken = index.readers.take(latest).expect("the newest frame");
+            let taken = index.readers.take(latest.into()).expect("the newest frame");
             assert_eq!(taken.range(0), Some(frame::Range { seq: 0, count: 2 }));
             assert_eq!(index.readers.release(2), &[]);
             assert_eq!(write(&mut index, key, &[3], at(2)), Ok(2..3));
@@ -537,7 +548,7 @@ mod tests {
             let key = index.gate.open(writer("a", 10), None, at(0));
             let session = index.readers.open_latest(None, s(0)).key;
             assert_eq!(write(&mut index, key, &[1, 2], at(1)), Ok(0..2));
-            assert!(index.readers.take(session).is_none());
+            assert!(index.readers.take(session.into()).is_none());
             assert_eq!(write(&mut index, key, &[3], at(2)), Ok(2..3));
         }
     }

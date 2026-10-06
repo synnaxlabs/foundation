@@ -7,9 +7,32 @@ use serde_json::Value;
 
 use crate::{field, files};
 
-/// The names of the packages in `metadata` with a `.rs` file whose text `matches`.
-/// It reads each file in the directory of each target's root, so it also reads
-/// oracles under `oracles/`. It never picks `xtask`, whose tests hold sample source.
+/// A workspace package that a task picked.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Package {
+    /// The package id from `cargo metadata`. `-p` takes it, and no other package in a
+    /// build shares it, as another package may share the name.
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
+
+impl Package {
+    /// Reads the id and the name of a package object of `cargo metadata`.
+    ///
+    /// # Errors
+    ///
+    /// A missing field.
+    pub(crate) fn read(package: &Value) -> Result<Self, String> {
+        Ok(Self {
+            id: field::text(package, "id")?.to_string(),
+            name: field::text(package, "name")?.to_string(),
+        })
+    }
+}
+
+/// The packages in `metadata` with a `.rs` file whose text `matches`. It reads each
+/// file in the directory of each target's root, so it also reads oracles under
+/// `oracles/`. It never picks `xtask`, whose tests hold sample source.
 ///
 /// # Errors
 ///
@@ -17,11 +40,11 @@ use crate::{field, files};
 pub(crate) fn packages(
     metadata: &Value,
     matches: impl Fn(&str) -> bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<Package>, String> {
     let mut picked = Vec::new();
     for package in field::list(metadata, "packages")? {
-        let name = field::text(package, "name")?;
-        if name == "xtask" {
+        let found = Package::read(package)?;
+        if found.name == "xtask" {
             continue;
         }
         let mut dirs = BTreeSet::new();
@@ -33,7 +56,7 @@ pub(crate) fn packages(
             dirs.insert(dir.to_path_buf());
         }
         if any(&dirs, &matches)? {
-            picked.push(name.to_string());
+            picked.push(found);
         }
     }
     Ok(picked)
@@ -106,7 +129,8 @@ mod tests {
 
         fn check(matches: impl Fn(&str) -> bool) -> Vec<String> {
             let metadata = crate::metadata(&crate::fixture()).unwrap();
-            packages(&metadata, matches).unwrap()
+            let picked = packages(&metadata, matches).unwrap();
+            picked.into_iter().map(|p| p.name).collect()
         }
 
         #[test]
@@ -122,11 +146,19 @@ mod tests {
 
         #[test]
         fn names_a_missing_metadata_field() {
-            let metadata = serde_json::json!({ "packages": [{ "name": "a" }] });
-            assert_eq!(
-                packages(&metadata, |_| true).unwrap_err(),
-                "cargo JSON has no array field `targets`"
-            );
+            for (package, error) in [
+                (
+                    serde_json::json!({ "id": "a-id", "name": "a" }),
+                    "cargo JSON has no array field `targets`",
+                ),
+                (
+                    serde_json::json!({ "name": "a", "targets": [] }),
+                    "cargo JSON has no string field `id`",
+                ),
+            ] {
+                let metadata = serde_json::json!({ "packages": [package] });
+                assert_eq!(packages(&metadata, |_| true).unwrap_err(), error);
+            }
         }
     }
 

@@ -14,6 +14,7 @@
 mod arbitrary;
 mod lex;
 mod parse;
+mod unwritable;
 mod update;
 mod write;
 
@@ -22,13 +23,14 @@ use std::fmt;
 use document::Span;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::encoding::TooDeep;
-use types::name::{self, Name};
+use types::name;
 
 pub use parse::read;
-pub use update::update;
+pub use unwritable::Unwritable;
+pub use update::{Refusal, update};
 pub use write::write;
 
-/// A problem in HCL text, or a part of a Document that HCL text cannot hold.
+/// A problem in HCL text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The text breaks the grammar.
@@ -88,13 +90,6 @@ pub enum Error {
         /// The length of the file.
         bytes: usize,
     },
-    /// A part of a Document that HCL text cannot hold, from [`write`].
-    Unwritable {
-        /// Where the part is, or `None` for a Document with no spans.
-        span: Option<Span>,
-        /// The part.
-        part: Unwritable,
-    },
 }
 
 impl Error {
@@ -116,9 +111,6 @@ impl Error {
                     .start()
                     .offset
             }
-            Self::Unwritable { .. } => {
-                unreachable!("invariant: read gives no Unwritable")
-            }
         }
     }
 }
@@ -131,16 +123,9 @@ impl From<&Error> for Diagnostic {
             Error::Syntax { span, expected } => syntax(*span, expected),
             Error::Unclosed { span, opener, part } => part.diagnostic(*span, *opener),
             Error::Form { span, form } => form.diagnostic(*span),
-            Error::Name { span, .. } => Self::new(
-                NAME,
-                Some(*span),
-                "the reference is not a valid name".into(),
-                format!(
-                    "Use segments of ASCII letters, digits, `_`, and `-`, split by \
-                     dots, with at most {} bytes in all",
-                    Name::MAX_BYTES
-                ),
-            ),
+            Error::Name { span, error } => {
+                Self::new(NAME, Some(*span), error.to_string(), error.fix().into())
+            }
             Error::Number { span, problem } => problem.diagnostic(*span),
             Error::Escape { span } => Self::new(
                 ESCAPE,
@@ -158,7 +143,6 @@ impl From<&Error> for Diagnostic {
                 format!("the file has {bytes} bytes, and the limit is {}", u32::MAX),
                 "Split it into smaller files".into(),
             ),
-            Error::Unwritable { span, part } => part.diagnostic(*span),
         }
     }
 }
@@ -180,11 +164,6 @@ const NAME: Code = Code::new("hcl.name");
 const NUMBER: Code = Code::new("hcl.number");
 const ESCAPE: Code = Code::new("hcl.escape");
 const TOO_LARGE: Code = Code::new("hcl.too-large");
-const UNWRITABLE_KEY: Code = Code::new("hcl.unwritable-key");
-const UNWRITABLE_KEYWORD: Code = Code::new("hcl.unwritable-keyword");
-const UNWRITABLE_FUNCTION: Code = Code::new("hcl.unwritable-function");
-const UNWRITABLE_REFERENCE: Code = Code::new("hcl.unwritable-reference");
-const UNWRITABLE_FOR: Code = Code::new("hcl.unwritable-for");
 
 /// A syntax error at `span`, which needs `needed` there.
 fn syntax(span: Span, needed: impl fmt::Display) -> Diagnostic {
@@ -220,7 +199,7 @@ pub enum Form {
     /// that starts with the word `for` as one, such as `[for]` or `{ for = 1 }`.
     For,
     /// An index or an attribute access after a value, such as `a[0]`, `a.0`, or
-    /// `f().b`.
+    /// `f().b`. A string index on a reference is a segment, not this form.
     Index,
     /// A splat, such as `a[*].b` or `a.*.b`.
     Splat,
@@ -270,7 +249,8 @@ impl Form {
             Self::Index => (
                 INDEX,
                 "indexes and attribute access do not exist in Foundation files",
-                "Write the value itself",
+                "Write the value itself. Write a name segment that is not an \
+                 identifier as a string index, such as `plc[\"40001\"]`",
             ),
             Self::Splat => (
                 SPLAT,
@@ -334,64 +314,6 @@ impl Number {
             ),
         };
         Diagnostic::new(NUMBER, Some(span), message.into(), fix.into())
-    }
-}
-
-/// A part of a Document that no HCL text reads back as the same part.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unwritable {
-    /// A key of a body that is not an identifier, such as `my key`. HCL has no quoted
-    /// key in a body. A key in a map value can be any text.
-    Key,
-    /// A block keyword that is not an identifier.
-    Keyword,
-    /// A function name that is not an identifier.
-    Function,
-    /// A name that HCL does not read as a reference: a segment does not start with a
-    /// letter or `_`, or the first segment is `true`, `false`, or `null`, such as
-    /// `a.7b`, `site_a.@changes`, or `true.x`.
-    Reference,
-    /// A list whose first item starts with the word `for`, such as the reference `for`
-    /// or `for.x`, or the call `for(1)`. HCL reads `[for` as a `for` expression.
-    For,
-    /// A block or a value nested deeper than [`document::encoding::DEPTH_MAX`], which
-    /// [`read`] refuses.
-    Depth,
-}
-
-impl Unwritable {
-    fn diagnostic(self, span: Option<Span>) -> Diagnostic {
-        let (code, message, fix) = match self {
-            Self::Key => (
-                UNWRITABLE_KEY,
-                "a key of a body must be an identifier, such as `retry_limit`",
-                "Rename the key, or move it into a map value",
-            ),
-            Self::Keyword => (
-                UNWRITABLE_KEYWORD,
-                "a block keyword must be an identifier, such as `channel`",
-                "Rename the keyword",
-            ),
-            Self::Function => (
-                UNWRITABLE_FUNCTION,
-                "a function name must be an identifier, such as `secret`",
-                "Rename the function",
-            ),
-            Self::Reference => (
-                UNWRITABLE_REFERENCE,
-                "the name does not read as a reference in HCL",
-                "Start each segment with a letter or `_`, and do not make `true`, \
-                 `false`, or `null` the first segment",
-            ),
-            Self::For => (
-                UNWRITABLE_FOR,
-                "a list cannot start with the word `for`, because HCL reads `[for` as a \
-                 `for` expression",
-                "Put another item first, or rename it",
-            ),
-            Self::Depth => return Diagnostic::from(&TooDeep { span }),
-        };
-        Diagnostic::new(code, span, message.into(), fix.into())
     }
 }
 
@@ -630,7 +552,8 @@ mod tests {
             Form::Index,
             "hcl.index",
             "indexes and attribute access do not exist in Foundation files",
-            "Write the value itself",
+            "Write the value itself. Write a name segment that is not an identifier \
+             as a string index, such as `plc[\"40001\"]`",
         ),
         (
             Form::Splat,
@@ -703,12 +626,12 @@ mod tests {
             (
                 Error::Name {
                     span: span(7),
-                    error: "a.@".parse::<Name>().unwrap_err(),
+                    error: "a.@".parse::<name::Name>().unwrap_err(),
                 },
                 "hcl.name",
-                "the reference is not a valid name",
-                "Use segments of ASCII letters, digits, `_`, and `-`, split by dots, \
-                 with at most 255 bytes in all",
+                "\"a.@\" has a segment that is not valid: \"@\"",
+                "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
+                 and no other character",
             ),
             (
                 Error::Number {
@@ -759,87 +682,20 @@ mod tests {
         assert_eq!(error.to_string(), format!("{message}. {fix}"));
     }
 
-    const UNWRITABLE: [(Unwritable, &str, &str, &str); 5] = [
-        (
-            Unwritable::Key,
-            "hcl.unwritable-key",
-            "a key of a body must be an identifier, such as `retry_limit`",
-            "Rename the key, or move it into a map value",
-        ),
-        (
-            Unwritable::Keyword,
-            "hcl.unwritable-keyword",
-            "a block keyword must be an identifier, such as `channel`",
-            "Rename the keyword",
-        ),
-        (
-            Unwritable::Function,
-            "hcl.unwritable-function",
-            "a function name must be an identifier, such as `secret`",
-            "Rename the function",
-        ),
-        (
-            Unwritable::Reference,
-            "hcl.unwritable-reference",
-            "the name does not read as a reference in HCL",
-            "Start each segment with a letter or `_`, and do not make `true`, \
-             `false`, or `null` the first segment",
-        ),
-        (
-            Unwritable::For,
-            "hcl.unwritable-for",
-            "a list cannot start with the word `for`, because HCL reads `[for` as a \
-             `for` expression",
-            "Put another item first, or rename it",
-        ),
-    ];
-
-    #[test]
-    fn each_unwritable_part_has_its_code_and_fix() {
-        for (part, code, message, fix) in UNWRITABLE {
-            // A new variant fails this match, so it joins `UNWRITABLE`.
-            match part {
-                Unwritable::Key
-                | Unwritable::Keyword
-                | Unwritable::Function
-                | Unwritable::Reference
-                | Unwritable::For => {}
-                Unwritable::Depth => unreachable!("`Depth` has its own test"),
-            }
-            let error = Error::Unwritable {
-                span: Some(span(7)),
-                part,
-            };
-            check(&error, code, message, fix);
-            let error = Error::Unwritable { span: None, part };
-            assert_eq!(Diagnostic::from(&error).span, None, "{part:?}");
-        }
-    }
-
     #[test]
     fn too_deep_keeps_documents_diagnostic() {
-        let read = Error::TooDeep { span: span(7) };
-        let write = |span| Error::Unwritable {
-            span,
-            part: Unwritable::Depth,
-        };
-        for (error, span) in [
-            (read, Some(span(7))),
-            (write(Some(span(7))), Some(span(7))),
-            (write(None), None),
-        ] {
-            let expected = Diagnostic::new(
-                Code::new("document.too-deep"),
-                span,
-                "the document nests deeper than 64 levels".into(),
-                "Make it flatter".into(),
-            );
-            assert_eq!(Diagnostic::from(&error), expected, "{error:?}");
-            assert_eq!(
-                error.to_string(),
-                "the document nests deeper than 64 levels. Make it flatter"
-            );
-        }
+        let error = Error::TooDeep { span: span(7) };
+        let expected = Diagnostic::new(
+            Code::new("document.too-deep"),
+            Some(span(7)),
+            "the document nests deeper than 64 levels".into(),
+            "Make it flatter".into(),
+        );
+        assert_eq!(Diagnostic::from(&error), expected);
+        assert_eq!(
+            error.to_string(),
+            "the document nests deeper than 64 levels. Make it flatter"
+        );
     }
 
     #[test]
@@ -865,13 +721,13 @@ mod tests {
         assert_eq!(error.to_string(), document.to_string());
     }
 
-    /// One error of each variant, each `Expected`, each `Unclosed` part, each `Form`,
-    /// and each `Unwritable` part.
+    /// One error of each variant, each `Expected`, each `Unclosed` part, and each
+    /// `Form`.
     fn every() -> Vec<Error> {
         let mut every = vec![
             Error::Name {
                 span: span(7),
-                error: "a.@".parse::<Name>().unwrap_err(),
+                error: "a.@".parse::<name::Name>().unwrap_err(),
             },
             Error::Number {
                 span: span(7),
@@ -892,10 +748,6 @@ mod tests {
                 span: span(0),
                 bytes: 4_294_967_296,
             },
-            Error::Unwritable {
-                span: None,
-                part: Unwritable::Depth,
-            },
         ];
         every.extend(EXPECTED.map(|(expected, _)| Error::Syntax {
             span: span(7),
@@ -910,9 +762,6 @@ mod tests {
             span: span(7),
             form,
         }));
-        every.extend(
-            UNWRITABLE.map(|(part, ..)| Error::Unwritable { span: None, part }),
-        );
         for error in &every {
             // A new variant fails this match, so it joins `every`.
             match error {
@@ -924,8 +773,7 @@ mod tests {
                 | Error::Escape { .. }
                 | Error::TooDeep { .. }
                 | Error::Document(_)
-                | Error::TooLarge { .. }
-                | Error::Unwritable { .. } => {}
+                | Error::TooLarge { .. } => {}
             }
         }
         every
@@ -942,21 +790,27 @@ mod tests {
                     assert_eq!(code, "hcl.syntax");
                 }
                 Error::Number { .. } => assert_eq!(code, "hcl.number"),
-                Error::TooDeep { .. }
-                | Error::Document(_)
-                | Error::Unwritable {
-                    part: Unwritable::Depth,
-                    ..
-                } => assert!(code.starts_with("document."), "{code}"),
+                Error::TooDeep { .. } | Error::Document(_) => {
+                    assert!(code.starts_with("document."), "{code}");
+                }
                 _ => assert!(new, "{code} repeats: {error:?}"),
+            }
+        }
+        for part in unwritable::tests::every(None) {
+            let code = Diagnostic::from(&part).code.as_str();
+            if matches!(part, Unwritable::TooDeep(_)) {
+                assert_eq!(code, "document.too-deep");
+            } else {
+                assert!(codes.insert(code), "{code} repeats: {part:?}");
             }
         }
     }
 
     #[test]
     fn each_message_is_a_clause_and_each_fix_a_sentence() {
-        for error in every() {
-            let diagnostic = Diagnostic::from(&error);
+        let (errors, parts) = (every(), unwritable::tests::every(None));
+        let diagnostics = errors.iter().map(Diagnostic::from);
+        for diagnostic in diagnostics.chain(parts.iter().map(Diagnostic::from)) {
             let (message, fix) = (&diagnostic.message, &diagnostic.fix);
             assert!(!message.ends_with('.'), "{message}");
             assert!(!fix.ends_with('.'), "{fix}");

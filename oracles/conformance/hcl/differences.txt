@@ -5,3 +5,5 @@ reference-unicode hcl.name A3: names are ASCII
 float-past-f64 hcl.number DOCUMENT MODEL: a float is a finite f64
 float-to-zero hcl.number HCL READER: a float that rounds to zero is refused
 object-key-155-digits hcl.number-key HCL READER: a number key of more than 154 digits is refused
+reference-index-empty hcl.name A3: a segment is not empty
+reference-index-heredoc hcl.name A3: a segment has no line end
