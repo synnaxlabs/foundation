@@ -124,7 +124,8 @@ pub enum Error {
     },
     /// A message names this node as its sender.
     Loopback,
-    /// A second node claims to lead a term that this node leads. Election safety is
+    /// A heartbeat or an append of this node's term from a node other than the
+    /// leader of the term it knows: the one it heard, or itself. Election safety is
     /// broken, or the sender is faulty.
     SecondLeader {
         /// The term with two leaders.
