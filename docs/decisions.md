@@ -1173,14 +1173,16 @@ How to read this record:
   Every other message of a higher term needs a proof that fits its body (a `Vote`
   the sender's pre-votes, a `Heartbeat` or `Append` the sender's votes, a reply any
   proof of the term) whose voters are a quorum of this node's configuration in
-  force or last committed; else `Error::Unproven`, and nothing changes or is sent. A
-  leader claim in this node's own term follows RAFT LOG. A late pre-vote or vote of
-  the term joins the proof its candidate carries. The known gap: a voter that was
-  down through a change holds the old configuration and refuses a leader whose votes
-  are no quorum of it until an election whose grants are. When a second node fails
-  first, the group waits for an operator, who wipes the voter and starts it with no
-  configuration (a node with no voters proves anything). The chain of proofs over
-  configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
+  force or last committed; else `Error::Unproven`, and nothing changes or is sent.
+  A node that started with no voters takes the configuration before its entries from its
+  first configuration entry: a joint entry's outgoing set, or a leave's incoming set. A
+  leader claim in this node's own term follows RAFT LOG. A late pre-vote or vote of the
+  term joins the proof its candidate carries. The known gap: a voter that was down
+  through a change holds the old configuration and refuses a leader whose votes are no
+  quorum of it until an election whose grants are. When a second node fails first, the
+  group waits for an operator, who wipes the voter and starts it with no configuration
+  (a node with no voters proves anything). The chain of proofs over configuration
+  entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
   pins both, and the random runs skip exactly such a voter until #881. The advisor
   required a proof on every message and on each refusal, signatures only, and the
   proof in the hard state (#750, 2026-10-05). `mesh` signs and checks the signatures
