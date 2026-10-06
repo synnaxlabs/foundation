@@ -242,8 +242,9 @@ impl State {
         self.open.is_empty() && self.queue.is_empty()
     }
 
-    /// The count of `commits` at which every entry queued now is durable.
-    fn until(&self) -> u64 {
+    /// The `commits` count at which every entry appended so far is durable. `taken`
+    /// counts a commit in flight, and a queued entry needs the next one.
+    fn durable_at(&self) -> u64 {
         if self.idle() {
             self.taken
         } else {
@@ -450,12 +451,12 @@ impl Buffer {
 
     /// Resolves when every entry appended before the call is durable: at once when
     /// none waits, else at the end of the group commit that holds the last of them.
-    /// Gives the error that ended the buffer instead.
+    /// Gives the error that ended the buffer when it ended before they were durable.
     #[must_use]
     pub fn committed(&self) -> Commit<'_> {
         Commit {
             shared: &self.shared,
-            until: self.shared.state.borrow().until(),
+            until: self.shared.state.borrow().durable_at(),
         }
     }
 }

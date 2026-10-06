@@ -2132,8 +2132,8 @@ fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
     });
 }
 
-/// A `Commit` polled once and then dropped waits on nothing, so the buffer idles
-/// and a drop ends the task at once.
+/// A resolved `Commit` leaves no waker behind, so the buffer idles after it and a
+/// drop ends the task at once.
 #[test]
 fn a_drop_after_an_abandoned_commit_ends_the_task_at_once() {
     run(123, Memory::default(), |shard| async move {
@@ -2215,5 +2215,63 @@ fn a_commit_awaited_during_a_slow_sync_resolves_when_the_sync_ends() {
         buffer.committed().await.expect("commits");
         assert_eq!(shard.clock.now() - opened, Span::from_nanos(tenth * 25));
         assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+    });
+}
+
+/// A commit future made while a deadline is in flight, with nothing open or queued,
+/// resolves well when that deadline syncs, also when the next one fails.
+#[test]
+fn a_commit_made_during_a_sync_resolves_with_that_sync() {
+    run(131, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let sync = Span::from_nanos(COMMIT.nanos() * 4 / 10);
+        shard.memory.slow_syncs(shard.clock.clone(), sync);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let half = Span::from_nanos(COMMIT.nanos() + sync.nanos() / 2);
+        shard.clock.sleep(half).await;
+        let first = buffer.committed();
+        shard.clock.sleep(commits(1)).await;
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(commits(3)).await;
+        assert_eq!(shard.memory.syncs(), 4, "the second commit failed its sync");
+        assert_eq!(first.await, Ok(()), "its entries synced");
+    });
+}
+
+/// A `Commit` held across two commits after the one that synced its entries still
+/// resolves well: `commits` passed its target, it did not land on it.
+#[test]
+fn a_commit_held_across_two_later_commits_resolves_well() {
+    run(125, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let held = buffer.committed();
+        for seq in 1..3 {
+            shard.clock.sleep(commits(3)).await;
+            buffer
+                .append([entry(1, a, Path::Live, seq, 1, None, Parts::default())])
+                .expect("queues");
+        }
+        shard.clock.sleep(commits(3)).await;
+        assert_eq!(buffer.commits(), 3, "two commits ran after its own");
+        assert_eq!(held.await, Ok(()), "its entries are durable");
     });
 }

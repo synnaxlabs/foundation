@@ -323,9 +323,9 @@ impl Shard {
 
     /// Resolves when every frame written before the call is on disk: at once when
     /// none waits, else at the end of the group commit that holds the last of them.
-    /// Gives the error that ended the buffer instead. Commits run without this
-    /// future, so a caller may drop it. Call [`woken`](Self::woken) after it
-    /// resolves.
+    /// Gives the error that ended the buffer when it ended before they were on disk.
+    /// Commits run without this future, so a caller may drop it. Call
+    /// [`woken`](Self::woken) after it resolves.
     pub(crate) fn committed(&self) -> buffer::Commit<'_> {
         self.buffer.committed()
     }
