@@ -45,6 +45,8 @@ struct Wake {
     listed: Vec<bool>,
     /// Each reader to wake, with a frame to take. A key can repeat.
     keys: Vec<reader::Key>,
+    /// The commits the buffer had ended at the last settle.
+    commits: u64,
 }
 
 /// The shard's state for an open writer.
@@ -397,8 +399,8 @@ impl Shard {
     /// Replaces `keys` with the readers to wake since the last call, sorted, each
     /// once. Complete readers first get the live frames now on disk. A key is a hint:
     /// take from each until [`take`](Self::take) gives `None`. Call it after each
-    /// write and each commit. It takes time linear in the indexes with live frames
-    /// queued for complete readers.
+    /// write and each commit. When a commit ended since the last call, it reads each
+    /// index with live frames queued for complete readers; else it reads none.
     pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.wake.settle(&self.buffer, &mut self.indexes);
         keys.clear();
@@ -463,8 +465,13 @@ impl Wake {
         }
     }
 
-    /// Gives complete readers the live frames on disk.
+    /// Gives complete readers the live frames on disk. Reads no index when no commit
+    /// ended since the last settle, as only a commit moves `durable`.
     fn settle(&mut self, buffer: &Buffer, indexes: &mut [Index]) {
+        let commits = buffer.commits();
+        if mem::replace(&mut self.commits, commits) == commits {
+            return;
+        }
         let mut pending = mem::take(&mut self.pending);
         pending.retain(|&(slot, place)| {
             let readers = &mut indexes[place].readers;
@@ -2146,6 +2153,47 @@ mod tests {
         }
 
         #[test]
+        fn releases_a_frame_at_the_first_woken_after_its_commit() {
+            run(50, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(woken(&mut shard), []);
+                shard.committed().await.expect("the commit ends");
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(woken(&mut shard), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn releases_a_frame_listed_after_a_settle_at_the_next_commit() {
+            run(51, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(shard.wake.pending, Vec::new());
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(woken(&mut shard), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
         fn lists_no_index_for_a_live_frame_with_no_complete_reader() {
             run(49, |test| async move {
                 let set = two_indexes();
@@ -2164,15 +2212,23 @@ mod tests {
         }
 
         #[test]
-        fn unlists_an_index_at_the_settle_after_its_last_complete_reader_closes() {
+        fn unlists_an_index_at_the_commit_after_its_last_complete_reader_closes() {
             run(52, |test| async move {
                 let set = two_indexes();
                 let mut shard = test.shard(AREA).await;
                 let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
                 let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
                 write(&test, &mut shard, a, &[10]);
-                shard.close_reader(reader, MESH);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
                 write(&test, &mut shard, a, &[20]);
+                shard.close_reader(reader, MESH);
+                write(&test, &mut shard, a, &[30]);
+                let place = shard.place(Slot::new(0));
+                assert_eq!(woken(&mut shard), []);
+                let listed = [(Slot::new(0), place)];
+                assert_eq!(shard.wake.pending, listed, "no commit ended");
+                shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), []);
                 assert_eq!(shard.wake.pending, Vec::new());
             });
