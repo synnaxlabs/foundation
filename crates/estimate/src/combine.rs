@@ -566,10 +566,11 @@ mod tests {
             assert_eq!((m.offset().nanos(), m.error().nanos()), (1_000, widest));
         }
 
-        /// A peer that reads the estimate at both ends of an exchange gets no known
-        /// bound, so it cannot vote with it.
+        /// One reading of an unknown estimate, sent as both intervals, gives no known
+        /// bound. Two readings whose centers move apart by more than the round trip
+        /// can give one.
         #[test]
-        fn gives_a_peer_no_known_bound() {
+        fn gives_one_unknown_reading_at_both_ends_no_known_bound() {
             let sources = filters(&[unknown(0), unknown(Span::SECOND.nanos())]);
             let m = combine(Monotonic(0), drift(0), &sources).expect("bounds meet");
             let exchange = Exchange {

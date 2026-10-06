@@ -43,10 +43,10 @@ impl Exchange {
     /// from mesh time by at most `drift`. When both intervals hold the other clock's
     /// true mesh time, it holds the true offset whatever the delay in each direction.
     /// An error over 36500 days gives an unknown measurement
-    /// ([`Measurement::unknown`]), centered between the edges. `None` when the
-    /// exchange allows no offset: an interval is inverted, the other clock goes back,
-    /// the local clock drifts more than the drift bound, or `sent` is after
-    /// `returned`.
+    /// ([`Measurement::unknown`]), centered between the edges or at the nearest span.
+    /// `None` when the exchange allows no offset: an interval is inverted, the other
+    /// clock goes back, the local clock drifts more than the drift bound, or `sent` is
+    /// after `returned`.
     #[must_use]
     pub fn measure(self, drift: Drift) -> Option<Measurement> {
         let (received, answered) = (self.received, self.answered);
@@ -297,9 +297,18 @@ mod tests {
                 let exchange = exchange(w, sent, delays, widths);
                 let at = exchange.returned.0;
                 let m = exchange.measure(w.drift).expect("an honest exchange");
+                let truth = w.truth(at);
                 if m.error() < MAX_ERROR {
-                    let truth = w.truth(at);
                     prop_assert!(w.holds_truth_at(m, at), "{m:?} misses {truth}");
+                } else {
+                    // At the center of edges that hold the truth, which are at most
+                    // the narrower interval, the round trip, and drift apart.
+                    let width = |a: i64, b: i64| i128::from(a) + i128::from(b);
+                    let narrowest =
+                        width(widths[0], widths[1]).min(width(widths[2], widths[3]));
+                    let reach = narrowest / 2 + i128::from(at - sent) + 1;
+                    let miss = i128::from(m.offset().nanos()) - truth;
+                    prop_assert!(miss.abs() <= reach, "{m:?} is {miss} from the truth");
                 }
             }
 
