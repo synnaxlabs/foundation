@@ -115,10 +115,10 @@ impl Log {
     pub(crate) fn nodes(&self) -> BTreeSet<node::Key> {
         let (at, voters) = self.voters();
         let before = (!self.settled())
-            .then(|| self.voters_before(at.index).peers())
+            .then(|| self.voters_before(at.index).nodes())
             .into_iter()
             .flatten();
-        voters.peers().chain(before).collect()
+        voters.nodes().chain(before).collect()
     }
 
     // The position at `index`: the zero position for 0, `None` past the end.
