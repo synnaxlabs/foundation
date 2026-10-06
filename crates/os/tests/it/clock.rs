@@ -6,17 +6,29 @@ use std::time::Instant;
 
 use env::clock::Clock;
 use env::shards::Config;
-use tokio::runtime::{Builder, Runtime};
 use types::time::{Monotonic, Span};
 
 use crate::common::assert_joins;
 
-/// The runtime that a thread of `os` runs, with Tokio's timer.
-fn runtime() -> Runtime {
-    Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("a current-thread runtime builds")
+/// Runs `body` on a dedicated thread of `os` and waits for it to end.
+fn on_a_thread<F>(body: impl FnOnce() -> F + Send + 'static)
+where
+    F: Future<Output = ()> + 'static,
+{
+    let threads = os::threads().expect("the OS gives the cores of this process");
+    assert_joins(threads.start("clock", body).unwrap(), Ok(()));
+}
+
+/// The polls of a sleep of `span` until it completes.
+async fn polls(clock: &Clock, span: Span) -> u32 {
+    let mut polls = 0;
+    let mut sleep = pin!(clock.sleep(span));
+    std::future::poll_fn(|cx| {
+        polls += 1;
+        sleep.as_mut().poll(cx)
+    })
+    .await;
+    polls
 }
 
 fn millis(n: i64) -> Span {
@@ -64,7 +76,7 @@ fn starts_near_zero_and_moves_with_instant_while_awake() {
     let (later, second, last) = (instant(origin), clock.now(), instant(origin));
     let moved = (second - first).nanos();
     // A time daemon slews `Instant` on Linux by up to 500 ppm.
-    let slew = 50_000;
+    let slew = (last - before) / 1_000;
     assert!(
         moved >= later - after - slew && moved <= last - before + slew,
         "moved {moved} ns, awake {} to {} ns",
@@ -125,9 +137,29 @@ fn each_call_starts_a_new_clock() {
 }
 
 #[test]
+fn a_sleep_is_polled_again_only_when_due() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let polls = polls(&clock, millis(50)).await;
+        assert!(polls < 10, "{polls} polls");
+    });
+}
+
+#[test]
+fn a_sleep_past_a_second_wakes_each_second() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let start = clock.now();
+        let polls = polls(&clock, millis(2_050)).await;
+        assert!(polls >= 4, "{polls} polls");
+        assert!(clock.now() >= start + millis(2_050), "{:?}", clock.now());
+    });
+}
+
+#[test]
 fn a_thousand_sleeps_each_complete_at_the_deadline_or_later() {
     let clock = os::clock();
-    runtime().block_on(async {
+    on_a_thread(move || async move {
         for i in 0..1_000 {
             let deadline = clock.now() + millis(i % 4);
             clock.sleep_until(deadline).await;
@@ -143,18 +175,18 @@ fn a_thousand_sleeps_each_complete_at_the_deadline_or_later() {
 #[test]
 fn a_passed_deadline_completes_on_the_first_poll() {
     let clock = os::clock();
-    let runtime = runtime();
-    let _guard = runtime.enter();
-    let deadline = clock.now();
-    let mut sleep = pin!(clock.sleep_until(deadline));
-    let mut cx = Context::from_waker(Waker::noop());
-    assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Ready(()));
+    on_a_thread(move || async move {
+        let deadline = clock.now();
+        let mut sleep = pin!(clock.sleep_until(deadline));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Ready(()));
+    });
 }
 
 #[test]
 fn a_reset_completes_at_the_new_deadline() {
     let clock = os::clock();
-    runtime().block_on(async {
+    on_a_thread(move || async move {
         let start = clock.now();
         let mut sleep = clock.sleep_until(start + seconds(2));
         sleep.reset(start + millis(5));
@@ -186,27 +218,27 @@ fn a_reset_completes_at_the_new_deadline() {
 #[test]
 fn a_far_deadline_is_pending() {
     let clock = os::clock();
-    let runtime = runtime();
-    let _guard = runtime.enter();
-    let deadline = clock.now() + seconds(3_650 * 86_400);
-    let mut sleep = pin!(clock.sleep_until(deadline));
-    let mut cx = Context::from_waker(Waker::noop());
-    assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+    on_a_thread(move || async move {
+        let deadline = clock.now() + seconds(3_650 * 86_400);
+        let mut sleep = pin!(clock.sleep_until(deadline));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+    });
 }
 
 #[test]
 fn a_deadline_at_the_end_of_the_clock_is_pending() {
     let clock = os::clock();
-    let runtime = runtime();
-    let _guard = runtime.enter();
-    let mut sleep = pin!(clock.sleep_until(Monotonic(u64::MAX)));
-    let mut cx = Context::from_waker(Waker::noop());
-    assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+    on_a_thread(move || async move {
+        let mut sleep = pin!(clock.sleep_until(Monotonic(u64::MAX)));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+    });
 }
 
 #[test]
 #[should_panic(expected = "must be called from the context of a Tokio 1.x runtime")]
-fn a_sleep_panics_on_a_thread_with_no_runtime() {
+fn a_sleep_panics_on_a_thread_that_os_did_not_start() {
     let clock: Clock = os::clock();
     drop(clock.sleep_until(Monotonic(0)));
 }

@@ -30,10 +30,9 @@ pub use files::Disk;
 /// call starts a new clock at `Monotonic(0)`. Clones read the same clock. Never
 /// compare readings of clocks from two calls.
 ///
-/// A sleep needs a thread with a Tokio runtime, as each thread that `os` starts has.
-/// Tokio's timer counts whole milliseconds, so a sleep completes about 2 ms late on
-/// an idle machine, and later under load. A sleep that waits across a suspend
-/// completes late by up to the time asleep.
+/// A sleep needs a thread that `os` started. It completes about 2 ms late on an idle
+/// machine, and later under load. A sleep that waits across a suspend completes up to
+/// 1 s late.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[must_use]
 pub fn clock() -> env::clock::Clock {

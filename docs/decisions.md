@@ -803,7 +803,15 @@ How to read this record:
   is not hit: no daemon slews `mach_continuous_time`. Lost: `CLOCK_BOOTTIME` with a
   rule that the daemon slews within a limit, because a node cannot check it;
   `CLOCK_BOOTTIME` with a bound that can fail in a fast slew. The person decided on
-  2026-10-06 ("yes"), #688.
+  2026-10-06 ("yes"), #688. On macOS `os` reads `CLOCK_MONOTONIC_RAW`, which is
+  `mach_continuous_time`. Each `os::clock()` call starts a new clock at 0, so `node`
+  calls it once. Tokio's timer stops in a suspend on macOS and slews on Linux, so `os`
+  arms it for at most 1 s at a time: a sleep across a suspend completes up to 1 s late.
+  The vDSO and the macOS commpage read the counter with no fence that waits for earlier
+  stores or holds back later loads, so `os` adds them to give the order that
+  `env::clock` requires (#458): `mfence; lfence` before the read and `lfence` after on
+  x86-64, `dsb ish; isb` before and `isb` after on arm64. Other architectures do not
+  build. Cost: 38 ns against 16 ns for one read without the fences (M3 Max) (#117).
 - **CLOCK RUN (2026-10-05)** Within TIME ADAPTERS. `clock::Clock::run` runs all time
   sources of one clock in one task on the clock's shard. `node` builds the source table
   and passes it to `run`. Today the table is the OS clock. Each adapter keeps its own
