@@ -99,8 +99,9 @@ pub(crate) enum Event {
 
 impl Endpoint {
     /// An endpoint for this node's key whose connection IDs all start with
-    /// `shard`. Each [`Transmit`] holds at most `datagrams_max` datagrams: the
-    /// socket's batch max.
+    /// `shard`. Each [`Transmit`] holds at most `datagrams_max` datagrams, the
+    /// socket's batch max, and at most
+    /// [`TRANSMIT_BYTES_MAX`](env::net::udp::TRANSMIT_BYTES_MAX) bytes.
     ///
     /// # Panics
     ///
@@ -114,7 +115,7 @@ impl Endpoint {
             epoch: config.clock.epoch(),
             settings,
             inner: endpoint,
-            datagrams_max,
+            datagrams_max: datagrams_max.min(settings::BATCH_MAX),
             pool: Rc::clone(&config.pool),
             message_bytes_max: config.message_bytes_max.get(),
             window_bytes: config.window_bytes,
@@ -287,7 +288,8 @@ impl Endpoint {
     /// Puts `message` on the stream after the messages before it. `Ready` when the
     /// stream took all of it. Else `sender` holds the rest: call
     /// [`Endpoint::flush`] after [`Event::Writable`]. `Pending` also when the
-    /// connection ended.
+    /// connection ended. The streams that wait for the connection take turns, by
+    /// class and then oldest first, so a write behind one waits.
     ///
     /// # Errors
     ///
@@ -313,10 +315,10 @@ impl Endpoint {
     /// Puts `message` on the stream after the messages before it when the stream
     /// can take it now. Else gives it back with nothing of it sent: when `sender`
     /// still holds part of an earlier message after a flush, when the send budget
-    /// has no room for it or a stream of its class or a higher class waits for room,
-    /// or when the connection ended. The stream does not wait for room for a message
-    /// it gives back. Once taken, `sender` may hold the rest of it: call
-    /// [`Endpoint::flush`] after [`Event::Writable`].
+    /// has no room for it or a stream of its class or a higher class waits for room
+    /// or its turn, or when the connection ended. The stream does not wait for room
+    /// for a message it gives back. Once taken, `sender` may hold the rest of it:
+    /// call [`Endpoint::flush`] after [`Event::Writable`].
     ///
     /// # Errors
     ///
@@ -343,8 +345,8 @@ impl Endpoint {
     }
 
     /// Writes the rest of the message that `sender` holds. `Ready` when it holds
-    /// none. `Pending` when the stream takes no more now ([`Event::Writable`]
-    /// follows), or when the connection ended.
+    /// none. `Pending` when the stream takes no more now or waits its turn
+    /// ([`Event::Writable`] follows), or when the connection ended.
     ///
     /// # Errors
     ///
@@ -1045,6 +1047,30 @@ mod tests {
                     .collect();
                 assert_ne!(ids[0], ids[1]);
                 assert_eq!([&ids[0], &ids[1]], [&ids[2], &ids[3]]);
+            });
+        }
+
+        #[test]
+        fn keeps_a_transmit_within_one_send_at_the_largest_batch() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, Duration::from_millis(1));
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
+                let batch = NonZeroUsize::new(64).expect("not zero");
+                pair.client.endpoint =
+                    Endpoint::new(&config, pair::CLIENT_SHARD, batch);
+                pair.dial(server());
+                pair.run(Duration::from_millis(100));
+                let sent: Vec<u8> = (0..=u8::MAX).cycle().take(1 << 16).collect();
+                let (now, key) = (pair.now(), pair.client.key.expect("a key"));
+                let client = &mut pair.client.endpoint;
+                for _ in 0..testing::STREAMS_MAX - 1 {
+                    let opened = client.open_sender(now, key, Class::Command);
+                    let mut sender = opened.expect("a stream");
+                    let written = client.write(now, &mut sender, shard.block(&sent));
+                    assert_eq!(written, Ok(Poll::Ready(())));
+                }
+                pair.run(Duration::from_secs(1));
+                assert_eq!(pair.client.batch_max, settings::BATCH_MAX.get());
             });
         }
     }

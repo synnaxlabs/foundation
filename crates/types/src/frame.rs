@@ -120,6 +120,14 @@ impl Range {
         Some(Self::read(&ranges[search(ranges, group)?]))
     }
 
+    /// Each present group and its range in the frame `bytes`, in group order.
+    fn all(bytes: &[u8]) -> impl Iterator<Item = (u32, Self)> {
+        let (ranges, ..) = parts(bytes);
+        ranges
+            .iter()
+            .map(|record| (lead(record), Self::read(record)))
+    }
+
     fn read(record: &[u8; RANGE]) -> Self {
         Self {
             seq: u64::from_le_bytes(get(record, at::range::SEQ)),
@@ -389,10 +397,7 @@ impl Draft {
     /// Each present group and its range, in group order. Time is linear in the
     /// number of present groups.
     pub fn ranges(&self) -> impl Iterator<Item = (u32, Range)> {
-        let (ranges, ..) = parts(&self.0);
-        ranges
-            .iter()
-            .map(|record| (lead(record), Range::read(record)))
+        Range::all(&self.0)
     }
 
     /// Sets how many samples each series of group `group` holds.
@@ -462,6 +467,12 @@ impl Frame {
     #[must_use]
     pub fn range(&self, group: u32) -> Option<Range> {
         Range::find(&self.0, group)
+    }
+
+    /// Each present group and its range, in group order. Time is linear in the
+    /// number of present groups.
+    pub fn ranges(&self) -> impl Iterator<Item = (u32, Range)> {
+        Range::all(&self.0)
     }
 
     /// The series bytes of `entry`, or `None` when it is absent. Time is logarithmic
@@ -1420,11 +1431,14 @@ mod tests {
         let set = two_groups();
         let empty = Draft::new(&pool, &set, Form::Raw, &[]).unwrap();
         assert_eq!(empty.ranges().count(), 0);
+        assert_eq!(empty.freeze(Path::Live).ranges().count(), 0);
         let mut draft = Draft::new(&pool, &set, Form::Raw, &[(2, 1)]).unwrap();
         draft.set_count(1, 1);
         draft.set_seq(1, 7);
         let ranges: Vec<_> = draft.ranges().collect();
         assert_eq!(ranges, [(1, Range { seq: 7, count: 1 })]);
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.ranges().collect::<Vec<_>>(), ranges);
     }
 
     #[test]
@@ -1440,6 +1454,8 @@ mod tests {
             ranges,
             [(0, Range::default()), (1, Range { seq: 5, count: 0 })]
         );
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.ranges().collect::<Vec<_>>(), ranges);
     }
 
     #[test]
@@ -1640,12 +1656,14 @@ mod tests {
             drafted.push((entry, bytes.to_vec()));
         }
         prop_assert_eq!(&drafted, &written);
+        let present: Vec<(u32, Range)> = draft.ranges().collect();
         let frame = draft.freeze(case.path);
 
         prop_assert_eq!(frame.key_set(), set.key());
         prop_assert_eq!(frame.path(), case.path);
         prop_assert_eq!(frame.form(), case.form);
         prop_assert_eq!(frame.charge(), taken);
+        prop_assert_eq!(frame.ranges().collect::<Vec<_>>(), present);
         for (group, range) in (0_u32..).zip(ranges) {
             prop_assert_eq!(frame.range(group), range);
         }
