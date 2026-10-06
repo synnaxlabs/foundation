@@ -25,6 +25,18 @@ pub(crate) struct Shard {
 }
 
 impl Shard {
+    /// What a shard of `node` with `tasks` gives, with a pool of 4 MiB.
+    pub(crate) fn new(node: &sim::node::Node, tasks: Tasks) -> Self {
+        let config = block::Config { budget: 1 << 22 };
+        let memory = Heap::new(config.reservation());
+        Self {
+            clock: node.clock(),
+            entropy: node.entropy(),
+            tasks,
+            pool: Rc::new(Pool::new(config, memory)),
+        }
+    }
+
     /// A config for a node with `private_key` and `idle`, on this shard.
     pub(crate) fn config(&self, private_key: PrivateKey, idle: Span) -> Config {
         Config {
@@ -64,15 +76,7 @@ pub(crate) fn run<T: Send + 'static>(
     });
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, |node, tasks| async move {
-        let config = block::Config { budget: 1 << 22 };
-        let memory = Heap::new(config.reservation());
-        let shard = Shard {
-            clock: node.clock(),
-            entropy: node.entropy(),
-            tasks,
-            pool: Rc::new(Pool::new(config, memory)),
-        };
-        test(&shard)
+        test(&Shard::new(&node, tasks))
     })
     .expect("the test passes")
 }

@@ -76,6 +76,12 @@ pub enum Error {
         /// more.
         available: usize,
     },
+    /// The socket under the session broke. Every session on it ends with this, and
+    /// the transport accepts and dials no more.
+    Network {
+        /// What the socket gave.
+        error: env::net::Error,
+    },
     /// A [`Config`](crate::Config) value is out of range.
     Config {
         /// The field's name.
@@ -119,6 +125,7 @@ impl fmt::Display for Error {
                 f,
                 "no room for a received message of {bytes} bytes ({available} free)"
             ),
+            Self::Network { error } => write!(f, "the socket broke: {error}"),
             Self::Config { field, rule } => write!(f, "config {field} {rule}"),
         }
     }
@@ -233,6 +240,17 @@ mod tests {
             check(
                 &error,
                 "no room for a received message of 10 bytes (4 free)",
+            );
+        }
+
+        #[test]
+        fn gives_what_broke_the_socket() {
+            let error = Error::Network {
+                error: env::net::Error::Io { code: 5 },
+            };
+            check(
+                &error,
+                "the socket broke: network call failed with OS error 5",
             );
         }
 

@@ -1,5 +1,6 @@
 //! The QUIC carrier: noq-proto with time, datagrams, and randomness as inputs.
 
+mod carrier;
 mod cid;
 pub(crate) mod connection;
 mod datagram;
