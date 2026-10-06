@@ -251,21 +251,10 @@ impl<'a> File<'a> {
             .expect("invariant: the last token is the end")
     }
 
-    /// The edit that puts the text of `writer` at `at`, before the item below when
-    /// `below`. At the end of a text with no final new line, the text starts a new
-    /// line, so no other insert may go there.
-    fn insert(&self, at: usize, writer: Writer<'_>, below: bool) -> Edit {
-        let mut text = written(writer);
-        let open =
-            at == self.text.len() && at > self.floor && !self.text.ends_with('\n');
-        if open {
-            text.insert_str(0, if self.crlf { "\r\n" } else { "\n" });
-        }
-        Edit {
-            range: at..at,
-            text,
-            below,
-        }
+    /// Reports whether `at` ends a text whose last line has no line end, so new
+    /// text there first ends that line. Only one insert may go there.
+    fn unended(&self, at: usize) -> bool {
+        at == self.text.len() && at > self.floor && !self.text.ends_with('\n')
     }
 
     /// Applies `edits`, which do not overlap, to the text.
@@ -380,14 +369,20 @@ impl Diff<'_, '_> {
             return;
         }
         let mut writer = Writer::new(&body.margin, 0, self.file.crlf);
+        if self.file.unended(at) {
+            writer.end_line();
+        }
         let (attributes, blocks) =
             (pending.attributes.drain(..), pending.blocks.drain(..));
         writer.body(attributes, blocks, 0, pending.ends.contains(&at));
         if gap {
-            writer.gap();
+            writer.end_line();
         }
-        let below = pending.anchor != Some(at);
-        self.edits.push(self.file.insert(at, writer, below));
+        self.edits.push(Edit {
+            range: at..at,
+            text: written(writer),
+            below: pending.anchor != Some(at),
+        });
     }
 
     /// Cuts the lines of removed items, as runs that merge across blank lines.

@@ -157,7 +157,7 @@ impl<'a> Writer<'a> {
         }
         for block in blocks {
             if written {
-                self.gap();
+                self.end_line();
             }
             self.pad(indent);
             self.block(block, indent);
@@ -364,8 +364,9 @@ impl<'a> Writer<'a> {
         self.errors.push(Unwritable::For { span });
     }
 
-    /// Writes the blank line between an item and a block after it.
-    pub(crate) fn gap(&mut self) {
+    /// Writes a line end: the blank line between an item and a block after it, or
+    /// the end of a last line that has none.
+    pub(crate) fn end_line(&mut self) {
         self.out.push('\n');
     }
 
