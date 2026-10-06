@@ -1,10 +1,12 @@
 //! Tests of `Sim::crash`: what a node keeps when its process dies or it loses power.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::future::{pending, poll_fn};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
@@ -307,6 +309,31 @@ fn a_write_in_flight_at_a_crash_keeps_any_subset_of_its_sectors() {
     for crash in [Crash::Process, Crash::Power] {
         let outcomes: BTreeSet<Vec<u8>> =
             (0..128).map(|seed| in_flight(seed, crash, false)).collect();
+        assert_eq!(outcomes, all, "{crash:?}");
+    }
+}
+
+/// [`write_in_flight`] with no fault, and with the file, the block, and the write
+/// leaked.
+async fn leaked_write_in_flight(node: node::Node) {
+    let (file, pool) = (create_synced(&node).await, pool());
+    until_crash(&node).await;
+    let file = Box::leak(Box::new(file));
+    let parts = Box::leak(Box::new([block(&pool, &[9; 1_024])]));
+    hang(Box::leak(Box::new(Box::pin(file.write_at(0, parts))))).await;
+}
+
+#[test]
+fn a_leaked_write_in_flight_at_a_crash_keeps_any_subset_of_its_sectors() {
+    let all = BTreeSet::from([vec![1, 1], vec![1, 9], vec![9, 1], vec![9, 9]]);
+    for crash in [Crash::Process, Crash::Power] {
+        let outcomes: BTreeSet<Vec<u8>> = (0..128)
+            .map(|seed| {
+                let (mut sim, node) = disk(seed);
+                crash_after(&mut sim, &node, crash, leaked_write_in_flight);
+                sectors_of(&mut sim, &node)
+            })
+            .collect();
         assert_eq!(outcomes, all, "{crash:?}");
     }
 }
@@ -619,4 +646,77 @@ fn a_sync_dir_in_flight_at_a_process_crash_may_miss_a_create_in_flight() {
         (0..64).map(create_then_sync_dir_at_a_crash).collect();
     let both = BTreeSet::from([vec![], vec![PathBuf::from("a")]]);
     assert_eq!(outcomes, both);
+}
+
+/// Whether a write open of the file `a` of `node` fails, in a new run.
+fn write_open(sim: &mut Sim, node: &node::Node) -> Option<Error> {
+    sim.run_on(node, |node, _| async move {
+        node.files().open(Path::new("a"), Mode::Write).await.err()
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_leaked_write_handle_is_free_after_a_crash() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        crash_after(&mut sim, &node, crash, |node| async move {
+            Box::leak(Box::new(create_synced(&node).await));
+        });
+        assert_eq!(write_open(&mut sim, &node), None, "{crash:?}");
+    }
+}
+
+/// A value that owns itself through an `Rc`, so it never drops.
+struct Cycle(RefCell<Option<(env::files::File, Rc<Cycle>)>>);
+
+#[test]
+fn a_write_handle_in_an_rc_cycle_is_free_after_a_crash() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        crash_after(&mut sim, &node, crash, |node| async move {
+            let cycle = Rc::new(Cycle(RefCell::new(None)));
+            let file = create_synced(&node).await;
+            *cycle.0.borrow_mut() = Some((file, Rc::clone(&cycle)));
+        });
+        assert_eq!(write_open(&mut sim, &node), None, "{crash:?}");
+    }
+}
+
+#[test]
+fn a_crash_frees_a_file_that_a_leaked_open_holds() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        crash_after(&mut sim, &node, crash, |node| async move {
+            drop(create_synced(&node).await);
+            let files = node.files();
+            let open = Box::new(Box::pin(files.open(Path::new("a"), Mode::Write)));
+            let open = Box::leak(open);
+            poll_fn(|cx| {
+                assert!(open.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            // The open ends, and nothing takes its handle.
+            node.clock().sleep(Span::MILLISECOND).await;
+        });
+        assert_eq!(write_open(&mut sim, &node), None, "{crash:?}");
+    }
+}
+
+#[test]
+fn a_crash_frees_a_removed_file_that_a_leaked_handle_holds() {
+    for crash in [Crash::Process, Crash::Power] {
+        let (mut sim, node) = disk(0);
+        crash_after(&mut sim, &node, crash, |node| async move {
+            Box::leak(Box::new(create(&node, "a", 64 * KIB).await));
+            node.files().remove(Path::new("a")).await.unwrap();
+        });
+        let free = sim
+            .run_on(&node, |node, _| async move {
+                node.files().free().await.unwrap()
+            })
+            .unwrap();
+        assert_eq!(free, MIB, "{crash:?}");
+    }
 }

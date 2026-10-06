@@ -99,8 +99,10 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 ## Errors
 
 - Each crate has one public `Error` enum, or one per module when a module is a clear
-  sub-boundary. Variants carry the data a caller needs to act or to show a fix. Do
-  not use error structs with a hidden kind (r16 17).
+  sub-boundary. A call may have its own named error type when the crate's `Error`
+  holds variants that the call never gives (`buffer::Rejected`), so no caller matches
+  a variant that cannot come. Variants carry the data a caller needs to act or to show
+  a fix. Do not use error structs with a hidden kind (r16 17).
 - Every error a user can see has a stable code and a fix-it hint.
 - Convert errors with `From` and `?`. Never drop the cause (r16 18).
 - Never ignore a `Result`: no `.ok();` and no `let _ = fallible();` (r16 19). Never
@@ -109,7 +111,7 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - An internal invariant that breaks panics. Bad outside input never panics: it returns
   an error. Panic and assert messages state what broke and the values (r16 20).
 - `Drop` never panics. It never blocks unless the type also gives a call that does
-  not block (r16 23).
+  not block (r16 23). One exception: `sim::Sim` (SIM DROP in `docs/decisions.md`).
 
 ## Unsafe
 

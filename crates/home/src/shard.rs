@@ -132,7 +132,7 @@ impl std::error::Error for Error {}
 
 impl Shard {
     /// A shard over `buffer` that carries no index yet. Index frames, stored headers,
-    /// and handoff bodies come from `pool`.
+    /// and handoff bodies come from `pool`, the pool of `buffer`.
     pub(crate) fn new(
         buffer: Buffer,
         pool: Rc<block::Pool>,
@@ -439,9 +439,15 @@ fn record(
         let Some((handoff, first)) = index.handoff() else {
             continue;
         };
-        let Ok(parts) = handoff::body(pool, handoff) else {
-            all = false;
-            continue;
+        let parts = match handoff::body(pool, handoff) {
+            Ok(parts) => parts,
+            Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
+                all = false;
+                continue;
+            }
+            Err(error @ block::Error::TooLarge { .. }) => {
+                panic!("invariant: the pool of the ring holds a handoff: {error}")
+            }
         };
         let appended = buffer.append([Entry {
             index: entry.key,
@@ -550,6 +556,7 @@ mod tests {
     use types::frame::Form;
     use types::frame::Range;
     use types::frame::key_set::Group;
+    use types::name::Name;
     use types::sample::{Scalar, Type};
     use types::time::Span;
 
@@ -593,6 +600,13 @@ mod tests {
         /// A shard over the ring of the node, made with `area` bytes when it is new,
         /// with slots 0 to `slots` assigned and no index carried.
         async fn open(&self, area: u64, slots: u32) -> Shard {
+            let buffer = self.buffer(area, BODY_MAX, slots).await;
+            Shard::new(buffer, Rc::clone(&self.pool), LIMITS)
+        }
+
+        /// The ring of the node, made with `area` bytes and bodies of `body_max` when
+        /// it is new, with slots 0 to `slots` assigned.
+        async fn buffer(&self, area: u64, body_max: usize, slots: u32) -> Buffer {
             let config = buffer::Config {
                 files: self.node.files(),
                 dir: PathBuf::from(DIR),
@@ -600,15 +614,14 @@ mod tests {
                 clock: self.clock.clone(),
                 tasks: self.tasks.clone(),
                 entropy: self.entropy.clone(),
-                layout: Layout::new(area, BODY_MAX).expect("a ring"),
+                layout: Layout::new(area, body_max).expect("a ring"),
                 commit: COMMIT,
             };
             let mut assigned = Slots::new();
             for n in 0..slots {
                 assigned.assign(key(Slot::new(n)));
             }
-            let buffer = Buffer::open(config, &mut assigned).await.expect("opens");
-            Shard::new(buffer, Rc::clone(&self.pool), LIMITS)
+            Buffer::open(config, &mut assigned).await.expect("opens")
         }
 
         /// A shard as [`open`](Self::open) makes, that carries the indexes of
@@ -1252,7 +1265,7 @@ mod tests {
     fn records_each_handoff_at_open_when_no_record_holds_them_together() {
         run(17, |test| async move {
             let (mut shard, set) = test.wide(WIDE).await;
-            let long = "b".repeat(255);
+            let long = "b".repeat(Name::MAX_BYTES);
             shard.open_writer(writer(&long, 1, &set), NOW, MESH);
             shard.committed().await.expect("the commit ends");
             let waiting = shard
@@ -1337,7 +1350,7 @@ mod tests {
         run(18, |test| async move {
             let (mut shard, set) = test.wide(WIDE).await;
             let a = shard.open_writer(writer("a", 2, &set), NOW, MESH);
-            let long = "b".repeat(255);
+            let long = "b".repeat(Name::MAX_BYTES);
             shard.open_writer(writer(&long, 1, &set), NOW, MESH);
             shard.close_writer(a, NOW, MESH);
             shard.committed().await.expect("the commit ends");
@@ -1350,7 +1363,7 @@ mod tests {
     fn applies_a_frame_after_waiting_handoffs_that_no_record_holds_together() {
         run(19, |test| async move {
             let (mut shard, set) = test.wide(WIDE).await;
-            let long = "b".repeat(255);
+            let long = "b".repeat(Name::MAX_BYTES);
             let blocks = test.fill();
             let a = shard.open_writer(writer(&long, 1, &set), NOW, MESH);
             drop(blocks);
@@ -1577,6 +1590,26 @@ mod tests {
                 Error::Resend.to_string(),
                 "the home does not take a resend frame yet"
             );
+        });
+    }
+
+    /// The smallest ring holds the largest handoff, so `new` needs no check for it.
+    #[test]
+    fn records_the_largest_handoff_in_the_smallest_ring() {
+        run(42, |test| async move {
+            let buffer = test.buffer(AREA, 4087, 1).await;
+            let mut shard = Shard::new(buffer, Rc::clone(&test.pool), LIMITS);
+            shard.carry(Slot::new(0));
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(0)),
+                data: &[],
+            }]);
+            let long = "b".repeat(Name::MAX_BYTES);
+            shard.open_writer(writer(&long, 1, &set), NOW, MESH);
+            shard.committed().await.expect("the commit ends");
+            let waiting = shard.indexes[0].handoff().is_some();
+            let handoffs = find(&test.ring().await, &handoff_to(&long));
+            assert_eq!((waiting, handoffs.len()), (false, 1));
         });
     }
 
