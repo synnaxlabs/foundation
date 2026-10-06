@@ -483,3 +483,17 @@ fn serves_the_next_stream_after_one_ends_or_is_out_of_step() {
     assert!(end.is_err(), "the device reset the bad stream: {end:?}");
     assert_eq!(last, Ok(Said::Registers(vec![4])));
 }
+
+#[test]
+fn wraps_the_transaction_number_past_65535() {
+    let mut network = Network::new(12);
+    network.serve(&device());
+    let last = network.client(1 << 16, |mut client, _| async move {
+        let request = read(Table::HoldingRegisters, 7, 1);
+        for _ in 0..u16::MAX {
+            said(client.exchange(UNIT, &request).await).expect("the device answers");
+        }
+        said(client.exchange(UNIT, &request).await)
+    });
+    assert_eq!(last, Ok(Said::Registers(vec![7])));
+}

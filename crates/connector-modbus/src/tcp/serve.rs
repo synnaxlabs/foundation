@@ -32,7 +32,7 @@ pub async fn serve(
 
 /// Answers each request frame on `stream` until it ends, fails, or is out of step.
 async fn answer(mut stream: Tcp, unit: u8, device: &Mutex<Device>) {
-    let (mut received, mut reply) = (Vec::new(), Vec::new());
+    let (mut received, mut pdu, mut reply) = (Vec::new(), Vec::new(), Vec::new());
     let mut buffer = [0; 260];
     loop {
         let frame = match super::decode(&received) {
@@ -51,25 +51,29 @@ async fn answer(mut stream: Tcp, unit: u8, device: &Mutex<Device>) {
             }
             Err(_) => return,
         };
-        reply.clear();
-        reply.extend_from_slice(&frame.header.transaction.to_be_bytes());
-        reply.extend_from_slice(&[0, 0, 0, 0, frame.header.unit]);
+        pdu.clear();
         if frame.header.unit == unit {
             device
                 .lock()
                 .expect("no panic under the device lock")
-                .answer(frame.pdu, &mut reply);
+                .answer(frame.pdu, &mut pdu);
         } else {
-            let function = frame.pdu.first().copied().unwrap_or_default();
-            Exception::GatewayTarget.write_to(function, &mut reply);
+            let function = *frame.pdu.first().expect("invariant: a PDU is not empty");
+            Exception::GatewayTarget.write_to(function, &mut pdu);
         }
+        let length = pdu
+            .len()
+            .checked_add(1)
+            .and_then(|n| u16::try_from(n).ok())
+            .expect("invariant: a reply PDU is at most 253 bytes");
+        reply.clear();
+        reply.extend_from_slice(&frame.header.transaction.to_be_bytes());
+        reply.extend_from_slice(&[0, 0]);
+        reply.extend_from_slice(&length.to_be_bytes());
+        reply.push(frame.header.unit);
+        reply.extend_from_slice(&pdu);
         let len = frame.len;
         received.drain(..len);
-        let length = u16::try_from(reply.len().saturating_sub(6))
-            .expect("invariant: a reply PDU is at most 253 bytes");
-        if let Some(field) = reply.get_mut(4..6) {
-            field.copy_from_slice(&length.to_be_bytes());
-        }
         if write(&mut stream, &reply).await.is_err() {
             return;
         }
