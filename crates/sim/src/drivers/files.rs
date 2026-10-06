@@ -119,8 +119,7 @@ impl Future for Wait {
 impl Drop for Wait {
     fn drop(&mut self) {
         if !self.taken {
-            let (node, key) = (self.node.node, self.key);
-            let unused = lock(&self.node.shared).files().abandon(node, key);
+            let unused = lock(&self.node.shared).files().abandon(self.key);
             drop(unused);
         }
     }
@@ -205,9 +204,11 @@ impl Future for Close {
         let descriptor =
             (self.0.as_ref()).expect("invariant: a close is not polled after it ends");
         let waker = cx.waker().clone();
-        let (poll, unused) = lock(&descriptor.node.shared)
-            .files()
-            .poll_close(descriptor.handle, waker);
+        let (poll, unused) = lock(&descriptor.node.shared).files().poll_close(
+            descriptor.node.node,
+            descriptor.handle,
+            waker,
+        );
         drop(unused);
         if poll.is_ready() {
             // The drop closes the descriptor, which locks the state.

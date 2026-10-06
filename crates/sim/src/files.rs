@@ -119,11 +119,12 @@ pub(crate) struct Files {
     flights: BTreeMap<u64, Flight>,
     /// The calls in flight by end time, then key.
     queue: BTreeSet<(Monotonic, u64)>,
-    /// The calls that ended, until their futures take the result.
-    done: BTreeMap<u64, Ended>,
-    /// The waker of each close that waits for the calls of its descriptor, by the key
-    /// of its handle.
-    closes: BTreeMap<u64, Waker>,
+    /// The node and result of each call that ended, until its future takes the
+    /// result.
+    done: BTreeMap<u64, (usize, Ended)>,
+    /// The node and waker of each close that waits for the calls of its descriptor,
+    /// by the key of its handle.
+    closes: BTreeMap<u64, (usize, Waker)>,
     rng: Rng,
     /// The last tick. A call's key is the tick of its start, a file or directory
     /// that it makes takes the same key, and a write takes a tick when it ends. One
@@ -228,13 +229,14 @@ impl Files {
                 (flight.node, flight.dropped, flight.waker.take());
             let kind = mem::discriminant(&flight.call);
             let close = flight.call.handle().map(|handle| handle.key);
-            wakers.extend(close.and_then(|key| self.closes.remove(&key)));
+            let close = close.and_then(|key| self.closes.remove(&key));
+            wakers.extend(close.map(|(_, waker)| waker));
             let ended = self.apply(key, flight);
             (due, key, kind, ended.result.is_ok()).hash(&mut self.digest);
             if dropped {
                 orphans.extend(self.discard(node, ended));
             } else {
-                self.done.insert(key, ended);
+                self.done.insert(key, (node, ended));
                 wakers.extend(waker);
             }
         }
@@ -318,7 +320,7 @@ impl Files {
         key: u64,
         waker: Waker,
     ) -> (Poll<Ended>, Option<Waker>) {
-        if let Some(ended) = self.done.remove(&key) {
+        if let Some((_, ended)) = self.done.remove(&key) {
             return (Poll::Ready(ended), Some(waker));
         }
         let flight = (self.flights.get_mut(&key))
@@ -326,18 +328,14 @@ impl Files {
         (Poll::Pending, flight.waker.replace(waker))
     }
 
-    /// The future of call `key` of `node` dropped before it took the result. A call
-    /// in flight still ends. Returns what to drop after the lock is released.
-    pub(crate) fn abandon(
-        &mut self,
-        node: usize,
-        key: u64,
-    ) -> (Option<Waker>, Option<Held>) {
+    /// The future of call `key` dropped before it took the result. A call in flight
+    /// still ends. Returns what to drop after the lock is released.
+    pub(crate) fn abandon(&mut self, key: u64) -> (Option<Waker>, Option<Held>) {
         if let Some(flight) = self.flights.get_mut(&key) {
             flight.dropped = true;
             return (flight.waker.take(), None);
         }
-        let ended = (self.done.remove(&key))
+        let (node, ended) = (self.done.remove(&key))
             .expect("invariant: a call whose result was not taken has ended");
         (None, self.discard(node, ended))
     }
@@ -355,15 +353,17 @@ impl Files {
     /// Crashes `node` by `crash` at true time `at`. Each call in flight of the node
     /// ends now as one whose future dropped, a leaked one too, in the order of its
     /// end time: after a `Process` crash each takes effect, and after a `Power` crash
-    /// only each write does, and the disk keeps what is durable. Then each file of
-    /// the node loses its holds, those of leaked descriptors too. Returns the blocks
-    /// of the calls, for the caller to drop after it releases the lock.
+    /// only each write does, and the disk keeps what is durable. The calls of the
+    /// node that ended and whose futures leaked drop, and so do the leaked closes of
+    /// the node. Then each file of the node loses its holds, those of leaked
+    /// descriptors too. Returns the blocks of the calls and the wakers of the closes,
+    /// for the caller to drop after it releases the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
         at: Monotonic,
         crash: Crash,
-    ) -> Vec<Held> {
+    ) -> (Vec<Held>, Vec<Waker>) {
         let flights = &self.flights;
         let (cut, queue): (BTreeSet<_>, _) = mem::take(&mut self.queue)
             .into_iter()
@@ -386,15 +386,26 @@ impl Files {
             (at, key, kind, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
+        let leaked: Vec<_> = (self.done)
+            .extract_if(.., |_, (owner, _)| *owner == node)
+            .collect();
+        for (_, (_, ended)) in leaked {
+            orphans.extend(self.discard(node, ended));
+        }
+        let closes = (self.closes)
+            .extract_if(.., |_, (owner, _)| *owner == node)
+            .map(|(_, (_, waker))| waker)
+            .collect();
         self.disks[node].crash(crash, &mut self.rng);
-        orphans
+        (orphans, closes)
     }
 
-    /// Polls the close of descriptor `handle`: ready when none of its calls is in
-    /// flight. Else it keeps `waker` to wake when one of them ends. Returns the waker
-    /// to drop after the lock is released.
+    /// Polls the close of descriptor `handle` of `node`: ready when none of its calls
+    /// is in flight. Else it keeps `waker` to wake when one of them ends. Returns the
+    /// waker to drop after the lock is released.
     pub(crate) fn poll_close(
         &mut self,
+        node: usize,
         handle: Handle,
         waker: Waker,
     ) -> (Poll<()>, Option<Waker>) {
@@ -405,14 +416,15 @@ impl Files {
         if calls.all(|held| held.key != handle.key) {
             return (Poll::Ready(()), Some(waker));
         }
-        (Poll::Pending, self.closes.insert(handle.key, waker))
+        let earlier = self.closes.insert(handle.key, (node, waker));
+        (Poll::Pending, earlier.map(|(_, waker)| waker))
     }
 
     /// Closes descriptor `handle` of `node`. Returns the waker of its close, to drop
     /// after the lock is released.
     pub(crate) fn release(&mut self, node: usize, handle: Handle) -> Option<Waker> {
         self.disks[node].release(handle);
-        self.closes.remove(&handle.key)
+        self.closes.remove(&handle.key).map(|(_, waker)| waker)
     }
 }
 
