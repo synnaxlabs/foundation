@@ -1237,7 +1237,7 @@ mod tests {
         run(70, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let mut stamps: Vec<i64> = (10..2510).collect();
             stamps[5] = 1;
             let mut index = encoded(&stamps);
@@ -1251,10 +1251,7 @@ mod tests {
                     available: 1,
                 },
             });
-            assert_eq!(
-                shard.write(a, LIVE, write, NOW, MESH),
-                Ok(&[refused(0, refusal)][..])
-            );
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[refused(0, refusal)][..]));
         });
     }
 
@@ -1263,7 +1260,7 @@ mod tests {
         run(71, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let mut index = encoded(&[10, 20]);
             index.push(0);
             let write = encoded_frame(&test.pool, &set, &[(0, &index)], &[(0, 2)]);
@@ -1271,15 +1268,9 @@ mod tests {
                 channel: key(Slot::new(0)),
                 error: codec::Error::Trailing { extra: 1 },
             });
-            assert_eq!(
-                shard.write(a, LIVE, write, NOW, MESH),
-                Ok(&[refused(0, refusal)][..])
-            );
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[refused(0, refusal)][..]));
             let write = frame(&test.pool, &set, &[(0, &[10, 20])]);
-            assert_eq!(
-                shard.write(a, LIVE, write, NOW, MESH),
-                Ok(&[applied(0, 0, 2)][..])
-            );
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[applied(0, 0, 2)][..]));
         });
     }
 
@@ -1288,7 +1279,7 @@ mod tests {
         run(72, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let index = untagged(encoded(&[10, 20]));
             let data = untagged(encoded(&[1, 2]));
             let series = [(0, &index[..]), (1, &data[..])];
@@ -1297,10 +1288,7 @@ mod tests {
                 channel: key(Slot::new(0)),
                 error: codec::Error::Tag { vector: 0, tag: 9 },
             });
-            assert_eq!(
-                shard.write(a, LIVE, write, NOW, MESH),
-                Ok(&[refused(0, refusal)][..])
-            );
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[refused(0, refusal)][..]));
         });
     }
 
@@ -1313,7 +1301,7 @@ mod tests {
                 index: key(Slot::new(1)),
                 data: &[(key(Slot::new(0)), Type::Scalar(Scalar::I64))],
             }]);
-            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let data = untagged(encoded(&[1, 2]));
             let index = untagged(encoded(&[10, 20]));
             let series = [(0, &data[..]), (1, &index[..])];
@@ -1322,10 +1310,7 @@ mod tests {
                 channel: key(Slot::new(0)),
                 error: codec::Error::Tag { vector: 0, tag: 9 },
             });
-            assert_eq!(
-                shard.write(a, LIVE, write, NOW, MESH),
-                Ok(&[refused(1, refusal)][..])
-            );
+            assert_eq!(shard.write(a, LIVE, write), Ok(&[refused(1, refusal)][..]));
         });
     }
 
