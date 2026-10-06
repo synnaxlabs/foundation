@@ -3460,6 +3460,22 @@ mod tests {
             events(side).contains(&&Event::Available { key: key(side) })
         }
 
+        /// A hello of [`BYTES_MAX`](crate::quic::hello::BYTES_MAX) bytes: both limits
+        /// in 8-byte varints, then unknown pairs in 4-byte varints.
+        fn full() -> Vec<u8> {
+            let long = |value: usize| {
+                (u64::try_from(value).expect("fits") | 0xc0 << 56).to_be_bytes()
+            };
+            let (window, message) = (OWN.window_bytes, OWN.message_bytes_max);
+            let mut bytes = [long(0), long(window), long(1), long(message)].concat();
+            for id in 2..=29_u32 {
+                bytes.extend((id | 0x8000_0000).to_be_bytes());
+                bytes.extend(0x8000_0000_u32.to_be_bytes());
+            }
+            assert_eq!(bytes.len(), crate::quic::hello::BYTES_MAX);
+            bytes
+        }
+
         /// Asserts that the server closed the connection for `reason` and that the
         /// foreign peer got the reason, after a run.
         fn assert_refused(pair: &mut Pair, reason: &str) {
@@ -3744,6 +3760,33 @@ mod tests {
             testing::run(1, |shard| {
                 let mut pair = foreign_dial(shard, |_| {});
                 raw(foreign(&mut pair), Dir::Uni, &[0; 257], false);
+                assert_refused(&mut pair, "a hello over 256 bytes");
+            });
+        }
+
+        #[test]
+        fn of_bytes_max_arrive_at_their_end() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let id = raw(foreign(&mut pair), Dir::Uni, &full(), false);
+                pair.run(RUN);
+                assert!(!available(&pair.server), "{:?}", pair.server.events);
+                let finished = foreign(&mut pair).send_stream(id).finish();
+                finished.expect("finished");
+                pair.run(RUN);
+                assert!(available(&pair.server), "{:?}", pair.server.events);
+            });
+        }
+
+        #[test]
+        fn of_bytes_max_break_the_connection_at_one_more_byte() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let id = raw(foreign(&mut pair), Dir::Uni, &full(), false);
+                pair.run(RUN);
+                assert!(!available(&pair.server), "{:?}", pair.server.events);
+                let written = foreign(&mut pair).send_stream(id).write(&[0]);
+                assert_eq!(written, Ok(1));
                 assert_refused(&mut pair, "a hello over 256 bytes");
             });
         }
