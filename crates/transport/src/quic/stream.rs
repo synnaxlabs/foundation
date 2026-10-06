@@ -9,8 +9,8 @@ use std::{mem, slice};
 use block::{Block, Pool};
 use bytes::Bytes;
 use noq_proto::{
-    ClosedStream, Dir, FinishError, ReadError, StreamEvent, StreamId, VarInt,
-    WriteError,
+    ClosedStream, Dir, FinishError, ReadError, SendStream, StreamEvent, StreamId,
+    VarInt, WriteError,
 };
 
 use super::connection::{self, Fault};
@@ -239,6 +239,24 @@ impl Sender {
     fn holds(&self) -> bool {
         !self.unsent.is_empty() || !self.body.is_empty()
     }
+
+    /// Writes what the sender holds to `send` until it holds nothing. It checks
+    /// neither the send budget nor the turn.
+    ///
+    /// # Errors
+    ///
+    /// The error of the write that took nothing.
+    fn write(&mut self, send: &mut SendStream<'_>) -> Result<(), WriteError> {
+        loop {
+            if !self.unsent.is_empty() {
+                self.unsent.start += send.write(&self.header[self.unsent.clone()])?;
+            } else if !self.body.is_empty() {
+                send.write_chunks(&mut slice::from_mut(&mut self.body))?;
+            } else {
+                return Ok(());
+            }
+        }
+    }
 }
 
 impl Receiver {
@@ -404,18 +422,13 @@ impl Turns {
         }
     }
 
-    /// Takes `sender` out of the queue, if it waits. Gives the new first sender when
-    /// `sender` was first.
-    #[expect(clippy::unwrap_in_result, reason = "a waiting sender is queued")]
-    fn leave(&mut self, sender: &mut Sender) -> Option<Key> {
-        if !mem::take(&mut sender.waiting) {
-            return None;
+    /// Takes `sender` out of the queue, if it waits.
+    fn leave(&mut self, sender: &mut Sender) {
+        if mem::take(&mut sender.waiting) {
+            let queue = &mut self.0[sender.claim.class.rank()];
+            let at = queue.iter().position(|&key| key == sender.key);
+            queue.remove(at.expect("invariant: a waiting sender is queued"));
         }
-        let first = self.first() == Some(sender.key);
-        let queue = &mut self.0[sender.claim.class.rank()];
-        let at = queue.iter().position(|&key| key == sender.key);
-        queue.remove(at.expect("invariant: a waiting sender is queued"));
-        first.then(|| self.first()).flatten()
     }
 }
 
@@ -675,25 +688,12 @@ impl Streams {
         let bytes = sender.body.len();
         let charged = self.sending.charge(sender.key, bytes, &mut sender.claim);
         let blocked = if charged && self.turns.allows(sender) {
-            let mut send = inner.send_stream(id);
-            loop {
-                let written = if !sender.unsent.is_empty() {
-                    let unsent = &sender.header[sender.unsent.clone()];
-                    send.write(unsent).map(|bytes| sender.unsent.start += bytes)
-                } else if !sender.body.is_empty() {
-                    let mut chunks = slice::from_mut(&mut sender.body);
-                    send.write_chunks(&mut chunks).map(drop)
-                } else {
-                    return Ok(Poll::Ready(()));
-                };
-                // A reset stream gives `Blocked` while the connection's window is
-                // shut.
-                match written {
-                    Ok(()) => {}
-                    Err(WriteError::Blocked) => break true,
-                    Err(WriteError::ClosedStream) => break false,
-                    Err(WriteError::Stopped(_)) => panic!("{STOPPED}"),
-                }
+            // A reset stream gives `Blocked` while the connection's window is shut.
+            match sender.write(&mut inner.send_stream(id)) {
+                Ok(()) => return Ok(Poll::Ready(())),
+                Err(WriteError::Blocked) => true,
+                Err(WriteError::ClosedStream) => false,
+                Err(WriteError::Stopped(_)) => panic!("{STOPPED}"),
             }
         } else {
             true
@@ -716,12 +716,17 @@ impl Streams {
     }
 
     /// Ends the message that `sender` holds or waits for: gives back its send budget
-    /// and its turn. The senders that get the room or the turn get
-    /// [`Event::Writable`] in `events`.
+    /// and its turn. The senders that get the room get [`Event::Writable`] in
+    /// `events`, and so does the new first sender in turn.
     fn release(&mut self, sender: &mut Sender, events: &mut VecDeque<Event>) {
+        let first = self.turns.first();
         let woken = |stream| events.push_back(Event::Writable { stream });
         self.sending.release(&mut sender.claim, woken);
-        if let Some(stream) = self.turns.leave(sender) {
+        self.turns.leave(sender);
+        let next = self.turns.first();
+        if next != first
+            && let Some(stream) = next
+        {
             events.push_back(Event::Writable { stream });
         }
     }
@@ -1636,6 +1641,28 @@ mod tests {
             let mut read = exchange(&mut pair, &mut senders, 50 * RUN);
             read.sort();
             assert_eq!(shapes(&read), shapes(&expected));
+        });
+    }
+
+    #[test]
+    fn a_header_that_the_window_splits_arrives_whole() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            // After the 10-byte hello, these leave 1 byte of the connection window.
+            let messages = [vec![1; MESSAGE_MAX], vec![2; 65_516]];
+            let blocks = messages.each_ref().map(|message| shard.block(message));
+            write(&mut pair.client, now, &mut first, &blocks);
+            let mut second = open_sender(&mut pair, Class::Complete);
+            let message = shard.block(&[3; 100]);
+            let written = pair.client.endpoint.write(now, &mut second, message);
+            assert_eq!(written, Ok(Poll::Pending));
+            assert_eq!(second.unsent, 1..3);
+            let id = second.key().id;
+            let read = exchange(&mut pair, &mut [first, second], 10 * RUN);
+            let read: Vec<_> = read.into_iter().filter(|&(at, _)| at == id).collect();
+            assert_eq!(read, [(id, vec![3; 100])]);
         });
     }
 

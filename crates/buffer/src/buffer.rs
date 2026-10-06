@@ -26,7 +26,8 @@ use types::time::Span;
 use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
-use crate::log::{self, Logs, Tail};
+use crate::log::{self, Logs, Mark, Tail};
+use crate::read::{Read, Reading};
 use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
 
@@ -38,7 +39,9 @@ pub struct Config {
     /// The directory of this shard's ring, relative to the data directory. Its parent
     /// must be there and durable.
     pub dir: PathBuf,
-    /// Blocks for record headers and recovery reads. It needs a class of 64 KiB.
+    /// Blocks for record headers, recovery reads, and the entries a read gives. It
+    /// needs a class of 64 KiB. Its largest block bounds an entry, with
+    /// [`Limit::Block`].
     pub pool: Rc<Pool>,
     /// Deadlines of the group commit.
     pub clock: Clock,
@@ -54,7 +57,7 @@ pub struct Config {
     pub commit: Span,
 }
 
-/// Why an open failed.
+/// Why an open or a read failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The ring has no room for its restart record.
@@ -66,7 +69,8 @@ pub enum Error {
         /// before their end, whichever is less.
         free: u64,
     },
-    /// The pool has no block for a header, a recovery read, or the restart record.
+    /// The pool has no block for a header, a recovery read, the restart record, a
+    /// recovered entry, or a read.
     Pool(block::Error),
     /// A file call failed.
     Files(files::Error),
@@ -138,8 +142,8 @@ impl std::error::Error for Error {}
 /// the entries are dropped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rejected {
-    /// The batch alone is over a limit of one record, so it never fits this ring.
-    /// The limit is the first one it is over, in the order of [`Limit`].
+    /// The batch alone is over a [`Limit`], so this buffer never takes it. The
+    /// limit is the first one it is over, in the order of [`Limit`].
     Large(Limit),
     /// The ring has no room for the batch. Room returns only when records leave the
     /// ring at its tail, and never when the offsets left before their end are under
@@ -329,7 +333,9 @@ impl Buffer {
     /// [`Error::Files`], [`Error::Pool`], [`Error::Length`], [`Error::Missing`],
     /// [`Error::Damaged`], [`Error::Version`], [`Error::Unfit`], and
     /// [`Error::Invalid`] as each says. [`Error::Full`] when the ring has no block
-    /// for its restart record.
+    /// for its restart record. [`Error::Pool`] with `TooLarge` when a recovered
+    /// entry is over the largest block of `pool`, which a read must give it in: a
+    /// larger pool must open the ring.
     ///
     /// # Panics
     ///
@@ -413,6 +419,61 @@ impl Buffer {
         self.shared.state.borrow().logs.durable(slot, path)
     }
 
+    /// The durable entries of `path` of the index at `slot` from `from`, in
+    /// order, until their blocks take `budget` pool bytes, by
+    /// [`block::footprint`] of each, a skip ahead starts, or the pool has no block
+    /// for the next entry. The last entry may pass the budget. An entry that holds
+    /// `from` comes whole. A read from a mark at or in the seqs a skip ahead left
+    /// out reports them as `gap` and goes on after them. The first read starts at
+    /// `Mark::at(0)`; each read continues at `next`, which a read that gives
+    /// nothing does not move. A read makes one file read for the table of each
+    /// record it visits, two when the record header and table pass 4 KiB, and one
+    /// per entry with bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Files`] when a ring read fails and [`Error::Pool`] when the pool
+    /// has no block for the first entry or its table; the buffer goes on. When a
+    /// commit's file call fails before the read ends, the error that ended the
+    /// buffer.
+    pub async fn read(
+        &self,
+        slot: Slot,
+        path: Path,
+        from: Mark,
+        budget: usize,
+    ) -> Result<Read, Error> {
+        let Shared {
+            file, pool, layout, ..
+        } = &*self.shared;
+        let mut reading = Reading::new(file, pool, *layout, path, from, budget);
+        let walked = self.walk(&mut reading, slot, path).await;
+        // After the walk: a ring read after a failed sync gives `Poisoned`.
+        if let Some(failed) = &self.shared.state.borrow().failed {
+            return Err(Error::Files(failed.clone()));
+        }
+        walked.map(|()| reading.finish())
+    }
+
+    /// Gives `reading` the records of `path` of the index at `slot` until it ends.
+    async fn walk(
+        &self,
+        reading: &mut Reading<'_>,
+        slot: Slot,
+        path: Path,
+    ) -> Result<(), Error> {
+        while let Some(from) = reading.next() {
+            let found = self.shared.state.borrow().logs.run(slot, path, from);
+            let Some((index, run)) = found else {
+                break;
+            };
+            if !reading.record(index, run).await? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// How many group commits ended since the open. It moves before the [`Commit`]
     /// futures that the commit resolves wake, and a failed commit does not move it.
     /// [`durable`](Self::durable) changes only at a commit that moves the count, and
@@ -439,7 +500,8 @@ impl Buffer {
     /// # Panics
     ///
     /// When a `first` is below the tail of its path, with the index, the path,
-    /// `first`, and the tail, or when `first + len` passes `u64::MAX`.
+    /// `first`, and the tail, when `first + len` passes `u64::MAX`, or when an
+    /// entry's slot held another index on its path before.
     pub fn append(
         &self,
         entries: impl IntoIterator<Item = Entry>,
@@ -579,7 +641,9 @@ async fn walk(
         let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
         let offset = cursor.offset();
         match cursor.next(&bytes)? {
-            Step::Data(body) => recover(body, offset, slots, &mut logs)?,
+            Step::Data(body) => {
+                recover(body, offset, pool.largest(), slots, &mut logs)?;
+            }
             Step::Moved | Step::More => {}
             Step::End => break,
         }
@@ -588,17 +652,22 @@ async fn walk(
 }
 
 /// Feeds the logs the entries of a record body at `offset`, as appended and
-/// synced.
+/// synced. Fails when an entry is over `largest`, the pool's largest block.
 fn recover(
     body: Body<'_>,
     offset: u64,
+    largest: usize,
     slots: &mut Slots,
     logs: &mut Logs,
 ) -> Result<(), Error> {
     let unread = |_: entry::Invalid| Error::Invalid { offset };
     let misplaced = |_: log::Invalid| Error::Invalid { offset };
     for header in entry::parse(body.start, body.len).map_err(unread)? {
-        let header = header.map_err(unread)?;
+        let (header, _) = header.map_err(unread)?;
+        let requested = usize::try_from(header.bytes).unwrap_or(usize::MAX);
+        if requested > largest {
+            return Err(Error::Pool(block::Error::TooLarge { requested, largest }));
+        }
         let slot = slots.assign(header.index);
         logs.append(slot, &header).map_err(misplaced)?;
         logs.sync(slot, &header, offset).map_err(misplaced)?;
@@ -832,8 +901,8 @@ mod tests {
     }
 
     /// Three commits, the first with two appends in one record, make one run per
-    /// record and path. An open of the same ring walks the records into the same
-    /// runs.
+    /// record and path, each from the mark after the record before. An open of the
+    /// same ring walks the records into the same runs.
     #[test]
     fn the_walk_makes_the_runs_the_syncs_made() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -862,9 +931,12 @@ mod tests {
                 buffer
             },
         );
-        let run = |first, offset| Run { first, offset };
+        let run = |seq, offset| Run {
+            start: Mark::at(seq),
+            offset,
+        };
         let live: Vec<Run> = written.runs(Slot::new(0), Path::Live).collect();
-        assert_eq!(live, [run(0, 4096), run(6, 8192), run(12, 12288)]);
+        assert_eq!(live, [run(0, 4096), run(6, 8192), run(9, 12288)]);
         let backfill: Vec<Run> = written.runs(Slot::new(1), Path::Backfill).collect();
         assert_eq!(backfill, [run(0, 4096), run(3, 8192), run(6, 12288)]);
         assert_eq!(written.durable(Slot::new(0), Path::Live).seq, 15);

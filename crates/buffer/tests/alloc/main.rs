@@ -10,10 +10,12 @@
 mod memory;
 
 use std::path::PathBuf;
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 use block::{Heap, Pool};
-use buffer::{Buffer, Config, Entry, Layout, Parts};
+use buffer::{Buffer, Config, Entry, Layout, Mark, Parts, Read};
 use types::channel::{self, Slots};
 use types::frame::Path;
 use types::time::{Span, Stamp};
@@ -47,6 +49,39 @@ fn entry(index: u32, first: u64, parts: Parts) -> Entry {
         tag: 0,
         parts,
     }
+}
+
+/// The six batch shapes of one commit: empty, two indexes, empty, every other
+/// index, one half-body entry, and a half-body entry with a small one.
+fn batches(commit: u64, parts: &Parts, half: &Parts) -> [Vec<Entry>; 6] {
+    let seq = 3 * commit;
+    let wide: Vec<Entry> = (2..WIDE)
+        .map(|index| entry(index, commit, Parts::default()))
+        .collect();
+    [
+        Vec::new(),
+        vec![entry(0, seq, parts.clone()), entry(1, seq, parts.clone())],
+        Vec::new(),
+        wide,
+        vec![entry(0, seq + 1, half.clone())],
+        vec![
+            entry(0, seq + 2, half.clone()),
+            entry(1, seq + 1, parts.clone()),
+        ],
+    ]
+}
+
+/// Reads the whole log of `slot` in one poll, with the allocations the read
+/// made.
+fn read_once(buffer: &Buffer, slot: channel::Slot) -> (Read, u64) {
+    let (read, allocations) = ALLOCATOR.count(|| {
+        let mut read = pin!(buffer.read(slot, Path::Live, Mark::at(0), usize::MAX));
+        match read.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("a read of the memory driver is ready at once"),
+        }
+    });
+    (read.expect("reads"), allocations)
 }
 
 fn main() {
@@ -88,21 +123,7 @@ fn main() {
             let parts = Parts::from(pool.alloc(256).expect("a block").freeze());
             let half = Parts::from(pool.alloc(BODY_MAX / 2).expect("a block").freeze());
             for commit in 0..WARM + COUNTED {
-                let seq = 3 * commit;
-                let wide: Vec<Entry> = (2..WIDE)
-                    .map(|index| entry(index, commit, Parts::default()))
-                    .collect();
-                let batches: [Vec<Entry>; 6] = [
-                    Vec::new(),
-                    vec![entry(0, seq, parts.clone()), entry(1, seq, parts.clone())],
-                    Vec::new(),
-                    wide,
-                    vec![entry(0, seq + 1, half.clone())],
-                    vec![
-                        entry(0, seq + 2, half.clone()),
-                        entry(1, seq + 1, parts.clone()),
-                    ],
-                ];
+                let batches = batches(commit, &parts, &half);
                 for (shape, batch) in batches.into_iter().enumerate() {
                     let (appended, allocations) =
                         ALLOCATOR.count(|| buffer.append(batch));
@@ -116,6 +137,18 @@ fn main() {
                 }
                 buffer.committed().await.expect("commits");
             }
+            let (read, allocations) = read_once(&buffer, channel::Slot::new(1));
+            assert_eq!(
+                read.entries.len(),
+                2,
+                "index 1 has two entries before its skip"
+            );
+            assert_eq!(
+                allocations, 7,
+                "the entries, the entries of a record to give, and one boxed file call \
+                 per entry and per table: the two records with an entry, and the one \
+                 where the skip ahead starts"
+            );
         })
         .expect("the shard starts");
     sim.run().expect("the run ends");

@@ -29,4 +29,10 @@ exclude_re = [
   # Only Miri sees the stub task that a skipped clear leaks, and the miri job runs
   # those tests.
   'crates/connector-ni/src/daqmx\.rs:.*replace <impl Drop for Task>::drop with \(\)',
+  # A fence changes the order of memory operations around a counter read, and no
+  # result a test can see. Loom does not model a counter read.
+  'crates/os/src/clock\.rs:.*replace (settle|hold) with \(\)',
+  # When the measured time asleep equals the largest, `fetch_max` stores the same
+  # value, so `>=` gives the same result as `>`.
+  'crates/os/src/clock\.rs:.*replace > with >= in combine',
 ]
