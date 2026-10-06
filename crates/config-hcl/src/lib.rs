@@ -206,7 +206,7 @@ pub enum Form {
     /// that starts with the word `for` as one, such as `[for]` or `{ for = 1 }`.
     For,
     /// An index or an attribute access after a value, such as `a[0]`, `a.0`, or
-    /// `f().b`.
+    /// `f().b`. A string index on a reference is a segment, not this form.
     Index,
     /// A splat, such as `a[*].b` or `a.*.b`.
     Splat,
@@ -256,7 +256,8 @@ impl Form {
             Self::Index => (
                 INDEX,
                 "indexes and attribute access do not exist in Foundation files",
-                "Write the value itself",
+                "Write the value itself. Write a name segment that is not an \
+                 identifier as a string index, such as `plc[\"40001\"]`",
             ),
             Self::Splat => (
                 SPLAT,
@@ -558,7 +559,8 @@ mod tests {
             Form::Index,
             "hcl.index",
             "indexes and attribute access do not exist in Foundation files",
-            "Write the value itself",
+            "Write the value itself. Write a name segment that is not an identifier \
+             as a string index, such as `plc[\"40001\"]`",
         ),
         (
             Form::Splat,
