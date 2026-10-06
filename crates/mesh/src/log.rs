@@ -23,7 +23,8 @@ use env::files::{self, File, Files, Mode};
 use raft::{Entry, Hard, Term};
 use types::digest::Digest;
 
-use crate::entry::{self, key, take};
+use crate::bytes::{put_key, take, take_key};
+use crate::entry;
 
 const VERSION: u16 = 1;
 const CHECK: usize = 8;
@@ -543,7 +544,9 @@ fn encode(number: u64, hard: Option<Hard>, entries: &[Entry]) -> Vec<u8> {
         Some(Hard { term, vote }) => {
             body.push(vote.map_or(HARD, |_| HARD_WITH_VOTE));
             body.extend(term.0.to_le_bytes());
-            body.extend(vote.iter().flat_map(|key| key.as_u128().to_le_bytes()));
+            if let Some(vote) = vote {
+                put_key(vote, &mut body);
+            }
         }
     }
     for entry in entries {
@@ -569,7 +572,7 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
         kind @ (HARD | HARD_WITH_VOTE) => {
             let term = Term(u64::from_le_bytes(take(body)?));
             let vote = match kind {
-                HARD_WITH_VOTE => Some(key(body)?),
+                HARD_WITH_VOTE => Some(take_key(body)?),
                 _ => None,
             };
             stored.hard = Hard { term, vote };
