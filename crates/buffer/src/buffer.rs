@@ -269,8 +269,7 @@ impl Drop for Buffer {
 impl Buffer {
     /// Opens the ring in `config.dir`, or creates it, makes the ring and its
     /// directory durable, and recovers the tail of every path from its records. Each
-    /// recovered index gets its slot from `slots`. The recovered tails are on disk
-    /// when it returns. Starts the commit task.
+    /// recovered index gets its slot from `slots`. Starts the commit task.
     ///
     /// # Errors
     ///
@@ -315,6 +314,8 @@ impl Buffer {
         let chain = random(&entropy);
         let (writer, sealed) = cursor.writer(header.tail.offset(), chain)?;
         write_restart(&file, &pool, sealed, chain).await?;
+        // A killed process may have written records that it never synced.
+        file.sync().await?;
         let shared = Rc::new(Shared {
             file,
             pool,
@@ -496,10 +497,8 @@ async fn read_header(
     Ok(header)
 }
 
-/// Recovers the tail of every path from the records after the tail of `header`,
-/// and syncs `file` when it read one, since a killed process may have written
-/// records that it never synced. Returns the cursor at the end of the walk and the
-/// logs.
+/// Recovers the tail of every path from the records after the tail of `header`.
+/// Returns the cursor at the end of the walk and the logs.
 async fn walk(
     file: &File,
     pool: &Pool,
@@ -508,22 +507,15 @@ async fn walk(
 ) -> Result<(Cursor, Logs), Error> {
     let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
     let mut logs = Logs::default();
-    let mut recovered = false;
     loop {
         let Window { place, len } = cursor.window();
         let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
         let offset = cursor.offset();
         match cursor.next(&bytes)? {
-            Step::Data(body) => {
-                recover(body, offset, slots, &mut logs)?;
-                recovered = true;
-            }
+            Step::Data(body) => recover(body, offset, slots, &mut logs)?,
             Step::Moved | Step::More => {}
             Step::End => break,
         }
-    }
-    if recovered {
-        file.sync().await?;
     }
     Ok((cursor, logs))
 }
