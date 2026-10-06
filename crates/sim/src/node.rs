@@ -81,12 +81,11 @@ impl Node {
         env::threads::Threads::new(self.0.clone())
     }
 
-    /// The node's network, on its [`Node::addresses`]. UDP only: `connect` and
-    /// `listen` panic.
+    /// The node's network, on its [`Node::addresses`].
     ///
-    /// - A bind or a send from an address that is not the node's gives `Error::Io`
-    ///   with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free port from
-    ///   49152.
+    /// - A bind, a listen, or a send from an address that is not the node's gives
+    ///   `Error::Io` with code 99 (`EADDRNOTAVAIL`). Port 0 binds the lowest free
+    ///   port from 49152.
     /// - A socket on IPv6 takes `::ffff:a.b.c.d` as `a.b.c.d`, in the destination and
     ///   the source of a send. A send to the other family than the socket's gives
     ///   `Error::Unreachable` with the destination as given.
@@ -96,8 +95,17 @@ impl Node {
     ///   destination, or when its receive queue takes more than `recv_buffer_bytes`,
     ///   in which each datagram takes its length plus 768 bytes. The send buffer
     ///   never fills.
-    /// - A socket half panics when it polls outside the node's threads or after a
-    ///   crash of the node.
+    /// - A TCP segment is never lost or duplicated, and each direction of a stream
+    ///   keeps its order. A connect is ready after one round trip, and its accept
+    ///   after one and a half. A connect takes the next free port after the node's
+    ///   last connect, from 49152. A listen conflicts only with other listens.
+    /// - A peer sends at most `recv_buffer_bytes` past the bytes read, and a stream
+    ///   holds at most `send_buffer_bytes` that its peer has not received. A write
+    ///   after `poll_close` gives `Error::Io` with code 32 (`EPIPE`).
+    /// - TCP panics on a link with loss, on `delayed` sends, on a connect to an
+    ///   address that no node has, and on a connect to a full backlog.
+    /// - A socket half, a stream, or a listener panics when it polls outside the
+    ///   node's threads or after a crash of the node.
     #[must_use]
     pub fn net(&self) -> env::net::Net {
         env::net::Net::new(self.0.clone())

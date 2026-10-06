@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Wake, Waker};
@@ -15,7 +16,7 @@ use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
 use crate::files::{Files, Held};
-use crate::net::Network;
+use crate::net::{self, Network};
 use crate::serial::Serial;
 use crate::{Crash, node, shard};
 
@@ -305,6 +306,11 @@ impl State {
     /// True time now.
     pub(crate) fn now(&self) -> Monotonic {
         self.now
+    }
+
+    /// Whether a node of the run has address `ip`.
+    pub(crate) fn hosts(&self, ip: IpAddr) -> bool {
+        net::node(ip).is_some_and(|node| node < self.nodes.len())
     }
 
     pub(crate) fn net(&mut self) -> &mut Network {
