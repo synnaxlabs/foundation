@@ -107,7 +107,10 @@ impl Index {
     }
 
     /// Opens a complete reader at the live tail, with a credit of `limit_bytes`.
-    pub(crate) fn open_complete(&mut self, limit_bytes: u64) -> delivery::Key {
+    pub(crate) fn open_complete(
+        &mut self,
+        limit_bytes: u64,
+    ) -> delivery::complete::Key {
         let live = self.order.tail(Path::Live).seq;
         let start = Start::At(Position {
             live,
@@ -124,7 +127,7 @@ impl Index {
     ///
     /// If either path moved, or the holder changed, after the check, or no frame was
     /// frozen.
-    pub(crate) fn advance(&mut self, accepted: Accepted) -> &[delivery::Key] {
+    pub(crate) fn advance(&mut self, accepted: Accepted) -> &[delivery::latest::Key] {
         let (path, seq, frame) = self.spend(accepted);
         let frame = frame.expect("invariant: a stored frame was frozen");
         match path {
@@ -143,7 +146,7 @@ impl Index {
     /// # Panics
     ///
     /// If either path moved, or the holder changed, after the check.
-    pub(crate) fn lose(&mut self, accepted: Accepted) -> &[delivery::Key] {
+    pub(crate) fn lose(&mut self, accepted: Accepted) -> &[delivery::latest::Key] {
         match self.spend(accepted) {
             (Path::Live, _, Some(frame)) => self.readers.put(frame),
             (Path::Live, _, None) | (Path::Backfill, ..) => &[],
@@ -415,7 +418,10 @@ mod tests {
             let frame = accepted.freeze(frames.draft(&series), 0).clone();
             assert_eq!(index.advance(accepted), &[session]);
             assert!(!index.readers.pending());
-            let taken = index.readers.take(session).expect("the newest frame");
+            let taken = index
+                .readers
+                .take(session.into())
+                .expect("the newest frame");
             assert_eq!(taken.path(), Path::Live);
             assert_eq!(taken.range(0), Some(frame::Range { seq: 1, count: 2 }));
             assert_eq!(taken.series(0), frame.series(0));
@@ -434,7 +440,7 @@ mod tests {
             assert_eq!(frame.path(), Path::Backfill);
             assert_eq!(frame.range(0), Some(frame::Range { seq: 0, count: 2 }));
             assert_eq!(index.advance(accepted), &[]);
-            assert!(index.readers.take(session).is_none());
+            assert!(index.readers.take(session.into()).is_none());
             assert_eq!(write(&mut index, key, &[3], at(2)), Ok(0..1));
         }
 
@@ -456,7 +462,10 @@ mod tests {
             assert!(index.readers.pending());
             assert_eq!(index.readers.release(1), &[]);
             assert_eq!(index.readers.release(2), &[session]);
-            let taken = index.readers.take(session).expect("the stored frame");
+            let taken = index
+                .readers
+                .take(session.into())
+                .expect("the stored frame");
             assert_eq!(taken.range(0), Some(frame::Range { seq: 0, count: 2 }));
         }
 
@@ -527,7 +536,7 @@ mod tests {
                 .expect("a holder's frame in order");
             let _ = accepted.freeze(frames.draft(&series), 0);
             assert_eq!(index.lose(accepted), &[latest]);
-            let taken = index.readers.take(latest).expect("the newest frame");
+            let taken = index.readers.take(latest.into()).expect("the newest frame");
             assert_eq!(taken.range(0), Some(frame::Range { seq: 0, count: 2 }));
             assert_eq!(index.readers.release(2), &[]);
             assert_eq!(write(&mut index, key, &[3], at(2)), Ok(2..3));
@@ -539,7 +548,7 @@ mod tests {
             let key = index.gate.open(writer("a", 10), None, at(0));
             let session = index.readers.open_latest(None, s(0)).key;
             assert_eq!(write(&mut index, key, &[1, 2], at(1)), Ok(0..2));
-            assert!(index.readers.take(session).is_none());
+            assert!(index.readers.take(session.into()).is_none());
             assert_eq!(write(&mut index, key, &[3], at(2)), Ok(2..3));
         }
     }

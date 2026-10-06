@@ -1,18 +1,16 @@
 [package]
-name = "acceptance"
+name = "connector-ni"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+libloading.workspace = true
+types = { path = "../types" }
 
 [dev-dependencies]
-block = { path = "../block" }
-env = { path = "../env" }
-node = { path = "../node" }
-sim = { path = "../sim" }
-types = { path = "../types" }
+daqmx-stub = { path = "../daqmx-stub" }
 
 [lints]
 workspace = true
