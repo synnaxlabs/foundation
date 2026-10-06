@@ -994,7 +994,12 @@ How to read this record:
   only delays the next round trip. A candidate counts its own vote at once because
   the write comes before the send. `hard()` stays a getter like `term()`. Randomness
   enters only through `tick`: a node draws its election timeout on the first tick
-  after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
+  after a reset. PreVote and CheckQuorum have no off switch. A PreVote answer, grant or
+  refusal, shows the voter's state when it sent the answer. A grant that arrives after
+  its voter got a lease back still counts, and costs one needless election; safety
+  holds. etcd/raft counts such a grant too. Lost: a round number in `PreVote`, which
+  changes the message format and closes only the case of two pre-campaigns. Decided by
+  the advisor under the failover delegation on 2026-10-05 (#719). A node that is not in
   its own voter list votes and follows, but never campaigns while that configuration
   is committed. `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
@@ -2638,7 +2643,8 @@ Parameters and later choices, recorded and not asked:
   driven, not self-running), `ring` holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
-  after sync vs on receipt).
+  after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
+  voter's state when it sent the answer.").
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
   tree key `<label>.@<kind>` of a policy (#729).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611).
