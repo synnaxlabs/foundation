@@ -9,7 +9,7 @@ mod shards;
 /// Shards on OS threads, each with its own Tokio runtime. The core count is read once
 /// from the thread that calls this. On Linux it is the size of the affinity set, and
 /// core `i` of [`env::shards::Config::core`] pins to the `i`-th CPU of the set. Only
-/// Linux can pin: elsewhere a set core gives [`env::thread::Error::Pin`].
+/// Linux can pin: elsewhere [`env::shards::Shards::pinnable`] is `false`.
 ///
 /// A panic ends the shard only where panics unwind, as in tests. A release build
 /// aborts the process at a panic.

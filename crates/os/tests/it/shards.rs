@@ -312,6 +312,7 @@ mod linux {
     fn each_core_pins_its_shard_to_its_cpu_of_the_affinity_set() {
         let cpus = affinity();
         let shards = shards();
+        assert!(shards.pinnable());
         assert_eq!(shards.cores().get(), cpus.len());
         for (core, &cpu) in cpus.iter().enumerate() {
             let seen = Arc::new(Mutex::new(Vec::new()));
@@ -330,37 +331,11 @@ mod linux {
 
 #[cfg(not(target_os = "linux"))]
 mod other {
-    use env::thread::Error;
-
     use super::*;
 
     #[test]
-    fn a_core_gives_a_pin_error() {
-        let config = Config {
-            name: "shard-0".into(),
-            core: Some(0),
-        };
-        let e = shards().start(config, |_| async {}).unwrap_err();
-        let pin = Error::Pin {
-            name: "shard-0".into(),
-            core: 0,
-        };
-        assert_eq!(e, pin);
-    }
-
-    #[test]
-    #[should_panic(expected = "bomb")]
-    fn a_panic_in_the_drop_of_main_before_the_start_reaches_start() {
-        let config = Config {
-            name: "shard-0".into(),
-            core: Some(0),
-        };
-        let bomb = Bomb;
-        let main = move |_: Tasks| {
-            let _bomb = &bomb;
-            async {}
-        };
-        drop(shards().start(config, main));
+    fn shards_cannot_pin() {
+        assert!(!shards().pinnable());
     }
 
     #[test]

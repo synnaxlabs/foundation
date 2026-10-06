@@ -29,7 +29,11 @@ impl Driver {
 
 impl env::shards::Driver for Driver {
     fn cores(&self) -> NonZeroUsize {
-        self.0.count()
+        self.0.count
+    }
+
+    fn pinnable(&self) -> bool {
+        !self.0.cpus.is_empty()
     }
 
     #[expect(
@@ -90,11 +94,12 @@ fn run(
 
 /// Pins the calling thread and builds its runtime.
 fn build(name: &str, pin: Option<(Arc<Cores>, usize)>) -> Result<LocalRuntime, Error> {
-    if let Some((cores, core)) = pin
-        && cores.pin(core).is_err()
-    {
-        let name = name.to_owned();
-        return Err(Error::Pin { name, core });
+    if let Some((cores, core)) = pin {
+        cores.pin(core).map_err(|e| Error::Pin {
+            name: name.to_owned(),
+            core,
+            reason: e.to_string(),
+        })?;
     }
     Builder::new_current_thread()
         .build_local(LocalOptions::default())
@@ -209,5 +214,19 @@ impl Drop for Caught {
         if panic::catch_unwind(AssertUnwindSafe(|| drop(task))).is_err() {
             self.alarm.raise();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cores_with_no_cpus_cannot_pin() {
+        let cores = Cores {
+            count: NonZeroUsize::MIN,
+            cpus: Vec::new(),
+        };
+        assert!(!env::shards::Shards::new(Driver::new(cores)).pinnable());
     }
 }
