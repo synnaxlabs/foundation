@@ -235,14 +235,20 @@ impl Readers {
     }
 
     /// Raises the session's credit to `limit_bytes` since it opened. A limit that is
-    /// not higher than the current one changes nothing.
+    /// not higher than the current one changes nothing, and so does a grant to a
+    /// closed session: a grant can arrive after its session closes.
     ///
     /// # Panics
     ///
-    /// If the complete session is not open.
+    /// If no session had `key`, or `key` is an open latest session.
     pub fn grant(&mut self, key: Key, limit_bytes: u64) {
-        let i = self.find(key);
-        self.flows[i].credit.grant(limit_bytes);
+        if let Ok(i) = self.complete.binary_search_by_key(&key, |s| s.key) {
+            self.flows[i].credit.grant(limit_bytes);
+        } else {
+            assert!(key.0 < self.next, "session {key} was never open");
+            let latest = self.latest.binary_search_by_key(&key, |s| s.key);
+            assert!(latest.is_err(), "session {key} is a latest session");
+        }
     }
 
     /// Queues `frame`, stored on the live path with the samples `seq`, for the
@@ -1180,11 +1186,18 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "session 0 is not open")]
-        fn grant_panics_on_a_closed_session() {
+        #[should_panic(expected = "session 1 was never open")]
+        fn grant_panics_on_a_session_never_open() {
             let mut readers = Readers::new(0);
-            let key = readers.open(Reader::Unnamed, Start::At(live(0))).key;
-            readers.close(key, at(0));
+            let _ = readers.open(Reader::Unnamed, Start::At(live(0)));
+            readers.grant(Key(1), 10);
+        }
+
+        #[test]
+        #[should_panic(expected = "session 0 is a latest session")]
+        fn grant_panics_on_a_latest_session() {
+            let mut readers = Readers::new(0);
+            let key = readers.open_latest(None, at(0)).key;
             readers.grant(key, 10);
         }
     }
@@ -1377,6 +1390,32 @@ pub(super) mod tests {
             let old = readers.open(named("a", 10), Start::At(live(0))).key;
             readers.grant(old, 10 * CHARGE);
             let new = readers.open(named("a", 10), resume(live(0))).key;
+            readers.queue(&frames.frame(1), 0..1);
+            assert_eq!(released(&mut readers, 1), []);
+            assert_eq!(taken(&mut readers, new), []);
+        }
+
+        #[test]
+        fn drops_a_grant_to_a_closed_session() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let closed = opened(&mut readers, 0, 0);
+            let open = opened(&mut readers, 0, 1);
+            readers.close(closed, at(0));
+            readers.grant(closed, 10 * CHARGE);
+            readers.queue(&frames.frame(1), 0..1);
+            readers.queue(&frames.frame(2), 1..2);
+            assert_eq!(released(&mut readers, 2), [open]);
+            assert_eq!(taken(&mut readers, open), [1]);
+        }
+
+        #[test]
+        fn drops_a_grant_to_a_session_a_takeover_closed() {
+            let frames = Frames::new(1);
+            let mut readers = Readers::new(0);
+            let old = readers.open(named("a", 10), Start::At(live(0))).key;
+            let new = readers.open(named("a", 10), resume(live(0))).key;
+            readers.grant(old, 10 * CHARGE);
             readers.queue(&frames.frame(1), 0..1);
             assert_eq!(released(&mut readers, 1), []);
             assert_eq!(taken(&mut readers, new), []);
