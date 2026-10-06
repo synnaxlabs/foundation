@@ -416,7 +416,8 @@ fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
 }
 
 /// A deadline that passes while a sync runs fires when the sync ends: the task did not
-/// park, so the entries that came during the sync wait no longer.
+/// idle, so the entries that came during the sync wait no longer. The task idles once
+/// before the first entry, as after an open.
 #[test]
 fn a_deadline_that_passes_during_a_sync_fires_when_the_sync_ends() {
     for (tenths, seed) in [(10, 45), (11, 46)] {
@@ -430,6 +431,7 @@ fn a_deadline_that_passes_during_a_sync_fires_when_the_sync_ends() {
             let tenth = COMMIT.nanos() / 10;
             let sync = Span::from_nanos(tenth * tenths);
             shard.memory.slow_syncs(shard.clock.clone(), sync);
+            shard.clock.sleep(commits(21)).await;
             let opened = shard.clock.now();
             buffer
                 .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
