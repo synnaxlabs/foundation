@@ -15,6 +15,7 @@ use env::thread::Handle;
 use types::time::{Monotonic, Span};
 
 use super::{millis, shard, sim};
+use crate::drivers::yield_now;
 use crate::net::addresses;
 use crate::{Config, Error, Sim, link, node};
 
@@ -523,14 +524,9 @@ fn a_receive_cuts_a_datagram_at_the_end_of_its_buffer() {
     let (sender, _a) = udp(&a, 4433);
     let (_b, mut receiver) = udp(&b, 4433);
     let _send = send(&a, sender, at(&b, 4433), vec![b"abcde".to_vec()]);
-    let cut = Arc::new(Mutex::new(None));
-    let log = Arc::clone(&cut);
-    let _receive = b.shards().start(shard("receive"), move |_| async move {
-        let batch = recv(&mut receiver, 2).await;
-        *log.lock().unwrap() = Some(batch);
-    });
-    sim.run_for(Span::SECOND).unwrap();
-    let (meta, bytes) = cut.lock().unwrap().clone().unwrap();
+    let (meta, bytes) = sim
+        .run_on(&b, move |_, _| async move { recv(&mut receiver, 2).await })
+        .unwrap();
     assert_eq!((meta.len, meta.stride, bytes), (2, 2, b"ab".to_vec()));
 }
 
@@ -699,14 +695,10 @@ fn sent(
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (mut sender, _a) = bind(&a, local(&a)).unwrap();
     let transmit = make(&a, &b);
-    let result = Arc::new(Mutex::new(None));
-    let log = Arc::clone(&result);
-    let _send = a.shards().start(shard("send"), move |_| async move {
-        let sent = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
-        *log.lock().unwrap() = Some(sent);
+    let sent = sim.run_on(&a, move |_, _| async move {
+        poll_fn(|cx| sender.poll_send(cx, &transmit)).await
     });
-    sim.run_for(Span::SECOND).unwrap();
-    assert_eq!(result.lock().unwrap().clone(), Some(expected));
+    assert_eq!(sent, Ok(expected));
 }
 
 #[test]
@@ -932,4 +924,57 @@ fn a_link_to_a_node_of_another_sim_panics() {
     let (mut sim, a, _b) = pair(0, link::Config::default());
     let (_other, stranger, _) = pair(0, link::Config::default());
     sim.link(&a, &stranger, link::Config::default());
+}
+
+/// The digest of a run in which a shard of `a` sends one datagram to `b` and yields
+/// once: before the send when `late`, after it otherwise.
+fn sent_in_poll(late: bool) -> u64 {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (mut sender, _a) = udp(&a, 4433);
+    let _b = udp(&b, 4433);
+    let to = at(&b, 4433);
+    let _send = a.shards().start(shard("send"), move |_| async move {
+        if late {
+            yield_now().await;
+        }
+        let transmit = transmit(to, b"x");
+        poll_fn(|cx| sender.poll_send(cx, &transmit)).await.unwrap();
+        if !late {
+            yield_now().await;
+        }
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_digest_holds_the_poll_of_each_send() {
+    assert_ne!(sent_in_poll(false), sent_in_poll(true));
+}
+
+/// The digest of a run in which `a` sends one datagram to `b`, which arrives while a
+/// shard of `b` sleeps: before its second yield when `early`, after it otherwise.
+fn polled_around_arrival(early: bool) -> u64 {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (sender, _a) = udp(&a, 4433);
+    let _b = udp(&b, 4433);
+    let _send = send(&a, sender, at(&b, 4433), vec![b"x".to_vec()]);
+    let clock = b.clock();
+    let _wait = b.shards().start(shard("wait"), move |_| async move {
+        yield_now().await;
+        if early {
+            clock.sleep(Span::MILLISECOND).await;
+        }
+        yield_now().await;
+        if !early {
+            clock.sleep(Span::MILLISECOND).await;
+        }
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_digest_holds_the_polls_before_an_arrival() {
+    assert_ne!(polled_around_arrival(true), polled_around_arrival(false));
 }

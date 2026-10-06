@@ -6,6 +6,8 @@
 mod change;
 mod check;
 mod config;
+mod disk;
 mod election;
+mod hostile;
 mod network;
 mod replication;

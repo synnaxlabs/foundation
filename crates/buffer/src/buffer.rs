@@ -23,11 +23,11 @@ use types::channel::{Slot, Slots};
 use types::frame::Path;
 use types::time::Span;
 
-use crate::entry::{self, Entry};
+use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{Closed, Group, Limit, META_LEN, Rejected, Sealed};
 use crate::header::{self, Header};
-use crate::record::{self, ALIGN, AREA_START};
-use crate::tails::{self, Tail, Tails};
+use crate::log::{self, Logs, Tail};
+use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 
 /// What one shard's buffer is given at open.
@@ -35,7 +35,8 @@ use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 pub struct Config {
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
-    /// The directory of this shard's ring, relative to the data directory.
+    /// The directory of this shard's ring, relative to the data directory. Its parent
+    /// must be there and durable.
     pub dir: PathBuf,
     /// Blocks for record headers and recovery reads. It needs a class of 64 KiB.
     pub pool: Rc<Pool>,
@@ -84,7 +85,8 @@ pub enum Error {
     },
     /// No header block has the magic: the file is not a ring.
     Missing,
-    /// Both header blocks have the magic and a wrong CRC: the ring is lost.
+    /// Both header blocks have the magic and a wrong CRC, which no crash leaves:
+    /// the ring is lost.
     Damaged,
     /// The ring has a format version this build does not read.
     Version(u16),
@@ -186,6 +188,9 @@ impl From<header::Error> for Error {
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
+    /// The entries of the append in progress, kept with capacity for up to one
+    /// record of entries.
+    batch: RefCell<Vec<Entry>>,
 }
 
 /// What the handle and the commit task share.
@@ -206,10 +211,8 @@ struct State {
     spares: Vec<Group>,
     /// Closed groups the task writes at its next deadline.
     queue: Vec<Closed>,
-    /// With every appended entry.
-    tails: Tails,
-    /// With every synced entry.
-    durable: Tails,
+    /// Where each path stands, and the records that hold it.
+    logs: Logs,
     /// How many deadlines took the groups to write.
     taken: u64,
     /// How many deadlines synced what they took.
@@ -241,8 +244,8 @@ impl State {
     fn synced(&mut self, sealed: impl Iterator<Item = Sealed>) {
         for record in sealed {
             for (&slot, header) in record.slots().iter().zip(record.headers()) {
-                self.durable
-                    .advance(slot, header)
+                self.logs
+                    .sync(slot, header, record.offset())
                     .expect("invariant: append checked the entry");
             }
             self.spares.push(record.clear());
@@ -264,9 +267,9 @@ impl Drop for Buffer {
 }
 
 impl Buffer {
-    /// Opens the ring in `config.dir`, or creates it, and recovers the tail of
-    /// every path from its records. Each recovered index gets its slot from `slots`.
-    /// Starts the commit task.
+    /// Opens the ring in `config.dir`, or creates it, makes the ring and its
+    /// directory durable, and recovers the tail of every path from its records. Each
+    /// recovered index gets its slot from `slots`. Starts the commit task.
     ///
     /// # Errors
     ///
@@ -297,22 +300,24 @@ impl Buffer {
             Err(files::Error::NotFound { .. }) => {
                 files.create_dir(&dir).await?;
                 let len = layout.file_len();
-                let file = files.open(&path, Mode::Create { len }).await?;
-                files.sync_dir(&dir).await?;
-                file
+                files.open(&path, Mode::Create { len }).await?
             }
             Err(error) => return Err(error.into()),
         };
+        // An open that stopped after it made the ring may not have made it durable.
+        if let Some(parent) = dir.parent() {
+            files.sync_dir(parent).await?;
+        }
+        files.sync_dir(&dir).await?;
         let header = read_header(&file, &pool, &entropy, layout).await?;
-        let mut cursor = Cursor::new(header.layout, header.tail);
-        let mut tails = Tails::default();
+        let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
+        let mut logs = Logs::default();
         loop {
             let Window { place, len } = cursor.window();
-            let len = usize::try_from(len).expect("invariant: a window fits in memory");
             let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
             let offset = cursor.offset();
             match cursor.next(&bytes)? {
-                Step::Data(body) => recover(body, offset, slots, &mut tails)?,
+                Step::Data(body) => recover(body, offset, slots, &mut logs)?,
                 Step::Moved | Step::More => {}
                 Step::End => break,
             }
@@ -329,8 +334,7 @@ impl Buffer {
                 open: Group::default(),
                 spares: Vec::new(),
                 queue: Vec::new(),
-                durable: tails.clone(),
-                tails,
+                logs,
                 taken: 0,
                 commits: 0,
                 wakers: Vec::new(),
@@ -340,7 +344,10 @@ impl Buffer {
             }),
         });
         tasks.spawn(run(Rc::clone(&shared), clock, commit, chain));
-        Ok(Self { shared })
+        Ok(Self {
+            shared,
+            batch: RefCell::default(),
+        })
     }
 
     /// The sizes of the ring. A commit holds at most `body_max` bytes.
@@ -352,13 +359,13 @@ impl Buffer {
     /// Where `path` of the index at `slot` stands, with every appended entry.
     #[must_use]
     pub fn tail(&self, slot: Slot, path: Path) -> Tail {
-        self.shared.state.borrow().tails.get(slot, path)
+        self.shared.state.borrow().logs.appended(slot, path)
     }
 
     /// Where `path` of the index at `slot` stands on disk.
     #[must_use]
     pub fn durable(&self, slot: Slot, path: Path) -> Tail {
-        self.shared.state.borrow().durable.get(slot, path)
+        self.shared.state.borrow().logs.durable(slot, path)
     }
 
     /// Queues every entry of `entries` for the next group commit, or none, and
@@ -374,34 +381,49 @@ impl Buffer {
     /// [`Error::Large`] when no record holds the entries together, [`Error::Full`]
     /// when the ring has no room for the whole call, and [`Error::Pool`] when the
     /// pool has no block for the record header; nothing is queued and no tail
-    /// moves. [`Error::Files`] after a failed sync.
+    /// moves. [`Error::Files`] after a failed sync. An append that fails takes no
+    /// part: the parts of `entries` are dropped.
     ///
     /// # Panics
     ///
     /// When a `first` is below the tail of its path, with the index, the path,
     /// `first`, and the tail, or when `first + len` passes `u64::MAX`.
-    pub fn append(&self, entries: &[Entry<'_>]) -> Result<(), Error> {
+    pub fn append(
+        &self,
+        entries: impl IntoIterator<Item = Entry>,
+    ) -> Result<(), Error> {
+        let mut batch = self.batch.take();
+        batch.extend(entries);
+        let queued = self.queue(&mut batch);
+        batch.clear();
+        batch.shrink_to(ENTRIES_MAX);
+        self.batch.replace(batch);
+        queued
+    }
+
+    /// Takes `batch` into a group, or leaves its entries in it.
+    fn queue(&self, batch: &mut Vec<Entry>) -> Result<(), Error> {
         let shared = &*self.shared;
         let mut guard = shared.state.borrow_mut();
         let state = &mut *guard;
         if let Some(error) = &state.failed {
             return Err(error.clone());
         }
-        match state.open.push(&shared.pool, &state.writer, entries) {
-            Ok(()) => {}
+        let taken = match state.open.push(&shared.pool, &state.writer, batch) {
+            Ok(taken) => taken,
             Err(Rejected::Record) => {
                 state.close_open();
                 state
                     .open
-                    .push(&shared.pool, &state.writer, entries)
-                    .map_err(rejected)?;
+                    .push(&shared.pool, &state.writer, batch)
+                    .map_err(rejected)?
             }
             Err(other) => return Err(rejected(other)),
-        }
-        for entry in entries {
+        };
+        for (slot, header) in state.open.entries(taken) {
             state
-                .tails
-                .advance(entry.slot, &entry.header())
+                .logs
+                .append(slot, header)
                 .unwrap_or_else(|invalid| panic!("invariant: {invalid}"));
         }
         let parked = state.parked.take();
@@ -484,20 +506,21 @@ async fn read_header(
     Ok(header)
 }
 
-/// Advances the tails past the entries of a record body at `offset`.
+/// Feeds the logs the entries of a record body at `offset`, as appended and
+/// synced.
 fn recover(
-    body: &[u8],
+    body: Body<'_>,
     offset: u64,
     slots: &mut Slots,
-    tails: &mut Tails,
+    logs: &mut Logs,
 ) -> Result<(), Error> {
     let unread = |_: entry::Invalid| Error::Invalid { offset };
-    let misplaced = |_: tails::Invalid| Error::Invalid { offset };
-    for entry in entry::parse(body).map_err(unread)? {
-        let (header, _) = entry.map_err(unread)?;
-        tails
-            .advance(slots.assign(header.index), &header)
-            .map_err(misplaced)?;
+    let misplaced = |_: log::Invalid| Error::Invalid { offset };
+    for header in entry::parse(body.start, body.len).map_err(unread)? {
+        let header = header.map_err(unread)?;
+        let slot = slots.assign(header.index);
+        logs.append(slot, &header).map_err(misplaced)?;
+        logs.sync(slot, &header, offset).map_err(misplaced)?;
     }
     Ok(())
 }
@@ -643,5 +666,129 @@ impl Future for Commit<'_> {
             waker.wake();
         }
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use block::Heap;
+    use types::channel;
+    use types::time::Stamp;
+
+    use super::*;
+    use crate::log::Run;
+
+    const COMMIT: Span = Span::from_nanos(1_000_000);
+
+    fn entry(index: u32, slot: Slot, path: Path, first: u64, part: &Block) -> Entry {
+        Entry {
+            index: channel::Key::from_u128(u128::from(index)),
+            slot,
+            path,
+            first,
+            len: 3,
+            stored_at: Stamp::from_nanos(7),
+            last: Some(Stamp::from_nanos(9)),
+            tag: 0,
+            parts: part.clone().into(),
+        }
+    }
+
+    /// Runs `main` on a shard of `node` with a buffer on the node's files, then
+    /// gives the logs the buffer ended with.
+    fn with_buffer<F>(
+        sim: &mut sim::Sim,
+        node: &sim::node::Node,
+        name: &str,
+        main: impl FnOnce(Buffer, Slots, Rc<Pool>) -> F + Send + 'static,
+    ) -> Logs
+    where
+        F: Future<Output = Buffer> + 'static,
+    {
+        let logs = Arc::new(Mutex::new(None));
+        let ended = Arc::clone(&logs);
+        let config = env::shards::Config {
+            name: name.into(),
+            core: None,
+        };
+        let shard = node.clone();
+        let handle = node
+            .shards()
+            .start(config, move |tasks| async move {
+                let config = block::Config { budget: 1 << 20 };
+                let pool =
+                    Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+                let config = Config {
+                    files: shard.files(),
+                    dir: PathBuf::from("ring"),
+                    pool: Rc::clone(&pool),
+                    clock: shard.clock(),
+                    tasks,
+                    entropy: shard.entropy(),
+                    layout: Layout::new(64 * 4096, 8000)
+                        .expect("the sizes make a ring"),
+                    commit: COMMIT,
+                };
+                let mut slots = Slots::new();
+                let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+                let buffer = main(buffer, slots, pool).await;
+                let logs = buffer.shared.state.borrow().logs.clone();
+                *ended.lock().expect("no panic held the lock") = Some(logs);
+            })
+            .expect("the shard starts");
+        sim.run().expect("the run ends");
+        handle.join().expect("the shard ended");
+        let mut logs = logs.lock().expect("no panic held the lock");
+        logs.take().expect("the shard gave the logs")
+    }
+
+    /// Three commits, the first with two appends in one record, make one run per
+    /// record and path. An open of the same ring walks the records into the same
+    /// runs.
+    #[test]
+    fn the_walk_makes_the_runs_the_syncs_made() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let written = with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = slots.assign(channel::Key::from_u128(1));
+                let two = slots.assign(channel::Key::from_u128(2));
+                let part = pool.alloc(100).expect("a block").freeze();
+                for commit in 0..3 {
+                    let seq = 6 * commit;
+                    let batch = [
+                        entry(1, one, Path::Live, seq, &part),
+                        entry(2, two, Path::Backfill, 3 * commit, &part),
+                    ];
+                    buffer.append(batch).expect("the ring has room");
+                    if commit == 0 {
+                        let more = [entry(1, one, Path::Live, 3, &part)];
+                        buffer.append(more).expect("the ring has room");
+                    }
+                    buffer.committed().await.expect("commits");
+                }
+                buffer
+            },
+        );
+        let run = |first, offset| Run { first, offset };
+        let live: Vec<Run> = written.runs(Slot::new(0), Path::Live).collect();
+        assert_eq!(live, [run(0, 4096), run(6, 8192), run(12, 12288)]);
+        let backfill: Vec<Run> = written.runs(Slot::new(1), Path::Backfill).collect();
+        assert_eq!(backfill, [run(0, 4096), run(3, 8192), run(6, 12288)]);
+        assert_eq!(written.durable(Slot::new(0), Path::Live).seq, 15);
+        assert_eq!(written.appended(Slot::new(0), Path::Live).seq, 15);
+        let walked =
+            with_buffer(
+                &mut sim,
+                &node,
+                "walk",
+                |buffer, _, _| async move { buffer },
+            );
+        assert_eq!(walked, written);
     }
 }

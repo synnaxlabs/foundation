@@ -70,6 +70,39 @@ impl Sender {
         todo!("#68")
     }
 
+    /// Sends `message` whole when the stream can take it now, and never waits. Gives
+    /// `message` back, with nothing of it sent, when the stream cannot take it now:
+    /// the messages that the session's streams hold and have not passed to the
+    /// carrier leave no room for it within the peer's
+    /// [`Config::window_bytes`](crate::Config::window_bytes), or the stream still
+    /// holds part of an earlier message. Like [`send`](Self::send), it returns once
+    /// the stream holds the message, not when the peer has it. It never resets the
+    /// stream.
+    ///
+    /// # Errors
+    ///
+    /// As [`send`](Self::send): [`Error::TooLarge`], [`Error::Stopped`], or the error
+    /// that ended the session.
+    ///
+    /// # Panics
+    ///
+    /// When called after [`finish`](Self::finish).
+    ///
+    /// ```
+    /// use transport::{Error, stream::Sender};
+    ///
+    /// fn live(sender: &mut Sender, frame: block::Block) -> Result<(), Error> {
+    ///     if let Some(frame) = sender.try_send(frame)? {
+    ///         drop(frame); // `hub` adds it to the pending gap.
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn try_send(&mut self, message: Block) -> Result<Option<Block>, Error> {
+        drop(message);
+        todo!("#68")
+    }
+
     /// Ends the stream after the messages already sent. The peer's
     /// [`Receiver::recv`] returns `None` after the last one. The sender stays, so
     /// [`reset`](Self::reset) can still cancel what the peer does not have yet.
@@ -96,7 +129,7 @@ impl Sender {
     ///
     /// ```
     /// fn cancel(sender: transport::stream::Sender) {
-    ///     sender.reset(transport::Code(1));
+    ///     sender.reset(transport::Code(16));
     /// }
     /// ```
     pub fn reset(self, code: Code) {
@@ -151,7 +184,7 @@ impl Receiver {
     ///
     /// ```
     /// fn hang_up(receiver: transport::stream::Receiver) {
-    ///     receiver.stop(transport::Code(1));
+    ///     receiver.stop(transport::Code(16));
     /// }
     /// ```
     pub fn stop(self, code: Code) {

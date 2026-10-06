@@ -1,6 +1,6 @@
 //! A network of nodes that cuts nodes off and loses, delays, reorders, and repeats
-//! messages, with nodes that restart from a modeled disk. It checks the safety
-//! properties of Raft after every input.
+//! messages, with nodes that restart from a modeled disk, with or without their last
+//! write. It checks the safety properties of Raft after every input.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,6 +22,9 @@ pub(crate) enum Action {
     Campaign { node: usize },
     Propose { node: usize },
     Restart { node: usize },
+    // The node crashes at its next `Ready` with something to write, after it wrote
+    // only `kept` of the two.
+    Crash { node: usize, kept: Kept },
     Deliver { picks: Vec<Index> },
     Repeat { pick: Index },
     Lose { pick: Index },
@@ -29,6 +32,12 @@ pub(crate) enum Action {
     Mend,
     // A proposal to `node` of the flagged nodes as the voters.
     ChangeVoters { node: usize, voters: Vec<bool> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kept {
+    Hard,
+    Entries,
 }
 
 // The actions of a group of `nodes`. With `fixed`, the voters do not change.
@@ -58,6 +67,15 @@ fn action(nodes: usize, fixed: bool) -> impl Strategy<Value = Action> {
             1,
             node.clone()
                 .prop_map(|node| Action::Restart { node })
+                .boxed(),
+        ),
+        (
+            1,
+            (
+                node.clone(),
+                prop_oneof![Just(Kept::Hard), Just(Kept::Entries)],
+            )
+                .prop_map(|(node, kept)| Action::Crash { node, kept })
                 .boxed(),
         ),
         (
@@ -138,6 +156,11 @@ pub(crate) struct Network {
     pub(crate) disks: Vec<Disk>,
     // A message between a node that is cut off and one that is not is lost.
     pub(crate) cut: Vec<bool>,
+    // A node whose disk lost entries it synced. Its `IndexPastLog` errors go to
+    // `refused`; any other error fails the run.
+    wiped: Vec<bool>,
+    pub(crate) refused: Vec<Error>,
+    crash: Vec<Option<Kept>>,
     flight: Vec<Message>,
     leaders: BTreeMap<Term, node::Key>,
     // The last positions each candidate claimed, by candidate, term, and whether
@@ -177,6 +200,9 @@ impl Network {
             nodes: Vec::new(),
             disks,
             cut: vec![false; logs.len()],
+            wiped: vec![false; logs.len()],
+            refused: Vec::new(),
+            crash: vec![None; logs.len()],
             flight: Vec::new(),
             leaders: BTreeMap::new(),
             asked: BTreeMap::new(),
@@ -222,12 +248,27 @@ impl Network {
         Raft::new(config, start).unwrap()
     }
 
-    fn deliver(&mut self, message: Message) {
+    pub(crate) fn deliver(&mut self, message: Message) {
         let (from, to) = (self.at(message.from), self.at(message.to));
         if self.cut[from] == self.cut[to] {
-            self.nodes[to].step(message).unwrap();
+            match self.nodes[to].step(message) {
+                Err(error @ Error::IndexPastLog { .. }) if self.wiped[to] => {
+                    self.refused.push(error);
+                }
+                result => result.unwrap(),
+            }
             self.collect();
         }
+    }
+
+    /// Restarts `node` from a disk that lost each entry after the first `keep`, and
+    /// what it applied of them.
+    pub(crate) fn wipe(&mut self, node: usize, keep: usize) {
+        let disk = &mut self.disks[node];
+        disk.entries.truncate(keep);
+        disk.applied = disk.applied.min(disk.last().index);
+        self.wiped[node] = true;
+        self.nodes[node] = self.build(node);
     }
 
     pub(crate) fn apply(&mut self, action: &Action) {
@@ -238,6 +279,7 @@ impl Network {
                 self.propose(*node);
             }
             Action::Restart { node } => self.nodes[*node] = self.build(*node),
+            Action::Crash { node, kept } => self.crash[*node] = Some(*kept),
             Action::Deliver { picks } => {
                 for pick in picks {
                     if self.flight.is_empty() {
@@ -285,6 +327,7 @@ impl Network {
                 assert_eq!(at.term, term);
                 let disk = &self.disks[node];
                 assert_eq!(at.index, u64::try_from(disk.entries.len()).unwrap() + 1);
+                let lost = self.crash[node] == Some(Kept::Hard);
                 self.collect();
                 let joint = Voters {
                     incoming: voters,
@@ -292,7 +335,8 @@ impl Network {
                 };
                 let index = usize::try_from(at.index - 1).unwrap();
                 let written = self.disks[node].entries.get(index).map(|e| &e.data);
-                assert_eq!(written, Some(&Data::Voters(joint)), "the joint entry");
+                let joint = Data::Voters(joint);
+                assert_eq!(written, (!lost).then_some(&joint), "the joint entry");
             }
             (role, Err(Error::NotLeader { leader })) if role != Role::Leader => {
                 assert_eq!(leader, self.nodes[node].leader());
@@ -342,11 +386,33 @@ impl Network {
     fn collect(&mut self) {
         for at in 0..self.nodes.len() {
             let ready = self.nodes[at].ready();
-            if let Some(hard) = ready.hard {
+            let pending = ready.hard.is_some() || !ready.entries.is_empty();
+            let kept = self.crash[at].take_if(|_| pending);
+            if let Some(hard) = ready.hard
+                && kept != Some(Kept::Entries)
+            {
                 self.disks[at].hard = hard;
             }
-            self.write(at, ready.entries);
+            if kept != Some(Kept::Hard) {
+                self.write(at, ready.entries);
+            }
+            if kept.is_some() {
+                self.nodes[at] = self.build(at);
+                continue;
+            }
+            // A node sends nothing of a term before its hard state of that term is
+            // durable. A prevote is the exception: it takes no term.
+            let stored = self.disks[at].hard.term;
             for message in ready.messages {
+                let durable = match message.body {
+                    Body::PreVote { .. } | Body::PreVoteReply { granted: true } => true,
+                    _ => message.term <= stored,
+                };
+                assert!(
+                    durable,
+                    "node {at} sends {:?} at {:?} above its stored {stored:?}",
+                    message.body, message.term
+                );
                 self.note(at, &message);
                 self.flight.push(message);
             }
@@ -526,6 +592,7 @@ impl Network {
             self.apply(action);
         }
         self.cut.fill(false);
+        self.crash.fill(None);
         // A leader that was cut off can step down once after the network mends,
         // because it counts the nodes it heard from over a full election timeout.
         let mut held = (None, 0);

@@ -2,7 +2,9 @@
 
 mod cid;
 pub(crate) mod connection;
+mod datagram;
 mod settings;
+mod stateless;
 pub(crate) mod stream;
 #[cfg(test)]
 mod testing;
@@ -15,10 +17,12 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use block::{Block, Pool};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use env::net::Ecn;
 use env::net::udp::{Meta, Transmit};
-use noq_proto::{ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple};
+use noq_proto::{
+    ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple, SendDatagramError,
+};
 use types::node::PublicKey;
 use types::time::Monotonic;
 
@@ -59,6 +63,8 @@ pub(crate) struct Endpoint {
     /// stateless reset. At most one for each datagram of a batch, because the caller
     /// takes them all with [`Endpoint::transmit`] after each [`Endpoint::receive`].
     responses: VecDeque<(noq_proto::Transmit, Vec<u8>)>,
+    /// The limit on stateless resets to each address.
+    resets: stateless::Limit,
     /// The buffer that each received batch is copied into and split from. noq-proto
     /// decrypts in place and keeps parts of it.
     received: BytesMut,
@@ -83,6 +89,9 @@ pub(crate) enum Event {
     /// `stream` may take more, or the peer stopped it. It can repeat, and it can
     /// name a stream the caller no longer holds or has not accepted yet.
     Writable { stream: stream::Key },
+    /// [`Endpoint::datagrams`] has a datagram of `key` to take. It comes when one
+    /// arrives and none waited, so take them all after it.
+    Datagram { key: connection::Key },
 }
 
 impl Endpoint {
@@ -92,9 +101,16 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `config.idle` is not positive, or `config.window_bytes` is below
-    /// `config.message_bytes_max`. `Transport::new` refuses both first.
+    /// When `config.idle` is not positive, `config.window_bytes` is below
+    /// `config.message_bytes_max`, or `config.message_bytes_max` is below 1472.
+    /// `Transport::new` refuses each first.
     pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
+        assert!(
+            config.message_bytes_max.get() >= usize::from(settings::PAYLOAD_IPV4),
+            "a largest message of {} bytes is below the largest UDP payload, {} bytes",
+            config.message_bytes_max,
+            settings::PAYLOAD_IPV4
+        );
         assert!(
             config.window_bytes >= config.message_bytes_max.get(),
             "a window of {} bytes is below the largest message, {} bytes",
@@ -115,6 +131,7 @@ impl Endpoint {
             ready: VecDeque::new(),
             events: VecDeque::new(),
             responses: VecDeque::new(),
+            resets: stateless::Limit::new(&config.entropy),
             received: BytesMut::new(),
         }
     }
@@ -172,7 +189,7 @@ impl Endpoint {
 
     /// The next datagrams to send, all to one destination, written into `buffer`.
     /// `None` when nothing is due. Call it until `None` after each other call but
-    /// [`Endpoint::deadline`] and [`Endpoint::poll`].
+    /// [`Endpoint::deadline`] and [`Endpoint::poll`], and after [`Datagrams::send`].
     pub(crate) fn transmit<'a>(
         &mut self,
         now: Monotonic,
@@ -296,14 +313,40 @@ impl Endpoint {
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
-        assert!(
-            message.len() <= self.message_bytes_max,
-            "a message of {} bytes is over the largest message, {} bytes",
-            message.len(),
-            self.message_bytes_max
-        );
+        self.check_size(&message);
         sender.load(message);
         self.flush(now, sender)
+    }
+
+    /// Puts `message` on the stream after the messages before it when the stream
+    /// can take it now. Else gives it back with nothing of it sent: when `sender`
+    /// still holds part of an earlier message after a flush, when the send budget
+    /// has no room for it, or when the connection ended. The stream does not wait
+    /// for room for a message it gives back. Once taken, `sender` may hold the rest
+    /// of it: call [`Endpoint::flush`] after [`Event::Writable`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Stopped`] when the peer stopped the stream.
+    ///
+    /// # Panics
+    ///
+    /// After [`Endpoint::finish`], or when `message` is over the largest message
+    /// (this side's own until the hello).
+    pub(crate) fn try_write(
+        &mut self,
+        now: Monotonic,
+        sender: &mut Sender,
+        message: Block,
+    ) -> Result<Option<Block>, Error> {
+        self.check_size(&message);
+        sender.check_unfinished();
+        let key = sender.key().connection;
+        let mut message = Some(message);
+        self.streams(now, key, (), |streams, inner, _, events| {
+            streams.try_write(inner, sender, &mut message, events)
+        })?;
+        Ok(message)
     }
 
     /// Writes the rest of the message that `sender` holds. `Ready` when it holds
@@ -373,9 +416,62 @@ impl Endpoint {
         })
     }
 
+    /// Resets `sender`'s stream with `code`. The peer's next read gives
+    /// [`Error::Reset`], and the messages it has not read drop, unless it acknowledged
+    /// all of the stream. The send budget of the message in hand comes back now, and
+    /// the stream's blocks go back to the pool at the latest when the peer
+    /// acknowledges the reset. A stream this side opened that resets before its first
+    /// message never reaches the peer, and the [`Receiver`] of a two-way one gets
+    /// [`Error::Reset`] with code 0. Does nothing when the connection ended.
+    pub(crate) fn reset(&mut self, now: Monotonic, sender: Sender, code: Code) {
+        let key = sender.key().connection;
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        let Connection { inner, streams, .. } = connection;
+        streams.reset(inner, sender, code, &mut self.events);
+        self.drive(key.handle, self.instant(now));
+    }
+
+    /// Stops `receiver`'s stream with `code`. The messages not read yet drop, and the
+    /// peer's next write gives [`Error::Stopped`]. The message in the reader drops, and
+    /// its receive budget comes back. Sends nothing after a read of the end. Does
+    /// nothing when the connection ended.
+    pub(crate) fn stop(&mut self, now: Monotonic, receiver: Receiver, code: Code) {
+        let key = receiver.key().connection;
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        let Connection { inner, streams, .. } = connection;
+        streams.stop(inner, receiver, code, &mut self.events);
+        self.drive(key.handle, self.instant(now));
+    }
+
+    /// The datagrams of `key`'s connection. `None` until it connects, and after it
+    /// ends.
+    pub(crate) fn datagrams(&mut self, key: connection::Key) -> Option<Datagrams<'_>> {
+        let connection = find(&mut self.connections, key).filter(|c| c.connected())?;
+        let ready = &mut self.ready;
+        Some(Datagrams { connection, ready })
+    }
+
     /// The next event, in the order they happened.
     pub(crate) fn poll(&mut self) -> Option<Event> {
         self.events.pop_front()
+    }
+
+    /// # Panics
+    ///
+    /// When `message` is over the largest message.
+    fn check_size(&self, message: &Block) {
+        assert!(
+            message.len() <= self.message_bytes_max,
+            "a message of {} bytes is over the largest message, {} bytes",
+            message.len(),
+            self.message_bytes_max
+        );
     }
 
     fn instant(&self, now: Monotonic) -> Instant {
@@ -464,6 +560,8 @@ impl Endpoint {
         if dropped(&datagram) {
             return;
         }
+        // noq-proto answers a short header only with a stateless reset.
+        let short = datagram.first().is_some_and(|form| form & 0x80 == 0);
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -488,7 +586,11 @@ impl Endpoint {
                     Err(error) => error.response,
                 }
             }
-            Some(DatagramEvent::Response(response)) => Some(response),
+            Some(DatagramEvent::Response(response)) => {
+                let admitted =
+                    !short || self.resets.admit(now, response.destination.ip());
+                admitted.then_some(response)
+            }
         };
         if let Some(response) = response {
             self.responses.push_back((response, reply));
@@ -496,16 +598,65 @@ impl Endpoint {
     }
 
     /// Drives `handle`'s connection at `now`. Frees it once it drained, and else
-    /// queues it for [`Endpoint::transmit`]: each call that can give it a datagram to
-    /// send ends here.
+    /// queues it for [`Endpoint::transmit`]. Each call that can give it a datagram to
+    /// send ends here, but [`Datagrams::send`], which queues it itself.
     fn drive(&mut self, handle: ConnectionHandle, now: Instant) {
         let entry = &mut self.connections[handle.0];
         let connection = entry.as_mut().expect("invariant: a live handle");
-        if connection.drive(now, &mut self.inner, &mut self.events) {
+        if connection.drive(now, &mut self.inner, &self.pool, &mut self.events) {
             *entry = None;
         } else {
             queue(&mut self.ready, connection);
         }
+    }
+}
+
+/// The datagrams of one connected connection: whole messages, each in one QUIC
+/// DATAGRAM frame, that may be lost.
+pub(crate) struct Datagrams<'a> {
+    connection: &'a mut Connection,
+    /// The endpoint's queue for [`Endpoint::transmit`].
+    ready: &'a mut VecDeque<connection::Key>,
+}
+
+impl Datagrams<'_> {
+    /// Queues `message` as one datagram. It never waits: when the queue is full, the
+    /// oldest unsent datagram drops.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TooLarge`] when `message` is over [`Datagrams::bytes_max`], or the
+    /// peer takes no datagrams.
+    pub(crate) fn send(&mut self, message: Block) -> Result<(), Error> {
+        let bytes = message.len();
+        let mut datagrams = self.connection.inner.datagrams();
+        match datagrams.send(Bytes::from_owner(Body(message)), true) {
+            Ok(()) => {}
+            Err(SendDatagramError::TooLarge | SendDatagramError::UnsupportedByPeer) => {
+                let bytes_max = datagrams.max_size().unwrap_or(0);
+                return Err(Error::TooLarge { bytes, bytes_max });
+            }
+            Err(
+                error @ (SendDatagramError::Disabled | SendDatagramError::Blocked(_)),
+            ) => {
+                panic!(
+                    "invariant: datagrams are on, and a send that drops never blocks: {error}"
+                )
+            }
+        }
+        queue(self.ready, self.connection);
+        Ok(())
+    }
+
+    /// The oldest datagram that arrived and was not taken.
+    pub(crate) fn receive(&mut self) -> Option<Block> {
+        self.connection.datagrams.pop()
+    }
+
+    /// The largest datagram [`Datagrams::send`] takes now. It changes with the path,
+    /// and is 0 when the peer takes no datagrams.
+    pub(crate) fn bytes_max(&mut self) -> usize {
+        self.connection.inner.datagrams().max_size().unwrap_or(0)
     }
 }
 
@@ -542,6 +693,15 @@ fn find(
 ) -> Option<&mut Connection> {
     let connection = connections.get_mut(key.handle.0)?.as_mut()?;
     (connection.key == key).then_some(connection)
+}
+
+/// A message that noq-proto holds until it needs the bytes no more.
+struct Body(Block);
+
+impl AsRef<[u8]> for Body {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 fn outgoing<'a>(transmit: &noq_proto::Transmit, buffer: &'a [u8]) -> Transmit<'a> {

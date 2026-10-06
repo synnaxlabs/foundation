@@ -4,8 +4,7 @@ use std::ops::Range;
 use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
-use crate::parse::Ends;
-use crate::write::{INDENT, Writer};
+use crate::write::{After, INDENT, Writer};
 use crate::{Error, read, write};
 
 /// Changes `text` so that [`read`] reads it as `document`, and returns the new text.
@@ -162,10 +161,11 @@ impl<'a> File<'a> {
         start..end
     }
 
-    /// The end of the line at `start` when that line is blank.
-    fn blank_below(&self, start: usize) -> Option<usize> {
-        let mark = self.mark(self.token(start));
-        (mark.newline && self.blank(start, mark.start)).then_some(mark.end)
+    /// The end of the line at `at` when only spaces are between `at` and the line
+    /// end. `None` at the end of a text with no line end.
+    fn blank_below(&self, at: usize) -> Option<usize> {
+        let mark = self.mark(self.token(at));
+        (mark.newline && self.blank(at, mark.start)).then_some(mark.end)
     }
 
     /// The start of the line that ends at `end` when that line is blank.
@@ -393,17 +393,14 @@ impl Diff<'_, '_> {
     fn value(&mut self, old: &Attribute, new: &Attribute) {
         let file = self.file;
         let (start, end) = offsets(old.value.span);
-        let next = file.mark(file.token(end));
-        // A heredoc ends its line, so a value with a comment after it is quoted, as
-        // in a list.
-        let ends = if file.blank(end, next.start) {
-            Ends::Line
+        let after = if file.blank_below(end).is_some() {
+            After::Line
         } else {
-            Ends::Comma
+            After::Other
         };
         let mut writer =
             Writer::new(file.margin(old.key_span), column(old.value.span), file.crlf);
-        writer.value(&new.value, 0, ends);
+        writer.value(&new.value, 0, after);
         self.edits.push(Edit {
             range: start..end,
             text: written(writer),
@@ -613,6 +610,7 @@ mod tests {
         let mut out = String::new();
         let mut at = 0;
         let mut heredoc = false;
+        let mut ends_at_closer = false;
         loop {
             let token = tokens.next();
             let (start, end) = (offset(token.span.start()), offset(token.span.end()));
@@ -629,12 +627,15 @@ mod tests {
             }
             out.push('\n');
             let lines = ["", "", "\n", "# c\n", "  // c\n", "/* c\nc */\n"];
-            out.push_str(lines.get(usize::from(picks.pick(6))).unwrap());
+            let line = lines.get(usize::from(picks.pick(6))).unwrap();
+            out.push_str(line);
+            ends_at_closer = heredoc && line.is_empty();
             at = end;
             heredoc = false;
         }
         out.push_str(text.get(at..).unwrap());
-        if picks.pick(4) == 0 && out.ends_with('\n') {
+        // A heredoc needs the line end after its closer.
+        if !ends_at_closer && picks.pick(4) == 0 && out.ends_with('\n') {
             out.pop();
         }
         if picks.pick(4) == 0 {
@@ -944,6 +945,21 @@ mod tests {
     }
 
     #[test]
+    fn quotes_a_value_at_the_end_of_a_text_with_no_line_end() {
+        assert_eq!(updated("a = 1", "a = \"x\\n\""), "a = \"x\\n\"");
+        assert_eq!(updated("a = 1  ", "a = \"x\\n\""), "a = \"x\\n\"  ");
+        assert_eq!(updated("a = 1\n", "a = \"x\\n\""), "a = <<EOT\nx\nEOT\n");
+    }
+
+    #[test]
+    fn keeps_a_value_that_fits_on_one_line_before_a_comment_or_the_end() {
+        let line = format!("a = [\"{}\"]", "x".repeat(80));
+        assert_eq!(line.chars().count(), 88);
+        assert_eq!(updated("a = 1", &line), line);
+        assert_eq!(updated("a = 1 # c\n", &line), format!("{line} # c\n"));
+    }
+
+    #[test]
     fn keeps_the_line_ends_and_the_byte_order_mark() {
         assert_eq!(
             updated(
@@ -954,14 +970,13 @@ mod tests {
         );
         assert_eq!(updated("a = 1", "a = 1\nb = 2"), "a = 1\nb = 2\n");
         assert_eq!(
-            updated("a = <<EOT\r\nx\r\nEOT", "a = \"x\\n\"\nb = 2"),
+            updated("a = <<EOT\r\nx\r\nEOT\r\n", "a = \"x\\n\"\nb = 2"),
             "a = <<EOT\r\nx\r\nEOT\r\nb = 2\r\n"
         );
         assert_eq!(
             updated("/* c\r\n*/ a = 1", "a = 1\nb = 2"),
             "/* c\r\n*/ a = 1\r\nb = 2\r\n"
         );
-        assert_eq!(updated("a = 1", "a = \"x\\n\""), "a = <<EOT\nx\nEOT");
         assert_eq!(
             updated("\u{feff}b = 1\n", "a = 0\nb = 1"),
             "\u{feff}a = 0\nb = 1\n"

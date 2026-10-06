@@ -2,7 +2,7 @@
 //! clocks, and device oscillator fits.
 //!
 //! Each time source gives [`Measurement`]s. A [`Filter`] keeps the recent ones of one
-//! source, and [`combine::combine`] intersects the best of each source into one
+//! source, and [`combine::combine`] combines the best of each source into one
 //! estimate. An [`overlap::Overlap`] keeps what every reading of one device clock
 //! allows. An [`exchange::Exchange`] turns one round trip to another clock into a
 //! measurement. A [`Slew`] moves mesh time toward an estimate without going back. The

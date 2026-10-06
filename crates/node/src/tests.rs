@@ -89,7 +89,7 @@ fn a_panic_in_one_shard_stops_the_others() {
         let e = run.node.join().unwrap_err();
         assert_eq!(
             e,
-            Error::Thread(thread::Error::Panicked {
+            Error::Panicked(thread::Panicked {
                 name: "shard-1".into()
             })
         );
@@ -105,7 +105,7 @@ fn a_shard_that_cannot_start_stops_the_started_shards() {
     let e = run.node.join().unwrap_err();
     assert_eq!(
         e,
-        Error::Thread(thread::Error::Start {
+        Error::Start(thread::Error::Start {
             name: "shard-2".into(),
             reason: "injected".into()
         })
@@ -121,7 +121,7 @@ fn a_shard_that_cannot_pin_stops_the_node() {
     let e = run.node.join().unwrap_err();
     assert_eq!(
         e,
-        Error::Thread(thread::Error::Pin {
+        Error::Start(thread::Error::Pin {
             name: "shard-0".into(),
             core: 0
         })
@@ -157,7 +157,7 @@ fn join_gives_the_first_shard_by_core_that_panicked() {
         assert_eq!(threads, ["shard-0", "shard-2"], "seed {seed}");
         assert_eq!(
             run.node.join(),
-            Err(Error::Thread(thread::Error::Panicked {
+            Err(Error::Panicked(thread::Panicked {
                 name: "shard-0".into()
             })),
             "seed {seed}"
@@ -173,7 +173,7 @@ fn join_gives_a_shard_that_could_not_start_over_one_that_panicked() {
         assert_eq!(panics(&mut run), ["shard-0"], "seed {seed}");
         assert_eq!(
             run.node.join(),
-            Err(Error::Thread(thread::Error::Start {
+            Err(Error::Start(thread::Error::Start {
                 name: "shard-1".into(),
                 reason: "injected".into()
             })),
