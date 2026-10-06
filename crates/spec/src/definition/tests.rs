@@ -83,16 +83,12 @@ fn refuses_a_newer_or_unknown_version() {
 
 #[test]
 fn refuses_an_unknown_kind() {
-    let bytes = [VERSION, 0];
-    assert_eq!(
-        Definition::decode(&bytes),
-        Err(Error::Kind { at: 1, tag: 0 })
-    );
-    let bytes = [VERSION, 5];
-    assert_eq!(
-        Definition::decode(&bytes),
-        Err(Error::Kind { at: 1, tag: 5 })
-    );
+    for tag in (0..=u8::MAX).filter(|t| ![ACCESS, NODE_SETTINGS].contains(t)) {
+        assert_eq!(
+            Definition::decode(&[VERSION, tag]),
+            Err(Error::Kind { at: 1, tag })
+        );
+    }
 }
 
 #[test]
@@ -271,8 +267,30 @@ fn writes_and_reads_no_budget_as_zero() {
     let disk = settings(Some(7), None);
     assert_eq!(disk.encode(), settings_bytes(7, 0));
     assert_eq!(Definition::decode(&settings_bytes(7, 0)), Ok(disk));
-    let none = settings(None, None);
-    assert_eq!(Definition::decode(&settings_bytes(0, 0)), Ok(none));
+    let extremes = settings(Some(1), Some(u64::MAX));
+    assert_eq!(extremes.encode(), settings_bytes(1, u64::MAX));
+    assert_eq!(
+        Definition::decode(&settings_bytes(1, u64::MAX)),
+        Ok(extremes)
+    );
+}
+
+#[test]
+fn refuses_node_settings_with_no_budget() {
+    let bytes = settings_bytes(0, 0);
+    let error = Definition::decode(&bytes).unwrap_err();
+    let at = bytes.len() - 16;
+    assert_eq!(
+        error,
+        Error::Budget {
+            at,
+            error: node_settings::Error::NoBudget
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("the budgets at byte {at}: the policy sets no budget")
+    );
 }
 
 #[test]
@@ -306,12 +324,15 @@ fn selectors() -> impl Strategy<Value = Selector> {
 }
 
 fn settings_strategy() -> impl Strategy<Value = Definition> {
-    let budget = prop::option::of(1..=u64::MAX);
-    (selectors(), budget.clone(), budget).prop_map(|(select, disk, pool)| {
-        let size = |b: Option<u64>| b.map(byte::Size::from_bytes);
-        let policy = node_settings::Policy::new(select, size(disk), size(pool));
-        Definition::NodeSettings(policy.unwrap())
-    })
+    let budget = prop::option::of(prop_oneof![Just(0), Just(1), any::<u64>()]);
+    (selectors(), budget.clone(), budget).prop_filter_map(
+        "a policy refuses a zero budget or none",
+        |(select, disk, pool)| {
+            let size = |b: Option<u64>| b.map(byte::Size::from_bytes);
+            let policy = node_settings::Policy::new(select, size(disk), size(pool));
+            policy.ok().map(Definition::NodeSettings)
+        },
+    )
 }
 
 fn access_strategy() -> impl Strategy<Value = Definition> {

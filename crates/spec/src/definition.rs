@@ -21,6 +21,7 @@
 //! admin 5. `authority` is zero when `allow` does not hold write.
 //!
 //! A node settings budget of 0 bytes is no budget, because a policy cannot hold zero.
+//! A policy sets at least one budget.
 
 #![deny(
     clippy::indexing_slicing,
@@ -207,20 +208,17 @@ impl<'a> Reader<'a> {
             .map_err(|error| Error::Pattern { at, error })
     }
 
-    #[expect(
-        clippy::unwrap_in_result,
-        reason = "a budget read as 0 is `None`, so no budget is zero"
-    )]
     fn node_settings(&mut self) -> Result<node_settings::Policy, Error> {
         let select = self.patterns()?;
+        let at = self.at();
         let mut budget = || {
             self.u64()
                 .map(|bytes| (bytes != 0).then_some(byte::Size::from_bytes(bytes)))
         };
         let disk = budget()?;
         let pool = budget()?;
-        Ok(node_settings::Policy::new(select, disk, pool)
-            .expect("invariant: no budget is zero"))
+        node_settings::Policy::new(select, disk, pool)
+            .map_err(|error| Error::Budget { at, error })
     }
 
     fn access(&mut self) -> Result<Policy, Error> {
@@ -313,6 +311,13 @@ pub enum Error {
         /// The authority.
         found: Authority,
     },
+    /// The budgets of a node settings policy make no policy.
+    Budget {
+        /// Where the budgets start.
+        at: usize,
+        /// Why they make no policy.
+        error: node_settings::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -354,6 +359,9 @@ impl fmt::Display for Error {
                 f,
                 "authority {found} at byte {at} is on a policy without write"
             ),
+            Self::Budget { at, error } => {
+                write!(f, "the budgets at byte {at}: {error}")
+            }
         }
     }
 }

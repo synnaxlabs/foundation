@@ -1568,10 +1568,12 @@ How to read this record:
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
-  default. The data directory is node-local: a start argument of `foundation`, with a
-  default, because the spec is stored in it. Node-local config for the budgets lost:
-  `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
-  decided on 2026-10-05 ("Yeah mesh node"), #342.
+  default. A policy sets at least one budget, because one with none changes nothing
+  but can still tie on specificity (#869). The data directory is node-local: a start
+  argument of `foundation`, with a default, because the spec is stored in it.
+  Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
+  change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
+  #342.
 
 ### 1.12 Access, identity, and secrets
 
@@ -2468,7 +2470,9 @@ Conflict: BQ2 makes `spec::resolve` "the ONE policy resolver" with most-specific
 and S12 lists access as one of those policies. C8 makes access allow-only with no
 conflicts (a union of allows).
 Resolution: `spec::resolve` applies most-specific-wins to setting policies (retention,
-placement, transmission, compression, reduction, time, secret store). Access is
+placement, transmission, compression, reduction, time, secret store, node settings).
+For node settings, each budget resolves on its own: a policy that leaves a budget unset
+gives that budget to a less specific policy. Access is
 evaluated only in `access`, as the union of matching allows; the authority cap is the
 highest authority among matching allows that grant `write`. Both use the one selector
 matcher in `types`. Basis: C8, SRP PASS (`access` split).
@@ -2481,10 +2485,10 @@ makes placement select connectors. r3 K2 forbids a policy from selecting outside
 region; r4 lets a root policy apply inside child regions.
 Resolution: each policy kind states its target: retention, transmission, and
 compression select indexes; placement selects connectors and indexes; reduction selects
-data channels; time selects nodes; access selects names (plus subjects anywhere);
-secret store selects secret names. A policy may select only names in its own region
-and that region's descendants; a descendant applies it as of the last parent version
-it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
+data channels; time and node settings select nodes; access selects names (plus
+subjects anywhere); secret store selects secret names. A policy may select only names
+in its own region and that region's descendants; a descendant applies it as of the
+last parent version it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
 
 **X27. Built-in channels have no spec definitions.**
 Conflict: S8 puts node status under the node's name, and S9 adds the changes channel.
