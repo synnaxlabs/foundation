@@ -123,7 +123,7 @@ pub(super) fn run<T: Send + 'static>(
         ..sim::Config::default()
     });
     let node = sim.node(sim::node::Config::default());
-    let result = sim.run_on(&node, |node, tasks| async move {
+    sim.run_on(&node, |node, tasks| async move {
         let config = block::Config { budget: 1 << 22 };
         let memory = Heap::new(config.reservation());
         let shard = Shard {
@@ -133,8 +133,8 @@ pub(super) fn run<T: Send + 'static>(
             pool: Rc::new(Pool::new(config, memory)),
         };
         test(&shard)
-    });
-    result.expect("the test passes")
+    })
+    .expect("the test passes")
 }
 
 /// An endpoint on [`CLIENT_SHARD`] and one on [`SERVER_SHARD`], over a link that
