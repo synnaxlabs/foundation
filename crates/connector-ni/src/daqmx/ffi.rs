@@ -7,6 +7,10 @@ use super::Error;
 /// A task handle of the driver.
 pub(super) type Handle = *mut c_void;
 
+/// `DAQmxCreateDIChan` or `DAQmxCreateDOChan`.
+pub(super) type Lines =
+    unsafe extern "system" fn(Handle, *const c_char, *const c_char, i32) -> i32;
+
 /// One pointer to each driver function this crate calls.
 #[derive(Debug)]
 pub(super) struct Functions {
@@ -57,6 +61,29 @@ pub(super) struct Functions {
         *mut i32,
         *mut u32,
     ) -> i32,
+    pub(super) digital_in: Lines,
+    pub(super) digital_out: Lines,
+    pub(super) read_digital: unsafe extern "system" fn(
+        Handle,
+        i32,
+        f64,
+        u32,
+        *mut u8,
+        u32,
+        *mut i32,
+        *mut i32,
+        *mut u32,
+    ) -> i32,
+    pub(super) write_digital: unsafe extern "system" fn(
+        Handle,
+        i32,
+        u32,
+        f64,
+        u32,
+        *const u8,
+        *mut i32,
+        *mut u32,
+    ) -> i32,
     pub(super) error: unsafe extern "system" fn(*mut c_char, u32) -> i32,
 }
 
@@ -70,6 +97,8 @@ pub(super) const RISING: i32 = 10_280;
 pub(super) const CONTINUOUS: i32 = 10_123;
 /// `DAQmx_Val_GroupByScanNumber`.
 pub(super) const BY_SCAN: u32 = 1;
+/// `DAQmx_Val_ChanPerLine`.
+pub(super) const PER_LINE: i32 = 0;
 
 impl Functions {
     /// Finds each function in `library`.
@@ -96,6 +125,10 @@ impl Functions {
             clock: find!("DAQmxCfgSampClkTiming"),
             read_analog: find!("DAQmxReadAnalogF64"),
             write_analog: find!("DAQmxWriteAnalogF64"),
+            digital_in: find!("DAQmxCreateDIChan"),
+            digital_out: find!("DAQmxCreateDOChan"),
+            read_digital: find!("DAQmxReadDigitalLines"),
+            write_digital: find!("DAQmxWriteDigitalLines"),
             error: find!("DAQmxGetExtendedErrorInfo"),
         })
     }
