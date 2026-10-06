@@ -1654,7 +1654,10 @@ How to read this record:
   future drops in its own `catch_unwind`, so a second panic never aborts the process.
   The error gives every panic, the first one first: a drop that panics is a defect of
   its own, even when an earlier panic caused the drop. `Sim::crash` panics with the
-  same messages after the crash ends. Built by `simulation` in #548.
+  same messages after the crash ends. At a crash, the start of each thread that has
+  not run drops the same way, after the futures. A thread that a drop starts on the
+  crashing node ends in the crash and never runs. Built by `simulation` in #548 and
+  #666.
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
