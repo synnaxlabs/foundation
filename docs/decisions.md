@@ -1764,6 +1764,15 @@ How to read this record:
   long as our systems are designed to cross compile i'm ok wiht only testing against
   linux for an alpha. as long as the system is designed for cross os deployment"
   (#574).
+- **CI PACE (2026-10-06)** The ARM pool must not hold up the agents. The ARM workflow
+  runs no loom step: loom is a software model, so the x86 `loom` job gives the same
+  result. A PR run is cancelled by a newer push; a run on main is not, so each commit
+  on main gets its ARM result. Each runner keeps its build in `$HOME/target/<runner>`,
+  outside the workspace, and deletes it past 25 GiB. Dependencies build at opt-level 2
+  in the dev profile; workspace crates stay at opt-level 0 with their checks. A PR
+  tests only the changed crates and their reverse dependencies (`cargo xtask
+  affected`); main tests the whole workspace. Decided by the advisor (#782). The person
+  said: "We need to make the agentic engineering the bottleneck, not CI".
 
 ### 1.15 Releases
 
