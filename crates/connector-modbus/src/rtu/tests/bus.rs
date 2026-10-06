@@ -768,7 +768,7 @@ fn drops_a_cut_frame_once_the_line_is_quiet() {
 
 #[test]
 fn fails_on_a_port_that_failed() {
-    let mut bus = Bus::new(14, settings(9_600, None), line::Config::default());
+    let mut bus = Bus::new(15, settings(9_600, None), line::Config::default());
     bus.serve(UNIT, &device());
     bus.client.fail_serial(Path::new(CLIENT));
     let got = bus.client(|mut client, _| async move {
@@ -786,4 +786,29 @@ fn fails_on_a_port_that_failed() {
         error.to_string(),
         "serial port /dev/ttyUSB0 failed with OS error 5"
     );
+}
+
+#[test]
+fn fails_when_the_port_fails_while_it_waits_for_the_reply() {
+    let mut bus = Bus::new(16, settings(9_600, None), line::Config::default());
+    let node = bus.client.clone();
+    let got = bus.client(move |mut client, clock| async move {
+        let request = read(Table::Coils, 0, 1);
+        let mut exchange = pin!(client.exchange(UNIT, &request));
+        let mut sleep = clock.sleep(ms(100));
+        let mut failed = false;
+        poll_fn(|cx| {
+            if !failed && std::pin::Pin::new(&mut sleep).poll(cx).is_ready() {
+                node.fail_serial(Path::new(CLIENT));
+                failed = true;
+            }
+            exchange.as_mut().poll(cx).map(said)
+        })
+        .await
+    });
+    let error = serial::Error::Io {
+        path: CLIENT.into(),
+        code: 5,
+    };
+    assert_eq!(got, Err(Failure::Serial(error)));
 }
