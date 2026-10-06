@@ -64,6 +64,13 @@ impl Measurement {
         self.error
     }
 
+    /// Whether the error is known: under 36500 days. A measurement from
+    /// [`Measurement::unknown`] is not known.
+    #[must_use]
+    pub const fn known(self) -> bool {
+        self.error.nanos() < MAX_ERROR.nanos()
+    }
+
     /// The error bound at `now`, earlier or later than `at`: `error` plus what `drift`
     /// can add between them, up to 36500 days.
     #[must_use]
@@ -77,12 +84,24 @@ impl Measurement {
     /// when mesh time is past that range, both edges are its end.
     #[must_use]
     pub fn interval(self) -> Interval {
-        let time = i128::from(self.at.0) + i128::from(self.offset.nanos());
+        let time = self.sum();
         let error = i128::from(self.error.nanos());
         Interval {
             earliest: Stamp::from_nanos(clamped(time - error)),
             latest: Stamp::from_nanos(clamped(time + error)),
         }
+    }
+
+    /// Mesh time at [`Measurement::at`]: `at` plus the offset, the best guess. A time
+    /// past the range of a stamp stops at the nearest stamp. Unlike the midpoint of
+    /// [`Measurement::interval`], it does not move when only one edge stops there.
+    #[must_use]
+    pub fn time(self) -> Stamp {
+        Stamp::from_nanos(clamped(self.sum()))
+    }
+
+    fn sum(self) -> i128 {
+        i128::from(self.at.0) + i128::from(self.offset.nanos())
     }
 
     /// The lowest and highest true offset at `now`, in nanoseconds. Unlike
@@ -192,6 +211,48 @@ mod tests {
             let wider = Span::from_nanos(m.error().nanos() + 1);
             assert_eq!(Measurement::new(m.at(), m.offset(), m.error()), Some(m));
             assert_eq!(Measurement::new(m.at(), m.offset(), wider), None);
+        }
+    }
+
+    mod known {
+        use super::*;
+
+        #[test]
+        fn is_under_36500_days() {
+            let under = Span::from_nanos(MAX_ERROR.nanos() - 1);
+            assert!(at(0, Span::ZERO).known());
+            assert!(at(0, under).known());
+            assert!(!at(0, MAX_ERROR).known());
+            assert!(!Measurement::unknown(Monotonic(0), Span::SECOND).known());
+        }
+    }
+
+    mod time {
+        use types::time::Stamp;
+
+        use super::*;
+
+        fn time(at: u64, offset: i64, error: Span) -> Stamp {
+            let m = Measurement::new(Monotonic(at), Span::from_nanos(offset), error);
+            m.expect("valid").time()
+        }
+
+        #[test]
+        fn is_at_plus_the_offset() {
+            assert_eq!(time(1_000, -300, Span::ZERO), Stamp::from_nanos(700));
+            assert_eq!(time(0, i64::MIN, MAX_ERROR), Stamp::from_nanos(i64::MIN));
+        }
+
+        #[test]
+        fn does_not_move_when_the_late_edge_stops() {
+            let guess = i64::MAX - Span::DAY.nanos();
+            assert_eq!(time(0, guess, MAX_ERROR), Stamp::from_nanos(guess));
+        }
+
+        #[test]
+        fn stops_at_the_latest_stamp() {
+            let latest = Stamp::from_nanos(i64::MAX);
+            assert_eq!(time(u64::MAX, i64::MAX, Span::ZERO), latest);
         }
     }
 
@@ -376,6 +437,21 @@ mod tests {
                 for m in measurements {
                     let error = m.error_at(Monotonic(now), drift);
                     prop_assert!(m.error() <= error && error <= MAX_ERROR);
+                }
+            }
+
+            #[test]
+            fn time_is_at_plus_the_offset_inside_the_interval(
+                measurements in any_measurements(i64::MAX, MAX_ERROR.nanos()),
+            ) {
+                for m in measurements {
+                    let Interval { earliest, latest } = m.interval();
+                    let time = m.time();
+                    prop_assert!(earliest <= time && time <= latest);
+                    let sum = i128::from(m.at().0) + i128::from(m.offset().nanos());
+                    if let Ok(sum) = i64::try_from(sum) {
+                        prop_assert_eq!(time.nanos(), sum);
+                    }
                 }
             }
 
