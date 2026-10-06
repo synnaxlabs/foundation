@@ -1701,11 +1701,9 @@ mod tests {
             assert_eq!(data.len(), 1, "one data entry");
             let decoded: Vec<(channel::Key, Vec<u8>)> = stored::read(&data[0].1)
                 .map(|series| {
-                    let Type::Scalar(scalar) = series.data_type else {
-                        panic!("a scalar series");
-                    };
                     let mut out = vec![0; 16];
-                    codec::decode(scalar, 2, series.bytes, &mut out).expect("decodes");
+                    codec::decode(series.data_type, 2, series.bytes, &mut out)
+                        .expect("decodes");
                     (series.channel, out)
                 })
                 .collect();
