@@ -72,11 +72,12 @@ fn stamp(seconds: impl Into<i64>, fraction: impl Into<i64>, nano: bool) -> Stamp
 }
 
 /// The error bound of a reading with clock state `state` and a `maxerror` in
-/// microseconds: `None` when the clock is not in sync or the bound is negative.
+/// microseconds: `None` when the clock is not in sync, or the bound is negative or
+/// past the end of a `Span`. Root can set any `maxerror`.
 fn bound(state: c_int, maxerror: impl Into<i64>) -> Option<Span> {
     let maxerror = maxerror.into();
-    (state != libc::TIME_ERROR && maxerror >= 0)
-        .then(|| Span::from_nanos(maxerror * 1_000))
+    let nanos = maxerror.checked_mul(1_000)?;
+    (state != libc::TIME_ERROR && maxerror >= 0).then(|| Span::from_nanos(nanos))
 }
 
 #[cfg(test)]
@@ -100,6 +101,12 @@ mod tests {
     }
 
     #[test]
+    fn a_bound_past_the_end_of_a_span_is_none() {
+        assert_eq!(bound(libc::TIME_OK, i64::MAX / 1_000 + 1), None);
+        assert_eq!(bound(libc::TIME_OK, i64::MAX), None);
+    }
+
+    #[test]
     #[should_panic(expected = "the OS wall clock is before the year 2262")]
     fn a_stamp_past_the_end_panics() {
         let _ = stamp(i64::MAX, 0i64, true);
@@ -116,11 +123,12 @@ mod tests {
         }
 
         #[test]
-        fn a_negative_bound_or_an_error_state_gives_none(
+        fn a_bound_out_of_range_or_an_error_state_gives_none(
             state in 0..=libc::TIME_ERROR,
-            maxerror in i64::MIN / 1_000..=i64::MAX / 1_000,
+            maxerror in any::<i64>(),
         ) {
-            prop_assume!(state == libc::TIME_ERROR || maxerror < 0);
+            let out = !(0..=i64::MAX / 1_000).contains(&maxerror);
+            prop_assume!(state == libc::TIME_ERROR || out);
             prop_assert_eq!(bound(state, maxerror), None);
         }
     }

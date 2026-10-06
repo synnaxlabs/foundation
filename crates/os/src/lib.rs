@@ -31,8 +31,9 @@ pub use files::Disk;
 /// compare readings of clocks from two calls.
 ///
 /// A sleep needs a thread with a Tokio runtime, as each thread that `os` starts has.
-/// It completes up to about 1 ms late. A sleep that waits across a suspend completes
-/// late by up to the time asleep.
+/// Tokio's timer counts whole milliseconds, so a sleep completes about 2 ms late on
+/// an idle machine, and later under load. A sleep that waits across a suspend
+/// completes late by up to the time asleep.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[must_use]
 pub fn clock() -> env::clock::Clock {
@@ -40,8 +41,8 @@ pub fn clock() -> env::clock::Clock {
 }
 
 /// The OS wall clock and its error bound, read in one call that needs no privilege.
-/// The bound is `None` when the OS says its clock is not in sync, or gives a negative
-/// bound.
+/// The bound is `None` when the OS says its clock is not in sync, or gives a bound
+/// that is negative or past the end of a `Span`.
 ///
 /// # Panics
 ///
