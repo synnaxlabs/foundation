@@ -1521,7 +1521,10 @@ How to read this record:
   binary larger is fine." "we should be careful about writing raw HTTP transports.",
   relayed by `advisor`; "Yes I approve", to the coordinator) (#341). #983 (an
   `httparse` reader) closed: the person told `connector` to use the `hyper` client on
-  2026-10-06. `httparse` comes in only as a dependency of `hyper`.
+  2026-10-06. `httparse` comes in only as a dependency of `hyper`. The client is
+  HTTP/1.1 only for now: `h2` 0.4 reads the OS clock to expire a reset stream, so
+  HTTP/2 turns on only when `h2` takes its clock through `env`, by an upstream change.
+  Decided by the coordinator with `advisor` on 2026-10-06 (#341).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
