@@ -327,6 +327,35 @@ fn an_idle_buffer_wakes_no_task() {
     handle.join().expect("the shard ended");
 }
 
+/// Runs a buffer that idles while its shard wakes every one and a half commits,
+/// with an empty append at each wake when `appends`. Returns the digest of the run.
+fn idle_with_wakes(appends: bool) -> u64 {
+    let (mut sim, handle) = start(27, Memory::default(), move |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        for _ in 0..8 {
+            shard.clock.sleep(commits(3)).await;
+            if appends {
+                buffer.append(Vec::new()).expect("takes an empty batch");
+            }
+        }
+        drop(buffer);
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    sim.digest()
+}
+
+/// Empty appends on an idle buffer wake no task: the run goes as one with no
+/// appends.
+#[test]
+fn empty_appends_wake_no_task() {
+    assert_eq!(idle_with_wakes(true), idle_with_wakes(false));
+}
+
 #[test]
 fn committed_on_an_idle_buffer_resolves_after_one_commit() {
     run(21, Memory::default(), |shard| async move {
@@ -661,6 +690,7 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
             buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
             failed
         );
+        assert_eq!(buffer.append(Vec::new()), failed, "an empty append");
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
         assert_eq!(buffer.committed().await, failed);
         assert_eq!(shard.memory.syncs(), 2, "the task ended at the failed sync");

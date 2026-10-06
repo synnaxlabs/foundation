@@ -420,6 +420,9 @@ impl Buffer {
             }
             Err(other) => return Err(rejected(other)),
         };
+        if taken.is_empty() {
+            return Ok(());
+        }
         for (slot, header) in state.open.entries(taken) {
             state
                 .logs
