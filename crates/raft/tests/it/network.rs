@@ -482,6 +482,23 @@ impl Network {
             .map(|entry| entry.at)
     }
 
+    // The configuration before the pending configuration entry of `node`, when one
+    // is pending. A node can commit later than the network, so this is not always
+    // its last committed configuration.
+    fn before(&self, node: usize) -> Option<Voters> {
+        let pending = self.pending(node)?;
+        let before = self.disks[node]
+            .entries
+            .iter()
+            .rev()
+            .filter(|entry| entry.at.index < pending.index)
+            .find_map(|entry| match &entry.data {
+                Data::Voters(voters) => Some(voters),
+                Data::Empty | Data::Bytes(_) => None,
+            });
+        Some(before.map_or_else(|| self.base(), Voters::clone))
+    }
+
     /// Proposes a new value to `node`. Returns its position when the node leads.
     pub(crate) fn propose(&mut self, node: usize) -> Option<Position> {
         self.proposed += 1;
@@ -627,13 +644,14 @@ impl Network {
         }
         if matches!(message.body, Body::PreVote { .. } | Body::Vote { .. }) {
             let node = &self.nodes[at];
-            let voters = node.voters();
             let key = node.key();
+            let voter = |voters: &Voters| {
+                voters.incoming.contains(&key) || voters.outgoing.contains(&key)
+            };
             assert!(
-                voters.incoming.contains(&key)
-                    || voters.outgoing.contains(&key)
-                    || self.pending(at).is_some(),
-                "node {at} campaigns outside its committed configuration"
+                voter(node.voters())
+                    || self.before(at).is_some_and(|before| voter(&before)),
+                "node {at} campaigns outside its configuration"
             );
         }
         let prevote = match message.body {
@@ -664,8 +682,13 @@ impl Network {
     // a leader must hold only the entries committed in a term below its own.
     fn check_leader(&mut self, at: usize) {
         let node = &self.nodes[at];
+        let key = node.key();
+        let voter = |voters: &Voters| {
+            voters.incoming.contains(&key) || voters.outgoing.contains(&key)
+        };
         assert!(
-            node.voters().incoming.contains(&node.key()) || self.pending(at).is_some(),
+            node.voters().incoming.contains(&key)
+                || self.before(at).is_some_and(|before| voter(&before)),
             "node {at} leads outside its committed configuration"
         );
         let term = node.term();

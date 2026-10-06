@@ -70,6 +70,24 @@ whether a clean boundary can separate it. When it cannot, make the trade explici
 write it down. Replication is the example: it is a separate `replica` component that
 uses two narrow calls into the home, not a reader inside `hub`.
 
+## Scope by the future, not the first caller
+
+Judge a build-or-use choice by every user the part will have, not by its first caller.
+Crate count and binary size are cheap, and they never tip the trade. Never hand-write a
+protocol, parser, or transport when a mature library lets us inject I/O and time. Our
+own code goes in the adapters, not in the protocol.
+
+Name the future users, and count only the ones on record: an entry in
+`docs/decisions.md`, an open issue, or a Synnax feature. The future scope picks the part
+we build on. It does not mean we build the future features now, and it does not excuse a
+trait with one speculative implementation.
+
+Evidence: #341 needed one InfluxDB POST. The first plan was a sans-I/O HTTP/1.1 module
+in `connector-influx` on `httparse`, to avoid new crates and a larger binary. A person
+rejected it: a general HTTP connector (like the one in Synnax), alarms, webhooks, and
+remote write all need HTTP. R7 now holds one `hyper` client over the `env` network seam.
+`hyper` takes any I/O type and an injected timer, so `sim` stays deterministic.
+
 ## The repo is the memory
 
 Sessions compact, crash, and get replaced. A decision that lives only in a session's
