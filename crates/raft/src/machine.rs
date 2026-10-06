@@ -322,8 +322,8 @@ impl Raft {
     /// random value. The node uses it to choose its next election timeout.
     ///
     /// A follower or candidate that reaches its election timeout starts an election,
-    /// unless its term is the last (`u64::MAX`). A leader sends heartbeats, and steps
-    /// down when it has not heard from a quorum for `election_ticks`.
+    /// unless [`Raft::campaign`] would do nothing. A leader sends heartbeats, and
+    /// steps down when it has not heard from a quorum for `election_ticks`.
     pub fn tick(&mut self, random: u64) {
         self.election_elapsed += 1;
         if self.role == Role::Leader {
@@ -3791,6 +3791,42 @@ mod tests {
             raft.step(message(2, 2, Body::Heartbeat { commit: 2 }))
                 .unwrap();
             assert_eq!(raft.role(), Role::Follower);
+            sent(&mut raft);
+            raft.campaign();
+            tick_times(&mut raft, 20);
+            assert_eq!(raft.role(), Role::Follower);
+            assert_eq!(sent(&mut raft), []);
+        }
+
+        // Node 1 is not in `Start.voters`. It joins, and its leave is not committed.
+        #[test]
+        fn a_node_that_joined_later_campaigns_before_its_leave_commits() {
+            let mut raft = raft(&[2, 3], Hard::default());
+            let entries = vec![
+                config(1, 1, voters(&[1, 2, 3], &[2, 3])),
+                config(1, 2, voters(&[1, 2, 3], &[])),
+                config(1, 3, voters(&[2, 3], &[1, 2, 3])),
+                config(1, 4, voters(&[2, 3], &[])),
+            ];
+            raft.step(message(2, 1, append(Position::default(), entries, 3)))
+                .unwrap();
+            sent(&mut raft);
+            raft.campaign();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+        }
+
+        // Node 1 is only in `Start.voters`. Every configuration after it leaves 1 out.
+        #[test]
+        fn a_node_only_in_the_start_configuration_does_not_campaign() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let entries = vec![
+                config(1, 1, voters(&[2, 3], &[1, 2, 3])),
+                config(1, 2, voters(&[2, 3], &[])),
+                config(1, 3, voters(&[2, 3, 4], &[2, 3])),
+            ];
+            raft.step(message(2, 1, append(Position::default(), entries, 2)))
+                .unwrap();
             sent(&mut raft);
             raft.campaign();
             tick_times(&mut raft, 20);
