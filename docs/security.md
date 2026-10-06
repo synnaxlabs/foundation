@@ -138,12 +138,12 @@ state on `main`.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
-- A disk that lost entries it synced can break Raft safety, because a lost entry can
-  be a committed entry or a counted vote. `raft` does not repair it: the disk owns
-  durability (`env::files`). A follower in this state gets `Error::IndexPastLog`
-  from each heartbeat of the leader that counted the lost entries, and stays out of
-  the group while that leader leads (#352 item 3). The node shows the error in its
-  status (#648).
+- A disk that lost entries it synced can break Raft safety: the leader still counts
+  them toward a commit, and the node can grant a vote to a candidate that lacks a
+  committed entry. `raft` does not find the loss: the disk owns durability
+  (`env::files`, RAFT DURABILITY, #352 item 3). The node gets `Error::IndexPastLog`
+  only once the leader's commit passes its last entry. Not built (#648): the node
+  shows the error in its status.
 - The `clock`, `replica`, and `blob` protocols are not built. To attack when they
   land: who may be a time source, and a binary that a peer serves under a hash it
   does not match (C9d).

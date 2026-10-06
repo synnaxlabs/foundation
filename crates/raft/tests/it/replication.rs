@@ -2,9 +2,8 @@
 //! and state machine safety after every input; these properties add liveness.
 
 use proptest::prelude::*;
-use raft::{Error, Position, Role};
 
-use crate::network::{ELECTION, Network, run, run_of_many};
+use crate::network::{Network, run, run_of_many};
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(CASES))]
@@ -62,37 +61,6 @@ proptest! {
             );
         }
     }
-}
-
-// The disk owns durability (#352): a follower that lost synced entries refuses each
-// heartbeat of the leader that counted them, and stays out while that leader leads.
-#[test]
-fn a_group_goes_on_without_a_follower_that_lost_synced_entries() {
-    let mut network = Network::new(&[Position::default(); 3], 0);
-    let agreed = network.settle(&[]).unwrap();
-    let at = network.propose(agreed.0).unwrap();
-    for _ in 0..4 * ELECTION {
-        network.round();
-    }
-    let (lost, other) = ((agreed.0 + 1) % 3, (agreed.0 + 2) % 3);
-    network.lose(lost);
-    for _ in 0..10 * ELECTION {
-        network.round();
-    }
-    let leader = &network.nodes[agreed.0];
-    assert_eq!((leader.role(), leader.term()), (Role::Leader, agreed.1));
-    let follows = |node: usize| {
-        let node = &network.nodes[node];
-        (node.term(), node.leader())
-    };
-    assert_eq!(follows(other), (agreed.1, Some(leader.key())));
-    assert_eq!(follows(lost), (agreed.1, None));
-    network.refused.dedup();
-    let refused = Error::IndexPastLog {
-        index: at.index,
-        last: 0,
-    };
-    assert_eq!(network.refused, [refused]);
 }
 
 const CASES: u32 = 1000;

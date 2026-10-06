@@ -914,13 +914,7 @@ How to read this record:
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no
   atomic write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that
   each caller must keep and that shows only at a restart. The person decided on
-  2026-10-05 ("I approve long term fix on 522"), #522. `raft` is safe only when a disk
-  keeps what it synced. A follower whose disk lost synced entries gets
-  `Error::IndexPastLog` from each heartbeat of a leader that counted them, and stays
-  out of the group while that leader leads; the others go on. The node keeps running
-  and shows the error in its status (#648). Lost: the leader sends again from below
-  what it counted, which lowers its count under a commit that a quorum may no longer
-  hold. Decided on 2026-10-05 (#352 item 3).
+  2026-10-05 ("I approve long term fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -941,6 +935,17 @@ How to read this record:
   written. Batch size (64 entries) and the number of appends in flight per follower
   (8) are constants, not `Config` fields: nothing measured asks for a knob. `Message`
   and `Body` are `Clone`, not `Copy`, because an append carries entries.
+- **RAFT DURABILITY (#352)** `raft` is safe only when a disk keeps what it synced. The
+  disk owns that (`env::files`); `mesh` writes each `Ready` there. `raft` does not
+  find a loss. When a follower's disk lost synced entries, and what it applied of
+  them, the leader still counts them. While the leader's commit is below the
+  follower's last entry, the follower follows, and the leader can commit an entry
+  that fewer than a quorum hold. Once the commit passes that entry, each heartbeat
+  gives the follower `Error::IndexPastLog`; an append to it fails with no error. A
+  loss that keeps `applied` fails at `Raft::new` with `Error::AppliedPastLog`. `node`
+  shows the error in its status (#648). Lost: the leader sends again from below what
+  it counted, which lowers its count under a commit that a quorum may no longer
+  hold. Decided on 2026-10-05 (#352 item 3).
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
