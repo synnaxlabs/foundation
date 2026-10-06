@@ -5,6 +5,7 @@ pub(crate) mod tcp;
 pub(crate) mod udp;
 mod wire;
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::task::Waker;
 
@@ -12,7 +13,7 @@ use env::net::Error;
 use env::rng::Rng;
 use types::time::Monotonic;
 
-use crate::{Crash, link};
+use crate::{Crash, link, name};
 use wire::{Packet, Wire};
 
 /// `10.0.0.0`: node `k` has `10.0.0.0` plus `k + 1`.
@@ -132,6 +133,8 @@ pub(crate) struct Network {
     wire: Wire,
     udp: udp::Sockets,
     tcp: tcp::Sockets,
+    /// The names that [`Sim::name`](crate::Sim::name) gave.
+    names: BTreeMap<String, name::Config>,
 }
 
 impl Network {
@@ -140,7 +143,18 @@ impl Network {
             wire: Wire::new(default, rng),
             udp: udp::Sockets::default(),
             tcp: tcp::Sockets::default(),
+            names: BTreeMap::new(),
         }
+    }
+
+    /// Makes each lookup of `host` from now on go as `config` says.
+    pub(crate) fn name(&mut self, host: &str, config: name::Config) {
+        self.names.insert(host.to_owned(), config);
+    }
+
+    /// How a lookup of `host` that starts now goes.
+    pub(crate) fn lookup(&self, host: &str) -> name::Config {
+        self.names.get(host).cloned().unwrap_or_default()
     }
 
     /// Sets the link from node `from` to node `to`.

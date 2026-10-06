@@ -12,6 +12,7 @@
 
 pub mod line;
 pub mod link;
+pub mod name;
 pub mod node;
 pub mod shard;
 
@@ -156,6 +157,29 @@ impl Sim {
         let (from, to) = (self.own(from), self.own(to));
         config.check();
         lock(&self.shared).net().link(from, to, config);
+    }
+
+    /// Makes each lookup of `host` that starts from now on, on any node, go as
+    /// `config` says. A name that no call gave has no address.
+    ///
+    /// ```
+    /// let mut sim = sim::Sim::new(sim::Config::default());
+    /// let historian = "10.0.0.2".parse().expect("an address");
+    /// let answer = sim::name::Answer::Addresses(vec![historian]);
+    /// let config = sim::name::Config { answer, ..sim::name::Config::default() };
+    /// sim.name("historian.local", config);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// When `config.delay` is negative.
+    pub fn name(&mut self, host: &str, config: name::Config) {
+        let delay = config.delay;
+        assert!(
+            delay >= Span::ZERO,
+            "the lookup of {host} takes a negative delay of {delay}"
+        );
+        lock(&self.shared).net().name(host, config);
     }
 
     /// Sets the line that joins port `a_path` of `a` and port `b_path` of `b`, for the
