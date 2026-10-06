@@ -221,9 +221,10 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
     let flags = match mode {
         Mode::Read => OFlags::RDONLY,
         Mode::Write => OFlags::RDWR,
-        Mode::Create { .. } => OFlags::RDWR | OFlags::CREATE,
+        Mode::Create { .. } => OFlags::RDWR.union(OFlags::CREATE),
     };
-    let fd = fs::openat(data, path, flags | OFlags::CLOEXEC, FILE).map_err(&failed)?;
+    let fd =
+        fs::openat(data, path, flags.union(OFlags::CLOEXEC), FILE).map_err(&failed)?;
     if mode != Mode::Read {
         match fs::flock(&fd, FlockOperation::NonBlockingLockExclusive) {
             Err(Errno::WOULDBLOCK) => {
