@@ -580,3 +580,32 @@ fn serves_a_client_that_comes_back_after_a_power_cut() {
     });
     assert_eq!(again, Ok(Said::Registers(vec![4])));
 }
+
+#[test]
+fn a_timeout_below_zero_acts_as_zero() {
+    let mut network = Network::new(15);
+    network.on_device(1 << 16, |mut listener, clock| async move {
+        let mut stream = poll_fn(|cx| listener.poll_accept(cx))
+            .await
+            .expect("a stream comes");
+        request(&mut stream).await;
+        clock.sleep(Span::HOUR).await;
+        drop((stream, listener));
+    });
+    let (net, clock) = (network.client.net(), network.client.clock());
+    let remote = network.remote();
+    let got = network.on_client(move || async move {
+        let config = tcp::Config {
+            remote,
+            options: options(1 << 16),
+        };
+        let timeout = Span::from_nanos(i64::MIN);
+        let mut client = Client::connect(&net, &config, clock.clone(), timeout)
+            .await
+            .expect("the device listens");
+        let start = clock.now();
+        let got = said(client.exchange(UNIT, &read(Table::Coils, 0, 1)).await);
+        (got, clock.now() - start)
+    });
+    assert_eq!(got, (Err(Failure::Timeout), Span::ZERO));
+}

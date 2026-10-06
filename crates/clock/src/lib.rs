@@ -2,6 +2,8 @@
 //! time as an interval.
 
 mod mesh;
+#[cfg_attr(not(test), expect(dead_code, reason = "the peer source is #145"))]
+mod peer;
 pub mod source;
 
 pub use mesh::{Clock, Reader, Status};

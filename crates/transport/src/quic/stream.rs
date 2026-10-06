@@ -16,8 +16,8 @@ use noq_proto::{
 use super::connection::{self, Fault};
 use super::hello::{self, Hello};
 use super::{Body, Event};
-use crate::message::{Prefix, Reader};
-use crate::{Class, Code, Error};
+use crate::message::{self, Reader};
+use crate::{Class, Code, Error, varint};
 
 /// Names one stream of a connection of an [`Endpoint`](super::Endpoint).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +36,7 @@ pub(crate) struct Sender {
     /// The stream needs no class byte: it has one, or it is a reply.
     started: bool,
     /// The class byte, then the length prefix of the message in hand.
-    header: [u8; 9],
+    header: [u8; 1 + varint::BYTES_MAX],
     /// The bytes of `header` that the stream has not taken.
     unsent: Range<usize>,
     /// The bytes of the message in hand that the stream has not taken.
@@ -157,7 +157,7 @@ impl Sender {
     /// A sender for `key` that starts the stream with `class`'s byte, to a peer whose
     /// largest message is `bytes_max`.
     fn new(key: Key, class: Class, bytes_max: usize) -> Self {
-        let mut header = [0; 9];
+        let mut header = [0; 1 + varint::BYTES_MAX];
         header[0] = byte(class);
         Self {
             started: false,
@@ -172,7 +172,7 @@ impl Sender {
         Self {
             key,
             started: true,
-            header: [0; 9],
+            header: [0; 1 + varint::BYTES_MAX],
             unsent: 0..0,
             body: Bytes::new(),
             claim: Claim::new(class),
@@ -190,7 +190,7 @@ impl Sender {
     /// Takes `message` as the message in hand, after its header. The sender holds no
     /// part of a message and is not finished.
     pub(super) fn load(&mut self, message: Block) {
-        let prefix = Prefix::new(message.len());
+        let prefix = message::prefix(message.len());
         let start = usize::from(self.started);
         self.started = true;
         self.header[1..=prefix.len()].copy_from_slice(&prefix);
@@ -1494,7 +1494,7 @@ mod tests {
     /// Opens `count` raw `Complete` streams on the client, and sends on each only the
     /// prefix of a message of [`MESSAGE_MAX`] bytes. Gives the streams.
     fn prefixes(pair: &mut Pair, count: u32) -> Vec<StreamId> {
-        let prefix = Prefix::new(MESSAGE_MAX);
+        let prefix = message::prefix(MESSAGE_MAX);
         let header = [[byte(Class::Complete)].as_slice(), &*prefix].concat();
         let mut ids = Vec::new();
         for _ in 0..count {
@@ -1898,7 +1898,7 @@ mod tests {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
             let small =
-                [[byte(Class::Complete)].as_slice(), &*Prefix::new(100)].concat();
+                [[byte(Class::Complete)].as_slice(), &*message::prefix(100)].concat();
             let ids = [
                 raw(pair.client.connection(), Dir::Uni, &small, false),
                 raw(pair.client.connection(), Dir::Uni, &small, false),
@@ -3780,6 +3780,22 @@ mod tests {
             events(side).contains(&&Event::Available { key: key(side) })
         }
 
+        /// A hello of [`BYTES_MAX`](crate::quic::hello::BYTES_MAX) bytes: both limits
+        /// in 8-byte varints, then unknown pairs in 4-byte varints.
+        fn full() -> Vec<u8> {
+            let long = |value: usize| {
+                (u64::try_from(value).expect("fits") | 0xc0 << 56).to_be_bytes()
+            };
+            let (window, message) = (OWN.window_bytes, OWN.message_bytes_max);
+            let mut bytes = [long(0), long(window), long(1), long(message)].concat();
+            for id in 2..=29_u32 {
+                bytes.extend((id | 0x8000_0000).to_be_bytes());
+                bytes.extend(0x8000_0000_u32.to_be_bytes());
+            }
+            assert_eq!(bytes.len(), crate::quic::hello::BYTES_MAX);
+            bytes
+        }
+
         /// Asserts that the server closed the connection for `reason` and that the
         /// foreign peer got the reason, after a run.
         fn assert_refused(pair: &mut Pair, reason: &str) {
@@ -4064,6 +4080,33 @@ mod tests {
             testing::run(1, |shard| {
                 let mut pair = foreign_dial(shard, |_| {});
                 raw(foreign(&mut pair), Dir::Uni, &[0; 257], false);
+                assert_refused(&mut pair, "a hello over 256 bytes");
+            });
+        }
+
+        #[test]
+        fn of_bytes_max_arrive_at_their_end() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let id = raw(foreign(&mut pair), Dir::Uni, &full(), false);
+                pair.run(RUN);
+                assert!(!available(&pair.server), "{:?}", pair.server.events);
+                let finished = foreign(&mut pair).send_stream(id).finish();
+                finished.expect("finished");
+                pair.run(RUN);
+                assert!(available(&pair.server), "{:?}", pair.server.events);
+            });
+        }
+
+        #[test]
+        fn of_bytes_max_break_the_connection_at_one_more_byte() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let id = raw(foreign(&mut pair), Dir::Uni, &full(), false);
+                pair.run(RUN);
+                assert!(!available(&pair.server), "{:?}", pair.server.events);
+                let written = foreign(&mut pair).send_stream(id).write(&[0]);
+                assert_eq!(written, Ok(1));
                 assert_refused(&mut pair, "a hello over 256 bytes");
             });
         }

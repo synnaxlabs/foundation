@@ -235,9 +235,9 @@ impl env::clock::Timer for Timer {
         let (poll, unused) = match state.due(this.node, deadline) {
             Due::Passed => (Poll::Ready(()), Some(waker)),
             Due::At(at) => {
-                state.arm(this.thread, at, this.key, waker);
-                this.due = Some(at);
-                (Poll::Pending, None)
+                let unused = state.arm(this.thread, at, this.key, waker);
+                this.due = unused.is_none().then_some(at);
+                (Poll::Pending, unused)
             }
             Due::Never => (Poll::Pending, Some(waker)),
         };

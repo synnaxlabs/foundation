@@ -59,7 +59,7 @@ pub fn combine<'a>(
             empty += 1;
             continue;
         };
-        let edges = if m.error_at(now, drift) < MAX_ERROR {
+        let edges = if m.known_at(now, drift) {
             &mut known
         } else {
             &mut unknown
@@ -413,7 +413,6 @@ mod tests {
 
     mod when_a_bound_is_unknown {
         use super::*;
-        use crate::exchange::Exchange;
 
         fn unknown(offset: i64) -> Measurement {
             Measurement::unknown(Monotonic(0), Span::from_nanos(offset))
@@ -564,24 +563,6 @@ mod tests {
             let m =
                 combine(now, drift(1_000), &sources).expect("every bound holds 1 us");
             assert_eq!((m.offset().nanos(), m.error().nanos()), (1_000, widest));
-        }
-
-        /// One reading of an unknown estimate, sent as both intervals, gives no known
-        /// bound. Two readings whose centers move apart by more than the round trip
-        /// can give one.
-        #[test]
-        fn gives_one_unknown_reading_at_both_ends_no_known_bound() {
-            let sources = filters(&[unknown(0), unknown(Span::SECOND.nanos())]);
-            let m = combine(Monotonic(0), drift(0), &sources).expect("bounds meet");
-            let exchange = Exchange {
-                sent: Monotonic(0),
-                received: m.interval(),
-                answered: m.interval(),
-                returned: Monotonic(10),
-            };
-            let unknown =
-                Measurement::unknown(Monotonic(10), Span::from_nanos(499_999_995));
-            assert_eq!(exchange.measure(drift(0)), Some(unknown));
         }
     }
 
