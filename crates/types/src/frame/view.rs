@@ -195,7 +195,7 @@ impl<'a> View<'a> {
         let (ranges, descriptors, _) = parts(&self.frame.0);
         let groups = join(ranges, &listed.groups).count();
         let (mut series, mut bytes) = (0, 0);
-        // The listed series from `run` to `next` are the last ones in a row.
+        // The listed series from `run` to `next` are the last consecutive ones.
         let (mut run, mut next) = (0, 0);
         for n in join(descriptors, &listed.entries) {
             let (start, end) = bounds(descriptors, n);
@@ -483,7 +483,7 @@ mod tests {
     /// One range, five descriptors, four series of 8 bytes, and 3 bytes. The view
     /// leaves out the last two series, so it ends at the 3 bytes.
     #[test]
-    fn charges_a_view_that_leaves_out_the_last_series_in_a_row() {
+    fn charges_a_view_that_leaves_out_the_last_two_series() {
         const F64: Type = Type::Scalar(Scalar::F64);
         let data: Vec<_> = (2..8).map(|n| (key(n), F64)).collect();
         let set = interner().intern(&[Group {
