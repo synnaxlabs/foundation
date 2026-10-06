@@ -2273,7 +2273,8 @@ fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
 }
 
 /// A record under `body_max` but over the largest block of the pool is recovered:
-/// the walk reads it in pieces of one block.
+/// the walk reads it in pieces of one block. The walk reads the first thirteen
+/// blocks of a record on their own, so the rest is over the largest block too.
 #[test]
 fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
     run(101, Memory::default(), |mut shard| async move {
@@ -2282,11 +2283,11 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 80 << 10);
-        let ring = layout(64 * BLOCK, 100_000);
+        let ring = layout(128 * BLOCK, 150_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
-        let mut part = parts_pool.alloc(30_000).expect("the pool has a block");
+        let mut part = parts_pool.alloc(48_000).expect("the pool has a block");
         part.fill(7);
         let parts = Parts::from(part.freeze());
         buffer
