@@ -134,12 +134,12 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
             )
         }
         Shape::Variable { element, max } => {
-            let start = element.start(count)?;
+            let (_, start) = element.front(count)?;
             let (elements, rest) = ends(count, bytes, max, None)?;
-            let len = start
-                .checked_add(element.raw_len(elements)?)
-                .ok_or(Error::Overflow)?;
-            (len, element.check(elements, rest, vectors(count))?)
+            (
+                element.total(start, elements)?,
+                element.check(elements, rest, vectors(count))?,
+            )
         }
     };
     trailing(rest)?;
@@ -195,14 +195,14 @@ fn decode_shape(
             element.fill(elements, bytes, 0, out)?
         }
         Shape::Variable { element, max } => {
-            let Some((front, out)) = out.split_at_mut_checked(element.start(count)?)
-            else {
+            let (ends_len, start) = element.front(count)?;
+            let Some((front, out)) = out.split_at_mut_checked(start) else {
                 return misfit(data_type, count, bytes, held);
             };
-            let (ends_out, padding) = front.split_at_mut(Layout::END.raw_len(count)?);
+            let (ends_out, padding) = front.split_at_mut(ends_len);
             padding.fill(0);
             let (elements, rest) = ends(count, bytes, max, Some(ends_out))?;
-            if out.len() != element.raw_len(elements)? {
+            if held != element.total(start, elements)? {
                 return misfit(data_type, count, bytes, held);
             }
             element.fill(elements, rest, vectors(count), out)?
@@ -400,15 +400,12 @@ impl Shape {
                 Ok((&[], values))
             }
             Self::Variable { element, max } => {
-                let start = element.start(count)?;
-                let ends_len = Layout::END.raw_len(count)?;
+                let (ends_len, start) = element.front(count)?;
                 let (ends, _) =
                     values.split_at_checked(ends_len).ok_or(length(ends_len))?;
                 let mut check = Ends::new(max);
                 check.check(ends)?;
-                let expected = start
-                    .checked_add(element.raw_len(check.elements())?)
-                    .ok_or(Error::Overflow)?;
+                let expected = element.total(start, check.elements())?;
                 if values.len() != expected {
                     return Err(length(expected));
                 }
@@ -535,13 +532,22 @@ impl Layout {
         count.checked_mul(self.width()).ok_or(Error::Overflow)
     }
 
-    /// Where the elements of `count` variable samples start in their raw bytes: after
-    /// the ends, padded to a multiple of the element width or 8, whichever is less. A
-    /// frame starts each series on 8 bytes, so the elements are then aligned.
-    fn start(self, count: usize) -> Result<usize, Error> {
-        Self::END
-            .raw_len(count)?
+    /// The bytes of the ends of `count` variable samples, and where their elements start
+    /// in their raw bytes: after the ends, padded to a multiple of the element width or
+    /// 8, whichever is less. A frame starts each series on 8 bytes, so the elements are
+    /// then aligned.
+    fn front(self, count: usize) -> Result<(usize, usize), Error> {
+        let ends = Self::END.raw_len(count)?;
+        let start = ends
             .checked_next_multiple_of(self.width().min(8))
+            .ok_or(Error::Overflow)?;
+        Ok((ends, start))
+    }
+
+    /// The raw bytes of variable samples whose `elements` elements start at `start`.
+    fn total(self, start: usize, elements: usize) -> Result<usize, Error> {
+        start
+            .checked_add(self.raw_len(elements)?)
             .ok_or(Error::Overflow)
     }
 
