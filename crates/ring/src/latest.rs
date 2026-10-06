@@ -28,8 +28,9 @@ pub fn new<const N: usize>(value: [u64; N]) -> (Writer<N>, Reader<N>) {
     )
 }
 
-/// The alignment keeps the `Arc` counts off the lines a read touches.
-#[repr(align(128))]
+/// The alignment keeps the `Arc` counts off the lines a read touches. `repr(C)` keeps
+/// `seq` on the first line with the first words.
+#[repr(C, align(128))]
 struct Shared<const N: usize> {
     /// Odd during an update.
     seq: AtomicU64,
@@ -42,6 +43,8 @@ pub struct Writer<const N: usize> {
     shared: Arc<Shared<N>>,
     /// The number in the cell between updates.
     seq: u64,
+    /// The words in the cell between updates. `update` stores only the words that
+    /// differ from it.
     value: [u64; N],
 }
 
@@ -51,6 +54,9 @@ impl<const N: usize> Writer<N> {
     /// and a read that overlaps the call runs again on the new value, so a read that
     /// returns the old value saw no part of the update ([`Reader::read`] has the order
     /// with a clock). If `f` panics, the old value stays.
+    ///
+    /// An update stores only the words that change, so readers keep their copies of
+    /// the cache lines that hold only unchanged words.
     pub fn update(&mut self, f: impl FnOnce([u64; N]) -> [u64; N]) {
         self.shared.seq.store(self.seq + 1, Relaxed);
         // SeqCst, not Release: the odd number must be visible before `f` reads a
@@ -170,9 +176,13 @@ mod tests {
         writer.update(|_| [1, 0]);
         writer.update(|_| [0, 0]);
         assert_eq!(reader.read(|value| value), [0, 0]);
-        assert!(
-            catch_unwind(AssertUnwindSafe(|| writer.update(|_| panic!("once"))))
-                .is_err()
+        writer.update(|_| [1, 1]);
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            writer.update(|_| panic!("the clock went back"));
+        }));
+        assert_eq!(
+            outcome.unwrap_err().downcast_ref::<&str>(),
+            Some(&"the clock went back")
         );
         writer.update(|_| [0, 2]);
         assert_eq!(reader.read(|value| value), [0, 2]);
@@ -295,13 +305,17 @@ mod model {
     }
 
     #[test]
-    fn never_reads_a_torn_value_when_some_words_do_not_change() {
+    fn never_reads_a_torn_or_stale_value_when_a_word_does_not_change() {
         bounded(|| {
-            let (mut writer, reader) = new([0, 0, 0]);
-            let reads = thread::spawn(move || reader.read(|value| value));
-            writer.update(|_| [1, 0, 1]);
+            let (mut writer, reader) = new([0, 0]);
+            let other = reader.clone();
+            let reads = thread::spawn(move || other.read(|value| value));
+            writer.update(|_| [1, 0]);
+            // Word 0 holds the store of the first update.
+            writer.update(|_| [1, 1]);
             let value = reads.join().unwrap();
-            assert!(value == [0, 0, 0] || value == [1, 0, 1], "torn: {value:?}");
+            assert!(matches!(value, [0, 0] | [1, 0] | [1, 1]), "torn: {value:?}");
+            assert_eq!(reader.read(|value| value), [1, 1]);
         });
     }
 
