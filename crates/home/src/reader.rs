@@ -11,11 +11,11 @@ use types::time::Stamp;
 
 /// A reader on its shard: the slot of its index and its session there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct Key {
+pub struct Key {
     /// The slot of the reader's index.
-    pub(crate) slot: Slot,
+    pub slot: Slot,
     /// The reader's session on the index.
-    pub(crate) session: delivery::Key,
+    pub session: delivery::Key,
 }
 
 /// The readers of each index of a shard, by the index's place in the shard, and the

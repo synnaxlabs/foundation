@@ -48,7 +48,7 @@ impl Accepted {
 
 impl Index {
     /// An index whose paths stand at `live` and `backfill`, with an empty gate.
-    pub(crate) fn new(limits: order::Config, live: Tail, backfill: Tail) -> Self {
+    pub(crate) fn new(limits: order::Limits, live: Tail, backfill: Tail) -> Self {
         Self {
             gate: Gate::new(),
             order: Order::new(limits, live, backfill),
@@ -200,7 +200,7 @@ mod tests {
     }
 
     fn index() -> Index {
-        let limits = order::Config {
+        let limits = order::Limits {
             earliest: "2000-01-01T00:00:00Z".parse().expect("a valid stamp"),
             ahead: Span::SECOND,
         };

@@ -6,13 +6,13 @@ use std::ops::Range;
 use types::frame::Path;
 use types::time::{Interval, Span, Stamp};
 
-/// Limits on the stamps an index accepts.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Config {
+/// The stamps an index accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
     /// The earliest stamp accepted. A clock that was never set reads near 1970.
-    pub(crate) earliest: Stamp,
+    pub earliest: Stamp,
     /// How far past the latest edge of mesh time a stamp may be.
-    pub(crate) ahead: Span,
+    pub ahead: Span,
 }
 
 /// A frame whose stamps passed a [`Check`] on one path.
@@ -41,16 +41,16 @@ pub(crate) struct Tail {
 /// their seq, per path.
 #[derive(Debug)]
 pub(crate) struct Order {
-    config: Config,
+    limits: Limits,
     live: Tail,
     backfill: Tail,
 }
 
 impl Order {
     /// Starts an index whose paths stand at `live` and `backfill`.
-    pub(crate) fn new(config: Config, live: Tail, backfill: Tail) -> Self {
+    pub(crate) fn new(limits: Limits, live: Tail, backfill: Tail) -> Self {
         Self {
-            config,
+            limits,
             live,
             backfill,
         }
@@ -62,7 +62,7 @@ impl Order {
     /// [`Order::advance`] spends the seq.
     pub(crate) fn check(&self, path: Path, now: Interval) -> Check<'_> {
         let latest = Stamp::from_nanos(
-            now.latest.nanos().saturating_add(self.config.ahead.nanos()),
+            now.latest.nanos().saturating_add(self.limits.ahead.nanos()),
         );
         Check {
             order: self,
@@ -146,7 +146,7 @@ impl Check<'_> {
             increasing & (i64::from_le_bytes(*a) < i64::from_le_bytes(*b))
         });
         if increasing
-            && first >= self.order.config.earliest
+            && first >= self.order.limits.earliest
             && last <= self.latest
             && floor.is_none_or(|floor| first > floor)
             && ceiling.is_none_or(|ceiling| last < ceiling)
@@ -193,7 +193,7 @@ impl Check<'_> {
     /// The first rule that `stamps` break, in the order that [`Check::push`] states.
     fn breach(&self, stamps: &[[u8; 8]]) -> Error {
         let (path, earliest, latest) =
-            (self.path, self.order.config.earliest, self.latest);
+            (self.path, self.order.limits.earliest, self.latest);
         let other = self.other();
         let mut before = self.before();
         for stamp in stamps.iter().copied().map(stamp) {
@@ -236,7 +236,7 @@ fn stamp(bytes: [u8; 8]) -> Stamp {
 
 /// A frame's stamps break a rule. The frame is rejected whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Error {
+pub enum Error {
     /// A stamp is not after the stamp before it on its path.
     Backwards {
         /// The path of the frame.
@@ -346,8 +346,8 @@ mod tests {
         stamps.iter().map(|s| s.nanos().to_le_bytes()).collect()
     }
 
-    fn config() -> Config {
-        Config {
+    fn limits() -> Limits {
+        Limits {
             earliest: "2000-01-01T00:00:00Z".parse().expect("a valid stamp"),
             ahead: Span::SECOND,
         }
@@ -390,7 +390,7 @@ mod tests {
     }
 
     fn order() -> Order {
-        Order::new(config(), Tail::default(), Tail::default())
+        Order::new(limits(), Tail::default(), Tail::default())
     }
 
     fn tail(stamp: i64, seq: u64) -> Tail {
@@ -496,7 +496,7 @@ mod tests {
                 error,
                 Error::Early {
                     stamp: Stamp::EPOCH,
-                    earliest: config().earliest,
+                    earliest: limits().earliest,
                 }
             );
             assert_eq!(
@@ -508,7 +508,7 @@ mod tests {
 
         #[test]
         fn accepts_a_stamp_at_the_earliest() {
-            let earliest = bytes(&[config().earliest]);
+            let earliest = bytes(&[limits().earliest]);
             assert_eq!(accept(&mut order(), Path::Live, &earliest, now()), Ok(0..1));
         }
 
@@ -696,7 +696,7 @@ mod tests {
 
         #[test]
         fn continues_from_the_tails_it_starts_at() {
-            let mut order = Order::new(config(), tail(5, 7), tail(2, 3));
+            let mut order = Order::new(limits(), tail(5, 7), tail(2, 3));
             let live = accept(&mut order, Path::Live, &stamps(&[5]), now());
             assert_eq!(
                 live,
@@ -731,19 +731,19 @@ mod tests {
                 earliest: Stamp::from_nanos(nanos),
                 latest: Stamp::from_nanos(nanos),
             };
-            let config = Config {
+            let limits = Limits {
                 earliest: Stamp::from_nanos(i64::MIN),
                 ahead: Span::SECOND,
             };
-            let mut order = Order::new(config, Tail::default(), Tail::default());
+            let mut order = Order::new(limits, Tail::default(), Tail::default());
             let last = Stamp::from_nanos(i64::MAX);
             assert_eq!(
                 accept(&mut order, Path::Live, &bytes(&[last]), at(i64::MAX - 1)),
                 Ok(0..1)
             );
-            let behind = Config {
+            let behind = Limits {
                 ahead: Span::from_nanos(-1),
-                ..config
+                ..limits
             };
             let mut order = Order::new(behind, Tail::default(), Tail::default());
             assert_eq!(
@@ -768,7 +768,7 @@ mod tests {
                 seq: u64::MAX,
             };
             let accepted = accept(
-                &mut Order::new(config(), full, Tail::default()),
+                &mut Order::new(limits(), full, Tail::default()),
                 Path::Live,
                 &stamps(&[1]),
                 now(),
@@ -784,7 +784,7 @@ mod tests {
 
         /// The rules, stated over every stamp accepted on each path.
         struct Model {
-            config: Config,
+            limits: Limits,
             accepted: [Vec<Stamp>; 2],
             seq: [u64; 2],
         }
@@ -797,9 +797,9 @@ mod tests {
         }
 
         impl Model {
-            fn new(config: Config, live: Tail, backfill: Tail) -> Self {
+            fn new(limits: Limits, live: Tail, backfill: Tail) -> Self {
                 Self {
-                    config,
+                    limits,
                     accepted: [live, backfill].map(|t| t.stamp.into_iter().collect()),
                     seq: [live.seq, backfill.seq],
                 }
@@ -812,9 +812,9 @@ mod tests {
                 now: Interval,
             ) -> Result<Range<u64>, Error> {
                 let p = index(path);
-                let earliest = self.config.earliest;
+                let earliest = self.limits.earliest;
                 let limit = i128::from(now.latest.nanos())
-                    + i128::from(self.config.ahead.nanos());
+                    + i128::from(self.limits.ahead.nanos());
                 let latest =
                     Stamp::from_nanos(i64::try_from(limit).unwrap_or(if limit > 0 {
                         i64::MAX
@@ -883,13 +883,13 @@ mod tests {
         /// and mesh time.
         type Frame = (Path, Vec<Stamp>, usize, Interval);
 
-        fn check(config: Config, start: [Tail; 2], frames: Vec<Frame>) {
-            let mut order = Order::new(config, start[0], start[1]);
-            let mut model = Model::new(config, start[0], start[1]);
+        fn check(limits: Limits, start: [Tail; 2], frames: Vec<Frame>) {
+            let mut order = Order::new(limits, start[0], start[1]);
+            let mut model = Model::new(limits, start[0], start[1]);
             for (path, stamps, size, now) in frames {
                 let before = tails(&order);
                 let series = bytes(&stamps);
-                let restarted = Order::new(config, before[0], before[1])
+                let restarted = Order::new(limits, before[0], before[1])
                     .check(path, now)
                     .push(&series)
                     .map(|check| check.end().seq);
@@ -962,7 +962,7 @@ mod tests {
                 frames in proptest::collection::vec(frame(), 0..40),
                 empty in any::<bool>(),
             ) {
-                let config = Config {
+                let limits = Limits {
                     earliest: Stamp::from_nanos(earliest),
                     ahead: Span::from_nanos(ahead),
                 };
@@ -974,7 +974,7 @@ mod tests {
                     };
                     frames.push((Path::Live, Vec::new(), 1, epoch));
                 }
-                check(config, [live, backfill], frames);
+                check(limits, [live, backfill], frames);
             }
         }
     }

@@ -385,11 +385,11 @@ fn encode(
 /// A series of `channel` that `codec` refuses at its group's count: a raw series of
 /// the wrong length, or an encoded series whose headers are not valid at that count.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Error {
+pub struct Error {
     /// The series' channel.
-    pub(crate) channel: channel::Key,
+    pub channel: channel::Key,
     /// Why `codec` refused it.
-    pub(crate) error: codec::Error,
+    pub error: codec::Error,
 }
 
 impl fmt::Display for Error {
