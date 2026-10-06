@@ -84,16 +84,12 @@ fn refuses_a_newer_or_unknown_version() {
 
 #[test]
 fn refuses_an_unknown_kind() {
-    let bytes = [VERSION, 0];
-    assert_eq!(
-        Definition::decode(&bytes),
-        Err(Error::Kind { at: 1, tag: 0 })
-    );
-    let bytes = [VERSION, u8::MAX];
-    assert_eq!(
-        Definition::decode(&bytes),
-        Err(Error::Kind { at: 1, tag: u8::MAX })
-    );
+    for tag in (0..=u8::MAX).filter(|t| ![ACCESS, CONNECTOR, REGION].contains(t)) {
+        assert_eq!(
+            Definition::decode(&[VERSION, tag]),
+            Err(Error::Kind { at: 1, tag })
+        );
+    }
 }
 
 #[test]
