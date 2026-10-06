@@ -1179,7 +1179,7 @@ How to read this record:
   down through a change holds the old configuration and refuses a leader whose votes
   are no quorum of it until an election whose grants are. When a second node fails
   first, the group waits for an operator, who wipes the voter and starts it with no
-  configuration (a node with no voters proves anything). The chain of proofs over
+  configuration (a node with no configuration proves anything). The chain of proofs over
   configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
   pins both, and the random runs skip exactly such a voter until #881. The advisor
   required a proof on every message and on each refusal, signatures only, and the
@@ -1274,9 +1274,21 @@ How to read this record:
   log: `Entry.data` is a `raft::Data`, one of `Empty` (a leader's first entry of its
   term), `Bytes` (a proposal), or `Voters`. A node uses the latest `Voters` entry in
   its log from the time it writes it; `Start.voters` is the configuration before
-  `Start.entries`. A `Voters` entry with an empty `incoming` set, in `Start.entries`
-  or in an `Append`, is `Error::NoVoters`: a group with no voter can never commit or
-  elect. A leader changes the voters with `Raft::propose_voters(set)`: it writes the
+  `Start.entries`. An empty `Start.voters` is a node that joins, or a voter that an
+  operator wiped. It takes any proof until it holds a `Voters` entry (#1004). Then its
+  first `Voters` entry shows the configuration before the entries: a joint entry's
+  outgoing set, or for a leave its own set (#928, coordinator, 2026-10-06). A log
+  starts at index 1, so that entry is the joint entry of the group's first change, and
+  the node checks proofs as a founder with the same log does, gaps included (#881,
+  #1005). Lost: an empty committed set proves nothing (the new node then refuses a
+  leader that the outgoing set elects when the old leader fails before the joint entry
+  commits); a joining node starts with the group's configuration (the caller must know
+  it, and it removes the operator's recovery of a wiped voter); the founding
+  configuration as entry 1, as in etcd (a wider change that alone leaves the node open
+  until it holds that entry). A `Voters` entry with an empty `incoming` set, in
+  `Start.entries` or in an `Append`, is `Error::NoVoters`: a group with no voter can
+  never commit or elect.
+  A leader changes the voters with `Raft::propose_voters(set)`: it writes the
   joint configuration (`incoming` the new set, `outgoing` the current one) and, when
   that entry commits, the leave (`incoming` alone). One change at a time: while the
   last configuration entry is not committed, a proposal is `Error::ChangePending`.
