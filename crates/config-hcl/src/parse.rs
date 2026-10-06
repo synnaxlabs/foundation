@@ -505,7 +505,7 @@ impl<'a> Parser<'a> {
         if self.token.kind != lex::Kind::Number {
             return Err(self.syntax(Expected::Key));
         }
-        if malformed(self.token.text) {
+        if parts(self.token.text).is_none() {
             let span = self.token.span;
             let span = minus.map_or(span, |minus| join(minus.span, span));
             self.errors.push(Error::Number {
@@ -710,14 +710,8 @@ fn text(token: Token<'_>) -> Box<str> {
 }
 
 /// The value of a number token, negated when `negative`.
-#[expect(
-    clippy::unwrap_in_result,
-    reason = "`f64` parses each number token that is not malformed"
-)]
 fn read_number(text: &str, negative: bool) -> Result<value::Kind, Number> {
-    if malformed(text) {
-        return Err(Number::Malformed);
-    }
+    let (whole, fraction, exponent) = parts(text).ok_or(Number::Malformed)?;
     if text.bytes().all(|b| b.is_ascii_digit()) {
         let magnitude = text.parse::<u128>().ok();
         return magnitude
@@ -731,31 +725,47 @@ fn read_number(text: &str, negative: bool) -> Result<value::Kind, Number> {
             .map(value::Kind::Integer)
             .ok_or(Number::Range);
     }
-    let float: f64 = text
-        .parse()
-        .expect("invariant: a number token that is not malformed is a float");
-    Some(float)
-        .filter(|&f| f != 0.0 || !significant(text))
+    nearest(whole, fraction, exponent)
         .map(|f| if negative { -f } else { f })
         .and_then(Float::new)
         .map(value::Kind::Float)
         .ok_or(Number::Range)
 }
 
-/// Reports whether the text of a number token is not a number: it has two dots, two
-/// exponents, a dot in its exponent, or an exponent outside `i64`. HCL refuses each,
-/// even on zero.
-fn malformed(text: &str) -> bool {
+/// The whole digits, the fraction digits, and the exponent of a number token, or
+/// `None` when it is not a number: it has two dots, two exponents, a dot in its
+/// exponent, or an exponent outside `i64`. HCL refuses each, even on zero.
+fn parts(text: &str) -> Option<(&str, &str, i64)> {
     let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
-    mantissa.matches('.').nth(1).is_some() || exponent.parse::<i64>().is_err()
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    if fraction.contains('.') {
+        return None;
+    }
+    Some((whole, fraction, exponent.parse().ok()?))
 }
 
-/// Reports whether the digits of a float before its exponent are not all zero.
-fn significant(digits: &str) -> bool {
-    digits
-        .bytes()
-        .take_while(|b| !matches!(b, b'e' | b'E'))
-        .any(|b| matches!(b, b'1'..=b'9'))
+/// The `f64` nearest to `whole.fraction` times ten to `exponent`, infinite past
+/// `f64::MAX`, or `None` when the number is not zero but rounds to zero.
+fn nearest(whole: &str, fraction: &str, exponent: i64) -> Option<f64> {
+    let digits = [whole, fraction].concat();
+    let significant = digits.trim_start_matches('0');
+    let mut rest = significant.chars();
+    let Some(lead) = rest.next() else {
+        return Some(0.0);
+    };
+    let zeros = digits.bytes().take_while(|&b| b == b'0').count();
+    let length = |n: usize| i64::try_from(n).expect("invariant: a text fits in a span");
+    // `str::parse::<f64>` stops reading the digits of a long exponent. Past 400, each
+    // float is infinite or zero.
+    let place = exponent
+        .saturating_add(length(whole.len()))
+        .saturating_sub(length(zeros))
+        .saturating_sub(1)
+        .clamp(-400, 400);
+    let float: f64 = format!("{lead}.{}e{place}", rest.as_str())
+        .parse()
+        .expect("invariant: `d.ddde<n>` is a float");
+    (float != 0.0).then_some(float)
 }
 
 /// The depth inside one more level, or `None` past [`DEPTH_MAX`].
@@ -937,6 +947,15 @@ mod tests {
                 ("l", float(0.0)),
             ]);
             assert_eq!(ok(text), expected);
+        }
+
+        /// HCL reads each as exactly 1: it holds the whole exponent, which fits `i64`.
+        #[test]
+        fn reads_a_long_number_with_a_long_exponent() {
+            let zeros = "0".repeat(655_359);
+            let text = format!("a = 0.{zeros}1e655360\nb = 1{zeros}0e-655360\n");
+            let expected = attributes(vec![("a", float(1.0)), ("b", float(1.0))]);
+            assert_eq!(ok(&text), expected);
         }
 
         #[test]
@@ -2160,6 +2179,9 @@ c = "°C # not a comment"
             check("f = 1e400\n", &[number(4, 9)]);
             check("f = -1e400\n", &[number(4, 10)]);
             check("f = 1e-400\n", &[number(4, 10)]);
+            check("f = 9e-400\n", &[number(4, 10)]);
+            check("f = 10e9223372036854775807\n", &[number(4, 26)]);
+            check("f = 0.01e-9223372036854775808\n", &[number(4, 29)]);
             check("f = 2e-324\n", &[number(4, 10)]);
             check("f = 1e2147483647\n", &[number(4, 16)]);
             check("f = 1e-3000000000\n", &[number(4, 17)]);
