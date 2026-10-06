@@ -42,6 +42,12 @@ impl Stop {
         }
     }
 
+    /// The number of guards that wait for the signal.
+    #[cfg(all(test, not(loom)))]
+    pub(crate) fn waiting(&self) -> usize {
+        self.lock().wakers.len()
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.0
             .lock()
