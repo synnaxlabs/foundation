@@ -99,23 +99,27 @@ impl Clock {
 
     fn steer(&mut self) -> Status {
         let estimate = combine(self.monotonic.now(), DRIFT, self.sources.values());
-        let old = self.state.slew();
-        let mut state = self.state;
-        self.cell.update(|_| {
-            state = match (old, estimate) {
-                (None, Err(e)) => State::Unsynced(e),
-                (Some(slew), Err(e)) => State::Holdover(slew, e),
-                // Before the first estimate, readers have no time that could go back.
-                (None, Ok(estimate)) => State::Synced(Slew::new(estimate)),
-                // `toward` keeps mesh time from going back only against reads before
-                // its `now`, so the clock reads inside the update.
-                (Some(old), Ok(estimate)) => {
-                    State::Synced(old.toward(self.monotonic.now(), DRIFT, estimate))
-                }
-            };
-            encode(state)
-        });
-        self.state = state;
+        let state = match (self.state.slew(), estimate) {
+            (None, Err(e)) => State::Unsynced(e),
+            (Some(slew), Err(e)) => State::Holdover(slew, e),
+            // Before the first estimate, readers have no time that could go back.
+            (None, Ok(estimate)) => State::Synced(Slew::new(estimate)),
+            // `toward` keeps mesh time from going back only against reads before its
+            // `now`, so the clock reads inside the update.
+            (Some(old), Ok(estimate)) => {
+                self.cell.update(|_| {
+                    let slew = old.toward(self.monotonic.now(), DRIFT, estimate);
+                    self.state = State::Synced(slew);
+                    encode(self.state)
+                });
+                self.state
+            }
+        };
+        // A write that changes nothing makes the reads that overlap it run again.
+        if state != self.state {
+            self.state = state;
+            self.cell.update(|_| encode(state));
+        }
         state.at(self.monotonic.now())
     }
 }
