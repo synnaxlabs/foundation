@@ -56,8 +56,8 @@ impl Set {
             readers: Readers::new(live),
             listed: false,
         });
-        // So that `applied` never grows the list.
-        self.listed.reserve(self.entries.len() - self.listed.len());
+        // Room for every index, so that `applied` never grows the list.
+        self.listed.reserve(self.entries.len());
     }
 
     /// Opens an unnamed complete reader on the index at `place` at seq `live`, with a
