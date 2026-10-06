@@ -299,8 +299,8 @@ impl Raft {
     }
 
     /// Starts an election now, without a wait for the election timeout. A leader, a
-    /// node that is not in its own voter list, and a node in the last term
-    /// (`u64::MAX`) do nothing.
+    /// node that is not in its own voter list while that list is committed, and a
+    /// node in the last term (`u64::MAX`) do nothing.
     pub fn campaign(&mut self) {
         if self.role != Role::Leader && self.promotable() {
             self.pre_campaign();
@@ -592,8 +592,8 @@ impl Raft {
         self.sync_voters();
     }
 
-    // Puts the log's configuration in force. The peers become its voters and the
-    // nodes it removed: the other voters of the configuration before it. A new peer
+    // Puts the log's configuration in force. The peers become its other voters and
+    // the nodes it removed: the other voters of the configuration before it. A new peer
     // starts at the end of the log.
     fn sync_voters(&mut self) {
         let (at, voters) = self.log.voters();
@@ -2662,7 +2662,7 @@ mod tests {
         }
 
         // Node 1 is in neither `Start.voters` nor the change, which is not committed.
-        // It may campaign, and needs a quorum of the others.
+        // It campaigns and needs a quorum of the others. #659 asks whether it should.
         #[test]
         fn a_node_outside_both_configurations_campaigns_without_its_own_vote() {
             let mut raft = raft(&[2, 3], Hard::default());
