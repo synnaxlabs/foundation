@@ -329,7 +329,10 @@ dependencies = [
 name = "connector-modbus"
 version = "0.0.0"
 dependencies = [
+ "env",
  "proptest",
+ "sim",
+ "types",
 ]
 
 [[package]]
