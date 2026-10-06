@@ -1141,12 +1141,6 @@ pub(super) mod tests {
     mod credit {
         use super::*;
 
-        fn granted(limit_bytes: u64) -> Credit {
-            let mut credit = Credit::new(0);
-            credit.grant(limit_bytes);
-            credit
-        }
-
         #[test]
         fn is_none_at_a_limit_of_0() {
             assert!(!Credit::new(0).spend(1));
@@ -1154,7 +1148,7 @@ pub(super) mod tests {
 
         #[test]
         fn is_spent_up_to_the_limit() {
-            let mut credit = granted(10);
+            let mut credit = Credit::new(10);
             assert!(credit.spend(4));
             assert!(credit.spend(6));
             assert!(!credit.spend(1));
@@ -1162,7 +1156,7 @@ pub(super) mod tests {
 
         #[test]
         fn is_not_lowered_by_a_grant() {
-            let mut credit = granted(10);
+            let mut credit = Credit::new(10);
             assert!(credit.spend(6));
             credit.grant(5);
             assert!(credit.spend(1));
@@ -1170,14 +1164,14 @@ pub(super) mod tests {
 
         #[test]
         fn lets_one_frame_pass_the_limit() {
-            let mut credit = granted(10);
+            let mut credit = Credit::new(10);
             assert!(credit.spend(25));
             assert!(!credit.spend(1));
         }
 
         #[test]
         fn counts_a_frame_past_the_limit_against_the_next_grant() {
-            let mut credit = granted(10);
+            let mut credit = Credit::new(10);
             assert!(credit.spend(25));
             credit.grant(20);
             assert!(!credit.spend(1));
@@ -1187,7 +1181,7 @@ pub(super) mod tests {
 
         #[test]
         fn is_not_spent_by_a_refused_frame() {
-            let mut credit = granted(10);
+            let mut credit = Credit::new(10);
             assert!(credit.spend(10));
             assert!(!credit.spend(5));
             credit.grant(12);
@@ -1381,31 +1375,31 @@ pub(super) mod tests {
 
         #[test]
         fn raises_the_limit_of_the_open_with_a_grant() {
-            let frames = Frames::new(3);
+            let frames = Frames::new(4);
             let mut readers = Readers::new(0);
             let key = readers
                 .open(Reader::Unnamed, Start::At(live(0)), CHARGE)
                 .key;
             readers.grant(key, 3 * CHARGE);
-            for n in 0..3 {
+            for n in 0..4 {
                 readers.queue(&frames.frame(n + 1), n..n + 1);
             }
-            assert_eq!(released(&mut readers, 3), [key]);
+            assert_eq!(released(&mut readers, 4), [key]);
             assert_eq!(taken(&mut readers, key), [1, 2, 3]);
         }
 
         #[test]
         fn keeps_the_limit_of_the_open_after_a_lower_grant() {
-            let frames = Frames::new(3);
+            let frames = Frames::new(4);
             let mut readers = Readers::new(0);
             let key = readers
                 .open(Reader::Unnamed, Start::At(live(0)), 3 * CHARGE)
                 .key;
             readers.grant(key, CHARGE);
-            for n in 0..3 {
+            for n in 0..4 {
                 readers.queue(&frames.frame(n + 1), n..n + 1);
             }
-            assert_eq!(released(&mut readers, 3), [key]);
+            assert_eq!(released(&mut readers, 4), [key]);
             assert_eq!(taken(&mut readers, key), [1, 2, 3]);
         }
 
@@ -1446,6 +1440,24 @@ pub(super) mod tests {
             readers.queue(&frames.frame(1), 0..1);
             assert_eq!(released(&mut readers, 1), []);
             assert_eq!(taken(&mut readers, new), []);
+        }
+
+        #[test]
+        fn counts_the_credit_of_a_takeover_from_zero() {
+            let frames = Frames::new(3);
+            let mut readers = Readers::new(0);
+            let old = readers
+                .open(named("a", 10), Start::At(live(0)), 2 * CHARGE)
+                .key;
+            readers.queue(&frames.frame(1), 0..1);
+            readers.queue(&frames.frame(2), 1..2);
+            assert_eq!(released(&mut readers, 2), [old]);
+            assert_eq!(taken(&mut readers, old), [1, 2]);
+            readers.ack(old, live(2)).expect("forward");
+            let new = readers.open(named("a", 10), resume(live(0)), CHARGE).key;
+            readers.queue(&frames.frame(3), 2..3);
+            assert_eq!(released(&mut readers, 3), [new]);
+            assert_eq!(taken(&mut readers, new), [3]);
         }
 
         #[test]
@@ -1946,10 +1958,11 @@ pub(super) mod tests {
         }
 
         /// Checks each spend against the credit rules stated a second way: the limit is
-        /// the largest grant, and the spent bytes are the sum of the frames.
-        fn check_credit(steps: Vec<Spending>) {
-            let mut credit = Credit::new(0);
-            let mut grants = Vec::new();
+        /// the largest grant, the open's `first` among them, and the spent bytes are the
+        /// sum of the frames.
+        fn check_credit(first: u64, steps: Vec<Spending>) {
+            let mut credit = Credit::new(first);
+            let mut grants = vec![first];
             let mut frames = Vec::new();
             for step in steps {
                 match step {
@@ -2110,21 +2123,29 @@ pub(super) mod tests {
         /// starts at or below a sample no longer in memory gets none, and nothing is
         /// kept with no session open. A release wakes each session that had no frame waiting and now
         /// has one.
-        fn check_live(steps: Vec<Live>) {
+        ///
+        /// The `n`th open takes `limits[n]`, or 0 past the end of `limits`.
+        fn check_live(steps: Vec<Live>, limits: &[u64]) {
             let frames = Frames::new(steps.len());
             let mut readers = Readers::new(0);
             let mut model = Flows::default();
+            let mut limits = limits.iter().copied();
             let mut end = 0;
             let mut made = 0;
             for step in steps {
                 match step {
                     Live::Open(back) => {
                         let start = (model.gone() + 4).saturating_sub(back);
-                        let key =
-                            readers.open(Reader::Unnamed, Start::At(live(start)), 0);
+                        let limit = limits.next().unwrap_or(0);
+                        let key = readers.open(
+                            Reader::Unnamed,
+                            Start::At(live(start)),
+                            limit,
+                        );
                         let got = Got {
                             position: start,
                             behind: model.behind(start),
+                            limit,
                             ..Got::default()
                         };
                         model.open.insert(key.key, got);
@@ -2179,14 +2200,36 @@ pub(super) mod tests {
                     0..120,
                 ),
             ) {
-                check_credit(steps);
+                check_credit(0, steps);
+            }
+
+            #[test]
+            fn follow_the_credit_rules_from_the_limit_of_the_open(
+                first in 0..200_u64,
+                steps in proptest::collection::vec(
+                    prop_oneof![
+                        (0..200_u64).prop_map(Spending::Grant),
+                        (0..40_u64).prop_map(Spending::Spend),
+                    ],
+                    0..120,
+                ),
+            ) {
+                check_credit(first, steps);
             }
 
             #[test]
             fn follow_the_live_rules(
                 steps in proptest::collection::vec(live_input(), 0..80),
             ) {
-                check_live(steps);
+                check_live(steps, &[]);
+            }
+
+            #[test]
+            fn follow_the_live_rules_from_the_limit_of_the_open(
+                steps in proptest::collection::vec(live_input(), 0..80),
+                limits in proptest::collection::vec(0..6 * CHARGE, 0..80),
+            ) {
+                check_live(steps, &limits);
             }
 
             #[test]
