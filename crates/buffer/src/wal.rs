@@ -23,8 +23,9 @@ use crate::record::{
 /// The body of a restart record: one chain value.
 const RESTART_LEN: usize = 4;
 
-/// Bytes of the whole blocks that hold a restart record.
-const RESTART: usize = (HEADER_LEN + RESTART_LEN).next_multiple_of(ALIGN);
+/// Bytes of the whole blocks that hold a restart record: one block.
+const RESTART: usize = ALIGN;
+const _: () = assert!(HEADER_LEN + RESTART_LEN <= RESTART, "a restart record fits");
 
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
