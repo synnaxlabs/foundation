@@ -521,8 +521,8 @@ How to read this record:
   frame and mask, so making one takes no reference count. Lost: only the list of the
   entries left out, walked as the runs of series between them, because near half
   that walk is 20% to 74% slower than a walk of the held entries (#873). Approved by
-  the coordinator (#157). The list of entries left out (#755) needs the person's
-  approval at the gate of PR #873.
+  the coordinator (#157). The list of entries left out (#755): approved at the gate
+  of PR #873.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
