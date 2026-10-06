@@ -142,6 +142,12 @@ fn writes_each_channel_within_its_range() {
 }
 
 #[test]
+#[should_panic(expected = "the driver wrote every sample")]
+fn panics_on_a_short_write() {
+    drop(output(&linked(), "short/ao0").write(&[1.0, 2.0], SECOND));
+}
+
+#[test]
 fn refuses_a_write_after_a_stop() {
     let mut task = output(&linked(), "Dev1/ao0");
     task.stop().unwrap();
@@ -256,10 +262,37 @@ fn writes_each_line() {
     let library = linked();
     let mut task = digital::Output::create(&library, "write").unwrap();
     task.add("Dev1/port0/line0:1").unwrap();
-    assert_eq!(task.write(&[0, 1], SECOND), Err(refused(stub::STOPPED)));
+    assert_eq!(
+        task.write(&[false, true], SECOND),
+        Err(refused(stub::STOPPED))
+    );
     task.start().unwrap();
-    task.write(&[0, 1, 1, 0], SECOND).unwrap();
-    assert_eq!(task.write(&[0, 2], SECOND), Err(refused(stub::ARGUMENT)));
+    task.write(&[false, true, true, false], SECOND).unwrap();
+}
+
+#[test]
+fn refuses_digital_reads_and_writes_after_a_stop() {
+    let library = linked();
+    let mut input = digital::Input::create(&library, "in").unwrap();
+    input.add("Dev1/port0/line0").unwrap();
+    input.start().unwrap();
+    input.stop().unwrap();
+    assert_eq!(input.read(&mut [0], SECOND), Err(refused(stub::STOPPED)));
+    let mut output = digital::Output::create(&library, "out").unwrap();
+    output.add("Dev1/port0/line1").unwrap();
+    output.start().unwrap();
+    output.stop().unwrap();
+    assert_eq!(output.write(&[true], SECOND), Err(refused(stub::STOPPED)));
+}
+
+#[test]
+#[should_panic(expected = "the driver wrote every sample")]
+fn panics_on_a_short_write_of_lines() {
+    let library = linked();
+    let mut task = digital::Output::create(&library, "short").unwrap();
+    task.add("short/port0/line0").unwrap();
+    task.start().unwrap();
+    drop(task.write(&[false, true], SECOND));
 }
 
 #[test]
@@ -269,7 +302,7 @@ fn panics_on_lines_that_do_not_fill_the_channels() {
     let mut task = digital::Output::create(&library, "panic").unwrap();
     task.add("Dev1/port0/line0:1").unwrap();
     task.start().unwrap();
-    drop(task.write(&[0, 1, 0], SECOND));
+    drop(task.write(&[false, true, false], SECOND));
 }
 
 /// The stub built as a shared library, which Cargo puts next to the test binary.

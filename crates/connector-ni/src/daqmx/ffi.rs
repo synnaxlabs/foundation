@@ -7,6 +7,10 @@ use super::Error;
 /// A task handle of the driver.
 pub(super) type Handle = *mut c_void;
 
+/// `DAQmxCreateDIChan` or `DAQmxCreateDOChan`.
+pub(super) type Lines =
+    unsafe extern "system" fn(Handle, *const c_char, *const c_char, i32) -> i32;
+
 /// One pointer to each driver function this crate calls.
 #[derive(Debug)]
 pub(super) struct Functions {
@@ -57,10 +61,8 @@ pub(super) struct Functions {
         *mut i32,
         *mut u32,
     ) -> i32,
-    pub(super) digital_in:
-        unsafe extern "system" fn(Handle, *const c_char, *const c_char, i32) -> i32,
-    pub(super) digital_out:
-        unsafe extern "system" fn(Handle, *const c_char, *const c_char, i32) -> i32,
+    pub(super) digital_in: Lines,
+    pub(super) digital_out: Lines,
     pub(super) read_digital: unsafe extern "system" fn(
         Handle,
         i32,

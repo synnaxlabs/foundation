@@ -3,8 +3,8 @@
 
 use types::time::Span;
 
-use super::ffi::{BY_SCAN, PER_LINE};
-use super::{Error, Library, Task, scans, seconds, size, text, values};
+use super::ffi::BY_SCAN;
+use super::{Error, Library, Task, scans, seconds, size, values};
 
 /// A task that reads digital lines. Dropping it clears it in the driver.
 #[derive(Debug)]
@@ -36,23 +36,12 @@ impl Input {
     ///
     /// When `lines` holds a NUL byte.
     pub fn add(&mut self, lines: &str) -> Result<(), Error> {
-        let task = &self.0;
-        let lines = text(lines);
-        // SAFETY: a live handle and NUL-terminated strings.
-        let code = unsafe {
-            (task.functions().digital_in)(
-                task.handle,
-                lines.as_ptr(),
-                c"".as_ptr(),
-                PER_LINE,
-            )
-        };
-        task.check(code)
+        self.0.lines(self.0.functions().digital_in, lines)
     }
 
     /// Samples each line `rate` times a second without end, on the device's own
     /// clock, into a driver buffer that holds `buffer` samples of each line. Without a
-    /// clock, each read takes one sample when called.
+    /// clock, a read samples the lines when called.
     ///
     /// # Errors
     ///
@@ -150,18 +139,7 @@ impl Output {
     ///
     /// When `lines` holds a NUL byte.
     pub fn add(&mut self, lines: &str) -> Result<(), Error> {
-        let task = &self.0;
-        let lines = text(lines);
-        // SAFETY: a live handle and NUL-terminated strings.
-        let code = unsafe {
-            (task.functions().digital_out)(
-                task.handle,
-                lines.as_ptr(),
-                c"".as_ptr(),
-                PER_LINE,
-            )
-        };
-        task.check(code)
+        self.0.lines(self.0.functions().digital_out, lines)
     }
 
     /// Starts the task, so writes reach the device.
@@ -183,7 +161,7 @@ impl Output {
     }
 
     /// Writes `values` by scan (each line of the first sample, then each line of the
-    /// next): 0 sets a line low, and 1 sets it high. It waits up to `timeout`, cut to
+    /// next): `true` sets a line high. It waits up to `timeout`, cut to
     /// whole milliseconds, for room in the driver's buffer. A driver warning reads as
     /// success.
     ///
@@ -195,12 +173,12 @@ impl Output {
     ///
     /// When `values` does not hold a whole number of samples of each line, or holds
     /// more than `i32::MAX` samples of each line.
-    pub fn write(&mut self, values: &[u8], timeout: Span) -> Result<(), Error> {
+    pub fn write(&mut self, values: &[bool], timeout: Span) -> Result<(), Error> {
         let task = &self.0;
         let per_channel = scans(values.len(), task.channels()?);
         let (mut written, mut reserved) = (0, 0);
-        // SAFETY: a live handle, `values` holds `per_channel` samples of each line,
-        // and `written` and `reserved` are valid for one write each.
+        // SAFETY: a live handle, `values` holds `per_channel` samples of each line as
+        // bytes of 0 or 1, and `written` and `reserved` are valid for one write each.
         let code = unsafe {
             (task.functions().write_digital)(
                 task.handle,
@@ -208,7 +186,7 @@ impl Output {
                 0,
                 seconds(timeout),
                 BY_SCAN,
-                values.as_ptr(),
+                values.as_ptr().cast::<u8>(),
                 &raw mut written,
                 &raw mut reserved,
             )

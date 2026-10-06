@@ -244,3 +244,27 @@ fn reads_and_writes_digital_lines() {
     assert_eq!((code, written), (0, 1));
     clear(output);
 }
+
+#[test]
+fn refuses_a_digital_write_of_no_samples_to_inputs() {
+    let input = create();
+    assert_eq!(lines(input, c"Dev1/port0/line0", false, PER_LINE), 0);
+    start(input);
+    let (mut written, mut reserved) = (0, 0);
+    let values: [u8; 0] = [];
+    // SAFETY: a live handle, and zero samples of one line.
+    let code = unsafe {
+        DAQmxWriteDigitalLines(
+            input,
+            0,
+            0,
+            1.0,
+            BY_SCAN,
+            values.as_ptr(),
+            &raw mut written,
+            &raw mut reserved,
+        )
+    };
+    assert_eq!(code, DIRECTION);
+    clear(input);
+}

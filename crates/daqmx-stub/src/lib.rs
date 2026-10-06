@@ -9,14 +9,17 @@
 //!   them in the other order, and `Dev1/ai0,Dev1/ai2` holds the two named.
 //! - A physical channel that starts with `fail/` fails the call that adds it with
 //!   [`FAIL`]. One that starts with `warn/` makes each read give [`WARN`], and one
-//!   that starts with `short/` makes each read give half the samples asked for.
+//!   that starts with `short/` makes each read and write take half the samples asked
+//!   for.
+//! - A digital channel names lines. A port with no line (`Dev1/port0`) counts as one
+//!   line, not as each line of the port.
 //! - A task holds one kind of channel (analog or digital, input or output), and reads
 //!   or writes only that kind: [`DIRECTION`].
 //! - An argument value the stub does not model fails with [`ARGUMENT`]: a terminal
 //!   other than the default, units other than volts, a range with `min >= max`, a
 //!   clock other than continuous on the rising edge with a rate above zero, digital
-//!   lines grouped other than one channel for each line, a written line value other
-//!   than 0 or 1, and a layout other than by scan.
+//!   lines grouped other than one channel for each line, and a layout other than by
+//!   scan.
 //! - A read or write on a task that is not running fails with [`STOPPED`].
 //! - A written value outside its channel's range fails with [`RANGE`].
 //! - A buffer smaller than the request fails with [`SIZE`].
@@ -56,25 +59,20 @@ const BY_SCAN: u32 = 1;
 const PER_LINE: i32 = 0;
 
 /// A kind of channel.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     AnalogIn,
-    /// An analog output with its range.
-    AnalogOut(f64, f64),
+    AnalogOut,
     DigitalIn,
     DigitalOut,
-}
-
-impl Kind {
-    fn same(self, other: Self) -> bool {
-        std::mem::discriminant(&self) == std::mem::discriminant(&other)
-    }
 }
 
 #[derive(Debug, Default)]
 struct Task {
     running: bool,
     channels: Vec<Kind>,
+    /// The range of each channel of an analog output task.
+    ranges: Vec<(f64, f64)>,
     sample: u64,
     warn: bool,
     short: bool,
@@ -105,32 +103,40 @@ unsafe fn task<'a>(handle: *mut c_void) -> &'a mut Task {
     unsafe { &mut *handle.cast::<Task>() }
 }
 
-/// Adds the channels `physical` names, each of `kind`.
+/// Adds the channels `physical` names, each of `kind` and with `range` if it has one.
 ///
 /// # Safety
 ///
 /// As [`task`], and `physical` is a NUL-terminated string.
-unsafe fn add(handle: *mut c_void, physical: *const c_char, kind: Kind) -> i32 {
+unsafe fn add(
+    handle: *mut c_void,
+    physical: *const c_char,
+    kind: Kind,
+    range: Option<(f64, f64)>,
+) -> i32 {
     // SAFETY: the caller's contract.
     let physical = unsafe { CStr::from_ptr(physical) };
     let name = physical.to_bytes();
     if name.starts_with(b"fail/") {
         return FAIL;
     }
-    if let Kind::AnalogOut(min, max) = kind
-        && min >= max
-    {
+    if range.is_some_and(|(min, max)| min >= max) {
         return ARGUMENT;
     }
     // SAFETY: the caller's contract.
     let task = unsafe { task(handle) };
-    if task.channels.first().is_some_and(|first| !first.same(kind)) {
+    if task.channels.first().is_some_and(|first| *first != kind) {
         return DIRECTION;
     }
     task.warn |= name.starts_with(b"warn/");
     task.short |= name.starts_with(b"short/");
-    task.channels
-        .extend(std::iter::repeat_n(kind, count(physical)));
+    let n = count(physical);
+    task.channels.extend(std::iter::repeat_n(kind, n));
+    task.ranges.extend(
+        range
+            .into_iter()
+            .flat_map(|range| std::iter::repeat_n(range, n)),
+    );
     0
 }
 
@@ -159,7 +165,7 @@ unsafe fn read<T>(
     if layout != BY_SCAN {
         return ARGUMENT;
     }
-    if task.channels.iter().any(|channel| !channel.same(kind)) {
+    if task.channels.iter().any(|channel| *channel != kind) {
         return DIRECTION;
     }
     let (Ok(asked), Ok(size)) = (usize::try_from(per_channel), usize::try_from(size))
@@ -191,8 +197,8 @@ unsafe fn read<T>(
     if task.warn { WARN } else { 0 }
 }
 
-/// Writes `per_channel` samples of each channel from `values`, with `check` giving
-/// the code of a value its channel refuses.
+/// Writes `per_channel` samples of each channel of `kind` from `values`, with
+/// `check` giving the code of values the task refuses.
 ///
 /// # Safety
 ///
@@ -200,11 +206,12 @@ unsafe fn read<T>(
 /// `written` for one write.
 unsafe fn write<T>(
     handle: *mut c_void,
+    kind: Kind,
     per_channel: i32,
     layout: u32,
     values: *const T,
     written: *mut i32,
-    check: impl Fn(Kind, &T) -> Option<i32>,
+    check: impl Fn(&Task, &[T]) -> Option<i32>,
 ) -> i32 {
     // SAFETY: the caller's contract.
     let task = unsafe { task(handle) };
@@ -214,6 +221,9 @@ unsafe fn write<T>(
     if layout != BY_SCAN {
         return ARGUMENT;
     }
+    if task.channels.iter().any(|channel| *channel != kind) {
+        return DIRECTION;
+    }
     let Ok(n) = usize::try_from(per_channel) else {
         return SIZE;
     };
@@ -222,16 +232,16 @@ unsafe fn write<T>(
     };
     // SAFETY: the caller's contract.
     let values = unsafe { std::slice::from_raw_parts(values, len) };
-    let channels = task.channels.iter().copied().cycle();
-    if let Some(code) = values
-        .iter()
-        .zip(channels)
-        .find_map(|(value, kind)| check(kind, value))
-    {
+    if let Some(code) = check(task, values) {
         return code;
     }
+    let n = if task.short {
+        per_channel / 2
+    } else {
+        per_channel
+    };
     // SAFETY: the caller's contract.
-    unsafe { written.write(per_channel) };
+    unsafe { written.write(n) };
     0
 }
 
@@ -324,7 +334,7 @@ pub unsafe extern "system" fn DAQmxCreateAIVoltageChan(
         return ARGUMENT;
     }
     // SAFETY: the caller's contract.
-    unsafe { add(handle, physical, Kind::AnalogIn) }
+    unsafe { add(handle, physical, Kind::AnalogIn, None) }
 }
 
 /// Adds analog output channels with the range `min` to `max`.
@@ -346,7 +356,7 @@ pub unsafe extern "system" fn DAQmxCreateAOVoltageChan(
         return ARGUMENT;
     }
     // SAFETY: the caller's contract.
-    unsafe { add(handle, physical, Kind::AnalogOut(min, max)) }
+    unsafe { add(handle, physical, Kind::AnalogOut, Some((min, max))) }
 }
 
 /// Accepts a continuous clock on the rising edge with a rate above zero.
@@ -419,12 +429,24 @@ pub unsafe extern "system" fn DAQmxWriteAnalogF64(
     written: *mut i32,
     _reserved: *mut u32,
 ) -> i32 {
-    let check = |kind, value: &f64| match kind {
-        Kind::AnalogOut(min, max) => (!(min..=max).contains(value)).then_some(RANGE),
-        _ => Some(DIRECTION),
+    let check = |task: &Task, values: &[f64]| {
+        let ranges = task.ranges.iter().cycle();
+        let outside =
+            |(value, (min, max)): (&f64, &(f64, f64))| !(min..=max).contains(&value);
+        values.iter().zip(ranges).any(outside).then_some(RANGE)
     };
     // SAFETY: the caller's contract.
-    unsafe { write(handle, per_channel, layout, values, written, check) }
+    unsafe {
+        write(
+            handle,
+            Kind::AnalogOut,
+            per_channel,
+            layout,
+            values,
+            written,
+            check,
+        )
+    }
 }
 
 /// Adds digital input lines, one channel for each line.
@@ -443,7 +465,7 @@ pub unsafe extern "system" fn DAQmxCreateDIChan(
         return ARGUMENT;
     }
     // SAFETY: the caller's contract.
-    unsafe { add(handle, lines, Kind::DigitalIn) }
+    unsafe { add(handle, lines, Kind::DigitalIn, None) }
 }
 
 /// Adds digital output lines, one channel for each line.
@@ -462,7 +484,7 @@ pub unsafe extern "system" fn DAQmxCreateDOChan(
         return ARGUMENT;
     }
     // SAFETY: the caller's contract.
-    unsafe { add(handle, lines, Kind::DigitalOut) }
+    unsafe { add(handle, lines, Kind::DigitalOut, None) }
 }
 
 /// Reads `per_channel` samples of each line into `out`, one byte for each.
@@ -519,13 +541,19 @@ pub unsafe extern "system" fn DAQmxWriteDigitalLines(
     written: *mut i32,
     _reserved: *mut u32,
 ) -> i32 {
-    let check = |kind, value: &u8| match (kind, *value) {
-        (Kind::DigitalOut, 0 | 1) => None,
-        (Kind::DigitalOut, _) => Some(ARGUMENT),
-        _ => Some(DIRECTION),
-    };
+    let check = |_: &Task, _: &[u8]| None;
     // SAFETY: the caller's contract.
-    unsafe { write(handle, per_channel, layout, values, written, check) }
+    unsafe {
+        write(
+            handle,
+            Kind::DigitalOut,
+            per_channel,
+            layout,
+            values,
+            written,
+            check,
+        )
+    }
 }
 
 /// Copies [`MESSAGE`] into `out`, cut to `size` bytes with its NUL.

@@ -92,8 +92,8 @@ impl Library {
     }
 }
 
-/// A task of the driver, which [`analog`] wraps by direction. Dropping it clears it
-/// in the driver.
+/// A task of the driver, which each public task type wraps. Dropping it clears it in
+/// the driver.
 #[derive(Debug)]
 struct Task {
     library: Library,
@@ -144,6 +144,15 @@ impl Task {
                 buffer,
             )
         };
+        self.check(code)
+    }
+
+    /// Adds the lines `lines` names with `create`, one channel for each line.
+    fn lines(&self, create: ffi::Lines, lines: &str) -> Result<(), Error> {
+        let lines = text(lines);
+        // SAFETY: a live handle and NUL-terminated strings.
+        let code =
+            unsafe { create(self.handle, lines.as_ptr(), c"".as_ptr(), ffi::PER_LINE) };
         self.check(code)
     }
 
