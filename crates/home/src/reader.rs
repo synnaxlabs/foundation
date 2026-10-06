@@ -43,14 +43,21 @@ struct Entry {
 }
 
 impl Set {
-    /// Adds the readers of the index at `slot` at the next place, with `live` as the
-    /// seq of its next live frame. The shard carries its indexes in the same order.
-    pub(crate) fn carry(&mut self, slot: Slot, live: u64) {
+    /// Adds the readers of the index at `slot` at `place`, with `live` as the seq of
+    /// its next live frame.
+    ///
+    /// # Panics
+    ///
+    /// If `place` is not the next place.
+    pub(crate) fn carry(&mut self, place: usize, slot: Slot, live: u64) {
+        assert_eq!(place, self.entries.len(), "{place} is not the next place");
         self.entries.push(Entry {
             slot,
             readers: Readers::new(live),
             listed: false,
         });
+        // So that `applied` never grows the list.
+        self.listed.reserve(self.entries.len() - self.listed.len());
     }
 
     /// Opens an unnamed complete reader on the index at `place` at seq `live`, with a
@@ -128,7 +135,7 @@ impl Set {
     /// Gives `frame`, stored in the buffer at `seq`, to the readers of the index at
     /// `place`. A live frame is the newest frame at once, and goes to complete readers
     /// after the commit that holds it. A backfill frame goes to no reader.
-    pub(crate) fn store(&mut self, place: usize, frame: Frame, seq: Range<u64>) {
+    pub(crate) fn applied(&mut self, place: usize, frame: Frame, seq: Range<u64>) {
         if frame.path() == Path::Backfill {
             return;
         }
@@ -140,12 +147,18 @@ impl Set {
         }
     }
 
-    /// Gives `frame`, which found no room in the buffer, to the readers of the index at
-    /// `place`: a live frame is the newest frame. Complete readers never get it.
-    pub(crate) fn lose(&mut self, place: usize, frame: Frame) {
-        if frame.path() == Path::Backfill {
-            return;
-        }
+    /// Makes `frame`, a live frame that found no room in the buffer, the newest frame
+    /// of the index at `place`. Complete readers never get it.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is a backfill frame, which waits for room instead.
+    pub(crate) fn lost(&mut self, place: usize, frame: Frame) {
+        assert_eq!(
+            frame.path(),
+            Path::Live,
+            "invariant: only a live frame is lost"
+        );
         let entry = &mut self.entries[place];
         wake(&mut self.keys, entry.slot, entry.readers.put(frame));
     }
@@ -197,8 +210,10 @@ fn wake<K: Copy + Into<delivery::Key>>(
 
 #[cfg(test)]
 mod tests {
+    use std::iter;
     use std::sync::Arc;
 
+    use delivery::complete;
     use types::frame::key_set::{Group, Interner, KeySet};
     use types::frame::{self, Draft, Form};
 
@@ -242,8 +257,8 @@ mod tests {
     /// A set that carries `indexes` indexes, at slots from 0, each with no live frame.
     fn carried(indexes: u32) -> Set {
         let mut set = Set::default();
-        for n in 0..indexes {
-            set.carry(Slot::new(n), 0);
+        for (place, n) in (0..indexes).enumerate() {
+            set.carry(place, Slot::new(n), 0);
         }
         set
     }
@@ -253,6 +268,24 @@ mod tests {
         mem::take(&mut set.keys)
     }
 
+    /// The complete readers of the index at `place` that get frames once its live
+    /// frames before `durable` are on disk.
+    fn released(set: &mut Set, place: usize, durable: u64) -> Vec<complete::Key> {
+        set.entries[place].readers.release(durable).to_vec()
+    }
+
+    /// The range of each frame the reader `session` of the index at `place` takes now.
+    fn taken(
+        set: &mut Set,
+        place: usize,
+        session: impl Into<delivery::Key>,
+    ) -> Vec<frame::Range> {
+        let session = session.into();
+        iter::from_fn(|| set.take(place, session))
+            .map(|frame| frame.range(0).expect("the index is present"))
+            .collect()
+    }
+
     fn reader(place: u32, session: impl Into<delivery::Key>) -> Key {
         Key {
             slot: Slot::new(place),
@@ -260,11 +293,11 @@ mod tests {
         }
     }
 
-    fn range(frame: &Frame) -> Option<frame::Range> {
-        frame.range(0)
+    fn range(seq: u64, count: u32) -> frame::Range {
+        frame::Range { seq, count }
     }
 
-    mod store {
+    mod applied {
         use super::*;
 
         #[test]
@@ -273,23 +306,23 @@ mod tests {
             let mut set = carried(2);
             let latest = set.open_latest(1, now());
             assert_eq!(woken(&mut set), []);
-            set.store(1, frames.frame(Path::Live, 0..2), 0..2);
+            set.applied(1, frames.frame(Path::Live, 0..2), 0..2);
             assert_eq!(woken(&mut set), [reader(1, latest)]);
             assert_eq!(set.listed(), []);
-            let taken = set.take(1, latest.into()).expect("the newest frame");
-            assert_eq!(range(&taken), Some(frame::Range { seq: 0, count: 2 }));
+            assert_eq!(taken(&mut set, 1, latest), [range(0, 2)]);
         }
 
         #[test]
-        fn lists_an_index_once_while_its_live_frames_wait_for_a_commit() {
+        fn queues_live_frames_for_complete_readers_and_lists_the_index_once() {
             let frames = Frames::new();
             let mut set = carried(2);
             let complete = set.open_complete(1, 0, u64::MAX);
-            set.store(1, frames.frame(Path::Live, 0..1), 0..1);
-            set.store(1, frames.frame(Path::Live, 1..3), 1..3);
+            set.applied(1, frames.frame(Path::Live, 0..1), 0..1);
+            set.applied(1, frames.frame(Path::Live, 1..3), 1..3);
             assert_eq!(set.listed(), [1]);
             assert_eq!(woken(&mut set), []);
-            assert!(set.take(1, complete.into()).is_none());
+            assert_eq!(released(&mut set, 1, 3), [complete]);
+            assert_eq!(taken(&mut set, 1, complete), [range(0, 1), range(1, 2)]);
         }
 
         #[test]
@@ -298,40 +331,51 @@ mod tests {
             let mut set = carried(1);
             let latest = set.open_latest(0, now());
             let _ = set.open_complete(0, 0, u64::MAX);
-            set.store(0, frames.frame(Path::Backfill, 0..2), 0..2);
+            set.applied(0, frames.frame(Path::Backfill, 0..2), 0..2);
             assert_eq!(woken(&mut set), []);
             assert_eq!(set.listed(), []);
-            assert!(set.take(0, latest.into()).is_none());
-            set.store(0, frames.frame(Path::Live, 0..1), 0..1);
+            assert_eq!(released(&mut set, 0, 2), []);
+            assert_eq!(taken(&mut set, 0, latest), []);
+            set.applied(0, frames.frame(Path::Live, 0..1), 0..1);
             assert_eq!(woken(&mut set), [reader(0, latest)]);
         }
     }
 
-    mod lose {
+    mod lost {
         use super::*;
 
         #[test]
-        fn wakes_the_latest_readers_of_a_live_frame_and_lists_nothing() {
+        fn gives_a_live_frame_to_the_latest_readers_only() {
             let frames = Frames::new();
             let mut set = carried(1);
             let latest = set.open_latest(0, now());
             let complete = set.open_complete(0, 0, u64::MAX);
-            set.lose(0, frames.frame(Path::Live, 0..2));
+            set.lost(0, frames.frame(Path::Live, 0..2));
             assert_eq!(woken(&mut set), [reader(0, latest)]);
             assert_eq!(set.listed(), []);
-            assert!(set.take(0, complete.into()).is_none());
-            let taken = set.take(0, latest.into()).expect("the newest frame");
-            assert_eq!(range(&taken), Some(frame::Range { seq: 0, count: 2 }));
+            assert_eq!(taken(&mut set, 0, latest), [range(0, 2)]);
+            set.applied(0, frames.frame(Path::Live, 2..3), 2..3);
+            assert_eq!(released(&mut set, 0, 3), [complete]);
+            assert_eq!(taken(&mut set, 0, complete), [range(2, 1)]);
         }
 
         #[test]
-        fn gives_a_backfill_frame_to_no_reader() {
+        #[should_panic(expected = "invariant: only a live frame is lost")]
+        fn panics_on_a_backfill_frame() {
             let frames = Frames::new();
             let mut set = carried(1);
-            let latest = set.open_latest(0, now());
-            set.lose(0, frames.frame(Path::Backfill, 0..2));
-            assert_eq!(woken(&mut set), []);
-            assert!(set.take(0, latest.into()).is_none());
+            set.lost(0, frames.frame(Path::Backfill, 0..2));
+        }
+    }
+
+    mod carry {
+        use super::*;
+
+        #[test]
+        #[should_panic(expected = "2 is not the next place")]
+        fn panics_when_the_place_is_not_the_next() {
+            let mut set = carried(1);
+            set.carry(2, Slot::new(1), 0);
         }
     }
 
@@ -342,10 +386,10 @@ mod tests {
         fn wakes_at_once_when_the_index_has_a_newest_frame() {
             let frames = Frames::new();
             let mut set = carried(1);
-            set.store(0, frames.frame(Path::Live, 0..1), 0..1);
+            set.applied(0, frames.frame(Path::Live, 0..1), 0..1);
             let latest = set.open_latest(0, now());
             assert_eq!(woken(&mut set), [reader(0, latest)]);
-            assert!(set.take(0, latest.into()).is_some());
+            assert_eq!(taken(&mut set, 0, latest), [range(0, 1)]);
         }
     }
 
@@ -359,8 +403,8 @@ mod tests {
             let first = set.open_latest(0, now());
             let second = set.open_latest(1, now());
             assert_eq!(first, second, "each index numbers its own readers");
-            set.store(0, frames.frame(Path::Live, 0..1), 0..1);
-            set.store(1, frames.frame(Path::Live, 0..1), 0..1);
+            set.applied(0, frames.frame(Path::Live, 0..1), 0..1);
+            set.applied(1, frames.frame(Path::Live, 0..1), 0..1);
             set.close(0, first.into(), now());
             assert_eq!(woken(&mut set), [reader(1, second)]);
         }

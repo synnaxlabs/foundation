@@ -57,8 +57,9 @@ struct Claim {
 #[derive(Debug, Default)]
 struct Scratch {
     split: split::Scratch,
-    /// The check of each present group, in group order.
-    checks: Vec<(u32, Result<Accepted, Refusal>)>,
+    /// The check of each present group, in group order, with its index frame once
+    /// frozen.
+    checks: Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
     /// The stored entry of each accepted group, in group order. Empty between
     /// appends.
     entries: Vec<Entry>,
@@ -158,10 +159,11 @@ impl Shard {
         };
         let live = tail(Path::Live);
         let index = Index::new(self.limits, live, tail(Path::Backfill));
-        let carried = self.places.insert(slot, self.indexes.len());
+        let place = self.indexes.len();
+        let carried = self.places.insert(slot, place);
         assert!(carried.is_none(), "the shard carries {slot:?} already");
         self.indexes.push(index);
-        self.readers.carry(slot, live.seq);
+        self.readers.carry(place, slot, live.seq);
     }
 
     /// Opens `writer` on each index of its key set at monotonic time `now`, and
@@ -256,9 +258,9 @@ impl Shard {
             let (claim, _) = session.claim(group);
             let index = &mut self.indexes[claim.place];
             let checked = index.check(claim.key, path, stamps, now, mesh);
-            scratch.checks.push((group, checked));
+            scratch.checks.push((group, checked, None));
         }
-        let groups = scratch.checks.iter().map(|&(group, _)| group);
+        let groups = scratch.checks.iter().map(|&(group, ..)| group);
         let recorded = record(
             &self.buffer,
             &self.pool,
@@ -405,7 +407,9 @@ impl Shard {
     /// the live frames now on disk. A key is a hint: take from each until
     /// [`take`](Self::take) gives `None`. Call it after each write and each commit.
     /// When a commit ended since the last call, it reads each index with live frames
-    /// queued for complete readers; else it reads none.
+    /// queued for complete readers; else it reads none. Pass the same `keys` each
+    /// time: the shard swaps it for its own, so neither allocates once both are large
+    /// enough.
     pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.readers.woken(&self.buffer, keys);
     }
@@ -449,8 +453,9 @@ impl Session {
     }
 }
 
-/// Freezes the index frame from `split` of each accepted group of `checks`, and pushes
-/// its stored entry onto `entries`, in group order, at mesh time `stored_at`.
+/// Freezes the index frame from `split` of each accepted group of `checks` into its
+/// check, and pushes its stored entry onto `entries`, in group order, at mesh time
+/// `stored_at`.
 ///
 /// # Errors
 ///
@@ -460,14 +465,14 @@ fn freeze(
     pool: &block::Pool,
     split: &mut Split<'_>,
     set: &KeySet,
-    checks: &mut [(u32, Result<Accepted, Refusal>)],
+    checks: &mut [(u32, Result<Accepted, Refusal>, Option<Frame>)],
     stored_at: Stamp,
 ) -> Result<(), block::Error> {
-    for (group, checked) in checks {
+    for (group, checked, frozen) in checks {
         if let Ok(accepted) = checked {
             let draft = split.frame(pool, *group)?;
+            let frame = frozen.insert(accepted.freeze(draft, *group));
             let last = accepted.last();
-            let frame = accepted.freeze(draft, *group);
             entries.push(stored::entry(pool, frame, set, last, stored_at)?);
         }
     }
@@ -523,7 +528,7 @@ fn record(
 /// present group into `out`: applied when the append found `room`, else lost. Each
 /// frame goes to `readers`.
 fn spend<'a>(
-    checks: &mut Vec<(u32, Result<Accepted, Refusal>)>,
+    checks: &mut Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
     indexes: &mut [Index],
     session: &Session,
     room: bool,
@@ -531,7 +536,7 @@ fn spend<'a>(
     out: &'a mut Vec<Outcome>,
 ) -> &'a [Outcome] {
     out.clear();
-    for (group, checked) in checks.drain(..) {
+    for (group, checked, frozen) in checks.drain(..) {
         let (claim, entry) = session.claim(group);
         let slot = entry.slot;
         let index = &mut indexes[claim.place];
@@ -539,15 +544,16 @@ fn spend<'a>(
             Ok(accepted) if room => {
                 let seq = accepted.seq();
                 let range = range(&seq);
-                let frame = index.spend(accepted);
-                let frame = frame.expect("invariant: a stored frame was frozen");
-                readers.store(claim.place, frame, seq);
+                index.spend(accepted);
+                let frame = frozen.expect("invariant: a stored frame was frozen");
+                readers.applied(claim.place, frame, seq);
                 Outcome::Applied { slot, range }
             }
             Ok(accepted) => {
                 let range = range(&accepted.seq());
-                if let Some(frame) = index.spend(accepted) {
-                    readers.lose(claim.place, frame);
+                index.spend(accepted);
+                if let Some(frame) = frozen {
+                    readers.lost(claim.place, frame);
                 }
                 Outcome::Lost { slot, range }
             }

@@ -22,7 +22,6 @@ pub(crate) struct Index {
 pub(crate) struct Accepted {
     order: order::Accepted,
     permit: Permit,
-    frame: Option<Frame>,
 }
 
 impl Accepted {
@@ -37,15 +36,13 @@ impl Accepted {
     }
 
     /// Sets the seq of `group` in `draft` and freezes it on the accepted path.
-    /// [`Index::spend`] gives the frame back.
     ///
     /// # Panics
     ///
-    /// If `group` is absent from `draft`, or a frame was frozen already.
-    pub(crate) fn freeze(&mut self, mut draft: Draft, group: u32) -> &Frame {
-        assert!(self.frame.is_none(), "invariant: a frame is frozen once");
+    /// If `group` is absent from `draft`.
+    pub(crate) fn freeze(&self, mut draft: Draft, group: u32) -> Frame {
         draft.set_seq(group, self.order.seq.start);
-        self.frame.insert(draft.freeze(self.order.path))
+        draft.freeze(self.order.path)
     }
 }
 
@@ -89,7 +86,6 @@ impl Index {
         Ok(Accepted {
             order: order.end(),
             permit,
-            frame: None,
         })
     }
 
@@ -104,21 +100,14 @@ impl Index {
         self.order.tail(Path::Live).seq
     }
 
-    /// Spends the seq of `accepted` and renews the writer's control lease. Returns the
-    /// frame frozen in `accepted`, or `None` when none was.
+    /// Spends the seq of `accepted` and renews the writer's control lease.
     ///
     /// # Panics
     ///
     /// If either path moved, or the holder changed, after the check.
-    pub(crate) fn spend(&mut self, accepted: Accepted) -> Option<Frame> {
-        let Accepted {
-            order,
-            permit,
-            frame,
-        } = accepted;
-        self.gate.renew(permit);
-        self.order.advance(order);
-        frame
+    pub(crate) fn spend(&mut self, accepted: Accepted) {
+        self.gate.renew(accepted.permit);
+        self.order.advance(accepted.order);
     }
 }
 
@@ -226,8 +215,7 @@ mod tests {
         Lease::new(Span::from_nanos(nanos)).expect("a lease longer than zero")
     }
 
-    /// Checks a live frame of `seconds` from `key` at `now`, and spends its seq with
-    /// no frame.
+    /// Checks a live frame of `seconds` from `key` at `now`, and spends its seq.
     fn write(
         index: &mut Index,
         key: control::Key,
@@ -236,7 +224,7 @@ mod tests {
     ) -> Result<Range<u64>, Refusal> {
         let accepted = check(index, key, Path::Live, seconds, now)?;
         let seq = accepted.seq();
-        assert!(index.spend(accepted).is_none(), "no frame was frozen");
+        index.spend(accepted);
         Ok(seq)
     }
 
@@ -334,15 +322,12 @@ mod tests {
 
         #[test]
         fn does_not_renew_the_lease_until_spend() {
-            let frames = Frames::new();
             let mut index = index();
             let holder = index.gate.open(writer("a", 10), Some(lease(10)), at(0));
-            let series = stamps(&[1]);
-            let mut accepted = check(&mut index, holder, Path::Live, &[1], at(8))
+            let accepted = check(&mut index, holder, Path::Live, &[1], at(8))
                 .expect("a holder's frame in order");
-            let _ = accepted.freeze(frames.draft(&series), 0);
             assert_eq!(index.gate.deadline(), Some(at(10)));
-            drop(index.spend(accepted));
+            index.spend(accepted);
             assert_eq!(index.gate.deadline(), Some(at(18)));
         }
 
@@ -358,49 +343,49 @@ mod tests {
         }
     }
 
+    mod freeze {
+        use super::*;
+
+        #[test]
+        fn freezes_a_live_frame_at_its_seq() {
+            let frames = Frames::new();
+            let mut index = index();
+            let key = index.gate.open(writer("a", 10), None, at(0));
+            assert_eq!(write(&mut index, key, &[1], at(1)), Ok(0..1));
+            let accepted = check(&mut index, key, Path::Live, &[2, 3], at(2))
+                .expect("a holder's frame in order");
+            let frame = accepted.freeze(frames.draft(&stamps(&[2, 3])), 0);
+            assert_eq!(frame.path(), Path::Live);
+            assert_eq!(frame.range(0), Some(frame::Range { seq: 1, count: 2 }));
+        }
+
+        #[test]
+        fn freezes_a_backfill_frame_at_its_seq() {
+            let frames = Frames::new();
+            let mut index = index();
+            let key = index.gate.open(writer("a", 10), None, at(0));
+            assert_eq!(write(&mut index, key, &[5], at(1)), Ok(0..1));
+            let accepted = check(&mut index, key, Path::Backfill, &[1, 2], at(2))
+                .expect("a holder's frame in order");
+            let frame = accepted.freeze(frames.draft(&stamps(&[1, 2])), 0);
+            assert_eq!(frame.path(), Path::Backfill);
+            assert_eq!(frame.range(0), Some(frame::Range { seq: 0, count: 2 }));
+        }
+    }
+
     mod spend {
         use super::*;
 
         #[test]
-        fn returns_a_live_frame_at_its_seq() {
-            let frames = Frames::new();
+        fn moves_only_the_accepted_path() {
             let mut index = index();
             let key = index.gate.open(writer("a", 10), None, at(0));
-            let series = stamps(&[2, 3]);
-            assert_eq!(write(&mut index, key, &[1], at(1)), Ok(0..1));
-            let mut accepted = check(&mut index, key, Path::Live, &[2, 3], at(2))
+            let accepted = check(&mut index, key, Path::Backfill, &[1, 2], at(1))
                 .expect("a holder's frame in order");
-            let frozen = accepted.freeze(frames.draft(&series), 0).clone();
-            let frame = index.spend(accepted).expect("the frozen frame");
-            assert_eq!(frame.path(), Path::Live);
-            assert_eq!(frame.range(0), Some(frame::Range { seq: 1, count: 2 }));
-            assert_eq!(frame.series(0), frozen.series(0));
-            assert_eq!(index.live_tail(), 3);
-        }
-
-        #[test]
-        fn returns_a_backfill_frame_and_keeps_the_live_path() {
-            let frames = Frames::new();
-            let mut index = index();
-            let key = index.gate.open(writer("a", 10), None, at(0));
-            let series = stamps(&[1, 2]);
-            let mut accepted = check(&mut index, key, Path::Backfill, &[1, 2], at(1))
-                .expect("a holder's frame in order");
-            let _ = accepted.freeze(frames.draft(&series), 0);
-            let frame = index.spend(accepted).expect("the frozen frame");
-            assert_eq!(frame.path(), Path::Backfill);
-            assert_eq!(frame.range(0), Some(frame::Range { seq: 0, count: 2 }));
+            index.spend(accepted);
+            assert_eq!(index.live_tail(), 0);
             assert_eq!(write(&mut index, key, &[3], at(2)), Ok(0..1));
-        }
-
-        #[test]
-        fn spends_the_seq_of_a_frame_the_pool_had_no_room_for() {
-            let mut index = index();
-            let key = index.gate.open(writer("a", 10), None, at(0));
-            let accepted = check(&mut index, key, Path::Live, &[1, 2], at(1))
-                .expect("a holder's frame in order");
-            assert!(index.spend(accepted).is_none(), "no frame was frozen");
-            assert_eq!(write(&mut index, key, &[3], at(2)), Ok(2..3));
+            assert_eq!(index.live_tail(), 1);
         }
 
         #[test]
@@ -412,7 +397,7 @@ mod tests {
             let first = first.expect("a holder's frame in order");
             // At the same time, so the gate still takes the first permit.
             assert_eq!(write(&mut index, key, &[1], at(1)), Ok(0..1));
-            drop(index.spend(first));
+            index.spend(first);
         }
 
         #[test]
@@ -425,20 +410,7 @@ mod tests {
             let first = check(&mut index, key, Path::Live, &[1], at(1));
             let first = first.expect("a holder's frame in order");
             let _ = index.gate.open(writer("b", 20), None, at(1));
-            drop(index.spend(first));
-        }
-
-        #[test]
-        #[should_panic(expected = "invariant: a frame is frozen once")]
-        fn panics_when_a_frame_is_frozen_twice() {
-            let frames = Frames::new();
-            let mut index = index();
-            let key = index.gate.open(writer("a", 10), None, at(0));
-            let series = stamps(&[1]);
-            let mut accepted = check(&mut index, key, Path::Live, &[1], at(1))
-                .expect("a holder's frame in order");
-            let _ = accepted.freeze(frames.draft(&series), 0);
-            let _ = accepted.freeze(frames.draft(&series), 0);
+            index.spend(first);
         }
     }
 
