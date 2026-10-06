@@ -91,7 +91,8 @@ How to read this record:
   non-ASCII device tags to ASCII names.
 - **NAME LENGTH (2026-10-04)** A name or pattern holds at most 255 bytes. The person
   chose "255 bytes": it fits a one-byte length prefix, and raising it later stays
-  backward compatible.
+  backward compatible. The `!` of an exclusion is syntax: the exclusion's pattern is
+  the text after it. Decided by the advisor on 2026-10-06, #762.
 - **SPECIFICITY (#3)** Pattern specificity orders by more literal segments, then fewer
   `**`, then more `*`: `a.b` > `a.*` > `a.*.**` > `a.**` > `**`. A run of wildcards
   counts as its `*`s and one `**` (`a.**.*.**` is `a.*.**`). Two different patterns may
