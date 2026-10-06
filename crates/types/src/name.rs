@@ -6,6 +6,7 @@
 
 use std::cmp::Reverse;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::str::{FromStr, Split};
 
 /// A name: dot-separated segments of letters, digits, `_`, and `-`, at most
@@ -202,13 +203,24 @@ pub struct Specificity {
     ones: usize,
 }
 
-/// A set of patterns. A name matches when an include pattern matches it and no
-/// exclusion does. An exclusion is a pattern written with a leading `!`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// A set of patterns, as written. A name matches when an include pattern matches it
+/// and no exclusion does. An exclusion is a pattern written with a leading `!`.
+/// Equality and hashing compare the texts in order.
+#[derive(Clone)]
 pub struct Selector {
-    /// Each include pattern, with its position in the list given to `new`.
+    texts: Box<[Box<str>]>,
+    // The patterns `texts` read as. Each include has its position in `texts`.
     include: Vec<(usize, Pattern)>,
     exclude: Vec<Pattern>,
+}
+
+/// A pattern of a selector as written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Written<'a> {
+    /// A pattern that includes names.
+    Include(&'a str),
+    /// A pattern that excludes names: the text after the `!`.
+    Exclude(&'a str),
 }
 
 impl Selector {
@@ -219,9 +231,14 @@ impl Selector {
     /// The first pattern that does not read, or [`Error::NoInclude`] when no pattern
     /// includes names.
     pub fn new<'a>(patterns: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
+        let texts = patterns
+            .into_iter()
+            .map(Box::from)
+            .collect::<Box<[Box<str>]>>();
         let mut include = Vec::new();
         let mut exclude = Vec::new();
-        for (position, text) in patterns.into_iter().enumerate() {
+        for (position, text) in texts.iter().enumerate() {
+            let text = &**text;
             match text.strip_prefix('!') {
                 Some("") => {
                     return Err(Error::Segment {
@@ -236,7 +253,26 @@ impl Selector {
         if include.is_empty() {
             return Err(Error::NoInclude);
         }
-        Ok(Self { include, exclude })
+        Ok(Self {
+            texts,
+            include,
+            exclude,
+        })
+    }
+
+    /// The patterns as written, in order, each exclusion with its `!`.
+    #[must_use]
+    pub fn texts(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.texts.iter().map(|t| &**t)
+    }
+
+    /// The patterns as written, in order, each by what it does.
+    #[must_use]
+    pub fn patterns(&self) -> impl ExactSizeIterator<Item = Written<'_>> {
+        self.texts().map(|text| {
+            text.strip_prefix('!')
+                .map_or(Written::Include(text), Written::Exclude)
+        })
     }
 
     /// The specificity of the most specific include pattern that matches `name`, or
@@ -266,45 +302,21 @@ impl Selector {
     }
 }
 
-/// The patterns of a selector as the file wrote them, in order, and the selector they
-/// read as. Two lists of patterns that select the same names are two values with two
-/// hashes, so a diff shows a rewrite of the patterns as a change.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Patterns {
-    texts: Box<[Box<str>]>,
-    // A function of `texts`, so the derived equality compares `texts`.
-    selector: Selector,
-}
-
-impl Patterns {
-    /// Reads the patterns. A pattern with a leading `!` excludes names.
-    ///
-    /// # Errors
-    ///
-    /// The error of [`Selector::new`] when the patterns do not read as a selector.
-    pub fn new<'a>(texts: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
-        let texts = texts
-            .into_iter()
-            .map(Box::from)
-            .collect::<Box<[Box<str>]>>();
-        let selector = Selector::new(texts.iter().map(|t| &**t))?;
-        Ok(Self { texts, selector })
-    }
-
-    /// The selector the patterns read as.
-    #[must_use]
-    pub const fn selector(&self) -> &Selector {
-        &self.selector
-    }
-
-    /// The patterns as written, in order.
-    #[must_use]
-    pub fn texts(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.texts.iter().map(|t| &**t)
+impl PartialEq for Selector {
+    fn eq(&self, other: &Self) -> bool {
+        self.texts == other.texts
     }
 }
 
-impl fmt::Debug for Patterns {
+impl Eq for Selector {}
+
+impl Hash for Selector {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.texts.hash(state);
+    }
+}
+
+impl fmt::Debug for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.texts()).finish()
     }
@@ -773,6 +785,39 @@ mod tests {
             assert_eq!(Selector::new(["a", "!"]), Err(segment_error("!", "")));
         }
 
+        #[test]
+        fn keeps_the_patterns_as_written() {
+            let s = Selector::new(["a.**.**", "!a.b"]).unwrap();
+            assert_eq!(format!("{s:?}"), r#"["a.**.**", "!a.b"]"#);
+            assert_eq!(s.texts().collect::<Vec<_>>(), ["a.**.**", "!a.b"]);
+            assert_eq!(
+                s.patterns().collect::<Vec<_>>(),
+                [Written::Include("a.**.**"), Written::Exclude("a.b")]
+            );
+        }
+
+        #[test]
+        fn compares_the_texts_in_order() {
+            let read = |texts: &[&str]| Selector::new(texts.iter().copied()).unwrap();
+            for (a, b) in [
+                (read(&["a.**.**"]), read(&["a.**"])),
+                (read(&["a", "b"]), read(&["b", "a"])),
+            ] {
+                for n in ["a", "a.b", "b", "c"] {
+                    assert_eq!(a.matches(&name(n)), b.matches(&name(n)), "{n}");
+                }
+                assert_ne!(a, b);
+            }
+            let hash = |s: &Selector| {
+                let mut hasher = std::hash::DefaultHasher::new();
+                s.hash(&mut hasher);
+                hasher.finish()
+            };
+            let a = read(&["a", "!a.b"]);
+            assert_eq!(a, read(&["a", "!a.b"]));
+            assert_eq!(hash(&a), hash(&read(&["a", "!a.b"])));
+        }
+
         mod outside {
             use super::*;
 
@@ -879,13 +924,6 @@ mod tests {
                 prop::collection::vec(prop::collection::vec(segment, 1..4), 7)
             }
         }
-    }
-
-    #[test]
-    fn shows_patterns_as_written() {
-        let patterns = Patterns::new(["a.**.**", "!a.b"]).unwrap();
-        assert_eq!(format!("{patterns:?}"), r#"["a.**.**", "!a.b"]"#);
-        assert_eq!(patterns.texts().collect::<Vec<_>>(), ["a.**.**", "!a.b"]);
     }
 
     proptest! {

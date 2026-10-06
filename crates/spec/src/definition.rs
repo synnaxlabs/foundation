@@ -27,7 +27,7 @@
 use std::{fmt, str};
 
 use types::authority::Authority;
-use types::name::{self, Patterns};
+use types::name::{self, Selector, Written};
 
 use crate::access::{Action, Actions, Policy};
 
@@ -90,10 +90,13 @@ impl Definition {
     }
 }
 
-fn patterns(out: &mut Vec<u8>, patterns: &Patterns) {
-    count(out, patterns.texts().len());
-    for text in patterns.texts() {
-        let (excluded, body) = text.strip_prefix('!').map_or((0, text), |b| (1, b));
+fn patterns(out: &mut Vec<u8>, selector: &Selector) {
+    count(out, selector.patterns().len());
+    for pattern in selector.patterns() {
+        let (excluded, body) = match pattern {
+            Written::Include(body) => (0, body),
+            Written::Exclude(body) => (1, body),
+        };
         out.push(excluded);
         count(out, body.len());
         out.extend_from_slice(body.as_bytes());
@@ -149,7 +152,7 @@ impl<'a> Reader<'a> {
             .ok_or(Error::Truncated { at })
     }
 
-    fn patterns(&mut self) -> Result<Patterns, Error> {
+    fn patterns(&mut self) -> Result<Selector, Error> {
         let at = self.at();
         let n = self.count(PATTERN_MIN)?;
         let mut texts = Vec::with_capacity(n);
@@ -176,7 +179,7 @@ impl<'a> Reader<'a> {
                 texts.push(text.to_owned());
             }
         }
-        Patterns::new(texts.iter().map(|t| &**t))
+        Selector::new(texts.iter().map(|t| &**t))
             .map_err(|error| Error::Pattern { at, error })
     }
 

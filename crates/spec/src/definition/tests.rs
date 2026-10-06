@@ -4,8 +4,8 @@ use types::name::Name;
 
 use super::*;
 
-fn patterns(texts: &[&str]) -> Patterns {
-    Patterns::new(texts.iter().copied()).unwrap()
+fn patterns(texts: &[&str]) -> Selector {
+    Selector::new(texts.iter().copied()).unwrap()
 }
 
 fn policy() -> Definition {
@@ -195,7 +195,7 @@ fn refuses_an_included_pattern_that_starts_with_a_bang() {
 fn stores_an_exclusion_of_the_longest_name() {
     let longest = "a".repeat(Name::MAX_BYTES);
     let excluded = format!("!{longest}");
-    let select = Patterns::new(["**", excluded.as_str()]).unwrap();
+    let select = Selector::new(["**", excluded.as_str()]).unwrap();
     let policy = Policy::new(patterns(&["a"]), select, Actions::NONE, Authority(0));
     let definition = Definition::Access(policy);
     let bytes = definition.encode();
@@ -251,9 +251,9 @@ fn pattern() -> impl Strategy<Value = String> {
     })
 }
 
-fn patterns_strategy() -> impl Strategy<Value = Patterns> {
+fn patterns_strategy() -> impl Strategy<Value = Selector> {
     ("[a-c]{1,3}", prop::collection::vec(pattern(), 0..4)).prop_map(|(first, rest)| {
-        Patterns::new(std::iter::once(first.as_str()).chain(rest.iter().map(|s| &**s)))
+        Selector::new(std::iter::once(first.as_str()).chain(rest.iter().map(|s| &**s)))
             .unwrap()
     })
 }
