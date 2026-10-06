@@ -261,8 +261,11 @@ mod tests {
 
     use super::{decode, encode};
 
+    /// The largest error a measurement has.
+    const UNKNOWN: Span = Measurement::unknown(Monotonic(0), Span::ZERO).error();
+
     fn slew() -> impl Strategy<Value = Slew> {
-        let error = 0..=36_500 * Span::DAY.nanos();
+        let error = 0..=UNKNOWN.nanos();
         let words = (
             any::<u64>(),
             any::<i64>(),

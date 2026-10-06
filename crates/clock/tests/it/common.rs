@@ -1,9 +1,10 @@
+use estimate::Measurement;
 use sim::Sim;
 use sim::node::{self, Node};
-use types::time::Span;
+use types::time::{Monotonic, Span};
 
-/// 36500 days, the error of an unknown measurement.
-pub(crate) const UNKNOWN: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
+/// The error of an unknown measurement.
+pub(crate) const UNKNOWN: Span = Measurement::unknown(Monotonic(0), Span::ZERO).error();
 
 pub(crate) fn ms(n: i64) -> Span {
     Span::from_nanos(n * 1_000_000)

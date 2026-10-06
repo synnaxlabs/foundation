@@ -758,10 +758,17 @@ How to read this record:
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
   source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
-  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` adds
-  the OS bound to the error of its own read, so the error is never less than the OS
-  bound. An error over 36500 days reads as unknown, the same as no bound (the
-  coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
+  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` gives
+  the OS reading to the exchange as an interval, its time plus or minus its bound, so
+  the error is never less than the OS bound. An error of 36500 days or more reads as
+  unknown, the same as no bound (the coordinator, #144). So does an edge of the bound
+  past the range of a stamp, centered at the reading as with no bound: a known bound
+  with such an edge needs a reading after 2162 or before 1777, so it cannot hold a true
+  time between those years. The coordinator approved it with the advisor, #910. Lost:
+  the edge stopped at the range, because it narrows a bound of 36500 days or more into a
+  known one; edges in `i128` through a new `estimate` input, because it keeps a false
+  bound that votes (#314); `Measurement::widened`, a public item that keeps the OS
+  reading a special path. Only `clock` and `node` call `clock::source::Wall::measure`; a
   lint denies it elsewhere (BQ20). On Linux the bound is the kernel's `maxerror`, and
   only chrony and ntpd compute it. `systemd-timesyncd` sets it to 0 at each update,
   while the clock can still be 0.4 s off. So a known OS bound on Linux needs chrony or
@@ -770,24 +777,28 @@ How to read this record:
   unknown, because it also drops the good bound from chrony and ntpd; detecting
   timesyncd, because it reaches outside `env::wall` and is a guess. The person decided
   on 2026-10-06 ("A is still fine"), #689.
-- **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its
-  OS reading and its OS bound. Cold nodes then vote with each other's OS clocks, and
-  each waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown
-  bound (an unknown estimate, or an OS clock with no bound) says "unknown" and carries
-  its offset. The asking node measures it as `exchange::Reading::Unknown`, so the answer
-  cannot narrow into a known bound (#930). A peer that never answers counts against a
-  majority, and `node` removes no source. Lost: a node with no time does not answer,
-  because then a mesh that starts cold never syncs; an answer of "no time" that takes
-  the source out of the vote, because a node with a bad OS clock then syncs on itself;
-  `node` removes a silent source after a timeout, a patch that puts time policy in
-  layer 4. The person decided on 2026-10-05 ("Yeah that's fine"), #145. So a node that
-  starts while no peer answers stays unsynced, even with a good OS bound. Its samples
-  keep their local monotonic reading, and the node stamps them in mesh time when the
-  first estimate comes, with the error of that estimate at each reading (200 ppm: 0.72 s
-  after 1 h). The buffer holds the samples until then, and a node that never syncs fills
-  it. Lost: drop the samples, a patch that loses data; stamp them with OS time at once,
-  a patch that writes a time the clock refused and cannot correct later. The person
-  decided on 2026-10-05 ("(b)"), #145.
+- **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its OS
+  reading and its OS bound. Cold nodes then vote with each other's OS clocks, and each
+  waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown bound
+  (an unknown estimate, or an OS clock with no bound) says "unknown" and carries its
+  offset. The asking node measures it as `exchange::Reading::Unknown`, so the answer
+  cannot narrow into a known bound (#930). A node answers from one read of its clock,
+  sent as both intervals, because two reads can straddle a sync and pair a known
+  interval with an unknown one. The read is after the request arrived and before the
+  answer left, so it bounds both ends of the exchange. An unknown answer carries
+  `Measurement::time`, because the midpoint of the interval moves after 2162 (#145). A
+  peer that never answers counts against a majority, and `node` removes no source. Lost:
+  a node with no time does not answer, because then a mesh that starts cold never syncs;
+  an answer of "no time" that takes the source out of the vote, because a node with a
+  bad OS clock then syncs on itself; `node` removes a silent source after a timeout, a
+  patch that puts time policy in layer 4. The person decided on 2026-10-05 ("Yeah that's
+  fine"), #145. So a node that starts while no peer answers stays unsynced, even with a
+  good OS bound. Its samples keep their local monotonic reading, and the node stamps
+  them in mesh time when the first estimate comes, with the error of that estimate at
+  each reading (200 ppm: 0.72 s after 1 h). The buffer holds the samples until then, and
+  a node that never syncs fills it. Lost: drop the samples, a patch that loses data;
+  stamp them with OS time at once, a patch that writes a time the clock refused and
+  cannot correct later. The person decided on 2026-10-05 ("(b)"), #145.
 - **CLOCK SUSPEND (2026-10-05)** `env::clock` counts time asleep (`CLOCK_BOOTTIME` on
   Linux, `mach_continuous_time` on macOS). After a suspend, the error has grown by
   drift over the sleep, and `clock` needs no reset. A monotonic clock that stops in
@@ -1900,7 +1911,10 @@ How to read this record:
   not depend on `transport`. `transport` owns the carriers and the session model, and
   its `Transport` trait is private. `Clock::epoch` gives the `Instant` at
   `Monotonic(0)` for libraries that take a std `Instant`. Decided by the design
-  session under the architecture delegation.
+  session under the architecture delegation. `Node::fail_udp` makes a UDP socket fail
+  as when the OS breaks it, until the socket drops: each receive gives `EIO`, the
+  datagrams that arrive at it are lost, and a send still works. Approved by the
+  coordinator on #907. Built by `simulation` in #926.
 - **SECTOR (2026-10-05)** `env::files::SECTOR` (512) is the length of the sector that
   a crash keeps or loses whole in a write that is not yet durable. It is a constant,
   so that a store format asserts against it when it compiles. A length read from the
@@ -2181,7 +2195,7 @@ Storage classes used in the table:
 | Time policy | Spec; selects node names; lists candidate peer nodes (default: the region's voters) | Files | `clock` | `spec`, `clock` |
 | Access policy | Spec; `{ subjects, select, allow, authority }` | Files | `access`, called by the owners (`home`, `mesh`) | `spec`, `access` |
 | Secret store policy | Spec; selects secret names | Files | The secret resolver | `spec` |
-| Connector | Files, then Spec as `spec::Connector { name, kind, node, config }` | People, `discover` | Supervisor on the placed node, the kind | `spec` (shell) |
+| Connector | Files, then Spec as `spec::connector::Connector { kind, node, config }`, keyed by its name | People, `discover` | Supervisor on the placed node, the kind | `spec` (shell) |
 | Kind config | Kind-owned: an opaque Document in the spec (canonical form, no source positions, so hashes stay stable) | Files | The kind's check at plan, `ctx.config()` at run | `connector-<kind>` |
 | Calculation | A connector of kind `calc`; program text is kind-owned; outputs on its own index | Files | `connector-calc` | `connector-calc` |
 | Open folder (A2) | Files, then Spec (mechanism: X28) | People | `hub`, `mesh` | `spec`, `mesh` |
