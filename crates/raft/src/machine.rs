@@ -1782,6 +1782,27 @@ mod tests {
             assert_eq!((raft.role(), raft.term()), (Role::Follower, Term(0)));
         }
 
+        // The candidate is not behind in term, so the refusal carries no proof.
+        #[test]
+        fn refuses_a_pre_vote_for_a_later_term_from_a_shorter_log_without_a_proof() {
+            let start = Start {
+                entries: entries(&[(1, 1)]),
+                ..start(&[1, 2, 3], proven(1))
+            };
+            let mut raft = Raft::new(CONFIG, start).unwrap();
+            let last = Position::default();
+            raft.step(message(2, 2, Body::PreVote { last })).unwrap();
+            let refusal = Message {
+                from: key(1),
+                to: key(2),
+                term: Term(1),
+                body: Body::PreVoteReply { granted: false },
+                proof: None,
+            };
+            assert_eq!(sent(&mut raft), [refusal]);
+            assert_eq!((raft.term(), raft.role()), (Term(1), Role::Follower));
+        }
+
         #[test]
         fn answers_a_heartbeat_from_a_lower_term_with_its_own_term() {
             let mut raft = raft(&[1, 2, 3], proven(5));

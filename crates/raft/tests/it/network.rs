@@ -266,19 +266,25 @@ impl Network {
         }
     }
 
-    // The last committed configuration of `node`, from its disk. `applied` is the
-    // node's commit index after each `collect`.
+    // The configuration `raft` counts as committed: the one in force once the node
+    // committed it, else the one before it, which the leader committed before it
+    // proposed the change. `applied` is the node's commit index after each `collect`.
     fn committed_voters(&self, node: usize) -> Voters {
         let disk = &self.disks[node];
-        let applied = usize::try_from(disk.applied).unwrap();
-        disk.entries[..applied]
-            .iter()
-            .rev()
-            .find_map(|entry| match &entry.data {
-                Data::Voters(voters) => Some(voters.clone()),
-                Data::Empty | Data::Bytes(_) => None,
-            })
-            .unwrap_or_else(|| self.base())
+        let mut configs =
+            disk.entries
+                .iter()
+                .rev()
+                .filter_map(|entry| match &entry.data {
+                    Data::Voters(voters) => Some((entry.at.index, voters)),
+                    Data::Empty | Data::Bytes(_) => None,
+                });
+        let committed = match configs.next() {
+            Some((index, voters)) if index <= disk.applied => Some(voters),
+            Some(_) => configs.next().map(|(_, voters)| voters),
+            None => None,
+        };
+        committed.map_or_else(|| self.base(), Voters::clone)
     }
 
     // Whether `voters` is a quorum of the configuration of `node`, in force or last
