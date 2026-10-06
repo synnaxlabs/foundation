@@ -718,6 +718,17 @@ mod tests {
                 let encoded = check(scalar, &values[..len * scalar.width()]);
                 prop_assert_eq!(encoded[0], vector::RAW);
             }
+
+            #[test]
+            fn constant_series_as_ffor_at_width_zero(
+                scalar in select(&INTS),
+                len in 3..2_100_usize,
+                word in any::<u64>(),
+            ) {
+                let values = word.to_le_bytes()[..scalar.width()].repeat(len);
+                let encoded = check(scalar, &values);
+                prop_assert_eq!(&encoded[..2], &[vector::FFOR, 0], "{:?}", scalar);
+            }
         }
     }
 
