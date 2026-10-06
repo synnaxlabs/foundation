@@ -1,7 +1,8 @@
 use std::pin::pin;
-use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
-use std::task::{Context, Poll, Waker};
+use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Instant;
 
 use env::clock::Clock;
@@ -142,6 +143,30 @@ fn a_sleep_is_polled_again_only_when_due() {
     on_a_thread(move || async move {
         let polls = polls(&clock, millis(50)).await;
         assert!(polls < 10, "{polls} polls");
+    });
+}
+
+/// Counts its wakes.
+#[derive(Default)]
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, SeqCst);
+    }
+}
+
+#[test]
+fn a_sleep_does_not_wake_its_task_before_the_deadline() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let counter = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut sleep = pin!(clock.sleep(millis(500)));
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
+        clock.sleep(millis(20)).await;
+        assert_eq!(counter.0.load(SeqCst), 0);
     });
 }
 
