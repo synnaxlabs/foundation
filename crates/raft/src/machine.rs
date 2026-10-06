@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::ops::RangeBounds;
 
 use types::node;
@@ -8,8 +8,8 @@ use crate::log::{Held, Log, Run};
 use crate::progress::Progress;
 use crate::voters::Tally;
 use crate::{
-    Body, Config, Data, Entry, Error, Grant, Hard, Message, Position, Proof, Start,
-    Term, Voters,
+    Answer, Body, Claim, Config, Data, Entry, Error, Grant, Hard, Message, Position,
+    Proof, Signature, Start, Term, Voters,
 };
 
 /// What a node is doing in its term.
@@ -52,9 +52,9 @@ impl Peer {
 // A message body that `check` passed.
 enum Checked {
     PreVote { last: Position },
-    PreVoteReply { granted: bool },
+    PreVoteReply { answer: Answer },
     Vote { last: Position },
-    VoteReply { granted: bool },
+    VoteReply { answer: Answer },
     Heartbeat { commit: Held },
     HeartbeatReply,
     Append { run: Run, commit: u64 },
@@ -62,10 +62,10 @@ enum Checked {
     AppendReject { hint: Held },
 }
 
-/// What the caller must do after an input, in this order: write `hard` and `entries`
-/// to disk and sync them, send `messages`, then apply `committed`. Write `hard` and
-/// `entries` in any order: a crash between the two is safe. `raft` is safe only when
-/// the disk keeps what it synced.
+/// What the caller must do after an input, in this order: [`sign`](Self::sign) this
+/// node's grants, write `hard` and `entries` to disk and sync them, send `messages`,
+/// then apply `committed`. Write `hard` and `entries` in any order: a crash between
+/// the two is safe. `raft` is safe only when the disk keeps what it synced.
 #[must_use = "a dropped Ready loses its messages and its hard state"]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ready {
@@ -77,6 +77,23 @@ pub struct Ready {
     pub committed: Vec<Entry>,
     /// Messages to send after the write, in the order the node made them.
     pub messages: Vec<Message>,
+}
+
+impl Ready {
+    /// Gives each grant with no signature the signature that `sign` makes for its
+    /// claim: this node's entry in the hard proof and in each message's proof, and
+    /// each grant it sends. Another node's grant keeps the signature it came with, so
+    /// it has one when the caller checked its message (see [`Message::claims`]).
+    pub fn sign(&mut self, mut sign: impl FnMut(&Claim) -> Signature) {
+        if let Some(hard) = &mut self.hard
+            && let Some(proof) = &mut hard.proof
+        {
+            proof.sign(hard.term, &mut sign);
+        }
+        for message in &mut self.messages {
+            message.sign(&mut sign);
+        }
+    }
 }
 
 /// One node's state machine. PreVote and CheckQuorum are always on.
@@ -96,7 +113,7 @@ pub struct Raft {
     // Never this node.
     peers: BTreeMap<node::Key, Peer>,
     // The first answer of each other voter to the current campaign.
-    answers: BTreeMap<node::Key, bool>,
+    answers: BTreeMap<node::Key, Answer>,
     // The leader's proof: the voters that elected it, itself included, with the
     // votes that arrive after the win. `None` in every other role.
     votes: Option<Proof>,
@@ -412,9 +429,11 @@ impl Raft {
                 let granted = (term > self.term || self.free_for(from))
                     && last >= self.log.last();
                 if granted {
-                    self.send(from, term, Body::PreVoteReply { granted }, None);
+                    let answer = Answer::Granted(None);
+                    self.send(from, term, Body::PreVoteReply { answer }, None);
                 } else if term > self.term {
-                    self.send(from, self.term, Body::PreVoteReply { granted }, None);
+                    let answer = Answer::Refused;
+                    self.send(from, self.term, Body::PreVoteReply { answer }, None);
                 } else {
                     // The candidate is one term behind, so the refusal is an
                     // answer to a stale message: it carries this term's proof.
@@ -422,28 +441,33 @@ impl Raft {
                 }
             }
             Checked::Vote { last } => {
-                let granted = self.free_for(from) && last >= self.log.last();
-                if granted {
+                let answer = if self.free_for(from) && last >= self.log.last() {
                     self.election_elapsed = 0;
                     self.vote = Some(from);
-                }
-                self.send(from, self.term, Body::VoteReply { granted }, None);
+                    Answer::Granted(None)
+                } else {
+                    Answer::Refused
+                };
+                self.send(from, self.term, Body::VoteReply { answer }, None);
             }
-            Checked::PreVoteReply { granted } => {
-                self.pre_vote_reply(from, term, granted);
+            Checked::PreVoteReply { answer } => {
+                self.pre_vote_reply(from, term, answer);
             }
-            Checked::VoteReply { granted } => match self.role {
-                Role::Candidate => self.poll(from, granted),
+            Checked::VoteReply { answer } => match (self.role, answer) {
+                (Role::Candidate, _) => self.poll(from, answer),
                 // A vote that arrives after the win joins the votes the leader
                 // carries.
-                Role::Leader if granted && self.voters.contains(from) => {
+                (Role::Leader, Answer::Granted(signature))
+                    if self.voters.contains(from) =>
+                {
                     let votes = self.votes.as_mut();
                     votes
                         .expect("invariant: a leader has its votes")
                         .voters
-                        .insert(from);
+                        .entry(from)
+                        .or_insert(signature);
                 }
-                Role::Leader | Role::Follower | Role::PreCandidate => {}
+                (Role::Leader | Role::Follower | Role::PreCandidate, _) => {}
             },
             Checked::Heartbeat { commit } => self.heartbeat(from, commit, proof),
             Checked::HeartbeatReply => {
@@ -492,9 +516,9 @@ impl Raft {
         }
         Ok(match body {
             Body::PreVote { last } => Checked::PreVote { last },
-            Body::PreVoteReply { granted } => Checked::PreVoteReply { granted },
+            Body::PreVoteReply { answer } => Checked::PreVoteReply { answer },
             Body::Vote { last } => Checked::Vote { last },
-            Body::VoteReply { granted } => Checked::VoteReply { granted },
+            Body::VoteReply { answer } => Checked::VoteReply { answer },
             Body::Heartbeat { commit } => Checked::Heartbeat {
                 commit: self.log.held(commit)?,
             },
@@ -756,10 +780,15 @@ impl Raft {
             return true;
         }
         let grant = match body {
-            Body::PreVote { .. } | Body::PreVoteReply { granted: true } => return true,
+            Body::PreVote { .. }
+            | Body::PreVoteReply {
+                answer: Answer::Granted(_),
+            } => return true,
             Body::Heartbeat { .. } | Body::Append { .. } => Some(Grant::Vote),
             Body::Vote { .. } => Some(Grant::PreVote),
-            Body::PreVoteReply { granted: false }
+            Body::PreVoteReply {
+                answer: Answer::Refused,
+            }
             | Body::VoteReply { .. }
             | Body::HeartbeatReply
             | Body::AppendReply { .. }
@@ -770,7 +799,8 @@ impl Raft {
             grant.is_none_or(|grant| proof.grant == grant && proof.candidate == from);
         // A leader elected under the committed configuration can overwrite a
         // configuration entry that is not committed yet.
-        let quorum = |voters: &Voters| voters.quorum(|key| proof.voters.contains(&key));
+        let quorum =
+            |voters: &Voters| voters.quorum(|key| proof.voters.contains_key(&key));
         fits && (quorum(&self.voters) || quorum(self.log.committed_voters()))
     }
 
@@ -794,12 +824,17 @@ impl Raft {
                 return false;
             }
             // A PreVote, or its grant, carries a term that no node is in yet.
-            Checked::PreVote { .. } | Checked::PreVoteReply { granted: true } => {
+            Checked::PreVote { .. }
+            | Checked::PreVoteReply {
+                answer: Answer::Granted(_),
+            } => {
                 return true;
             }
             Checked::Heartbeat { .. } | Checked::Append { .. } => Some(from),
             Checked::Vote { .. }
-            | Checked::PreVoteReply { granted: false }
+            | Checked::PreVoteReply {
+                answer: Answer::Refused,
+            }
             | Checked::VoteReply { .. }
             | Checked::HeartbeatReply
             | Checked::AppendReply { .. }
@@ -817,7 +852,9 @@ impl Raft {
             // The reply carries the higher term, so a stale leader steps down and
             // a node that is ahead of its group can be elected.
             Body::Heartbeat { .. } | Body::Append { .. } => Body::HeartbeatReply,
-            Body::PreVote { .. } => Body::PreVoteReply { granted: false },
+            Body::PreVote { .. } => Body::PreVoteReply {
+                answer: Answer::Refused,
+            },
             Body::Vote { .. }
             | Body::PreVoteReply { .. }
             | Body::VoteReply { .. }
@@ -932,35 +969,34 @@ impl Raft {
 
     // A grant carries the term the pre-campaign asked for, a refusal the voter's own
     // term. A grant of this node's term from a voter came late to the campaign.
-    fn pre_vote_reply(&mut self, from: node::Key, term: Term, granted: bool) {
-        let asked = if granted {
-            self.term.next()
-        } else {
-            Some(self.term)
+    fn pre_vote_reply(&mut self, from: node::Key, term: Term, answer: Answer) {
+        let asked = match answer {
+            Answer::Granted(_) => self.term.next(),
+            Answer::Refused => Some(self.term),
         };
         if self.role == Role::PreCandidate && asked == Some(term) {
-            self.poll(from, granted);
-        } else if self.role == Role::Candidate
-            && granted
+            self.poll(from, answer);
+        } else if let Answer::Granted(signature) = answer
+            && self.role == Role::Candidate
             && term == self.term
             && self.voters.contains(from)
         {
-            self.join_pre_vote(from);
+            self.join_pre_vote(from, signature);
         }
     }
 
     // Adds a pre-vote that arrived after the campaign to the candidate's proof and
     // asks the voters that have not answered again. A voter whose configuration the
     // first proof did not cover may take the larger one.
-    fn join_pre_vote(&mut self, from: node::Key) {
+    fn join_pre_vote(&mut self, from: node::Key, signature: Option<Signature>) {
         let proof = self.proof.as_mut();
-        let joined = proof
+        let voters = &mut proof
             .expect("invariant: a candidate has its pre-votes")
-            .voters
-            .insert(from);
-        if !joined {
+            .voters;
+        let btree_map::Entry::Vacant(entry) = voters.entry(from) else {
             return;
-        }
+        };
+        entry.insert(signature);
         let proof = self.proof.clone();
         let last = self.log.last();
         let unanswered: Vec<node::Key> = self
@@ -974,13 +1010,17 @@ impl Raft {
         }
     }
 
-    // The voters that granted the current campaign, this node included.
-    fn granted(&self) -> BTreeSet<node::Key> {
+    // The voters that granted the current campaign with their signatures, this node
+    // included with none.
+    fn granted(&self) -> BTreeMap<node::Key, Option<Signature>> {
+        let granted = |(&key, &answer)| match answer {
+            Answer::Granted(signature) => Some((key, signature)),
+            Answer::Refused => None,
+        };
         self.answers
             .iter()
-            .filter(|&(_, &granted)| granted)
-            .map(|(&key, _)| key)
-            .chain([self.key])
+            .filter_map(granted)
+            .chain([(self.key, None)])
             .collect()
     }
 
@@ -1037,9 +1077,9 @@ impl Raft {
 
     // Records one answer to the current campaign and acts when the answers decide it.
     // An answer from a node that is not a voter has no effect.
-    fn poll(&mut self, from: node::Key, granted: bool) {
+    fn poll(&mut self, from: node::Key, answer: Answer) {
         if self.voters.contains(from) {
-            self.answers.entry(from).or_insert(granted);
+            self.answers.entry(from).or_insert(answer);
             self.decide();
         }
     }
@@ -1050,7 +1090,8 @@ impl Raft {
             if key == self.key {
                 Some(true)
             } else {
-                self.answers.get(&key).copied()
+                let granted = |answer: &Answer| matches!(answer, Answer::Granted(_));
+                self.answers.get(&key).map(granted)
             }
         };
         match self.voters.tally(answer) {
@@ -1139,6 +1180,19 @@ mod tests {
         heartbeat_ticks: 1,
     };
 
+    const GRANTED: Answer = Answer::Granted(None);
+    const REFUSED: Answer = Answer::Refused;
+
+    // The signature of voter `id` for `grant`: each pair has its own.
+    fn signature(grant: Grant, id: u8) -> Signature {
+        let mut bytes = [id; 64];
+        bytes[0] = match grant {
+            Grant::PreVote => 0,
+            Grant::Vote => 1,
+        };
+        Signature(bytes)
+    }
+
     fn position(term: u64, index: u64) -> Position {
         Position {
             term: Term(term),
@@ -1180,12 +1234,26 @@ mod tests {
 
     // The message `from` sends node 1 in `term`, with the proof a correct sender
     // carries: its votes on a leader's message, its pre-votes on a vote request, a
-    // proof of the term on a reply, and none on a pre-vote or its grant.
-    fn message(from: u8, term: u64, body: Body) -> Message {
+    // proof of the term on a reply, and none on a pre-vote or its grant. A grant
+    // carries the sender's signature.
+    fn message(from: u8, term: u64, mut body: Body) -> Message {
+        let grant = if matches!(body, Body::VoteReply { .. }) {
+            Grant::Vote
+        } else {
+            Grant::PreVote
+        };
+        if let Body::PreVoteReply { answer } | Body::VoteReply { answer } = &mut body
+            && *answer == GRANTED
+        {
+            *answer = Answer::Granted(Some(signature(grant, from)));
+        }
         let grant = match body {
-            Body::PreVote { .. } | Body::PreVoteReply { granted: true } => None,
+            Body::PreVote { .. }
+            | Body::PreVoteReply {
+                answer: Answer::Granted(_),
+            } => None,
             Body::Vote { .. } => Some(Grant::PreVote),
-            Body::PreVoteReply { granted: false }
+            Body::PreVoteReply { answer: REFUSED }
             | Body::VoteReply { .. }
             | Body::Heartbeat { .. }
             | Body::HeartbeatReply
@@ -1518,8 +1586,8 @@ mod tests {
             let mut raft = raft(&[1, 2], Hard::default());
             raft.campaign();
             for body in [
-                Body::PreVoteReply { granted: true },
-                Body::VoteReply { granted: true },
+                Body::PreVoteReply { answer: GRANTED },
+                Body::VoteReply { answer: GRANTED },
             ] {
                 raft.step(message(2, 1, body)).unwrap();
             }
@@ -1575,7 +1643,7 @@ mod tests {
         fn rejects_a_message_from_itself() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             raft.campaign();
-            let rejected = Body::PreVoteReply { granted: false };
+            let rejected = Body::PreVoteReply { answer: REFUSED };
             let err = raft.step(message(1, 1, rejected.clone())).unwrap_err();
             assert_eq!(err, Error::Loopback);
             assert_eq!(err.to_string(), "a message names this node as its sender");
@@ -1751,12 +1819,12 @@ mod tests {
                 last: Position::default(),
             };
             first.step(message(2, 1, vote.clone())).unwrap();
-            let granted = Body::VoteReply { granted: true };
+            let granted = Body::VoteReply { answer: GRANTED };
             assert_eq!(sent(&mut first)[0].body, granted);
 
             let mut restarted = raft(&[1, 2, 3], first.hard());
             restarted.step(message(3, 1, vote.clone())).unwrap();
-            let rejected = Body::VoteReply { granted: false };
+            let rejected = Body::VoteReply { answer: REFUSED };
             assert_eq!(sent(&mut restarted)[0].body, rejected);
             restarted.step(message(2, 1, vote.clone())).unwrap();
             assert_eq!(sent(&mut restarted)[0].body, granted);
@@ -1766,9 +1834,9 @@ mod tests {
         fn counts_only_the_first_answer_of_a_voter() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             raft.campaign();
-            let rejected = Body::PreVoteReply { granted: false };
+            let rejected = Body::PreVoteReply { answer: REFUSED };
             raft.step(message(2, 0, rejected.clone())).unwrap();
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(2, 1, granted.clone())).unwrap();
             assert_eq!(raft.role(), Role::PreCandidate);
             raft.step(message(3, 1, granted.clone())).unwrap();
@@ -1779,7 +1847,7 @@ mod tests {
         fn ignores_an_answer_from_a_node_that_is_not_a_voter() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             raft.campaign();
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(9, 1, granted.clone())).unwrap();
             assert_eq!(raft.role(), Role::PreCandidate);
         }
@@ -1788,7 +1856,7 @@ mod tests {
         fn becomes_follower_when_a_quorum_rejects() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             raft.campaign();
-            let rejected = Body::PreVoteReply { granted: false };
+            let rejected = Body::PreVoteReply { answer: REFUSED };
             raft.step(message(2, 0, rejected.clone())).unwrap();
             assert_eq!(raft.role(), Role::PreCandidate);
             raft.step(message(3, 0, rejected.clone())).unwrap();
@@ -1809,7 +1877,7 @@ mod tests {
                 from: key(1),
                 to: key(2),
                 term: Term(1),
-                body: Body::PreVoteReply { granted: false },
+                body: Body::PreVoteReply { answer: REFUSED },
                 proof: None,
             };
             assert_eq!(sent(&mut raft), [refusal]);
@@ -1838,8 +1906,8 @@ mod tests {
             elect(&mut raft, &[2]);
             let hard = raft.hard();
             let bodies = [
-                Body::PreVoteReply { granted: false },
-                Body::VoteReply { granted: false },
+                Body::PreVoteReply { answer: REFUSED },
+                Body::VoteReply { answer: REFUSED },
                 Body::HeartbeatReply,
                 Body::AppendReply { last: 9 },
                 Body::AppendReject { hint: 9 },
@@ -1863,14 +1931,14 @@ mod tests {
                 let mut raft = raft(&[1, 2, 3], Hard::default());
                 raft.campaign();
                 if granted {
-                    let reply = Body::PreVoteReply { granted: true };
+                    let reply = Body::PreVoteReply { answer: GRANTED };
                     raft.step(message(2, 1, reply)).unwrap();
                 }
                 let (role, hard) = (raft.role(), raft.hard());
                 sent(&mut raft);
                 let bodies = [
-                    Body::PreVoteReply { granted: false },
-                    Body::VoteReply { granted: false },
+                    Body::PreVoteReply { answer: REFUSED },
+                    Body::VoteReply { answer: REFUSED },
                 ];
                 for body in bodies {
                     raft.step(message(9, 5, body.clone())).unwrap();
@@ -1888,8 +1956,8 @@ mod tests {
         raft.campaign();
         let term = raft.term().0 + 1;
         for granted in [
-            Body::PreVoteReply { granted: true },
-            Body::VoteReply { granted: true },
+            Body::PreVoteReply { answer: GRANTED },
+            Body::VoteReply { answer: GRANTED },
         ] {
             for &from in from {
                 raft.step(message(from, term, granted.clone())).unwrap();
@@ -1922,11 +1990,16 @@ mod tests {
         }
     }
 
+    // The proof of `voters` for `candidate`, each signed but node 1 in its own proof.
     fn proof(grant: Grant, candidate: u8, voters: &[u8]) -> Proof {
+        let entry = |id| {
+            let signed = id != 1 || candidate != 1;
+            (key(id), signed.then(|| signature(grant, id)))
+        };
         Proof {
             grant,
             candidate: key(candidate),
-            voters: voters.iter().copied().map(key).collect(),
+            voters: voters.iter().copied().map(entry).collect(),
         }
     }
 
@@ -1948,7 +2021,7 @@ mod tests {
             let mut raft = raft(&[1, 2, 3], at_term(1));
             raft.campaign();
             sent(&mut raft);
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(2, 2, granted)).unwrap();
             let expected = proof(Grant::PreVote, 1, &[1, 2]);
             let vote = |to| Message {
@@ -1971,15 +2044,105 @@ mod tests {
         }
 
         #[test]
+        fn a_candidate_carries_the_signatures_of_its_pre_votes() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            raft.campaign();
+            sent(&mut raft);
+            raft.step(message(2, 2, Body::PreVoteReply { answer: GRANTED }))
+                .unwrap();
+            let signed = Some(signature(Grant::PreVote, 2));
+            let voters = BTreeMap::from([(key(1), None), (key(2), signed)]);
+            for vote in sent(&mut raft) {
+                assert_eq!(vote.proof.unwrap().voters, voters);
+            }
+            assert_eq!(raft.hard().proof.unwrap().voters, voters);
+        }
+
+        #[test]
+        fn a_leader_carries_the_signatures_of_its_votes() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            raft.tick(0);
+            let signed = Some(signature(Grant::Vote, 2));
+            let voters = BTreeMap::from([(key(1), None), (key(2), signed)]);
+            for heartbeat in sent(&mut raft) {
+                assert_eq!(heartbeat.proof.unwrap().voters, voters);
+            }
+        }
+
+        #[test]
+        fn a_late_pre_vote_joins_with_its_signature() {
+            let mut raft = raft(&[1, 2, 3, 4], at_term(1));
+            raft.campaign();
+            for from in [2, 3] {
+                raft.step(message(from, 2, Body::PreVoteReply { answer: GRANTED }))
+                    .unwrap();
+            }
+            raft.step(message(4, 2, Body::PreVoteReply { answer: GRANTED }))
+                .unwrap();
+            let voters = raft.hard().proof.unwrap().voters;
+            let signed = Some(signature(Grant::PreVote, 4));
+            assert_eq!(voters.get(&key(4)), Some(&signed));
+        }
+
+        #[test]
+        fn a_late_vote_joins_with_its_signature() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            raft.step(message(3, 1, Body::VoteReply { answer: GRANTED }))
+                .unwrap();
+            raft.tick(0);
+            let voters = sent(&mut raft).remove(0).proof.unwrap().voters;
+            let signed = Some(signature(Grant::Vote, 3));
+            assert_eq!(voters.get(&key(3)), Some(&signed));
+        }
+
+        #[test]
+        fn grants_with_no_signature() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let last = Position::default();
+            raft.step(message(2, 1, Body::PreVote { last })).unwrap();
+            raft.step(message(2, 1, Body::Vote { last })).unwrap();
+            let bodies: Vec<Body> =
+                sent(&mut raft).into_iter().map(|m| m.body).collect();
+            let expected = [
+                Body::PreVoteReply { answer: GRANTED },
+                Body::VoteReply { answer: GRANTED },
+            ];
+            assert_eq!(bodies, expected);
+        }
+
+        #[test]
+        fn a_restart_keeps_the_signatures_of_its_proof() {
+            let signed = Proof {
+                grant: Grant::PreVote,
+                candidate: key(1),
+                voters: [1, 2]
+                    .map(|id| (key(id), Some(signature(Grant::PreVote, id))))
+                    .into(),
+            };
+            let hard = Hard {
+                term: Term(2),
+                vote: Some(key(1)),
+                leader: Some(key(1)),
+                proof: Some(signed.clone()),
+            };
+            let mut raft = raft(&[1, 2, 3], hard);
+            raft.step(message(3, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            assert_eq!(sent(&mut raft).remove(0).proof, Some(signed));
+        }
+
+        #[test]
         fn a_late_pre_vote_joins_the_candidates_proof_and_asks_again() {
             let mut raft = raft(&[1, 2, 3, 4], at_term(1));
             raft.campaign();
             sent(&mut raft);
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(2, 2, granted.clone())).unwrap();
             raft.step(message(3, 2, granted.clone())).unwrap();
             sent(&mut raft);
-            raft.step(message(2, 2, Body::VoteReply { granted: true }))
+            raft.step(message(2, 2, Body::VoteReply { answer: GRANTED }))
                 .unwrap();
             raft.step(message(4, 2, granted)).unwrap();
             let expected = proof(Grant::PreVote, 1, &[1, 2, 3, 4]);
@@ -2020,7 +2183,7 @@ mod tests {
             };
             let mut raft = Raft::new(CONFIG, start).unwrap();
             raft.campaign();
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(2, 2, granted.clone())).unwrap();
             assert_eq!(raft.role(), Role::Candidate);
             sent(&mut raft);
@@ -2079,7 +2242,7 @@ mod tests {
         fn a_vote_from_outside_the_voters_does_not_join() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             elect(&mut raft, &[2]);
-            raft.step(message(4, 1, Body::VoteReply { granted: true }))
+            raft.step(message(4, 1, Body::VoteReply { answer: GRANTED }))
                 .unwrap();
             raft.tick(0);
             let votes = Some(proof(Grant::Vote, 1, &[1, 2]));
@@ -2091,7 +2254,7 @@ mod tests {
         fn a_late_vote_joins_the_votes() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             elect(&mut raft, &[2]);
-            raft.step(message(3, 1, Body::VoteReply { granted: true }))
+            raft.step(message(3, 1, Body::VoteReply { answer: GRANTED }))
                 .unwrap();
             raft.tick(0);
             let votes = Some(proof(Grant::Vote, 1, &[1, 2, 3]));
@@ -2110,7 +2273,7 @@ mod tests {
             };
             for (body, reply) in [
                 (Body::Heartbeat { commit: 0 }, Body::HeartbeatReply),
-                (prevote, Body::PreVoteReply { granted: false }),
+                (prevote, Body::PreVoteReply { answer: REFUSED }),
             ] {
                 raft.step(message(3, 0, body)).unwrap();
                 let expected = Message {
@@ -2136,7 +2299,7 @@ mod tests {
                 from: key(1),
                 to: key(3),
                 term: Term(1),
-                body: Body::PreVoteReply { granted: false },
+                body: Body::PreVoteReply { answer: REFUSED },
                 proof: Some(proof(Grant::PreVote, 1, &[1, 2])),
             };
             assert_eq!(sent(&mut raft), [expected]);
@@ -2146,7 +2309,7 @@ mod tests {
         fn writes_the_proof_and_the_leader_once_with_the_term() {
             let mut raft = raft(&[1, 2, 3], at_term(1));
             raft.campaign();
-            raft.step(message(2, 2, Body::PreVoteReply { granted: true }))
+            raft.step(message(2, 2, Body::PreVoteReply { answer: GRANTED }))
                 .unwrap();
             let candidate = Hard {
                 term: Term(2),
@@ -2155,14 +2318,14 @@ mod tests {
                 proof: Some(proof(Grant::PreVote, 1, &[1, 2])),
             };
             assert_eq!(raft.ready().hard, Some(candidate.clone()));
-            raft.step(message(2, 2, Body::VoteReply { granted: true }))
+            raft.step(message(2, 2, Body::VoteReply { answer: GRANTED }))
                 .unwrap();
             let leader = Hard {
                 leader: Some(key(1)),
                 ..candidate
             };
             assert_eq!(raft.ready().hard, Some(leader));
-            raft.step(message(3, 2, Body::VoteReply { granted: true }))
+            raft.step(message(3, 2, Body::VoteReply { answer: GRANTED }))
                 .unwrap();
             assert_eq!(raft.ready().hard, None);
         }
@@ -2260,8 +2423,8 @@ mod tests {
                 Body::Vote {
                     last: Position::default(),
                 },
-                Body::VoteReply { granted: true },
-                Body::PreVoteReply { granted: false },
+                Body::VoteReply { answer: GRANTED },
+                Body::PreVoteReply { answer: REFUSED },
                 Body::Heartbeat { commit: 0 },
                 Body::HeartbeatReply,
                 append(Position::default(), vec![], 0),
@@ -2670,7 +2833,7 @@ mod tests {
         fn candidate() -> Raft {
             let mut raft = raft(&[1, 2, 3, 4, 5], at_term(1));
             raft.campaign();
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(2, 2, granted.clone())).unwrap();
             raft.step(message(3, 2, granted.clone())).unwrap();
             assert_eq!((raft.role(), raft.term()), (Role::Candidate, Term(2)));
@@ -2681,7 +2844,7 @@ mod tests {
         #[test]
         fn does_not_count_a_prevote_grant_as_a_vote() {
             let mut raft = candidate();
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(4, 2, granted.clone())).unwrap();
             raft.step(message(5, 2, granted.clone())).unwrap();
             assert_eq!(raft.role(), Role::Candidate);
@@ -2690,7 +2853,7 @@ mod tests {
         #[test]
         fn does_not_count_a_vote_from_a_lower_term() {
             let mut raft = candidate();
-            let granted = Body::VoteReply { granted: true };
+            let granted = Body::VoteReply { answer: GRANTED };
             raft.step(message(4, 1, granted.clone())).unwrap();
             raft.step(message(5, 1, granted.clone())).unwrap();
             assert_eq!(raft.role(), Role::Candidate);
@@ -2716,7 +2879,7 @@ mod tests {
         #[test]
         fn steps_down_on_a_vote_reply_from_a_higher_term() {
             let mut raft = candidate();
-            let rejected = message(4, 7, Body::VoteReply { granted: false });
+            let rejected = message(4, 7, Body::VoteReply { answer: REFUSED });
             let expected = Hard {
                 proof: rejected.proof.clone(),
                 ..at_term(7)
@@ -2733,7 +2896,7 @@ mod tests {
         fn does_not_count_a_vote_grant_as_a_prevote() {
             let mut raft = raft(&[1, 2, 3], at_term(1));
             raft.campaign();
-            let granted = Body::VoteReply { granted: true };
+            let granted = Body::VoteReply { answer: GRANTED };
             raft.step(message(2, 1, granted.clone())).unwrap();
             assert_eq!((raft.role(), raft.term()), (Role::PreCandidate, Term(1)));
         }
@@ -2743,7 +2906,7 @@ mod tests {
         fn keeps_no_answer_from_a_node_that_is_not_a_voter() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             raft.campaign();
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(9, 1, granted.clone())).unwrap();
             assert_eq!(raft.role(), Role::PreCandidate);
             assert!(raft.answers.is_empty());
@@ -2756,7 +2919,7 @@ mod tests {
         fn counts_a_grant_only_for_the_term_it_asks_for() {
             let mut raft = raft(&[1, 2, 3], at_term(1));
             raft.campaign();
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(2, 1, granted.clone())).unwrap();
             raft.step(message(2, 3, granted.clone())).unwrap();
             assert_eq!((raft.role(), raft.term()), (Role::PreCandidate, Term(1)));
@@ -2802,7 +2965,7 @@ mod tests {
                 last: Position::default(),
             };
             raft.step(message(3, 1, vote.clone())).unwrap();
-            let rejected = Body::VoteReply { granted: false };
+            let rejected = Body::VoteReply { answer: REFUSED };
             assert_eq!(sent(&mut raft)[0].body, rejected);
             let expected = Hard {
                 leader: Some(key(2)),
@@ -2832,7 +2995,7 @@ mod tests {
                 from: key(1),
                 to: key(2),
                 term: Term(3),
-                body: Body::VoteReply { granted: false },
+                body: Body::VoteReply { answer: REFUSED },
                 proof: None,
             };
             assert_eq!(sent(&mut raft), [reply]);
@@ -2850,7 +3013,7 @@ mod tests {
                 from: key(1),
                 to: key(2),
                 term: Term(5),
-                body: Body::PreVoteReply { granted: false },
+                body: Body::PreVoteReply { answer: REFUSED },
                 proof: with_proof(5).proof,
             };
             assert_eq!(sent(&mut raft), [reply]);
@@ -2942,7 +3105,7 @@ mod tests {
                 last: Position::default(),
             };
             raft.step(message(3, 1, vote.clone())).unwrap();
-            let rejected = Body::VoteReply { granted: false };
+            let rejected = Body::VoteReply { answer: REFUSED };
             assert_eq!(sent(&mut raft)[0].body, rejected);
             assert_eq!(raft.hard().vote, Some(key(1)));
         }
@@ -3039,10 +3202,10 @@ mod tests {
             let mut raft = raft(&[1, 2, 3], at_term(1));
             raft.campaign();
             let term = Term(2);
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(2, 2, granted)).unwrap();
             sent(&mut raft);
-            raft.step(message(2, 2, Body::VoteReply { granted: true }))
+            raft.step(message(2, 2, Body::VoteReply { answer: GRANTED }))
                 .unwrap();
             let ready = raft.ready();
             let empty = Entry {
@@ -3249,12 +3412,12 @@ mod tests {
         fn a_non_voter_answer_does_not_move_a_campaign() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
             raft.campaign();
-            let grant = Body::PreVoteReply { granted: true };
+            let grant = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(9, 1, grant.clone())).unwrap();
             assert_eq!(raft.role(), Role::PreCandidate);
             raft.step(message(2, 1, grant)).unwrap();
             assert_eq!(raft.role(), Role::Candidate);
-            let grant = Body::VoteReply { granted: true };
+            let grant = Body::VoteReply { answer: GRANTED };
             raft.step(message(9, 1, grant.clone())).unwrap();
             assert_eq!(raft.role(), Role::Candidate);
             raft.step(message(3, 1, grant)).unwrap();
@@ -3930,6 +4093,28 @@ mod tests {
             }
         }
 
+        // Node 5's vote arrives after the change that removes it is in force. Node 5
+        // is still a peer, but its vote does not join the votes that the leader
+        // carries to node 4, which has not answered.
+        #[test]
+        fn a_late_vote_of_a_removed_node_does_not_join_the_votes() {
+            let mut raft = raft(&[1, 2, 3, 4, 5], Hard::default());
+            elect(&mut raft, &[2, 3]);
+            accept(&mut raft, &[2, 3], 1);
+            raft.propose_voters(set(&[1, 2, 3, 4])).unwrap();
+            accept(&mut raft, &[2, 3], 2);
+            accept(&mut raft, &[2, 3], 3);
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3, 4], &[]));
+            raft.step(message(5, 1, Body::VoteReply { answer: GRANTED }))
+                .unwrap();
+            sent(&mut raft);
+            raft.tick(0);
+            let to_4 = sent(&mut raft).into_iter().find(|m| m.to == key(4));
+            let voters = to_4.unwrap().proof.unwrap().voters;
+            let expected = [key(1), key(2), key(3)];
+            assert_eq!(voters.into_keys().collect::<Vec<_>>(), expected);
+        }
+
         // Node 3 lags and answers each heartbeat, so it is still a peer when the
         // next change comes into force. That change releases it: node 3 gets
         // nothing more.
@@ -4203,7 +4388,7 @@ mod tests {
             let mut raft = joint(&[1, 2, 3], &[4, 5, 6]);
             raft.campaign();
             sent(&mut raft);
-            let granted = Body::PreVoteReply { granted: true };
+            let granted = Body::PreVoteReply { answer: GRANTED };
             raft.step(message(2, 1, granted.clone())).unwrap();
             raft.step(message(3, 1, granted.clone())).unwrap();
             assert_eq!(raft.role(), Role::PreCandidate);
@@ -4218,12 +4403,12 @@ mod tests {
             let mut raft = joint(&[1, 2, 3], &[4, 5, 6]);
             raft.campaign();
             sent(&mut raft);
-            raft.step(message(2, 1, Body::PreVoteReply { granted: true }))
+            raft.step(message(2, 1, Body::PreVoteReply { answer: GRANTED }))
                 .unwrap();
-            raft.step(message(4, 0, Body::PreVoteReply { granted: false }))
+            raft.step(message(4, 0, Body::PreVoteReply { answer: REFUSED }))
                 .unwrap();
             assert_eq!(raft.role(), Role::PreCandidate);
-            raft.step(message(5, 0, Body::PreVoteReply { granted: false }))
+            raft.step(message(5, 0, Body::PreVoteReply { answer: REFUSED }))
                 .unwrap();
             assert_eq!((raft.role(), raft.term()), (Role::Follower, Term(0)));
         }

@@ -8,8 +8,8 @@ use proptest::prelude::*;
 use proptest::sample::Index;
 use proptest::strategy::Union;
 use raft::{
-    Body, Config, Data, Entry, Error, Grant, Hard, Message, Position, Raft, Role,
-    Start, Term, Voters,
+    Answer, Body, Claim, Config, Data, Entry, Error, Grant, Hard, Message, Position,
+    Raft, Ready, Role, Signature, Start, Term, Voters,
 };
 use types::node;
 
@@ -151,6 +151,15 @@ impl Disk {
     }
 }
 
+// Signs as the caller of `raft` does, and checks that `raft` leaves only this node's
+// grants with no signature.
+fn sign(key: node::Key, ready: &mut Ready) {
+    ready.sign(|claim| {
+        assert_eq!(claim.voter, key, "{key:?} leaves {claim:?} unsigned");
+        Network::signature(claim)
+    });
+}
+
 pub(crate) struct Network {
     pub(crate) nodes: Vec<Raft>,
     pub(crate) disks: Vec<Disk>,
@@ -235,6 +244,20 @@ impl Network {
         node::Key::from_u128(node as u128 + 1)
     }
 
+    /// The stand-in signature of `claim`: its fields themselves, so a check can
+    /// rebuild it.
+    pub(crate) fn signature(claim: &Claim) -> Signature {
+        let mut bytes = [0; 64];
+        bytes[0] = match claim.grant {
+            Grant::PreVote => 1,
+            Grant::Vote => 2,
+        };
+        bytes[1..9].copy_from_slice(&claim.term.0.to_le_bytes());
+        bytes[9..25].copy_from_slice(&claim.candidate.as_u128().to_le_bytes());
+        bytes[25..41].copy_from_slice(&claim.voter.as_u128().to_le_bytes());
+        Signature(bytes)
+    }
+
     fn at(&self, key: node::Key) -> usize {
         self.nodes
             .iter()
@@ -314,8 +337,12 @@ impl Network {
         let (from, to) = (self.at(message.from), self.at(message.to));
         if self.cut[from] == self.cut[to] {
             let prevote = match message.body {
-                Body::PreVoteReply { granted: true } => Some(true),
-                Body::VoteReply { granted: true } => Some(false),
+                Body::PreVoteReply {
+                    answer: Answer::Granted(_),
+                } => Some(true),
+                Body::VoteReply {
+                    answer: Answer::Granted(_),
+                } => Some(false),
                 _ => None,
             };
             if let Some(prevote) = prevote {
@@ -356,7 +383,9 @@ impl Network {
             }
             (Body::Vote { .. }, false) => Some(Grant::PreVote),
             (
-                Body::PreVoteReply { granted: false }
+                Body::PreVoteReply {
+                    answer: Answer::Refused,
+                }
                 | Body::VoteReply { .. }
                 | Body::HeartbeatReply
                 | Body::AppendReply { .. }
@@ -375,7 +404,7 @@ impl Network {
             "node {to} refuses a proof that fits {body:?}: {proof:?}"
         );
         assert!(
-            !self.quorum(to, &proof.voters),
+            !self.quorum(to, &proof.voters.keys().copied().collect()),
             "node {to} refuses a proven {body:?} at {term:?} from {from:?}"
         );
         self.behind_refused = true;
@@ -523,7 +552,8 @@ impl Network {
     /// messages into the network, and checks the safety properties.
     fn collect(&mut self) {
         for at in 0..self.nodes.len() {
-            let ready = self.nodes[at].ready();
+            let mut ready = self.nodes[at].ready();
+            sign(Self::key(at), &mut ready);
             let pending = ready.hard.is_some() || !ready.entries.is_empty();
             let kept = self.crash[at].take_if(|_| pending);
             if let Some(hard) = ready.hard
@@ -543,7 +573,10 @@ impl Network {
             let stored = self.disks[at].hard.term;
             for message in ready.messages {
                 let durable = match message.body {
-                    Body::PreVote { .. } | Body::PreVoteReply { granted: true } => true,
+                    Body::PreVote { .. }
+                    | Body::PreVoteReply {
+                        answer: Answer::Granted(_),
+                    } => true,
                     _ => message.term <= stored,
                 };
                 assert!(
@@ -551,6 +584,7 @@ impl Network {
                     "node {at} sends {:?} at {:?} above its stored {stored:?}",
                     message.body, message.term
                 );
+                Self::check_signatures(at, &message);
                 self.note(at, &message);
                 self.flight.push(message);
             }
@@ -619,6 +653,19 @@ impl Network {
         }
     }
 
+    // Each signature a node sends is the one its claim's voter made: a signature
+    // moved to another term, grant, candidate, or voter fails.
+    fn check_signatures(at: usize, message: &Message) {
+        for (claim, signature) in message.claims() {
+            let own = Self::signature(&claim);
+            assert_eq!(
+                signature,
+                Some(own),
+                "node {at} carries a wrong signature of {claim:?}"
+            );
+        }
+    }
+
     // A vote goes only to a candidate whose log is at least as new as the voter's.
     // A proof names the sender, with the grant its body carries, and only the voters
     // that granted it.
@@ -635,10 +682,14 @@ impl Network {
                 assert_eq!(proof.candidate, message.from, "node {at} proves another");
                 let mut granted = self.granted.get(&key).cloned().unwrap_or_default();
                 granted.insert(message.from);
+                let forged: Vec<_> = proof
+                    .voters
+                    .keys()
+                    .filter(|voter| !granted.contains(voter))
+                    .collect();
                 assert!(
-                    proof.voters.is_subset(&granted),
-                    "node {at} carries voters that did not grant: {:?}",
-                    proof.voters.difference(&granted).collect::<Vec<_>>()
+                    forged.is_empty(),
+                    "node {at} carries voters that did not grant: {forged:?}"
                 );
             }
         }
@@ -665,8 +716,12 @@ impl Network {
                 self.asked.entry(key).or_default().push(last);
                 return;
             }
-            Body::PreVoteReply { granted: true } => true,
-            Body::VoteReply { granted: true } => false,
+            Body::PreVoteReply {
+                answer: Answer::Granted(_),
+            } => true,
+            Body::VoteReply {
+                answer: Answer::Granted(_),
+            } => false,
             _ => return,
         };
         let last = self.disks[at].last();

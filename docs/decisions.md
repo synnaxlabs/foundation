@@ -129,6 +129,11 @@ How to read this record:
 - **A16** Units only, no ranges. A unit lives where the number is defined: on a
   primitive channel or on a struct field. Foundation maps common units to the standard
   codes that targets need.
+  A unit is 1 to 32 printable ASCII characters with no space, case-sensitive, and
+  stored as the text the file wrote. `spec::unit` maps each common unit, with one
+  spelling (`degC`, `ohm`, `m/s2`), to its UN/CEFACT Recommendation 20 code, the one
+  standard code. A unit that is not in the table is valid and has no code; a sink that
+  needs a code fails for that channel only and names the unit (coordinator, #213).
 - **A17** Calculated channels are in scope. Calculations write data channels only,
   never commands. Scaling is a calculation. Raw counts plus calculated scaling is the
   default way to meet P1's byte target.
@@ -411,9 +416,10 @@ How to read this record:
   not check the record CRC: the open's walk checked each record, and a record
   this process wrote is read as written. A read's budget counts the pool bytes
   that its entries' blocks take (`block::footprint`), so an entry with no bytes
-  still costs its block. A read holds no record while it waits for a file read,
-  so a change that frees ring space must first hold the records of each read in
-  progress (#510).
+  still costs its block. A read drops a record's table block before it takes the
+  blocks of the record's entries, so an entry of the pool's largest block reads
+  (#968). A read holds no record while it waits for a file read, so a change that
+  frees ring space must first hold the records of each read in progress (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
@@ -452,13 +458,19 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. An open of a header with a smaller `body_max` fails with `Unfit` (#627).
+  records. It also refuses with `Large` a batch with an entry whose parts, joined,
+  pass the largest block of the shard's pool (`Limit::Block`), because a read gives
+  each entry in one block (#968). An open fails with `Pool(TooLarge)` when a
+  recovered entry passes that block, as after a restart with a smaller budget; a
+  larger pool opens the ring. An open of a header with a smaller `body_max` fails
+  with `Unfit` (#627).
   `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
   one entry, at least `Layout::ENTRY_MAX_MIN` (4032); a batch of more entries holds
   less. `Layout::check` gives the `Limit` that `append` would refuse a batch with,
   from its counts of entries, parts, and bytes, so the home checks a frame before it
-  takes the blocks of its entries (#795). An entry has no part, one, or two; `append`
-  takes them owned and drops them when it fails (#582).
+  takes the blocks of its entries (#795). It does not check `Limit::Block`, which
+  depends on the pool. An entry has no part, one, or two; `append` takes them owned
+  and drops them when it fails (#582).
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
@@ -498,8 +510,9 @@ How to read this record:
   record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **LARGE FRAME (#191)** The home refuses a write whose bodies no record of the ring or
-  no block of the shard's pool holds, on either path, with `Large`. No seq moves and the
-  home stores no part of the frame. The waiting handoffs of the frame's indexes are
+  no block of the shard's pool holds, on either path, with `Large`. The pool bound is on
+  each entry's parts joined, the home's header part included (#968). No seq moves and
+  the home stores no part of the frame. The waiting handoffs of the frame's indexes are
   still recorded (HANDOFF RECORD). The writer splits the frame by samples or by indexes
   and writes each part. The home never splits a frame, because a frame applies whole
   (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
@@ -1139,11 +1152,23 @@ How to read this record:
   last index the caller applied). `Hard` holds the term, the vote, the leader of the
   term (this node when it led), and the proof that moved the node to the term: its
   own pre-votes when it campaigned, else the proof of the message that moved it. A
-  `Proof` is a `Grant` (pre-vote or vote), the candidate, and the voter keys, the
-  candidate included; `raft` counts the keys, and `mesh` holds and checks the
-  signatures. `Message.proof` carries one: a `Vote` carries the candidate's
-  pre-votes; a leader's `Heartbeat` or `Append` carries its votes until the receiver
-  answers an append, and again after the receiver is silent through a quorum check;
+  `Proof` is a `Grant` (pre-vote or vote), the candidate, and each voter's key with its
+  `Signature`, the candidate included. It proves the term of the message or hard state
+  that holds it. A granted `PreVoteReply` or `VoteReply` carries the voter's signature
+  in its `Answer`, and the candidate copies it into its proof. `raft` counts the keys
+  and carries the signatures as opaque bytes: it does no crypto. A signature attests
+  a `Claim`: the voter, the grant, the term, and the candidate. `raft` owns the rule
+  that gives each signature its claim: a proof entry claims the proof's grant to its
+  candidate in the term of the message or hard state, and a granted reply claims its
+  grant from the sender to the receiver in the message's term. `raft` gives this
+  node's own entries and grants with no signature (`None`). `Ready::sign` gives each
+  `None` the signature that the caller's closure makes for its claim, before the
+  write and the sends. The caller checks each pair that `Message::claims` gives
+  before `step` and refuses a `None`: `step` keeps each signature as it came, so an
+  unchecked `None` of another voter reaches `Ready::sign`.
+  `Message.proof` carries one: a `Vote` carries the candidate's pre-votes; a leader's
+  `Heartbeat` or `Append` carries its votes until the receiver answers an append, and
+  again after the receiver is silent through a quorum check;
   an answer to a message of a lower term carries the sender's hard proof, and a node
   with no proof of its term sends no refusal. `step` checks a proof before anything
   changes. A `PreVote`, or a granted `PreVoteReply`, of a higher term needs none.
@@ -1160,8 +1185,8 @@ How to read this record:
   configuration entries closes it (#881, a release blocker). `raft/tests/it/behind.rs`
   pins both, and the random runs skip exactly such a voter until #881. The advisor
   required a proof on every message and on each refusal, signatures only, and the
-  proof in the hard state (#750, 2026-10-05). The signatures follow in the third PR
-  of #750.
+  proof in the hard state (#750, 2026-10-05). `mesh` signs and checks the signatures
+  in the next PR of #750.
   `Raft` takes `tick(random)`,
   `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
   when it changed), `entries` to write, `committed` entries to apply, and `messages`
@@ -1274,7 +1299,7 @@ How to read this record:
   coordinator gives the person's words in its comment on #647. The removed node takes
   that answer only from a voter of its own region, and stops its `raft` group for that
   region. `raft` sends such a node no entries, only answers. A voter with a lease drops
-  its campaign or refuses it with a `PreVoteReply { granted: false }` at the voter's
+  its campaign or refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's
   term. Until `mesh` sends the answer, the node campaigns. While a voter has a lease,
   this has no effect. Once no voter has a lease, as after the leader fails, the voters
   can elect the node: it commits an entry of its term, which commits the leave, and
@@ -1308,10 +1333,13 @@ How to read this record:
   changed, and the entries, so one sync makes both durable; two slots for the hard state
   lost, because they need a second sync and a second torn-write rule. The hard state is
   the term, then the vote, the leader, and the proof, each behind a presence byte; the
-  proof is a grant byte, the candidate, and the voter keys as a count and the keys in
-  rising order (#750). A `raft` message on the wire carries its proof in the same
-  form, after the term and before the body. The signatures follow in the third PR of
-  #750. The format version stays 1: no log has shipped. A later record replaces the
+  proof is a grant byte, the candidate, a count of voters, then each voter's key (16
+  bytes) and signature (64 bytes) in rising key order (#750). A `raft` message on the
+  wire carries its proof in the same form, after the term and before the body. A
+  granted `PreVoteReply` or `VoteReply` is the byte 1, then the signature; a refusal
+  is the byte 0 alone. No form holds an entry with no signature: encode panics on
+  one, because the caller signs before each write and send. The format version stays
+  1: no log has shipped. A later record replaces the
   entries from its first index. A file is 1 MiB, or the length of its first
   record when that is more, and a record that does not fit starts the next file. In a
   file with no record, it makes that file again, larger, so each file but the last
