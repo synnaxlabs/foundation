@@ -4,7 +4,7 @@
 use std::slice;
 
 use types::byte;
-use types::name::{self, Name, Selector};
+use types::name::{Error, Name, Selector};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::value::{Kind, Value};
@@ -57,7 +57,7 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
 /// # Errors
 ///
 /// A `document.bad-name` diagnostic at the label when [`Name`] refuses its text, with
-/// the message and the fix of the [`name::Error`].
+/// the message and the fix of its [`Error`].
 pub fn name(label: &Label) -> Result<Name, Diagnostic> {
     label
         .text
@@ -70,14 +70,12 @@ pub fn name(label: &Label) -> Result<Name, Diagnostic> {
 ///
 /// # Errors
 ///
-/// A `document.bad-selector` diagnostic: at a pattern that is not a string or a
-/// reference, or that [`Selector`] refuses, with the message and the fix of the
-/// [`name::Error`]; at the value when no pattern includes names.
+/// A `document.bad-selector` diagnostic for the first problem in source order: at a
+/// pattern that is not a string or a reference; at a pattern that [`Selector`]
+/// refuses, with the message and the fix of its [`Error`]; or at the value when no
+/// pattern includes names, with those of [`Error::NoInclude`].
 pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
-    let patterns = match &value.kind {
-        Kind::List(items) => items.as_slice(),
-        _ => slice::from_ref(value),
-    };
+    let patterns = patterns(value);
     let mut texts = Vec::with_capacity(patterns.len());
     for pattern in patterns {
         let text: &str = match &pattern.kind {
@@ -95,7 +93,7 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
         // `Selector::new` does not say which pattern it refuses, so each reads alone
         // first. Alone, an exclusion includes no names, which is not its error.
         match Selector::new([text]) {
-            Err(error) if error != name::Error::NoInclude => {
+            Err(error) if error != Error::NoInclude => {
                 return Err(diagnose(BAD_SELECTOR, pattern.span, &error));
             }
             _ => texts.push(text),
@@ -104,7 +102,16 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
     Selector::new(texts).map_err(|error| diagnose(BAD_SELECTOR, value.span, &error))
 }
 
-fn diagnose(code: Code, span: Option<Span>, error: &name::Error) -> Diagnostic {
+/// The patterns of a selector value, at the positions that [`Selector`] gives: the
+/// items of a list, or the value itself.
+fn patterns(value: &Value) -> &[Value] {
+    match &value.kind {
+        Kind::List(items) => items,
+        _ => slice::from_ref(value),
+    }
+}
+
+fn diagnose(code: Code, span: Option<Span>, error: &Error) -> Diagnostic {
     Diagnostic::new(code, span, error.to_string(), error.fix().into())
 }
 
@@ -298,6 +305,7 @@ mod tests {
 
         #[test]
         fn refuses_a_label_that_name_refuses() {
+            let long = "a".repeat(256);
             for (text, message, fix) in [
                 (
                     "site a",
@@ -316,6 +324,12 @@ mod tests {
                     "a name or pattern is empty",
                     "Write at least one segment",
                 ),
+                (
+                    long.as_str(),
+                    "a name or pattern is 256 bytes long, more than the limit of 255 \
+                     bytes",
+                    "Use fewer or shorter segments",
+                ),
             ] {
                 assert_eq!(name(&label(text)), refused(message, fix), "{text:?}");
             }
@@ -332,7 +346,9 @@ mod tests {
 
         proptest! {
             #[test]
-            fn reads_as_name_does(text in prop_oneof![any::<String>(), "[a-z_.* @-]{0,8}"]) {
+            fn reads_as_name_does(
+                text in prop_oneof![any::<String>(), "[a-z_.* @-]{0,8}"],
+            ) {
                 match (name(&label(&text)), text.parse::<Name>()) {
                     (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
                     (Err(diagnostic), Err(error)) => prop_assert_eq!(
@@ -457,6 +473,57 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_pattern_too_long_or_empty_at_the_pattern() {
+            let long = "a".repeat(256);
+            assert_eq!(
+                selector(&list(vec![text("site_a.*"), text(&long)])),
+                Err(refused(
+                    at(1),
+                    "a name or pattern is 256 bytes long, more than the limit of 255 \
+                     bytes",
+                    "Use fewer or shorter segments"
+                ))
+            );
+            assert_eq!(
+                selector(&list(vec![text("site_a.*"), text("")])),
+                Err(refused(
+                    at(1),
+                    "a name or pattern is empty",
+                    "Write at least one segment"
+                ))
+            );
+        }
+
+        #[test]
+        fn reads_an_exclusion_whose_pattern_is_at_the_limit() {
+            let exclusion = format!("!{}", "a".repeat(255));
+            assert_eq!(
+                selector(&list(vec![text("b"), text(&exclusion)])),
+                Ok(Selector::new(["b", exclusion.as_str()]).unwrap())
+            );
+        }
+
+        #[test]
+        fn refuses_the_first_problem_in_source_order() {
+            assert_eq!(
+                selector(&list(vec![text("site a"), Kind::Integer(7)])),
+                Err(refused(
+                    at(0),
+                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    SEGMENT
+                ))
+            );
+            assert_eq!(
+                selector(&list(vec![Kind::Integer(7), text("site a")])),
+                Err(refused(
+                    at(0),
+                    "a pattern is a string or a reference, not an integer",
+                    "Write a string such as \"site_a.*\""
+                ))
+            );
+        }
+
+        #[test]
         fn refuses_a_value_that_is_not_a_pattern() {
             let fix = "Write a string such as \"site_a.*\"";
             assert_eq!(
@@ -489,27 +556,23 @@ mod tests {
 
         proptest! {
             #[test]
-            fn reads_as_selector_new_does(texts in prop::collection::vec(pattern(), 0..4)) {
+            fn reads_as_selector_new_does(
+                texts in prop::collection::vec(pattern(), 0..4),
+            ) {
                 let read = selector(&list(texts.iter().map(|t| text(t)).collect()));
                 match (read, Selector::new(texts.iter().map(String::as_str))) {
                     (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
                     (Err(diagnostic), Err(error)) => {
                         prop_assert_eq!(&diagnostic.message, &error.to_string());
                         prop_assert_eq!(diagnostic.fix.as_str(), error.fix());
-                        // The span is at the first pattern that does not read alone,
-                        // or at the list when every pattern reads.
-                        let alone = |t: &String| match Selector::new([t.as_str()]) {
-                            Err(name::Error::NoInclude) | Ok(_) => None,
-                            Err(error) => Some(error),
-                        };
-                        let first = (0..).zip(&texts).find_map(|(i, t)| Some((i, alone(t)?)));
-                        let expected = match first {
-                            Some((i, alone)) => {
-                                prop_assert_eq!(alone, error);
-                                at(i)
-                            }
-                            None => Some(span()),
-                        };
+                        // After an include, the first prefix of the list that
+                        // `Selector::new` refuses ends at the refused pattern.
+                        let mut prefix = vec!["x"];
+                        let refused_at = (0..).zip(&texts).find_map(|(i, text)| {
+                            prefix.push(text);
+                            Selector::new(prefix.iter().copied()).is_err().then_some(i)
+                        });
+                        let expected = refused_at.map_or(Some(span()), at);
                         prop_assert_eq!(diagnostic.span, expected);
                     }
                     (read, parsed) => {
