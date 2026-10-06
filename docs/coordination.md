@@ -229,6 +229,16 @@ next issue for a crate early, labeled `blocked` with a link to the open one.
   removes, or changes no `pub` item, has no `interface` label, and touches nothing in
   `oracles/`, `docs/decisions.md`, `docs/coordination.md`, `CLAUDE.md`, `.github/`,
   `.claude/`, `.cargo/`, `xtask/`, `clippy.toml`, or any `Cargo.toml`.
+- **Stale base:** before each merge, if `main` moved since the PR's last CI run, the
+  coordinator merges the PR into `main` locally, runs clippy with `-D warnings` on the
+  crates the PR changes and every crate that uses them, and runs the tests of each
+  crate that depends (dev-dependencies too) on both a crate the PR changes and a crate
+  `main` changed since that CI run. Only those tests can newly fail. If either fails,
+  the owner merges `main`, and CI runs again. A PR that changes any `Cargo.toml`,
+  `Cargo.lock`, `.cargo/`, `rust-toolchain*`, `clippy.toml`, `fuzz/`, or `oracles/`, or
+  that has over 8 crates to test, goes back to CI instead. Two PRs can each pass
+  CI and fail together: #721 used a function that #671 had renamed, and `main` did not
+  build; a test from #761 failed after #672 added a sync, and `main` tests failed.
 
 ## Interface changes
 

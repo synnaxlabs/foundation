@@ -24,6 +24,10 @@ use crate::stop::Stop;
 pub struct Config {
     /// Where shards run. One shard starts per core.
     pub shards: env::shards::Shards,
+    /// The monotonic clock. Mesh time runs on it.
+    pub clock: env::clock::Clock,
+    /// The OS clock, a source of mesh time.
+    pub wall: env::wall::Wall,
 }
 
 /// A running node. Call [`Node::stop`] to end it, then [`Node::join`].
@@ -40,7 +44,13 @@ impl Node {
     /// node, and [`Node::join`] returns its error.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start(config: Config) -> Self {
-        let Config { shards } = config;
+        let Config {
+            shards,
+            clock: monotonic,
+            wall,
+        } = config;
+        let (mesh, _reader) = clock::Clock::new(monotonic);
+        let mut mesh = Some((mesh, wall));
         let stop = Stop::default();
         let mut node = Self {
             stop: stop.clone(),
@@ -52,8 +62,16 @@ impl Node {
                 name: format!("shard-{core}"),
                 core: Some(core),
             };
+            // Only the first shard gets the mesh clock.
+            let mesh = mesh.take();
             let guard = stop.guard();
-            match shards.start(shard, move |_tasks| guard) {
+            let main = move |tasks: env::tasks::Tasks| {
+                if let Some((mesh, wall)) = mesh {
+                    tasks.spawn(async { mesh.run(wall).await });
+                }
+                guard
+            };
+            match shards.start(shard, main) {
                 Ok(handle) => node.handles.push(handle),
                 Err(e) => {
                     // The driver dropped `main` and its guard, which stopped the node.
