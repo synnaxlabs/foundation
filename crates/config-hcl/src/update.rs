@@ -68,7 +68,8 @@ struct Mark {
     newline: bool,
 }
 
-/// Text to put in place of a range of the old text. An empty range inserts.
+/// Text to put in place of a range of the old text. An empty range inserts, and
+/// empty text cuts.
 struct Edit {
     range: Range<usize>,
     text: String,
@@ -243,12 +244,6 @@ impl<'a> File<'a> {
             .expect("invariant: the last token is the end")
     }
 
-    /// Reports whether `at` ends a text whose last line has no line end, so new
-    /// text there first ends that line. Only one insert may go there.
-    fn unended(&self, at: usize) -> bool {
-        at == self.text.len() && at > self.floor && !self.text.ends_with('\n')
-    }
-
     /// Applies `edits`, which do not overlap, to the text.
     fn apply(&self, mut edits: Vec<Edit>) -> String {
         // At one place, inserts after the item above come first, then inserts before
@@ -332,9 +327,10 @@ impl Diff<'_, '_> {
                 self.block(was, block);
             }
         }
+        // `place` reads the cuts.
+        self.cut(cuts, body);
         let at = pending.anchor.unwrap_or(body.end);
         self.place(body, &mut pending, at, false);
-        self.cut(cuts, body);
     }
 
     /// Puts the waiting items after the anchor, or else before the kept item at
@@ -361,7 +357,7 @@ impl Diff<'_, '_> {
             return;
         }
         let mut writer = Writer::new(&body.margin, 0, self.file.crlf);
-        if self.file.unended(at) {
+        if self.unended(at) {
             writer.end_line();
         }
         let (attributes, blocks) =
@@ -375,6 +371,21 @@ impl Diff<'_, '_> {
             text: written(writer),
             below: pending.anchor != Some(at),
         });
+    }
+
+    /// Reports whether the text kept before `at` ends in a line with no line end, so
+    /// new text at `at` first ends that line. Only one insert may go there. A cut
+    /// that ends at `at` starts at a line start or the floor, so the kept text before
+    /// it needs no line end.
+    fn unended(&self, at: usize) -> bool {
+        let text = self.file.text;
+        at == text.len()
+            && at > self.file.floor
+            && !text.ends_with('\n')
+            && !self
+                .edits
+                .iter()
+                .any(|edit| edit.text.is_empty() && edit.range.end == at)
     }
 
     /// Cuts the lines of removed items, as runs that merge across blank lines.
@@ -802,6 +813,40 @@ mod tests {
             prop_assert!(out.ends_with(text.get(end..).unwrap()), "{}", out);
             prop_assert_eq!(read(Source(0), &out), Ok(document), "{}", out);
         }
+
+        #[test]
+        fn updates_an_unended_text_as_the_ended_text(
+            a in document(),
+            b in document(),
+            picks in prop::collection::vec(any::<u8>(), 0..256),
+            attributes_last in any::<bool>(),
+        ) {
+            let mut picks = Picks(picks.into_iter());
+            let ended = annotate(&text_of(&a, attributes_last), &mut picks);
+            let line_end = if ended.ends_with("\r\n") { "\r\n" } else { "\n" };
+            let Some(text) = ended.strip_suffix(line_end) else {
+                return Ok(());
+            };
+            // `update` takes the line end of the first line, which a one-line text
+            // loses with its line end.
+            let first_line_kept = text.contains('\n') || line_end == "\n";
+            if text.ends_with('\n')
+                || !first_line_kept
+                || read(Source(0), text) != Ok(a.clone())
+            {
+                return Ok(());
+            }
+            let document = mix(&a, &b, &mut picks);
+            let out = update(Source(0), text, &document).unwrap();
+            let want = update(Source(0), &ended, &document).unwrap();
+            prop_assert!(
+                want == out || want == format!("{out}{line_end}"),
+                "{:?}\n{:?}\n{:?}",
+                text,
+                out,
+                want
+            );
+        }
     }
 
     #[test]
@@ -992,6 +1037,15 @@ mod tests {
             updated("a = 1\nb = 2\r\nc = 3", "a = 1\nb = 2\nc = 3\nd = 4"),
             "a = 1\nb = 2\r\nc = 3\nd = 4\n"
         );
+    }
+
+    #[test]
+    fn starts_no_blank_line_when_the_last_line_is_cut() {
+        assert_eq!(updated("a = 1\r\nb = 2\r\n", "c = 3"), "c = 3\r\n");
+        assert_eq!(updated("a = 1\r\nb = 2", "c = 3"), "c = 3\r\n");
+        assert_eq!(updated("a = 1", "b = 2"), "b = 2\n");
+        assert_eq!(updated("\u{feff}a = 1", "b = 1"), "\u{feff}b = 1\n");
+        assert_eq!(updated("# c\r\na = 1", "b = 2"), "b = 2\r\n");
     }
 
     #[test]
