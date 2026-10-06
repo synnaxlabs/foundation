@@ -215,8 +215,10 @@ impl<'a> Layout<'a> {
     /// Checks `series` for a frame of `set`: each present entry and the byte length
     /// of its series, in increasing entry order. Each data entry needs the index of
     /// its group in `series`. A group is present when its index is. Takes no block.
-    /// Time is linear in `series` while the data of at most 16 groups alternate, and
-    /// O(n log n) for n series at worst.
+    /// Time is linear in `series` when it holds every entry of `set`, or when the data
+    /// of each group follow its index, alternate among at most 16 groups, or take
+    /// turns in index order. Each other data series costs a search logarithmic in its
+    /// distance from the last index passed or found.
     ///
     /// # Errors
     ///
@@ -225,11 +227,13 @@ impl<'a> Layout<'a> {
     pub fn new(set: &'a KeySet, series: &'a [(usize, usize)]) -> Result<Self, Error> {
         let entries = set.entries().len();
         let (mut groups, mut bytes, mut last) = (0, 0_usize, None);
-        // An index usually comes just before its data. Other data search `series`, once
-        // per group while `found` holds its index. An absent index waits for the order
-        // checks, without which the search means nothing.
-        let (mut last_index, mut found, mut absent) = (None, [usize::MAX; 16], None);
-        for &(entry, len) in series {
+        // Ordered, a full frame holds each index. Other data look at `series[near]`,
+        // the last index passed or found, then at `found`, then search out from
+        // `near`. An absent index waits for the order checks, without which the search
+        // means nothing.
+        let full = series.len() == entries;
+        let (mut near, mut found, mut absent) = (0, [usize::MAX; 16], None);
+        for (at, &(entry, len)) in series.iter().enumerate() {
             if entry >= entries {
                 return Err(Error::OutOfRange { entry, entries });
             }
@@ -243,15 +247,13 @@ impl<'a> Layout<'a> {
             let index = set.groups()[group];
             if index == entry {
                 groups += 1;
-                last_index = Some(index);
-            } else if last_index != Some(index) && absent.is_none() {
+                near = at;
+            } else if !full && series[near].0 != index && absent.is_none() {
                 let memo = &mut found[group % found.len()];
                 if *memo != index {
-                    if series
-                        .binary_search_by_key(&index, |&(entry, _)| entry)
-                        .is_err()
-                    {
-                        absent = Some(Error::IndexAbsent { entry, index });
+                    match gallop(series, near, index) {
+                        Some(at) => near = at,
+                        None => absent = Some(Error::IndexAbsent { entry, index }),
                     }
                     *memo = index;
                 }
@@ -655,6 +657,26 @@ fn cut(body: &[u8], start: usize, end: usize) -> Result<&[u8], BadEnd> {
 fn next_end(last: usize, len: usize) -> usize {
     last.checked_next_multiple_of(SERIES_ALIGN)
         .map_or(usize::MAX, |start| start.saturating_add(len))
+}
+
+/// The position of `entry` in `series`, by steps that double out from position
+/// `near` and then halve, in time logarithmic in the distance, or `None`. The answer
+/// means nothing unless `series` is in increasing entry order.
+fn gallop(series: &[(usize, usize)], near: usize, entry: usize) -> Option<usize> {
+    let mut step = 1;
+    let (start, end) = if series[near].0 < entry {
+        while near + step < series.len() && series[near + step].0 < entry {
+            step *= 2;
+        }
+        (near + step / 2 + 1, series.len().min(near + step + 1))
+    } else {
+        while step <= near && series[near - step].0 > entry {
+            step *= 2;
+        }
+        (near.saturating_sub(step), near - step / 2 + 1)
+    };
+    let at = series[start..end].binary_search_by_key(&entry, |&(entry, _)| entry);
+    at.ok().map(|at| start + at)
 }
 
 /// The charge of a frame of `len` bytes (CREDIT RULES).
@@ -1304,6 +1326,64 @@ mod tests {
         assert_eq!(error, Error::IndexAbsent { entry: 0, index: 1 });
     }
 
+    #[test]
+    fn finds_an_index_far_after_its_data() {
+        // Entries 0 to 99 are the data of group 1, whose index is entry 101. Entry 100
+        // is the index of group 0, which has no data.
+        let data: Vec<_> = (1..=100).map(|n| (key(n), F64)).collect();
+        let set = interner().intern(&[
+            Group {
+                index: key(500),
+                data: &[],
+            },
+            Group {
+                index: key(999),
+                data: &data,
+            },
+        ]);
+        let pool = pool(1 << 20);
+        let data = (0..100).map(|entry| (entry, 1));
+        let series: Vec<_> = data.clone().chain([(101, 1)]).collect();
+        Draft::new(&pool, &set, Form::Raw, &series).unwrap();
+        let series: Vec<_> = data.chain([(100, 1)]).collect();
+        let error = Draft::new(&pool, &set, Form::Raw, &series).unwrap_err();
+        assert_eq!(
+            error,
+            Error::IndexAbsent {
+                entry: 0,
+                index: 101
+            }
+        );
+    }
+
+    #[test]
+    fn finds_an_index_far_before_its_data() {
+        // Entries 0 to 100 are the indexes of groups 0 to 100, and entry 101 is the
+        // data of group 0, past each other index.
+        let data = [(key(900), F64)];
+        let groups: Vec<_> = (1..=101)
+            .map(|n| Group {
+                index: key(n),
+                data: if n == 1 { &data[..] } else { &[] },
+            })
+            .collect();
+        let set = interner().intern(&groups);
+        let pool = pool(1 << 20);
+        let series: Vec<_> = (0..102)
+            .filter(|&entry| entry != 1)
+            .map(|entry| (entry, 1))
+            .collect();
+        Draft::new(&pool, &set, Form::Raw, &series).unwrap();
+        let error = Draft::new(&pool, &set, Form::Raw, &series[1..]).unwrap_err();
+        assert_eq!(
+            error,
+            Error::IndexAbsent {
+                entry: 101,
+                index: 0
+            }
+        );
+    }
+
     /// Takes each block of `pool`, a `pool(256)`, and gives them.
     fn exhaust(pool: &block::Pool) -> [block::Unique; 2] {
         let held = [pool.alloc(1).unwrap(), pool.alloc(1).unwrap()];
@@ -1721,31 +1801,67 @@ mod tests {
             keys in Just((0..1000).collect::<Vec<u32>>()).prop_shuffle(),
             kept in vec(any::<bool>(), 200),
         ) {
-            let mut keys = keys.into_iter().map(key);
-            let data: Vec<Vec<(channel::Key, Type)>> = sizes
-                .iter()
-                .map(|&size| keys.by_ref().take(size).map(|key| (key, F64)).collect())
-                .collect();
-            let groups: Vec<Group<'_>> = data
-                .iter()
-                .map(|data| Group {
-                    index: keys.next().unwrap(),
-                    data,
-                })
-                .collect();
-            let set = interner().intern(&groups);
+            let set = spread(&sizes, keys);
             let series: Vec<(usize, usize)> = (0..set.entries().len())
                 .filter(|&entry| kept[entry])
                 .map(|entry| (entry, 1))
                 .collect();
-            let present = |index| series.iter().any(|&(entry, _)| entry == index);
-            let expected = series
-                .iter()
-                .map(|&(entry, _)| (entry, set.index(entry)))
-                .find(|&(_, index)| !present(index))
-                .map(|(entry, index)| Error::IndexAbsent { entry, index });
             let result = Draft::new(&pool(1 << 20), &set, Form::Raw, &series);
-            prop_assert_eq!(result.err(), expected);
+            prop_assert_eq!(result.err(), first_absent(&set, &series));
         }
+
+        /// Each index but at most one is present, so most data search for their index
+        /// and find it, in either direction, among more groups than [`Layout::new`]
+        /// remembers.
+        #[test]
+        fn finds_each_present_index_among_many_groups(
+            sizes in vec(0_usize..10, 17..65),
+            keys in Just((0..1000).collect::<Vec<u32>>()).prop_shuffle(),
+            kept in vec(any::<bool>(), 640),
+            dropped in proptest::option::of(0_usize..64),
+        ) {
+            let set = spread(&sizes, keys);
+            let dropped = dropped.map(|group| set.groups()[group % set.groups().len()]);
+            let series: Vec<(usize, usize)> = (0..set.entries().len())
+                .filter(|&entry| {
+                    if set.index(entry) == entry {
+                        Some(entry) != dropped
+                    } else {
+                        kept[entry]
+                    }
+                })
+                .map(|entry| (entry, 1))
+                .collect();
+            let result = Draft::new(&pool(1 << 20), &set, Form::Raw, &series);
+            prop_assert_eq!(result.err(), first_absent(&set, &series));
+        }
+    }
+
+    /// A key set with a group of `sizes[g]` data for each `g`, keyed from `keys` in
+    /// turn: each group's data, then its index.
+    fn spread(sizes: &[usize], keys: Vec<u32>) -> std::sync::Arc<KeySet> {
+        let mut keys = keys.into_iter().map(key);
+        let data: Vec<Vec<(channel::Key, Type)>> = sizes
+            .iter()
+            .map(|&size| keys.by_ref().take(size).map(|key| (key, F64)).collect())
+            .collect();
+        let groups: Vec<Group<'_>> = data
+            .iter()
+            .map(|data| Group {
+                index: keys.next().unwrap(),
+                data,
+            })
+            .collect();
+        interner().intern(&groups)
+    }
+
+    /// The error for the first entry of `series` whose index is absent from it.
+    fn first_absent(set: &KeySet, series: &[(usize, usize)]) -> Option<Error> {
+        let present = |index| series.iter().any(|&(entry, _)| entry == index);
+        series
+            .iter()
+            .map(|&(entry, _)| (entry, set.index(entry)))
+            .find(|&(_, index)| !present(index))
+            .map(|(entry, index)| Error::IndexAbsent { entry, index })
     }
 }

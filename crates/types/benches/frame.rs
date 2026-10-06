@@ -102,8 +102,13 @@ fn cases() -> Vec<Case> {
         ),
         case(
             "100k of 100k in two groups, data in turn",
-            in_turn(&mut interner),
+            in_turn(&mut interner, 2),
             (0..100_000).map(|entry| (entry, 8)).collect(),
+        ),
+        case(
+            "50k of 100k in 32 groups, data in turn",
+            in_turn(&mut interner, 32),
+            (0..50_000).map(|entry| (entry, 8)).collect(),
         ),
         case(
             "100k of 100k private indexes",
@@ -125,25 +130,29 @@ fn index_last(interner: &mut Interner) -> Arc<KeySet> {
     }])
 }
 
-/// Two groups: both index slots first, then the data slots of the groups in turn.
-fn in_turn(interner: &mut Interner) -> Arc<KeySet> {
+/// `groups` groups of 100,000 entries in all: each index slot first, then the data
+/// slots of the groups in turn.
+fn in_turn(interner: &mut Interner, groups: usize) -> Arc<KeySet> {
     for n in 300_000..400_000 {
         interner.slots().assign(key(n));
     }
-    let data = |from| -> Vec<_> {
-        (from..400_000).step_by(2).map(|n| (key(n), F64)).collect()
-    };
-    let (even, odd) = (data(300_002), data(300_003));
-    interner.intern(&[
-        Group {
-            index: key(300_000),
-            data: &even,
-        },
-        Group {
-            index: key(300_001),
-            data: &odd,
-        },
-    ])
+    let data: Vec<Vec<_>> = (0..groups)
+        .map(|group| {
+            (300_000 + groups + group..400_000)
+                .step_by(groups)
+                .map(|n| (key(n), F64))
+                .collect()
+        })
+        .collect();
+    let groups: Vec<_> = data
+        .iter()
+        .enumerate()
+        .map(|(group, data)| Group {
+            index: key(300_000 + group),
+            data,
+        })
+        .collect();
+    interner.intern(&groups)
 }
 
 fn pool() -> block::Pool {
