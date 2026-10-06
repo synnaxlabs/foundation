@@ -50,7 +50,8 @@ struct Part {
     series: Range<usize>,
     /// Its index series, once checked.
     index: Series,
-    /// The error of its first series that does not fit `count`.
+    /// The error of its first series that does not fit `count`. The index of an
+    /// encoded frame is checked as [`Stamps`] decodes it.
     check: Result<(), Error>,
     made: bool,
 }
@@ -129,7 +130,7 @@ impl Scratch {
 
     /// Checks each series against the count of its group, until the first error in
     /// the group, and records each series that fits. Encodes a raw series into
-    /// `bytes`.
+    /// `bytes`. Leaves the index of an encoded frame to [`Stamps`].
     fn check(&mut self, set: &KeySet, draft: &mut Draft) {
         let form = draft.form();
         for (entry, bytes) in draft.iter_mut() {
@@ -144,6 +145,7 @@ impl Scratch {
             let start = self.bytes.len();
             let checked = match form {
                 Form::Raw => encode(&mut self.bytes, scalar, count, bytes),
+                Form::Encoded if index => Ok(bytes.len()),
                 Form::Encoded => codec::validate(Type::Scalar(scalar), count, bytes)
                     .map(|_| bytes.len()),
             };
@@ -207,8 +209,9 @@ pub(crate) struct Stamps<'a>(Source<'a>);
 enum Source<'a> {
     /// The stamps of a raw series that are not given yet.
     Raw(&'a [[u8; 8]]),
-    /// An encoded series, decoded into `vector`.
+    /// An encoded series of `channel`, not yet checked, decoded into `vector`.
     Encoded {
+        channel: channel::Key,
         decoder: codec::Decoder<'a>,
         vector: &'a mut [[u8; 8]],
     },
@@ -216,29 +219,40 @@ enum Source<'a> {
 
 impl Stamps<'_> {
     /// The stamps of the next vector, at most [`codec::VECTOR_LEN`], or `None` after
-    /// the last.
-    pub(crate) fn next(&mut self) -> Option<&[[u8; 8]]> {
+    /// the last vector and after an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Error`] when the index series of an encoded frame does not fit its group's
+    /// count, as the split gives it for a data series.
+    pub(crate) fn next(&mut self) -> Option<Result<&[[u8; 8]], Error>> {
         match &mut self.0 {
             Source::Raw(stamps) => {
                 let len = stamps.len().min(codec::VECTOR_LEN);
                 let (vector, rest) = stamps.split_at(len);
                 *stamps = rest;
-                (len > 0).then_some(vector)
+                (len > 0).then_some(Ok(vector))
             }
-            Source::Encoded { decoder, vector } => {
-                let stamps = decoder
-                    .next(vector.as_flattened_mut())?
-                    .expect("invariant: the split checked the index series");
-                Some(stamps.as_chunks::<8>().0)
-            }
+            Source::Encoded {
+                channel,
+                decoder,
+                vector,
+            } => Some(match decoder.next(vector.as_flattened_mut())? {
+                Ok(stamps) => Ok(stamps.as_chunks::<8>().0),
+                Err(error) => Err(Error {
+                    channel: *channel,
+                    error,
+                }),
+            }),
         }
     }
 }
 
 impl Split<'_> {
     /// The next present group, in group order, with the stamps of its index series,
-    /// or the [`Error`] of its first series that does not fit the group's count.
-    /// After the last group, it gives the blocks of a raw frame back to the pool.
+    /// or the [`Error`] of its first series that does not fit the group's count. The
+    /// stamps give the error of the index of an encoded frame. After the last group,
+    /// it gives the blocks of a raw frame back to the pool.
     ///
     /// # Panics
     ///
@@ -263,6 +277,7 @@ impl Split<'_> {
         } else {
             let encoded = encoded(&mut self.draft, &scratch.bytes, part.index);
             Source::Encoded {
+                channel: self.set.entries()[part.index.entry].key,
                 decoder: codec::Decoder::new(
                     Scalar::Stamp,
                     to_usize(part.count),
@@ -276,7 +291,8 @@ impl Split<'_> {
 
     /// The index frame of `group`: the writer's key set with only `group` present, its
     /// count, and its series encoded. The index frame of an encoded frame with one
-    /// group is that frame, with no copy.
+    /// group is that frame, with no copy. Call it only for a group whose stamps gave
+    /// no error, as only they check the index of an encoded frame.
     ///
     /// # Errors
     ///
@@ -513,13 +529,13 @@ mod tests {
         values.as_chunks::<8>().0.to_vec()
     }
 
-    /// The stamps of each vector of `stamps`.
-    fn vectors(mut stamps: Stamps<'_>) -> Vec<Vec<[u8; 8]>> {
+    /// The stamps of each vector of `stamps`, or their error.
+    fn vectors(mut stamps: Stamps<'_>) -> Result<Vec<Vec<[u8; 8]>>, Error> {
         let mut vectors = Vec::new();
         while let Some(vector) = stamps.next() {
-            vectors.push(vector.to_vec());
+            vectors.push(vector?.to_vec());
         }
-        vectors
+        Ok(vectors)
     }
 
     /// A present group, with its stamps or its error.
@@ -529,7 +545,8 @@ mod tests {
     fn groups(split: &mut Split<'_>) -> Vec<Checked> {
         let mut groups = Vec::new();
         while let Some((group, stamps)) = split.next() {
-            groups.push((group, stamps.map(|stamps| vectors(stamps).concat())));
+            let stamps = stamps.and_then(|stamps| Ok(vectors(stamps)?.concat()));
+            groups.push((group, stamps));
         }
         groups
     }
@@ -726,13 +743,16 @@ mod tests {
             #[test]
             fn refuses_an_encoded_index_of_too_few_stamps() {
                 let set = two_groups();
-                let write = both();
+                let mut write = both();
+                let one = write.get_mut(&1).expect("group 1");
+                one.count = 3;
+                let three = [300_u16, 301, 302].map(u16::to_le_bytes).concat();
+                one.series.insert(3, three);
                 let pool = pool(1 << 16);
-                let mut draft = draft(&pool, &set, Form::Encoded, &write);
-                draft.set_count(1, 3);
                 let mut scratch = Scratch::default();
 
-                let mut split = scratch.split(&set, draft);
+                let mut split =
+                    scratch.split(&set, draft(&pool, &set, Form::Encoded, &write));
 
                 let groups = groups(&mut split);
                 let expected = codec::Error::Truncated {
@@ -752,6 +772,34 @@ mod tests {
                 assert_eq!(groups[1], (1, Err(error)));
                 let stamps = stamps(&write[&0].series[&0]);
                 assert_eq!(groups[0], (0, Ok(stamps)));
+            }
+
+            #[test]
+            fn gives_the_error_of_a_data_series_before_that_of_an_encoded_index() {
+                let set = two_groups();
+                let pool = pool(1 << 16);
+                let mut draft = draft(&pool, &set, Form::Encoded, &both());
+                draft.set_count(1, 3);
+                let mut scratch = Scratch::default();
+
+                let mut split = scratch.split(&set, draft);
+
+                let groups = groups(&mut split);
+                let expected = codec::Error::Truncated {
+                    vector: 0,
+                    needed: 8,
+                    available: 6,
+                };
+                assert_eq!(
+                    expected.to_string(),
+                    "vector 0 needs 8 bytes, but 6 are left"
+                );
+                let channel = key(Slot::new(4));
+                let error = Error {
+                    channel,
+                    error: expected,
+                };
+                assert_eq!(groups[1], (1, Err(error)));
             }
 
             #[test]
@@ -833,7 +881,7 @@ mod tests {
                 let mut split = scratch.split(&set, draft(&pool, &set, form, &write));
 
                 let (group, stamps) = split.next().expect("group 0");
-                let vectors = vectors(stamps.expect("a valid group"));
+                let vectors = vectors(stamps.expect("a valid group")).expect("stamps");
 
                 assert_eq!(group, 0);
                 let lens: Vec<usize> = vectors.iter().map(Vec::len).collect();
@@ -885,6 +933,7 @@ mod tests {
             let mut stamps = stamps.expect("a valid group");
             let mut read = 0;
             while let Some(vector) = stamps.next() {
+                let vector = vector.expect("a valid vector");
                 assert_eq!(vector, [7_u64.to_le_bytes(); 1024]);
                 read += vector.len();
             }
@@ -920,6 +969,26 @@ mod tests {
             assert_eq!(groups, [(0, Err(error))]);
             drop(split);
             assert_eq!(scratch.vector.capacity(), codec::VECTOR_LEN);
+        }
+
+        #[test]
+        fn refuses_an_encoded_index_with_bytes_after_its_last_vector() {
+            let set = one_index();
+            let pool = pool(1 << 16);
+            let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
+            index.push(0);
+            let mut scratch = Scratch::default();
+            let mut split = scratch.split(&set, encoded_index(&pool, &set, 1, &index));
+
+            let groups = groups(&mut split);
+
+            let expected = codec::Error::Trailing { extra: 1 };
+            assert_eq!(expected.to_string(), "bytes after the last vector: 1");
+            let error = Error {
+                channel: key(Slot::new(1)),
+                error: expected,
+            };
+            assert_eq!(groups, [(0, Err(error))]);
         }
 
         #[test]

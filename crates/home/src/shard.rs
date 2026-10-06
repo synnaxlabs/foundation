@@ -857,6 +857,18 @@ mod tests {
         draft
     }
 
+    /// `stamps` encoded as an index series.
+    fn encoded(stamps: &[i64]) -> Vec<u8> {
+        let values: Vec<u8> = stamps.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut out =
+            vec![0; codec::max_len(Type::Scalar(Scalar::Stamp), values.len())];
+        let len = codec::Encoder::new(Type::Scalar(Scalar::Stamp))
+            .encode(stamps.len(), &values, &mut out)
+            .expect("stamps");
+        out.truncate(len);
+        out
+    }
+
     fn applied(slot: u32, seq: u64, count: u32) -> Outcome {
         Outcome::Applied {
             slot: Slot::new(slot),
@@ -1083,6 +1095,45 @@ mod tests {
             assert_eq!(
                 shard.write(a, LIVE, write, NOW, MESH),
                 Ok(&[refused(0, Refusal::Order(backwards)), applied(2, 0, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_an_encoded_index_whose_later_vector_is_not_valid() {
+        run(47, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let stamps: Vec<i64> = (10..2510).collect();
+            let mut index = encoded(&stamps);
+            index[encoded(&stamps[..1024]).len()] = 9;
+            let other = encoded(&[10]);
+            let lens = [(0, index.len()), (2, other.len())];
+            let mut write =
+                Draft::new(&test.pool, &set, Form::Encoded, &lens).expect("a frame");
+            write
+                .series_mut(0)
+                .expect("index 0")
+                .copy_from_slice(&index);
+            write
+                .series_mut(2)
+                .expect("index 2")
+                .copy_from_slice(&other);
+            write.set_count(0, 2500);
+            write.set_count(1, 1);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Tag { vector: 1, tag: 9 },
+            });
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[refused(0, refusal), applied(2, 0, 1)][..])
+            );
+            let write = frame(&test.pool, &set, &[(0, &[11])]);
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[applied(0, 0, 1)][..])
             );
         });
     }
