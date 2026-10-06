@@ -78,7 +78,8 @@ pub struct Listen {
 /// A drop never blocks. Before `poll_close` is ready, a drop sends a reset (RST) and
 /// loses the queued bytes; `os` sets `SO_LINGER` to 0 until then. After it, a drop
 /// lets the queued bytes and the FIN go out. A drop with received bytes unread resets
-/// in both cases, under `os` and `sim`.
+/// in both cases, under `os` and `sim`, unless the stream has ended: an RST arrived,
+/// or each FIN arrived and its own is acked.
 ///
 /// ```
 /// fn peer(stream: &dyn env::net::tcp::Driver) -> std::net::SocketAddr {

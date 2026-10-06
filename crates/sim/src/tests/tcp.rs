@@ -498,6 +498,28 @@ fn a_drop_after_close_with_bytes_unread_resets_the_peer() {
 }
 
 #[test]
+fn a_drop_of_a_finished_stream_with_bytes_unread_sends_no_reset() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    start(&b, "server", move |node| async move {
+        let mut tcp = accept(&mut listener).await;
+        close(&mut tcp).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        drop(tcp);
+    });
+    let remote = at(&b, 4433);
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        write_all(&mut tcp, b"unread").await.unwrap();
+        close(&mut tcp).await.unwrap();
+        node.clock().sleep(millis(20)).await;
+        read_all(&mut tcp).await
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&client), (Vec::new(), Ok(())));
+}
+
+#[test]
 fn a_drop_after_close_still_sends_every_byte_and_the_end() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let mut listener = listen_on(
@@ -1084,6 +1106,113 @@ fn a_dropped_listener_frees_the_pairs_of_its_streams_for_a_later_connect() {
     sim.run().unwrap();
     assert_eq!(take(&client), Err(Net::Reset { remote }));
     assert_eq!(take(&server), at(&a, 49_152));
+}
+
+#[test]
+fn a_syn_to_a_reset_stream_that_a_driver_holds_reaches_the_listener() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let mut old = accept(&mut listener).await;
+        node.clock().sleep(millis(10)).await;
+        let first = read(&mut old, 1).await;
+        let peer = accept(&mut listener).await.peer();
+        (first, peer)
+    });
+    let (remote, closed) = (at(&b, 4433), at(&b, 9));
+    start(&a, "client", move |node| async move {
+        drop(connect(&node, remote, options()).await.unwrap());
+        node.clock().sleep(millis(5)).await;
+        wrap(&node, closed).await;
+        let _tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(20)).await;
+    });
+    sim.run().unwrap();
+    let peer = at(&a, 49_152);
+    assert_eq!(take(&server), (Err(Net::Reset { remote: peer }), peer));
+}
+
+#[test]
+fn a_syn_to_a_finished_stream_that_a_driver_holds_reaches_the_listener() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |_| async move {
+        let mut old = accept(&mut listener).await;
+        read_all(&mut old).await.1.unwrap();
+        close(&mut old).await.unwrap();
+        let peer = accept(&mut listener).await.peer();
+        drop(old);
+        peer
+    });
+    let (remote, closed) = (at(&b, 4433), at(&b, 9));
+    start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        close(&mut tcp).await.unwrap();
+        drop(tcp);
+        node.clock().sleep(millis(10)).await;
+        wrap(&node, closed).await;
+        let _tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(1)).await;
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&server), at(&a, 49_152));
+}
+
+#[test]
+fn a_drop_of_a_finished_stream_with_bytes_unread_refuses_no_later_connect() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let mut old = accept(&mut listener).await;
+        close(&mut old).await.unwrap();
+        node.clock().sleep_until(after(millis(10))).await;
+        drop(old);
+        accept(&mut listener).await.peer()
+    });
+    let (remote, closed) = (at(&b, 4433), at(&b, 9));
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        write_all(&mut tcp, b"unread").await.unwrap();
+        close(&mut tcp).await.unwrap();
+        drop(tcp);
+        let later = after(millis(10)) + Span::from_nanos(100_000);
+        node.clock().sleep_until(later).await;
+        wrap(&node, closed).await;
+        let tcp = connect(&node, remote, options()).await;
+        node.clock().sleep(millis(1)).await;
+        tcp.map(|tcp| tcp.local())
+    });
+    let ran = sim.run();
+    assert_eq!(take(&client), Ok(at(&a, 49_152)));
+    ran.unwrap();
+    assert_eq!(take(&server), at(&a, 49_152));
+}
+
+#[test]
+fn a_drop_of_a_finished_stream_with_bytes_unread_resets_no_newer_stream() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    start(&b, "server", move |node| async move {
+        let mut old = accept(&mut listener).await;
+        close(&mut old).await.unwrap();
+        let mut new = accept(&mut listener).await;
+        drop(old);
+        write_all(&mut new, b"y").await.unwrap();
+        node.clock().sleep(millis(10)).await;
+    });
+    let (remote, closed) = (at(&b, 4433), at(&b, 9));
+    let client = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        write_all(&mut tcp, b"x").await.unwrap();
+        close(&mut tcp).await.unwrap();
+        drop(tcp);
+        node.clock().sleep(millis(10)).await;
+        wrap(&node, closed).await;
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        read(&mut tcp, 1).await
+    });
+    sim.run().unwrap();
+    assert_eq!(take(&client), Ok(b"y".to_vec()));
 }
 
 #[test]
