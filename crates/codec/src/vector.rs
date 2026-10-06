@@ -322,6 +322,17 @@ impl Vector<'_> {
                     *sample = word::store(reference.wrapping_add(residual));
                 }
             }
+            Plan::Delta {
+                first,
+                base,
+                bits: 0,
+            } => {
+                let mut value = first;
+                for sample in samples {
+                    *sample = word::store(value);
+                    value = value.wrapping_add(base);
+                }
+            }
             Plan::Delta { first, base, bits } => {
                 let mut previous = first;
                 if let Some(sample) = samples.next() {
