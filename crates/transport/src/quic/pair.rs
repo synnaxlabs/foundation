@@ -11,7 +11,7 @@ use types::time::{Monotonic, Span};
 
 use super::settings::MTU_MIN;
 use super::{Endpoint, Event, cid, connection, find, queue};
-pub(super) use crate::testing::{STREAMS_MAX, Shard, run};
+use crate::testing::Shard;
 
 /// The client's address. The server's is [`SERVER`].
 pub(super) const CLIENT: SocketAddr =
