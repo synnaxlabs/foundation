@@ -53,7 +53,7 @@ pub struct Config {
     pub commit: Span,
 }
 
-/// Why an open or a commit failed.
+/// Why an open failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The ring has no room for its restart record.
@@ -67,7 +67,7 @@ pub enum Error {
     },
     /// The pool has no block for a header, a recovery read, or the restart record.
     Pool(block::Error),
-    /// A file call failed. After a failed sync, every call fails with it.
+    /// A file call failed.
     Files(files::Error),
     /// The ring file has another length than its header, or the layout for a new
     /// ring, says.
@@ -140,9 +140,9 @@ pub enum Rejected {
     /// The batch alone is over a limit of one record, so it never fits this ring.
     /// The limit is the first one it is over, in the order of [`Limit`].
     Large(Limit),
-    /// The ring has no room for the batch. The caller records a gap. Room returns
-    /// at a commit, or never when the offsets left before their end are under
-    /// `needed`.
+    /// The ring has no room for the batch. Room returns only when records leave the
+    /// ring at its tail, and never when the offsets left before their end are under
+    /// `needed`. Nothing moves records out of the ring yet.
     Full {
         /// Bytes of the area that the batch's record needs, with the rest of the
         /// area it must skip.
@@ -465,7 +465,7 @@ impl Buffer {
     }
 
     /// Resolves at the end of the next group commit, when every entry appended
-    /// before the call is durable, or with the error that ended the buffer.
+    /// before the call is durable, or with the file error that ended the buffer.
     #[must_use]
     pub fn committed(&self) -> Commit<'_> {
         Commit {
@@ -680,12 +680,12 @@ pub struct Commit<'a> {
 }
 
 impl Future for Commit<'_> {
-    type Output = Result<(), Error>;
+    type Output = Result<(), files::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.shared.state.borrow_mut();
         if let Some(error) = &state.failed {
-            return Poll::Ready(Err(Error::Files(error.clone())));
+            return Poll::Ready(Err(error.clone()));
         }
         if state.commits > self.since {
             return Poll::Ready(Ok(()));

@@ -658,7 +658,7 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
             operation: Operation::Sync,
             code: 5,
         };
-        let ended = Err(Error::Files(failed.clone()));
+        let ended = Err(failed.clone());
         assert_eq!(buffer.committed().await, ended);
         assert_eq!(buffer.durable(a, Path::Live), Tail::default());
         assert_eq!(
@@ -1361,6 +1361,62 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
                 free: 0
             })
         );
+    });
+}
+
+#[test]
+fn a_failed_record_write_ends_the_buffer_with_its_error() {
+    let (mut sim, node) = one_node(111);
+    let own = node.clone();
+    run_on(&mut sim, &node, "write", move |tasks| async move {
+        let config = node_config(&own, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        own.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(buffer.committed().await, Err(failed.clone()));
+        assert_eq!(buffer.durable(a, Path::Live), Tail::default());
+        assert_eq!(
+            buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
+            Err(Rejected::Files(failed))
+        );
+    });
+}
+
+#[test]
+fn an_append_with_no_block_for_its_record_header_is_refused() {
+    run(112, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        let refused =
+            buffer.append([entry(1, a, Path::Live, 0, 1, None, Parts::default())]);
+        let header = block::Error::Exhausted {
+            requested: 52186,
+            available: 0,
+        };
+        assert_eq!(refused, Err(Rejected::Pool(header)));
+        assert_eq!(buffer.tail(a, Path::Live), tail(0, None));
+        drop(held);
     });
 }
 

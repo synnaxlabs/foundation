@@ -1527,10 +1527,7 @@ mod tests {
                 operation: Operation::Sync,
                 code: 5,
             };
-            assert_eq!(
-                shard.committed().await,
-                Err(buffer::Error::Files(failed.clone()))
-            );
+            assert_eq!(shard.committed().await, Err(failed.clone()));
             let disk = Error::Disk(failed);
             assert_eq!(
                 disk.to_string(),
