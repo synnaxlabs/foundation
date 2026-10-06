@@ -23,8 +23,9 @@ use crate::record::{
 /// The body of a restart record: one chain value.
 const RESTART_LEN: usize = 4;
 
-/// The smallest body a layout allows: the table of one entry.
-const BODY_MIN: usize = entry::table_len(1);
+/// The smallest body a layout allows: the rest of a block after the record header.
+/// A record takes whole blocks, so a smaller body saves no disk.
+const BODY_MIN: usize = ALIGN - HEADER_LEN;
 
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
@@ -94,10 +95,10 @@ impl Layout {
     /// # Errors
     ///
     /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
-    /// under the table of one entry or over `u32::MAX`, when `area` is less than
-    /// twice the largest record less one block, or when the ring file (two header
-    /// blocks and the area) does not fit in a `u64`. An empty ring of that length
-    /// takes any record, wherever its head is.
+    /// under 4087 bytes (one block less the record header) or over `u32::MAX`,
+    /// when `area` is less than twice the largest record less one block, or when
+    /// the ring file (two header blocks and the area) does not fit in a `u64`. An
+    /// empty ring of that length takes any record, wherever its head is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         let window = HEADER_LEN
             .checked_add(body_max)
@@ -140,7 +141,7 @@ impl Layout {
     /// less in all.
     #[must_use]
     pub fn entry_max(self) -> usize {
-        self.body_max - BODY_MIN
+        self.body_max - entry::table_len(1)
     }
 
     /// The length of the ring file: the two header blocks and the area.
@@ -896,11 +897,7 @@ mod tests {
             let block = 4096;
             let cases = [
                 ("an area of part blocks", 7 * block + 1, 4087),
-                (
-                    "a body under one entry table",
-                    8 * block,
-                    entry::table_len(1) - 1,
-                ),
+                ("a body under one block less the header", 8 * block, 4086),
                 ("an area under two records less a block", 2 * block, 4088),
                 ("a body over u32::MAX", u64::MAX - 4095, usize::MAX),
                 ("a record size over u64", u64::MAX - 4095, usize::MAX - 8),
@@ -923,9 +920,8 @@ mod tests {
         }
 
         #[test]
-        fn takes_a_body_of_one_entry_table() {
-            let window = Layout::new(4096, entry::table_len(1)).map(|l| l.window);
-            assert_eq!(window, Ok(4096));
+        fn holds_an_entry_of_4032_bytes_at_the_smallest_body() {
+            assert_eq!(Layout::new(4096, 4087).map(Layout::entry_max), Ok(4032));
         }
 
         #[test]

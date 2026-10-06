@@ -415,9 +415,11 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. `Layout::entry_max` is the most bytes of parts that `append` takes in a
-  batch of one entry; a batch of more entries holds less. A user that appends an
-  entry alone checks at open that its largest one fits (#627). An entry has no
+  records. `body_max` is at least one block less the record header (4087 bytes): a
+  record takes whole blocks, so a smaller one saves no disk and only holds less per
+  commit. An open of a header under that fails with `Unfit` (#627).
+  `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
+  one entry, at least 4032; a batch of more entries holds less. An entry has no
   part, one, or two; `append` takes them owned and drops them when it fails (#582).
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
@@ -2482,7 +2484,8 @@ Parameters and later choices, recorded and not asked:
 - Quality: X10 (ack quality on the ack's index), X19 (death record scope), R16-1 and
   R16-3 to R16-9 (r16 Rust guides).
 - Memory and performance: X8 (seq per index group), X30 (merge rule), X42 (interner),
-  S4 disk format starting point, r12 I4 (`buffer` driven, not self-running), `ring`
+  S4 disk format starting point, `Layout::new` refuses a `body_max` under one block
+  less the record header (#627), r12 I4 (`buffer` driven, not self-running), `ring`
   holds its own unsafe slot code (section 4).
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send

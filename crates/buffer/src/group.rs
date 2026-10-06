@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn a_ring_that_a_header_opens_holds_one_entry() {
         use crate::header;
-        let small = Layout::new(AREA, table_len(1)).expect("the sizes make a ring");
+        let small = Layout::new(AREA, 4087).expect("the sizes make a ring");
         let block = header::Header::new(small, CHAIN).encode();
         let opened = header::Header::decode(&block, &[0; 4096]).expect("a whole block");
         let bytes = vec![0; index(AREA)];
@@ -1048,7 +1048,7 @@ mod tests {
         /// byte more.
         #[test]
         fn one_entry_alone_takes_the_entry_max(
-            body_max in prop_oneof![Just(table_len(1)), table_len(1)..=60_000usize],
+            body_max in prop_oneof![Just(4087), 4087..=60_000usize],
         ) {
             let area = Area::with_body_max(body_max);
             let max = area.layout.entry_max();

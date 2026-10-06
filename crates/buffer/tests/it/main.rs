@@ -1172,6 +1172,25 @@ fn a_header_with_sizes_that_make_no_ring_is_unfit() {
     });
 }
 
+/// A header whose `body_max` is under one block less the record header makes no
+/// ring.
+#[test]
+fn a_header_with_a_body_under_one_block_is_unfit() {
+    run(28, Memory::default(), |shard| async move {
+        let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        drop(buffer.expect("opens"));
+        let body_max = BODY_MAX - 1;
+        let small = u32::try_from(body_max).expect("a small size");
+        shard.tamper(BODY_MAX_AT, &small.to_le_bytes());
+        let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
+        let unfit = Unfit {
+            area: AREA,
+            body_max,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Unfit(unfit)));
+    });
+}
+
 #[test]
 fn a_record_whose_entry_cannot_be_read_is_invalid() {
     run(18, Memory::default(), |shard| async move {
