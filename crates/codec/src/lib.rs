@@ -722,7 +722,7 @@ mod tests {
             #[test]
             fn constant_series_as_ffor_at_width_zero(
                 scalar in select(&INTS),
-                len in 3..2_100_usize,
+                len in 2..2_100_usize,
                 word in any::<u64>(),
             ) {
                 let values = word.to_le_bytes()[..scalar.width()].repeat(len);

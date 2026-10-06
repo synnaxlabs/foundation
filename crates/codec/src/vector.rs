@@ -310,15 +310,16 @@ impl Vector<'_> {
     /// Writes the samples into `out`, which holds exactly them.
     pub(crate) fn decode<const W: usize>(&self, out: &mut [u8]) {
         let body = self.body;
-        let out = out.as_chunks_mut::<W>().0;
-        let mut samples = out.iter_mut();
+        let mut samples = out.as_chunks_mut::<W>().0.iter_mut();
         match self.plan {
             Plan::Raw => {
                 for (sample, value) in samples.zip(body.as_chunks::<W>().0) {
                     *sample = *value;
                 }
             }
-            Plan::Ffor { reference, bits: 0 } => out.fill(word::store(reference)),
+            Plan::Ffor { reference, bits: 0 } => {
+                samples.into_slice().fill(word::store(reference));
+            }
             Plan::Ffor { reference, bits } => {
                 for (sample, residual) in samples.zip(bits::unpack(body, bits)) {
                     *sample = word::store(reference.wrapping_add(residual));
