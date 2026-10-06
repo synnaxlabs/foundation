@@ -87,6 +87,14 @@ pub(crate) const PRESENT: u8 = 1;
 pub(crate) const PRE_VOTE: u8 = 0;
 pub(crate) const VOTE: u8 = 1;
 
+/// Adds a grant as one byte.
+pub(crate) fn put_grant(grant: Grant, out: &mut Vec<u8>) {
+    out.push(match grant {
+        Grant::PreVote => PRE_VOTE,
+        Grant::Vote => VOTE,
+    });
+}
+
 /// Adds a presence byte, then the key when there is one.
 pub(crate) fn put_optional_key(key: Option<node::Key>, out: &mut Vec<u8>) {
     match key {
@@ -126,10 +134,7 @@ pub(crate) fn put_optional_proof(proof: Option<&Proof>, out: &mut Vec<u8>) {
         None => out.push(ABSENT),
         Some(proof) => {
             out.push(PRESENT);
-            out.push(match proof.grant {
-                Grant::PreVote => PRE_VOTE,
-                Grant::Vote => VOTE,
-            });
+            put_grant(proof.grant, out);
             put_key(proof.candidate, out);
             put_count(proof.voters.len(), out);
             for (&voter, &signature) in &proof.voters {
