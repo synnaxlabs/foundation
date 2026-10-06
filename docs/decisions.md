@@ -501,7 +501,7 @@ How to read this record:
   their order and padding are part of the disk and wire format version (C9d). A change
   to either needs a new version. The padding is at most 7 bytes for each present
   series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
-  (measured on #317). `frame::split` cuts a body at its `(entry, end)` pairs and
+  (measured on #317). `frame::split` cuts a body at its `(tag, end)` pairs and
   panics on ends that do not fit. Copy mode runs `frame::check` once where remote
   records enter (X43). Decided by the coordinator (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit

@@ -405,9 +405,10 @@ impl Frame {
 ///
 /// # Panics
 ///
-/// The iterator panics where [`check`] refuses `body` and `ends`. The body and ends of
-/// one frame never panic. Run [`check`] once on a body and ends from another node
-/// before the first [`split`].
+/// The iterator panics at the first end that [`check`] refuses. When the body runs past
+/// the last end, it panics only once it runs out. The body and ends of one frame never
+/// panic. Run [`check`] once on a body and ends from another node before the first
+/// [`split`].
 pub fn split<T>(
     body: &[u8],
     ends: impl IntoIterator<Item = (T, usize)>,
@@ -923,6 +924,12 @@ mod tests {
     #[should_panic(expected = "the last end 8 is not the end of the body of 17 bytes")]
     fn panics_when_the_ends_stop_before_the_body() {
         split(&[1; 17], tagged(&[3, 8])).for_each(drop);
+    }
+
+    #[test]
+    #[should_panic(expected = "the last end 0 is not the end of the body of 16 bytes")]
+    fn panics_on_a_body_with_no_ends() {
+        split(&[1; 16], tagged(&[])).for_each(drop);
     }
 
     #[test]
