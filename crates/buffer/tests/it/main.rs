@@ -226,12 +226,14 @@ fn a_new_ring_keeps_its_layout_across_opens() {
         let first = layout(AREA, BODY_MAX);
         let buffer = shard.open(first, &mut Slots::new()).await.expect("opens");
         assert_eq!(buffer.layout(), first);
-        assert_eq!(shard.memory.syncs(), 1, "the header is synced");
+        assert_eq!(shard.memory.syncs(), 2, "the header and the open");
         drop(buffer);
+        let header = shard.memory.bytes(RING)[..to_usize(AREA_START)].to_vec();
         let other = layout(2 * AREA, 2 * BODY_MAX);
         let buffer = shard.open(other, &mut Slots::new()).await.expect("reopens");
         assert_eq!(buffer.layout(), first);
-        assert_eq!(shard.memory.syncs(), 1, "a reopen syncs nothing");
+        let reopened = &shard.memory.bytes(RING)[..to_usize(AREA_START)];
+        assert_eq!(reopened, header, "the reopen rewrote the header");
     });
     let bytes = memory.bytes(RING);
     assert_eq!(bytes.len(), to_usize(AREA_START + AREA));
@@ -271,7 +273,7 @@ fn entries_are_durable_at_committed_and_recovered_at_open() {
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), live);
         assert_eq!(buffer.durable(b, Path::Backfill), backfill);
-        assert_eq!(shard.memory.syncs(), 2, "one sync per commit");
+        assert_eq!(shard.memory.syncs(), 3, "one sync per commit");
         drop(buffer);
         let mut slots = Slots::new();
         let buffer = shard
@@ -391,7 +393,7 @@ fn the_first_append_after_an_idle_span_commits_after_one_commit() {
         assert_eq!(buffer.durable(a, Path::Live), tail(0, None));
         shard.clock.sleep(commits(2)).await;
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
-        assert_eq!(shard.memory.syncs(), 2, "the append alone woke the task");
+        assert_eq!(shard.memory.syncs(), 3, "the append alone woke the task");
     });
 }
 
@@ -414,7 +416,7 @@ fn a_busy_buffer_keeps_one_deadline_per_commit() {
             .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
             .expect("queues during the first sync");
         shard.clock.sleep(tenths(12)).await;
-        assert_eq!(shard.memory.syncs(), 3, "two deadlines, one commit apart");
+        assert_eq!(shard.memory.syncs(), 4, "two deadlines, one commit apart");
         assert_eq!(buffer.durable(a, Path::Live), tail(2, Some(2)));
     });
 }
@@ -440,7 +442,7 @@ fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
             .await;
         assert_eq!(
             shard.memory.syncs(),
-            2,
+            3,
             "the passed deadline fired at the wake"
         );
         assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
@@ -527,7 +529,7 @@ fn a_batch_past_the_open_group_starts_the_next_record() {
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(3)));
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(3)));
-        assert_eq!(shard.memory.syncs(), 2, "both records go in one sync");
+        assert_eq!(shard.memory.syncs(), 3, "both records go in one sync");
         drop(buffer);
         let mut slots = Slots::new();
         let buffer = shard
@@ -707,6 +709,47 @@ fn a_failed_append_holds_no_part() {
     });
 }
 
+/// A reopen syncs the ring once before it reports the tails durable, and a failed
+/// sync fails the reopen.
+#[test]
+fn a_reopen_syncs_the_ring_once() {
+    run(26, Memory::default(), |shard| async move {
+        let ring = layout(AREA, BODY_MAX);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        for (first, last) in [(0, 30), (3, 60)] {
+            buffer
+                .append([entry(
+                    1,
+                    a,
+                    Path::Live,
+                    first,
+                    3,
+                    Some(last),
+                    Parts::default(),
+                )])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        drop(buffer);
+        drop(shard.open(ring, &mut Slots::new()).await.expect("reopens"));
+        assert_eq!(
+            shard.memory.syncs(),
+            5,
+            "the header, the open, two commits, the reopen"
+        );
+        shard.memory.fail_syncs();
+        let reopened = shard.open(ring, &mut Slots::new()).await.map(drop);
+        let failed = Error::Files(FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        });
+        assert_eq!(reopened, Err(failed));
+    });
+}
+
 #[test]
 fn a_failed_sync_ends_the_buffer_with_its_error() {
     run(7, Memory::default(), |shard| async move {
@@ -734,7 +777,7 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
         assert_eq!(buffer.append(Vec::new()), failed, "an empty append");
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
         assert_eq!(buffer.committed().await, failed);
-        assert_eq!(shard.memory.syncs(), 2, "the task ended at the failed sync");
+        assert_eq!(shard.memory.syncs(), 3, "the task ended at the failed sync");
     });
 }
 
@@ -828,13 +871,13 @@ fn a_drop_ends_the_commit_task() {
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         buffer.committed().await.expect("commits");
-        assert_eq!(shard.memory.syncs(), 2);
+        assert_eq!(shard.memory.syncs(), 3);
         buffer
             .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
             .expect("queues");
         drop(buffer);
         shard.clock.sleep(commits(10)).await;
-        assert_eq!(shard.memory.syncs(), 2, "no deadline runs after the drop");
+        assert_eq!(shard.memory.syncs(), 3, "no deadline runs after the drop");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -873,7 +916,7 @@ fn committed_waits_for_an_entry_appended_during_a_commit() {
         assert_eq!(buffer.durable(a, Path::Live), tail(2, Some(2)));
         assert_eq!(
             shard.memory.syncs(),
-            3,
+            4,
             "the second entry took its own sync"
         );
     });
@@ -1118,7 +1161,7 @@ fn node_config(node: &sim::node::Node, tasks: Tasks, dir: &str) -> Config {
 }
 
 /// Calls `at` with each seed of `seeds` and each cut from 0 ns in steps of `step`
-/// ns, until `at` returns that the first open had ended at the cut.
+/// ns, until `at` returns that the work it cuts had ended at the cut.
 fn each_cut(seeds: Range<u64>, step: i64, mut at: impl FnMut(u64, i64) -> bool) {
     for seed in seeds {
         let mut cut = 0;
@@ -1245,6 +1288,73 @@ fn a_kill_during_the_first_open_keeps_the_commits_of_the_next() {
             tail(3, Some(30)),
             "seed {seed}, kill at {cut} ns"
         );
+        ended
+    });
+}
+
+/// Starts a new ring on a node with `seed`, appends one entry, and kills the
+/// process `cut` nanoseconds after a point at most 10 µs before the deadline of the
+/// first commit. Returns the sim, the node, and whether the commit had ended.
+fn kill_the_first_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, bool) {
+    let (mut sim, node) = one_node(seed);
+    let opened = Arc::new(AtomicBool::new(false));
+    let committed = Arc::new(AtomicBool::new(false));
+    let (open, commit) = (Arc::clone(&opened), Arc::clone(&committed));
+    let first = node.clone();
+    drop(on_node(&node, "first", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&first, tasks, DIR);
+        let buffer = Buffer::open(config, &mut slots)
+            .await
+            .expect("the first open ends well");
+        open.store(true, Ordering::Relaxed);
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        commit.store(true, Ordering::Relaxed);
+        std::future::pending::<()>().await;
+    }));
+    let step = 10_000;
+    while !opened.load(Ordering::Relaxed) {
+        sim.run_for(Span::from_nanos(step))
+            .expect("the run goes on");
+    }
+    let rest = Span::from_nanos(COMMIT.nanos() - step + cut);
+    sim.run_for(rest).expect("the run goes on");
+    sim.crash(&node, sim::Crash::Process);
+    (sim, node, committed.load(Ordering::Relaxed))
+}
+
+/// A process that opens a ring after a kill at any point of the first commit
+/// reports durable only what a power cut then keeps.
+#[test]
+fn a_tail_reported_durable_after_a_kill_survives_a_power_cut() {
+    each_cut(0..32, 10_000, |seed, cut| {
+        let (mut sim, node, ended) = kill_the_first_commit(seed, cut);
+        assert!(
+            cut != 0 || !ended,
+            "seed {seed}: the kill missed the commit"
+        );
+        let reported = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the kill");
+            buffer.durable(slots.assign(key(1)), Path::Live)
+        });
+        let reported = reported.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
+        sim.crash(&node, sim::Crash::Power);
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the power cut");
+            buffer.tail(slots.assign(key(1)), Path::Live)
+        });
+        let recovered = recovered.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
+        assert_eq!(recovered, reported, "seed {seed}, cut at {cut} ns");
         ended
     });
 }
@@ -1862,7 +1972,7 @@ fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_once() {
             .await;
         assert_eq!(shard.memory.open_files(), 0, "the task ended");
         shard.clock.sleep(commits(10)).await;
-        assert_eq!(shard.memory.syncs(), 1, "no deadline runs after the drop");
+        assert_eq!(shard.memory.syncs(), 2, "no deadline runs after the drop");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1910,7 +2020,7 @@ fn a_drop_during_a_commit_ends_the_task_after_the_sync() {
             "the task ended after the sync"
         );
         shard.clock.sleep(commits(10)).await;
-        assert_eq!(shard.memory.syncs(), 2, "no deadline runs after the drop");
+        assert_eq!(shard.memory.syncs(), 3, "no deadline runs after the drop");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -2004,7 +2114,7 @@ fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
             .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
             .expect("queues");
         shard.clock.sleep(commits(3)).await;
-        assert_eq!(shard.memory.syncs(), 3, "the second commit failed its sync");
+        assert_eq!(shard.memory.syncs(), 4, "the second commit failed its sync");
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
         let ended = Err(Error::Files(FileError::Io {
             path: PathBuf::from(RING),
