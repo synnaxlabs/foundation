@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use block::{Block, Pool};
 use bytes::{Bytes, BytesMut};
 use env::net::Ecn;
-use env::net::udp::{Meta, TRANSMIT_BYTES_MAX, Transmit};
+use env::net::udp::{Meta, Transmit};
 use noq_proto::{
     ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, FourTuple, SendDatagramError,
 };
@@ -30,15 +30,10 @@ use types::time::Monotonic;
 use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
-use crate::{Class, Code, Config, Error, PAYLOAD_IPV4, Peer};
+use crate::{Class, Code, Config, Error, Peer};
 
 /// The server name a dial sends. The verifiers check the node key, not the name.
 const SERVER_NAME: &str = "foundation";
-
-/// The most datagrams of the largest size that one send takes. noq-proto bounds a
-/// batch only by its count.
-const DATAGRAMS_MAX: NonZeroUsize =
-    NonZeroUsize::new(TRANSMIT_BYTES_MAX / PAYLOAD_IPV4 as usize).expect("not zero");
 
 /// One shard's QUIC endpoint and its connections, with no I/O. The caller gives it
 /// the time and the datagrams that arrive, and takes from it the datagrams to send,
@@ -105,7 +100,8 @@ pub(crate) enum Event {
 impl Endpoint {
     /// An endpoint for this node's key whose connection IDs all start with
     /// `shard`. Each [`Transmit`] holds at most `datagrams_max` datagrams, the
-    /// socket's batch max, and at most [`TRANSMIT_BYTES_MAX`] bytes.
+    /// socket's batch max, and at most
+    /// [`TRANSMIT_BYTES_MAX`](env::net::udp::TRANSMIT_BYTES_MAX) bytes.
     ///
     /// # Panics
     ///
@@ -119,7 +115,7 @@ impl Endpoint {
             epoch: config.clock.epoch(),
             settings,
             inner: endpoint,
-            datagrams_max: datagrams_max.min(DATAGRAMS_MAX),
+            datagrams_max: datagrams_max.min(settings::BATCH_MAX),
             pool: Rc::clone(&config.pool),
             message_bytes_max: config.message_bytes_max.get(),
             window_bytes: config.window_bytes,
@@ -1074,8 +1070,7 @@ mod tests {
                     assert_eq!(written, Ok(Poll::Ready(())));
                 }
                 pair.run(Duration::from_secs(1));
-                let most = TRANSMIT_BYTES_MAX / usize::from(PAYLOAD_IPV4);
-                assert_eq!(pair.client.batch_max, most);
+                assert_eq!(pair.client.batch_max, settings::BATCH_MAX.get());
             });
         }
     }
