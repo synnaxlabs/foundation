@@ -1846,7 +1846,7 @@ How to read this record:
   those of a leaked call too (#763). A crash of either kind closes each serial port of
   the node, a leaked one too, and a socket or serial port from before the crash panics
   when it polls. A `Power` crash is a `Process` crash and then the loss of what is not
-  durable, so an in-flight `sync` or `sync_dir` may take effect, as on a real disk; a
+  durable, so a `sync` or `sync_dir` in flight can take effect, as on a real disk; a
   test pins that the states of a `Power` crash equal those of a `Process` crash followed
   at once by a `Power` crash (#857, coordinator and advisor, delegated by the person). A
   `Power` crash keeps, for each 512-byte sector, its durable bytes or the bytes of any

@@ -207,7 +207,8 @@ impl Files {
         self.queue.first().map(|&(at, _)| at)
     }
 
-    /// A hash of every end of a call so far: its time, key, kind, and success.
+    /// A hash of every end of a call so far: its time, key, kind, and success, and at
+    /// a crash whether it took effect.
     pub(crate) fn digest(&self) -> u64 {
         self.digest.finish()
     }
@@ -348,12 +349,12 @@ impl Files {
     }
 
     /// Crashes `node` by `crash` at true time `at`: each call, result, close, and
-    /// hold of the node ends, a leaked one too. A call in flight ends as one whose
-    /// future dropped, in the order of its end time: a write keeps any subset of its
-    /// sectors, and another call takes its effect or none by a coin. After a `Power`
-    /// crash the disk keeps only what is durable. Returns the wakers of the closes
-    /// and the blocks of the calls, for the caller to drop after it releases the
-    /// lock.
+    /// hold of the node ends, a leaked one too. Each call in flight ends, in the
+    /// order of its end time: a write keeps any subset of its sectors, as one whose
+    /// future dropped, and another call takes its effect or none by a coin. After a
+    /// `Power` crash the disk keeps only what is durable. Returns the wakers of the
+    /// closes and the blocks of the calls, for the caller to drop after it releases
+    /// the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
@@ -379,9 +380,10 @@ impl Files {
                 let ended = self.apply(key, flight);
                 (ended.result.is_ok(), ended.held)
             } else {
+                // `Disk::crash` drops the holds of the call on its file.
                 (false, flight.held)
             };
-            (at, key, kind, ok).hash(&mut self.digest);
+            (at, key, kind, applied, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
         let leaked: Vec<_> = (self.done)

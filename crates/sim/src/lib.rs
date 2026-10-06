@@ -222,8 +222,8 @@ impl Sim {
     /// A hash of every scheduler pick, every datagram event, every byte arrival on a
     /// line, and every end of a file call so far: the time, addresses, length, and
     /// fate of a datagram, the time, end, and fate of a byte, and the time, kind,
-    /// and success of a call, never the bytes. In one build, the same seed and the
-    /// same calls give the same digest.
+    /// and success of a call and whether it took effect at a crash, never the bytes.
+    /// In one build, the same seed and the same calls give the same digest.
     #[must_use]
     pub fn digest(&self) -> u64 {
         lock(&self.shared).digest()
@@ -492,8 +492,8 @@ impl fmt::Debug for Sim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Crash {
     /// The process dies, as on a kill or a panic with `panic = "abort"`. The disk
-    /// keeps each call that ended. Each file call in flight ends at the crash, as
-    /// if its future dropped: a write keeps any subset of its sectors, and each
+    /// keeps each call that ended. Each file call in flight ends at the crash: a
+    /// write keeps any subset of its sectors, as one whose future dropped, and each
     /// other call takes its effect or none, so a create makes the whole file or
     /// none.
     Process,

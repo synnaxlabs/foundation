@@ -683,11 +683,21 @@ fn a_sync_dir_in_flight_at_a_process_crash_may_miss_a_create_in_flight() {
 /// The paths of the files of [`history`].
 const PATHS: [&str; 3] = ["a", "b", "d/c"];
 
+/// The kind of a [`Step`].
+#[derive(Clone, Copy)]
+enum Kind {
+    Create,
+    Write,
+    Sync,
+    SyncDir,
+    Remove,
+    CreateDir,
+}
+
 /// One file call of [`history`].
 #[derive(Clone, Copy)]
 struct Step {
-    /// The kind of call, below 6.
-    kind: u64,
+    kind: Kind,
     /// The index of its file in [`PATHS`].
     at: usize,
     /// The offset of a write of 512 bytes.
@@ -699,7 +709,14 @@ struct Step {
 impl Step {
     fn new(rng: &mut Rng) -> Self {
         Self {
-            kind: rng.below(6),
+            kind: [
+                Kind::Create,
+                Kind::Write,
+                Kind::Sync,
+                Kind::SyncDir,
+                Kind::Remove,
+                Kind::CreateDir,
+            ][usize::try_from(rng.below(6)).unwrap()],
             at: usize::try_from(rng.below(3)).unwrap(),
             offset: 256 * rng.below(3),
             value: rng.next_u64().to_le_bytes()[0],
@@ -716,16 +733,18 @@ impl Step {
     ) -> Option<File> {
         let (path, file) = (Path::new(PATHS[self.at]), handles[self.at].as_ref());
         match (self.kind, file) {
-            (0, _) => return files.open(path, Mode::Create { len: KIB }).await.ok(),
-            (1, Some(file)) => {
+            (Kind::Create, _) => {
+                return files.open(path, Mode::Create { len: KIB }).await.ok();
+            }
+            (Kind::Write, Some(file)) => {
                 let part = block(pool, &[self.value; 512]);
                 drop(file.write_at(self.offset, &[part]).await);
             }
-            (2, Some(file)) => drop(file.sync().await),
-            (3, _) => drop(files.sync_dir(path.parent().unwrap()).await),
-            (4, _) => drop(files.remove(path).await),
-            (5, _) => drop(files.create_dir(Path::new("d")).await),
-            _ => {}
+            (Kind::Sync, Some(file)) => drop(file.sync().await),
+            (Kind::SyncDir, _) => drop(files.sync_dir(path.parent().unwrap()).await),
+            (Kind::Remove, _) => drop(files.remove(path).await),
+            (Kind::CreateDir, _) => drop(files.create_dir(Path::new("d")).await),
+            (Kind::Write | Kind::Sync, None) => {}
         }
         None
     }
