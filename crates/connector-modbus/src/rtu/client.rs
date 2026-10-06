@@ -74,12 +74,13 @@ impl Client {
         super::encode(unit.get(), request, &mut self.bytes)
             .map_err(Failure::Request)?;
         let (stale, now) = (self.stale, self.line.now());
-        // A timeout past the end of the clock never ends.
+        // The end of the clock never comes, so a timeout past it never ends.
         let deadline = stale
             .map_or(now, |stale| stale.max(now))
-            .checked_add(self.timeout);
-        self.stale = deadline;
-        let read = self.ask(request, stale, deadline).await;
+            .checked_add(self.timeout)
+            .unwrap_or(Monotonic(u64::MAX));
+        self.stale = Some(deadline);
+        let read = self.ask(request, stale, Some(deadline)).await;
         self.stale = None;
         read?;
         let frame = super::decode_reply(request, &self.bytes)

@@ -71,12 +71,22 @@ struct Bus {
 
 impl Bus {
     fn new(seed: u64, settings: Settings, line: line::Config) -> Self {
+        Self::with_client(seed, settings, line, node::Config::default())
+    }
+
+    /// As [`Bus::new`], with `client` for the client node.
+    fn with_client(
+        seed: u64,
+        settings: Settings,
+        line: line::Config,
+        client: node::Config,
+    ) -> Self {
         let mut sim = Sim::new(sim::Config {
             seed,
             steps_max: 10_000_000,
             ..sim::Config::default()
         });
-        let client = sim.node(node::Config::default());
+        let client = sim.node(client);
         let device = sim.node(node::Config::default());
         let mut bus = Self {
             sim,
@@ -811,4 +821,67 @@ fn fails_when_the_port_fails_while_it_waits_for_the_reply() {
         code: 5,
     };
     assert_eq!(got, Err(Failure::Serial(error)));
+}
+
+/// Runs an exchange of `request` for at most `span`, and gives what it gave.
+async fn until(
+    clock: &Clock,
+    span: Span,
+    client: &mut Client,
+    request: &Request,
+) -> Option<Result<Said, Failure>> {
+    let mut exchange = pin!(client.exchange(UNIT, request));
+    let mut sleep = clock.sleep(span);
+    poll_fn(|cx| {
+        if let Poll::Ready(reply) = exchange.as_mut().poll(cx) {
+            return Poll::Ready(Some(said(reply)));
+        }
+        std::pin::Pin::new(&mut sleep).poll(cx).map(|()| None)
+    })
+    .await
+}
+
+#[test]
+fn reads_its_own_reply_after_a_dropped_exchange_with_no_deadline() {
+    let client = node::Config {
+        monotonic: Monotonic(u64::MAX - ms(100).nanos().unsigned_abs()),
+        ..node::Config::default()
+    };
+    let line = line::Config::default();
+    let mut bus = Bus::with_client(17, settings(9_600, None), line, client);
+    raw(&mut bus, |mut port, clock| async move {
+        take(&mut port, &clock, 8).await;
+        clock.sleep(ms(20)).await;
+        write(&mut port, &framed(&[17, 0x03, 0x02, 0x00, 0x2A])).await;
+        take(&mut port, &clock, 8).await;
+        write(&mut port, &framed(&[17, 0x03, 0x02, 0x00, 0x2B])).await;
+        port
+    });
+    let (serial, clock) = (bus.client.serial(), bus.client.clock());
+    let config = config(CLIENT, bus.settings);
+    let out = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&out);
+    let handle = bus
+        .client
+        .shards()
+        .start(shard("client"), move |_| async move {
+            let mut client = Client::open(&serial, &config, clock.clone(), TIMEOUT)
+                .await
+                .expect("the port opens");
+            let request = read(Table::HoldingRegisters, 0, 1);
+            let dropped = until(&clock, ms(12), &mut client, &request).await.is_none();
+            let request = read(Table::HoldingRegisters, 1, 1);
+            let got = until(&clock, ms(60), &mut client, &request).await;
+            *slot.lock().expect("no panic under the lock") = Some((dropped, got));
+        });
+    bus.handles.push(handle.expect("the shard starts"));
+    bus.sim.run_for(ms(90)).expect("the run goes on");
+    let got = out.lock().expect("no panic under the lock").take();
+    let (dropped, got) = got.expect("main returned");
+    assert!(dropped, "the first exchange was still waiting at 12 ms");
+    assert_eq!(
+        got,
+        Some(Err(Failure::Timeout)),
+        "the dropped exchange never ends, so the next one cannot wait it out"
+    );
 }
