@@ -7,6 +7,7 @@
 use clock::{Clock, Status};
 use estimate::Measurement;
 use estimate::combine::Error;
+use estimate::discipline::Cause;
 use types::time::Span;
 
 #[global_allocator]
@@ -34,7 +35,7 @@ fn main() {
         "the reader reads mesh time"
     );
 
-    let _ = clock.add();
+    let os = clock.add();
     let (interval, allocations) = ALLOCATOR.count(|| reader.now());
     assert_eq!(allocations, 0, "the hot path allocated in holdover");
     assert_eq!(
@@ -51,7 +52,30 @@ fn main() {
     };
     assert_eq!(
         status,
-        Status::Holdover(first, alone),
+        Status::Holdover(first, Cause::NoEstimate(alone)),
         "the reader reads the status"
+    );
+
+    clock.push(os, Measurement::unknown(node.clock().now(), Span::ZERO));
+    clock.remove(source);
+    let (interval, allocations) = ALLOCATOR.count(|| reader.now());
+    assert_eq!(
+        allocations, 0,
+        "the hot path allocated with an unknown estimate"
+    );
+    assert_eq!(
+        interval,
+        Some(first.interval()),
+        "the reader reads mesh time with an unknown estimate"
+    );
+    let (status, allocations) = ALLOCATOR.count(|| reader.status());
+    assert_eq!(
+        allocations, 0,
+        "the status read allocated with an unknown estimate"
+    );
+    assert_eq!(
+        status,
+        Status::Holdover(first, Cause::UnknownEstimate),
+        "the reader reads the status with an unknown estimate"
     );
 }
