@@ -303,8 +303,9 @@ impl<const N: usize> Iterator for Join<'_, N> {
 
     #[expect(
         clippy::inline_always,
-        reason = "the default calls `fold` out of line, and the charge then saves three \
-                  more register pairs on each call: a narrow charge about 12% slower"
+        reason = "the default calls `fold` out of line, and the charge then saves \
+                  three more register pairs on each call: a narrow charge about 12% \
+                  slower"
     )]
     #[inline(always)]
     fn count(mut self) -> usize {
