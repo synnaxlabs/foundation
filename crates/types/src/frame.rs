@@ -193,7 +193,7 @@ impl From<block::Error> for Error {
     }
 }
 
-/// The shape of a frame of a key set, checked against each rule of [`Draft::new`],
+/// The shape of a frame of a key set, checked against each rule of [`Layout::new`],
 /// before it takes a block.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout<'a> {
@@ -205,8 +205,10 @@ pub struct Layout<'a> {
 
 impl<'a> Layout<'a> {
     /// Checks `series` for a frame of `set`: each present entry and the byte length
-    /// of its series, in increasing entry order, with the index of each data entry's
-    /// group. Takes no block. Time is linear in `series`.
+    /// of its series, in increasing entry order. Each data entry needs the index of
+    /// its group in `series`. A group is present when its index is. Takes no block.
+    /// Time is linear in `series` while the data of at most 16 groups alternate, and
+    /// O(n log n) for n series at worst.
     ///
     /// # Errors
     ///
@@ -320,17 +322,15 @@ impl<'a> Layout<'a> {
 pub struct Draft(block::Unique);
 
 impl Draft {
-    /// Takes a block from `pool` for a frame of `set`, and writes its header, ranges,
-    /// and descriptors. `series` holds each present entry and the byte length of its
-    /// series, in increasing entry order. Each data entry needs the index of its group
-    /// in `series`. A group is present when its index is. Each range starts at zero,
-    /// and series bytes are not cleared.
+    /// Takes a block from `pool` for a frame of `set` and `series`, and writes its
+    /// header, ranges, and descriptors: [`Layout::new`], then [`Layout::draft`]. Each
+    /// range starts at zero, and series bytes are not cleared.
     ///
     /// # Errors
     ///
     /// [`Error::OutOfRange`], [`Error::Unordered`], or [`Error::IndexAbsent`] when
-    /// `series` breaks a rule above. [`Error::Pool`] only when `series` keeps every
-    /// rule and the pool cannot give a block for the frame.
+    /// `series` breaks a rule of [`Layout::new`]. [`Error::Pool`] only when `series`
+    /// keeps every rule and the pool cannot give a block for the frame.
     pub fn new(
         pool: &block::Pool,
         set: &KeySet,
