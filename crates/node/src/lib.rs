@@ -35,10 +35,10 @@ pub struct Node {
 }
 
 impl Node {
-    /// Starts one shard per core, named `shard-<i>` and pinned to core `i` when the
-    /// host can pin (`env::shards::Shards::pinnable`). Returns once each shard runs
-    /// or one has failed to start. A failed start stops the node, and [`Node::join`]
-    /// returns its error.
+    /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
+    /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
+    /// Returns once each shard runs or one has failed to start. A failed start stops
+    /// the node, and [`Node::join`] returns its error.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start(config: Config) -> Self {
         let Config { shards } = config;
@@ -48,10 +48,11 @@ impl Node {
             handles: Vec::new(),
             failed: None,
         };
+        let pinnable = shards.pinnable();
         for core in 0..shards.cores().get() {
             let shard = env::shards::Config {
                 name: format!("shard-{core}"),
-                core: shards.pinnable().then_some(core),
+                core: pinnable.then_some(core),
             };
             let guard = stop.guard();
             match shards.start(shard, move |_tasks| guard) {

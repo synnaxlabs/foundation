@@ -14,14 +14,19 @@ struct Run {
 
 /// Starts a node on `cores` cores of a `sim` host, after `faults` aim at its shards.
 fn start(seed: u64, cores: usize, faults: &[(usize, Fault)]) -> Run {
+    let host = sim::node::Config {
+        cores: NonZeroUsize::new(cores).unwrap(),
+        ..sim::node::Config::default()
+    };
+    start_on(seed, host, faults)
+}
+
+fn start_on(seed: u64, host: sim::node::Config, faults: &[(usize, Fault)]) -> Run {
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
     });
-    let host = sim.node(sim::node::Config {
-        cores: NonZeroUsize::new(cores).unwrap(),
-        ..sim::node::Config::default()
-    });
+    let host = sim.node(host);
     for &(core, fault) in faults {
         host.fail_shard(core, fault);
     }
@@ -188,22 +193,24 @@ fn join_gives_a_shard_that_could_not_start_over_one_that_panicked() {
 
 #[test]
 fn a_host_that_cannot_pin_starts_shards_on_no_core() {
-    let mut sim = sim::Sim::new(sim::Config::default());
-    let host = sim.node(sim::node::Config {
+    let host = sim::node::Config {
         cores: NonZeroUsize::new(2).unwrap(),
         unpinnable: true,
         ..sim::node::Config::default()
-    });
-    let node = Node::start(Config {
-        shards: host.shards(),
-    });
-    let starts = host.shard_starts();
-    let starts: Vec<_> = starts.into_iter().map(|c| (c.name, c.core)).collect();
+    };
+    let mut run = start_on(7, host, &[]);
     assert_eq!(
-        starts,
+        starts(&run),
         [("shard-0".to_string(), None), ("shard-1".to_string(), None)]
     );
-    node.stop();
-    assert_eq!(sim.run(), Ok(()));
-    assert_eq!(node.join(), Ok(()));
+    assert_eq!(
+        run.sim.run(),
+        Err(sim::Error::Stuck {
+            threads: vec!["shard-0".into(), "shard-1".into()],
+            seed: 7,
+        })
+    );
+    run.node.stop();
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(run.node.join(), Ok(()));
 }
