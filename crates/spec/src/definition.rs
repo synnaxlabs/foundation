@@ -5,13 +5,14 @@
 //! Format, with every integer little-endian:
 //!
 //! ```text
-//! definition := version:u8 tag:u8 body
-//! access     := subjects:patterns select:patterns allow:u8 authority:u8   tag 1
-//! connector  := kind:text node:text length:u64 document                  tag 2
-//! region     := epoch:u64 count:u64 text*                                tag 3
-//! patterns   := count:u64 pattern*
-//! pattern    := excluded:u8 length:u64 UTF-8 bytes
-//! text       := length:u64 UTF-8 bytes
+//! definition    := version:u8 tag:u8 body
+//! access        := subjects:patterns select:patterns allow:u8 authority:u8   tag 1
+//! connector     := kind:text node:text length:u64 document                  tag 2
+//! region        := epoch:u64 count:u64 text*                                tag 3
+//! node_settings := select:patterns disk:u64 pool:u64                       tag 4
+//! patterns      := count:u64 pattern*
+//! pattern       := excluded:u8 length:u64 UTF-8 bytes
+//! text          := length:u64 UTF-8 bytes
 //! ```
 //!
 //! A `text` is a name. `document` is the canonical encoding of the connector config.
@@ -24,6 +25,9 @@
 //!
 //! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
 //! admin 5. `authority` is zero when `allow` does not hold write.
+//!
+//! A node settings budget of 0 bytes is no budget, because a policy cannot hold zero.
+//! A policy sets at least one budget.
 
 #![deny(
     clippy::indexing_slicing,
@@ -36,16 +40,19 @@ use std::{fmt, str};
 
 use document::encoding;
 use types::authority::Authority;
+use types::byte;
 use types::name::{self, Name, Selector, Written};
 
 use crate::access::{Action, Actions, Policy};
 use crate::connector::Connector;
+use crate::node_settings;
 use crate::region::{Delegation, NoVoters};
 
 const VERSION: u8 = 1;
 const ACCESS: u8 = 1;
 const CONNECTOR: u8 = 2;
 const REGION: u8 = 3;
+const NODE_SETTINGS: u8 = 4;
 /// The fewest bytes a text takes: its length.
 const TEXT_MIN: usize = 8;
 /// The fewest bytes a pattern takes: its flag and its length.
@@ -61,6 +68,8 @@ pub enum Definition {
     Connector(Connector),
     /// The record of a child region, in its parent's tree.
     Region(Delegation),
+    /// A node settings policy.
+    NodeSettings(node_settings::Policy),
 }
 
 impl Definition {
@@ -97,6 +106,14 @@ impl Definition {
                     text(&mut out, voter.as_str());
                 }
             }
+            Self::NodeSettings(policy) => {
+                out.push(NODE_SETTINGS);
+                patterns(&mut out, policy.select());
+                for budget in [policy.disk(), policy.pool()] {
+                    let bytes = budget.map_or(0, byte::Size::bytes);
+                    out.extend_from_slice(&bytes.to_le_bytes());
+                }
+            }
         }
         out
     }
@@ -123,6 +140,7 @@ impl Definition {
             ACCESS => Self::Access(reader.access()?),
             CONNECTOR => Self::Connector(reader.connector()?),
             REGION => Self::Region(reader.region()?),
+            NODE_SETTINGS => Self::NodeSettings(reader.node_settings()?),
             tag => return Err(Error::Kind { at, tag }),
         };
         if !reader.rest.is_empty() {
@@ -275,6 +293,19 @@ impl<'a> Reader<'a> {
         Delegation::new(epoch, voters).map_err(|NoVoters| Error::NoVoters { at })
     }
 
+    fn node_settings(&mut self) -> Result<node_settings::Policy, Error> {
+        let select = self.patterns()?;
+        let at = self.at();
+        let mut budget = || {
+            self.u64()
+                .map(|bytes| (bytes != 0).then_some(byte::Size::from_bytes(bytes)))
+        };
+        let disk = budget()?;
+        let pool = budget()?;
+        node_settings::Policy::new(select, disk, pool)
+            .map_err(|error| Error::Budget { at, error })
+    }
+
     fn access(&mut self) -> Result<Policy, Error> {
         let subjects = self.patterns()?;
         let select = self.patterns()?;
@@ -384,6 +415,14 @@ pub enum Error {
         /// The authority.
         found: Authority,
     },
+    /// The budgets of a node settings policy make no policy. A zero budget reads as
+    /// no budget, so `error` is always [`node_settings::Error::NoBudget`].
+    Budget {
+        /// Where the budgets start.
+        at: usize,
+        /// Why they make no policy.
+        error: node_settings::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -435,6 +474,9 @@ impl fmt::Display for Error {
                 f,
                 "authority {found} at byte {at} is on a policy without write"
             ),
+            Self::Budget { at, error } => {
+                write!(f, "the budgets at byte {at}: {error}")
+            }
         }
     }
 }

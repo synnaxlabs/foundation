@@ -510,13 +510,19 @@ How to read this record:
 - **M1** Node-local u32 `channel::Slot`s. Each writer session gets an interned key set
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
-- **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
-  home routes by key set. A mask holds the index of each channel it holds, so the
-  series of a view make a frame, and `View::charge` is its charge (CREDIT RULES). A
-  mask is a sorted list, or no list when it holds every entry, so a view's cost grows
-  with the smaller of its frame's series and its mask's entries (rule 11). A view
-  borrows its frame and mask, so making one takes no reference count. Approved by the
-  coordinator (#157).
+- **M2 (revised 2026-10-06)** Readers get a view: the frame plus a mask cached per
+  key set and reader. The home routes by key set. A mask holds the index of each
+  channel it holds, so the series of a view make a frame, and `View::charge` is its
+  charge (CREDIT RULES). A mask is a sorted list of the entries it holds, or no list
+  when it holds every entry. A mask that holds more than half of its key set also
+  keeps a sorted list of the entries it leaves out. A view's walk grows with the
+  smaller of its frame's series and its mask's entries, and its charge with the
+  smaller of its frame's series and the shorter list (rule 11). A view borrows its
+  frame and mask, so making one takes no reference count. Lost: only the list of the
+  entries left out, walked as the runs of series between them, because near half
+  that walk is 20% to 74% slower than a walk of the held entries (#873). Approved by
+  the coordinator (#157). The list of entries left out (#755): approved at the gate
+  of PR #873.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
@@ -758,10 +764,17 @@ How to read this record:
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
   source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
-  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` adds
-  the OS bound to the error of its own read, so the error is never less than the OS
-  bound. An error over 36500 days reads as unknown, the same as no bound (the
-  coordinator, #144). Only `clock` and `node` call `clock::source::Wall::measure`; a
+  macOS). The person decided on 2026-10-05 ("314 should be (b)"), #314. `clock` gives
+  the OS reading to the exchange as an interval, its time plus or minus its bound, so
+  the error is never less than the OS bound. An error of 36500 days or more reads as
+  unknown, the same as no bound (the coordinator, #144). So does an edge of the bound
+  past the range of a stamp, centered at the reading as with no bound: a known bound
+  with such an edge needs a reading after 2162 or before 1777, so it cannot hold a true
+  time between those years. The coordinator approved it with the advisor, #910. Lost:
+  the edge stopped at the range, because it narrows a bound of 36500 days or more into a
+  known one; edges in `i128` through a new `estimate` input, because it keeps a false
+  bound that votes (#314); `Measurement::widened`, a public item that keeps the OS
+  reading a special path. Only `clock` and `node` call `clock::source::Wall::measure`; a
   lint denies it elsewhere (BQ20). On Linux the bound is the kernel's `maxerror`, and
   only chrony and ntpd compute it. `systemd-timesyncd` sets it to 0 at each update,
   while the clock can still be 0.4 s off. So a known OS bound on Linux needs chrony or
@@ -1632,10 +1645,12 @@ How to read this record:
   A node that no policy selects computes a default from its free disk and memory at
   start, so a mesh with no policy works. Before it reads the spec, a node uses the last
   budget it applied, which it keeps in its data directory; the first start uses the
-  default. The data directory is node-local: a start argument of `foundation`, with a
-  default, because the spec is stored in it. Node-local config for the budgets lost:
-  `plan` cannot show it and `apply` cannot change it. Proposed by `ops`; the person
-  decided on 2026-10-05 ("Yeah mesh node"), #342.
+  default. A policy that sets no budget is a user mistake, refused as normal
+  validation with the fix in the message (#869). The data directory is node-local:
+  a start argument of `foundation`, with a default, because the spec is stored in it.
+  Node-local config for the budgets lost: `plan` cannot show it and `apply` cannot
+  change it. Proposed by `ops`; the person decided on 2026-10-05 ("Yeah mesh node"),
+  #342.
 
 ### 1.12 Access, identity, and secrets
 
@@ -2545,7 +2560,13 @@ Conflict: BQ2 makes `spec::resolve` "the ONE policy resolver" with most-specific
 and S12 lists access as one of those policies. C8 makes access allow-only with no
 conflicts (a union of allows).
 Resolution: `spec::resolve` applies most-specific-wins to setting policies (retention,
-placement, transmission, compression, reduction, time, secret store). Access is
+placement, transmission, compression, reduction, time, secret store, node settings).
+For node settings, each budget resolves on its own: a policy that leaves a budget unset
+gives that budget to a less specific policy. Two policies of equal specificity that
+both set the same budget for one node are a plan error; two that set different budgets
+do not conflict. Per-budget resolution holds only because `disk` and `pool` are
+independent. It does not extend to kinds whose fields go together (such as placement),
+where values from different policies could make a combination nobody wrote. Access is
 evaluated only in `access`, as the union of matching allows; the authority cap is the
 highest authority among matching allows that grant `write`. Both use the one selector
 matcher in `types`. Basis: C8, SRP PASS (`access` split).
@@ -2558,10 +2579,10 @@ makes placement select connectors. r3 K2 forbids a policy from selecting outside
 region; r4 lets a root policy apply inside child regions.
 Resolution: each policy kind states its target: retention, transmission, and
 compression select indexes; placement selects connectors and indexes; reduction selects
-data channels; time selects nodes; access selects names (plus subjects anywhere);
-secret store selects secret names. A policy may select only names in its own region
-and that region's descendants; a descendant applies it as of the last parent version
-it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
+data channels; time and node settings select nodes; access selects names (plus
+subjects anywhere); secret store selects secret names. A policy may select only names
+in its own region and that region's descendants; a descendant applies it as of the
+last parent version it saw. Basis: S12, REDUCTION, C8, C6, r4 Q5.
 
 **X27. Built-in channels have no spec definitions.**
 Conflict: S8 puts node status under the node's name, and S9 adds the changes channel.
