@@ -1826,7 +1826,8 @@ How to read this record:
   `Error::Memory` with the core and the `os::memory::Error`. Lost: making the pool on
   the shard's thread, which needs a second path for the error and a `Send + Sync`
   seam. The purge timer and `reclaim` on each loop turn land with the first PR that
-  allocates from a pool, since no test can see either before then (#410).
+  allocates from a pool, since no test can see either before then (#410). Proposed
+  by `ops` in #410; approved by the coordinator on #806.
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
