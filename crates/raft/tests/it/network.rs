@@ -482,6 +482,23 @@ impl Network {
             .map(|entry| entry.at)
     }
 
+    // The configuration before the pending configuration entry of `node`, when one
+    // is pending. A node can commit later than the network, so this is not always
+    // its last committed configuration.
+    fn before(&self, node: usize) -> Option<Voters> {
+        let pending = self.pending(node)?;
+        let before = self.disks[node]
+            .entries
+            .iter()
+            .rev()
+            .filter(|entry| entry.at.index < pending.index)
+            .find_map(|entry| match &entry.data {
+                Data::Voters(voters) => Some(voters),
+                Data::Empty | Data::Bytes(_) => None,
+            });
+        Some(before.map_or_else(|| self.base(), Voters::clone))
+    }
+
     /// Proposes a new value to `node`. Returns its position when the node leads.
     pub(crate) fn propose(&mut self, node: usize) -> Option<Position> {
         self.proposed += 1;
@@ -631,12 +648,9 @@ impl Network {
             let voter = |voters: &Voters| {
                 voters.incoming.contains(&key) || voters.outgoing.contains(&key)
             };
-            // Every configuration entry before the last is committed, so the one
-            // before a pending entry is the committed one.
             assert!(
                 voter(node.voters())
-                    || (self.pending(at).is_some()
-                        && voter(&self.committed_voters(at))),
+                    || self.before(at).is_some_and(|before| voter(&before)),
                 "node {at} campaigns outside its configuration"
             );
         }
@@ -674,7 +688,7 @@ impl Network {
         };
         assert!(
             node.voters().incoming.contains(&key)
-                || (self.pending(at).is_some() && voter(&self.committed_voters(at))),
+                || self.before(at).is_some_and(|before| voter(&before)),
             "node {at} leads outside its committed configuration"
         );
         let term = node.term();
