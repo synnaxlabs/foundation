@@ -13,7 +13,9 @@ use crate::{Error, Unwritable, read, write};
 /// its comments and blank lines. A changed value and a changed block on one line are
 /// written again, without the comments in them. A block that moves past another is
 /// cut and written again. A new attribute or block goes into its body, and a removed
-/// one is cut with its lines and the comments directly above it.
+/// one is cut with its lines and the comments directly above it. New text takes the
+/// line end of the first line of `text`, and when that is `\r\n`, a new string is
+/// never a heredoc.
 ///
 /// # Errors
 ///
@@ -279,6 +281,7 @@ impl<'a> File<'a> {
         for Edit { range, text, .. } in edits {
             let kept = self.text.get(at..range.start);
             out.push_str(kept.expect("invariant: edits do not overlap"));
+            // With `\r\n`, the writer writes no heredoc, so each `\n` ends a line.
             out.push_str(&text.replace('\n', line_end));
             at = range.end;
         }
@@ -668,6 +671,24 @@ mod tests {
         out
     }
 
+    /// The bytes of each heredoc in `text`.
+    fn heredocs(text: &str) -> Vec<&str> {
+        let mut tokens = Tokens::new(Source(0), text).unwrap();
+        let mut out = Vec::new();
+        loop {
+            let token = tokens.next();
+            match token.kind {
+                lex::Kind::End => return out,
+                lex::Kind::Heredoc(_) => {
+                    let (start, end) =
+                        (offset(token.span.start()), offset(token.span.end()));
+                    out.push(text.get(start..end).unwrap());
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Mixes `b` into `a`: keeps, cuts, or changes each attribute of `a` to a value of
     /// `b`, adds some new keys of `b`, and keeps, cuts, or mixes each block of `a`,
     /// with blocks of `b` put in and the first moved last.
@@ -772,6 +793,10 @@ mod tests {
             prop_assert_eq!(read(Source(0), &out), Ok(document), "{}\n{}", text, out);
             if text.contains('\r') {
                 prop_assert!(!out.replace("\r\n", "").contains('\n'), "{}", out);
+                // HCL keeps the `\r` in a heredoc, so each one is kept from `text`.
+                for heredoc in heredocs(&out) {
+                    prop_assert!(text.contains(heredoc), "{}\n{}", text, out);
+                }
             } else {
                 prop_assert!(!out.contains('\r'), "{}", out);
             }
@@ -978,6 +1003,18 @@ mod tests {
         assert_eq!(line.chars().count(), 88);
         assert_eq!(updated("a = 1", &line), line);
         assert_eq!(updated("a = 1 # c\n", &line), format!("{line} # c\n"));
+    }
+
+    #[test]
+    fn takes_the_line_end_of_the_first_line() {
+        assert_eq!(
+            updated("a = 1\nb = 2\r\n", "a = 1\nb = \"x\\n\""),
+            "a = 1\nb = <<EOT\nx\nEOT\r\n"
+        );
+        assert_eq!(
+            updated("a = 1\r\nb = 2\n", "a = 1\nb = 2\nc = \"x\\n\""),
+            "a = 1\r\nb = 2\nc = \"x\\n\"\r\n"
+        );
     }
 
     #[test]
