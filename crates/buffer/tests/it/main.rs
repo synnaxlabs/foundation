@@ -1570,6 +1570,112 @@ fn a_tail_reported_durable_after_a_kill_survives_a_power_cut() {
     });
 }
 
+/// The error of an open of the ring while another handle holds it.
+fn busy() -> Error {
+    Error::Files(FileError::Busy {
+        path: PathBuf::from(RING),
+    })
+}
+
+/// The commit task holds the ring until it ends, so an open right after a drop fails
+/// with `Busy`. The task writes the entry queued at the drop, then ends, and the open
+/// after it recovers the entry.
+#[test]
+fn an_open_right_after_a_drop_fails_with_busy_until_the_task_ended() {
+    let (mut sim, node) = one_node(41);
+    let run = sim.run_on(&node, |node, tasks| async move {
+        let config = || node_config(&node, tasks.clone(), DIR);
+        let mut slots = Slots::new();
+        let first = Buffer::open(config(), &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        first
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        drop(first);
+        let held = Buffer::open(config(), &mut slots).await.map(drop);
+        assert_eq!(held, Err(busy()));
+        node.clock().sleep(commits(20)).await;
+        let buffer = Buffer::open(config(), &mut slots).await.expect("reopens");
+        buffer.durable(a, Path::Live)
+    });
+    assert_eq!(run, Ok(tail(1, Some(1))));
+}
+
+/// A `Commit` held past the drop holds the ring after the task ended, so an open
+/// fails with `Busy` until the commit drops.
+#[test]
+fn an_open_while_a_commit_of_a_dropped_buffer_is_held_fails_with_busy() {
+    let (mut sim, node) = one_node(41);
+    let run = sim.run_on(&node, |node, tasks| async move {
+        let config = || node_config(&node, tasks.clone(), DIR);
+        let mut slots = Slots::new();
+        let first = Buffer::open(config(), &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        first
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let held = first.committed();
+        let ending = first.committed();
+        drop(first);
+        ending
+            .await
+            .expect("the task writes the queue before it ends");
+        let busy_open = Buffer::open(config(), &mut slots).await.map(drop);
+        assert_eq!(busy_open, Err(busy()));
+        drop(held);
+        let buffer = Buffer::open(config(), &mut slots).await.expect("reopens");
+        buffer.durable(a, Path::Live)
+    });
+    assert_eq!(run, Ok(tail(1, Some(1))));
+}
+
+/// A failed sync leaves the record of entry 2 clean in the cache and not durable. A
+/// reopen in the same process reports it durable and commits entry 3 after it, so a
+/// power cut keeps both.
+#[test]
+fn a_reopen_after_a_failed_sync_keeps_what_it_reports_across_a_power_cut() {
+    for seed in 0..16 {
+        let (mut sim, node) = one_node(seed);
+        let reported = sim.run_on(&node, |node, tasks| async move {
+            let config = || node_config(&node, tasks.clone(), DIR);
+            let mut slots = Slots::new();
+            let first = Buffer::open(config(), &mut slots).await.expect("opens");
+            let a = slots.assign(key(1));
+            first
+                .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+                .expect("queues");
+            first.committed().await.expect("commits");
+            node.fail_file(FilePath::new(RING), Operation::Sync);
+            first
+                .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+                .expect("queues");
+            let failed = FileError::Io {
+                path: PathBuf::from(RING),
+                operation: Operation::Sync,
+                code: 5,
+            };
+            assert_eq!(first.committed().await, Err(failed));
+            drop(first);
+            let second = Buffer::open(config(), &mut slots).await.expect("reopens");
+            second
+                .append([entry(1, a, Path::Live, 2, 1, Some(3), Parts::default())])
+                .expect("queues");
+            second.committed().await.expect("commits");
+            second.durable(a, Path::Live)
+        });
+        assert_eq!(reported, Ok(tail(3, Some(3))), "seed {seed}");
+        sim.crash(&node, sim::Crash::Power);
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the power cut");
+            buffer.tail(slots.assign(key(1)), Path::Live)
+        });
+        assert_eq!(recovered, Ok(tail(3, Some(3))), "seed {seed}");
+    }
+}
+
 /// A ring of 64 blocks with records of up to 60,000 bytes, on the files of `node`.
 fn long_config(node: &sim::node::Node, tasks: Tasks) -> Config {
     Config {
