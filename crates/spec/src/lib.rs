@@ -3,6 +3,8 @@
 //! `spec::resolve`.
 
 pub mod access;
+pub mod connector;
 pub mod definition;
 pub mod patterns;
+pub mod region;
 pub mod tree;
