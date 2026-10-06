@@ -3,5 +3,6 @@
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 
+mod common;
 mod shards;
 mod threads;
