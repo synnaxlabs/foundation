@@ -240,12 +240,14 @@ How to read this record:
   `buffer` trims below it, past retention (by store time), and under disk pressure. A
   resume takes, per path, the position the reader's `hub` presents, then the position at
   this home, then the home's fallback. A position below the floor or past the head is
-  accepted as is; the `buffer` read reports any gap (B2). Named readers write a position
-  record at once when they open, close, or are taken over, and on the home's interval
-  when the position changed. A session open at a crash restores as closed at the
-  restore. Complete and latest sessions have separate key types, so a call in the
-  wrong mode does not compile (#725). Supersedes the B3 single position. Basis: A6,
-  A8, B2, B3, S10, X14, #41.
+  accepted as is; the `buffer` read reports any gap (B2). A resume starts a `buffer`
+  read at `Mark::at(position)`, so the entries with no samples at the position come
+  again. Between reads, the caller keeps the mark the last read gave, in memory
+  (#510). Named readers write a position record at once when they open, close, or are
+  taken over, and on the home's interval when the position changed. A session open at
+  a crash restores as closed at the restore. Complete and latest sessions have
+  separate key types, so a call in the wrong mode does not compile (#725). Supersedes
+  the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -401,10 +403,17 @@ How to read this record:
   over 1023, an unknown path or presence byte, or bytes after the last entry is a
   wrong shape.
   For each path, memory holds one run per data record with an entry of it: the
-  `first` of the path's first entry in the record and the record's offset, oldest
-  first, 16 bytes per record and path in a deque that doubles, so at most 32/51
-  of the area. The recovery walk and each sync feed the runs in ring order; a
-  read starts from them (#510).
+  mark before the path's first entry in the record and the record's offset, oldest
+  first, 24 bytes per record and path in a deque that doubles, so at most 48/51
+  of the area. A mark is a seq and the count of entries with no samples at it
+  already given, so a read resumes between two such entries. The recovery walk
+  and each sync feed the runs in ring order; a read starts from them. A read does
+  not check the record CRC: the open's walk checked each record, and a record
+  this process wrote is read as written. A read's budget counts the pool bytes
+  that its entries' blocks take (`block::footprint`), so an entry with no bytes
+  still costs its block. A read holds no record while it waits for a file read,
+  so a change that frees ring space must first hold the records of each read in
+  progress (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
@@ -492,6 +501,18 @@ How to read this record:
   size is checked only when the bodies are appended, after the handoffs: a frame whose
   handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
   is known. Decided by the `write-path` builder (#191).
+- **HOME CLOCKS (#191)** A shard reads monotonic time and mesh time itself, from the
+  clocks in its `Config`, in each call that needs them. Before the node first has mesh
+  time, it opens no writer and no reader, with `Unsynced`. A write needs an open writer,
+  so it never meets that case. This is a patch: #523 decides where samples wait before
+  the first estimate (CLOCK PEER ANSWER), and removes or keeps `Unsynced`. Lost: time as
+  arguments of each call, because each caller repeats the same two reads and can pass an
+  old one. Approved by the coordinator on 2026-10-05 (#191). Mesh time in the home (the
+  ahead limit and the stamp of each entry) is the midpoint of `clock::Reader::now`,
+  which never goes back. Lost: the latest edge, because it goes back when the error
+  shrinks, and with an unknown error (OS CLOCK BOUND) it is 36500 days ahead, so the
+  ahead limit stops nothing and one bad stamp makes each later true stamp `Backwards`
+  (#952 review, 2026-10-06).
 - **BQ9** Re-index by changing `index` in the files. The old home seals the channel at
   its last accepted sample and records the seal with voters (which region: X39). The
   history "index A until T, index B from T" is runtime state in `mesh`; the spec keeps
@@ -648,8 +669,8 @@ How to read this record:
   at `now`, given or grown by drift, votes only when no bound is known. A vote for it
   lost: it turned a peer split into a wide estimate that no peer gave. The person chose
   this (OS CLOCK BOUND); counting a grown bound is from the `time` builder, approved by
-  the coordinator (#314). A known bound votes at any width, so a wide one (an unsynced
-  Linux bound of 16 s) can still turn a peer split into the hull of both sides. #314
+  the coordinator (#314). A known bound votes at any width, so a wide one (a Linux
+  bound of 15 s) can still turn a peer split into the hull of both sides. #314
   showed this case before the person chose. When only unknown bounds vote, the estimate
   is unknown too, at the center of the same hull. Approved by the coordinator (#437),
   with the hull of #344. When drift grows unknown bounds so that this hull spans more
@@ -754,7 +775,7 @@ How to read this record:
   fires when both bounds hold.
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
-  `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
+  `ntp_gettime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
   `clock` reads that as `Measurement::unknown` (36500 days): a node alone with no known
   estimate (CLOCK HOLDOVER) still gets OS time, with an error that says "unknown", and
   beside a known bound the reading does not vote (ESTIMATE COMBINE). A fixed invented
@@ -782,7 +803,11 @@ How to read this record:
   gives a false bound until its operator installs chrony. Lost: the Linux bound always
   unknown, because it also drops the good bound from chrony and ntpd; detecting
   timesyncd, because it reaches outside `env::wall` and is a guess. The person decided
-  on 2026-10-06 ("A is still fine"), #689.
+  on 2026-10-06 ("A is still fine"), #689. `os` also gives `None` in clock state
+  `TIME_ERROR`, and for a negative `maxerror` or one past the end of a `Span`, because
+  root can set any value. `os::wall()` reads once and returns `Error::Wall` when the OS
+  refuses the call, as a seccomp filter or systemd's `ProtectClock` can. A later
+  refusal panics (#117).
 - **CLOCK PEER ANSWER (2026-10-05)** A node with no mesh time answers a peer with its OS
   reading and its OS bound. Cold nodes then vote with each other's OS clocks, and each
   waits until more than half agree (ESTIMATE COMBINE). An answer with an unknown bound
@@ -820,7 +845,15 @@ How to read this record:
   is not hit: no daemon slews `mach_continuous_time`. Lost: `CLOCK_BOOTTIME` with a
   rule that the daemon slews within a limit, because a node cannot check it;
   `CLOCK_BOOTTIME` with a bound that can fail in a fast slew. The person decided on
-  2026-10-06 ("yes"), #688.
+  2026-10-06 ("yes"), #688. On macOS `os` reads `CLOCK_MONOTONIC_RAW`, which is
+  `mach_continuous_time`. Each `os::clock()` call starts a new clock at 0, so `node`
+  calls it once. Tokio's timer stops in a suspend on macOS and slews on Linux, so `os`
+  arms it for at most 1 s at a time: a sleep across a suspend completes up to 1 s late.
+  The vDSO and the macOS commpage read the counter with no fence that waits for earlier
+  stores or holds back later loads, so `os` adds them to give the order that
+  `env::clock` requires (#458): `mfence; lfence` before the read and `lfence` after on
+  x86-64, `dsb ish; isb` before and `isb` after on arm64. Other architectures do not
+  build. Cost: 38 ns against 16 ns for one read without the fences (M3 Max) (#117).
 - **CLOCK RUN (2026-10-05)** Within TIME ADAPTERS. `clock::Clock::run` runs all time
   sources of one clock in one task on the clock's shard. `node` builds the source table
   and passes it to `run`. Today the table is the OS clock. Each adapter keeps its own
@@ -1136,9 +1169,9 @@ How to read this record:
   its voter got a lease back still counts, and costs one needless election; safety
   holds. etcd/raft counts such a grant too. Lost: a round number in `PreVote`, which
   changes the message format and closes only the case of two pre-campaigns. Decided by
-  the advisor under the failover delegation on 2026-10-05 (#719). A node that is not in
-  its own voter list votes and follows, but never campaigns while that configuration
-  is committed. `step` does not check that a sender is a voter (a voter can learn late
+  the advisor under the failover delegation on 2026-10-05 (#719). A node that may not
+  campaign (RAFT VOTERS) still votes and follows.
+  `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
   may send. `step` drops a reply with no check when its sender is not in `voters()`,
   unless the configuration in force removed the sender and the node still sends to it:
@@ -1245,9 +1278,22 @@ How to read this record:
   decided on 2026-10-05 ("(a)"), #482. Readmit in
   `raft` (#414) lost: it sent the log to a sender that `raft` cannot check. The person
   decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set
-  sends the commit and steps down. A node outside an uncommitted configuration still
-  campaigns: the entry may be truncated, and a removed leader that lost its lead before
-  the leave reached a peer is the only node that can win the election that commits it.
+  sends the commit and steps down. A node may campaign when it is a voter, incoming or
+  outgoing, of the configuration in force, or, while that configuration is not
+  committed, of the configuration before it. No other node campaigns. The rule is
+  exact: a leader appends a configuration entry only after the last one commits, so
+  by Log Matching only the last configuration entry in a log can be truncated, and
+  the one before it is committed. The fallback keeps two cases: a truncation gives
+  the configuration before back, and a removed leader that lost its lead before the
+  leave reached a peer is the only node that can win the election that commits it. A
+  follower whose commit index lags lets the configuration before campaign for
+  longer, which costs liveness, never safety. The `mesh` admission check stays
+  beside this rule: `promotable` decides whether an honest node campaigns, and `mesh`
+  checks a sender that may lie, because `raft` never checks senders (RAFT SURFACE).
+  Neither is a second guard for the other. Decided by the coordinator and the
+  advisor on 2026-10-06 (#659). After compaction a snapshot carries the
+  configuration in force at its index, so the configuration before the last entry
+  stays known (#253).
 - **MESH LOG (#471)** `mesh` keeps the `raft` hard state and log of a region in the
   files `log-0`, `log-1`, and so on of one directory; any other file there is
   `Error::Stray`. One write of `raft` is one record: a header, then the body. The header
@@ -1434,6 +1480,15 @@ How to read this record:
   runtime-loaded bindings, NI functions declared by hand. Codecs: built. Crypto: rustls
   with aws-lc-rs and blake3. Tooling: clap, schemars, toml_edit, tracing. Our own thin
   MCP server, Prometheus text output, and InfluxDB line protocol. FIPS build later.
+  HTTP: one client for all connectors, on `hyper` (HTTP/1.1 and HTTP/2) over the `env`
+  network seam with `rustls`, in the connector component library. InfluxDB, a general
+  HTTP connector, alarms, webhooks, and remote write use it. No HTTP parser of our own.
+  Every clock read and name lookup of the client goes through `env`, and no Tokio
+  feature of `hyper` or `hyper-util` is on. TLS takes a configured CA, and no setting
+  turns verification off. Lost: a sans-I/O HTTP/1.1 module in `connector-influx`. The
+  person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
+  binary larger is fine." "we should be careful about writing raw HTTP transports.",
+  relayed by `advisor`; "Yes I approve", to the coordinator) (#341).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -1942,7 +1997,12 @@ How to read this record:
   the entries at its end. A removed file takes space until the removal is durable. The
   monotonic clock starts again and the wall runs on. `join` on a thread that a crash
   ended panics, because no process joins its own threads after it dies. Built by
-  `simulation` in #114, #535, #580, and #763.
+  `simulation` in #114, #535, #580, and #763. Amended (2026-10-06, #876): a failed
+  `sync` covers each write up to the last one that ended before it started, in the
+  order of the writes. As on Linux, these writes stay in the cache, clean: a read sees
+  them, and a later write goes over them. A power cut drops them, and at each read or
+  write of their sector the cache may drop them, by a coin. A sector with a write that
+  no `sync` covered is dirty, and the cache keeps it.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
@@ -1963,20 +2023,27 @@ How to read this record:
   run drops the same way, after the futures. A thread that a drop starts on the
   crashing node ends in the crash and never runs. Built by `simulation` in #548, #666,
   and #870.
-- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
-  segment is never lost or duplicated. It arrives after the delay and a jitter draw of
-  its link, and never before an earlier segment in its direction, so each direction
-  keeps its order. A connect is ready after one round trip and its accept after one
-  and a half. The receive buffer sets the window, the send buffer holds the bytes that
-  the peer has not received, and a write waits while `unsent_bytes_max` bytes are not
-  sent. A drop before close, or with bytes unread, sends an RST; a drop after close
-  sends the bytes and the FIN. A process crash drops each stream. A power cut sends
-  nothing, so the peer gets an RST only when it sends. A case that `sim` does not
-  model panics with "sim does not simulate ... yet": a link with loss, `delayed`
-  sends, a connect to an address with no node, a full backlog, and a SYN to a live
-  stream. Rejected: retransmission over a lossy link (a full TCP state machine to
-  test before a carrier needs it), and a pipe of bytes with no segments (no window,
-  so no test of a writer that a slow reader stops). Built by `simulation` in #113.
+- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A segment
+  is never lost or duplicated. It arrives after the delay and a jitter draw of its link,
+  and never before an earlier segment in its direction, so each direction keeps its
+  order. Each segment carries the key of its stream, and only the end of that stream
+  takes it, so a late segment of an older stream on the same pair meets a closed port. A
+  connect is ready after one round trip and its accept after one and a half. The receive
+  buffer sets the window, the send buffer holds the bytes that the peer has not
+  received, and a write waits while `unsent_bytes_max` bytes are not sent. A drop before
+  close, or with bytes unread, sends an RST; a drop after close sends the bytes and the
+  FIN. A stream is done when an RST arrived, or each FIN arrived and its own is acked. A
+  drop of it sends nothing. An end that is done leaves its pair, as a Linux socket
+  leaves its table: a segment to the pair then meets a closed port, a SYN opens a new
+  stream, and a connect may take its port, also while a driver holds the old end. A
+  process crash drops each stream. A power cut sends nothing, so the peer gets an RST
+  only when it sends. A case that `sim` does not model panics with "sim does not
+  simulate ... yet": a link with loss, `delayed` sends, a connect to an address with no
+  node, a full backlog, and a SYN to a live stream. Rejected: retransmission over a
+  lossy link (a full TCP state machine to test before a carrier needs it), and a pipe of
+  bytes with no segments (no window, so no test of a writer that a slow reader stops).
+  Built by `simulation` in #113 and #944. Amended (2026-10-06, #874): a stream that is
+  done sends no RST at its drop and leaves its pair.
 - **SIM DROP (2026-10-06)** The drop of a `Sim` drops each live future in its own
   `catch_unwind`. If any panicked, it then panics once with every message, the first
   one first, but only when the thread is not already panicking. This is the one
@@ -2842,7 +2909,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY). | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY), and the OS calls of its clock and wall clock in `os::clock` and `os::wall` (#117). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |

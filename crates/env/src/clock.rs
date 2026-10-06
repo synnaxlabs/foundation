@@ -67,11 +67,13 @@ impl Clock {
     }
 
     /// Returns a future that completes at `deadline` or later, never before. A
-    /// deadline that has passed completes at once.
+    /// deadline that has passed completes at once. Make and poll the future on one
+    /// thread that `env` started.
     ///
     /// # Panics
     ///
-    /// On a thread that `env` did not start. Make and poll the future on one thread.
+    /// A driver may panic on a thread that `env` did not start. `sim` panics on each
+    /// such thread, and on a thread of another node.
     ///
     /// ```
     /// async fn wait(clock: &env::clock::Clock, deadline: types::time::Monotonic) {
@@ -87,12 +89,13 @@ impl Clock {
     }
 
     /// Returns a future that completes when `span` has passed. A span of zero or less
-    /// completes at once.
+    /// completes at once. Make and poll the future on one thread that `env` started.
     ///
     /// # Panics
     ///
-    /// On a thread that `env` did not start. Make and poll the future on one thread.
-    /// When `now` plus `span` is past the end of `Monotonic`.
+    /// When `now` plus `span` is past the end of `Monotonic`. A driver may panic on a
+    /// thread that `env` did not start. `sim` panics on each such thread, and on a
+    /// thread of another node.
     ///
     /// ```
     /// async fn pause(clock: &env::clock::Clock) {
@@ -128,11 +131,13 @@ pub trait Driver: Send + Sync {
     /// The std [`Instant`] at `Monotonic(0)`. It never changes.
     fn epoch(&self) -> Instant;
 
-    /// Makes a timer bound to the executor of the calling thread.
+    /// Makes a timer for the calling thread. Call it only on a thread that `env`
+    /// started.
     ///
     /// # Panics
     ///
-    /// On a thread that `env` did not start, in every driver.
+    /// A driver may panic on a thread that `env` did not start. `sim` panics on each
+    /// such thread, and on a thread of another node.
     fn timer(&self) -> Pin<Box<dyn Timer>>;
 }
 

@@ -191,8 +191,10 @@ impl Node {
     /// `Error::Io` and code 5 (`EIO`). Faults on one path and operation fire in
     /// turn, one per call. The call does not touch the disk, except a sync: each
     /// sector keeps its durable bytes, or its bytes after one write that the sync
-    /// covers or a part of one. These bytes are then durable, and a read sees them
-    /// unless a later write covers the sector.
+    /// covers or a part of one. These bytes are then durable. As on Linux, the writes
+    /// that the sync covers stay in the cache, clean: a read sees them, and a later
+    /// write goes over them. A power cut drops them, and at each read or write of
+    /// their sector the cache may drop them, by a coin.
     ///
     /// # Panics
     ///

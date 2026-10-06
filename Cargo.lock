@@ -719,6 +719,7 @@ version = "0.0.0"
 dependencies = [
  "block",
  "buffer",
+ "clock",
  "codec",
  "control",
  "delivery",
@@ -1000,9 +1001,14 @@ name = "os"
 version = "0.0.0"
 dependencies = [
  "block",
+ "divan",
  "env",
+ "getrandom 0.4.3",
+ "libc",
+ "proptest",
  "rustix",
  "tokio",
+ "types",
 ]
 
 [[package]]
