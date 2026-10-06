@@ -382,6 +382,11 @@ How to read this record:
   entries, so that write stays within `IOV_MAX`. A body that ends early, a count
   over 1023, an unknown path or presence byte, or bytes after the last entry is a
   wrong shape.
+  For each path, memory holds one run per data record with an entry of it: the
+  `first` of the path's first entry in the record and the record's offset, oldest
+  first, 16 bytes per record and path in a deque that doubles, so at most 32/51
+  of the area. The recovery walk and each sync feed the runs in ring order; a
+  read starts from them (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
@@ -649,8 +654,9 @@ How to read this record:
   a reader gets no mesh time. After it, when `combine` fails (no majority, or no sources
   after a remove), the clock holds over: it keeps its last estimate and its error grows
   by drift. It never follows the largest group or one side of a tie.
-  `push` returns the holdover and its cause, and `node` publishes it. The next majority
-  ends the holdover. Decided by the `time` builder (#142).
+  `push` returns the status, `Reader::status` gives it on any shard, and `node`
+  publishes it. The next majority ends the holdover. Decided by the `time` builder
+  (#142). The coordinator approved `Reader::status` within it (#598).
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
   not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
@@ -716,8 +722,8 @@ How to read this record:
   loop and decides when it measures: the OS clock at once, then one second after the
   last measurement, so once after a suspend. `run` adds a source for each adapter and
   pushes each measurement. `run` owns every source, so it panics on a clock that has a
-  source already: nothing could push to that source. `run` does not give out each
-  `Status` yet (#598). Lost: a task for each adapter with a shared clock
+  source already: nothing could push to that source. A reader gives the status
+  (`Reader::status`, #598). Lost: a task for each adapter with a shared clock
   (`Rc<RefCell>` or a queue), because then the caller shares the clock; the loop in
   `node`, because the peer exchange adds and removes sources, and `node` would pass its
   events through. Decided by the `time` builder (#144, #600). The coordinator approved
@@ -800,33 +806,58 @@ How to read this record:
   of TLS over TCP. The person decided on 2026-10-05: "QUIC" (#10). Streams carry whole
   messages in pool blocks, not bytes; the QUIC carrier benchmark decides whether decode
   reads chunks in place instead. A stream reaches the peer with its first message, and a
-  `Sender` dropped without `finish` resets it. Each stream has a `Class` (`Command`,
-  `Latest`, `Complete`, `CatchUp`) that sets its priority and preferred carrier. A peer
-  is a node key or a `Client` (an SDK, proved by its signed hello above). Callers admit
-  peers, dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on
-  SIM NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
+  `Sender` dropped without `finish` resets it. A `Sender` can also send without waiting
+  (`try_send`): it gives the message back whole when the stream cannot take it now, and
+  it never resets the stream. Each stream has a `Class` (`Command`, `Latest`,
+  `Complete`, `CatchUp`) that sets its priority and preferred carrier. A peer is a node
+  key or a `Client` (an SDK, proved by its signed hello above). Callers admit peers,
+  dispatch streams (STREAM DISPATCH), and cancel stale latest frames. Builds on SIM
+  NETWORK. Proposed by `network` in #45; approved by the coordinator on PR #53.
 - **STREAM WIRE (#55, 2026-10-05)** On QUIC, the side that opens a stream sends one
   class byte first in its own direction: 0 `Command`, 1 `Latest`, 2 `Complete`, 3
-  `CatchUp`. The byte goes with the first message, so a stream reaches the peer with
-  its first message. A stream that ends or resets before its class byte drops: the
-  peer never accepts it, and resets the reply half of a two-way stream with code 0.
-  Each message is a QUIC varint length, then that many bytes, at most
-  `message_bytes_max`. A node accepts the waiting streams highest class first. A node
-  resets a stream with the stop's code when the stop arrives. A peer breaks the
-  protocol when it sends another class byte, ends a stream inside a message, sends a
-  message over the limit, or resets or stops a stream with a code over 32 bits. The
-  node then closes the connection with application code 2^32 and the reason as text,
-  and the caller gets `Error::Broken`. Each connection keeps two budgets, which count
-  the length of each message. A sender starts a message only when the messages it
-  started and the streams have not taken in full stay within the peer's
-  `window_bytes`; else the write waits for `Writable`. A receiver takes a block only
-  when the messages that hold one stay within `window_bytes` plus
-  `message_bytes_max`; else the read waits for `Readable`. So bytes that wait for a
-  block never use up the credit that a started message needs, and a peer that breaks
-  the send rule holds at most the receive budget and stops only its own connection.
-  Until the hello carries the peer's window, a sender uses its own. Proposed by
-  `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
+  `CatchUp`. The byte goes with the first message, so a stream reaches the peer with its
+  first message. A stream that ends or resets before its class byte drops: the peer
+  never accepts it, and resets the reply half of a two-way stream with code 0. Each
+  message is a QUIC varint length, then that many bytes, at most `message_bytes_max`. A
+  node accepts the waiting streams highest class first. A node resets a stream with the
+  stop's code when the stop arrives. A peer breaks the protocol when it sends another
+  class byte, ends a stream inside a message, sends a message over the limit, or resets
+  or stops a stream with a code over 32 bits. The node then closes the connection with
+  application code 2^32 and the reason as text, and the caller gets `Error::Broken`.
+  Each connection keeps two budgets, which count the length of each message. A sender
+  starts a message only when the messages it started and the streams have not taken in
+  full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
+  message that fits starts at once, ahead of streams that wait for room, whatever their
+  class (#611). A send that does not wait (`try_send`) starts a message only by the same
+  rule and when, after a flush, the stream holds no part of an earlier one; else it
+  gives the message back with no byte of it sent, and the stream does not wait for room
+  (#597). A receiver takes a block only when the messages that hold one stay within
+  `window_bytes` plus `message_bytes_max`; else the read waits for `Readable`. So bytes
+  that wait for a block never use up the credit that a started message needs, and a peer
+  that breaks the send rule holds at most the receive budget and stops only its own
+  connection. Until the hello carries the peer's window, a sender uses its own. Proposed
+  by `network` in #55; approved by the coordinator on PR #407. The budgets: proposed by
   `network` in #228.
+- **DATAGRAM WIRE (#55, 2026-10-05)** On QUIC, a datagram is one message in one QUIC
+  DATAGRAM frame. `transport` adds no prefix: the frame carries the length, and the
+  message itself starts with the STREAM DISPATCH header, which the caller writes. A node
+  takes datagrams on every connection. It sends its `message_bytes_max`, at most 65535,
+  as the QUIC `max_datagram_frame_size` parameter. noq-proto holds at most
+  `message_bytes_max` bytes of datagrams until the node takes them, after each UDP
+  packet, so `message_bytes_max` is at least 1472, the largest UDP payload a node takes
+  (#610). A sender's largest datagram is the smaller of the path's limit and the peer's
+  limit less the frame header (9 bytes). A peer that takes no datagrams, such as an SDK
+  client, gets none: the limit is 0, and each send gives `Error::TooLarge`. A datagram
+  over the receiver's `message_bytes_max` breaks the protocol: noq-proto closes the
+  connection with PROTOCOL_VIOLATION, and the caller gets `Error::Broken`. Each
+  connection queues at most 64 KiB of datagram bytes to send; when a new one does not
+  fit, the oldest unsent ones drop. Small datagrams hold more pool than that, because
+  each holds a block (#615). A node copies each datagram into a block from its pool when
+  it arrives, and drops it when it gets no block (the pool or the system has no room).
+  At most 64 wait untaken on one connection; a new one drops the oldest, and they free
+  when the connection ends. #68 adds a count of each drop, with the counts of RECV
+  WAITS. Proposed by `network` in #55; approved by the coordinator on #55, and the
+  `datagram` doc on #565.
 - **RECV WAITS (#581, 2026-10-05)** `stream::Receiver::recv` waits while it has no
   block, because the pool has no room or the system refused a commit. It gives the
   next message, `None` at the end, `Error::Reset` when the sender cancelled the
@@ -849,14 +880,14 @@ How to read this record:
   drops it and adds its samples and stamps to one pending gap for each index. When the
   stream can take a message again, `hub` sends the pending gap first, and the home
   records it and warns. The writer gets the same answer as for a frame the home
-  dropped, and never resends it (B7). Backfill waits. This needs a send that does not
-  wait and gives the message back; `network` sets it in #68. `block` gets no wake when
-  a block returns until simulation shows that the resume latency matters; then
-  `memory` proposes one wake, which home backfill shares. Until then, home backfill
-  also retries on a timer. Rejected: each caller retries (each caller writes the same
-  timer, and the pool's states leak into `hub`), and the stream ends (memory pressure
-  becomes stream churn and lost messages, and `Command` streams drop first). Decided
-  by the advisor under the delivery and wire internals delegation.
+  dropped, and never resends it (B7). Backfill waits. The live send is
+  `stream::Sender::try_send` (#597). `block` gets no wake when a block returns until
+  simulation shows that the resume latency matters; then `memory` proposes one wake,
+  which home backfill shares. Until then, home backfill also retries on a timer.
+  Rejected: each caller retries (each caller writes the same timer, and the pool's
+  states leak into `hub`), and the stream ends (memory pressure becomes stream churn and
+  lost messages, and `Command` streams drop first). Decided by the advisor under the
+  delivery and wire internals delegation.
 - **NODE KEY TLS** Every carrier but the diode runs TLS 1.3 only. A node's certificate
   is self-signed from a fixed template: Ed25519 key, `CN=foundation`, serial 1, valid
   from 1970 to `99991231235959Z`. The same key always gives the same bytes. A peer is
@@ -1567,6 +1598,13 @@ How to read this record:
   removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
   thread that a crash ended panics, because no process joins its own threads after it
   dies. Built by `simulation` in #114.
+- **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
+  Bytes go at the sender's `Settings::rate`, and an end with other settings gets
+  random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
+  from its own stream as each byte is sent, so a change of the line acts only on the
+  bytes sent after it. A flip with parity on is lost. Each port holds 4 KiB to send
+  and 4 KiB to read, as a Linux TTY does. An open ends at once. Built by `simulation`
+  in #431.
 - **SIM PANICS (2026-10-05)** A panic in a poll or in the drop of a future ends the
   thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
   future drops in its own `catch_unwind`, so a second panic never aborts the process.
@@ -1582,7 +1620,10 @@ How to read this record:
   are usable from the start: they hold the pool's header, so `Pool::new` makes no
   commit that can fail. A purged page stops counting against the memory the system
   can commit. On Linux with strict overcommit, `madvise` and `mprotect` keep that
-  charge, so `os` purges with a `MAP_FIXED` remap (#475).
+  charge, so `os` purges with a `MAP_FIXED` remap (#475). `block::testing::{Scarce,
+  Switch}`, behind the `sim` feature, is heap memory whose commits a test makes
+  refuse, so a crate above `block` tests a refused commit through its production
+  path (#591).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -1816,7 +1857,7 @@ Storage classes used in the table:
 | Quarantine | Per out connector: a hold on the original data plus an error record (samples on a channel under the connector's name); size on a status channel | The kind, through a library component | `ops` list, retry, drop | `connector` |
 | Secret value | Never in files, plans, or output. Built-in store: region state ciphertexts. External stores through adapters. References by name in kind config | `secret set` (person or CI) | `ctx.secret()` on the connector's node | `secret` (seal and open; `ops` seals, `node` opens), resolver (X40) |
 | Time sources | Binary: a source table built in `node`; adapters probe for hardware | Adapters feed measurements | The estimator | `clock` (adapters), estimator crate (X11) |
-| Mesh clock state | Memory per node; published as `<node>.clock.offset` and `.clock.error` | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
+| Mesh clock state | Memory per node; any shard reads its time and status (`Reader::now`, `Reader::status`); published as `<node>.clock.offset`, `.clock.error`, and the status | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
 | Operation table | Binary | The build | CLI, MCP, embedded docs | `ops` |
 | Node key material | Node-local disk | `node` at join | `transport`, `node` | `node` |
 | Per-node settings (disk budget, pool budget, data directory) | Budgets: a policy in the spec; data directory: a start argument (NODE SETTINGS) | `apply`; whoever starts the node | `buffer`, `block` | `node` |
@@ -2062,9 +2103,10 @@ an opaque document in `spec` (layer 1). KINDS OWN THEIR CONFIG gives kinds (laye
 shared Document reader with positions, name and unit parsing, and diagnostics. KINDS
 OWN also says "`config` parses files to Documents", but K1 says front ends parse.
 Resolution: a layer-1 crate `document` holds the Document, source positions,
-diagnostics, and readers for durations and rates. Unit names live in `spec::unit`, name
-syntax in `types::name`. Front ends (`config-hcl`) parse files; `config` reads only
-Documents. Basis: K1, BQ2, KINDS OWN, "decide the best architecture".
+diagnostics, and readers for durations, rates, and byte sizes. Channel unit names live
+in `spec::unit`, name syntax in `types::name`. Front ends (`config-hcl`) parse files;
+`config` reads only Documents. Basis: K1, BQ2, KINDS OWN, "decide the best
+architecture".
 
 **X22. Where a connector runs: the connector's `node` vs placement.**
 Conflict: C3 and C5 SHAPE give each connector a `node` attribute. BQ10 says a placement
@@ -2381,7 +2423,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
 | 2 | `blob` | Stores content by hash and fetches it from peers (spec chunks, binaries). | `env`, `types`, `block`, `wire`, `transport` |
-| 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
+| 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network, serial lines) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
 | 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
 | 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |

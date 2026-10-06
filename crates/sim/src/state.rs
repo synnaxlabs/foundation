@@ -17,6 +17,7 @@ use types::time::{Monotonic, Span, Stamp};
 
 use crate::files::{Files, Held};
 use crate::net::Network;
+use crate::serial::Serial;
 use crate::{Crash, node, shard};
 
 pub(crate) type Shared = Arc<Mutex<State>>;
@@ -50,8 +51,9 @@ pub(crate) struct State {
     next: u64,
     net: Network,
     files: Files,
-    /// A hash of every pick, in order, with the network and file digests at the pick,
-    /// so that it holds where their events fall between the picks.
+    serial: Serial,
+    /// A hash of every pick, in order, with the network, file, and serial digests at
+    /// the pick, so that it holds where their events fall between the picks.
     digest: DefaultHasher,
 }
 
@@ -122,7 +124,12 @@ pub(crate) enum Start {
 }
 
 impl State {
-    pub(crate) fn new(epoch: Instant, net: Network, files: Files) -> Self {
+    pub(crate) fn new(
+        epoch: Instant,
+        net: Network,
+        files: Files,
+        serial: Serial,
+    ) -> Self {
         Self {
             now: Monotonic::default(),
             nodes: Vec::new(),
@@ -136,6 +143,7 @@ impl State {
             next: 0,
             net,
             files,
+            serial,
             digest: DefaultHasher::new(),
         }
     }
@@ -289,11 +297,20 @@ impl State {
         &mut self.files
     }
 
-    /// A hash of the picks, the network, and the files.
+    pub(crate) fn serial(&mut self) -> &mut Serial {
+        &mut self.serial
+    }
+
+    /// A hash of the picks, the network, the files, and the serial lines.
     pub(crate) fn digest(&self) -> u64 {
         let mut digest = self.digest.clone();
-        (self.net.digest(), self.files.digest()).hash(&mut digest);
+        self.parts().hash(&mut digest);
         digest.finish()
+    }
+
+    /// The digests of the network, the files, and the serial lines.
+    fn parts(&self) -> [u64; 3] {
+        [self.net.digest(), self.files.digest(), self.serial.digest()]
     }
 
     /// Adds a thread whose first task is ready, and returns the thread's key.
@@ -349,6 +366,7 @@ impl State {
         let at = timer
             .into_iter()
             .chain(self.net.first())
+            .chain(self.serial.first())
             .chain(self.files.first())
             .chain(pauses)
             .filter(|&at| at <= last)
@@ -377,7 +395,7 @@ impl State {
         let nth = usize::try_from(rng.below(count))
             .expect("invariant: a value below a usize fits usize");
         let task = runnable[nth];
-        (task, self.net.digest(), self.files.digest()).hash(&mut self.digest);
+        (task, self.parts()).hash(&mut self.digest);
         self.ready.remove(&task);
         let thread = self.tasks[&task];
         self.current = Some(thread);
@@ -418,11 +436,11 @@ impl State {
         tasks
     }
 
-    /// Moves true time to `at`, delivers the datagrams that arrive by then, and ends
-    /// the file calls due by then. Returns the wakers of the timers due, of the
-    /// sockets that receive, and of the file calls that end, and the blocks of the
-    /// file calls whose futures dropped, for the caller to drop after it releases
-    /// the lock.
+    /// Moves true time to `at`, delivers the datagrams and bytes that arrive by then,
+    /// and ends the file calls due by then. Returns the wakers of the timers due, of
+    /// the sockets and ports that the arrivals wake, and of the file calls that end,
+    /// and the blocks of the file calls whose futures dropped, for the caller to drop
+    /// after it releases the lock.
     pub(crate) fn advance(&mut self, at: Monotonic) -> (Vec<Waker>, Vec<Held>) {
         self.now = at;
         let mut wakers = Vec::new();
@@ -433,6 +451,7 @@ impl State {
             wakers.push(timer.remove());
         }
         wakers.extend(self.net.deliver(at));
+        wakers.extend(self.serial.deliver(at));
         let (ended, orphans) = self.files.end(at);
         wakers.extend(ended);
         (wakers, orphans)

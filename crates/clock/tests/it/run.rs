@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use clock::{Clock, Reader};
+use clock::{Clock, Reader, Status};
+use estimate::combine::Error;
 use sim::Sim;
 use sim::node::{self, Node};
 use types::time::{Interval, Span, Stamp};
@@ -49,6 +50,7 @@ fn serves_the_os_clock_at_once() {
     let (mut sim, host) = node();
     let reader = run(&host, host.wall());
     assert_eq!(reader.now(), None);
+    assert_eq!(reader.status(), Status::Unsynced(Error::NoSources));
     sim.run_for(Span::ZERO).expect("runs");
     let (mesh, wall) = read(&host, &reader);
     let expected = Interval {
@@ -56,6 +58,10 @@ fn serves_the_os_clock_at_once() {
         latest: wall + ms(10),
     };
     assert_eq!(mesh, expected);
+    let Status::Synced(m) = reader.status() else {
+        panic!("{:?}", reader.status());
+    };
+    assert_eq!(m.interval(), expected);
 }
 
 #[test]
