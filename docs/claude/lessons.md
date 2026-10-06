@@ -74,3 +74,18 @@ uses two narrow calls into the home, not a reader inside `hub`.
 
 Sessions compact, crash, and get replaced. A decision that lives only in a session's
 context is lost. Write it into `docs/` in the same PR that depends on it.
+
+## One target dir for each worktree
+
+Cargo names the build of a workspace crate by its path from the workspace root, so the
+same crate in two worktrees gets one artifact in a shared `CARGO_TARGET_DIR`. Cargo
+rebuilds it only when a source file is newer than the artifact. A worktree whose
+sources are older then runs a test binary or `xtask` built from another worktree, and
+a local gate reports the result of the wrong tree. Each worktree uses its own target
+dir: cargo's default, `target/` in the worktree. Touching the changed sources is a
+patch, not the fix.
+
+Evidence: in the #734 worktree, `cargo test -p transport` ran 194 tests with 3
+failures. Those are the counts of #727, built in another worktree. A fresh copy of
+#734 passed 190. `cargo xtask oracles` in one worktree compiled the crates of another,
+because `xtask` fixes the workspace root when it compiles (#730).

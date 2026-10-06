@@ -4,7 +4,7 @@ use std::ops::RangeBounds;
 use types::node;
 
 use crate::log;
-use crate::log::Log;
+use crate::log::{Held, Log, Run};
 use crate::progress::Progress;
 use crate::voters::Tally;
 use crate::{
@@ -27,13 +27,12 @@ pub enum Role {
 // Entries in one `Append`.
 const BATCH: usize = 64;
 
-// One voter: the leader's view of its log, its answer to the current campaign, and
-// whether the next quorum check counts it (it answered since the last check, or a
-// change just added it).
+// The leader's view of one other node: how much of the log it holds, and whether
+// the next quorum check counts it (it answered since the last check, or a change
+// just added it).
 #[derive(Debug)]
 struct Peer {
     progress: Progress,
-    vote: Option<bool>,
     active: bool,
 }
 
@@ -41,15 +40,28 @@ impl Peer {
     fn new(last: u64) -> Self {
         Self {
             progress: Progress::new(last),
-            vote: None,
             active: false,
         }
     }
 }
 
+// A message body that `check` passed.
+enum Checked {
+    PreVote { last: Position },
+    PreVoteReply { granted: bool },
+    Vote { last: Position },
+    VoteReply { granted: bool },
+    Heartbeat { commit: Held },
+    HeartbeatReply,
+    Append { run: Run, commit: u64 },
+    AppendReply { last: Held },
+    AppendReject { hint: Held },
+}
+
 /// What the caller must do after an input, in this order: write `hard` and `entries`
-/// to disk, send `messages`, then apply `committed`. Write `hard` and `entries` in
-/// any order: a crash between the two is safe.
+/// to disk and sync them, send `messages`, then apply `committed`. Write `hard` and
+/// `entries` in any order: a crash between the two is safe. `raft` is safe only when
+/// the disk keeps what it synced.
 #[must_use = "a dropped Ready loses its messages and its hard state"]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ready {
@@ -73,9 +85,12 @@ pub struct Raft {
     voters: Voters,
     // Where the log holds `voters`: the zero position for `Start.voters`.
     in_force: Position,
-    // The voters in force, plus the nodes that the configuration in force removed,
-    // until a release, a quorum check, or the next configuration drops them.
+    // The other voters in force, plus the nodes that the configuration in force
+    // removed, until a release, a quorum check, or the next configuration drops them.
+    // Never this node.
     peers: BTreeMap<node::Key, Peer>,
+    // The first answer of each other voter to the current campaign.
+    answers: BTreeMap<node::Key, bool>,
     election_ticks: u64,
     heartbeat_ticks: u64,
     term: Term,
@@ -85,6 +100,9 @@ pub struct Raft {
     log: Log,
     role: Role,
     leader: Option<node::Key>,
+    // The leader of `term`, once this node hears one or becomes one. It stays until
+    // the term ends, through a step-down and a campaign; `leader` does not.
+    led: Option<node::Key>,
     election_elapsed: u64,
     heartbeat_elapsed: u64,
     // The randomized election timeout. `None` until the first tick after a reset.
@@ -130,8 +148,7 @@ impl Raft {
         let last = log.last();
         let (in_force, voters) = log.voters();
         let voters = voters.clone();
-        let peers = log
-            .nodes()
+        let peers = others(&log, key)
             .into_iter()
             .map(|key| (key, Peer::new(last.index)))
             .collect();
@@ -145,6 +162,7 @@ impl Raft {
             voters,
             in_force,
             peers,
+            answers: BTreeMap::new(),
             outbox: Vec::new(),
             election_ticks: u64::from(election_ticks),
             heartbeat_ticks: u64::from(heartbeat_ticks),
@@ -154,6 +172,7 @@ impl Raft {
             log,
             role: Role::Follower,
             leader: None,
+            led: None,
             election_elapsed: 0,
             heartbeat_elapsed: 0,
             timeout: None,
@@ -298,8 +317,8 @@ impl Raft {
     }
 
     /// Starts an election now, without a wait for the election timeout. A leader, a
-    /// node that is not in its own voter list, and a node in the last term
-    /// (`u64::MAX`) do nothing.
+    /// node that is not in its own voter list while that list is committed, and a
+    /// node in the last term (`u64::MAX`) do nothing.
     pub fn campaign(&mut self) {
         if self.role != Role::Leader && self.promotable() {
             self.pre_campaign();
@@ -312,8 +331,8 @@ impl Raft {
     ///
     /// - [`Error::Misrouted`] when the message is for another node.
     /// - [`Error::Loopback`] when the message names this node as its sender.
-    /// - [`Error::SecondLeader`] when this node leads the message's term and the
-    ///   message is a heartbeat or an append.
+    /// - [`Error::SecondLeader`] when the message is a heartbeat or an append of this
+    ///   node's term from a node other than the leader of the term it knows.
     /// - [`Error::EntryOutOfOrder`] when an append's entries do not follow its `prev`.
     /// - [`Error::NoVoters`] when an append carries a configuration with an empty
     ///   `incoming` set.
@@ -341,7 +360,7 @@ impl Raft {
             self.answer_stale(from, &body);
             return Ok(());
         }
-        self.check(from, term, &body)?;
+        let body = self.check(from, term, body)?;
         if self.meet(from, term, &body) {
             self.handle(from, term, body);
         }
@@ -350,15 +369,15 @@ impl Raft {
 
     // Applies a message that `check` and `meet` passed: one of this term, a PreVote
     // for a later one, or a granted PreVoteReply for a later one.
-    fn handle(&mut self, from: node::Key, term: Term, body: Body) {
+    fn handle(&mut self, from: node::Key, term: Term, body: Checked) {
         match body {
-            Body::PreVote { last } => {
+            Checked::PreVote { last } => {
                 let granted = (term > self.term || self.free_for(from))
                     && last >= self.log.last();
                 let reply = if granted { term } else { self.term };
                 self.send(from, reply, Body::PreVoteReply { granted });
             }
-            Body::Vote { last } => {
+            Checked::Vote { last } => {
                 let granted = self.free_for(from) && last >= self.log.last();
                 if granted {
                     self.election_elapsed = 0;
@@ -366,18 +385,18 @@ impl Raft {
                 }
                 self.send(from, self.term, Body::VoteReply { granted });
             }
-            Body::PreVoteReply { granted } => {
+            Checked::PreVoteReply { granted } => {
                 if self.role == Role::PreCandidate {
                     self.poll(from, granted);
                 }
             }
-            Body::VoteReply { granted } => {
+            Checked::VoteReply { granted } => {
                 if self.role == Role::Candidate {
                     self.poll(from, granted);
                 }
             }
-            Body::Heartbeat { commit } => self.heartbeat(from, commit),
-            Body::HeartbeatReply => {
+            Checked::Heartbeat { commit } => self.heartbeat(from, commit),
+            Checked::HeartbeatReply => {
                 let last = self.log.last().index;
                 let behind = self.heard_from(from).is_some_and(|peer| {
                     peer.progress.heard();
@@ -389,18 +408,14 @@ impl Raft {
                     self.send_appends(from..=from);
                 }
             }
-            Body::Append {
-                prev,
-                entries,
-                commit,
-            } => {
+            Checked::Append { run, commit } => {
                 self.follow(from);
-                self.append(from, prev, entries, commit);
+                self.append(from, run, commit);
             }
-            Body::AppendReply { last } => self.accepted(from, last),
-            Body::AppendReject { hint } => {
+            Checked::AppendReply { last } => self.accepted(from, last),
+            Checked::AppendReject { hint } => {
                 if let Some(peer) = self.heard_from(from) {
-                    peer.progress.rejected(hint);
+                    peer.progress.rejected(hint.index());
                     self.catch_up(from);
                 }
             }
@@ -408,51 +423,47 @@ impl Raft {
     }
 
     // Checks a message of this term or a later one against the node's state and its
-    // log. The index of a heartbeat, an append reply, or an append reject is then at
-    // most the last log index. An append and a vote can name one past it, because
-    // this node can be behind.
-    fn check(&self, from: node::Key, term: Term, body: &Body) -> Result<(), Error> {
-        let last = self.log.last();
-        let within = |index: u64| {
-            if index > last.index {
-                return Err(Error::IndexPastLog {
-                    index,
-                    last: last.index,
-                });
-            }
-            Ok(())
-        };
-        match body {
+    // log. An append and a vote can name an index past the last one, because this
+    // node can be behind.
+    fn check(&self, from: node::Key, term: Term, body: Body) -> Result<Checked, Error> {
+        Ok(match body {
             Body::Heartbeat { .. } | Body::Append { .. }
-                if term == self.term && self.role == Role::Leader =>
+                if term == self.term && self.led.is_some_and(|led| led != from) =>
             {
-                Err(Error::SecondLeader { term, from })
+                return Err(Error::SecondLeader { term, from });
             }
-            Body::Heartbeat { commit } => within(*commit),
-            Body::Append { prev, entries, .. } => {
-                log::check(entries, *prev)?;
-                match entries.last() {
-                    Some(entry) if entry.at.term > term => Err(Error::TermBehindLog {
-                        term,
-                        last: entry.at,
-                    }),
-                    _ => Ok(()),
+            Body::PreVote { last } => Checked::PreVote { last },
+            Body::PreVoteReply { granted } => Checked::PreVoteReply { granted },
+            Body::Vote { last } => Checked::Vote { last },
+            Body::VoteReply { granted } => Checked::VoteReply { granted },
+            Body::Heartbeat { commit } => Checked::Heartbeat {
+                commit: self.log.held(commit)?,
+            },
+            Body::HeartbeatReply => Checked::HeartbeatReply,
+            Body::Append {
+                prev,
+                entries,
+                commit,
+            } => {
+                let run = log::check(prev, entries)?;
+                if let Some(last) = run.last().filter(|last| last.term > term) {
+                    return Err(Error::TermBehindLog { term, last });
                 }
+                Checked::Append { run, commit }
             }
-            Body::AppendReply { last } => within(*last),
-            Body::AppendReject { hint } => within(*hint),
-            Body::PreVote { .. }
-            | Body::Vote { .. }
-            | Body::PreVoteReply { .. }
-            | Body::VoteReply { .. }
-            | Body::HeartbeatReply => Ok(()),
-        }
+            Body::AppendReply { last } => Checked::AppendReply {
+                last: self.log.held(last)?,
+            },
+            Body::AppendReject { hint } => Checked::AppendReject {
+                hint: self.log.held(hint)?,
+            },
+        })
     }
 
     // Commits what the leader's heartbeat says and answers it.
-    fn heartbeat(&mut self, leader: node::Key, commit: u64) {
+    fn heartbeat(&mut self, leader: node::Key, commit: Held) {
         self.follow(leader);
-        self.log.commit_to(commit);
+        self.log.commit_to(commit.index());
         self.release_removed();
         self.send(leader, self.term, Body::HeartbeatReply);
     }
@@ -484,7 +495,7 @@ impl Raft {
             .map(|(&key, _)| key)
             .collect();
         for key in removed {
-            if leader && key != self.key {
+            if leader {
                 self.send_heartbeat(key);
             }
             self.peers.remove(&key);
@@ -499,14 +510,8 @@ impl Raft {
     }
 
     // Appends the leader's entries as a follower and answers.
-    fn append(
-        &mut self,
-        leader: node::Key,
-        prev: Position,
-        entries: Vec<Entry>,
-        commit: u64,
-    ) {
-        let reply = match self.log.append(prev, entries) {
+    fn append(&mut self, leader: node::Key, run: Run, commit: u64) {
+        let reply = match self.log.append(run) {
             Ok(last) => {
                 self.sync_voters();
                 self.log.commit_to(commit.min(last));
@@ -519,10 +524,10 @@ impl Raft {
     }
 
     // Records that a follower holds the leader's log up to `last`, as the leader.
-    fn accepted(&mut self, from: node::Key, last: u64) {
+    fn accepted(&mut self, from: node::Key, last: Held) {
         let accepted = self
             .heard_from(from)
-            .is_some_and(|peer| peer.progress.accepted(last));
+            .is_some_and(|peer| peer.progress.accepted(last.index()));
         if !accepted || self.advance() {
             return;
         }
@@ -591,8 +596,8 @@ impl Raft {
         self.sync_voters();
     }
 
-    // Puts the log's configuration in force. The peers become its voters and the
-    // nodes it removed: the other voters of the configuration before it. A new peer
+    // Puts the log's configuration in force. The peers become its other voters and
+    // the nodes it removed: the other voters of the configuration before it. A new peer
     // starts at the end of the log.
     fn sync_voters(&mut self) {
         let (at, voters) = self.log.voters();
@@ -603,7 +608,7 @@ impl Raft {
         self.in_force = at;
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
-        let keep = self.log.nodes();
+        let keep = others(&self.log, self.key);
         self.peers.retain(|key, _| keep.contains(key));
         for key in keep {
             let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
@@ -640,7 +645,7 @@ impl Raft {
         let commit = self.log.committed();
         let removed_end = self.removed_end();
         for (&to, peer) in self.peers.range_mut(range) {
-            if to == self.key || peer.progress.paused() {
+            if peer.progress.paused() {
                 continue;
             }
             let next = peer.progress.next();
@@ -672,25 +677,25 @@ impl Raft {
     // Steps down for a message of a higher term that `check` passed, except a PreVote
     // or its grant. Returns false, so the message is dropped, only for a PreVote or
     // Vote of a higher term while this node has a lease.
-    fn meet(&mut self, from: node::Key, term: Term, body: &Body) -> bool {
+    fn meet(&mut self, from: node::Key, term: Term, body: &Checked) -> bool {
         if term > self.term {
             match body {
                 // A voter that heard from a leader within the election timeout does
                 // not help to replace it.
-                Body::PreVote { .. } | Body::Vote { .. } if self.leased() => {
+                Checked::PreVote { .. } | Checked::Vote { .. } if self.leased() => {
                     return false;
                 }
                 // A PreVote, or its grant, carries a term that no node is in yet.
-                Body::PreVote { .. } | Body::PreVoteReply { granted: true } => {}
-                Body::Heartbeat { .. } | Body::Append { .. } => {
+                Checked::PreVote { .. } | Checked::PreVoteReply { granted: true } => {}
+                Checked::Heartbeat { .. } | Checked::Append { .. } => {
                     self.become_follower(term, Some(from));
                 }
-                Body::Vote { .. }
-                | Body::PreVoteReply { granted: false }
-                | Body::VoteReply { .. }
-                | Body::HeartbeatReply
-                | Body::AppendReply { .. }
-                | Body::AppendReject { .. } => self.become_follower(term, None),
+                Checked::Vote { .. }
+                | Checked::PreVoteReply { granted: false }
+                | Checked::VoteReply { .. }
+                | Checked::HeartbeatReply
+                | Checked::AppendReply { .. }
+                | Checked::AppendReject { .. } => self.become_follower(term, None),
             }
         }
         true
@@ -740,15 +745,14 @@ impl Raft {
             self.heartbeat_elapsed = 0;
             let peers: Vec<node::Key> = self.peers.keys().copied().collect();
             for to in peers {
-                if to != self.key {
-                    self.send_heartbeat(to);
-                }
+                self.send_heartbeat(to);
             }
         }
     }
 
     // Handles a heartbeat or an append from the leader of the node's own term.
     fn follow(&mut self, leader: node::Key) {
+        self.led = Some(leader);
         match self.role {
             Role::Leader => unreachable!(
                 "invariant: `check` refuses a second leader of term {}",
@@ -769,9 +773,7 @@ impl Raft {
         let Some(next) = self.term.next() else {
             return;
         };
-        for peer in self.peers.values_mut() {
-            peer.vote = None;
-        }
+        self.answers.clear();
         self.leader = None;
         self.role = Role::PreCandidate;
         self.broadcast(
@@ -780,7 +782,7 @@ impl Raft {
                 last: self.log.last(),
             },
         );
-        self.poll(self.key, true);
+        self.decide();
     }
 
     fn become_candidate(&mut self) {
@@ -797,12 +799,13 @@ impl Raft {
                 last: self.log.last(),
             },
         );
-        self.poll(self.key, true);
+        self.decide();
     }
 
     fn become_leader(&mut self) {
         self.reset(self.term);
         self.leader = Some(self.key);
+        self.led = Some(self.key);
         self.role = Role::Leader;
         let last = self.log.last().index;
         for peer in self.peers.values_mut() {
@@ -828,25 +831,37 @@ impl Raft {
         if self.term != term {
             self.term = term;
             self.vote = None;
+            self.led = None;
         }
         self.leader = None;
         self.election_elapsed = 0;
         self.heartbeat_elapsed = 0;
         self.timeout = None;
+        self.answers.clear();
         for peer in self.peers.values_mut() {
-            peer.vote = None;
             peer.active = false;
         }
     }
 
     // Records one answer to the current campaign and acts when the answers decide it.
-    // The first answer of a voter counts.
+    // An answer from a node that is not a voter has no effect.
     fn poll(&mut self, from: node::Key, granted: bool) {
-        let Some(peer) = self.peers.get_mut(&from) else {
-            return;
+        if self.voters.contains(from) {
+            self.answers.entry(from).or_insert(granted);
+            self.decide();
+        }
+    }
+
+    // Acts when the answers decide the current campaign. This node grants itself.
+    fn decide(&mut self) {
+        let answer = |key| {
+            if key == self.key {
+                Some(true)
+            } else {
+                self.answers.get(&key).copied()
+            }
         };
-        peer.vote.get_or_insert(granted);
-        match self.voters.tally(|key| self.peer(key).vote) {
+        match self.voters.tally(answer) {
             Tally::Won => match self.role {
                 Role::PreCandidate => self.become_candidate(),
                 Role::Candidate => self.become_leader(),
@@ -879,19 +894,17 @@ impl Raft {
     fn peer(&self, key: node::Key) -> &Peer {
         self.peers
             .get(&key)
-            .expect("invariant: every voter has a peer")
+            .expect("invariant: every other voter has a peer")
     }
 
     fn broadcast(&mut self, term: Term, body: &Body) {
         for &to in self.peers.keys() {
-            if to != self.key {
-                self.outbox.push(Message {
-                    from: self.key,
-                    to,
-                    term,
-                    body: body.clone(),
-                });
-            }
+            self.outbox.push(Message {
+                from: self.key,
+                to,
+                term,
+                body: body.clone(),
+            });
         }
     }
 
@@ -903,6 +916,13 @@ impl Raft {
             body,
         });
     }
+}
+
+// The nodes that `log` keeps a peer for on node `key`: every node but `key`.
+fn others(log: &Log, key: node::Key) -> BTreeSet<node::Key> {
+    let mut nodes = log.nodes();
+    nodes.remove(&key);
+    nodes
 }
 
 #[cfg(test)]
@@ -1351,6 +1371,93 @@ mod tests {
         }
 
         #[test]
+        fn rejects_a_second_leader_in_the_term_of_the_leader_it_follows() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.step(message(2, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            sent(&mut raft);
+            let entry = Entry {
+                at: Position {
+                    term: Term(1),
+                    index: 1,
+                },
+                data: Data::Voters(Voters {
+                    incoming: [key(1)].into_iter().collect(),
+                    ..Voters::default()
+                }),
+            };
+            let append = Body::Append {
+                prev: Position::default(),
+                entries: vec![entry],
+                commit: 0,
+            };
+            for body in [Body::Heartbeat { commit: 0 }, append] {
+                let err = raft.step(message(3, 1, body)).unwrap_err();
+                assert_eq!(
+                    err,
+                    Error::SecondLeader {
+                        term: Term(1),
+                        from: key(3)
+                    }
+                );
+                assert_eq!(
+                    err.to_string(),
+                    "node 00000000000000000000000000000003 also claims to lead term 1"
+                );
+            }
+            assert_eq!((raft.role(), raft.leader()), (Role::Follower, Some(key(2))));
+            let ready = raft.ready();
+            assert_eq!((ready.messages, ready.entries), (vec![], vec![]));
+            assert_eq!(
+                raft.step(message(2, 1, Body::Heartbeat { commit: 0 })),
+                Ok(())
+            );
+        }
+
+        // The restart dropped the leader of the term: a known gap of #391.
+        #[test]
+        fn follows_the_first_leader_of_a_term_it_is_in() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            raft.step(message(3, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            assert_eq!((raft.role(), raft.leader()), (Role::Follower, Some(key(3))));
+        }
+
+        // A vote names a candidate, not the leader: a known gap of #391.
+        #[test]
+        fn follows_the_first_leader_of_a_term_it_voted_in() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let vote = Body::Vote {
+                last: Position::default(),
+            };
+            raft.step(message(2, 1, vote)).unwrap();
+            raft.step(message(3, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            assert_eq!((raft.role(), raft.leader()), (Role::Follower, Some(key(3))));
+        }
+
+        #[test]
+        fn rejects_a_second_leader_after_its_election_timeout_in_the_term() {
+            let mut raft = raft(&[1, 2, 3], at_term(1));
+            raft.step(message(2, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            tick_times(&mut raft, 10);
+            assert_eq!((raft.role(), raft.leader()), (Role::PreCandidate, None));
+            sent(&mut raft);
+            let err = raft
+                .step(message(3, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap_err();
+            let expected = Error::SecondLeader {
+                term: Term(1),
+                from: key(3),
+            };
+            assert_eq!(err, expected);
+            raft.step(message(2, 1, Body::Heartbeat { commit: 0 }))
+                .unwrap();
+            assert_eq!((raft.role(), raft.leader()), (Role::Follower, Some(key(2))));
+        }
+
+        #[test]
         fn rejects_an_append_for_a_term_it_leads() {
             let mut raft = raft(&[1], Hard::default());
             raft.campaign();
@@ -1725,6 +1832,19 @@ mod tests {
             assert_eq!((raft.role(), raft.term()), (Role::PreCandidate, Term(1)));
         }
 
+        // The answers stay as few as the voters, whatever nodes reply.
+        #[test]
+        fn keeps_no_answer_from_a_node_that_is_not_a_voter() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.campaign();
+            let granted = Body::PreVoteReply { granted: true };
+            raft.step(message(9, 1, granted.clone())).unwrap();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            assert!(raft.answers.is_empty());
+            raft.step(message(2, 1, granted)).unwrap();
+            assert_eq!(raft.role(), Role::Candidate);
+        }
+
         #[test]
         fn sends_prevotes_again_only_after_a_full_timeout() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
@@ -1833,6 +1953,50 @@ mod tests {
             assert_eq!(raft.role(), Role::Leader);
             raft.tick(0);
             assert_eq!((raft.role(), raft.leader()), (Role::Follower, None));
+        }
+
+        #[test]
+        fn rejects_a_second_leader_of_the_term_it_led_after_it_steps_down() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            tick_times(&mut raft, 10);
+            assert_eq!((raft.role(), raft.leader()), (Role::Follower, None));
+            sent(&mut raft);
+            let alone = Voters {
+                incoming: [key(1)].into_iter().collect(),
+                ..Voters::default()
+            };
+            let append = Body::Append {
+                prev: Position {
+                    term: Term(1),
+                    index: 1,
+                },
+                entries: vec![Entry {
+                    at: Position {
+                        term: Term(1),
+                        index: 2,
+                    },
+                    data: Data::Voters(alone),
+                }],
+                commit: 0,
+            };
+            let err = raft.step(message(3, 1, append)).unwrap_err();
+            let expected = Error::SecondLeader {
+                term: Term(1),
+                from: key(3),
+            };
+            let voters: Vec<node::Key> =
+                raft.voters().incoming.iter().copied().collect();
+            raft.campaign();
+            assert_eq!(
+                (err, voters, raft.role(), raft.ready().committed),
+                (
+                    expected,
+                    vec![key(1), key(2), key(3)],
+                    Role::PreCandidate,
+                    vec![]
+                )
+            );
         }
 
         #[test]
@@ -2190,6 +2354,24 @@ mod tests {
 
     mod config {
         use super::*;
+
+        #[test]
+        fn a_leader_keeps_its_lead_when_it_adds_voters_late_in_a_quorum_period() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            tick_times(&mut raft, 9);
+            for from in [2, 3] {
+                raft.step(message(from, 1, Body::HeartbeatReply)).unwrap();
+            }
+            let joint = Voters {
+                incoming: [1, 4, 5].into_iter().map(key).collect(),
+                outgoing: [1, 2, 3].into_iter().map(key).collect(),
+            };
+            raft.propose_entry(Data::Voters(joint));
+            // Nodes 4 and 5 had one tick to answer a leader they did not know.
+            tick_times(&mut raft, 1);
+            assert_eq!(raft.role(), Role::Leader);
+        }
 
         fn voters(ids: &[u8]) -> Voters {
             Voters {
@@ -2617,7 +2799,42 @@ mod tests {
             appended.step(append).unwrap();
             let peers = |raft: &Raft| raft.peers.keys().copied().collect::<Vec<_>>();
             assert_eq!(peers(&restarted), peers(&appended));
-            assert_eq!(peers(&restarted), [key(1), key(2), key(3)]);
+            assert_eq!(peers(&restarted), [key(1), key(2)]);
+        }
+
+        // The leave that removes node 1 is not committed, so node 1 may campaign. It
+        // has no vote of its own to count: 2 and 3 elect it.
+        #[test]
+        fn a_removed_leader_campaigns_with_no_peer_of_its_own() {
+            let mut raft = leader();
+            assert!(!raft.peers.contains_key(&key(1)));
+            raft.propose_voters(set(&[2, 3])).unwrap();
+            accept(&mut raft, &[2, 3], 2);
+            assert_eq!(raft.voters(), &voters(&[2, 3], &[]));
+            tick_times(&mut raft, 20);
+            assert_eq!(raft.role(), Role::Follower);
+            elect(&mut raft, &[2, 3]);
+            assert!(!raft.peers.contains_key(&key(1)));
+        }
+
+        // Node 1 is in neither `Start.voters` nor the change, which is not committed.
+        // It campaigns and needs a quorum of the others. #659 asks whether it should.
+        #[test]
+        fn a_node_outside_both_configurations_campaigns_without_its_own_vote() {
+            let mut raft = raft(&[2, 3], Hard::default());
+            let joint = voters(&[2, 3, 4], &[2, 3]);
+            let change = append(Position::default(), vec![config(1, 1, joint)], 0);
+            raft.step(message(2, 1, change)).unwrap();
+            sent(&mut raft);
+            raft.campaign();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4)]);
+            let granted = Body::PreVoteReply { granted: true };
+            raft.step(message(2, 2, granted.clone())).unwrap();
+            assert_eq!(raft.role(), Role::PreCandidate);
+            raft.step(message(3, 2, granted)).unwrap();
+            assert_eq!(raft.role(), Role::Candidate);
+            assert!(!raft.peers.contains_key(&key(1)));
         }
 
         // Node 1 restarts with the leave of node 4 applied: the leave is committed

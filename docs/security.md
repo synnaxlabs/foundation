@@ -72,10 +72,14 @@ state on `main`.
   reset for it. The router is not built. #77 asks that it hands such a datagram
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
-  byte arrives), #607 (a stranger keeps the ID from a failed dial and makes the node
-  send a reset to each address it spoofs, with no limit), #620 (a stop after the
-  peer's reset gives the peer the stream's window twice, so a peer grows the
-  connection's receive memory with no bound).
+  byte arrives). A connection now holds at most its receive budget (#467), and a
+  size takes the budget of a size with no block in use (#270). Still open: a test
+  that a stream on another connection reads while one connection holds its budget,
+  and many connections before admission (#563).
+- Open: #607 (a stranger keeps the ID from a failed dial and makes the node send a
+  reset to each address it spoofs, with no limit), #620 (a stop after the peer's
+  reset gives the peer the stream's window twice, so a peer grows the connection's
+  receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
   session). A chain is one certificate of at most 1 KiB. #298 (datagrams that are
   not valid, from one address, stopped every stateless reset; a small datagram of an
@@ -139,9 +143,20 @@ state on `main`.
   newest configuration (RAFT VOTERS, #654). Not built (`mesh`). A voter that lies can
   also break safety, because a false `AppendReply` counts as held, so `raft` trusts
   its voters. No change in `raft` (RAFT SURFACE, #352 item 2).
+- A voter that does not lead can make a follower commit a voter set alone: it sends
+  one `Append` with a configuration entry in a term the follower has not seen, or in
+  its term before the follower hears that term's leader. The two logs then differ at
+  one index. Open by decision; tests pin both sequences (#391). The long-term fix is
+  a proof of election.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
+- A disk that lost entries it synced can break Raft safety: the leader still counts
+  them toward a commit, and the node can grant a vote to a candidate that lacks a
+  committed entry. `raft` does not find the loss: the disk owns durability
+  (`env::files`, RAFT DURABILITY, #352 item 3). The node gets `Error::IndexPastLog`
+  only once the leader's commit passes its last entry. Not built (#648): the node
+  shows the error in its status.
 - The `clock`, `replica`, and `blob` protocols are not built. To attack when they
   land: who may be a time source, and a binary that a peer serves under a hash it
   does not match (C9d).
@@ -149,10 +164,11 @@ state on `main`.
 ### Time source to `estimate`
 
 - `estimate` combines one bound per source and does not know what a source is
-  (ESTIMATE COMBINE). The result holds the truth only when every bound outside the
-  majority misses it. Open, needs a decision on ESTIMATE COMBINE: #344 (one lying
-  source of three puts a small bound inside the honest overlap, and the estimate
-  follows it). This is the attack of R6.
+  (ESTIMATE COMBINE). A known result holds the truth when more than half of the bounds
+  that vote hold it, whatever the others are. So a small bound from a lying minority
+  cannot steer it off the truth (the attack of R6, #344). A lying majority can. So can
+  one known bound beside unknown bounds alone, because an unknown bound does not vote
+  beside a known one.
 
 ### Files to the spec
 
@@ -188,10 +204,11 @@ state on `main`.
   config (a new ring with a body of 4 to 54 bytes stops the node at its first
   `append`).
 - Fuzzed: `buffer_open`. Open on `main`: #392 (three ways a ring loses data it
-  reported durable or cannot open), #553 (a power cut after the first open loses
-  the new ring: its directory is not synced in its parent), #566 (a write of a dead
-  process can land on a ring that a new process opened), #572 (`append` takes a
-  record over the pool's largest block, and then each open fails). Fixed: #393 (two
+  reported durable or cannot open), #566 (a write of a dead process can land on a
+  ring that a new process opened), #572 (`append` takes a record over the pool's
+  largest block, and then each open fails), #657 (an open reports durable the
+  records a killed process never synced). Fixed: #553 (a power cut after the first
+  open lost the new ring: its directory was not synced in its parent), #393 (two
   CRC-valid fields stopped the node at open); the `area` and `below_tail` inputs
   hold both.
 
