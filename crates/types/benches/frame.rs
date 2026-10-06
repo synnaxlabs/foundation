@@ -2,9 +2,9 @@
 //! bytes), to set each seq on a built draft, to fill and read every series in order,
 //! to look each one up, to give its charge, to view the series bytes, to give the end
 //! of each series, to check and walk the series from stored ends, to make a view
-//! through a full, a narrow, and an almost full mask and walk or charge it, to walk the
-//! last one step by step, and to make a narrow mask, for a dense frame and for frames
-//! of 100,000 channels.
+//! through a full, a narrow, an almost full, and a half full mask and walk or charge
+//! it, and to make a narrow mask, for a dense frame and for frames of 100,000
+//! channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -348,22 +348,6 @@ fn most_walk(bencher: Bencher<'_, '_>, case: &Case) {
     bencher.bench_local(|| walk_view(View::new(black_box(&frame), black_box(&mask))));
 }
 
-/// Makes a view through a mask that wants every channel but one, then sums the length
-/// of each of its series in a `for` loop, which takes one step at a time and no fold.
-#[divan::bench(args = cases(), sample_count = 1000)]
-fn most_step(bencher: Bencher<'_, '_>, case: &Case) {
-    let pool = pool();
-    let frame = frame(&pool, case);
-    let mask = Mask::new(&case.set, most(case));
-    bencher.bench_local(|| {
-        let mut len = 0;
-        for (_, bytes) in View::new(black_box(&frame), black_box(&mask)).iter() {
-            len += bytes.len();
-        }
-        len
-    });
-}
-
 /// Makes a view through a mask that wants every channel but one, then gives its
 /// charge.
 #[divan::bench(args = cases(), sample_count = 1000)]
@@ -371,6 +355,26 @@ fn most_charge(bencher: Bencher<'_, '_>, case: &Case) {
     let pool = pool();
     let frame = frame(&pool, case);
     let mask = Mask::new(&case.set, most(case));
+    bencher.bench_local(|| View::new(black_box(&frame), black_box(&mask)).charge());
+}
+
+/// Makes a view through a mask that wants just over half the channels, in turn with
+/// those it leaves out, then sums the length of each of its series.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn half_walk(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, alternate(case));
+    bencher.bench_local(|| walk_view(View::new(black_box(&frame), black_box(&mask))));
+}
+
+/// Makes a view through a mask that wants just over half the channels, in turn with
+/// those it leaves out, then gives its charge.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn half_charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, alternate(case));
     bencher.bench_local(|| View::new(black_box(&frame), black_box(&mask)).charge());
 }
 
@@ -396,6 +400,14 @@ fn most(case: &Case) -> impl Iterator<Item = channel::Slot> {
     let entries = set.entries().iter().enumerate();
     entries
         .filter(move |&(entry, _)| Some(entry) != skip)
+        .map(|(_, entry)| entry.slot)
+}
+
+/// The first channel of `case` and every second one after it.
+fn alternate(case: &Case) -> impl Iterator<Item = channel::Slot> {
+    let entries = case.set.entries().iter().enumerate();
+    entries
+        .filter(|&(entry, _)| entry == 0 || entry % 2 == 1)
         .map(|(_, entry)| entry.slot)
 }
 

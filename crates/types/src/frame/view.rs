@@ -171,8 +171,8 @@ impl<'a> View<'a> {
     /// The charge of a frame of only the view's series (CREDIT RULES): what a remote
     /// complete reader spends. Equal to [`Frame::charge`] when the mask holds every
     /// present series. Time is constant when the mask holds every entry, else
-    /// O(m log(n/m)) for the smaller m and larger n of the frame's series and the
-    /// shorter of the mask's entries and the entries it leaves out.
+    /// O(m log n) for the smaller m and larger n of the frame's series and the shorter
+    /// of the mask's entries and the entries it leaves out.
     #[must_use]
     pub fn charge(&self) -> u64 {
         charge_of(self.len())
@@ -180,60 +180,51 @@ impl<'a> View<'a> {
 
     /// The length of a frame of only the view's series.
     fn len(&self) -> usize {
-        match &self.mask.held {
-            Held::Every => self.frame.0.len(),
+        let (listed, left_out) = match &self.mask.held {
+            Held::Every => return self.frame.0.len(),
             Held::Listed {
-                left_out: Some(list),
+                list: listed,
+                left_out: None,
+            } => (listed, false),
+            Held::Listed {
+                left_out: Some(listed),
                 ..
-            } => len_without(self.frame, list),
-            Held::Listed { list, .. } => len_of_only(self.frame, list),
+            } => (listed, true),
+        };
+        // One walk for both lists: a second call of `join` keeps both out of line.
+        let (ranges, descriptors, _) = parts(&self.frame.0);
+        let groups = join(ranges, &listed.groups).count();
+        let (mut series, mut bytes) = (0, 0);
+        // The listed series from `run` to `next` are the last ones in a row.
+        let (mut run, mut next) = (0, 0);
+        for n in join(descriptors, &listed.entries) {
+            let (start, end) = bounds(descriptors, n);
+            series += 1;
+            bytes = next_end(bytes, end - start);
+            if n != next {
+                run = n;
+            }
+            next = n + 1;
         }
-    }
-}
-
-/// The length of a frame of only the series of `frame` that `list` holds.
-fn len_of_only(frame: &Frame, list: &List) -> usize {
-    let (ranges, descriptors, _) = parts(&frame.0);
-    let groups = join(ranges, &list.groups).count();
-    let (mut series, mut bytes) = (0, 0);
-    for n in join(descriptors, &list.entries) {
-        let (start, end) = bounds(descriptors, n);
-        series += 1;
-        bytes = next_end(bytes, end - start);
-    }
-    body_start(groups, series) + bytes
-}
-
-/// The length of `frame` without the series that `list` holds.
-fn len_without(frame: &Frame, list: &List) -> usize {
-    let (ranges, descriptors, _) = parts(&frame.0);
-    let groups = join(ranges, &list.groups).count();
-    let (mut series, mut cut, mut after) = (0, 0, 0);
-    // The latest run of series left out: where it starts, and its part of `cut`.
-    let (mut run, mut run_cut) = (0, 0);
-    for n in join(descriptors, &list.entries) {
-        let (start, end) = bounds(descriptors, n);
-        let padded = end.next_multiple_of(SERIES_ALIGN) - start;
-        if n != after {
-            (run, run_cut) = (n, 0);
+        if !left_out {
+            return body_start(groups, series) + bytes;
         }
-        series += 1;
-        cut += padded;
-        run_cut += padded;
-        after = n + 1;
+        let padded = |end: usize| end.next_multiple_of(SERIES_ALIGN);
+        let whole = descriptors.last().map_or(0, |&last| padded(end_of(last)));
+        // The view ends at the series before the left-out series that end the frame,
+        // without that series' padding.
+        let before = if next == descriptors.len() {
+            run
+        } else {
+            descriptors.len()
+        };
+        let tail = descriptors[..before].last().map_or(0, |&last| {
+            let end = end_of(last);
+            padded(end) - end
+        });
+        let kept = ranges.len() - groups;
+        body_start(kept, descriptors.len() - series) + whole - padded(bytes) - tail
     }
-    // A frame that ends with series left out gives a view that ends at the last series
-    // kept, without its padding.
-    let (tail, tail_cut) = if after == descriptors.len() {
-        (run, run_cut)
-    } else {
-        (descriptors.len(), 0)
-    };
-    let end = tail
-        .checked_sub(1)
-        .map_or(0, |last| end_of(descriptors[last]));
-    body_start(ranges.len() - groups, descriptors.len() - series) + end
-        - (cut - tail_cut)
 }
 
 /// The series of a view: those of the whole frame, or those of the listed entries.
@@ -487,6 +478,30 @@ mod tests {
         assert_eq!(narrow.0.len(), 256);
         assert_eq!(view.charge(), charge(256));
         assert_ne!(view.charge(), whole.charge());
+    }
+
+    /// One range, five descriptors, four series of 8 bytes, and 3 bytes. The view
+    /// leaves out the last two series, so it ends at the 3 bytes.
+    #[test]
+    fn charges_a_view_that_leaves_out_the_last_series_in_a_row() {
+        const F64: Type = Type::Scalar(Scalar::F64);
+        let data: Vec<_> = (2..8).map(|n| (key(n), F64)).collect();
+        let set = interner().intern(&[Group {
+            index: key(1),
+            data: &data,
+        }]);
+        let series = [(0, 8), (1, 8), (2, 8), (3, 8), (4, 3), (5, 8), (6, 8)];
+        let frame = |series| {
+            let draft = Draft::new(&pool(1 << 16), &set, Form::Raw, series).unwrap();
+            draft.freeze(Path::Live)
+        };
+        let (whole, narrow) = (frame(&series), frame(&series[..5]));
+        let mask = Mask::new(&set, (2..6).map(Slot::new));
+        assert_eq!(left_out(&mask), Some([5, 6].as_slice()));
+        let view = View::new(&whole, &mask);
+        assert_eq!(view.len(), 16 + 16 + 5 * 8 + 4 * 8 + 3);
+        assert_eq!(view.len(), narrow.0.len());
+        assert_eq!(view.charge(), charge(view.len()));
     }
 
     #[test]
