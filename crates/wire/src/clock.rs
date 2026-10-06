@@ -50,8 +50,8 @@ pub struct Answer {
 /// The time of the node that answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Time {
-    /// Its time with a known bound when the request arrived and when it answered: its
-    /// mesh time, or its OS time and OS bound before its first estimate.
+    /// Its time with a known bound when the request arrived and when it answered, as
+    /// it sent them: nothing checks the order of either interval.
     Known {
         /// Its time when the request arrived.
         received: Interval,
@@ -67,6 +67,7 @@ pub enum Time {
 
 /// Writes `message` into `out` and returns the bytes it wrote. A datagram carries them
 /// after its header.
+#[must_use]
 pub fn encode<'o>(message: &Message, out: &'o mut [u8; MAX_LEN]) -> &'o [u8] {
     let word = |stamp: Stamp| stamp.nanos().cast_unsigned();
     match *message {
@@ -95,8 +96,7 @@ pub fn encode<'o>(message: &Message, out: &'o mut [u8; MAX_LEN]) -> &'o [u8] {
 /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte names
 /// no message, and [`Error::Length`] when the length is not the length of that kind.
 pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
-    let (&kind, body) = bytes.split_first().ok_or(Error::Empty)?;
-    let len = bytes.len();
+    let &kind = bytes.first().ok_or(Error::Empty)?;
     let stamp = |word: u64| Stamp::from_nanos(word.cast_signed());
     let interval = |earliest, latest| Interval {
         earliest: stamp(earliest),
@@ -104,14 +104,13 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
     };
     let message = match kind {
         REQUEST => {
-            let [sent] = words(body, len)?;
+            let [sent] = words(bytes)?;
             Message::Request(Request {
                 sent: Monotonic(sent),
             })
         }
         KNOWN => {
-            let [sent, received_0, received_1, answered_0, answered_1] =
-                words(body, len)?;
+            let [sent, received_0, received_1, answered_0, answered_1] = words(bytes)?;
             let time = Time::Known {
                 received: interval(received_0, received_1),
                 answered: interval(answered_0, answered_1),
@@ -119,7 +118,7 @@ pub fn decode(bytes: &[u8]) -> Result<Message, Error> {
             answer(sent, time)
         }
         UNKNOWN => {
-            let [sent, answered] = words(body, len)?;
+            let [sent, answered] = words(bytes)?;
             answer(
                 sent,
                 Time::Unknown {
@@ -172,23 +171,25 @@ impl std::error::Error for Error {}
 
 /// Writes `kind` and then `words` to the front of `out`, and returns those bytes.
 fn put<const N: usize>(out: &mut [u8; MAX_LEN], kind: u8, words: [u64; N]) -> &[u8] {
-    const { assert!(8 * N < MAX_LEN, "a message is longer than MAX_LEN") };
+    let len = const {
+        let len = 1 + 8 * N;
+        assert!(len <= MAX_LEN, "a message is longer than MAX_LEN");
+        len
+    };
     let bytes = iter::once(kind).chain(words.into_iter().flat_map(u64::to_le_bytes));
-    let len = out
-        .iter_mut()
-        .zip(bytes)
-        .map(|(at, byte)| *at = byte)
-        .count();
+    for (at, byte) in out.iter_mut().zip(bytes) {
+        *at = byte;
+    }
     out.split_at(len).0
 }
 
-/// Reads `body`, the bytes after the kind, as `N` words. `len` is the message's length.
-fn words<const N: usize>(body: &[u8], len: usize) -> Result<[u64; N], Error> {
-    let (words, rest) = body.as_chunks::<8>();
+/// Reads the `N` words after the kind byte of `message`.
+fn words<const N: usize>(message: &[u8]) -> Result<[u64; N], Error> {
+    let (words, rest) = message.get(1..).unwrap_or_default().as_chunks::<8>();
     match <&[[u8; 8]; N]>::try_from(words) {
         Ok(words) if rest.is_empty() => Ok(words.map(u64::from_le_bytes)),
         _ => Err(Error::Length {
-            len,
+            len: message.len(),
             expected: const { 1 + 8 * N },
         }),
     }
@@ -345,7 +346,8 @@ mod tests {
     proptest! {
         #[test]
         fn round_trips(message in message(), stale in any::<u8>()) {
-            prop_assert_eq!(decode(encode(&message, &mut [stale; MAX_LEN])), Ok(message));
+            let mut out = [stale; MAX_LEN];
+            prop_assert_eq!(decode(encode(&message, &mut out)), Ok(message));
         }
 
         #[test]
