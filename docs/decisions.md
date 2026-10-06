@@ -240,8 +240,9 @@ How to read this record:
   `buffer` trims below it, past retention (by store time), and under disk pressure. A
   resume takes, per path, the position the reader's `hub` presents, then the position at
   this home, then the home's fallback. A position below the floor or past the head is
-  accepted as is; the `buffer` read reports any gap (B2). A `buffer` read resumes at a
-  mark: the position, and the count of entries with no samples at it already given
+  accepted as is; the `buffer` read reports any gap (B2). A resume starts a `buffer`
+  read at `Mark::at(position)`, so the entries with no samples at the position come
+  again. Between reads, the caller keeps the mark the last read gave, in memory
   (#510). Named readers write a position record at once when they open, close, or are
   taken over, and on the home's interval when the position changed. A session open at
   a crash restores as closed at the restore. Complete and latest sessions have
@@ -406,8 +407,11 @@ How to read this record:
   first, 24 bytes per record and path in a deque that doubles, so at most 48/51
   of the area. A mark is a seq and the count of entries with no samples at it
   already given, so a read resumes between two such entries. The recovery walk
-  and each sync feed the runs in ring order; a read starts from them, and does
-  not check the record CRC: the sync that made the record durable did (#510).
+  and each sync feed the runs in ring order; a read starts from them. A read does
+  not check the record CRC: the open's walk checked each record, and a record
+  this process wrote is read as written. A read holds no record while it waits
+  for a file read, so a change that frees ring space must first hold the records
+  of each read in progress (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose

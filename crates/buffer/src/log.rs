@@ -105,7 +105,7 @@ impl Tail {
 /// Where a read of a path stands: before the entries that end past `seq`, and
 /// past the first `given` entries with no samples at `seq`. Marks order as reads
 /// do.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Mark {
     /// The seq that the entries the read has not given end past.
     pub seq: u64,
@@ -125,7 +125,8 @@ impl Mark {
     ///
     /// # Panics
     ///
-    /// When `first + len` passes `u64::MAX`: the tail checked the entry.
+    /// When `first + len` passes `u64::MAX`: the tail checked the entry. When
+    /// `given` passes `u64::MAX`: a ring holds fewer entries.
     pub(crate) fn after(self, first: u64, len: u32) -> Self {
         if len != 0 {
             let seq = first
@@ -136,7 +137,9 @@ impl Mark {
         let given = if first == self.seq { self.given } else { 0 };
         Self {
             seq: first,
-            given: given.saturating_add(1),
+            given: given
+                .checked_add(1)
+                .expect("invariant: a ring holds fewer entries"),
         }
     }
 }
@@ -157,8 +160,8 @@ struct Log {
     index: channel::Key,
     appended: Tail,
     durable: Tail,
-    /// The mark after the newest durable entry.
-    mark: Mark,
+    /// How many durable entries with no samples are at `durable.seq`.
+    empty: u64,
     runs: VecDeque<Run>,
 }
 
@@ -168,17 +171,25 @@ impl Log {
             index,
             appended: Tail::default(),
             durable: Tail::default(),
-            mark: Mark::default(),
+            empty: 0,
             runs: VecDeque::new(),
         }
     }
 
-    /// Moves the durable tail and mark past the entry and adds the record at
-    /// `offset` to the runs when it is not the newest.
+    /// The mark after the newest durable entry.
+    fn end(&self) -> Mark {
+        Mark {
+            seq: self.durable.seq,
+            given: self.empty,
+        }
+    }
+
+    /// Moves the durable tail past the entry and adds the record at `offset` to
+    /// the runs when it is not the newest.
     fn sync(&mut self, header: &Header, offset: u64) -> Result<(), Invalid> {
+        let start = self.end();
         self.durable.advance(header)?;
-        let start = self.mark;
-        self.mark = start.after(header.first, header.len);
+        self.empty = start.after(header.first, header.len).given;
         if let Some(newest) = self.runs.back() {
             assert!(
                 newest.offset <= offset,
@@ -232,12 +243,14 @@ impl Logs {
         from: Mark,
     ) -> Option<(channel::Key, Run)> {
         let log = self.0.get(&(slot, path))?;
-        let after = log.runs.partition_point(|run| run.start <= from);
-        let run = *log.runs.get(after.saturating_sub(1))?;
-        let end = log
+        // The newest run that starts at or before `from`, else the oldest.
+        let chosen = log
             .runs
-            .get(after.max(1))
-            .map_or(log.mark, |next| next.start);
+            .partition_point(|run| run.start <= from)
+            .saturating_sub(1);
+        let mut runs = log.runs.range(chosen..);
+        let run = *runs.next()?;
+        let end = runs.next().map_or_else(|| log.end(), |next| next.start);
         (end > from).then_some((log.index, run))
     }
 

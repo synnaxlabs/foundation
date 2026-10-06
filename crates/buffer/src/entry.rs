@@ -20,6 +20,7 @@
 
 use std::array;
 use std::iter;
+use std::mem;
 
 use block::Block;
 use types::channel::{self, Slot};
@@ -305,36 +306,30 @@ pub(crate) enum Invalid {
 /// When `start` is longer than `len`.
 pub(crate) fn parse(start: &[u8], len: usize) -> Result<Headers<'_>, Invalid> {
     assert!(start.len() <= len, "invariant: the body holds its start");
-    let (count, rest) = start.split_first_chunk::<4>().ok_or(Invalid::Truncated)?;
+    let offset = table_end(start)?;
+    let table = start.get(4..offset).ok_or(Invalid::Truncated)?;
+    Ok(Headers { table, offset, len })
+}
+
+/// The size of the table at the start of the body that begins with `start`: the
+/// body offset of the first entry's bytes. `start` holds at least the count.
+///
+/// # Errors
+///
+/// [`Invalid::Truncated`] when `start` holds no count, and [`Invalid::Count`] when
+/// the count is over [`ENTRIES_MAX`].
+pub(crate) fn table_end(start: &[u8]) -> Result<usize, Invalid> {
+    let (count, _) = start.split_first_chunk::<4>().ok_or(Invalid::Truncated)?;
     let count = u32::from_le_bytes(*count);
-    let headers_len = usize::try_from(count)
+    usize::try_from(count)
         .ok()
         .filter(|&entries| entries <= ENTRIES_MAX)
-        .and_then(|entries| entries.checked_mul(HEADER_LEN))
-        .ok_or(Invalid::Count(count))?;
-    let (headers, rest) = rest
-        .split_at_checked(headers_len)
-        .ok_or(Invalid::Truncated)?;
-    let offset = start
-        .len()
-        .checked_sub(rest.len())
-        .expect("invariant: the body holds its start");
-    Ok(Headers {
-        table: headers,
-        offset,
-        len,
-    })
+        .map(table_len)
+        .ok_or(Invalid::Count(count))
 }
 
-/// The size of the table at the start of the body that begins with `start`, or
-/// `None` when `start` holds no count or the count is over [`ENTRIES_MAX`].
-pub(crate) fn table_at(start: &[u8]) -> Option<usize> {
-    let (count, _) = start.split_first_chunk::<4>()?;
-    let count = usize::try_from(u32::from_le_bytes(*count)).ok()?;
-    (count <= ENTRIES_MAX).then(|| table_len(count))
-}
-
-/// The headers of one group commit, in order.
+/// The headers of one group commit, in order, each with the body offset of its
+/// bytes.
 #[derive(Clone, Debug)]
 pub(crate) struct Headers<'a> {
     /// The headers not given yet.
@@ -346,7 +341,7 @@ pub(crate) struct Headers<'a> {
 }
 
 impl Iterator for Headers<'_> {
-    type Item = Result<Header, Invalid>;
+    type Item = Result<(Header, usize), Invalid>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.header()?;
@@ -359,13 +354,8 @@ impl Iterator for Headers<'_> {
 }
 
 impl Headers<'_> {
-    /// The body offset of the bytes of the header that `next` gives next.
-    pub(crate) fn offset(&self) -> usize {
-        self.offset
-    }
-
     #[expect(clippy::unwrap_in_result, reason = "the offset stays in the body")]
-    fn header(&mut self) -> Option<Result<Header, Invalid>> {
+    fn header(&mut self) -> Option<Result<(Header, usize), Invalid>> {
         let Some((header, rest)) = self.table.split_first_chunk::<HEADER_LEN>() else {
             let trailing = self
                 .len
@@ -378,30 +368,29 @@ impl Headers<'_> {
             Ok(header) => header,
             Err(invalid) => return Some(Err(invalid)),
         };
-        let Some(offset) = usize::try_from(header.bytes)
+        let Some(end) = usize::try_from(header.bytes)
             .ok()
             .and_then(|bytes| self.offset.checked_add(bytes))
-            .filter(|&offset| offset <= self.len)
+            .filter(|&end| end <= self.len)
         else {
             return Some(Err(Invalid::Truncated));
         };
-        self.offset = offset;
-        Some(Ok(header))
+        let offset = mem::replace(&mut self.offset, end);
+        Some(Ok((header, offset)))
     }
 }
 
 /// Each header with its bytes, from a body that is whole in memory.
 #[cfg(test)]
 pub(crate) fn parsed(body: &[u8]) -> Result<Vec<(Header, &[u8])>, Invalid> {
-    let headers = parse(body, body.len())?;
-    let mut bytes = body.get(headers.offset()..).unwrap_or(&[]);
-    headers
+    parse(body, body.len())?
         .map(|header| {
-            let header = header?;
-            let len = usize::try_from(header.bytes).expect("the body holds the bytes");
-            let (mine, rest) = bytes.split_at(len);
-            bytes = rest;
-            Ok((header, mine))
+            let (header, offset) = header?;
+            let len = usize::try_from(header.bytes).expect("a u32 fits usize");
+            let bytes = offset
+                .checked_add(len)
+                .and_then(|end| body.get(offset..end));
+            Ok((header, bytes.expect("the body holds the bytes")))
         })
         .collect()
 }

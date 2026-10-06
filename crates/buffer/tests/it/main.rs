@@ -3236,6 +3236,50 @@ fn a_read_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
     });
 }
 
+/// A read that holds entries ends where the pool has no block for the next one,
+/// as at its budget, and the next read goes on from there.
+#[test]
+fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
+    run(153, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let first = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
+        buffer.append([first]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let second = entry(1, a, Path::Live, 3, 2, Some(50), shard.block(12).into());
+        buffer.append([second]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let table = shard.pool.alloc(4096).expect("a block for one table");
+        let bytes = shard.pool.alloc(10).expect("a block for one entry");
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        drop((table, bytes));
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("the read keeps the first entry");
+        let expected = vec![stored(0, 3, Some(30), shard.block(10))];
+        assert_eq!(read, whole(expected, mark(3, 0)));
+        drop(held);
+        let read = buffer
+            .read(a, Path::Live, read.next, usize::MAX)
+            .await
+            .expect("the next read passes");
+        let expected = vec![stored(3, 2, Some(50), shard.block(12))];
+        assert_eq!(read, whole(expected, mark(5, 0)));
+    });
+}
+
 /// Commits one entry, appends a second, and cuts the power `cut` nanoseconds after
 /// a point at most 100 µs before the deadline of the second commit. Returns the
 /// sim, the node, and whether the second commit had ended.

@@ -8,27 +8,27 @@ use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
-use std::ops::Range;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::slice;
 use std::task::{Context, Poll, Waker};
 
-use block::{Block, Pool, Unique};
+use block::{Block, Pool};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{self, File, Files, Mode};
 use env::tasks::Tasks;
-use types::channel::{self, Slot, Slots};
+use types::channel::{Slot, Slots};
 use types::frame::Path;
-use types::time::{Span, Stamp};
+use types::time::Span;
 
 use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
-use crate::log::{self, Logs, Mark, Run, Tail};
-use crate::record::{self, ALIGN, AREA_START, Body, HEADER_LEN};
+use crate::log::{self, Logs, Mark, Tail};
+use crate::read::{Read, Reading};
+use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
 
 /// What one shard's buffer is given at open.
@@ -55,7 +55,7 @@ pub struct Config {
     pub commit: Span,
 }
 
-/// Why an open failed.
+/// Why an open or a read failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The ring has no room for its restart record.
@@ -67,7 +67,8 @@ pub enum Error {
         /// before their end, whichever is less.
         free: u64,
     },
-    /// The pool has no block for a header, a recovery read, or the restart record.
+    /// The pool has no block for a header, a recovery read, the restart record, or
+    /// a read.
     Pool(block::Error),
     /// A file call failed.
     Files(files::Error),
@@ -215,148 +216,6 @@ impl From<header::Error> for Error {
             header::Error::Unaligned(_) => Self::Invalid { offset: 0 },
         }
     }
-}
-
-/// One entry that a read gives back.
-#[derive(Clone, Debug)]
-pub struct Stored {
-    /// The first seq.
-    pub first: u64,
-    /// How many samples. A caller record has `len` 0.
-    pub len: u32,
-    /// Mesh time at which the home stored it.
-    pub stored_at: Stamp,
-    /// The newest stamp of the entry's samples; none for a caller record.
-    pub last: Option<Stamp>,
-    /// The tag the caller gave.
-    pub tag: u8,
-    /// The bytes of the entry: its parts, joined.
-    pub bytes: Block,
-}
-
-impl PartialEq for Stored {
-    fn eq(&self, other: &Self) -> bool {
-        self.first == other.first
-            && self.len == other.len
-            && self.stored_at == other.stored_at
-            && self.last == other.last
-            && self.tag == other.tag
-            && *self.bytes == *other.bytes
-    }
-}
-
-impl Eq for Stored {}
-
-/// What one [`Buffer::read`] gives.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Read {
-    /// The seqs a skip ahead left out right before the first entry, when the read
-    /// started at or in them.
-    pub gap: Option<Range<u64>>,
-    /// The entries, in order, with no seq left out between them.
-    pub entries: Vec<Stored>,
-    /// Where the next read continues.
-    pub next: Mark,
-}
-
-/// One read in progress.
-struct Reading {
-    path: Path,
-    budget: usize,
-    /// Bytes of the entries given so far.
-    given: usize,
-    read: Read,
-}
-
-impl Reading {
-    /// Gives the entries of `index` on the path in the record of `run` that come
-    /// after `read.next`. Returns whether the read goes on to the next record.
-    async fn record(
-        &mut self,
-        shared: &Shared,
-        index: channel::Key,
-        run: Run,
-    ) -> Result<bool, Error> {
-        let place = AREA_START + run.offset % shared.layout.area();
-        let table = table(shared, place).await?;
-        let head = record::head(&table).expect("invariant: a run names a record");
-        let body = table
-            .get(HEADER_LEN..)
-            .expect("invariant: the table holds the record header");
-        let start = body.get(..head.len).unwrap_or(body);
-        let mut headers =
-            entry::parse(start, head.len).expect("invariant: the sync read the record");
-        let mut at = run.start;
-        loop {
-            let offset = headers.offset();
-            let Some(header) = headers.next() else {
-                return Ok(true);
-            };
-            let header = header.expect("invariant: the sync read the record");
-            if (header.index, header.path) != (index, self.path) {
-                continue;
-            }
-            let after = at.after(header.first, header.len);
-            at = after;
-            if after <= self.read.next {
-                continue;
-            }
-            if self.given >= self.budget {
-                return Ok(false);
-            }
-            if header.first > self.read.next.seq {
-                if !self.read.entries.is_empty() {
-                    return Ok(false);
-                }
-                self.read.gap = Some(self.read.next.seq..header.first);
-            }
-            let bytes = bytes(shared, place, offset, header.bytes).await?;
-            self.given = self.given.saturating_add(bytes.len());
-            self.read.entries.push(Stored {
-                first: header.first,
-                len: header.len,
-                stored_at: header.stored_at,
-                last: header.last,
-                tag: header.tag,
-                bytes,
-            });
-            self.read.next = after;
-        }
-    }
-}
-
-/// The header and entry table of the record at `place` in the ring file.
-async fn table(shared: &Shared, place: u64) -> Result<Unique, Error> {
-    let block = shared
-        .file
-        .read_at(place, shared.pool.alloc(ALIGN)?)
-        .await?;
-    let len = block
-        .get(HEADER_LEN..)
-        .and_then(entry::table_at)
-        .and_then(|table| table.checked_add(HEADER_LEN))
-        .expect("invariant: a run names a record");
-    if len <= block.len() {
-        return Ok(block);
-    }
-    Ok(shared.file.read_at(place, shared.pool.alloc(len)?).await?)
-}
-
-/// The `len` bytes at body offset `offset` of the record at `place` in the ring
-/// file. No bytes make no file read.
-async fn bytes(
-    shared: &Shared,
-    place: u64,
-    offset: usize,
-    len: u32,
-) -> Result<Block, Error> {
-    let len = usize::try_from(len).expect("invariant: a u32 fits usize");
-    let block = shared.pool.alloc(len)?;
-    if len == 0 {
-        return Ok(block.freeze());
-    }
-    let at = u64::try_from(HEADER_LEN + offset).expect("invariant: a body fits u64");
-    Ok(shared.file.read_at(place + at, block).await?.freeze())
 }
 
 /// One shard's logs. It lives on its shard: the commit task runs on the shard's
@@ -557,19 +416,19 @@ impl Buffer {
     }
 
     /// The durable entries of `path` of the index at `slot` from `from`, in
-    /// order, until an entry would pass `budget` bytes of entry bytes in all or a
-    /// skip ahead starts. An entry that holds `from` comes whole. A read from a
-    /// mark at or in the seqs a skip ahead left out reports them as `gap` and goes
-    /// on after them. The first read starts at `Mark::at(0)`; each read continues
-    /// at `next`, which a read that gives nothing does not move. A read makes one
-    /// file read per record it visits and one per entry with bytes. It does not
-    /// check the record CRC: the sync that made the record durable did.
+    /// order, until an entry would pass `budget` bytes of entry bytes in all, a
+    /// skip ahead starts, or the pool has no block for the next entry. An entry
+    /// that holds `from` comes whole. A read from a mark at or in the seqs a skip
+    /// ahead left out reports them as `gap` and goes on after them. The first read
+    /// starts at `Mark::at(0)`; each read continues at `next`, which a read that
+    /// gives nothing does not move. A read makes one file read per record it
+    /// visits and one per entry with bytes.
     ///
     /// # Errors
     ///
     /// [`Error::Files`] when a ring read fails and [`Error::Pool`] when the pool
-    /// has no block for a table or an entry; the buffer goes on. After a failed
-    /// sync, the error that ended the buffer.
+    /// has no block for the first entry or its table; the buffer goes on. After a
+    /// failed sync, the error that ended the buffer.
     pub async fn read(
         &self,
         slot: Slot,
@@ -577,32 +436,26 @@ impl Buffer {
         from: Mark,
         budget: usize,
     ) -> Result<Read, Error> {
-        let mut reading = Reading {
-            path,
-            budget,
-            given: 0,
-            read: Read {
-                gap: None,
-                entries: Vec::new(),
-                next: from,
-            },
-        };
-        while reading.given < reading.budget {
+        let Shared {
+            file, pool, layout, ..
+        } = &*self.shared;
+        let mut reading = Reading::new(file, pool, *layout, path, from, budget);
+        while let Some(from) = reading.next() {
             let found = {
                 let state = self.shared.state.borrow();
                 if let Some(failed) = &state.failed {
                     return Err(Error::Files(failed.clone()));
                 }
-                state.logs.run(slot, path, reading.read.next)
+                state.logs.run(slot, path, from)
             };
             let Some((index, run)) = found else {
                 break;
             };
-            if !reading.record(&self.shared, index, run).await? {
+            if !reading.record(index, run).await? {
                 break;
             }
         }
-        Ok(reading.read)
+        Ok(reading.finish())
     }
 
     /// How many group commits ended since the open. It moves before the [`Commit`]
@@ -790,7 +643,7 @@ fn recover(
     let unread = |_: entry::Invalid| Error::Invalid { offset };
     let misplaced = |_: log::Invalid| Error::Invalid { offset };
     for header in entry::parse(body.start, body.len).map_err(unread)? {
-        let header = header.map_err(unread)?;
+        let (header, _) = header.map_err(unread)?;
         let slot = slots.assign(header.index);
         logs.append(slot, &header).map_err(misplaced)?;
         logs.sync(slot, &header, offset).map_err(misplaced)?;
@@ -953,8 +806,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use block::Heap;
+    use types::channel;
+    use types::time::Stamp;
 
     use super::*;
+    use crate::log::Run;
 
     const COMMIT: Span = Span::from_nanos(1_000_000);
 
