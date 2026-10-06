@@ -490,7 +490,7 @@ mod tests {
     use std::future::poll_fn;
     use std::net::SocketAddr;
     use std::pin::pin;
-    use std::task::Poll;
+    use std::task::{Context, Poll};
 
     use env::net::udp::{self, Transmit};
     use sim::Sim;
@@ -498,7 +498,8 @@ mod tests {
     use types::node::PrivateKey;
     use types::time::Span;
 
-    use super::{BATCHES, Carrier};
+    use super::{BATCHES, Carrier, Socket};
+    use crate::quic::Endpoint;
     use crate::testing::Shard;
     use crate::tls::public;
     use crate::{Code, Config, Error, Peer};
@@ -741,39 +742,72 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    /// Sends `count` datagrams of zeros to `to` from the port after [`PORT`] on
+    /// `node`, each longer than the last, so no two join in one batch.
+    async fn junk(node: &Node, to: SocketAddr, count: usize) {
+        let local = SocketAddr::new(node.addresses()[0], PORT + 1);
+        let config = udp::Config {
+            local,
+            send_buffer_bytes: 1 << 20,
+            recv_buffer_bytes: 1 << 20,
+        };
+        let (mut sender, _receiver) = node.net().udp(&config).expect("a socket");
+        for len in 1..=count {
+            let transmit = Transmit {
+                destination: to,
+                source: None,
+                ecn: None,
+                contents: &vec![0; len],
+                segment: None,
+            };
+            let sent = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
+            assert_eq!(sent, Ok(()));
+        }
+    }
+
     #[test]
-    fn a_dial_behind_more_batches_than_one_poll_takes_connects() {
+    fn a_receive_stops_at_the_batch_limit() {
         let (mut sim, client, server) = nodes(0);
-        let at = address(&server);
-        shard(&server, SERVER, |config, node| async move {
+        let to = address(&client);
+        shard(&server, SERVER, move |_, node| async move {
+            junk(&node, to, 2 * BATCHES).await;
+        });
+        shard(&client, CLIENT, |config, node| async move {
             let (sender, receiver) = socket(&node).expect("a socket");
+            let mut endpoint = Endpoint::new(&config, 0, sender.batch_max());
+            let mut socket = Socket::new(sender, receiver);
             node.clock().sleep(Span::MILLISECOND).await;
-            let carrier = Carrier::new(&config, 0, sender, receiver);
+            let now = node.clock().now();
+            let mut taken = Vec::new();
+            for _ in 0..3 {
+                let receive = |cx: &mut Context<'_>| {
+                    Poll::Ready(socket.receive(cx, &mut endpoint, now))
+                };
+                taken.push(poll_fn(receive).await);
+            }
+            assert_eq!(taken, [Ok(true), Ok(true), Ok(false)]);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dial_behind_more_batches_than_one_poll_takes_connects_at_once() {
+        let (mut sim, client, server) = nodes(0);
+        let (at, to) = (address(&server), address(&client));
+        start(&server, SERVER, move |carrier, node| async move {
+            junk(&node, to, BATCHES).await;
             let session = carrier.accept().await.expect("a session");
             let closed = Error::PeerClosed { code: Code(5) };
             assert_eq!(session.closed().await, closed);
         });
-        start(&client, CLIENT, move |carrier, node| async move {
-            let local = SocketAddr::new(node.addresses()[0], PORT + 1);
-            let config = udp::Config {
-                local,
-                send_buffer_bytes: 1 << 20,
-                recv_buffer_bytes: 1 << 20,
-            };
-            let (mut sender, _receiver) = node.net().udp(&config).expect("a socket");
-            // Each longer than the last, so no two join in one batch.
-            for len in 1..=BATCHES {
-                let transmit = Transmit {
-                    destination: at,
-                    source: None,
-                    ecn: None,
-                    contents: &vec![0; len],
-                    segment: None,
-                };
-                let sent = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
-                assert_eq!(sent, Ok(()));
-            }
+        shard(&client, CLIENT, move |config, node| async move {
+            let (sender, receiver) = socket(&node).expect("a socket");
+            node.clock().sleep(Span::MILLISECOND).await;
+            let carrier = Carrier::new(&config, 0, sender, receiver);
+            let before = node.clock().now();
             let dialed = carrier.connect(public(&SERVER), at).await;
+            // A lost first datagram goes again only after hundreds of milliseconds.
+            assert!(node.clock().now() - before < spans(Span::MILLISECOND, 10));
             let session = dialed.expect("a session");
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
