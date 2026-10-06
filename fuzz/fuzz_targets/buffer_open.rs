@@ -43,8 +43,10 @@ const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const COMMIT: Span = Span::from_nanos(10_000_000);
 const INDEXES: usize = 3;
-/// Bytes of each entry the check commits. Six of them and their table fit `BODY_MAX`.
+/// Bytes of each entry the check commits.
 const CHECK_PART: usize = 512;
+/// The check's batch and its table, of 51 bytes an entry, fit one record.
+const _: () = assert!(4 + INDEXES * PATHS.len() * (51 + CHECK_PART) <= BODY_MAX);
 const PATHS: [frame::Path; 2] = [frame::Path::Live, frame::Path::Backfill];
 
 /// One entry the build phase appends.
