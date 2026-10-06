@@ -7,16 +7,15 @@ use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::mpsc::{self, SyncSender};
 use std::task::{Context, Poll, Waker};
-use std::thread;
 
 use env::shards::{Config, Main};
 use env::tasks::{Task, Tasks};
-use env::thread::{Error, Handle, Panicked};
+use env::thread::{Error, Handle};
 use tokio::runtime::{Builder, LocalOptions, LocalRuntime};
 
 use crate::cores::Cores;
+use crate::thread;
 
 /// Starts each shard on its own thread.
 pub(crate) struct Driver(Arc<Cores>);
@@ -36,71 +35,21 @@ impl env::shards::Driver for Driver {
         !self.0.cpus.is_empty()
     }
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "os starts threads, and a start blocks until its thread runs"
-    )]
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error> {
         let Config { name, core } = config;
-        let pin = core.map(|core| (Arc::clone(&self.0), core));
-        let (report, started) = mpsc::sync_channel(1);
-        let shard = name.clone();
-        let thread_name = name
-            .split_once('\0')
-            .map_or(name.as_str(), |(head, _)| head);
-        let thread = thread::Builder::new()
-            .name(thread_name.to_owned())
-            .spawn(move || run(&shard, pin, main, &report))
-            .map_err(|e| Error::Start {
-                name: name.clone(),
-                reason: e.to_string(),
-            })?;
-        match started.recv() {
-            Ok(Ok(())) => Ok(Handle::new(move || match thread.join() {
-                Ok(false) => Ok(()),
-                Ok(true) | Err(_) => Err(Panicked { name }),
-            })),
-            // The thread holds nothing after its report, and ends.
-            Ok(Err(e)) => Err(e),
-            Err(_) => panic::resume_unwind(
-                thread
-                    .join()
-                    .expect_err("a shard that did not report panicked"),
-            ),
-        }
+        let cores = Arc::clone(&self.0);
+        let build = move |name: &str| build(&cores, name, core);
+        thread::start(name, build, |runtime| serve(runtime, main))
     }
 }
 
-/// Runs one shard on its thread: builds it, reports the start to `start`, and serves
-/// it. Returns whether a task panicked.
-fn run(
+/// Places the calling thread and builds its runtime.
+fn build(
+    cores: &Cores,
     name: &str,
-    pin: Option<(Arc<Cores>, usize)>,
-    main: Main,
-    report: &SyncSender<Result<(), Error>>,
-) -> bool {
-    let runtime = match build(name, pin) {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            // First, so that a panic in its drop reaches `start` as no report.
-            drop(main);
-            report.send(Err(e)).expect("start waits for the report");
-            return false;
-        }
-    };
-    report.send(Ok(())).expect("start waits for the report");
-    serve(runtime, main)
-}
-
-/// Pins the calling thread and builds its runtime.
-fn build(name: &str, pin: Option<(Arc<Cores>, usize)>) -> Result<LocalRuntime, Error> {
-    if let Some((cores, core)) = pin {
-        cores.pin(core).map_err(|e| Error::Pin {
-            name: name.to_owned(),
-            core,
-            reason: e.to_string(),
-        })?;
-    }
+    core: Option<usize>,
+) -> Result<LocalRuntime, Error> {
+    cores.place(name, core)?;
     Builder::new_current_thread()
         .build_local(LocalOptions::default())
         .map_err(|e| Error::Start {
