@@ -1570,6 +1570,160 @@ fn a_tail_reported_durable_after_a_kill_survives_a_power_cut() {
     });
 }
 
+/// A ring of 64 blocks with records of up to 60,000 bytes, on the files of `node`.
+fn long_config(node: &sim::node::Node, tasks: Tasks) -> Config {
+    Config {
+        layout: layout(64 * BLOCK, 60_000),
+        ..node_config(node, tasks, DIR)
+    }
+}
+
+/// Commits one entry of `len` bytes, zero except at `marked`, on a new ring on a
+/// node with `seed` while the commit's sync fails. The process dies, a new one opens
+/// the ring and reports what is durable, the power is cut, and a last open recovers.
+/// Returns what the second open reported and what the last one recovered.
+fn fail_a_sync_and_cut(seed: u64, len: usize, marked: Range<usize>) -> (Tail, Tail) {
+    let (mut sim, node) = one_node(seed);
+    let failed = sim.run_on(&node, move |node, tasks| async move {
+        let config = long_config(&node, tasks);
+        let pool = Rc::clone(&config.pool);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        node.fail_file(FilePath::new(RING), Operation::Sync);
+        let mut bytes = pool.alloc(len).expect("a block");
+        bytes[marked].fill(0xab);
+        let bytes = bytes.freeze();
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::from(bytes))])
+            .expect("queues");
+        buffer.committed().await
+    });
+    let sync = FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::Sync,
+        code: 5,
+    };
+    assert_eq!(failed, Ok(Err(sync)), "seed {seed}");
+    sim.crash(&node, sim::Crash::Process);
+    let reported = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(long_config(&node, tasks), &mut slots)
+            .await
+            .expect("opens after the failed sync");
+        buffer.durable(slots.assign(key(1)), Path::Live)
+    });
+    let reported = reported.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+    sim.crash(&node, sim::Crash::Power);
+    let recovered = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(long_config(&node, tasks), &mut slots)
+            .await
+            .expect("opens after the power cut");
+        buffer.tail(slots.assign(key(1)), Path::Live)
+    });
+    let recovered = recovered.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+    (reported, recovered)
+}
+
+/// A process that opens a ring after a commit whose sync failed, in the same boot,
+/// reports durable only what a power cut then keeps. The failed sync can leave a
+/// record in the cache only, where the open's walk sees it.
+#[test]
+fn an_open_after_a_failed_sync_in_the_same_boot_reports_only_disk_records_durable() {
+    for seed in 0..32 {
+        let (reported, recovered) = fail_a_sync_and_cut(seed, 0, 0..0);
+        assert_eq!(recovered, reported, "seed {seed}");
+    }
+}
+
+/// As above, for a record of three blocks, which the walk reads in pieces and then
+/// reads its start again. Only the entry's bytes in the third block are not zero:
+/// a lost sector that reads as zeros on a new ring loses nothing, and many lost
+/// sectors rarely all stay in the cache.
+#[test]
+fn an_open_after_a_failed_sync_of_a_long_record_reports_only_disk_records_durable() {
+    for seed in 0..32 {
+        let (reported, recovered) = fail_a_sync_and_cut(seed, 8_300, 8_128..8_300);
+        assert_eq!(recovered, reported, "seed {seed}");
+    }
+}
+
+/// A failed write of the bytes an open read fails the open with the write's error.
+#[test]
+fn a_failed_write_of_the_read_bytes_fails_the_open() {
+    let (mut sim, node) = one_node(7);
+    let first = sim.run_on(&node, |node, tasks| async move {
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await
+    });
+    assert_eq!(first, Ok(Ok(())));
+    sim.crash(&node, sim::Crash::Process);
+    let opened = sim.run_on(&node, |node, tasks| async move {
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
+        let config = node_config(&node, tasks, DIR);
+        Buffer::open(config, &mut Slots::new()).await.map(drop)
+    });
+    let failed = FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::WriteAt,
+        code: 5,
+    };
+    assert_eq!(opened, Ok(Err(Error::Files(failed))));
+}
+
+/// A process that opens a new ring whose first header sync failed, in the same
+/// boot, reports durable only what a power cut then keeps. The failed sync can
+/// leave the header in the cache only, where the open reads it.
+#[test]
+fn an_open_after_a_failed_sync_of_the_first_header_reports_only_disk_records_durable() {
+    for seed in 0..32 {
+        let (mut sim, node) = one_node(seed);
+        let failed = sim.run_on(&node, |node, tasks| async move {
+            node.fail_file(FilePath::new(RING), Operation::Sync);
+            let config = node_config(&node, tasks, DIR);
+            Buffer::open(config, &mut Slots::new()).await.map(drop)
+        });
+        let sync = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(failed, Ok(Err(Error::Files(sync))), "seed {seed}");
+        sim.crash(&node, sim::Crash::Process);
+        let reported = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the failed sync");
+            let a = slots.assign(key(1));
+            buffer
+                .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            buffer.durable(a, Path::Live)
+        });
+        let reported = reported.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        sim.crash(&node, sim::Crash::Power);
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the power cut");
+            buffer.tail(slots.assign(key(1)), Path::Live)
+        });
+        let recovered = recovered.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        assert_eq!(recovered, reported, "seed {seed}");
+    }
+}
+
 /// A power cut at any point of an open whose restart record goes over the one of
 /// an open with no data keeps the committed entry. The ring then takes the next
 /// entry, and it survives a power cut.
