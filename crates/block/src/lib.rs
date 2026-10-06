@@ -1110,6 +1110,22 @@ mod tests {
         fn prints_its_length() {
             assert_eq!(format!("{:?}", Heap::new(64)), "Heap { len: 64 }");
         }
+
+        #[test]
+        fn is_aligned_and_zeroed() {
+            for len in [1, ALIGN, ALIGN + 1, 200, 4_097] {
+                let heap = Heap::new(len);
+                assert_eq!(heap.base().addr().get() % ALIGN, 0, "{len}");
+                assert_eq!(heap.len(), len);
+                for offset in [0, ALIGN.min(len - 1), len - 1] {
+                    // SAFETY: `offset` is under `len`.
+                    let byte = unsafe { heap.base().add(offset) };
+                    // SAFETY: the bytes are initialized from the start.
+                    let byte = unsafe { byte.read() };
+                    assert_eq!(byte, 0, "{len} at {offset}");
+                }
+            }
+        }
     }
 
     fn cases() -> ProptestConfig {

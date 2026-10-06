@@ -51,11 +51,14 @@ pub unsafe trait Memory: Send {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Refused;
 
-/// Memory from the heap, committed in full from the start. It never gives pages back.
+/// Memory from the heap, usable in full from the start. It never gives pages back.
 /// It serves tests and simulation, where no OS mapping exists.
 pub struct Heap {
-    base: NonNull<u8>,
+    /// What the allocator gave. `base` rounds it up to [`ALIGN`].
+    ptr: NonNull<u8>,
     layout: Layout,
+    base: NonNull<u8>,
+    len: usize,
 }
 
 impl Heap {
@@ -67,15 +70,31 @@ impl Heap {
     #[must_use]
     pub fn new(len: usize) -> Self {
         assert!(len > 0, "heap memory must be more than 0 bytes");
-        let Ok(layout) = Layout::from_size_align(len, ALIGN) else {
+        // Std gets zeroed bytes from `calloc` only at an alignment the allocator
+        // gives by itself. At `ALIGN` it writes zero over the whole range, which
+        // faults in each page. Aligning by hand leaves the pages untouched until
+        // the pool writes them.
+        let Some(layout) = len
+            .checked_add(ALIGN)
+            .and_then(|size| Layout::from_size_align(size, 1).ok())
+        else {
             panic!("heap memory of {len} bytes is too large to allocate");
         };
         // SAFETY: the layout has a size above 0.
-        let base = unsafe { alloc_zeroed(layout) };
-        let Some(base) = NonNull::new(base) else {
+        let ptr = unsafe { alloc_zeroed(layout) };
+        let Some(ptr) = NonNull::new(ptr) else {
             handle_alloc_error(layout)
         };
-        Self { base, layout }
+        let skew = ptr.addr().get().next_multiple_of(ALIGN) - ptr.addr().get();
+        // SAFETY: `skew` is under `ALIGN`, so `base` and the `len` bytes after it
+        // lie in the allocation.
+        let base = unsafe { ptr.add(skew) };
+        Self {
+            ptr,
+            layout,
+            base,
+            len,
+        }
     }
 }
 
@@ -90,7 +109,7 @@ unsafe impl Memory for Heap {
     }
 
     fn len(&self) -> usize {
-        self.layout.size()
+        self.len
     }
 
     fn commit(&self, _offset: usize, _len: usize) -> Result<(), Refused> {
@@ -108,7 +127,7 @@ impl fmt::Debug for Heap {
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        // SAFETY: `new` got `base` from the allocator with this layout.
-        unsafe { dealloc(self.base.as_ptr(), self.layout) };
+        // SAFETY: `new` got `ptr` from the allocator with this layout.
+        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
     }
 }
