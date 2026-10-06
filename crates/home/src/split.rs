@@ -79,10 +79,15 @@ impl Scratch {
         self.collect(set, &mut draft);
         self.check(set, &mut draft);
         self.gather();
+        let (raw, draft) = match draft.form() {
+            Form::Raw => (Some(draft), None),
+            Form::Encoded => (None, Some(draft)),
+        };
         Split {
             scratch: self,
             set,
-            draft: (draft.form() == Form::Encoded).then_some(draft),
+            draft,
+            raw,
             next: 0,
         }
     }
@@ -187,38 +192,63 @@ pub(crate) struct Split<'a> {
     /// The writer's frame when it is encoded, as its series are the encoded bytes.
     /// `None` for a raw frame, or once the frame of its one group was given out.
     draft: Option<Draft>,
+    /// The writer's frame when it is raw, for the stamps of its indexes, until
+    /// [`Split::next`] has given every group.
+    raw: Option<Draft>,
     /// The place in [`Scratch::parts`] of the group that [`Split::next`] gives next.
     next: usize,
 }
 
 /// The stamps of a group's index series, one vector at a time.
 #[derive(Debug)]
-pub(crate) struct Stamps<'a> {
-    decoder: codec::Decoder<'a>,
-    vector: &'a mut [[u8; 8]],
+pub(crate) struct Stamps<'a>(Source<'a>);
+
+#[derive(Debug)]
+enum Source<'a> {
+    /// The stamps of a raw series that are not given yet.
+    Raw(&'a [[u8; 8]]),
+    /// An encoded series, decoded into `vector`.
+    Encoded {
+        decoder: codec::Decoder<'a>,
+        vector: &'a mut [[u8; 8]],
+    },
 }
 
 impl Stamps<'_> {
-    /// The stamps of the next vector, or `None` after the last.
+    /// The stamps of the next vector, at most [`codec::VECTOR_LEN`], or `None` after
+    /// the last.
     pub(crate) fn next(&mut self) -> Option<&[[u8; 8]]> {
-        let stamps = self
-            .decoder
-            .next(self.vector.as_flattened_mut())?
-            .expect("invariant: the split checked the index series");
-        Some(stamps.as_chunks::<8>().0)
+        match &mut self.0 {
+            Source::Raw(stamps) => {
+                let len = stamps.len().min(codec::VECTOR_LEN);
+                let (vector, rest) = stamps.split_at(len);
+                *stamps = rest;
+                (len > 0).then_some(vector)
+            }
+            Source::Encoded { decoder, vector } => {
+                let stamps = decoder
+                    .next(vector.as_flattened_mut())?
+                    .expect("invariant: the split checked the index series");
+                Some(stamps.as_chunks::<8>().0)
+            }
+        }
     }
 }
 
 impl Split<'_> {
     /// The next present group, in group order, with the stamps of its index series,
     /// or the [`Error`] of its first series that does not fit the group's count.
+    /// After the last group, it gives the blocks of a raw frame back to the pool.
     ///
     /// # Panics
     ///
     /// If the index frame of the group was made already.
     pub(crate) fn next(&mut self) -> Option<(u32, Result<Stamps<'_>, Error>)> {
         let scratch = &mut *self.scratch;
-        let part = scratch.parts.get(self.next)?;
+        let Some(part) = scratch.parts.get(self.next) else {
+            self.raw = None;
+            return None;
+        };
         self.next += 1;
         let group = part.group;
         if let Err(error) = &part.check {
@@ -228,13 +258,20 @@ impl Split<'_> {
             !part.made,
             "the index frame of group {group} was made before its stamps"
         );
-        let encoded = encoded(&mut self.draft, &scratch.bytes, part.index);
-        let decoder = codec::Decoder::new(Scalar::Stamp, to_usize(part.count), encoded);
-        let stamps = Stamps {
-            decoder,
-            vector: &mut scratch.vector,
+        let stamps = if let Some(raw) = &mut self.raw {
+            Source::Raw(series(raw, part.index.entry).as_chunks::<8>().0)
+        } else {
+            let encoded = encoded(&mut self.draft, &scratch.bytes, part.index);
+            Source::Encoded {
+                decoder: codec::Decoder::new(
+                    Scalar::Stamp,
+                    to_usize(part.count),
+                    encoded,
+                ),
+                vector: &mut scratch.vector,
+            }
         };
-        Some((group, Ok(stamps)))
+        Some((group, Ok(Stamps(stamps))))
     }
 
     /// The index frame of `group`: the writer's key set with only `group` present, its
@@ -306,11 +343,16 @@ fn encoded<'s>(
     series: Series,
 ) -> &'s [u8] {
     match draft {
-        Some(draft) => draft
-            .series_mut(series.entry)
-            .expect("invariant: a checked series is in the frame"),
+        Some(draft) => self::series(draft, series.entry),
         None => &bytes[series.start..series.start + series.len],
     }
+}
+
+/// The bytes of the checked series of `entry` in `draft`.
+fn series(draft: &mut Draft, entry: usize) -> &[u8] {
+    draft
+        .series_mut(entry)
+        .expect("invariant: a checked series is in the frame")
 }
 
 /// The scalar of a series of `data_type`.
@@ -799,6 +841,28 @@ mod tests {
                 assert_eq!(vectors.concat(), super::stamps(&values), "{form:?}");
                 assert!(split.next().is_none());
             }
+        }
+
+        #[test]
+        fn gives_the_blocks_of_a_raw_frame_back_after_the_last_group() {
+            let set = two_groups();
+            let pool = pool(1 << 16);
+            let mut scratch = Scratch::default();
+            let mut split = scratch.split(&set, draft(&pool, &set, Form::Raw, &both()));
+            let mut held = Vec::new();
+            while let Ok(block) = pool.alloc(64) {
+                held.push(block);
+            }
+
+            assert!(split.next().is_some());
+            assert!(split.next().is_some());
+            assert!(
+                pool.alloc(64).is_err(),
+                "the frame is held to the last group"
+            );
+            assert!(split.next().is_none());
+
+            pool.alloc(64).expect("the blocks of the frame");
         }
 
         #[test]
