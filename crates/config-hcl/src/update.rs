@@ -608,6 +608,7 @@ mod tests {
         let mut out = String::new();
         let mut at = 0;
         let mut heredoc = false;
+        let mut ends_at_closer = false;
         loop {
             let token = tokens.next();
             let (start, end) = (offset(token.span.start()), offset(token.span.end()));
@@ -624,12 +625,15 @@ mod tests {
             }
             out.push('\n');
             let lines = ["", "", "\n", "# c\n", "  // c\n", "/* c\nc */\n"];
-            out.push_str(lines.get(usize::from(picks.pick(6))).unwrap());
+            let line = lines.get(usize::from(picks.pick(6))).unwrap();
+            out.push_str(line);
+            ends_at_closer = heredoc && line.is_empty();
             at = end;
             heredoc = false;
         }
         out.push_str(text.get(at..).unwrap());
-        if picks.pick(4) == 0 && out.ends_with('\n') {
+        // A heredoc needs the line end after its closer.
+        if !ends_at_closer && picks.pick(4) == 0 && out.ends_with('\n') {
             out.pop();
         }
         if picks.pick(4) == 0 {
@@ -950,7 +954,7 @@ mod tests {
         );
         assert_eq!(updated("a = 1", "a = 1\nb = 2"), "a = 1\nb = 2\n");
         assert_eq!(
-            updated("a = <<EOT\r\nx\r\nEOT", "a = \"x\\n\"\nb = 2"),
+            updated("a = <<EOT\r\nx\r\nEOT\r\n", "a = \"x\\n\"\nb = 2"),
             "a = <<EOT\r\nx\r\nEOT\r\nb = 2\r\n"
         );
         assert_eq!(

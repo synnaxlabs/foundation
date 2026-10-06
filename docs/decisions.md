@@ -415,9 +415,12 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. An entry has no part, one, or two; `append` takes them owned and drops
-  them when it fails (#582). A new ring has the same block at `seq` 0 in
-  both places, with the tail at offset 0 and a random chain value.
+  records. `Layout::entry_max` is the most bytes of parts that `append` takes in a
+  batch of one entry; a batch of more entries holds less. A user that appends an
+  entry alone checks at open that its largest one fits (#627). An entry has no
+  part, one, or two; `append` takes them owned and drops them when it fails (#582).
+  A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
+  and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
   write: the writer's key set with only that group present, its range, and its
   encoded series. The home stores it, keeps it as the index's newest frame, and later
@@ -937,15 +940,20 @@ How to read this record:
   enters only through `tick`: a node draws its election timeout on the first tick
   after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
   its own voter list votes and follows, but never campaigns while that configuration
-  is committed. `step` does not check
-  that a sender is a voter (a voter can learn late that a peer joined), so the caller
-  authenticates the sender and decides which nodes may send. When the term of the
-  last entry is above `hard.term`, `Raft::new` starts at that term with no vote. The
-  node sends nothing before its write, so no peer counted a vote or an answer that a
-  lost `hard` held. The caller writes `hard` and `entries` in any order, with no
-  atomic write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that
-  each caller must keep and that shows only at a restart. The person decided on
-  2026-10-05 ("I approve long term fix on 522"), #522.
+  is committed. `step` does not check that a sender is a voter (a voter can learn late
+  that a peer joined), so the caller authenticates the sender and decides which nodes
+  may send. A node that may send can stop a group for good with one message in term
+  `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
+  as it is. It trusts its voters: one that lies can already break safety, because a
+  false `AppendReply` counts as held, so a bound on the term would guard nothing. No
+  bound on a term jump spares an honest node that was down, either. Lost: a sender
+  proves a term jump with a signed term, which needs `mesh`. Decided on 2026-10-05 (#352
+  item 2). When the term of the last entry is above `hard.term`, `Raft::new` starts at
+  that term with no vote. The node sends nothing before its write, so no peer counted a
+  vote or an answer that a lost `hard` held. The caller writes `hard` and `entries` in
+  any order, with no atomic write. Lost: the `Ready` doc requires `hard` before
+  `entries`, a patch that each caller must keep and that shows only at a restart. The
+  person decided on 2026-10-05 ("I approve long term fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
