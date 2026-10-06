@@ -11,10 +11,10 @@
 
 #![no_main]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use libfuzzer_sys::fuzz_target;
-use spec::tree::{self, Change, Chunks, Diff};
+use spec::tree::{self, Change, Chunks, Diff, Error};
 use types::digest::Digest;
 use types::name::Name;
 
@@ -49,27 +49,55 @@ fuzz_target!(|input: &[u8]| {
         };
         changes.extend(change);
     }
+    let names: BTreeSet<Name> =
+        changes.iter().map(|change| name(change).clone()).collect();
     for (at, &root) in roots.iter().enumerate() {
-        check(&mut chunks, root, roots[at.saturating_sub(1)], &changes);
+        check(
+            &mut chunks,
+            root,
+            roots[at.saturating_sub(1)],
+            &names,
+            &changes,
+        );
     }
 });
 
 /// Runs each operation on the tree at `root`, and `diff` against `previous` too.
-fn check(chunks: &mut Chunks, root: Digest, previous: Digest, changes: &[Change]) {
-    let _ = tree::diff(chunks, root, previous);
-    let whole = tree::diff(chunks, tree::empty(), root).map(|diff| entries(&diff));
-    let got: Vec<_> = changes
+fn check(
+    chunks: &mut Chunks,
+    root: Digest,
+    previous: Digest,
+    names: &BTreeSet<Name>,
+    changes: &[Change],
+) {
+    let whole =
+        tree::diff(chunks, tree::empty(), root).map(|diff| entries(root, &diff));
+    let got: Vec<_> = names
         .iter()
-        .map(|change| tree::get(chunks, root, name(change)).map(|v| v.map(Vec::from)))
+        .map(|name| tree::get(chunks, root, name).map(|value| value.map(Vec::from)))
         .collect();
+    let between = tree::diff(chunks, root, previous).map(drop);
+    let errors = got.iter().filter_map(|got| got.as_ref().err());
+    for error in errors
+        .chain(whole.as_ref().err())
+        .chain(between.as_ref().err())
+    {
+        named(chunks, error);
+    }
     let applied = tree::apply(chunks, root, changes.iter().cloned());
+    if let Err(error) = &applied {
+        named(chunks, error);
+    }
     let Ok(whole) = whole else {
         return;
     };
     let mut expected: BTreeMap<Name, Vec<u8>> = whole.into_iter().collect();
-    for (change, got) in changes.iter().zip(got) {
-        let want = expected.get(name(change)).cloned();
-        assert_eq!(got, Ok(want), "get disagrees with diff");
+    for (name, got) in names.iter().zip(got) {
+        assert_eq!(
+            got,
+            Ok(expected.get(name).cloned()),
+            "get disagrees with diff"
+        );
     }
     for change in changes {
         match change {
@@ -78,14 +106,35 @@ fn check(chunks: &mut Chunks, root: Digest, previous: Digest, changes: &[Change]
         };
     }
     let update = applied.expect("a change reads a tree that a diff reads whole");
-    let found =
-        tree::diff(chunks, tree::empty(), update.root).map(|diff| entries(&diff));
+    let found = tree::diff(chunks, tree::empty(), update.root)
+        .map(|diff| entries(update.root, &diff));
     let expected: Vec<_> = expected.into_iter().collect();
     assert_eq!(
         found,
         Ok(expected),
         "the changed tree is not the entries with the change"
     );
+    let made = tree::diff(chunks, root, update.root).map(|diff| diff.chunks);
+    assert_eq!(
+        made,
+        Ok(update.chunks),
+        "the update does not list the chunks it made"
+    );
+}
+
+/// The chunk an error names is absent for `Missing` and present for `Corrupt`. The
+/// empty tree has no chunk, so a parent that names it gives `Corrupt`.
+fn named(chunks: &Chunks, error: &Error) {
+    match *error {
+        Error::Missing(digest) => {
+            let absent = chunks.get(digest).is_none() && digest != tree::empty();
+            assert!(absent, "{error}, but the chunk is here");
+        }
+        Error::Corrupt(digest) => {
+            let present = chunks.get(digest).is_some() || digest == tree::empty();
+            assert!(present, "{error}, but the chunk is not here");
+        }
+    }
 }
 
 fn name(change: &Change) -> &Name {
@@ -93,8 +142,15 @@ fn name(change: &Change) -> &Name {
     name
 }
 
-/// The entries of a diff from the empty tree, which are in name order.
-fn entries(diff: &Diff<'_>) -> Vec<(Name, Vec<u8>)> {
+/// The entries of a diff from the empty tree to `root`, which are in name order. The
+/// chunks of the diff are in digest order and hold `root`.
+fn entries(root: Digest, diff: &Diff<'_>) -> Vec<(Name, Vec<u8>)> {
+    assert!(
+        diff.chunks.is_sorted(),
+        "the chunks of a diff are out of digest order"
+    );
+    let has_root = root == tree::empty() || diff.chunks.contains(&root);
+    assert!(has_root, "a diff from the empty tree leaves out the root");
     let entries: Vec<_> = diff
         .changes
         .iter()
