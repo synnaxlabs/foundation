@@ -24,11 +24,11 @@ use types::frame::Path;
 use types::time::Span;
 
 use crate::entry::{self, ENTRIES_MAX, Entry};
-use crate::group::{self, Closed, Group, Limit, META_LEN, Sealed};
+use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
 use crate::log::{self, Logs, Tail};
 use crate::record::{self, ALIGN, AREA_START, Body};
-use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
+use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
 
 /// What one shard's buffer is given at open.
 #[derive(Debug)]
