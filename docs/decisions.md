@@ -874,11 +874,20 @@ How to read this record:
   first message. A stream that ends or resets before its class byte drops: the peer
   never accepts it, and resets the reply half of a two-way stream with code 0. Each
   message is a QUIC varint length, then that many bytes, at most `message_bytes_max`. A
-  node accepts the waiting streams highest class first. A node resets a stream with the
-  stop's code when the stop arrives. A peer breaks the protocol when it sends another
-  class byte, ends a stream inside a message, sends a message over the limit, or resets
-  or stops a stream with a code over 32 bits. The node then closes the connection with
-  application code 2^32 and the reason as text, and the caller gets `Error::Broken`.
+  node accepts the waiting streams highest class first. Each stream sends at the QUIC
+  priority of its class, `Command` first, and streams of one class share in turn. The
+  priority is strict: a class sends nothing, resends too, while a higher class has bytes
+  to send, so a steady higher class starves the lower ones. It orders only the bytes
+  that QUIC holds. All classes share one QUIC send window, so a message can wait for
+  bytes of a lower class to be acknowledged (#797). The mapping is a `transport`
+  constant that simulation tunes (5.3); weights need a scheduler above QUIC. Lost: a
+  scheduler of ours, because the bytes QUIC holds and their resends still go in turn; a
+  connection per class, because four handshakes and four congestion controllers compete
+  on one path (#55). A node resets a stream with the stop's code when the stop arrives.
+  A peer breaks the protocol when it sends another class byte, ends a stream inside a
+  message, sends a message over the limit, or resets or stops a stream with a code over
+  32 bits. The node then closes the connection with application code 2^32 and the reason
+  as text, and the caller gets `Error::Broken`.
   Each connection keeps two budgets, which count the length of each message. A sender
   starts a message only when the messages it started and the streams have not taken in
   full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
