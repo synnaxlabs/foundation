@@ -1,8 +1,9 @@
 //! The time to build a frame (header, ranges, and descriptors, but not the series
 //! bytes), to set each seq on a built draft, to fill and read every series in order,
 //! to look each one up, to give its charge, to view the series bytes, to give the end
-//! of each series, and to check and walk the series from stored ends, for a dense
-//! frame and for frames of 100,000 channels.
+//! of each series, to check and walk the series from stored ends, and to walk and
+//! charge a view through a full and a narrow mask, for a dense frame and for frames of
+//! 100,000 channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use divan::Bencher;
 use types::channel;
 use types::frame::key_set::{Group, Interner, KeySet};
-use types::frame::{self, Draft, Form, Frame, Path};
+use types::frame::{self, Draft, Form, Frame, Mask, Path, View};
 use types::sample::{Scalar, Type};
 
 const F64: Type = Type::Scalar(Scalar::F64);
@@ -295,4 +296,56 @@ fn stored(bencher: Bencher<'_, '_>, case: &Case) {
             .map(|(_, bytes)| bytes.len())
             .sum::<usize>()
     });
+}
+
+/// Sums the length of every series of a view through a mask that wants every channel.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn full_walk(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let view = view(&pool, case, |_| true);
+    bencher.bench_local(|| walk_view(black_box(&view)));
+}
+
+/// Gives the charge of a view through a mask that wants every channel.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn full_charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let view = view(&pool, case, |_| true);
+    bencher.bench_local(|| black_box(&view).charge());
+}
+
+/// Sums the length of every series of a view through a mask that wants only the last
+/// present channel.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn narrow_walk(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let view = view(&pool, case, last(case));
+    bencher.bench_local(|| walk_view(black_box(&view)));
+}
+
+/// Gives the charge of a view through a mask that wants only the last present channel.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn narrow_charge(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let view = view(&pool, case, last(case));
+    bencher.bench_local(|| black_box(&view).charge());
+}
+
+fn view(
+    pool: &block::Pool,
+    case: &Case,
+    wanted: impl FnMut(channel::Slot) -> bool,
+) -> View {
+    View::new(frame(pool, case), Arc::new(Mask::new(&case.set, wanted)))
+}
+
+/// Wants only the channel of the last present series of `case`.
+fn last(case: &Case) -> impl Fn(channel::Slot) -> bool {
+    let (entry, _) = *case.series.last().expect("each case has a series");
+    let wanted = case.set.entries()[entry].slot;
+    move |slot| slot == wanted
+}
+
+fn walk_view(view: &View) -> usize {
+    view.iter().map(|(_, bytes)| bytes.len()).sum()
 }

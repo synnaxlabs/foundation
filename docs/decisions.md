@@ -476,7 +476,10 @@ How to read this record:
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
-  home routes by key set.
+  home routes by key set. A mask holds the index of each channel it holds, so the
+  series of a view make a frame, and `View::charge` is its charge (CREDIT RULES). A
+  mask is a sorted list, so a view's cost grows with the smaller of its frame's series
+  and its mask's entries (rule 11). Approved by the coordinator (#157).
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
