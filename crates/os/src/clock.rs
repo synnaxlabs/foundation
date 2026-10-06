@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use tokio::time::Sleep;
 use types::time::Monotonic;
 
+use crate::alarm::Alarm;
+
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("os orders a clock read only on x86_64 and aarch64");
 
@@ -93,6 +95,7 @@ impl env::clock::Driver for Driver {
         Box::pin(Timer {
             driver: self.clone(),
             sleep: Box::pin(tokio::time::sleep(Duration::ZERO)),
+            alarm: None,
             armed: None,
         })
     }
@@ -150,13 +153,27 @@ fn read_ns(clock: libc::clockid_t) -> u64 {
 /// slews on Linux, so a sleep completes late by at most this much from either.
 const ARM_MAX: Duration = Duration::from_secs(1);
 
-/// A Tokio sleep that fires at or after a deadline on the boot clock. Each poll
-/// checks the boot clock and re-arms the sleep from it.
+/// The end of a wait that an alarm covers. Tokio's timer rounds a deadline up to the
+/// next millisecond and can wake a millisecond after that.
+const TAIL: Duration = Duration::from_millis(2);
+
+/// A timer that fires at or after a deadline on the boot clock: a Tokio sleep until
+/// the tail of the wait, then an alarm. Each poll checks the boot clock and re-arms
+/// from it.
 struct Timer {
     driver: Driver,
     sleep: Pin<Box<Sleep>>,
-    /// The deadline the sleep is armed for.
-    armed: Option<Monotonic>,
+    /// The alarm, made at the first tail. `None` while the OS gives no timer, and then
+    /// the sleep covers the tail too.
+    alarm: Option<Alarm>,
+    /// The deadline and the timer armed for it.
+    armed: Option<(Monotonic, Via)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Via {
+    Sleep,
+    Alarm,
 }
 
 impl env::clock::Timer for Timer {
@@ -171,14 +188,32 @@ impl env::clock::Timer for Timer {
             if now >= deadline {
                 return Poll::Ready(());
             }
-            if this.armed != Some(deadline) {
-                let wait = Duration::from_nanos(deadline.0 - now.0).min(ARM_MAX);
-                let at = tokio::time::Instant::now() + wait;
-                this.sleep.as_mut().reset(at);
-                this.armed = Some(deadline);
+            let wait = Duration::from_nanos(deadline.0 - now.0);
+            if wait <= TAIL && this.alarm.is_none() {
+                this.alarm = Alarm::new().ok();
             }
-            // Ends by the second pass: a sleep armed from Tokio's now is pending.
-            match this.sleep.as_mut().poll(cx) {
+            let alarm = this.alarm.as_ref().filter(|_| wait <= TAIL);
+            // Ends by the second pass: a timer armed from its own clock is pending.
+            let fired = if let Some(alarm) = alarm {
+                if this.armed != Some((deadline, Via::Alarm)) {
+                    alarm.arm(wait);
+                    this.armed = Some((deadline, Via::Alarm));
+                }
+                alarm.poll_fired(cx)
+            } else {
+                if this.armed != Some((deadline, Via::Sleep)) {
+                    let lead = if wait > TAIL {
+                        wait.saturating_sub(TAIL)
+                    } else {
+                        wait
+                    };
+                    let at = tokio::time::Instant::now() + lead.min(ARM_MAX);
+                    this.sleep.as_mut().reset(at);
+                    this.armed = Some((deadline, Via::Sleep));
+                }
+                this.sleep.as_mut().poll(cx)
+            };
+            match fired {
                 Poll::Ready(()) => this.armed = None,
                 Poll::Pending => return Poll::Pending,
             }

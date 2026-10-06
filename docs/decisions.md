@@ -1551,6 +1551,20 @@ How to read this record:
   or spin mode: precision belongs to the clock driver in `os` (#379). Decided by the
   `connector` builder in the plan on #237, after `/eb-review`; approved by the
   coordinator (#237). Supersedes: r12 A.3 `pace` modes and blocking wait.
+- **OS TIMER (2026-10-06)** A sleep of the `os` clock waits on a Tokio sleep until
+  2 ms before its deadline, then on an OS timer: a `timerfd` on `CLOCK_MONOTONIC` on
+  Linux, and a kqueue `EVFILT_TIMER` with `NOTE_CRITICAL` on macOS. Each sleep makes
+  its timer at its first tail and closes it when it drops. The fd waits in the Tokio
+  reactor, so each `os` runtime enables Tokio's I/O driver, which the UDP and TCP
+  drivers (#119, #120) also use. Each wake reads the boot clock again, so a sleep
+  never completes early. When the OS gives no fd, the Tokio sleep covers the tail. A
+  sequence of sleeps on an Apple M3 Max at load 7 to 14 has a median lateness of 32
+  us at 1 kHz and 5 us at 10 kHz, against 1134 us and 631 us on the Tokio sleep
+  alone (`crates/os/benches/lateness.rs`). Lost: a spin window (it holds the core),
+  an OS timer for every sleep (an fd and syscalls also for the many sleeps that reset
+  before their deadline), and one OS timer per shard (a second timer wheel in `os`).
+  Windows is #682. Decided by the `memory` builder in the plan on #379, after
+  `/eb-review`.
 
 ### 1.11 Config as code
 

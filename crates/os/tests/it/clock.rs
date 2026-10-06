@@ -1,4 +1,4 @@
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -197,6 +197,72 @@ fn a_thousand_sleeps_each_complete_at_the_deadline_or_later() {
     });
 }
 
+/// The median lateness of `deadlines`, in nanoseconds. Panics when a sleep completes
+/// early.
+async fn median_lateness(clock: &Clock, deadlines: impl Iterator<Item = Span>) -> i64 {
+    let start = clock.now();
+    let mut sleep = clock.sleep_until(start);
+    let mut late = Vec::new();
+    for offset in deadlines {
+        let deadline = start + offset;
+        sleep.reset(deadline);
+        (&mut sleep).await;
+        let now = clock.now();
+        assert!(now >= deadline, "woke at {now:?} for {deadline:?}");
+        late.push((now - deadline).nanos());
+    }
+    late.sort_unstable();
+    late[late.len() / 2]
+}
+
+#[test]
+fn a_sequence_at_1_khz_is_under_500_us_late_at_the_median() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let median = median_lateness(&clock, (1..=1_000).map(millis)).await;
+        assert!(median < 500_000, "median {median} ns");
+    });
+}
+
+#[test]
+fn a_reset_from_a_far_deadline_is_under_500_us_late_at_the_median() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let mut late = Vec::new();
+        for i in 0..200 {
+            let start = clock.now();
+            let mut sleep = clock.sleep_until(start + seconds(2));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert_eq!(Pin::new(&mut sleep).poll(&mut cx), Poll::Pending);
+            let deadline = start + millis(1 + i % 3);
+            sleep.reset(deadline);
+            sleep.await;
+            late.push((clock.now() - deadline).nanos());
+        }
+        late.sort_unstable();
+        assert!(late[100] < 500_000, "median {} ns", late[100]);
+    });
+}
+
+/// The open file descriptors of this process.
+fn open_fds() -> usize {
+    std::fs::read_dir("/dev/fd").unwrap().count()
+}
+
+#[test]
+fn a_sleep_closes_what_it_opens() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let before = open_fds();
+        for _ in 0..2_000 {
+            clock.sleep(Span::from_nanos(100_000)).await;
+        }
+        let after = open_fds();
+        // The tests that run in parallel open and close a few.
+        assert!(after < before + 100, "{before} open, then {after}");
+    });
+}
+
 #[test]
 fn a_passed_deadline_completes_on_the_first_poll() {
     let clock = os::clock();
@@ -276,4 +342,15 @@ fn a_sleep_panics_in_a_runtime_with_no_timer() {
         .build()
         .unwrap();
     runtime.block_on(async { drop(clock.sleep_until(Monotonic(0))) });
+}
+
+#[test]
+#[should_panic(expected = "A Tokio 1.x context was found, but IO is disabled")]
+fn a_sleep_panics_in_a_runtime_with_no_io_driver() {
+    let clock: Clock = os::clock();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async { clock.sleep(millis(1)).await });
 }

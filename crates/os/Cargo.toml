@@ -10,14 +10,14 @@ block = { path = "../block" }
 env = { path = "../env" }
 getrandom = { workspace = true }
 rustix = { workspace = true, features = ["fs"] }
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
 types = { path = "../types" }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { workspace = true, features = ["thread"] }
+rustix = { workspace = true, features = ["thread", "time"] }
 
 [dev-dependencies]
 divan = { workspace = true }
@@ -27,6 +27,10 @@ tokio = { workspace = true, features = ["rt", "time"] }
 
 [[bench]]
 name = "now"
+harness = false
+
+[[bench]]
+name = "lateness"
 harness = false
 
 [lints]

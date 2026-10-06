@@ -6,6 +6,12 @@ use std::fmt;
 use std::path::Path;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(
+    target_os = "macos",
+    expect(unsafe_code, reason = "a kqueue is an OS call")
+)]
+mod alarm;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[expect(unsafe_code, reason = "the clock is an OS call")]
 mod clock;
 mod cores;
@@ -31,10 +37,11 @@ pub use files::Disk;
 /// compare readings of clocks from two calls.
 ///
 /// A sleep is made on the Tokio runtime current at the call, and panics when there is
-/// none or it has no timer. Each thread that `os` starts has one with a timer, but a
-/// runtime that its body starts may not. A sleep completes about 2 ms late on an idle
-/// machine, and later under load. A sleep that waits across a suspend completes up to
-/// 1 s late.
+/// none, or it has no timer or no I/O driver. Each thread that `os` starts has one
+/// with both, but a runtime that its body starts may not. A sleep completes tens of
+/// microseconds late on an idle machine, and later under load. When the process has
+/// no free fd, a sleep completes a millisecond or more late. A sleep that waits across
+/// a suspend completes up to 1 s late.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[must_use]
 pub fn clock() -> env::clock::Clock {
