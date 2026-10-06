@@ -34,14 +34,14 @@ pub struct Port {
 
 impl Port {
     /// Binds the node's sockets at `local`: UDP, and TCP on the same port number
-    /// once the port carries TCP (#77). Port 0 lets UDP take a free port, which
-    /// [`Port::addresses`] shows, and TCP binds that port with no retry on another.
-    /// `[::]` takes IPv4 and IPv6.
+    /// once the port carries TCP (#77). With port 0, UDP takes a free port, which
+    /// [`Port::addresses`] shows, and TCP binds the same one. When TCP finds it in
+    /// use, `bind` tries a new port, up to 8 tries in all. `[::]` takes IPv4 and IPv6.
     ///
     /// # Errors
     ///
-    /// The error of the first bind that fails: [`env::net::Error::AddressInUse`]
-    /// when another socket holds the address.
+    /// The error of the bind that failed, which with port 0 is the last try:
+    /// [`env::net::Error::AddressInUse`] when another socket holds the address.
     pub fn bind(
         net: &env::net::Net,
         local: SocketAddr,

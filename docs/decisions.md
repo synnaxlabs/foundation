@@ -939,8 +939,11 @@ How to read this record:
   breaks on NAT rebinding), and one shard doing all network work. If the receive loop
   saturates on Linux, add a reuse-port group steered by the same connection ID. Decided
   by the design session under the architecture delegation (#53). The same port number
-  (2026-10-06): port 0 lets UDP take a free port, and TCP binds that port with no retry
-  on another, so a failed bind stays visible. Approved by the coordinator on #990.
+  (2026-10-06): with port 0, UDP takes a free port and TCP binds the same one. When TCP
+  finds it in use, the node closes the UDP socket and tries a new port, up to 8 tries,
+  then gives the last error: TCP and UDP have separate port spaces, and no OS call gives
+  a port free in both. A fixed port that fails gives its error at once. Approved by the
+  coordinator on #990.
 - **TLS RANDOMNESS (2026-10-04)** All randomness inside TLS (key shares, client
   random, nonces) comes from aws-lc, not from `env`. rustls holds its random source
   as a `&'static` value, and aws-lc makes X25519 key shares with its own randomness,
