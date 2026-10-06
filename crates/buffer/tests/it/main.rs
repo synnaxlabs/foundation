@@ -981,6 +981,30 @@ fn each_cut(seeds: Range<u64>, step: i64, mut at: impl FnMut(u64, i64) -> bool) 
     }
 }
 
+/// Starts an open of the ring on `node`, and stops the node with `crash` `cut`
+/// nanoseconds into it. Returns whether the open had ended.
+fn cut_an_open(
+    sim: &mut sim::Sim,
+    node: &sim::node::Node,
+    cut: i64,
+    crash: sim::Crash,
+) -> bool {
+    let ended = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ended);
+    let own = node.clone();
+    drop(on_node(node, "cut", move |tasks| async move {
+        let config = node_config(&own, tasks, DIR);
+        let _buffer = Buffer::open(config, &mut Slots::new())
+            .await
+            .expect("the open ends well");
+        flag.store(true, Ordering::Relaxed);
+        std::future::pending::<()>().await;
+    }));
+    sim.run_for(Span::from_nanos(cut)).expect("the run goes on");
+    sim.crash(node, crash);
+    ended.load(Ordering::Relaxed)
+}
+
 /// Starts the first open of a ring on a new node with `seed`, and stops the node
 /// with `crash` `cut` nanoseconds into it. Returns the sim, the node, and whether
 /// the open had ended.
@@ -990,20 +1014,8 @@ fn cut_the_first_open(
     crash: sim::Crash,
 ) -> (sim::Sim, sim::node::Node, bool) {
     let (mut sim, node) = one_node(seed);
-    let ended = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&ended);
-    let first = node.clone();
-    drop(on_node(&node, "first", move |tasks| async move {
-        let config = node_config(&first, tasks, DIR);
-        let _buffer = Buffer::open(config, &mut Slots::new())
-            .await
-            .expect("the first open ends well");
-        flag.store(true, Ordering::Relaxed);
-        std::future::pending::<()>().await;
-    }));
-    sim.run_for(Span::from_nanos(cut)).expect("the run goes on");
-    sim.crash(&node, crash);
-    (sim, node, ended.load(Ordering::Relaxed))
+    let ended = cut_an_open(&mut sim, &node, cut, crash);
+    (sim, node, ended)
 }
 
 /// Opens the ring in `dir` on `node`, commits one entry, cuts the power, and opens
@@ -1086,6 +1098,69 @@ fn a_kill_during_the_first_open_keeps_the_commits_of_the_next() {
             tail(3, Some(30)),
             "seed {seed}, kill at {cut} ns"
         );
+        ended
+    });
+}
+
+/// A power cut at any point of an open whose restart record goes over the one of
+/// an open with no data keeps the committed entry. The ring then takes the next
+/// entry, and it survives a power cut.
+#[test]
+fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
+    each_cut(0..32, 10_000, |seed, cut| {
+        let (mut sim, node) = one_node(seed);
+        sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let config = node_config(&node, tasks.clone(), DIR);
+            let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+            let a = slots.assign(key(1));
+            buffer
+                .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            drop(buffer);
+            let config = node_config(&node, tasks, DIR);
+            drop(
+                Buffer::open(config, &mut Slots::new())
+                    .await
+                    .expect("reopens"),
+            );
+        })
+        .expect("the run ends");
+        let ended = cut_an_open(&mut sim, &node, cut, sim::Crash::Power);
+        let recovered = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let config = node_config(&node, tasks, DIR);
+            let buffer = Buffer::open(config, &mut slots).await?;
+            let a = slots.assign(key(1));
+            let recovered = buffer.tail(a, Path::Live);
+            buffer.append([entry(
+                1,
+                a,
+                Path::Live,
+                3,
+                2,
+                Some(50),
+                Parts::default(),
+            )])?;
+            buffer.committed().await?;
+            Ok::<_, Error>(recovered)
+        });
+        let recovered = recovered.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
+        assert_eq!(
+            recovered,
+            Ok(tail(3, Some(30))),
+            "seed {seed}, cut at {cut} ns"
+        );
+        sim.crash(&node, sim::Crash::Power);
+        let last = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let config = node_config(&node, tasks, DIR);
+            let buffer = Buffer::open(config, &mut slots).await;
+            buffer.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live))
+        });
+        let last = last.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
+        assert_eq!(last, Ok(tail(5, Some(50))), "seed {seed}, cut at {cut} ns");
         ended
     });
 }
@@ -1315,20 +1390,89 @@ fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
     );
 }
 
+/// Opens with no data write their restart records at the same place, each with
+/// a new chain.
 #[test]
 fn each_open_starts_a_new_chain() {
     run(20, Memory::default(), |shard| async move {
+        let mut chains = Vec::new();
         for _ in 0..2 {
             let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
             drop(buffer.expect("opens"));
+            let file = shard.memory.bytes(RING);
+            let at = to_usize(AREA_START) + 9;
+            let chain = file[at..at + 4].try_into().expect("four bytes");
+            chains.push(u32::from_le_bytes(chain));
         }
-        let file = shard.memory.bytes(RING);
-        let chain = |offset: u64| {
-            let at = to_usize(AREA_START + offset) + 9;
-            u32::from_le_bytes(file[at..at + 4].try_into().expect("four bytes"))
-        };
-        assert_ne!(chain(0), chain(BLOCK), "both opens drew the same chain");
+        assert_ne!(chains[0], chains[1], "both opens drew the same chain");
     });
+}
+
+/// Opens with no data leave one restart record, so a ring opened more times than
+/// it has blocks opens and takes its largest record.
+#[test]
+fn opens_with_no_data_leave_room_for_the_largest_record() {
+    for area in [2 * BLOCK, AREA] {
+        run(24, Memory::default(), move |shard| async move {
+            let ring = layout(area, BODY_MAX);
+            for _ in 0..area / BLOCK {
+                drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
+            }
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens again");
+            let a = slots.assign(key(1));
+            let largest = Parts::from(shard.block(BODY_MAX - 55));
+            let batch = [entry(1, a, Path::Live, 0, 1, None, largest)];
+            assert_eq!(buffer.append(batch), Ok(()), "an area of {area}");
+        });
+    }
+}
+
+/// Each open with no data writes its restart record right after the last entry,
+/// over the one before it. The entry survives, also when the first sector of the
+/// last restart record holds other bytes, and the ring takes the next entry.
+#[test]
+fn opens_with_no_data_after_an_entry_leave_room_for_the_next() {
+    for torn in [false, true] {
+        run(25, Memory::default(), move |shard| async move {
+            let ring = layout(6 * BLOCK, BODY_MAX);
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens");
+            let a = slots.assign(key(1));
+            buffer
+                .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+            drop(buffer);
+            for _ in 0..3 {
+                drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
+            }
+            if torn {
+                let after = to_usize(AREA_START + 2 * BLOCK);
+                shard.memory.put(RING, after, &[0xA5; SECTOR]);
+            }
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("opens again");
+            let a = slots.assign(key(1));
+            assert_eq!(
+                buffer.tail(a, Path::Live),
+                tail(3, Some(30)),
+                "torn: {torn}"
+            );
+            let next = [entry(1, a, Path::Live, 3, 2, Some(50), Parts::default())];
+            assert_eq!(buffer.append(next), Ok(()), "torn: {torn}");
+            buffer.committed().await.expect("commits");
+            drop(buffer);
+            let mut slots = Slots::new();
+            let buffer = shard.open(ring, &mut slots).await.expect("reopens");
+            let a = slots.assign(key(1));
+            assert_eq!(
+                buffer.tail(a, Path::Live),
+                tail(5, Some(50)),
+                "torn: {torn}"
+            );
+        });
+    }
 }
 
 #[test]
