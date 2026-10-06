@@ -4,7 +4,7 @@ use std::ops::RangeBounds;
 use types::node;
 
 use crate::log;
-use crate::log::{Log, Run};
+use crate::log::{Held, Log, Run};
 use crate::progress::Progress;
 use crate::voters::Tally;
 use crate::{
@@ -47,18 +47,17 @@ impl Peer {
     }
 }
 
-// A message body that `check` passed. A heartbeat's `commit`, an append reply's
-// `last`, and a reject's `hint` are at most the last log index.
+// A message body that `check` passed.
 enum Checked {
     PreVote { last: Position },
     PreVoteReply { granted: bool },
     Vote { last: Position },
     VoteReply { granted: bool },
-    Heartbeat { commit: u64 },
+    Heartbeat { commit: Held },
     HeartbeatReply,
     Append { run: Run, commit: u64 },
-    AppendReply { last: u64 },
-    AppendReject { hint: u64 },
+    AppendReply { last: Held },
+    AppendReject { hint: Held },
 }
 
 /// What the caller must do after an input, in this order: write `hard` and `entries`
@@ -410,7 +409,7 @@ impl Raft {
             Checked::AppendReply { last } => self.accepted(from, last),
             Checked::AppendReject { hint } => {
                 if let Some(peer) = self.heard_from(from) {
-                    peer.progress.rejected(hint);
+                    peer.progress.rejected(hint.index());
                     self.catch_up(from);
                 }
             }
@@ -421,13 +420,6 @@ impl Raft {
     // log. An append and a vote can name an index past the last one, because this
     // node can be behind.
     fn check(&self, from: node::Key, term: Term, body: Body) -> Result<Checked, Error> {
-        let end = self.log.last().index;
-        let within = |index: u64| {
-            if index > end {
-                return Err(Error::IndexPastLog { index, last: end });
-            }
-            Ok(index)
-        };
         Ok(match body {
             Body::Heartbeat { .. } | Body::Append { .. }
                 if term == self.term && self.role == Role::Leader =>
@@ -439,7 +431,7 @@ impl Raft {
             Body::Vote { last } => Checked::Vote { last },
             Body::VoteReply { granted } => Checked::VoteReply { granted },
             Body::Heartbeat { commit } => Checked::Heartbeat {
-                commit: within(commit)?,
+                commit: self.log.held(commit)?,
             },
             Body::HeartbeatReply => Checked::HeartbeatReply,
             Body::Append {
@@ -454,18 +446,18 @@ impl Raft {
                 Checked::Append { run, commit }
             }
             Body::AppendReply { last } => Checked::AppendReply {
-                last: within(last)?,
+                last: self.log.held(last)?,
             },
             Body::AppendReject { hint } => Checked::AppendReject {
-                hint: within(hint)?,
+                hint: self.log.held(hint)?,
             },
         })
     }
 
     // Commits what the leader's heartbeat says and answers it.
-    fn heartbeat(&mut self, leader: node::Key, commit: u64) {
+    fn heartbeat(&mut self, leader: node::Key, commit: Held) {
         self.follow(leader);
-        self.log.commit_to(commit);
+        self.log.commit_to(commit.index());
         self.release_removed();
         self.send(leader, self.term, Body::HeartbeatReply);
     }
@@ -526,10 +518,10 @@ impl Raft {
     }
 
     // Records that a follower holds the leader's log up to `last`, as the leader.
-    fn accepted(&mut self, from: node::Key, last: u64) {
+    fn accepted(&mut self, from: node::Key, last: Held) {
         let accepted = self
             .heard_from(from)
-            .is_some_and(|peer| peer.progress.accepted(last));
+            .is_some_and(|peer| peer.progress.accepted(last.index()));
         if !accepted || self.advance() {
             return;
         }

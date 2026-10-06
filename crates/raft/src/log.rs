@@ -47,8 +47,9 @@ impl Log {
         applied: u64,
     ) -> Result<Self, Error> {
         base.check()?;
-        let Run { entries, .. } = check(Position::default(), entries)?;
-        let last = entries.last().map_or(0, |entry| entry.at.index);
+        let run = check(Position::default(), entries)?;
+        let last = run.last().map_or(0, |at| at.index);
+        let Run { entries, .. } = run;
         if applied > last {
             return Err(Error::AppliedPastLog { applied, last });
         }
@@ -66,6 +67,15 @@ impl Log {
         self.entries
             .last()
             .map_or_else(Position::default, |entry| entry.at)
+    }
+
+    // `index` as an index that the log holds.
+    pub(crate) fn held(&self, index: u64) -> Result<Held, Error> {
+        let last = self.last().index;
+        if index > last {
+            return Err(Error::IndexPastLog { index, last });
+        }
+        Ok(Held(index))
     }
 
     pub(crate) fn committed(&self) -> u64 {
@@ -239,9 +249,21 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    // The position of the last entry, or `None` with no entries.
+    // The position of the last entry. `None`, not `prev`, with no entries: the run
+    // writes no entry at `prev`.
     pub(crate) fn last(&self) -> Option<Position> {
         self.entries.last().map(|entry| entry.at)
+    }
+}
+
+// An index at most the last index of the log that made it. Only `Log::held` makes
+// one, and a caller uses it before the log changes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Held(u64);
+
+impl Held {
+    pub(crate) fn index(self) -> u64 {
+        self.0
     }
 }
 
