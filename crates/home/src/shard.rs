@@ -38,8 +38,8 @@ pub(crate) struct Shard {
 /// The readers to wake, and the indexes whose live frames wait for a commit.
 #[derive(Debug, Default)]
 struct Wake {
-    /// The slot and place of each index with live frames for complete readers that
-    /// may not be on disk, each once.
+    /// The slot and place of each index whose readers may be
+    /// [pending](delivery::Readers::pending), each once.
     pending: Vec<(Slot, usize)>,
     /// Whether `pending` holds the index, by place. A place past the end is not.
     listed: Vec<bool>,
@@ -398,7 +398,7 @@ impl Shard {
     /// once. Complete readers first get the live frames now on disk. A key is a hint:
     /// take from each until [`take`](Self::take) gives `None`. Call it after each
     /// write and each commit. It takes time linear in the indexes with live frames
-    /// not yet on disk.
+    /// queued for complete readers.
     pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.wake.settle(&self.buffer, &mut self.indexes);
         keys.clear();
@@ -453,7 +453,7 @@ impl Wake {
         self.keys.extend(keys);
     }
 
-    /// Lists the index at `slot` and `place`, which queued a live frame, once.
+    /// Lists the index at `slot` and `place`, whose readers are pending, once.
     fn list(&mut self, slot: Slot, place: usize) {
         if place >= self.listed.len() {
             self.listed.resize(place + 1, false);
@@ -467,11 +467,10 @@ impl Wake {
     fn settle(&mut self, buffer: &Buffer, indexes: &mut [Index]) {
         let mut pending = mem::take(&mut self.pending);
         pending.retain(|&(slot, place)| {
-            let durable = buffer.durable(slot, Path::Live).seq;
-            self.add(slot, indexes[place].readers.release(durable));
-            let listed = buffer.tail(slot, Path::Live).seq > durable;
-            self.listed[place] = listed;
-            listed
+            let readers = &mut indexes[place].readers;
+            self.add(slot, readers.release(buffer.durable(slot, Path::Live).seq));
+            self.listed[place] = readers.pending();
+            self.listed[place]
         });
         self.pending = pending;
     }
@@ -576,9 +575,8 @@ fn spend<'a>(
         out.push(match checked {
             Ok(accepted) if room => {
                 let range = range(&accepted);
-                let (queued, woken) = index.advance(accepted);
-                wake.add(slot, woken);
-                if queued {
+                wake.add(slot, index.advance(accepted));
+                if index.readers.pending() {
                     wake.list(slot, claim.place);
                 }
                 Outcome::Applied { slot, range }
@@ -2178,6 +2176,21 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn unlists_an_index_at_the_settle_after_its_last_complete_reader_closes() {
+            run(52, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                write(&test, &mut shard, a, &[10]);
+                shard.close_reader(reader, MESH);
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(shard.wake.pending, Vec::new());
             });
         }
 

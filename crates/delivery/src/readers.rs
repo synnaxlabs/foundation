@@ -253,14 +253,14 @@ impl Readers {
 
     /// Queues `frame`, stored on the live path with the samples `seq`, for the
     /// complete sessions. [`Readers::release`] gives it to them once it is on disk.
-    /// Returns whether it kept the frame: `false` when no complete session is open
-    /// or the frame has no samples, so a release has nothing to give.
+    /// Keeps nothing when no complete session is open. A frame with no samples
+    /// reaches no session.
     ///
     /// # Panics
     ///
     /// If `seq` ends before it starts, or starts below the end of an earlier live
     /// frame or below the `live` given to [`Readers::new`] or [`Readers::restore`].
-    pub fn queue(&mut self, frame: &Frame, seq: Range<u64>) -> bool {
+    pub fn queue(&mut self, frame: &Frame, seq: Range<u64>) {
         assert!(
             seq.start <= seq.end,
             "live frame at seq {}..{} ends before it starts",
@@ -276,14 +276,13 @@ impl Readers {
         );
         self.queued = seq.end;
         if seq.is_empty() {
-            return false;
+            return;
         }
         if self.complete.is_empty() {
             self.released = seq.end;
-            return false;
+        } else {
+            self.queue.push_back((frame.clone(), seq));
         }
-        self.queue.push_back((frame.clone(), seq));
-        true
     }
 
     /// Gives each queued frame that ends at or below `durable`, the first live seq not
@@ -320,6 +319,13 @@ impl Readers {
             self.released = seq.end;
         }
         &self.woken
+    }
+
+    /// Whether a queued live frame waits to be on disk. While one does, call
+    /// [`Readers::release`] after each commit.
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        !self.queue.is_empty()
     }
 
     /// Takes the session's next waiting frame, or `None` when it has none. A latest
@@ -1224,15 +1230,21 @@ pub(super) mod tests {
         }
 
         #[test]
-        fn keeps_a_frame_only_with_a_complete_session_open() {
-            let frames = Frames::new(3);
+        fn pends_only_while_a_frame_for_a_complete_session_waits_for_the_disk() {
+            let frames = Frames::new(4);
             let mut readers = Readers::new(0);
-            assert!(!readers.queue(&frames.frame(1), 0..2));
+            readers.queue(&frames.frame(1), 0..2);
+            assert!(!readers.pending());
             let key = opened(&mut readers, 2, 10);
-            assert!(readers.queue(&frames.frame(2), 2..4));
-            assert!(!readers.queue(&frames.frame(3), 4..4));
+            readers.queue(&frames.frame(2), 2..4);
+            assert!(readers.pending());
             assert_eq!(released(&mut readers, 4), [key]);
-            assert_eq!(taken(&mut readers, key), [2]);
+            assert!(!readers.pending());
+            readers.queue(&frames.frame(3), 4..4);
+            assert!(!readers.pending());
+            readers.queue(&frames.frame(4), 4..6);
+            readers.close(key, at(0));
+            assert!(!readers.pending());
         }
 
         #[test]
@@ -1983,12 +1995,15 @@ pub(super) mod tests {
                 self.open.get_mut(&key).expect("the session is open")
             }
 
-            /// Queues frame `n` and returns whether a release can give it.
-            fn queue(&mut self, n: u64, seq: Range<u64>) -> bool {
+            fn queue(&mut self, n: u64, seq: Range<u64>) {
                 let held = !self.open.is_empty();
-                let kept = held && !seq.is_empty();
                 self.queued.push(Queued { n, seq, held });
-                kept
+            }
+
+            /// Whether memory holds a frame with samples that no release gave yet.
+            fn pending(&self) -> bool {
+                let mut queued = self.queued.iter();
+                queued.any(|queued| queued.held && !queued.seq.is_empty())
             }
 
             fn close(&mut self, key: Key) {
@@ -2111,8 +2126,8 @@ pub(super) mod tests {
                         made += 1;
                         let seq = end + gap..end + gap + len;
                         end = seq.end;
-                        let kept = readers.queue(&frames.frame(made), seq.clone());
-                        assert_eq!(kept, model.queue(made, seq));
+                        readers.queue(&frames.frame(made), seq.clone());
+                        model.queue(made, seq);
                     }
                     Live::Release(back) => {
                         let durable = end.saturating_sub(back);
@@ -2126,6 +2141,7 @@ pub(super) mod tests {
                         assert_eq!(taken, model.take(key));
                     }
                 }
+                assert_eq!(readers.pending(), model.pending());
             }
         }
 
