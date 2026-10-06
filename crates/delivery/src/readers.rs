@@ -322,6 +322,13 @@ impl Readers {
         &self.woken
     }
 
+    /// Whether a queued live frame waits to be on disk. While one does, call
+    /// [`Readers::release`] after each commit.
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
     /// Takes the session's next waiting frame, or `None` when it has none. A latest
     /// session has at most one; a complete session has the frames that
     /// [`Readers::release`] gave it, in seq order.
@@ -1226,6 +1233,24 @@ pub(super) mod tests {
         }
 
         #[test]
+        fn pends_only_while_a_frame_for_a_complete_session_waits_for_the_disk() {
+            let frames = Frames::new(4);
+            let mut readers = Readers::new(0);
+            readers.queue(&frames.frame(1), 0..2);
+            assert!(!readers.pending());
+            let key = opened(&mut readers, 2, 10);
+            readers.queue(&frames.frame(2), 2..4);
+            assert!(readers.pending());
+            assert_eq!(released(&mut readers, 4), [key]);
+            assert!(!readers.pending());
+            readers.queue(&frames.frame(3), 4..4);
+            assert!(!readers.pending());
+            readers.queue(&frames.frame(4), 4..6);
+            readers.close(key, at(0));
+            assert!(!readers.pending());
+        }
+
+        #[test]
         fn gives_only_frames_on_disk() {
             let frames = Frames::new(2);
             let mut readers = Readers::new(0);
@@ -2042,6 +2067,12 @@ pub(super) mod tests {
                 self.queued.push(Queued { n, seq, held });
             }
 
+            /// Whether memory holds a frame with samples that no release gave yet.
+            fn pending(&self) -> bool {
+                let mut queued = self.queued.iter();
+                queued.any(|queued| queued.held && !queued.seq.is_empty())
+            }
+
             fn close(&mut self, key: Key) {
                 self.open.remove(&key);
                 if self.open.is_empty() {
@@ -2186,6 +2217,7 @@ pub(super) mod tests {
                         assert_eq!(taken, model.take(key));
                     }
                 }
+                assert_eq!(readers.pending(), model.pending());
             }
         }
 

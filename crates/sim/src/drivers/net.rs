@@ -41,11 +41,17 @@ impl Node {
 
 impl env::net::Driver for Node {
     fn udp(&self, config: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
-        let bound = lock(&self.shared).net().udp().bind(self.node, config)?;
+        let (life, bound) = {
+            let mut state = lock(&self.shared);
+            (
+                state.life(self.node),
+                state.net().udp().bind(self.node, config),
+            )
+        };
         Ok(Box::new(Socket {
             node: self.clone(),
-            bound,
-            owner: Owner::new(HALF),
+            bound: bound?,
+            owner: Owner::new(HALF, life),
         }))
     }
 
@@ -57,8 +63,10 @@ impl env::net::Driver for Node {
         Box::pin(async move {
             let connect =
                 |tcp: &mut Tcp<'_>, now| tcp.connect(self.node, now, remote, options);
+            let life = lock(&self.shared).life(self.node);
             let key = self.tcp(|tcp, now| (connect(tcp, now), ()))?;
-            let stream: Box<dyn tcp::Driver> = Box::new(Stream::new(self.clone(), key));
+            let stream: Box<dyn tcp::Driver> =
+                Box::new(Stream::new(self.clone(), key, life));
             poll_fn(|cx| self.tcp(|tcp, _| tcp.connected(key, cx.waker()))).await?;
             Ok(stream)
         })
@@ -66,12 +74,13 @@ impl env::net::Driver for Node {
 
     fn listen(&self, config: &tcp::Listen) -> Result<Box<dyn listener::Driver>, Error> {
         assert!(!config.options.delayed, "{DELAYED}");
+        let life = lock(&self.shared).life(self.node);
         let (key, local) = self.tcp(|tcp, _| (tcp.listen(self.node, config), ()))?;
         Ok(Box::new(Listener {
             node: self.clone(),
             key,
             local,
-            owner: Owner::new(LISTENER),
+            owner: Owner::new(LISTENER, life),
         }))
     }
 }
@@ -100,7 +109,8 @@ impl listener::Driver for Listener {
     ) -> Poll<Result<Box<dyn tcp::Driver>, Error>> {
         self.owner.check(&self.node);
         let key = ready!(self.node.tcp(|tcp, _| tcp.accept(self.key, cx.waker())));
-        Poll::Ready(Ok(Box::new(Stream::new(self.node.clone(), key))))
+        let stream = Stream::new(self.node.clone(), key, self.owner.life);
+        Poll::Ready(Ok(Box::new(stream)))
     }
 }
 
@@ -123,11 +133,12 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(node: Node, key: Key) -> Self {
+    /// The end `key` of `node`, opened in `life` of the node.
+    fn new(node: Node, key: Key, life: u64) -> Self {
         Self {
             node,
             key,
-            owner: Owner::new(STREAM),
+            owner: Owner::new(STREAM, life),
         }
     }
 }
@@ -207,7 +218,7 @@ impl udp::Driver for Socket {
         Box::new(Sender {
             node: self.node.clone(),
             key: self.bound.key,
-            owner: Owner::new(HALF),
+            owner: Owner::new(HALF, self.owner.life),
         })
     }
 

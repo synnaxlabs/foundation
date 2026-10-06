@@ -16,7 +16,7 @@ use types::time::{Monotonic, Span};
 use super::{after, at, delay, millis, pair, panicked, shard, sim};
 use crate::drivers::yield_now;
 use crate::net::addresses;
-use crate::{Config, Error, Sim, link, node};
+use crate::{Config, Crash, Error, Sim, link, node};
 
 /// Arrivals: the receiver's clock, the meta, and the bytes of each batch.
 type Log = Arc<Mutex<Vec<(Monotonic, Meta, Vec<u8>)>>>;
@@ -788,6 +788,30 @@ fn a_socket_polled_on_a_thread_of_another_node_panics() {
     let message = "a socket half of node 0 runs on a thread of node 1";
     assert_eq!(foreign(send_once), panicked("b", message));
     assert_eq!(foreign(recv_once), panicked("b", message));
+}
+
+/// Polls the halves of a socket of `a` with `poll` on a shard of `a` after a crash
+/// of `a`, with a sender clone made after the crash when `cloned`, and gives the
+/// error of the run.
+fn crashed(poll: fn(&mut Sender, &mut Receiver), cloned: bool) -> Error {
+    let (mut sim, a, _b) = pair(0, link::Config::default());
+    let (mut sender, mut receiver) = udp(&a, 4433);
+    sim.crash(&a, Crash::Process);
+    if cloned {
+        sender = sender.clone();
+    }
+    let _after = a.shards().start(shard("after"), move |_| async move {
+        poll(&mut sender, &mut receiver);
+    });
+    sim.run().unwrap_err()
+}
+
+#[test]
+fn a_socket_half_from_before_a_crash_panics_when_it_polls() {
+    let message = "a socket half of node 0 polls after a crash of the node";
+    assert_eq!(crashed(send_once, false), panicked("after", message));
+    assert_eq!(crashed(send_once, true), panicked("after", message));
+    assert_eq!(crashed(recv_once, false), panicked("after", message));
 }
 
 /// Polls the halves of a socket with `poll` on a thread that the sim did not start.
