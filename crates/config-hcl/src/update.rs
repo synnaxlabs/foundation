@@ -147,14 +147,9 @@ impl<'a> File<'a> {
         let mut start = self
             .line_start(i)
             .expect("invariant: an item starts its line");
-        // Each pass moves up a line or returns.
-        while let Some(above) = i.checked_sub(1) {
-            let Some(line) = self.line_start(above) else {
-                break;
-            };
-            if self.blank(line, self.mark(above).start) {
-                break;
-            }
+        while let Some(above) = i.checked_sub(1)
+            && let Some(line) = self.comment_line(above)
+        {
             start = line;
             i = above;
         }
@@ -197,6 +192,22 @@ impl<'a> File<'a> {
         let newline = self.token(end).checked_sub(1)?;
         let line = self.line_start(newline)?;
         self.blank(line, self.mark(newline).start).then_some(line)
+    }
+
+    /// Reports whether the line above an insert at `at` holds only a comment. At the
+    /// end of a text with no last line end, that line is the last line.
+    fn comment_above(&self, at: usize) -> bool {
+        let i = self.token(at);
+        let unended = at == self.text.len() && !self.text.ends_with('\n');
+        let last = if unended { Some(i) } else { i.checked_sub(1) };
+        last.and_then(|last| self.comment_line(last)).is_some()
+    }
+
+    /// The start of the line of token `i` when only a comment is before `i` on that
+    /// line.
+    fn comment_line(&self, i: usize) -> Option<usize> {
+        let line = self.line_start(i)?;
+        (!self.blank(line, self.mark(i).start)).then_some(line)
     }
 
     /// The start of the line of token `i`, when no token is before it on its line.
@@ -365,13 +376,18 @@ impl Diff<'_, '_> {
     }
 
     /// Inserts the waiting items at `at`, the anchor or the start of the lines of the
-    /// kept item below. A blank line goes before the first block when a kept item
-    /// ends at `at`, and after the items when `gap`.
+    /// kept item below. A blank line goes before the items when a comment line ends
+    /// at `at`, before the first block when a kept item ends there, and after the
+    /// items when `gap`.
     fn place(&mut self, body: &Body, pending: &mut Pending<'_>, at: usize, gap: bool) {
         if pending.is_empty() {
             return;
         }
-        let mut writer = Writer::new(&body.margin, 0, self.file.crlf);
+        let file = self.file;
+        let mut writer = Writer::new(&body.margin, 0, file.crlf);
+        if file.comment_above(at) {
+            writer.end_line();
+        }
         let (attributes, blocks) =
             (pending.attributes.drain(..), pending.blocks.drain(..));
         writer.body(attributes, blocks, 0, pending.ends.contains(&at));
@@ -897,6 +913,28 @@ mod tests {
             updated("x {\n  # c\n\n  a = 1\n\n}\n", "x { b = 2 }"),
             "x {\n  # c\n\n  b = 2\n}\n"
         );
+    }
+
+    #[test]
+    fn keeps_a_comment_at_the_end_of_a_body_apart_from_new_items() {
+        let tail = "# tail\n\nc = 2\n";
+        assert_eq!(updated("\n\na = 1\n\n# tail\n", "c = 2"), tail);
+        assert_eq!(updated("a = 1\n\n# tail\n", "c = 2"), tail);
+        assert_eq!(updated("a = 1\n# tail\n", "c = 2"), tail);
+        assert_eq!(updated("# tail\n", "c = 2"), tail);
+        assert_eq!(updated("# tail\n", "x {}"), "# tail\n\nx {}\n");
+        assert_eq!(updated("a = 1\n/* c */\n", "c = 2"), "/* c */\n\nc = 2\n");
+        assert_eq!(
+            updated("a = 1\r\n\r\n# tail\r\n", "c = 2"),
+            "# tail\r\n\r\nc = 2\r\n"
+        );
+        assert_eq!(
+            updated("x {\n  a = 1\n  # tail\n}\n", "x { c = 2 }"),
+            "x {\n  # tail\n\n  c = 2\n}\n"
+        );
+        assert_eq!(updated("a = 1 # c\n", "c = 2"), "c = 2\n");
+        assert_eq!(updated("a = 1\n# tail", "c = 2"), "# tail\n\nc = 2\n");
+        assert_eq!(updated("a = 1 # c", "c = 2"), "c = 2\n");
     }
 
     #[test]
