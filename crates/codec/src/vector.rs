@@ -21,7 +21,7 @@ use crate::{Error, Layout, VECTOR_LEN, bits, word};
 pub(crate) const RAW: u8 = 0;
 pub(crate) const FFOR: u8 = 1;
 pub(crate) const DELTA: u8 = 2;
-const RLE: u8 = 3;
+pub(crate) const RLE: u8 = 3;
 
 /// The codec of one vector and its header values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
