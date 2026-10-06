@@ -364,8 +364,7 @@ impl<'a> Writer<'a> {
         self.errors.push(Unwritable::For { span });
     }
 
-    /// Writes a line end: the blank line between an item and a block after it, or
-    /// the end of a last line that has none.
+    /// Writes a line end: the blank line between an item and a block after it.
     pub(crate) fn end_line(&mut self) {
         self.out.push('\n');
     }

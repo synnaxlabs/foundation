@@ -122,6 +122,9 @@ Full text and evidence: `docs/claude/lessons.md`.
   field on each item.
 - **Policies never create channels.** Anything that creates a channel is an explicit
   definition.
+- **Scope by the future, not the first caller.** Judge a build-or-use choice by every
+  user the part will have. Crates and binary size are cheap. Never hand-write a
+  protocol, parser, or transport when a mature library lets us inject I/O and time.
 
 ## Universal code style
 

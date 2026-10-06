@@ -143,6 +143,11 @@ impl Layout {
         self.area
     }
 
+    /// The place in the area of ring offset `offset`.
+    pub(crate) fn place(self, offset: u64) -> u64 {
+        offset % self.area
+    }
+
     /// The most bytes one record body holds.
     #[must_use]
     pub fn body_max(self) -> usize {
@@ -354,13 +359,12 @@ impl Writer {
     /// When `len` is more than the layout's maximum.
     pub(crate) fn append(&mut self, len: usize) -> Result<Plan, Full> {
         let (skipped, size) = self.cost(len)?;
-        let area = self.layout.area;
-        let wrap = (skipped > 0).then(|| self.head % area);
+        let wrap = (skipped > 0).then(|| self.layout.place(self.head));
         let start = self.head + skipped;
         self.head = start + size;
         Ok(Plan {
             wrap,
-            place: start % area,
+            place: self.layout.place(start),
             offset: start,
             next: self.head,
             len,
@@ -411,7 +415,7 @@ impl Writer {
         );
         let size = to_u64((HEADER_LEN + len).next_multiple_of(ALIGN));
         let area = self.layout.area;
-        let rest = area - self.head % area;
+        let rest = area - self.layout.place(self.head);
         let skipped = if size > rest { rest } else { 0 };
         let live = self.head - self.tail;
         let free = (area - live).min(u64::MAX - self.head);
@@ -588,7 +592,7 @@ impl Cursor {
     /// or the rest of one lap.
     fn bound(&self) -> Window {
         let area = self.layout.area;
-        let place = self.at.offset % area;
+        let place = self.layout.place(self.at.offset);
         let len = self.layout.window.min(area - place).min(self.unread());
         let len = usize::try_from(len).expect("invariant: a window fits in memory");
         Window { place, len }
@@ -687,7 +691,7 @@ impl Cursor {
         } = record;
         let offset = self.at.offset;
         let unread = self.unread();
-        let rest = self.layout.area - offset % self.layout.area;
+        let rest = self.layout.area - self.layout.place(offset);
         let (moved, chain, step) = match (Kind::decode(kind), body.whole()) {
             (Some(Kind::Data), _) => (to_u64(size), crc, Step::Data(body)),
             (Some(Kind::Wrap), Some([])) if rest < unread => (rest, crc, Step::Moved),
