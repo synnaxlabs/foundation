@@ -969,13 +969,14 @@ How to read this record:
   as it is. It trusts its voters: one that lies can already break safety, because a
   false `AppendReply` counts as held, so a bound on the term would guard nothing. No
   bound on a term jump spares an honest node that was down, either. Lost: a sender
-  proves a term jump with a signed term, which needs `mesh`. Decided on 2026-10-05 (#352
-  item 2). When the term of the last entry is above `hard.term`, `Raft::new` starts at
-  that term with no vote. The node sends nothing before its write, so no peer counted a
-  vote or an answer that a lost `hard` held. The caller writes `hard` and `entries` in
-  any order, with no atomic write. Lost: the `Ready` doc requires `hard` before
-  `entries`, a patch that each caller must keep and that shows only at a restart. The
-  person decided on 2026-10-05 ("I approve long term fix on 522"), #522.
+  proves a term jump with a signed term, which needs `mesh`. The person decided on
+  2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
+  `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
+  before its write, so no peer counted a vote or an answer that a lost `hard` held. The
+  caller writes `hard` and `entries` in any order, with no atomic write. Lost: the
+  `Ready` doc requires `hard` before `entries`, a patch that each caller must keep and
+  that shows only at a restart. The person decided on 2026-10-05 ("I approve long term
+  fix on 522"), #522.
 - **RAFT LOG (#91)** A leader takes `propose(data)` and returns the entry's `Position`,
   or `Error::NotLeader { leader }` with the leader it knows. A new leader writes an
   empty entry of its term first, so it can commit what came before. It replicates with
@@ -992,7 +993,8 @@ How to read this record:
   node other than the leader it knows is `Error::SecondLeader`: one term has one
   leader, and a node keeps the leader of its term until the term ends, through a
   step-down and a campaign. A node that knows no leader of its term, after a restart or
-  its vote, takes the first (#391). A bad message changes nothing.
+  its vote, takes the first. The person approved it on 2026-10-05 ("Yeah that's fine",
+  #391). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1010,7 +1012,8 @@ How to read this record:
   loss that keeps `applied` fails at `Raft::new` with `Error::AppliedPastLog`. `node`
   shows the error in its status (#648). Lost: the leader sends again from below what
   it counted, which lowers its count under a commit that a quorum may no longer
-  hold. Decided on 2026-10-05 (#352 item 3). Later, at low priority: the leader
+  hold. The person left the choice to the coordinator on 2026-10-05 ("your choice",
+  #352 item 3), and the coordinator chose this. Later, at low priority: the leader
   learns the follower's real last index and stops counting lost entries (#663).
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
@@ -1393,13 +1396,17 @@ How to read this record:
 
 ### 1.12 Access, identity, and secrets
 
-- **C8** A subject is anything that reads or writes (person, agent, program,
-  connector), named in the tree and governed by its region. People, agents, and
-  programs authenticate with keys; a node vouches for its connectors. Access is
-  allow-only, default deny, with no conflicts: `access { subjects, select, allow,
-  authority }`. Actions: read, write, plan, apply, secret, admin. No groups or roles; a
-  group is a selector over subject names. A connector may write channels under its own
-  name by default. `plan` lists access changes separately. SSO comes later.
+- **C8** A subject is anything that reads or writes (person, agent, program, connector),
+  named in the tree and governed by its region. People, agents, and programs
+  authenticate with keys; a node vouches for its connectors. Access is allow-only,
+  default deny, with no conflicts:
+  `access "<name>" { subjects, select, allow, authority }`. Every access policy has a
+  name: it is unique among access policies, it decides the governing region, and the
+  tree key is `<name>.@access` (for example `site_a.operators.@access`). The person
+  approved the name on 2026-10-06 ("Yes I confirm", #729). Actions: read, write, plan,
+  apply, secret, admin. No groups or roles; a group is a selector over subject names. A
+  connector may write channels under its own name by default. `plan` lists access
+  changes separately. SSO comes later.
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -1609,15 +1616,16 @@ How to read this record:
   scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
   (#37) gives files under one data directory, with owned blocks and a sync that
   poisons the file on failure (S4). One handle at a time holds a file open to write,
-  until it drops and its calls end; another write open fails with `Busy` (#392). Each
-  `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP sockets
-  that move GSO and GRO batches with ECN and the local address, TCP streams, and
+  until it drops and its calls end; another write open fails with `Busy` (#392).
+  `File::close` ends after the calls of its handle end; a drop closes without a wait
+  (#516). Each `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP
+  sockets that move GSO and GRO batches with ECN and the local address, TCP streams, and
   listeners. `env::serial` (#431) gives serial ports that move bytes at the line rate,
   with 8 data bits, a parity, and stop bits. Framing belongs to the protocol: a USB
   adapter hides the gap between frames, so a seam that split frames would act
-  differently on `os` and `sim`. A socket, listener, or port may move to another
-  thread before its first poll. The first poll binds it to its thread, and a poll on
-  another thread panics.
+  differently on `os` and `sim`. A socket, listener, or port may move to another thread
+  before its first poll. The first poll binds it to its thread, and a poll on another
+  thread panics.
 - **SIM NETWORK (2026-10-04)** `sim` replaces only the network, not the transport.
   The production carriers (QUIC through `noq-proto`, TLS over TCP, relays) run
   unchanged under simulation, which is why r5 rejected iroh. The network seam lives
@@ -2529,7 +2537,8 @@ Parameters and later choices, recorded and not asked:
 - Failover: X18 (gate start from log records, R13-5 "held, not connected" grace), X43
   (copy mode), R13-10 (three voters for failover; `plan` warns with fewer), R13-6 (send
   after sync vs on receipt).
-- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52.
+- Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
+  tree key `<label>.@<kind>` of a policy (#729).
 - Delivery and wire internals: RECV WAITS (#581).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
