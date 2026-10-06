@@ -1,0 +1,228 @@
+use proptest::prelude::*;
+
+use super::*;
+
+fn patterns(texts: &[&str]) -> Patterns {
+    Patterns::new(texts.iter().copied()).unwrap()
+}
+
+fn policy() -> Definition {
+    let allow = [Action::Read, Action::Write].into_iter().collect();
+    Definition::Access(Policy::new(
+        patterns(&["ops.*"]),
+        patterns(&["site_a.**", "!site_a.@secrets.**"]),
+        allow,
+        Authority(9),
+    ))
+}
+
+fn text(bytes: &mut Vec<u8>, text: &[u8]) {
+    bytes.extend_from_slice(&u64::try_from(text.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(text);
+}
+
+/// The bytes of an access policy, from its parts.
+fn access(subjects: &[&[u8]], select: &[&[u8]], allow: u8, authority: u8) -> Vec<u8> {
+    let mut bytes = vec![VERSION, ACCESS];
+    for list in [subjects, select] {
+        bytes.extend_from_slice(&u64::try_from(list.len()).unwrap().to_le_bytes());
+        for t in list {
+            text(&mut bytes, t);
+        }
+    }
+    bytes.extend_from_slice(&[allow, authority]);
+    bytes
+}
+
+#[test]
+fn writes_the_documented_layout() {
+    let expected = access(
+        &[b"ops.*"],
+        &[b"site_a.**", b"!site_a.@secrets.**"],
+        0b11,
+        9,
+    );
+    assert_eq!(policy().encode(), expected);
+}
+
+#[test]
+fn reads_what_it_writes() {
+    assert_eq!(Definition::decode(&policy().encode()), Ok(policy()));
+}
+
+#[test]
+fn writes_no_authority_without_write() {
+    let read = [Action::Read].into_iter().collect();
+    let policy = Policy::new(patterns(&["a"]), patterns(&["b"]), read, Authority(9));
+    let bytes = Definition::Access(policy).encode();
+    assert_eq!(bytes, access(&[b"a"], &[b"b"], 0b1, 0));
+}
+
+#[test]
+fn refuses_a_newer_or_unknown_version() {
+    let mut bytes = policy().encode();
+    bytes[0] = 2;
+    assert_eq!(Definition::decode(&bytes), Err(Error::Newer { found: 2 }));
+    bytes[0] = 0;
+    assert_eq!(Definition::decode(&bytes), Err(Error::Version { found: 0 }));
+    assert_eq!(Definition::decode(&[]), Err(Error::Truncated { at: 0 }));
+}
+
+#[test]
+fn refuses_an_unknown_kind() {
+    let bytes = [VERSION, 0];
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::Kind { at: 1, tag: 0 })
+    );
+    let bytes = [VERSION, 2];
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::Kind { at: 1, tag: 2 })
+    );
+}
+
+#[test]
+fn refuses_bytes_that_end_early_or_run_on() {
+    let bytes = policy().encode();
+    let end = bytes.len();
+    assert_eq!(
+        Definition::decode(&bytes[..end - 1]),
+        Err(Error::Truncated { at: end - 1 })
+    );
+    let mut longer = bytes;
+    longer.push(0);
+    assert_eq!(
+        Definition::decode(&longer),
+        Err(Error::TrailingBytes { at: end })
+    );
+}
+
+#[test]
+fn refuses_a_count_larger_than_the_bytes_left() {
+    let mut bytes = vec![VERSION, ACCESS];
+    bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+    assert_eq!(Definition::decode(&bytes), Err(Error::Truncated { at: 2 }));
+}
+
+#[test]
+fn refuses_a_pattern_that_is_not_utf8() {
+    let bytes = access(&[b"ab\xff"], &[b"b"], 1, 0);
+    assert_eq!(Definition::decode(&bytes), Err(Error::Utf8 { at: 20 }));
+}
+
+#[test]
+fn refuses_patterns_that_do_not_read() {
+    let bytes = access(&[b"a"], &[b"!b"], 1, 0);
+    let error = Error::Pattern {
+        at: 19,
+        error: name::Error::NoInclude,
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error));
+    assert_eq!(
+        Definition::decode(&bytes).unwrap_err().to_string(),
+        "the patterns at byte 19 do not read: a selector includes no names. Add a \
+         pattern without a leading `!`"
+    );
+    let bytes = access(&[b"a*"], &[b"b"], 1, 0);
+    let error = Error::Pattern {
+        at: 2,
+        error: name::Error::Wildcard { input: "a*".into() },
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error));
+}
+
+#[test]
+fn refuses_bits_that_name_no_action() {
+    let bytes = access(&[b"a"], &[b"b"], 0b100_0001, 0);
+    let error = Error::Actions {
+        at: 36,
+        bits: 0b100_0001,
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the actions 0b01000001 at byte 36 name no action"
+    );
+}
+
+#[test]
+fn refuses_an_authority_without_write() {
+    let bytes = access(&[b"a"], &[b"b"], 0b1, 3);
+    let error = Error::Authority {
+        at: 37,
+        found: Authority(3),
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "authority 3 at byte 37 is on a policy that does not allow write"
+    );
+}
+
+#[test]
+fn shows_patterns_as_written() {
+    let patterns = patterns(&["a.**.**", "!a.b"]);
+    assert_eq!(format!("{patterns:?}"), r#"["a.**.**", "!a.b"]"#);
+    assert_eq!(patterns.texts().collect::<Vec<_>>(), ["a.**.**", "!a.b"]);
+}
+
+fn pattern() -> impl Strategy<Value = String> {
+    let segment = prop_oneof![
+        Just("*".to_owned()),
+        Just("**".to_owned()),
+        "[a-c]{1,2}",
+        "@[a-c]",
+    ];
+    (any::<bool>(), prop::collection::vec(segment, 1..4)).prop_map(|(excluded, s)| {
+        let body = s.join(".");
+        if excluded { format!("!{body}") } else { body }
+    })
+}
+
+fn patterns_strategy() -> impl Strategy<Value = Patterns> {
+    ("[a-c]{1,3}", prop::collection::vec(pattern(), 0..4)).prop_map(|(first, rest)| {
+        Patterns::new(std::iter::once(first.as_str()).chain(rest.iter().map(|s| &**s)))
+            .unwrap()
+    })
+}
+
+fn definition() -> impl Strategy<Value = Definition> {
+    (
+        patterns_strategy(),
+        patterns_strategy(),
+        prop::sample::subsequence(Action::ALL.to_vec(), 0..=6),
+        any::<u8>(),
+    )
+        .prop_map(|(subjects, select, allow, authority)| {
+            let allow = allow.into_iter().collect();
+            Definition::Access(Policy::new(
+                subjects,
+                select,
+                allow,
+                Authority(authority),
+            ))
+        })
+}
+
+proptest! {
+    #[test]
+    fn decodes_each_encoding_to_its_definition(definition in definition()) {
+        prop_assert_eq!(Definition::decode(&definition.encode()), Ok(definition));
+    }
+
+    #[test]
+    fn encodes_each_decoded_byte_string_to_the_same_bytes(
+        definition in definition(),
+        flips in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 1..4),
+    ) {
+        let mut bytes = definition.encode();
+        for (at, byte) in flips {
+            let at = at.index(bytes.len());
+            bytes[at] = byte;
+        }
+        if let Ok(decoded) = Definition::decode(&bytes) {
+            prop_assert_eq!(decoded.encode(), bytes);
+        }
+    }
+}
