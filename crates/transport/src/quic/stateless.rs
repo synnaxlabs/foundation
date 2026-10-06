@@ -72,14 +72,15 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::quic::testing;
+    use crate::quic::pair;
+    use crate::testing;
 
     const V4: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
 
     /// The clock's epoch, and a limit with the simulated entropy.
     fn create() -> (Instant, Limit) {
         testing::run(1, |shard| {
-            let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+            let config = shard.config(pair::SERVER_KEY, Span::SECOND);
             (config.clock.epoch(), Limit::new(&config.entropy))
         })
     }
@@ -130,7 +131,7 @@ mod tests {
     fn hashes_with_a_key_from_entropy() {
         let buckets = |value| {
             testing::run(value, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
                 Limit::new(&config.entropy).bucket(V4)
             })
         };

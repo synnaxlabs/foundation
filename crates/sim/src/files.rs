@@ -11,13 +11,11 @@ use env::files::{Error, Mode, Operation};
 use env::rng::Rng;
 use types::time::Monotonic;
 
-use crate::Crash;
 use crate::disk::{self, Cause, Disk, Handle};
+use crate::{Crash, EIO};
 
 /// The count of call delays in nanoseconds: a call takes 0 to 100 us.
 const DELAYS: u64 = 100_001;
-/// The Linux code for an I/O error (`EIO`), which a fault gives.
-const IO: i32 = 5;
 
 /// One file call, as a driver starts it.
 pub(crate) enum Call {
@@ -119,8 +117,9 @@ pub(crate) struct Files {
     flights: BTreeMap<u64, Flight>,
     /// The calls in flight by end time, then key.
     queue: BTreeSet<(Monotonic, u64)>,
-    /// The calls that ended, until their futures take the result.
-    done: BTreeMap<u64, Ended>,
+    /// The node and result of each call that ended, until its future takes the
+    /// result.
+    done: BTreeMap<u64, (usize, Ended)>,
     /// The waker of each close that waits for the calls of its descriptor, by the key
     /// of its handle.
     closes: BTreeMap<u64, Waker>,
@@ -234,7 +233,7 @@ impl Files {
             if dropped {
                 orphans.extend(self.discard(node, ended));
             } else {
-                self.done.insert(key, ended);
+                self.done.insert(key, (node, ended));
                 wakers.extend(waker);
             }
         }
@@ -258,9 +257,9 @@ impl Files {
         let result = match &call {
             Call::Sync { handle } if failed => {
                 disk.file(handle.inode).tear(key, &mut self.rng);
-                Err(Cause::Code(IO))
+                Err(Cause::Code(EIO))
             }
-            _ if failed => Err(Cause::Code(IO)),
+            _ if failed => Err(Cause::Code(EIO)),
             Call::Open(mode) => disk
                 .open(key, &path, *mode)
                 .map(|(handle, len)| Done::Open { handle, len }),
@@ -318,7 +317,7 @@ impl Files {
         key: u64,
         waker: Waker,
     ) -> (Poll<Ended>, Option<Waker>) {
-        if let Some(ended) = self.done.remove(&key) {
+        if let Some((_, ended)) = self.done.remove(&key) {
             return (Poll::Ready(ended), Some(waker));
         }
         let flight = (self.flights.get_mut(&key))
@@ -326,18 +325,14 @@ impl Files {
         (Poll::Pending, flight.waker.replace(waker))
     }
 
-    /// The future of call `key` of `node` dropped before it took the result. A call
-    /// in flight still ends. Returns what to drop after the lock is released.
-    pub(crate) fn abandon(
-        &mut self,
-        node: usize,
-        key: u64,
-    ) -> (Option<Waker>, Option<Held>) {
+    /// The future of call `key` dropped before it took the result. A call in flight
+    /// still ends. Returns what to drop after the lock is released.
+    pub(crate) fn abandon(&mut self, key: u64) -> (Option<Waker>, Option<Held>) {
         if let Some(flight) = self.flights.get_mut(&key) {
             flight.dropped = true;
             return (flight.waker.take(), None);
         }
-        let ended = (self.done.remove(&key))
+        let (node, ended) = (self.done.remove(&key))
             .expect("invariant: a call whose result was not taken has ended");
         (None, self.discard(node, ended))
     }
@@ -352,45 +347,50 @@ impl Files {
         ended.held
     }
 
-    /// Crashes `node` by `crash` at true time `at`, whose calls in flight have all
-    /// dropped. Each call ends now, in the order of its end time: after a `Process`
-    /// crash each takes effect, and after a `Power` crash only each write does, and
-    /// the disk keeps what is durable. Returns the blocks of the calls, for the
-    /// caller to drop after it releases the lock.
+    /// Crashes `node` by `crash` at true time `at`: each call, result, close, and
+    /// hold of the node ends, a leaked one too. A call in flight ends as one whose
+    /// future dropped, in the order of its end time. After a `Power` crash only each
+    /// write takes effect, and the disk keeps what is durable. Returns the wakers of
+    /// the closes and the blocks of the calls, for the caller to drop after it
+    /// releases the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
         at: Monotonic,
         crash: Crash,
-    ) -> Vec<Held> {
+    ) -> (Vec<Waker>, Vec<Held>) {
         let flights = &self.flights;
         let (cut, queue): (BTreeSet<_>, _) = mem::take(&mut self.queue)
             .into_iter()
             .partition(|(_, key)| flights[key].node == node);
         self.queue = queue;
-        let mut orphans = Vec::new();
+        let (mut closes, mut orphans) = (Vec::new(), Vec::new());
         for (_, key) in cut {
-            let flight = (self.flights.remove(&key))
+            let mut flight = (self.flights.remove(&key))
                 .expect("invariant: a queued call is in flight");
+            flight.dropped = true;
+            let close = flight.call.handle().map(|handle| handle.key);
+            closes.extend(close.and_then(|key| self.closes.remove(&key)));
             let kind = mem::discriminant(&flight.call);
             let applied =
                 crash == Crash::Process || matches!(flight.call, Call::Write { .. });
             let (ok, held) = if applied {
                 let ended = self.apply(key, flight);
-                (ended.result.is_ok(), self.discard(node, ended))
+                (ended.result.is_ok(), ended.held)
             } else {
-                if let Some(handle) = flight.call.handle() {
-                    self.disks[node].release(handle);
-                }
                 (false, flight.held)
             };
             (at, key, kind, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
-        if crash == Crash::Power {
-            self.disks[node].cut_power(&mut self.rng);
+        let leaked: Vec<_> = (self.done)
+            .extract_if(.., |_, (owner, _)| *owner == node)
+            .collect();
+        for (_, (_, ended)) in leaked {
+            orphans.extend(self.discard(node, ended));
         }
-        orphans
+        self.disks[node].crash(crash, &mut self.rng);
+        (closes, orphans)
     }
 
     /// Polls the close of descriptor `handle`: ready when none of its calls is in

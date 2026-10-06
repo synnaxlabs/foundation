@@ -1110,6 +1110,35 @@ mod tests {
         fn prints_its_length() {
             assert_eq!(format!("{:?}", Heap::new(64)), "Heap { len: 64 }");
         }
+
+        #[test]
+        fn is_aligned_and_zeroed() {
+            for len in (1..=512).chain([4_097]) {
+                let heap = Heap::new(len);
+                assert_eq!(heap.base().addr().get() % ALIGN, 0, "{len}");
+                assert_eq!(heap.len(), len);
+                for offset in [0, ALIGN.min(len - 1), len - 1] {
+                    // SAFETY: `offset` is under `len`.
+                    let byte = unsafe { heap.base().add(offset) };
+                    // SAFETY: the bytes are initialized from the start.
+                    let byte = unsafe { byte.read() };
+                    assert_eq!(byte, 0, "{len} at {offset}");
+                }
+            }
+        }
+
+        #[test]
+        #[should_panic(expected = "heap memory of 9223372036854775807 bytes is too")]
+        fn panics_when_the_padded_layout_is_too_large() {
+            drop(Heap::new(isize::MAX as usize));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "Miri stops at an allocation it cannot make")]
+        #[should_panic(expected = "heap memory of 9223372036854775743 bytes is too")]
+        fn panics_when_the_padded_layout_fits_but_cannot_be_allocated() {
+            drop(Heap::new(isize::MAX as usize - ALIGN));
+        }
     }
 
     fn cases() -> ProptestConfig {

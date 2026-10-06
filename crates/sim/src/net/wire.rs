@@ -7,10 +7,17 @@ use std::net::IpAddr;
 use env::rng::Rng;
 use types::time::{Monotonic, Span};
 
+use super::tcp::Segment;
 use super::udp::Datagram;
 use super::{Fate, node};
 use crate::chance::roll;
 use crate::link;
+
+/// A packet in flight.
+pub(super) enum Packet {
+    Datagram(Datagram),
+    Segment(Segment),
+}
 
 /// The links and the packets in flight. Each fate comes from the network's own stream
 /// of the seed.
@@ -18,8 +25,8 @@ pub(super) struct Wire {
     /// The link of each ordered pair of nodes that has no link of its own.
     default: link::Config,
     links: BTreeMap<(usize, usize), link::Config>,
-    /// Datagrams by true arrival time, then by a key in the order they were sent.
-    flights: BTreeMap<(Monotonic, u64), Datagram>,
+    /// Packets by true arrival time, then by a key in the order they were sent.
+    flights: BTreeMap<(Monotonic, u64), Packet>,
     rng: Rng,
     next: u64,
     /// A hash of every send and arrival, in order.
@@ -66,10 +73,12 @@ impl Wire {
             return Fate::Lost;
         }
         let duplicated = roll(&mut self.rng, link.duplication);
-        if duplicated {
-            self.arrive(now, link, datagram.clone());
+        if duplicated && let Some(at) = self.draw(now, link) {
+            self.put(at, Packet::Datagram(datagram.clone()));
         }
-        self.arrive(now, link, datagram);
+        if let Some(at) = self.draw(now, link) {
+            self.put(at, Packet::Datagram(datagram));
+        }
         if duplicated {
             Fate::Duplicated
         } else {
@@ -77,19 +86,26 @@ impl Wire {
         }
     }
 
-    /// Schedules the arrival of `datagram` after the delay of `link` and a draw of its
-    /// jitter. One that would arrive past `u64` nanoseconds never arrives.
-    fn arrive(&mut self, now: Monotonic, link: &link::Config, datagram: Datagram) {
+    /// The true arrival time of a packet sent on `link` at true time `now`: after the
+    /// delay of the link and a draw of its jitter. `None` past `u64` nanoseconds,
+    /// where a packet never arrives.
+    pub(super) fn draw(
+        &mut self,
+        now: Monotonic,
+        link: &link::Config,
+    ) -> Option<Monotonic> {
         let jitter = u64::try_from(link.jitter.nanos())
             .expect("invariant: a checked link has no negative jitter");
         let extra = i64::try_from(self.rng.below(jitter + 1))
             .expect("invariant: a draw up to a jitter fits i64");
-        let at = (now.checked_add(link.delay))
-            .and_then(|at| at.checked_add(Span::from_nanos(extra)));
-        if let Some(at) = at {
-            self.next += 1;
-            self.flights.insert((at, self.next), datagram);
-        }
+        (now.checked_add(link.delay))
+            .and_then(|at| at.checked_add(Span::from_nanos(extra)))
+    }
+
+    /// Puts `packet` in flight to arrive at true time `at`.
+    pub(super) fn put(&mut self, at: Monotonic, packet: Packet) {
+        self.next += 1;
+        self.flights.insert((at, self.next), packet);
     }
 
     /// The true time of the first arrival.
@@ -97,8 +113,8 @@ impl Wire {
         self.flights.first_key_value().map(|(&(at, _), _)| at)
     }
 
-    /// Takes the first datagram that arrives by true time `at`.
-    pub(super) fn pop(&mut self, at: Monotonic) -> Option<Datagram> {
+    /// Takes the first packet that arrives by true time `at`.
+    pub(super) fn pop(&mut self, at: Monotonic) -> Option<Packet> {
         let flight = self.flights.first_entry()?;
         (flight.key().0 <= at).then(|| flight.remove())
     }

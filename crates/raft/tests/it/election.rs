@@ -4,6 +4,7 @@
 use proptest::prelude::*;
 use proptest::sample::Index;
 use raft::{Body, Message, Position, Role, Term};
+use types::node;
 
 use crate::network::{Action, ELECTION, Network, run, run_of_many};
 
@@ -74,6 +75,52 @@ proptest! {
         let elected: Vec<usize> = elected.map(|(at, _)| at).collect();
         prop_assert!(elected.len() == 1 && elected[0] != leader, "{elected:?}");
     }
+
+    // An accepted gap (#719): a node counts a PreVote grant that its voter sent with
+    // no lease, after the voter got its lease back.
+    #[test]
+    fn a_late_prevote_grant_costs_one_election(random in any::<u64>()) {
+        let mut network = Network::new(&[Position::default(); 3], random);
+        let (leader, term) = network.settle(&[])?;
+        let (cut, other) = ((leader + 1) % 3, (leader + 2) % 3);
+        network.cut[cut] = true;
+        while network.nodes[cut].role() != Role::PreCandidate {
+            network.round();
+        }
+        network.cut[cut] = false;
+        network.deliver(Message {
+            from: Network::key(other),
+            to: Network::key(cut),
+            term: Term(term.0 + 1),
+            body: Body::PreVoteReply { granted: true },
+            proof: None,
+        });
+        prop_assert_eq!(network.nodes[cut].role(), Role::Candidate);
+        for _ in 0..4 * ELECTION {
+            network.round();
+        }
+        let agreed = network.agreed();
+        prop_assert!(agreed.is_some_and(|(_, now)| now > term), "{agreed:?}");
+    }
+}
+
+#[test]
+fn a_group_keeps_its_leader_after_a_reply_from_a_node_that_is_not_a_peer() {
+    let mut network = Network::new(&[Position::default(); 3], 0);
+    let agreed = network.settle(&[]).unwrap();
+    let follower = (agreed.0 + 1) % 3;
+    let reply = Message {
+        from: node::Key::from_u128(9),
+        to: Network::key(follower),
+        term: Term(agreed.1.0 + 1),
+        body: Body::HeartbeatReply,
+        proof: None,
+    };
+    network.nodes[follower].step(reply).unwrap();
+    for _ in 0..4 * ELECTION {
+        network.round();
+    }
+    assert_eq!(network.agreed(), Some(agreed));
 }
 
 // An accepted gap (#352 item 2).
@@ -87,6 +134,7 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
         to: Network::key(follower),
         term: Term(u64::MAX),
         body: Body::Heartbeat { commit: 0 },
+        proof: None,
     });
     for _ in 0..10 * ELECTION {
         network.round();
@@ -100,6 +148,32 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
     let states = network.nodes.iter().map(|node| (node.role(), node.term()));
     let states: Vec<_> = states.collect();
     assert_eq!(states, [(Role::Follower, Term(u64::MAX)); 3]);
+}
+
+// A grant carries the term that its pre-campaign asks for. A grant of the current
+// term is a late answer to a pre-campaign from the term before.
+#[test]
+fn a_prevote_grant_from_an_earlier_term_does_not_depose_the_leader() {
+    let mut network = Network::new(&[Position::default(); 3], 0);
+    let agreed = network.settle(&[]).unwrap();
+    let (cut, other) = ((agreed.0 + 1) % 3, (agreed.0 + 2) % 3);
+    network.cut[cut] = true;
+    while network.nodes[cut].role() != Role::PreCandidate {
+        network.round();
+    }
+    network.cut[cut] = false;
+    network.deliver(Message {
+        from: Network::key(other),
+        to: Network::key(cut),
+        term: agreed.1,
+        body: Body::PreVoteReply { granted: true },
+        proof: None,
+    });
+    assert_eq!(network.nodes[cut].role(), Role::PreCandidate);
+    for _ in 0..4 * ELECTION {
+        network.round();
+    }
+    assert_eq!(network.agreed(), Some(agreed));
 }
 
 // Enough cases that each election-safety change tried in review fails a run.

@@ -11,7 +11,7 @@ use env::net::{Ecn, Error};
 use types::time::Monotonic;
 
 use super::wire::Wire;
-use super::{EPHEMERAL, Fate, NOT_AVAILABLE, addresses, covers, node};
+use super::{Fate, NOT_AVAILABLE, addresses, receives};
 
 /// The IPv4 and UDP header bytes of a datagram.
 const V4_HEADERS: usize = 28;
@@ -74,14 +74,6 @@ struct Binding {
 }
 
 impl Binding {
-    /// Whether the socket receives a datagram to `destination`.
-    fn receives(&self, destination: SocketAddr) -> bool {
-        let (local, ip) = (self.local.ip(), destination.ip());
-        self.local.port() == destination.port()
-            && covers(local, ip)
-            && node(ip) == Some(self.node)
-    }
-
     /// Queues `datagram` while the queue takes at most `capacity` bytes, so that, as
     /// on Linux, the last datagram may go past it. Returns its fate, and the waker of
     /// a receive to wake.
@@ -146,29 +138,10 @@ impl<'a> Udp<'a> {
         node: usize,
         config: &Config,
     ) -> Result<Bound, Error> {
-        let local = config.local;
-        let ip = local.ip();
-        if !ip.is_unspecified() && !addresses(node).contains(&ip) {
-            return Err(Error::Io {
-                code: NOT_AVAILABLE,
-            });
-        }
-        let taken = |port: u16| {
-            (self.sockets.bindings.values()).any(|binding| {
-                let other = binding.local.ip();
-                binding.node == node
-                    && binding.local.port() == port
-                    && (covers(ip, other) || covers(other, ip))
-            })
-        };
-        let port = match local.port() {
-            0 => (EPHEMERAL..=u16::MAX).find(|&port| !taken(port)),
-            port => Some(port).filter(|&port| !taken(port)),
-        };
-        let Some(port) = port else {
-            return Err(Error::AddressInUse { local });
-        };
-        let local = SocketAddr::new(ip, port);
+        let bound = (self.sockets.bindings.values())
+            .filter(|binding| binding.node == node)
+            .map(|binding| binding.local);
+        let local = super::bind(node, config.local, &bound)?;
         let [send_batch_max, recv_batch_max] = [(); 2].map(|()| {
             let index = self.wire.rng().below(3);
             let index = usize::try_from(index).expect("invariant: below 3 fits usize");
@@ -242,7 +215,7 @@ impl<'a> Udp<'a> {
         let (source, destination) = (datagram.source, datagram.destination);
         let len = datagram.contents.len();
         let binding = (self.sockets.bindings.values_mut())
-            .find(|binding| binding.receives(destination));
+            .find(|binding| receives(binding.node, binding.local, destination));
         let (fate, waker) = match binding {
             Some(binding) => binding.push(datagram),
             None => (Fate::Dropped, None),

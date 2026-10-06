@@ -28,7 +28,7 @@ attacker can use is a GitHub issue with the `security` label and a failing test.
 | Subject | Sign hellos and session opens with a key in the spec | Go past its `access` allows |
 | Member node | Act as itself and as the connectors placed on it; read and change the traffic of subjects connected through it; use their open sessions until the hello expires; drop or delay what it forwards | Hold another node's key; change the spec |
 | Home of an index | Write any data into the index, run its gate, lie to its readers | Act outside its placement |
-| Voter | Vote and stall its region | Forge a spec change or move a home outside placement |
+| Voter | Vote and stall its region; break `raft` safety (Node to node) | Forge a spec change or move a home outside placement |
 | Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
 | Local user | Read and write the node's files, and so hold its keys and cached secrets and become that member node | Read memory of the process |
@@ -133,21 +133,25 @@ state on `main`.
   append's term. A node that a change removed and that missed its release can win
   an election once no voter has a lease, and lead until it commits the leave
   (#483).
-- `raft` counts a reply only from a voter. But it takes a higher term from any
-  sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
-  #352 (a reply from a node that is not a voter makes the leader step down). #352
-  asks to change RAFT SURFACE for replies.
-- A node that may send to a group and lies can stop the group for good with one
-  message in term `u64::MAX`: each node writes that term to disk, and none can
-  campaign. Only a voter can: `mesh` admits a `raft` message only from a voter of the
-  newest configuration (RAFT VOTERS, #654). Not built (`mesh`). A voter that lies can
-  also break safety, because a false `AppendReply` counts as held, so `raft` trusts
-  its voters. No change in `raft` (RAFT SURFACE, #352 item 2).
-- A voter that does not lead can make a follower commit a voter set alone: it sends
-  one `Append` with a configuration entry in a term the follower has not seen, or in
-  its term before the follower hears that term's leader. The two logs then differ at
-  one index. Open by decision; tests pin both sequences (#391). The long-term fix is
-  a proof of election.
+- `raft` drops a reply from a node that is not a voter, unless a change removed the node
+  and `raft` still sends to it (#352). But it takes a higher term from any sender of a
+  request but a `PreVote`, or a `Vote` to a node with a lease, and from any reply it
+  keeps but a granted `PreVoteReply`.
+- A node that may send to a group and lies can stop the group for good with one message
+  in term `u64::MAX`: each node writes that term to disk, and none can campaign. Only a
+  voter, or a removed node that `raft` still sends to, can: `mesh` admits a `raft`
+  request only from a voter of the newest configuration (RAFT VOTERS, #654), and `raft`
+  drops a reply from any other node. Not built (`mesh`). A voter that lies can also
+  break safety, because a false `AppendReply` counts as held, so `raft` trusts its
+  voters. No change in `raft` for that (RAFT SURFACE, #352 item 2). Proof of election
+  closes the `u64::MAX` case (#750).
+- A voter that does not lead can make a node commit a voter set alone. It sends a
+  heartbeat or an `Append` of a higher term, or a reply of a higher term and then
+  either, or an `Append` in the node's term before the node hears that term's
+  leader. The node follows the voter and writes and commits what it sends. So two
+  nodes can apply different entries at one index, and a forged voter set can take
+  the group over (RAFT LOG). Open by decision; `raft/tests/it/hostile.rs` pins it.
+  The long-term fix is a proof of election (#750).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
@@ -219,9 +223,9 @@ state on `main`.
 
 ### Encoded series
 
-- `codec::validate` and `codec::decode` read series from peers and from disk. A
-  series cannot make `decode` write outside `out`. Fuzzed: `codec_series`,
-  `codec_encoder`.
+- `codec::validate`, `codec::decode`, and `codec::Decoder` read series from peers
+  and from disk. A series cannot make `decode` or `Decoder` write outside `out`.
+  Fuzzed: `codec_series`, `codec_encoder`.
 
 ## Secrets
 
@@ -275,9 +279,11 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
-| `codec_series` | `codec::validate`, `codec::decode` | Both give one result |
+| `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
+| `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
+| `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
@@ -295,5 +301,6 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
-(#64), `types::time::Rate`, and each connector's protocol parser.
+and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
+messages (their encoding is in `mesh`), `spec` tree chunks (#64),
+`types::time::Rate`, and each connector's protocol parser.

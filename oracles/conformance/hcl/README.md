@@ -42,7 +42,7 @@ with its type and position. Add it to the table.
 | An operator, except `-` before a number | `hcl.operator` |
 | `a ? b : c` | `hcl.conditional` |
 | `[for ...]` or `{for ...}` | `hcl.for` |
-| `a[0]`, `f().b` | `hcl.index` |
+| `a[0]`, `f().b`, but not a string index on a name, such as `a["b"]`, which is a segment | `hcl.index` |
 | `a[*].b`, `a.*.b` | `hcl.splat` |
 | `(a)` | `hcl.parentheses` |
 | `p::f()` | `hcl.namespace` |
@@ -65,8 +65,9 @@ only parses, so their verdict is "accepted".
   past the largest `f64` is infinity.
 - A string, a key, a label, a keyword, or a function name is in `"`, with `\` before
   `"` and `\`. Printable ASCII is as it is, and each other character is `\u{hex}`.
-- A reference is `$` and its name, such as `$a.b`. A call is `"f"(value, ...)`, a
-  list is `[value, ...]`, and a map is `{"key" = value, ...}`, by key.
+- A reference is `$` and its name, such as `$a.b`. A string index is a segment, with
+  the escapes of a string but no `"`: `a["b"]` is `$a.b`. A call is `"f"(value, ...)`,
+  a list is `[value, ...]`, and a map is `{"key" = value, ...}`, by key.
 
 HCL makes each object key a string: the number key `007` is `"7"`. A value outside
 this form stops the program with its type and position.

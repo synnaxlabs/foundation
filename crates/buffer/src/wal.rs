@@ -15,7 +15,9 @@
 
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
-use crate::entry;
+use std::fmt;
+
+use crate::entry::{self, ENTRIES_MAX};
 use crate::record::{
     self, ALIGN, AREA_START, BLOCK, Body, Check, HEADER_LEN, Head, Kind, Record,
 };
@@ -27,8 +29,10 @@ const RESTART_LEN: usize = 4;
 const RESTART: usize = ALIGN;
 const _: () = assert!(HEADER_LEN + RESTART_LEN <= RESTART, "a restart record fits");
 
-/// The smallest body a layout allows: the table of one entry.
-const BODY_MIN: usize = entry::table_len(1);
+/// The smallest body a layout allows: the rest of a block after the record header.
+/// A record takes whole blocks, so a smaller body saves no disk.
+const BODY_MIN: usize = ALIGN - HEADER_LEN;
+const _: () = assert!(entry::table_len(1) <= BODY_MIN, "a body holds one entry");
 
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
@@ -93,16 +97,21 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The least [`entry_max`](Self::entry_max) of any layout: the bytes of parts
+    /// that one entry alone holds in a record at the smallest `body_max`.
+    pub const ENTRY_MAX_MIN: usize = BODY_MIN - entry::table_len(1);
+
     /// A ring of `area` bytes whose records hold a body of at most `body_max` bytes.
     ///
     /// # Errors
     ///
     /// [`Unfit`] when `area` is not a multiple of [`ALIGN`], when `body_max` is
-    /// under the table of one entry or over `u32::MAX`, when `area` is less than
-    /// twice the largest record (a 9-byte header and `body_max`, in whole 4096-byte
-    /// blocks), or when the ring file (two header blocks and the area) does not fit
-    /// in a `u64`. A ring of that length that holds only its restart record takes
-    /// any record, wherever the restart record is.
+    /// under 4087 bytes (one block less the record header) or over `u32::MAX`,
+    /// when `area` is less than twice the largest record (a 9-byte header and
+    /// `body_max`, in whole 4096-byte blocks), or when the ring file (two header
+    /// blocks and the area) does not fit in a `u64`. A ring of that length that
+    /// holds only its restart record takes any record, wherever the restart record
+    /// is.
     pub fn new(area: u64, body_max: usize) -> Result<Self, Unfit> {
         let window = HEADER_LEN
             .checked_add(body_max)
@@ -141,18 +150,93 @@ impl Layout {
     }
 
     /// The most bytes of parts in a batch of one entry that
-    /// [`Buffer::append`](crate::Buffer::append) takes: one byte more gives
-    /// [`Error::Large`](crate::Error::Large) with [`Limit::Body`](crate::Limit::Body).
-    /// Each entry of a larger batch adds to the record's table, so its entries hold
-    /// less in all.
+    /// [`Buffer::append`](crate::Buffer::append) takes, at least
+    /// [`ENTRY_MAX_MIN`](Self::ENTRY_MAX_MIN): one byte more gives
+    /// [`Rejected::Large`](crate::Rejected::Large) with
+    /// [`Limit::Body`](crate::Limit::Body). Each entry of a larger batch adds to the
+    /// record's table, so its entries hold less in all.
     #[must_use]
     pub fn entry_max(self) -> usize {
-        self.body_max - BODY_MIN
+        self.body_max - entry::table_len(1)
+    }
+
+    /// Checks a batch of `entries` entries, with `parts` parts and `bytes` bytes of
+    /// parts in all, against the limits of one record of this ring, as
+    /// [`Buffer::append`](crate::Buffer::append) does before it queues the batch.
+    ///
+    /// # Errors
+    ///
+    /// The first [`Limit`] the batch is over, in the order of [`Limit`]. `append`
+    /// then gives [`Rejected::Large`](crate::Rejected::Large) with the same limit,
+    /// unless the buffer ended with a file error, which `append` reports first.
+    pub fn check(
+        self,
+        entries: usize,
+        parts: usize,
+        bytes: usize,
+    ) -> Result<(), Limit> {
+        if entries > ENTRIES_MAX {
+            return Err(Limit::Entries { count: entries });
+        }
+        if parts > ENTRIES_MAX {
+            return Err(Limit::Parts { count: parts });
+        }
+        let len = entry::table_len(entries).saturating_add(bytes);
+        if len > self.body_max {
+            return Err(Limit::Body {
+                len,
+                max: self.body_max,
+            });
+        }
+        Ok(())
     }
 
     /// The length of the ring file: the two header blocks and the area.
     pub(crate) fn file_len(self) -> u64 {
         AREA_START + self.area
+    }
+}
+
+/// A limit of one record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    /// More entries than one record holds.
+    Entries {
+        /// The entries of the batch.
+        count: usize,
+    },
+    /// More parts, in all the entries together, than one record holds.
+    Parts {
+        /// The parts of the batch.
+        count: usize,
+    },
+    /// A record body, the entry table and the parts, over the layout's `body_max`.
+    Body {
+        /// Bytes of the body, or `usize::MAX` when the body is past it.
+        len: usize,
+        /// The layout's `body_max`.
+        max: usize,
+    },
+}
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Entries { count } => write!(
+                f,
+                "the batch has {count} entries, and a record holds at most \
+                 {ENTRIES_MAX}"
+            ),
+            Self::Parts { count } => write!(
+                f,
+                "the batch has {count} parts, and a record holds at most {ENTRIES_MAX}"
+            ),
+            Self::Body { len, max } => write!(
+                f,
+                "the batch needs a record body of {len} bytes, and a record of this \
+                 ring holds at most {max}"
+            ),
+        }
     }
 }
 
@@ -283,9 +367,9 @@ impl Writer {
         })
     }
 
-    /// The most bytes a record body holds.
-    pub(crate) fn body_max(&self) -> usize {
-        self.layout.body_max
+    /// The layout of the ring.
+    pub(crate) fn layout(&self) -> Layout {
+        self.layout
     }
 
     /// Checks that a record with a body of `len` bytes fits before the tail.
@@ -931,11 +1015,7 @@ mod tests {
             let block = 4096;
             let cases = [
                 ("an area of part blocks", 7 * block + 1, 4087),
-                (
-                    "a body under one entry table",
-                    8 * block,
-                    entry::table_len(1) - 1,
-                ),
+                ("a body under one block less the header", 8 * block, 4086),
                 ("an area of one record of two blocks", 2 * block, 4088),
                 ("an area of one record of one block", block, 4087),
                 ("an area of two records less a block", 3 * block, 4088),
@@ -960,9 +1040,58 @@ mod tests {
         }
 
         #[test]
-        fn takes_a_body_of_one_entry_table() {
-            let window = Layout::new(2 * 4096, entry::table_len(1)).map(|l| l.window);
-            assert_eq!(window, Ok(4096));
+        fn checks_a_batch_against_each_limit_at_its_boundary() {
+            let layout = Layout::new(32 * 4096, 60_000).expect("a ring of 32 blocks");
+            let body = |len| Limit::Body { len, max: 60_000 };
+            let cases = [
+                ("no entry", (0, 0, 0), Ok(())),
+                ("the most entries", (1023, 0, 0), Ok(())),
+                (
+                    "one entry too many",
+                    (1024, 0, 0),
+                    Err(Limit::Entries { count: 1024 }),
+                ),
+                ("the most parts", (1023, 1023, 0), Ok(())),
+                (
+                    "one part too many",
+                    (1, 1024, 0),
+                    Err(Limit::Parts { count: 1024 }),
+                ),
+                ("a body of body_max", (1, 1, 59_945), Ok(())),
+                ("a body one byte over", (1, 1, 59_946), Err(body(60_001))),
+                (
+                    "a table alone over the body",
+                    (1023, 0, 10_000),
+                    Err(body(62_177)),
+                ),
+                (
+                    "over the entries and the parts",
+                    (1024, 2048, 0),
+                    Err(Limit::Entries { count: 1024 }),
+                ),
+                (
+                    "over the parts and the body",
+                    (1023, 1024, 100_000),
+                    Err(Limit::Parts { count: 1024 }),
+                ),
+                (
+                    "bytes past usize",
+                    (1, 1, usize::MAX),
+                    Err(body(usize::MAX)),
+                ),
+            ];
+            for (case, (entries, parts, bytes), expected) in cases {
+                assert_eq!(layout.check(entries, parts, bytes), expected, "{case}");
+            }
+        }
+
+        #[test]
+        fn holds_an_entry_of_4032_bytes_at_the_smallest_body() {
+            assert_eq!(Layout::ENTRY_MAX_MIN, 4032);
+            assert_eq!(
+                Layout::new(2 * 4096, 4087).map(Layout::entry_max),
+                Ok(Layout::ENTRY_MAX_MIN)
+            );
         }
 
         #[test]
@@ -980,7 +1109,7 @@ mod tests {
             /// wherever the restart record is.
             #[test]
             fn takes_the_largest_record_after_the_restart_record_at_any_tail(
-                body_max in entry::table_len(1)..=3 * ALIGN - HEADER_LEN,
+                body_max in BODY_MIN..=3 * ALIGN - HEADER_LEN,
                 tail in 0..64u64,
             ) {
                 let record = to_u64((HEADER_LEN + body_max).next_multiple_of(ALIGN));

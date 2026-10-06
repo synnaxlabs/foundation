@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use serde_json::Value;
+
 use crate::select;
 
 /// The `MIRIFLAGS` of each Miri pass.
@@ -11,17 +13,28 @@ const PASSES: [&str; 2] = [
     "-Zmiri-strict-provenance -Zmiri-tree-borrows",
 ];
 
-/// Runs `cargo miri test` once per pass in [`PASSES`] on each workspace crate whose
-/// source names `unsafe_code`, the lint that each `unsafe` use must expect. It uses
-/// rustup and the nightly in `rust-toolchain-nightly`. It fails when a crate fails or
-/// runs no tests.
+/// Crates whose `unsafe` code only calls the OS, which Miri cannot run. Tests on the
+/// real OS check them (BLOCK MEMORY).
+pub(crate) const SKIPPED: [&str; 1] = ["os"];
+
+/// The workspace crates whose source names `unsafe_code`, the lint that each `unsafe`
+/// use must expect, except those in [`SKIPPED`].
+pub(crate) fn packages(metadata: &Value) -> Result<Vec<select::Package>, String> {
+    let mut packages =
+        select::packages(metadata, |s| select::has_word(s, "unsafe_code"))?;
+    packages.retain(|package| !SKIPPED.contains(&package.name.as_str()));
+    Ok(packages)
+}
+
+/// Runs `cargo miri test` once per pass in [`PASSES`] on each crate of [`packages`].
+/// It uses rustup and the nightly in `rust-toolchain-nightly`. It fails when a crate
+/// fails or runs no tests.
 pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let pin = root.join("rust-toolchain-nightly");
     let nightly = std::fs::read_to_string(&pin)
         .map_err(|e| vec![format!("{}: {e}", pin.display())])?;
     let metadata = crate::metadata(root).map_err(|e| vec![e])?;
-    let packages = select::packages(&metadata, |s| select::has_word(s, "unsafe_code"))
-        .map_err(|e| vec![e])?;
+    let packages = packages(&metadata).map_err(|e| vec![e])?;
     if packages.is_empty() {
         eprintln!("no crate names `unsafe_code`, so Miri has nothing to check");
         return Ok(());
@@ -29,29 +42,20 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
     for flags in PASSES {
         for package in &packages {
-            let output = Command::new("rustup")
-                .current_dir(root)
-                .args([
-                    "run",
-                    nightly.trim(),
-                    "cargo",
-                    "miri",
-                    "test",
-                    "-p",
-                    package,
-                ])
-                .env("MIRIFLAGS", flags)
+            let output = command(root, nightly.trim(), package, flags)
                 .stderr(Stdio::inherit())
                 .output()
                 .map_err(|e| vec![format!("rustup: {e}")])?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             eprint!("{stdout}");
             if !output.status.success() {
-                problems.push(format!("Miri with `{flags}` failed in `{package}`"));
+                problems
+                    .push(format!("Miri with `{flags}` failed in `{}`", package.name));
             } else if tests_ran(&stdout) == 0 {
                 problems.push(format!(
-                    "`{package}` names `unsafe_code` but runs no tests under Miri. Add \
-                     tests that reach its unsafe code."
+                    "`{}` names `unsafe_code` but runs no tests under Miri. Add tests \
+                     that reach its unsafe code.",
+                    package.name
                 ));
             }
         }
@@ -61,6 +65,22 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     } else {
         Err(problems)
     }
+}
+
+/// The command that runs Miri with `flags` on `package` of the workspace at `root`,
+/// on the toolchain `nightly`.
+fn command(
+    root: &Path,
+    nightly: &str,
+    package: &select::Package,
+    flags: &str,
+) -> Command {
+    let mut command = Command::new("rustup");
+    command
+        .current_dir(root)
+        .args(["run", nightly, "cargo", "miri", "test", "-p", &package.id])
+        .env("MIRIFLAGS", flags);
+    command
 }
 
 /// The sum of N over the `running N tests` lines of libtest output.
@@ -81,6 +101,36 @@ mod tests {
         let output = "\nrunning 2 tests\ntest a ... ok\n\nrunning 0 tests\n\n\
                       running 1 test\ntest b ... ok\n";
         assert_eq!(tests_ran(output), 3);
+    }
+
+    #[test]
+    fn packages_are_the_crates_that_name_unsafe_code() {
+        let metadata = crate::metadata(&crate::fixture()).unwrap();
+        let picked = packages(&metadata).unwrap();
+        let names: Vec<_> = picked.into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["model"]);
+    }
+
+    #[test]
+    fn selects_the_package_by_its_id() {
+        let package = select::Package {
+            id: "path+file:///w/crates/model#0.0.0".to_string(),
+            name: "model".to_string(),
+        };
+        let command = command(Path::new("/w"), "nightly-x", &package, PASSES[0]);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "run",
+                "nightly-x",
+                "cargo",
+                "miri",
+                "test",
+                "-p",
+                &package.id
+            ]
+        );
     }
 
     #[test]

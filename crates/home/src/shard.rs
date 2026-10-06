@@ -1,25 +1,27 @@
-//! The write path of one shard: the indexes it carries, their writers, and each frame
-//! from split to one buffer append.
+//! The indexes one shard carries: their writers, each frame from split to one buffer
+//! append, and their readers.
 
 use std::fmt;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use block::Block;
 use buffer::{Buffer, Entry};
 use types::channel::Slot;
 use types::frame::key_set::{self, KeySet};
-use types::frame::{self, Draft, Label, Path};
+use types::frame::{self, Draft, Frame, Label, Path};
 use types::hash;
 use types::time::{Interval, Monotonic, Stamp};
 
 use crate::Refusal;
 use crate::index::{Accepted, Index};
+use crate::reader;
 use crate::split::Split;
 use crate::writer::{self, Writer};
 use crate::{handoff, order, split, stored};
 
-/// The write path of one shard. Each call is on the shard's thread.
+/// The indexes of one shard, with their writers and readers. Each call is on the
+/// shard's thread.
 #[derive(Debug)]
 pub(crate) struct Shard {
     buffer: Buffer,
@@ -31,6 +33,8 @@ pub(crate) struct Shard {
     writers: hash::Map<writer::Key, Session>,
     next: u64,
     scratch: Scratch,
+    /// The readers of each index, by the same place as `indexes`.
+    readers: reader::Set,
 }
 
 /// The shard's state for an open writer.
@@ -53,26 +57,13 @@ struct Claim {
 #[derive(Debug, Default)]
 struct Scratch {
     split: split::Scratch,
-    /// The check of each present group, in group order.
-    checks: Vec<(u32, Result<Accepted, Refusal>)>,
-    batch: Batch,
+    /// The check of each present group, in group order, with its index frame once
+    /// frozen.
+    checks: Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
+    /// The stored entry of each accepted group, in group order. Empty between
+    /// appends.
+    entries: Vec<Entry>,
     outcomes: Vec<Outcome>,
-}
-
-/// The stored bodies of one frame's append. Empty between appends.
-#[derive(Debug, Default)]
-struct Batch {
-    /// The stored body of each accepted group, in group order.
-    bodies: Vec<Body>,
-}
-
-/// The stored body of one accepted group.
-#[derive(Debug)]
-struct Body {
-    group: u32,
-    range: frame::Range,
-    last: Option<Stamp>,
-    parts: [Block; 2],
 }
 
 /// What became of one group of a frame.
@@ -107,8 +98,9 @@ pub(crate) enum Outcome {
 pub(crate) enum Error {
     /// The frame is labeled resend, which the home does not take yet.
     Resend,
-    /// A backfill frame found no room in the ring or the pool. No seq moves, and the
-    /// writer writes the frame again later.
+    /// A backfill frame found no room in the ring or the pool. No seq moves. The pool
+    /// has room again when commits end and readers take their frames. The ring has
+    /// room again only when records leave it, which no write does.
     Full,
     /// The frame is too large for one write. Nothing is spent: the writer splits the
     /// frame by samples or by indexes and writes each part.
@@ -133,24 +125,11 @@ impl std::error::Error for Error {}
 impl Shard {
     /// A shard over `buffer` that carries no index yet. Index frames, stored headers,
     /// and handoff bodies come from `pool`, the pool of `buffer`.
-    ///
-    /// # Panics
-    ///
-    /// If one entry alone in a record of `buffer` holds less than the largest handoff
-    /// body.
     pub(crate) fn new(
         buffer: Buffer,
         pool: Rc<block::Pool>,
         limits: order::Config,
     ) -> Self {
-        let layout = buffer.layout();
-        let entry_max = layout.entry_max();
-        assert!(
-            entry_max >= handoff::MAX_BYTES,
-            "the ring's body_max of {} is under {}, the least that holds a handoff",
-            layout.body_max(),
-            layout.body_max() - entry_max + handoff::MAX_BYTES
-        );
         Self {
             buffer,
             pool,
@@ -160,6 +139,7 @@ impl Shard {
             writers: hash::Map::default(),
             next: 0,
             scratch: Scratch::default(),
+            readers: reader::Set::default(),
         }
     }
 
@@ -177,10 +157,13 @@ impl Shard {
                 seq: tail.seq,
             }
         };
-        let index = Index::new(self.limits, tail(Path::Live), tail(Path::Backfill));
-        let carried = self.places.insert(slot, self.indexes.len());
+        let live = tail(Path::Live);
+        let index = Index::new(self.limits, live, tail(Path::Backfill));
+        let place = self.indexes.len();
+        let carried = self.places.insert(slot, place);
         assert!(carried.is_none(), "the shard carries {slot:?} already");
         self.indexes.push(index);
+        self.readers.carry(place, slot, live.seq);
     }
 
     /// Opens `writer` on each index of its key set at monotonic time `now`, and
@@ -203,18 +186,12 @@ impl Shard {
             set,
         } = writer;
         let entries = set.entries();
-        let claims = set
-            .groups()
-            .iter()
-            .map(|&entry| {
-                let entry = &entries[entry];
-                let Some(&place) = self.places.get(&entry.slot) else {
-                    panic!("the shard does not carry index {}", entry.key);
-                };
-                let key = self.indexes[place].gate.open(control.clone(), lease, now);
-                Claim { place, key }
-            })
-            .collect();
+        let mut claims = Vec::with_capacity(set.groups().len());
+        for &entry in set.groups() {
+            let place = self.place(entries[entry].slot);
+            let key = self.indexes[place].gate.open(control.clone(), lease, now);
+            claims.push(Claim { place, key });
+        }
         let session = Session { set, claims };
         self.record_all(&session, mesh);
         let key = writer::Key(self.next);
@@ -277,13 +254,13 @@ impl Shard {
         };
         let scratch = &mut self.scratch;
         let mut split = scratch.split.split(&session.set, frame);
-        for (group, stamps) in split.groups() {
+        while let Some((group, stamps)) = split.next() {
             let (claim, _) = session.claim(group);
             let index = &mut self.indexes[claim.place];
             let checked = index.check(claim.key, path, stamps, now, mesh);
-            scratch.checks.push((group, checked));
+            scratch.checks.push((group, checked, None));
         }
-        let groups = scratch.checks.iter().map(|&(group, _)| group);
+        let groups = scratch.checks.iter().map(|&(group, ..)| group);
         let recorded = record(
             &self.buffer,
             &self.pool,
@@ -292,21 +269,28 @@ impl Shard {
             groups,
             mesh,
         );
-        let batch = &mut scratch.batch;
-        let made =
-            batch.bodies(&self.pool, &mut split, &session.set, &mut scratch.checks);
+        let entries = &mut scratch.entries;
+        let made = freeze(
+            entries,
+            &self.pool,
+            &mut split,
+            &session.set,
+            &mut scratch.checks,
+            mesh.latest,
+        );
         drop(split);
         // Made also when a handoff found no room: freezing gives a lost live frame to
         // latest readers.
         let ready = made.is_ok() && recorded == Ok(true);
         if !ready {
-            batch.clear();
+            entries.clear();
         }
         let appended = match made {
             Err(block::Error::TooLarge { .. }) if recorded == Ok(true) => {
                 Err(Error::Large)
             }
-            _ => batch.append(&self.buffer, session, path, mesh),
+            // An empty append still reports a failed commit.
+            _ => room(self.buffer.append(entries.drain(..))),
         };
         let room =
             recorded
@@ -321,6 +305,7 @@ impl Shard {
                 &mut self.indexes,
                 session,
                 room,
+                &mut self.readers,
                 &mut scratch.outcomes,
             )),
             Err(error) => {
@@ -330,14 +315,115 @@ impl Shard {
         }
     }
 
-    /// Resolves when the next group commit ends.
-    pub(crate) fn committed(&self) -> buffer::Commit<'_> {
+    /// Resolves when every frame written before the call is on disk: at once when
+    /// none waits, else at the end of the group commit that holds the last of them.
+    /// Gives the error that ended the buffer when it ended before they were on disk.
+    /// Commits run without this future, so a caller may drop it. Call
+    /// [`woken`](Self::woken) after it resolves.
+    pub(crate) fn committed(&self) -> buffer::Commit {
         self.buffer.committed()
     }
 
     /// The first seq on `path` of the index at `slot` that is not on disk.
     pub(crate) fn stored(&self, slot: Slot, path: Path) -> u64 {
         self.buffer.durable(slot, path).seq
+    }
+
+    /// Opens an unnamed complete reader on the index at `slot`, with a credit of
+    /// `limit_bytes`. From the index's live tail on, it gets each live frame after
+    /// the commit that holds it, while it has credit for the frame.
+    ///
+    /// # Panics
+    ///
+    /// If the shard does not carry `slot`.
+    pub(crate) fn open_complete(
+        &mut self,
+        slot: Slot,
+        limit_bytes: u64,
+    ) -> delivery::complete::Key {
+        let place = self.place(slot);
+        let live = self.indexes[place].live_tail();
+        self.readers.open_complete(place, live, limit_bytes)
+    }
+
+    /// Opens an unnamed latest reader on the index at `slot`, at mesh time `mesh`. It
+    /// gets the index's newest live frame, before its commit.
+    ///
+    /// # Panics
+    ///
+    /// If the shard does not carry `slot`.
+    pub(crate) fn open_latest(
+        &mut self,
+        slot: Slot,
+        mesh: Interval,
+    ) -> delivery::latest::Key {
+        self.readers.open_latest(self.place(slot), mesh.latest)
+    }
+
+    /// Raises the credit of the complete reader `session` on the index at `slot` to
+    /// `limit_bytes` since it opened. A limit that is not higher changes nothing, and
+    /// so does a grant to a reader that is not open: a grant can arrive after its
+    /// reader closes.
+    ///
+    /// # Panics
+    ///
+    /// If the shard does not carry `slot`, or its readers never gave `session`.
+    pub(crate) fn grant(
+        &mut self,
+        slot: Slot,
+        session: delivery::complete::Key,
+        limit_bytes: u64,
+    ) {
+        self.readers.grant(self.place(slot), session, limit_bytes);
+    }
+
+    /// Takes the next frame of the reader `session` on the index at `slot`, or `None`
+    /// when none waits.
+    ///
+    /// # Panics
+    ///
+    /// If the reader is not open.
+    pub(crate) fn take(&mut self, slot: Slot, session: delivery::Key) -> Option<Frame> {
+        self.readers.take(self.place(slot), session)
+    }
+
+    /// Closes the reader `session` on the index at `slot` at mesh time `mesh`. Its
+    /// waiting frames do not go out, and [`woken`](Self::woken) does not name it.
+    ///
+    /// # Panics
+    ///
+    /// If the reader is not open.
+    pub(crate) fn close_reader(
+        &mut self,
+        slot: Slot,
+        session: delivery::Key,
+        mesh: Interval,
+    ) {
+        self.readers.close(self.place(slot), session, mesh.latest);
+    }
+
+    /// Replaces `keys` with the readers to wake since the last call, each once, in slot
+    /// order and with the latest readers of an index first. Complete readers first get
+    /// the live frames now on disk. A key is a hint: take from each until
+    /// [`take`](Self::take) gives `None`. Call it after each write and each commit.
+    /// When a commit ended since the last call, it reads each index with live frames
+    /// queued for complete readers; else it reads none. Pass the same `keys` each
+    /// time: the shard swaps it for its own, so neither allocates once both are large
+    /// enough.
+    pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
+        self.readers.woken(&self.buffer, keys);
+    }
+
+    /// The place in `indexes` of the index at `slot`.
+    ///
+    /// # Panics
+    ///
+    /// If the shard does not carry `slot`.
+    fn place(&self, slot: Slot) -> usize {
+        let Some(&place) = self.places.get(&slot) else {
+            panic!("the shard does not carry the index at {slot:?}");
+        };
+        place
     }
 
     /// Appends the unrecorded handoff of each index of `session`.
@@ -367,66 +453,30 @@ impl Session {
     }
 }
 
-impl Batch {
-    /// Adds the stored body of each accepted group of `checks`, in group order, with
-    /// its index frame from `split`.
-    fn bodies(
-        &mut self,
-        pool: &block::Pool,
-        split: &mut Split<'_>,
-        set: &KeySet,
-        checks: &mut [(u32, Result<Accepted, Refusal>)],
-    ) -> Result<(), block::Error> {
-        for (group, checked) in checks {
-            if let Ok(accepted) = checked {
-                let draft = split.frame(pool, *group)?;
-                let parts = stored::body(pool, accepted.freeze(draft, *group), set)?;
-                self.bodies.push(Body {
-                    group: *group,
-                    range: range(accepted),
-                    last: accepted.last(),
-                    parts,
-                });
-            }
+/// Freezes the index frame from `split` of each accepted group of `checks` into its
+/// check, and pushes its stored entry onto `entries`, in group order, at mesh time
+/// `stored_at`.
+///
+/// # Errors
+///
+/// [`block::Error`] when `pool` has no block for an index frame or a header.
+fn freeze(
+    entries: &mut Vec<Entry>,
+    pool: &block::Pool,
+    split: &mut Split<'_>,
+    set: &KeySet,
+    checks: &mut [(u32, Result<Accepted, Refusal>, Option<Frame>)],
+    stored_at: Stamp,
+) -> Result<(), block::Error> {
+    for (group, checked, frozen) in checks {
+        if let Ok(accepted) = checked {
+            let draft = split.frame(pool, *group)?;
+            let frame = frozen.insert(accepted.freeze(draft, *group));
+            let last = accepted.last();
+            entries.push(stored::entry(pool, frame, set, last, stored_at)?);
         }
-        Ok(())
     }
-
-    /// Appends the batch as one record on `path` at mesh time `mesh`, and empties
-    /// it. Returns whether it found room. An empty batch appends nothing.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Large`] when no record holds the batch. [`Error::Disk`] after a failed
-    /// commit, also for an empty batch.
-    fn append(
-        &mut self,
-        buffer: &Buffer,
-        session: &Session,
-        path: Path,
-        mesh: Interval,
-    ) -> Result<bool, Error> {
-        let bodies = self.bodies.drain(..).map(|body| {
-            let (_, entry) = session.claim(body.group);
-            Entry {
-                index: entry.key,
-                slot: entry.slot,
-                path,
-                first: body.range.seq,
-                len: body.range.count,
-                stored_at: mesh.latest,
-                last: body.last,
-                tag: stored::TAG,
-                parts: body.parts.into(),
-            }
-        });
-        room(buffer.append(bodies))
-    }
-
-    /// Empties the batch.
-    fn clear(&mut self) {
-        self.bodies.clear();
-    }
+    Ok(())
 }
 
 /// Appends the unrecorded handoff of the index of each of `groups` of `session`, each
@@ -452,8 +502,8 @@ fn record(
         let Some((handoff, first)) = index.handoff() else {
             continue;
         };
-        let parts = match handoff::body(pool, handoff) {
-            Ok(parts) => parts,
+        let appended = match handoff::entry(pool, handoff, entry, first, mesh.latest) {
+            Ok(handoff) => buffer.append([handoff]),
             Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
                 all = false;
                 continue;
@@ -462,18 +512,7 @@ fn record(
                 panic!("invariant: the pool of the ring holds a handoff: {error}")
             }
         };
-        let appended = buffer.append([Entry {
-            index: entry.key,
-            slot: entry.slot,
-            path: Path::Live,
-            first,
-            len: 0,
-            stored_at: mesh.latest,
-            last: None,
-            tag: handoff::TAG,
-            parts: parts.into(),
-        }]);
-        if let Err(buffer::Error::Large(limit)) = appended {
+        if let Err(buffer::Rejected::Large(limit)) = appended {
             panic!("invariant: a record holds one handoff: {limit}");
         }
         if room(appended)? {
@@ -486,27 +525,37 @@ fn record(
 }
 
 /// Spends the seq of each accepted group of `checks`, and makes the outcome of each
-/// present group into `out`: applied when the append found `room`, else lost.
+/// present group into `out`: applied when the append found `room`, else lost. Each
+/// frame goes to `readers`.
 fn spend<'a>(
-    checks: &mut Vec<(u32, Result<Accepted, Refusal>)>,
+    checks: &mut Vec<(u32, Result<Accepted, Refusal>, Option<Frame>)>,
     indexes: &mut [Index],
     session: &Session,
     room: bool,
+    readers: &mut reader::Set,
     out: &'a mut Vec<Outcome>,
 ) -> &'a [Outcome] {
     out.clear();
-    for (group, checked) in checks.drain(..) {
+    for (group, checked, frozen) in checks.drain(..) {
         let (claim, entry) = session.claim(group);
         let slot = entry.slot;
+        let index = &mut indexes[claim.place];
         out.push(match checked {
+            Ok(accepted) if room => {
+                let seq = accepted.seq();
+                let range = range(&seq);
+                index.spend(accepted);
+                let frame = frozen.expect("invariant: a stored frame was frozen");
+                readers.applied(claim.place, frame, seq);
+                Outcome::Applied { slot, range }
+            }
             Ok(accepted) => {
-                let range = range(&accepted);
-                indexes[claim.place].advance(accepted);
-                if room {
-                    Outcome::Applied { slot, range }
-                } else {
-                    Outcome::Lost { slot, range }
+                let range = range(&accepted.seq());
+                index.spend(accepted);
+                if let Some(frame) = frozen {
+                    readers.lost(claim.place, frame);
                 }
+                Outcome::Lost { slot, range }
             }
             Err(refusal) => Outcome::Refused { slot, refusal },
         });
@@ -514,9 +563,8 @@ fn spend<'a>(
     out
 }
 
-/// The seq range of an accepted group.
-fn range(accepted: &Accepted) -> frame::Range {
-    let seq = accepted.seq();
+/// The seq range of an accepted group at `seq`.
+fn range(seq: &Range<u64>) -> frame::Range {
     let count = u32::try_from(seq.end - seq.start)
         .expect("invariant: a group holds at most u32::MAX samples");
     frame::Range {
@@ -531,25 +579,12 @@ fn range(accepted: &Accepted) -> frame::Range {
 ///
 /// [`Error::Large`] when no record holds the batch, and [`Error::Disk`] after a
 /// failed commit.
-///
-/// # Panics
-///
-/// If the append failed as only an open fails.
-fn room(appended: Result<(), buffer::Error>) -> Result<bool, Error> {
-    use buffer::Error::{Damaged, Invalid, Length, Missing, Unfit, Version};
+fn room(appended: Result<(), buffer::Rejected>) -> Result<bool, Error> {
     match appended {
         Ok(()) => Ok(true),
-        Err(buffer::Error::Full { .. } | buffer::Error::Pool(_)) => Ok(false),
-        Err(buffer::Error::Large(_)) => Err(Error::Large),
-        Err(buffer::Error::Files(error)) => Err(Error::Disk(error)),
-        Err(
-            error @ (Length { .. }
-            | Missing
-            | Damaged
-            | Version(_)
-            | Unfit(_)
-            | Invalid { .. }),
-        ) => panic!("invariant: an append never fails as an open: {error}"),
+        Err(buffer::Rejected::Full { .. } | buffer::Rejected::Pool(_)) => Ok(false),
+        Err(buffer::Rejected::Large(_)) => Err(Error::Large),
+        Err(buffer::Rejected::Files(error)) => Err(Error::Disk(error)),
     }
 }
 
@@ -585,6 +620,8 @@ mod tests {
     const BODY_MAX: usize = 4087;
     const POOL: usize = 1 << 21;
     const COMMIT: Span = Span::from_nanos(10_000_000);
+    /// Past the first commit interval, while its sync runs.
+    const SYNC: Span = Span::from_nanos(10_001_000);
     const LIMITS: order::Config = order::Config {
         earliest: Stamp::from_nanos(1),
         ahead: Span::from_nanos(1_000_000_000),
@@ -780,6 +817,18 @@ mod tests {
             }
         }
         draft
+    }
+
+    /// `stamps` encoded as an index series.
+    fn encoded(stamps: &[i64]) -> Vec<u8> {
+        let values: Vec<u8> = stamps.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut out =
+            vec![0; codec::max_len(Type::Scalar(Scalar::Stamp), values.len())];
+        let len = codec::Encoder::new(Type::Scalar(Scalar::Stamp))
+            .encode(stamps.len(), &values, &mut out)
+            .expect("stamps");
+        out.truncate(len);
+        out
     }
 
     fn applied(slot: u32, seq: u64, count: u32) -> Outcome {
@@ -985,6 +1034,103 @@ mod tests {
             assert_eq!(
                 shard.write(a, LIVE, write, NOW, MESH),
                 Ok(&[refused(0, Refusal::Order(backwards)), applied(2, 1, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_a_backwards_stamp_in_a_later_vector_of_its_index() {
+        run(46, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let mut stamps: Vec<i64> = (10..2510).collect();
+            stamps[2100] = 5;
+            let data = vec![0; stamps.len()];
+            let series = [(0, &stamps[..]), (1, &data[..]), (2, &[10][..])];
+            let write = frame(&test.pool, &set, &series);
+            let backwards = order::Error::Backwards {
+                path: Path::Live,
+                before: Stamp::from_nanos(2109),
+                stamp: Stamp::from_nanos(5),
+            };
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[refused(0, Refusal::Order(backwards)), applied(2, 0, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_an_encoded_index_whose_later_vector_is_not_valid() {
+        run(47, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let stamps: Vec<i64> = (10..2510).collect();
+            let mut index = encoded(&stamps);
+            index[encoded(&stamps[..1024]).len()] = 9;
+            let other = encoded(&[10]);
+            let lens = [(0, index.len()), (2, other.len())];
+            let mut write =
+                Draft::new(&test.pool, &set, Form::Encoded, &lens).expect("a frame");
+            write
+                .series_mut(0)
+                .expect("index 0")
+                .copy_from_slice(&index);
+            write
+                .series_mut(2)
+                .expect("index 2")
+                .copy_from_slice(&other);
+            write.set_count(0, 2500);
+            write.set_count(1, 1);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Tag { vector: 1, tag: 9 },
+            });
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[refused(0, refusal), applied(2, 0, 1)][..])
+            );
+            let write = frame(&test.pool, &set, &[(0, &[11])]);
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[applied(0, 0, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_an_encoded_index_that_is_not_valid_before_its_order() {
+        run(48, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let mut stamps: Vec<i64> = (10..2510).collect();
+            stamps[5] = 1;
+            let mut index = encoded(&stamps);
+            index[encoded(&stamps[..1024]).len()] = 9;
+            let other = encoded(&[10]);
+            let lens = [(0, index.len()), (2, other.len())];
+            let mut write =
+                Draft::new(&test.pool, &set, Form::Encoded, &lens).expect("a frame");
+            write
+                .series_mut(0)
+                .expect("index 0")
+                .copy_from_slice(&index);
+            write
+                .series_mut(2)
+                .expect("index 2")
+                .copy_from_slice(&other);
+            write.set_count(0, 2500);
+            write.set_count(1, 1);
+            let refusal = Refusal::Codec(split::Error {
+                channel: key(Slot::new(0)),
+                error: codec::Error::Tag { vector: 1, tag: 9 },
+            });
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[refused(0, refusal), applied(2, 0, 1)][..])
             );
         });
     }
@@ -1566,10 +1712,7 @@ mod tests {
                 operation: Operation::Sync,
                 code: 5,
             };
-            assert_eq!(
-                shard.committed().await,
-                Err(buffer::Error::Files(failed.clone()))
-            );
+            assert_eq!(shard.committed().await, Err(failed.clone()));
             let disk = Error::Disk(failed);
             assert_eq!(
                 disk.to_string(),
@@ -1606,36 +1749,11 @@ mod tests {
         });
     }
 
-    /// The `body_max` of a ring whose records hold `len` bytes of one entry alone.
-    fn body_max(len: usize) -> usize {
-        let layout = Layout::new(AREA, BODY_MAX).expect("a ring");
-        len + BODY_MAX - layout.entry_max()
-    }
-
+    /// The smallest ring holds the largest handoff, so `new` needs no check for it.
     #[test]
-    fn panics_at_new_when_one_entry_of_a_record_holds_less_than_a_handoff() {
-        let (mut sim, _handle) = start(41, |test| async move {
-            let buffer = test.buffer(AREA, body_max(handoff::MAX_BYTES - 1), 1).await;
-            Shard::new(buffer, Rc::clone(&test.pool), LIMITS);
-        });
-        assert_eq!(
-            sim.run(),
-            Err(sim::Error::Panicked {
-                thread: DIR.into(),
-                message:
-                    "the ring's body_max of 310 is under 311, the least that holds \
-                          a handoff"
-                        .into(),
-                seed: 41,
-            })
-        );
-    }
-
-    #[test]
-    fn records_the_largest_handoff_when_one_entry_of_a_record_holds_it() {
+    fn records_the_largest_handoff_in_the_smallest_ring() {
         run(42, |test| async move {
-            let buffer = test.buffer(AREA, body_max(handoff::MAX_BYTES), 1).await;
-            assert_eq!(buffer.layout().entry_max(), handoff::MAX_BYTES);
+            let buffer = test.buffer(AREA, 4087, 1).await;
             let mut shard = Shard::new(buffer, Rc::clone(&test.pool), LIMITS);
             shard.carry(Slot::new(0));
             let set = interner().intern(&[Group {
@@ -1665,9 +1783,7 @@ mod tests {
             sim.run(),
             Err(sim::Error::Panicked {
                 thread: DIR.into(),
-                message: "the shard does not carry index \
-                          03000000-0000-0000-0000-000000000003"
-                    .into(),
+                message: "the shard does not carry the index at Slot(3)".into(),
                 seed: 12,
             })
         );
@@ -1692,6 +1808,30 @@ mod tests {
                     (zero, 0, 0, 1, 0),
                     (two, 0, 0, 1, 0),
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn stores_a_body_under_its_index_when_a_data_channel_has_a_lower_slot() {
+        run(46, |test| async move {
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(2)),
+                data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
+            }]);
+            let mut shard = test.open(AREA, 4).await;
+            shard.carry(Slot::new(2));
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MARKED);
+            let write = frame(&test.pool, &set, &[(0, &[1, 2]), (1, &[10, 20])]);
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MARKED),
+                Ok(&[applied(2, 0, 2)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let two = key(Slot::new(2)).as_u128();
+            assert_eq!(
+                headers(&test.ring().await, MARKED.latest),
+                [(two, 0, 0, 0, 1), (two, 0, 0, 2, 0)]
             );
         });
     }
@@ -1739,11 +1879,9 @@ mod tests {
             assert_eq!(data.len(), 1, "one data entry");
             let decoded: Vec<(channel::Key, Vec<u8>)> = stored::read(&data[0].1)
                 .map(|series| {
-                    let Type::Scalar(scalar) = series.data_type else {
-                        panic!("a scalar series");
-                    };
                     let mut out = vec![0; 16];
-                    codec::decode(scalar, 2, series.bytes, &mut out).expect("decodes");
+                    codec::decode(series.data_type, 2, series.bytes, &mut out)
+                        .expect("decodes");
                     (series.channel, out)
                 })
                 .collect();
@@ -1761,5 +1899,501 @@ mod tests {
                 ]
             );
         });
+    }
+
+    mod read {
+        use super::*;
+        const CREDIT: u64 = 1 << 20;
+
+        fn woken(shard: &mut Shard) -> Vec<reader::Key> {
+            let mut keys = Vec::new();
+            shard.woken(&mut keys);
+            keys
+        }
+
+        fn key(slot: Slot, session: impl Into<delivery::Key>) -> reader::Key {
+            reader::Key {
+                slot,
+                session: session.into(),
+            }
+        }
+
+        /// Opens a complete reader on the index at `slot`, with a credit of `CREDIT`.
+        fn complete(shard: &mut Shard, slot: Slot) -> reader::Key {
+            key(slot, shard.open_complete(slot, CREDIT))
+        }
+
+        fn latest(shard: &mut Shard, slot: Slot) -> reader::Key {
+            key(slot, shard.open_latest(slot, MESH))
+        }
+
+        /// The seq of the index group `group` of each frame `reader` takes now.
+        fn taken(shard: &mut Shard, reader: reader::Key, group: u32) -> Vec<Range> {
+            iter::from_fn(|| shard.take(reader.slot, reader.session))
+                .map(|frame| frame.range(group).expect("the index is present"))
+                .collect()
+        }
+
+        fn close(shard: &mut Shard, reader: reader::Key) {
+            shard.close_reader(reader.slot, reader.session, MESH);
+        }
+
+        /// Writes a live frame of the index at slot 0 with `stamps`.
+        fn write(test: &Test, shard: &mut Shard, a: writer::Key, stamps: &[i64]) {
+            let set = two_indexes();
+            let values = vec![1; stamps.len()];
+            let write = frame(&test.pool, &set, &[(0, stamps), (1, &values)]);
+            let written = shard.write(a, LIVE, write, NOW, MESH).expect("written");
+            assert!(
+                matches!(written, [Outcome::Applied { .. } | Outcome::Lost { .. }]),
+                "{written:?}"
+            );
+        }
+
+        fn seq(seq: u64, count: u32) -> Range {
+            Range { seq, count }
+        }
+
+        #[test]
+        fn gives_a_latest_reader_the_newest_frame_before_its_commit() {
+            run(33, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = latest(&mut shard, Slot::new(0));
+                assert_eq!(woken(&mut shard), []);
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10, 20]);
+                write(&test, &mut shard, a, &[30]);
+                assert_eq!(shard.stored(Slot::new(0), Path::Live), 0);
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(2, 1)]);
+                let late = latest(&mut shard, Slot::new(0));
+                assert_eq!(woken(&mut shard), [late]);
+                assert_eq!(taken(&mut shard, late, 0), [seq(2, 1)]);
+            });
+        }
+
+        #[test]
+        fn gives_a_complete_reader_each_frame_after_the_commit_that_holds_it() {
+            run(34, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10, 20]);
+                write(&test, &mut shard, a, &[30]);
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 2), seq(2, 1)]);
+                assert_eq!(woken(&mut shard), []);
+                write(&test, &mut shard, a, &[40]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(3, 1)]);
+            });
+        }
+
+        #[test]
+        fn writes_and_serves_a_latest_reader_while_a_commit_runs() {
+            run(32, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let latest = latest(&mut shard, Slot::new(0));
+                let complete = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                test.clock.sleep(SYNC).await;
+                assert_eq!(shard.stored(Slot::new(0), Path::Live), 0, "a sync runs");
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(woken(&mut shard), [latest]);
+                assert_eq!(taken(&mut shard, latest, 0), [seq(1, 1)]);
+                assert_eq!(taken(&mut shard, complete, 0), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [complete]);
+                assert_eq!(taken(&mut shard, complete, 0), [seq(0, 1), seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn gives_a_complete_reader_a_lost_group_as_a_gap_in_seq() {
+            run(35, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                let lost = frame(&test.pool, &set, &[(0, &[20, 30]), (1, &[2, 3])]);
+                let blocks = test.fill();
+                assert_eq!(
+                    shard.write(a, LIVE, lost, NOW, MESH),
+                    Ok(&[super::lost(0, 1, 2)][..])
+                );
+                drop(blocks);
+                write(&test, &mut shard, a, &[40]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1), seq(3, 1)]);
+            });
+        }
+
+        #[test]
+        fn gives_a_latest_reader_a_live_frame_the_ring_had_no_room_for() {
+            run(36, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(1 << 16).await;
+                let reader = latest(&mut shard, Slot::new(2));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                let mut next = 0;
+                loop {
+                    let stamp = 10 + i64::try_from(next).expect("a short test");
+                    let write = frame(&test.pool, &set, &[(2, &[stamp])]);
+                    let written =
+                        shard.write(a, LIVE, write, NOW, MESH).expect("written");
+                    if matches!(written, [Outcome::Lost { .. }]) {
+                        break;
+                    }
+                    next += 1;
+                    shard.committed().await.expect("the commit ends");
+                }
+                assert_eq!(taken(&mut shard, reader, 1), [seq(next, 1)]);
+            });
+        }
+
+        #[test]
+        fn gives_a_complete_reader_out_of_credit_no_later_frame() {
+            run(37, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let session = shard.open_complete(Slot::new(0), 1);
+                let reader = key(Slot::new(0), session);
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                write(&test, &mut shard, a, &[20]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                shard.grant(Slot::new(0), session, CREDIT);
+                write(&test, &mut shard, a, &[30]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), []);
+            });
+        }
+
+        #[test]
+        fn raises_the_credit_of_a_complete_reader_with_a_grant() {
+            run(25, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let session = shard.open_complete(Slot::new(0), 1);
+                let reader = key(Slot::new(0), session);
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                shard.grant(Slot::new(0), session, CREDIT);
+                write(&test, &mut shard, a, &[20]);
+                write(&test, &mut shard, a, &[30]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1), seq(2, 1)]);
+            });
+        }
+
+        #[test]
+        fn ignores_a_grant_to_a_closed_complete_reader() {
+            run(46, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                let session = shard.open_complete(Slot::new(0), 1);
+                close(&mut shard, key(Slot::new(0), session));
+                shard.grant(Slot::new(0), session, CREDIT);
+                let after = shard.open_complete(Slot::new(0), 1);
+                assert_ne!(after, session);
+            });
+        }
+
+        #[test]
+        fn gives_a_complete_reader_that_opens_after_writes_only_later_frames() {
+            run(26, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                write(&test, &mut shard, a, &[20, 30]);
+                let reader = complete(&mut shard, Slot::new(0));
+                write(&test, &mut shard, a, &[40]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(3, 1)]);
+            });
+        }
+
+        #[test]
+        fn gives_complete_readers_of_an_index_the_same_frames_in_order() {
+            run(27, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let first = complete(&mut shard, Slot::new(0));
+                let second = complete(&mut shard, Slot::new(0));
+                let other = complete(&mut shard, Slot::new(2));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10, 20]);
+                let both = frame(&test.pool, &set, &[(0, &[30]), (1, &[3]), (2, &[5])]);
+                shard.write(a, LIVE, both, NOW, MESH).expect("written");
+                write(&test, &mut shard, a, &[40]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [first, second, other]);
+                let frames = [seq(0, 2), seq(2, 1), seq(3, 1)];
+                assert_eq!(taken(&mut shard, first, 0), frames);
+                assert_eq!(taken(&mut shard, second, 0), frames);
+                assert_eq!(taken(&mut shard, other, 1), [seq(0, 1)]);
+            });
+        }
+
+        #[test]
+        fn wakes_no_reader_after_its_close() {
+            run(28, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let latest = latest(&mut shard, Slot::new(0));
+                let complete = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                close(&mut shard, latest);
+                assert_eq!(woken(&mut shard), []);
+                write(&test, &mut shard, a, &[20]);
+                shard.committed().await.expect("the commit ends");
+                close(&mut shard, complete);
+                assert_eq!(woken(&mut shard), []);
+            });
+        }
+
+        #[test]
+        fn gives_no_reader_a_backfill_frame() {
+            run(30, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let latest = latest(&mut shard, Slot::new(0));
+                let complete = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                let backfill = frame(&test.pool, &set, &[(0, &[1, 2]), (1, &[1, 2])]);
+                assert_eq!(
+                    shard.write(a, BACKFILL, backfill, NOW, MESH),
+                    Ok(&[applied(0, 0, 2)][..])
+                );
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, latest, 0), []);
+                assert_eq!(taken(&mut shard, complete, 0), []);
+            });
+        }
+
+        #[test]
+        fn holds_a_frame_written_while_a_sync_runs_until_its_own_commit() {
+            run(38, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                test.clock.sleep(SYNC).await;
+                assert_eq!(shard.stored(Slot::new(0), Path::Live), 0, "a sync runs");
+                write(&test, &mut shard, a, &[20]);
+                while shard.stored(Slot::new(0), Path::Live) == 0 {
+                    test.clock.sleep(Span::from_nanos(1_000)).await;
+                }
+                assert_eq!(shard.stored(Slot::new(0), Path::Live), 1);
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn lists_an_index_only_while_a_live_frame_is_not_on_disk() {
+            run(42, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                test.clock.sleep(SYNC).await;
+                write(&test, &mut shard, a, &[20]);
+                while shard.stored(Slot::new(0), Path::Live) == 0 {
+                    test.clock.sleep(Span::from_nanos(1_000)).await;
+                }
+                let place = shard.place(Slot::new(0));
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(shard.readers.listed(), [place]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(shard.readers.listed(), []);
+            });
+        }
+
+        #[test]
+        fn releases_a_frame_at_the_first_woken_after_its_commit() {
+            run(50, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(woken(&mut shard), []);
+                shard.committed().await.expect("the commit ends");
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(woken(&mut shard), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn releases_a_frame_listed_after_a_settle_at_the_next_commit() {
+            run(51, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(shard.readers.listed(), []);
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(woken(&mut shard), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn lists_no_index_for_a_live_frame_with_no_complete_reader() {
+            run(49, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                assert_eq!(shard.readers.listed(), []);
+                let reader = complete(&mut shard, Slot::new(0));
+                write(&test, &mut shard, a, &[20]);
+                let place = shard.place(Slot::new(0));
+                assert_eq!(shard.readers.listed(), [place]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn unlists_an_index_at_the_commit_after_its_last_complete_reader_closes() {
+            run(52, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                let reader = complete(&mut shard, Slot::new(0));
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                write(&test, &mut shard, a, &[20]);
+                close(&mut shard, reader);
+                write(&test, &mut shard, a, &[30]);
+                let place = shard.place(Slot::new(0));
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(shard.readers.listed(), [place], "no commit ended");
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(shard.readers.listed(), []);
+            });
+        }
+
+        #[test]
+        fn gives_a_complete_reader_a_frame_on_disk_with_no_commit_future() {
+            run(39, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                test.clock.sleep(Span::from_nanos(100_000_000)).await;
+                assert_eq!(shard.stored(Slot::new(0), Path::Live), 1);
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+            });
+        }
+
+        #[test]
+        fn names_no_complete_reader_that_took_its_frames() {
+            run(40, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = complete(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(woken(&mut shard), []);
+            });
+        }
+
+        #[test]
+        fn names_each_reader_to_wake_once_in_order() {
+            run(41, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let first = latest(&mut shard, Slot::new(0));
+                let second = latest(&mut shard, Slot::new(2));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                let later = frame(&test.pool, &set, &[(2, &[10])]);
+                shard.write(a, LIVE, later, NOW, MESH).expect("written");
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(taken(&mut shard, first, 0), [seq(0, 1)]);
+                write(&test, &mut shard, a, &[30]);
+                assert_eq!(woken(&mut shard), [first, second]);
+            });
+        }
+
+        #[test]
+        fn names_the_latest_readers_of_an_index_before_its_complete_readers() {
+            run(53, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let complete = complete(&mut shard, Slot::new(0));
+                let latest = latest(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [latest, complete]);
+            });
+        }
+
+        #[test]
+        fn panics_at_the_open_of_a_reader_of_an_index_it_does_not_carry() {
+            let (mut sim, _handle) = start(29, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                latest(&mut shard, Slot::new(3));
+            });
+            assert_eq!(
+                sim.run(),
+                Err(sim::Error::Panicked {
+                    thread: DIR.into(),
+                    message: "the shard does not carry the index at Slot(3)".into(),
+                    seed: 29,
+                })
+            );
+        }
     }
 }

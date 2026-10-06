@@ -6,6 +6,7 @@
 
 use std::cmp::Reverse;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::str::{FromStr, Split};
 
 /// A name: dot-separated segments of letters, digits, `_`, and `-`, at most
@@ -202,13 +203,24 @@ pub struct Specificity {
     ones: usize,
 }
 
-/// A set of patterns. A name matches when an include pattern matches it and no
-/// exclusion does. An exclusion is a pattern written with a leading `!`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// A list of patterns, as written. A name matches when an include pattern matches it
+/// and no exclusion does. An exclusion is a pattern written with a leading `!`.
+/// Equality and hashing compare the texts in order.
+#[derive(Clone)]
 pub struct Selector {
-    /// Each include pattern, with its position in the list given to `new`.
+    texts: Box<[Box<str>]>,
+    // The patterns `texts` read as. Each include has its position in `texts`.
     include: Vec<(usize, Pattern)>,
     exclude: Vec<Pattern>,
+}
+
+/// A pattern of a selector as written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Written<'a> {
+    /// A pattern that includes names.
+    Include(&'a str),
+    /// A pattern that excludes names: the text after the `!`.
+    Exclude(&'a str),
 }
 
 impl Selector {
@@ -219,24 +231,41 @@ impl Selector {
     /// The first pattern that does not read, or [`Error::NoInclude`] when no pattern
     /// includes names.
     pub fn new<'a>(patterns: impl IntoIterator<Item = &'a str>) -> Result<Self, Error> {
+        let texts = patterns
+            .into_iter()
+            .map(Box::from)
+            .collect::<Box<[Box<str>]>>();
         let mut include = Vec::new();
         let mut exclude = Vec::new();
-        for (position, text) in patterns.into_iter().enumerate() {
-            match text.strip_prefix('!') {
-                Some("") => {
+        for (position, text) in texts.iter().enumerate() {
+            let text = &**text;
+            match written(text) {
+                Written::Exclude("") => {
                     return Err(Error::Segment {
                         input: text.into(),
                         segment: String::new(),
                     });
                 }
-                Some(body) => exclude.push(Pattern::read(text, body)?),
-                None => include.push((position, Pattern::read(text, text)?)),
+                Written::Exclude(body) => exclude.push(Pattern::read(text, body)?),
+                Written::Include(body) => {
+                    include.push((position, Pattern::read(text, body)?));
+                }
             }
         }
         if include.is_empty() {
             return Err(Error::NoInclude);
         }
-        Ok(Self { include, exclude })
+        Ok(Self {
+            texts,
+            include,
+            exclude,
+        })
+    }
+
+    /// The patterns as written, in order, each by what it does.
+    #[must_use]
+    pub fn written(&self) -> impl ExactSizeIterator<Item = Written<'_>> {
+        self.texts.iter().map(|text| written(text))
     }
 
     /// The specificity of the most specific include pattern that matches `name`, or
@@ -253,8 +282,8 @@ impl Selector {
             .max()
     }
 
-    /// The positions, in the list given to [`Selector::new`], of the include patterns
-    /// that can match a name that does not start with `prefix`, by whole segments, as
+    /// The positions, in [`Selector::written`], of the include patterns that can match
+    /// a name that does not start with `prefix`, by whole segments, as
     /// [`Name::starts_with`] reads it. The selector stays within `prefix` when this
     /// gives no position. Exclusions are not read, so an include that only its
     /// exclusions keep inside `prefix` still gives its position.
@@ -264,6 +293,32 @@ impl Selector {
             .filter(|(_, p)| !p.within(prefix))
             .map(|(position, _)| *position)
     }
+}
+
+impl PartialEq for Selector {
+    fn eq(&self, other: &Self) -> bool {
+        self.texts == other.texts
+    }
+}
+
+impl Eq for Selector {}
+
+impl Hash for Selector {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.texts.hash(state);
+    }
+}
+
+impl fmt::Debug for Selector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.texts.iter()).finish()
+    }
+}
+
+/// Reads a pattern as written: a leading `!` makes it an exclusion.
+fn written(text: &str) -> Written<'_> {
+    text.strip_prefix('!')
+        .map_or(Written::Include(text), Written::Exclude)
 }
 
 fn split(s: &str) -> Result<Split<'_, char>, Error> {
@@ -746,6 +801,40 @@ mod tests {
                 Selector::new(["a", &format!("!{}", "é".repeat(128))]),
                 Err(Error::Long { bytes: 256 })
             );
+        }
+
+        #[test]
+        fn keeps_the_patterns_as_written() {
+            let s = Selector::new(["a.**.**", "!a.b"]).unwrap();
+            assert_eq!(format!("{s:?}"), r#"["a.**.**", "!a.b"]"#);
+            assert_eq!(
+                s.written().collect::<Vec<_>>(),
+                [Written::Include("a.**.**"), Written::Exclude("a.b")]
+            );
+        }
+
+        #[test]
+        fn compares_the_texts_in_order() {
+            let read = |texts: &[&str]| Selector::new(texts.iter().copied()).unwrap();
+            for (a, b) in [
+                (read(&["a.**.**"]), read(&["a.**"])),
+                (read(&["a", "b"]), read(&["b", "a"])),
+            ] {
+                for n in ["a", "a.b", "b", "c"] {
+                    assert_eq!(a.matches(&name(n)), b.matches(&name(n)), "{n}");
+                }
+                assert_ne!(a, b);
+            }
+            let hash = |s: &Selector| {
+                let mut hasher = std::hash::DefaultHasher::new();
+                s.hash(&mut hasher);
+                hasher.finish()
+            };
+            let a = read(&["a", "!a.b"]);
+            assert_eq!(a, read(&["a", "!a.b"]));
+            assert_eq!(hash(&a), hash(&read(&["a", "!a.b"])));
+            assert_ne!(hash(&read(&["a", "b"])), hash(&read(&["b", "a"])));
+            assert_ne!(hash(&read(&["a.**.**"])), hash(&read(&["a.**"])));
         }
 
         mod outside {
