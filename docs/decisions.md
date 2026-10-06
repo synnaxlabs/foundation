@@ -1596,6 +1596,13 @@ How to read this record:
   removal is durable. The monotonic clock starts again and the wall runs on. `join` on a
   thread that a crash ended panics, because no process joins its own threads after it
   dies. Built by `simulation` in #114.
+- **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
+  Bytes go at the sender's `Settings::rate`, and an end with other settings gets
+  random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
+  from its own stream as each byte is sent, so a change of the line acts only on the
+  bytes sent after it. A flip with parity on is lost. Each port holds 4 KiB to send
+  and 4 KiB to read, as a Linux TTY does. An open ends at once. Built by `simulation`
+  in #431.
 - **SIM PANICS (2026-10-05)** A panic in a poll or in the drop of a future ends the
   thread and the run with `Error::Panicked`, and the thread's other futures drop. Each
   future drops in its own `catch_unwind`, so a second panic never aborts the process.
@@ -2414,7 +2421,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
 | 2 | `blob` | Stores content by hash and fetches it from peers (spec chunks, binaries). | `env`, `types`, `block`, `wire`, `transport` |
-| 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
+| 2 | `sim` | Simulates the `env` seams (time, randomness, scheduling, files, network, serial lines) with a deterministic scheduler and fault injection; ships behind a feature. | `env`, `types`, `block` |
 | 2 | `mesh` | Agrees per region, through `raft`, on spec pointers, delegations, and runtime state (membership, node leases, homes, seq blocks, index history, secret ciphertexts, tickets, versions, rollout lock, format flag); serves snapshots, watches, effective settings, and the changes channels. | `env`, `types`, `raft`, `spec`, `access`, `wire`, `transport`, `clock`, `blob` |
 | 2 | `home` | Runs the per-index write path (time checks, seq, fence, control, storage, fan-out), crash-recovery and copy-mode opens, and companion writes. | `env`, `types`, `block`, `ring`, `control`, `delivery`, `codec`, `spec`, `access`, `buffer`, `clock`, `mesh` |
 | 2 | `replica` | Receives an index's log from its home on a standby or copy node and stores it with `append`. | `env`, `types`, `block`, `wire`, `transport`, `buffer`, `mesh` |
