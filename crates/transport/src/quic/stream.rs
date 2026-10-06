@@ -1100,11 +1100,15 @@ mod tests {
     fn with_a_full_pool_fail_the_read_until_a_block_frees() {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-            // A 100-byte block takes 192 bytes of the budget.
-            let config = block::Config { budget: 300 };
+            // A 100-byte block takes 192 bytes of the budget, and `_filled` leaves 300.
+            let config = block::Config {
+                budget: block::footprint(1_472) + 300,
+            };
             let memory = Heap::new(config.reservation());
             let pool = Rc::new(Pool::new(config, memory));
+            let _filled = pool.alloc(1_472).expect("room");
             let config = Config {
+                message_bytes_max: NonZeroUsize::new(pool.largest()).expect("not zero"),
                 pool: Rc::clone(&pool),
                 ..shard.config(testing::SERVER_KEY, Span::SECOND)
             };
@@ -1841,9 +1845,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "a window of 65535 bytes is below the largest message, 65536 bytes"
-    )]
+    #[should_panic(expected = "config window_bytes must be at least message_bytes_max")]
     fn with_a_window_below_one_message_panics() {
         testing::run(1, |shard| {
             let config = Config {

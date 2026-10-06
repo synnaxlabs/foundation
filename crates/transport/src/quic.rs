@@ -7,7 +7,7 @@ mod settings;
 mod stateless;
 pub(crate) mod stream;
 #[cfg(test)]
-pub(crate) mod testing;
+mod testing;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -25,8 +25,6 @@ use noq_proto::{
 };
 use types::node::PublicKey;
 use types::time::Monotonic;
-
-pub(crate) use self::settings::PAYLOAD_IPV4;
 
 use self::connection::Connection;
 use self::settings::Settings;
@@ -103,22 +101,11 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// When `config.idle` is not positive, `config.window_bytes` is below
-    /// `config.message_bytes_max`, or `config.message_bytes_max` is below 1472.
-    /// `Transport::new` refuses each first.
+    /// When [`Transport::new`](crate::Transport::new) refuses `config`, with its error.
     pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
-        assert!(
-            config.message_bytes_max.get() >= usize::from(settings::PAYLOAD_IPV4),
-            "a largest message of {} bytes is below the largest UDP payload, {} bytes",
-            config.message_bytes_max,
-            settings::PAYLOAD_IPV4
-        );
-        assert!(
-            config.window_bytes >= config.message_bytes_max.get(),
-            "a window of {} bytes is below the largest message, {} bytes",
-            config.window_bytes,
-            config.message_bytes_max
-        );
+        if let Err(error) = config.check() {
+            panic!("{error}");
+        }
         let (settings, endpoint) = Settings::new(config, shard);
         Self {
             epoch: config.clock.epoch(),

@@ -100,14 +100,18 @@ mod tests {
         Rc::new(Pool::new(config, memory))
     }
 
-    /// A pool with room for one block of 100 bytes and not two.
-    fn small() -> Rc<Pool> {
-        pool(300)
+    /// A pool with room for one block of 100 bytes and not two while the block it
+    /// gives is held.
+    fn small() -> (Rc<Pool>, block::Unique) {
+        let pool = pool(block::footprint(1_472) + 300);
+        let filled = pool.alloc(1_472).expect("room");
+        (pool, filled)
     }
 
-    /// A server config that takes messages from `pool`.
+    /// A server config that takes messages from `pool`, up to its largest block.
     fn with_pool(shard: &testing::Shard, pool: &Rc<Pool>) -> Config {
         Config {
+            message_bytes_max: NonZeroUsize::new(pool.largest()).expect("not zero"),
             pool: Rc::clone(pool),
             ..shard.config(testing::SERVER_KEY, Span::SECOND)
         }
@@ -201,10 +205,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "a largest message of 1471 bytes is below the largest UDP payload, \
-                    1472 bytes"
-    )]
+    #[should_panic(expected = "config message_bytes_max must be at least 1472")]
     fn a_largest_message_below_one_packet_panics() {
         testing::run(1, |shard| {
             let config = Config {
@@ -273,7 +274,7 @@ mod tests {
     #[test]
     fn one_that_finds_the_pool_full_drops_with_no_event() {
         testing::run(1, |shard| {
-            let pool = small();
+            let (pool, _filled) = small();
             let mut pair = dial_with(shard, &with_pool(shard, &pool));
             let held = pool.alloc(100).expect("room");
             datagrams(&mut pair.client)
@@ -315,7 +316,7 @@ mod tests {
     #[test]
     fn the_ones_after_one_with_no_block_still_arrive() {
         testing::run(1, |shard| {
-            let pool = small();
+            let (pool, _filled) = small();
             let mut pair = dial_with(shard, &with_pool(shard, &pool));
             let mut client = datagrams(&mut pair.client);
             for byte in 1..=3 {
@@ -335,7 +336,7 @@ mod tests {
     #[test]
     fn are_there_only_while_connected_and_free_when_the_connection_ends() {
         testing::run(1, |shard| {
-            let pool = small();
+            let (pool, _filled) = small();
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             pair.server.endpoint = Endpoint::new(
                 &with_pool(shard, &pool),
