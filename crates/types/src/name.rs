@@ -18,7 +18,7 @@ use std::str::{FromStr, Split};
 pub struct Name(Box<str>);
 
 impl Name {
-    /// The most bytes a name or pattern holds.
+    /// The most bytes a name or pattern holds as written, with the `!` of an exclusion.
     pub const MAX_BYTES: usize = 255;
 
     /// The name as written.
@@ -60,7 +60,7 @@ impl FromStr for Name {
     /// Reads and checks a name. Reserved segments are allowed here; `spec` decides
     /// who may use them.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        for segment in split(s)? {
+        for segment in split(s, s)? {
             check_literal(s, segment)?;
         }
         Ok(Self(s.into()))
@@ -148,7 +148,7 @@ impl Pattern {
     /// that match the same names are equal and have the same specificity.
     fn read(input: &str, body: &str) -> Result<Self, Error> {
         let mut segments = Vec::new();
-        for segment in split(body)? {
+        for segment in split(input, body)? {
             let next = match segment {
                 "*" => Segment::One,
                 "**" => Segment::Any,
@@ -243,14 +243,15 @@ impl Selector {
     }
 }
 
-fn split(s: &str) -> Result<Split<'_, char>, Error> {
-    if s.is_empty() {
+/// Splits `body` into segments. The limit counts `input`, the text the user wrote.
+fn split<'a>(input: &str, body: &'a str) -> Result<Split<'a, char>, Error> {
+    if body.is_empty() {
         return Err(Error::Empty);
     }
-    if s.len() > Name::MAX_BYTES {
-        return Err(Error::Long { bytes: s.len() });
+    if input.len() > Name::MAX_BYTES {
+        return Err(Error::Long { bytes: input.len() });
     }
-    Ok(s.split('.'))
+    Ok(body.split('.'))
 }
 
 /// Checks a segment that is not a wildcard, reporting errors against `input`.
@@ -657,6 +658,17 @@ mod tests {
             );
             assert_eq!(Selector::new(["a", "!b*"]), Err(wildcard_error("!b*")));
             assert_eq!(Selector::new(["a", "!"]), Err(segment_error("!", "")));
+        }
+
+        #[test]
+        fn counts_the_bang_in_the_length_of_an_exclusion() {
+            let body = "b".repeat(Name::MAX_BYTES - 1);
+            let s = Selector::new(["**", &format!("!{body}")]).unwrap();
+            assert_eq!(s.matches(&name(&body)), None);
+            assert_eq!(
+                Selector::new(["a", &format!("!b{body}")]),
+                Err(Error::Long { bytes: 256 })
+            );
         }
     }
 
