@@ -1024,8 +1024,20 @@ How to read this record:
   ranges it uses.
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
-  on disk: `hard` (term and vote), `voters`, `entries` (the log from index 1), and
-  `applied` (the last index the caller applied). `Raft` takes `tick(random)`,
+  on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
+  last index the caller applied). `Hard` holds the term, the vote, the leader of the
+  term (this node when it led), and the proof that moved the node to the term: its
+  own pre-votes when it campaigned, else the proof of the message that moved it. A
+  `Proof` is a `Grant` (pre-vote or vote), the candidate, and the voter keys, the
+  candidate included; `raft` counts the keys, and `mesh` holds and checks the
+  signatures. `Message.proof` carries one: a `Vote` carries the candidate's
+  pre-votes; a leader's `Heartbeat` or `Append` carries its votes until the receiver
+  answers once in the term, and a late vote joins them; an answer to a message of a
+  lower term carries the sender's hard proof. The rules that check a proof, and
+  `Error::Unproven`, follow in the second PR of #750; until then a received proof is
+  stored, not checked. The advisor required a proof on every message and on each
+  refusal, signatures only, and the proof in the hard state (#750, 2026-10-05).
+  `Raft` takes `tick(random)`,
   `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
   when it changed), `entries` to write, `committed` entries to apply, and `messages`
   to send. The caller writes, then sends, then applies, as etcd does: to apply first
@@ -1069,19 +1081,20 @@ How to read this record:
   2026-10-05 ("a is fine", #232). A heartbeat or an append of this node's term from a
   node other than the leader it knows is `Error::SecondLeader`: one term has one
   leader, and a node keeps the leader of its term until the term ends, through a
-  step-down and a campaign. A node that knows no leader of its term, after a restart or
-  its vote, takes the first. The person approved it on 2026-10-05 ("Yeah that's fine",
-  #391). A bad message changes nothing. A forged message that passes these checks
+  step-down and a campaign. A node that knows no leader of its term, after its vote,
+  takes the first; `Hard.leader` keeps it through a restart (#750). The person approved
+  it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing. A forged
+  message that passes these checks
   does, until a leader proves its election (#750). After a heartbeat or an `Append`
   of a higher term from a voter that does not lead, or a reply of a higher term and
   then either, a node follows the sender and writes and commits what it sends. So
   two nodes can apply different entries at one index, and a forged voter set can
-  take the group over. The first leader after a restart or a vote is the same gap.
-  Tests pin it. Lost: a lease that drops a heartbeat or an `Append` of a higher term
-  from a node that is not the leader. A reply of a higher term ends any node's
-  lease, and a leader must step down on one; the lease also changed three etcd
-  oracle tests. The coordinator decided on 2026-10-06 under the person's delegation
-  (#391). The person may change it.
+  take the group over. The first leader after a vote is the same gap. Tests pin it.
+  Lost: a lease that drops a heartbeat or an `Append` of a higher term from a node
+  that is not the leader. A reply of a higher term ends any node's lease, and a
+  leader must step down on one; the lease also changed three etcd oracle tests. The
+  coordinator decided on 2026-10-06 under the person's delegation (#391). The person
+  may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1153,8 +1166,13 @@ How to read this record:
   `types::digest::Digest::of`), the format version (1, C9d), the record's number, the
   body length, and an 8-byte check of the body. The body holds the hard state, when it
   changed, and the entries, so one sync makes both durable; two slots for the hard state
-  lost, because they need a second sync and a second torn-write rule. A later record
-  replaces the entries from its first index. A file is 1 MiB, or the length of its first
+  lost, because they need a second sync and a second torn-write rule. The hard state is
+  the term, then the vote, the leader, and the proof, each behind a presence byte; the
+  proof is a grant byte, the candidate, and the voter keys as a count and the keys in
+  rising order (#750). A `raft` message on the wire carries its proof in the same
+  form, after the term and before the body. The signatures follow in the third PR of
+  #750. The format version stays 1: no log has shipped. A later record replaces the
+  entries from its first index. A file is 1 MiB, or the length of its first
   record when that is more, and a record that does not fit starts the next file. In a
   file with no record, it makes that file again, larger, so each file but the last
   holds a record. A failed or dropped write poisons the log (`Error::Poisoned`). A

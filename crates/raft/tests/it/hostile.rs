@@ -34,6 +34,7 @@ fn forged_append(
             entries: vec![entry.clone()],
             commit: at.index,
         },
+        proof: None,
     };
     (append, entry)
 }
