@@ -1,12 +1,18 @@
-//! Readers for the quantities that kinds and `config` share, so a value reads the same
-//! in every block.
+//! Readers for the values that kinds and `config` share, so a value reads the same in
+//! every block.
+
+use std::slice;
 
 use types::byte;
+use types::name::{self, Name, Selector};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::value::{Kind, Value};
+use crate::{Label, Span};
 
 const BAD_SIZE: Code = Code::new("document.bad-size");
+const BAD_NAME: Code = Code::new("document.bad-name");
+const BAD_SELECTOR: Code = Code::new("document.bad-selector");
 
 /// Reads a byte size from a string that [`byte::Size`] reads, such as `"200GiB"` or
 /// `"1.5GiB"`.
@@ -44,6 +50,62 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
         };
         bad(format!("cannot read the byte size {text:?}: {error}"), fix)
     })
+}
+
+/// Reads a block label as a name, such as `"site_a.cell_1"`.
+///
+/// # Errors
+///
+/// A `document.bad-name` diagnostic at the label when [`Name`] refuses its text, with
+/// the message and the fix of the [`name::Error`].
+pub fn name(label: &Label) -> Result<Name, Diagnostic> {
+    label
+        .text
+        .parse()
+        .map_err(|error| diagnose(BAD_NAME, label.span, &error))
+}
+
+/// Reads a selector from one pattern or a list of patterns, each a string or a
+/// reference, such as `"site_a.*"` or `["site_a.*", "!site_a.test"]`.
+///
+/// # Errors
+///
+/// A `document.bad-selector` diagnostic: at a pattern that is not a string or a
+/// reference, or that [`Selector`] refuses, with the message and the fix of the
+/// [`name::Error`]; at the value when no pattern includes names.
+pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
+    let patterns = match &value.kind {
+        Kind::List(items) => items.as_slice(),
+        _ => slice::from_ref(value),
+    };
+    let mut texts = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        let text: &str = match &pattern.kind {
+            Kind::String(text) => text,
+            Kind::Reference(name) => name.as_str(),
+            kind => {
+                return Err(Diagnostic::new(
+                    BAD_SELECTOR,
+                    pattern.span,
+                    format!("a pattern is a string or a reference, not {}", noun(kind)),
+                    "Write a string such as \"site_a.*\"".into(),
+                ));
+            }
+        };
+        // `Selector::new` does not say which pattern it refuses, so each reads alone
+        // first. Alone, an exclusion includes no names, which is not its error.
+        match Selector::new([text]) {
+            Err(error) if error != name::Error::NoInclude => {
+                return Err(diagnose(BAD_SELECTOR, pattern.span, &error));
+            }
+            _ => texts.push(text),
+        }
+    }
+    Selector::new(texts).map_err(|error| diagnose(BAD_SELECTOR, value.span, &error))
+}
+
+fn diagnose(code: Code, span: Option<Span>, error: &name::Error) -> Diagnostic {
+    Diagnostic::new(code, span, error.to_string(), error.fix().into())
 }
 
 /// The noun for a kind of value, with its article.
@@ -205,6 +267,257 @@ mod tests {
             span: None,
         };
         assert_eq!(size(&value).unwrap_err().span, None);
+    }
+
+    mod names {
+        use super::*;
+
+        fn label(text: &str) -> Label {
+            Label {
+                text: text.into(),
+                span: Some(span()),
+            }
+        }
+
+        fn refused(message: &str, fix: &str) -> Result<Name, Diagnostic> {
+            Err(Diagnostic::new(
+                Code::new("document.bad-name"),
+                Some(span()),
+                message.into(),
+                fix.into(),
+            ))
+        }
+
+        #[test]
+        fn reads_a_label() {
+            assert_eq!(
+                name(&label("site_a.cell_1")),
+                Ok("site_a.cell_1".parse().unwrap())
+            );
+        }
+
+        #[test]
+        fn refuses_a_label_that_name_refuses() {
+            for (text, message, fix) in [
+                (
+                    "site a",
+                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    "Use one or more ASCII letters, digits, `_`, and `-` in that \
+                     segment, and no other character",
+                ),
+                (
+                    "site_a.*",
+                    "\"site_a.*\" uses a wildcard where it cannot",
+                    "Use `*` and `**` only as whole segments of a pattern, never in a \
+                     name",
+                ),
+                (
+                    "",
+                    "a name or pattern is empty",
+                    "Write at least one segment",
+                ),
+            ] {
+                assert_eq!(name(&label(text)), refused(message, fix), "{text:?}");
+            }
+        }
+
+        #[test]
+        fn puts_no_span_on_a_label_with_none() {
+            let label = Label {
+                text: "site a".into(),
+                span: None,
+            };
+            assert_eq!(name(&label).unwrap_err().span, None);
+        }
+
+        proptest! {
+            #[test]
+            fn reads_as_name_does(text in prop_oneof![any::<String>(), "[a-z_.* @-]{0,8}"]) {
+                match (name(&label(&text)), text.parse::<Name>()) {
+                    (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
+                    (Err(diagnostic), Err(error)) => prop_assert_eq!(
+                        diagnostic,
+                        Diagnostic::new(
+                            Code::new("document.bad-name"),
+                            Some(span()),
+                            error.to_string(),
+                            error.fix().into(),
+                        )
+                    ),
+                    (read, parsed) => {
+                        prop_assert!(false, "{:?}: {:?} and {:?}", text, read, parsed);
+                    }
+                }
+            }
+        }
+    }
+
+    mod selectors {
+        use super::*;
+
+        /// A span that starts at `offset`, so each pattern in a list has its own.
+        fn at(offset: u32) -> Option<Span> {
+            let at = |offset| Position {
+                offset,
+                line: 0,
+                column: offset,
+            };
+            Span::new(Source(3), at(offset), at(offset.saturating_add(1)))
+        }
+
+        /// A list of the patterns, each at its index.
+        fn list(patterns: Vec<Kind>) -> Value {
+            let items = (0..)
+                .zip(patterns)
+                .map(|(i, kind)| Value { kind, span: at(i) });
+            value(Kind::List(items.collect()))
+        }
+
+        fn text(text: &str) -> Kind {
+            Kind::String(text.into())
+        }
+
+        fn reference(name: &str) -> Kind {
+            Kind::Reference(name.parse().unwrap())
+        }
+
+        fn refused(span: Option<Span>, message: &str, fix: &str) -> Diagnostic {
+            Diagnostic::new(
+                Code::new("document.bad-selector"),
+                span,
+                message.into(),
+                fix.into(),
+            )
+        }
+
+        const SEGMENT: &str = "Use one or more ASCII letters, digits, `_`, and `-` in \
+                               that segment, and no other character";
+        const NO_INCLUDE: &str = "Add a pattern without a leading `!`";
+
+        #[test]
+        fn reads_each_form() {
+            let expected =
+                |patterns: &[&str]| Ok(Selector::new(patterns.to_vec()).unwrap());
+            assert_eq!(selector(&string("site_a.*")), expected(&["site_a.*"]));
+            assert_eq!(
+                selector(&value(reference("site_a.plc_7"))),
+                expected(&["site_a.plc_7"])
+            );
+            assert_eq!(
+                selector(&list(vec![
+                    text("site_a.*"),
+                    text("!site_a.test"),
+                    reference("site_b.plc_7"),
+                ])),
+                expected(&["site_a.*", "!site_a.test", "site_b.plc_7"])
+            );
+        }
+
+        #[test]
+        fn refuses_a_list_that_includes_no_names() {
+            for patterns in [vec![], vec![text("!site_a.test")]] {
+                assert_eq!(
+                    selector(&list(patterns)),
+                    Err(refused(
+                        Some(span()),
+                        "a selector includes no names",
+                        NO_INCLUDE
+                    ))
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_a_pattern_at_the_pattern() {
+            assert_eq!(
+                selector(&list(vec![text("site_a.*"), text("site a"), text("a*b")])),
+                Err(refused(
+                    at(1),
+                    "\"site a\" has a segment that is not valid: \"site a\"",
+                    SEGMENT
+                ))
+            );
+            assert_eq!(
+                selector(&list(vec![text("!site_a.test"), text("!")])),
+                Err(refused(
+                    at(1),
+                    "\"!\" has a segment that is not valid: \"\"",
+                    SEGMENT
+                ))
+            );
+            assert_eq!(
+                selector(&string("a*b")),
+                Err(refused(
+                    Some(span()),
+                    "\"a*b\" uses a wildcard where it cannot",
+                    "Use `*` and `**` only as whole segments of a pattern, never in a \
+                     name"
+                ))
+            );
+        }
+
+        #[test]
+        fn refuses_a_value_that_is_not_a_pattern() {
+            let fix = "Write a string such as \"site_a.*\"";
+            assert_eq!(
+                selector(&value(Kind::Integer(7))),
+                Err(refused(
+                    Some(span()),
+                    "a pattern is a string or a reference, not an integer",
+                    fix
+                ))
+            );
+            assert_eq!(
+                selector(&list(vec![
+                    text("site_a.*"),
+                    Kind::List(vec![string("site_b.*")]),
+                ])),
+                Err(refused(
+                    at(1),
+                    "a pattern is a string or a reference, not a list",
+                    fix
+                ))
+            );
+        }
+
+        fn pattern() -> impl Strategy<Value = String> {
+            prop_oneof![
+                any::<String>(),
+                "!?[a-z_* @-]{0,3}(\\.[a-z_* @-]{0,3}){0,2}",
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn reads_as_selector_new_does(texts in prop::collection::vec(pattern(), 0..4)) {
+                let read = selector(&list(texts.iter().map(|t| text(t)).collect()));
+                match (read, Selector::new(texts.iter().map(String::as_str))) {
+                    (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
+                    (Err(diagnostic), Err(error)) => {
+                        prop_assert_eq!(&diagnostic.message, &error.to_string());
+                        prop_assert_eq!(diagnostic.fix.as_str(), error.fix());
+                        // The span is at the first pattern that does not read alone,
+                        // or at the list when every pattern reads.
+                        let alone = |t: &String| match Selector::new([t.as_str()]) {
+                            Err(name::Error::NoInclude) | Ok(_) => None,
+                            Err(error) => Some(error),
+                        };
+                        let first = (0..).zip(&texts).find_map(|(i, t)| Some((i, alone(t)?)));
+                        let expected = match first {
+                            Some((i, alone)) => {
+                                prop_assert_eq!(alone, error);
+                                at(i)
+                            }
+                            None => Some(span()),
+                        };
+                        prop_assert_eq!(diagnostic.span, expected);
+                    }
+                    (read, parsed) => {
+                        prop_assert!(false, "{:?}: {:?} and {:?}", texts, read, parsed);
+                    }
+                }
+            }
+        }
     }
 
     /// A text that is often close to a byte size.
