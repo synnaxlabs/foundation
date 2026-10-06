@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use block::{Block, Heap, Pool};
@@ -124,31 +123,18 @@ pub(super) fn run<T: Send + 'static>(
         ..sim::Config::default()
     });
     let node = sim.node(sim::node::Config::default());
-    let (clock, entropy) = (node.clock(), node.entropy());
-    let shard = env::shards::Config {
-        name: "shard-0".into(),
-        core: Some(0),
-    };
-    let result = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&result);
-    let handle = node.shards().start(shard, move |tasks| async move {
+    let result = sim.run_on(&node, |node, tasks| async move {
         let config = block::Config { budget: 1 << 22 };
         let memory = Heap::new(config.reservation());
         let shard = Shard {
-            clock,
-            entropy,
+            clock: node.clock(),
+            entropy: node.entropy(),
             tasks,
             pool: Rc::new(Pool::new(config, memory)),
         };
-        *out.lock().expect("not poisoned") = Some(test(&shard));
+        test(&shard)
     });
-    sim.run().expect("the run ends");
-    handle
-        .expect("the shard starts")
-        .join()
-        .expect("the test passes");
-    let result = result.lock().expect("not poisoned").take();
-    result.expect("the test ran")
+    result.expect("the test passes")
 }
 
 /// An endpoint on [`CLIENT_SHARD`] and one on [`SERVER_SHARD`], over a link that
