@@ -13,6 +13,8 @@
 //!
 //! `excluded` is 1 for an exclusion, which a file writes with a leading `!`, and 0
 //! otherwise. The stored text has no `!`.
+//! Patterns are stored as written, so a rewrite that matches the same names still
+//! changes the bytes, and `plan` shows it.
 //!
 //! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
 //! admin 5. `authority` is zero when `allow` does not hold write.
