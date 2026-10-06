@@ -543,7 +543,7 @@ pub enum Error {
     },
     /// A placement's standby and copies make no policy.
     Placement {
-        /// Where the standby starts.
+        /// Where the standby presence flag is.
         at: usize,
         /// Why they make no policy.
         error: placement::Error,
