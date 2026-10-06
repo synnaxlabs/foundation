@@ -1250,6 +1250,17 @@ mod tests {
             }
 
             #[test]
+            fn constant_series_as_ffor_at_width_zero(
+                scalar in select(&INTS),
+                len in 2..2_100_usize,
+                word in any::<u64>(),
+            ) {
+                let values = bytes(scalar.width(), iter::repeat_n(word.into(), len));
+                let encoded = check(scalar, &values);
+                prop_assert_eq!(&encoded[..2], &[vector::FFOR, 0], "{:?}", scalar);
+            }
+
+            #[test]
             fn fixed_steps_as_delta_at_width_zero(
                 scalar in select(&INTS),
                 // Under 17 samples, FFOR can cost no more than delta, and wins.
