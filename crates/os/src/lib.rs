@@ -3,8 +3,11 @@
 //! allowed to call them.
 
 use std::fmt;
+use std::path::Path;
 
 mod cores;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod files;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[expect(unsafe_code, reason = "a pool's memory is an OS mapping")]
 pub mod memory;
@@ -46,17 +49,37 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
     Ok(env::threads::Threads::new(threads::Driver::new(cores)))
 }
 
+/// The files on the real disk under `dir/data`, for the calling thread. `os` keeps its
+/// own entries in `dir`, so give it a directory that nothing else uses. One I/O
+/// thread of its own runs every call of the handle, its clones, and their files, in
+/// order, and ends after the last of them drops. Call it once on each shard.
+///
+/// # Errors
+///
+/// - [`Error::Dir`] when the OS cannot open or make `dir/data`.
+/// - [`Error::Thread`] when the I/O thread cannot start.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn files(dir: &Path) -> Result<env::files::Files, Error> {
+    Ok(env::files::Files::new(files::Driver::new(dir)?))
+}
+
 /// Why `os` could not build a seam.
 #[derive(Debug)]
 pub enum Error {
     /// The OS could not give the cores of the calling thread.
     Cores(std::io::Error),
+    /// The OS could not open or make the data directory.
+    Dir(std::io::Error),
+    /// The OS could not start a thread of `os`.
+    Thread(std::io::Error),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cores(e) => write!(f, "cannot read the cores of this thread: {e}"),
+            Self::Dir(e) => write!(f, "cannot open the data directory: {e}"),
+            Self::Thread(e) => write!(f, "cannot start a thread: {e}"),
         }
     }
 }
@@ -64,7 +87,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Cores(e) => Some(e),
+            Self::Cores(e) | Self::Dir(e) | Self::Thread(e) => Some(e),
         }
     }
 }
