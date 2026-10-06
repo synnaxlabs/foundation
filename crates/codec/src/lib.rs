@@ -331,12 +331,12 @@ impl Shape {
                 Ok((&[], values))
             }
             Self::Variable { element, max } => {
+                let start = element.start(count)?;
                 let ends_len = Layout::END.raw_len(count)?;
                 let (ends, _) =
                     values.split_at_checked(ends_len).ok_or(length(ends_len))?;
                 let mut check = Ends::new(max);
                 check.check(ends)?;
-                let start = element.start(count)?;
                 let expected = start
                     .checked_add(element.raw_len(check.elements())?)
                     .ok_or(Error::Overflow)?;
@@ -1788,6 +1788,16 @@ mod tests {
             assert_eq!(encoded, Err(Error::Overflow));
             assert_eq!(validate(Type::Bytes, usize::MAX, &[]), Err(Error::Overflow));
             assert_eq!(decode(LIST, usize::MAX, &[], &mut []), Err(Error::Overflow));
+        }
+
+        /// The ends fit in a `usize`, but not once padded to 8 bytes.
+        #[test]
+        fn refuses_padded_ends_past_usize() {
+            let count = usize::MAX / 4;
+            let encoded = Encoder::new(LIST_8).encode(count, &[], &mut []);
+            assert_eq!(encoded, Err(Error::Overflow));
+            assert_eq!(validate(LIST_8, count, &[]), Err(Error::Overflow));
+            assert_eq!(decode(LIST_8, count, &[], &mut []), Err(Error::Overflow));
         }
     }
 
