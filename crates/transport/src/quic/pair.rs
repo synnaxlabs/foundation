@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
-use env::net::udp::Meta;
+use env::net::udp::{Meta, TRANSMIT_BYTES_MAX};
 use noq_proto::{
     ClientConfig, ConnectionHandle, DatagramEvent, FourTuple, SendDatagramError,
     TransportConfig,
@@ -270,6 +270,7 @@ impl Side {
         let mut buffer = Vec::new();
         while let Some(transmit) = self.endpoint.transmit(at(now), &mut buffer) {
             let len = transmit.contents.len();
+            assert!(len <= TRANSMIT_BYTES_MAX, "a transmit of {len} bytes");
             let stride = transmit.segment.map_or(len, NonZeroUsize::get);
             for datagram in transmit.contents.chunks(stride) {
                 self.sent

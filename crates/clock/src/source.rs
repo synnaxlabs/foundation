@@ -2,8 +2,8 @@
 //! measure the node's monotonic clock against a time source.
 
 use estimate::Measurement;
-use estimate::exchange::{self, Exchange};
-use types::time::{Interval, Monotonic, Span, Stamp};
+use estimate::exchange::{Exchange, Reading};
+use types::time::{Interval, Monotonic, Span};
 
 use crate::DRIFT;
 
@@ -73,56 +73,42 @@ impl Wall {
     pub fn measure(&self) -> Measurement {
         let sent = self.monotonic.now();
         #[expect(clippy::disallowed_methods, reason = "clock reads the OS clock")]
-        let reading = self.os.now();
+        let os = self.os.now();
         let returned = self.monotonic.now();
-        let bound = reading.error.inspect(|&bound| {
+        let bound = os.error.inspect(|&bound| {
             assert!(
                 bound >= Span::ZERO,
                 "invariant: the OS error bound {bound} is negative"
             );
         });
         let instant = Interval {
-            earliest: reading.time,
-            latest: reading.time,
+            earliest: os.time,
+            latest: os.time,
         };
         let exchange = Exchange {
             sent,
-            received: instant,
-            answered: instant,
+            reading: match bound {
+                Some(_) => Reading::Known {
+                    received: instant,
+                    answered: instant,
+                },
+                None => Reading::Unknown(os.time),
+            },
             returned,
         };
-        let read = match exchange.measure(DRIFT) {
-            Ok(read) => read,
-            Err(exchange::Error::Bound { .. }) => {
-                return Measurement::unknown(
-                    returned,
-                    offset(reading.time, sent, returned),
-                );
-            }
-            // The OS reading is one instant, so only a clock that goes back crosses.
-            Err(exchange::Error::Crossed) => {
-                panic!(
-                    "invariant: the monotonic clock went from {sent:?} to {returned:?}"
-                )
-            }
+        // The OS reading is one instant, so only a clock that goes back allows no
+        // offset.
+        let Some(read) = exchange.measure(DRIFT) else {
+            panic!("invariant: the monotonic clock went from {sent:?} to {returned:?}")
         };
-        let unknown = Measurement::unknown(read.at(), read.offset());
         let Some(bound) = bound else {
-            return unknown;
+            return read;
         };
         let error =
             Span::from_nanos(read.error().nanos().saturating_add(bound.nanos()));
-        Measurement::new(read.at(), read.offset(), error).unwrap_or(unknown)
+        Measurement::new(read.at(), read.offset(), error)
+            .unwrap_or(Measurement::unknown(read.at(), read.offset()))
     }
-}
-
-/// `time` minus the midpoint of `sent` and `returned`, or the nearest span when it is
-/// past that range.
-fn offset(time: Stamp, sent: Monotonic, returned: Monotonic) -> Span {
-    let mid = sent.0.midpoint(returned.0);
-    let nanos = (i128::from(time.nanos()) - i128::from(mid))
-        .clamp(i64::MIN.into(), i64::MAX.into());
-    Span::from_nanos(i64::try_from(nanos).expect("invariant: clamped to a span"))
 }
 
 #[cfg(test)]
@@ -288,10 +274,10 @@ mod tests {
     }
 
     #[test]
-    fn is_unknown_at_the_midpoint_when_the_reads_are_too_far_apart() {
+    fn is_unknown_at_the_center_when_the_reads_are_too_far_apart() {
         let returned = 7_000_000_000_000_000_000;
         let m = measure_between(0, returned, 10_000_000_000, Some(Span::ZERO));
-        let offset = Span::from_nanos(-3_499_999_990_000_000_000);
+        let offset = Span::from_nanos(-3_499_299_990_000_000_000);
         assert_eq!(m, Measurement::unknown(Monotonic(returned), offset));
     }
 

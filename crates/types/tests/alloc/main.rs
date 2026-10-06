@@ -56,6 +56,10 @@ fn read_a_frame(pool: &block::Pool, set: &KeySet) {
         assert_eq!(drafted, 32, "the draft reads both series");
         let expected = Some(Range { seq: 9, count: 2 });
         assert_eq!(draft.range(0), expected, "the draft reads its range");
+        assert!(
+            draft.ranges().eq([(0, Range { seq: 9, count: 2 })]),
+            "the draft reads its ranges"
+        );
         let frame = draft.freeze(Path::Backfill);
         let copy = frame.clone();
         assert_eq!(frame.charge(), 192, "the frame charges its block");
@@ -64,6 +68,10 @@ fn read_a_frame(pool: &block::Pool, set: &KeySet) {
         assert_eq!(frame.form(), Form::Raw, "the frame keeps its form");
         assert_eq!(frame.series(1), None, "entry 1 is absent");
         assert_eq!(frame.range(1), None, "group 1 is absent");
+        assert!(
+            frame.ranges().eq([(0, Range { seq: 9, count: 2 })]),
+            "the frame reads its ranges"
+        );
         assert_eq!(
             frame.series(2),
             Some([2; 16].as_slice()),

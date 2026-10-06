@@ -413,7 +413,6 @@ mod tests {
 
     mod when_a_bound_is_unknown {
         use super::*;
-        use crate::exchange::{self, Exchange};
 
         fn unknown(offset: i64) -> Measurement {
             Measurement::unknown(Monotonic(0), Span::from_nanos(offset))
@@ -564,25 +563,6 @@ mod tests {
             let m =
                 combine(now, drift(1_000), &sources).expect("every bound holds 1 us");
             assert_eq!((m.offset().nanos(), m.error().nanos()), (1_000, widest));
-        }
-
-        /// A peer that reads the estimate at both ends of an exchange gets no known
-        /// bound, so it cannot vote with it.
-        #[test]
-        fn gives_a_peer_no_known_bound() {
-            let sources = filters(&[unknown(0), unknown(Span::SECOND.nanos())]);
-            let m = combine(Monotonic(0), drift(0), &sources).expect("bounds meet");
-            let exchange = Exchange {
-                sent: Monotonic(0),
-                received: m.interval(),
-                answered: m.interval(),
-                returned: Monotonic(10),
-            };
-            let error = Span::from_nanos(MAX_ERROR.nanos() + 5);
-            assert_eq!(
-                exchange.measure(drift(0)),
-                Err(exchange::Error::Bound { error })
-            );
         }
     }
 
