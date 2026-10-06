@@ -38,8 +38,8 @@ pub(crate) struct State {
     /// The thread of each live task.
     tasks: BTreeMap<u64, u64>,
     ready: BTreeSet<u64>,
-    /// Nodes and wakers by true deadline, then timer key.
-    timers: BTreeMap<(Monotonic, u64), (usize, Waker)>,
+    /// Threads and wakers by true deadline, then timer key.
+    timers: BTreeMap<(Monotonic, u64), (u64, Waker)>,
     /// The first task of each thread that has not run yet.
     starts: BTreeMap<u64, Start>,
     /// The thread whose task the scheduler polls now: set by `pick`, cleared by
@@ -100,6 +100,16 @@ pub(crate) enum Outcome {
     Done(Result<(), Panicked>),
     /// A crash of its node ended it.
     Crashed,
+}
+
+/// What threads leave at their end, for the caller to drop after it releases the
+/// lock.
+#[derive(Default)]
+pub(crate) struct Ended {
+    /// The tasks whose futures the caller drops, in key order.
+    pub(crate) tasks: Vec<u64>,
+    /// The wakers of the timers of the threads.
+    pub(crate) timers: Vec<Waker>,
 }
 
 /// The next step of a run.
@@ -276,9 +286,9 @@ impl State {
         }
     }
 
-    /// Adds timer `key` of `node`, which wakes `waker` at true time `at`.
-    pub(crate) fn arm(&mut self, node: usize, at: Monotonic, key: u64, waker: Waker) {
-        self.timers.insert((at, key), (node, waker));
+    /// Adds timer `key` of `thread`, which wakes `waker` at true time `at`.
+    pub(crate) fn arm(&mut self, thread: u64, at: Monotonic, key: u64, waker: Waker) {
+        self.timers.insert((at, key), (thread, waker));
     }
 
     /// Removes timer `key` at true time `at`, and returns its waker for the caller to
@@ -428,20 +438,21 @@ impl State {
     }
 
     /// Removes `task` of `thread`, which completed; it may have woken itself as it
-    /// completed. The first task of a thread ends the thread. Returns the tasks whose
-    /// futures the caller drops.
-    pub(crate) fn finish(&mut self, task: u64, thread: u64) -> Vec<u64> {
+    /// completed. The first task of a thread ends the thread, as [`State::end`] does.
+    pub(crate) fn finish(&mut self, task: u64, thread: u64) -> Ended {
         if task == self.threads[&thread].main {
             return self.end(thread, Outcome::Done(Ok(())));
         }
         self.tasks.remove(&task);
         self.ready.remove(&task);
-        vec![task]
+        Ended {
+            tasks: vec![task],
+            timers: Vec::new(),
+        }
     }
 
-    /// Ends `thread` with `outcome` and returns the keys of its tasks, whose futures
-    /// the caller drops.
-    pub(crate) fn end(&mut self, thread: u64, outcome: Outcome) -> Vec<u64> {
+    /// Ends `thread` with `outcome`, and its timers, leaked ones too.
+    pub(crate) fn end(&mut self, thread: u64, outcome: Outcome) -> Ended {
         self.threads
             .get_mut(&thread)
             .expect("invariant: an ending thread exists")
@@ -453,7 +464,11 @@ impl State {
             self.tasks.remove(task);
             self.ready.remove(task);
         }
-        tasks
+        let timers = (self.timers)
+            .extract_if(.., |_, (owner, _)| *owner == thread)
+            .map(|(_, (_, waker))| waker)
+            .collect();
+        Ended { tasks, timers }
     }
 
     /// Moves true time to `at`, delivers the datagrams and bytes that arrive by then,
@@ -478,13 +493,13 @@ impl State {
     }
 
     /// Ends each live thread of the nodes whose index `stopped` picks in a crash, and
-    /// makes those nodes crashing until [`State::crash`]. Returns the tasks whose
-    /// futures the caller drops, and the starts of the threads that had not run, each
-    /// in start order, for the caller to drop after it releases the lock.
+    /// makes those nodes crashing until [`State::crash`]. Returns what the threads
+    /// leave, and the starts of the threads that had not run in start order, for the
+    /// caller to drop after it releases the lock.
     pub(crate) fn stop(
         &mut self,
         stopped: impl Fn(usize) -> bool,
-    ) -> (Vec<u64>, Vec<Start>) {
+    ) -> (Ended, Vec<Start>) {
         for (key, node) in self.nodes.iter_mut().enumerate() {
             node.crashing |= stopped(key);
         }
@@ -492,39 +507,35 @@ impl State {
             .filter(|(_, thread)| stopped(thread.node) && thread.outcome.is_none())
             .map(|(&key, thread)| (key, thread.main))
             .collect();
-        let (mut tasks, mut starts) = (Vec::new(), Vec::new());
+        let (mut ended, mut starts) = (Ended::default(), Vec::new());
         for (thread, main) in live {
             starts.extend(self.starts.remove(&main));
-            tasks.extend(self.end(thread, Outcome::Crashed));
+            let Ended { tasks, timers } = self.end(thread, Outcome::Crashed);
+            ended.tasks.extend(tasks);
+            ended.timers.extend(timers);
         }
-        tasks.sort_unstable();
-        (tasks, starts)
+        ended.tasks.sort_unstable();
+        (ended, starts)
     }
 
-    /// Ends the crash of `node` that [`State::stop`] began, and the timers and file
-    /// calls in flight of the node. After a `Power` crash, its monotonic clock reads
-    /// its boot value again, and its disk keeps what is durable. Returns the wakers
-    /// of the timers and the closes, and the blocks of the calls, for the caller to
-    /// drop after it releases the lock.
+    /// Ends the crash of `node` that [`State::stop`] began, and the file calls in
+    /// flight of the node. After a `Power` crash, its monotonic clock reads its boot
+    /// value again, and its disk keeps what is durable. Returns the wakers of the
+    /// closes and the blocks of the calls, for the caller to drop after it releases
+    /// the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
         crash: Crash,
     ) -> (Vec<Waker>, Vec<Held>) {
         self.nodes[node].crashing = false;
-        let mut wakers: Vec<Waker> = (self.timers)
-            .extract_if(.., |_, (owner, _)| *owner == node)
-            .map(|(_, (_, waker))| waker)
-            .collect();
         let now = self.now;
         if crash == Crash::Power {
             let wall = self.wall(node).time;
             let booted = &mut self.nodes[node];
             (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
         }
-        let (closes, held) = self.files.crash(node, now, crash);
-        wakers.extend(closes);
-        (wakers, held)
+        self.files.crash(node, now, crash)
     }
 
     /// The names of the threads that have not ended, in start order.

@@ -23,7 +23,8 @@ use crate::{drivers, net, shard};
 pub struct Node(pub(crate) drivers::Node);
 
 impl Node {
-    /// The node's monotonic clock. A sleep on it panics outside the node's threads.
+    /// The node's monotonic clock. A sleep on it panics outside the node's threads,
+    /// and stops when its thread ends, a leaked one too.
     #[must_use]
     pub fn clock(&self) -> env::clock::Clock {
         env::clock::Clock::new(self.0.clone())

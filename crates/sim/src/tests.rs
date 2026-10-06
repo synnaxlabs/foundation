@@ -621,6 +621,32 @@ fn a_dropped_sleep_does_not_move_time() {
 }
 
 #[test]
+fn a_leaked_sleep_stops_at_the_end_of_its_thread() {
+    for panics in [false, true] {
+        let mut sim = sim(0);
+        let node = sim.node(node::Config::default());
+        let clock = node.clock();
+        let handle = node.shards().start(shard("shard-0"), move |_| async move {
+            let sleep = Box::leak(Box::new(clock.sleep(Span::SECOND)));
+            let poll =
+                std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *sleep).poll(cx)));
+            assert_eq!(poll.await, Poll::Pending, "the sleep is not due");
+            assert!(!panics, "boom");
+        });
+        let start = node.clock().now();
+        let panicked = Error::Panicked {
+            thread: "shard-0".into(),
+            message: "boom".into(),
+            seed: 0,
+        };
+        assert_eq!(sim.run(), if panics { Err(panicked) } else { Ok(()) });
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(handle.unwrap().join().is_ok(), !panics);
+        assert_eq!(node.clock().now(), start, "panics: {panics}");
+    }
+}
+
+#[test]
 #[should_panic(expected = "a sleep needs a thread that the sim started")]
 fn a_sleep_outside_the_sim_panics_after_a_run() {
     let mut sim = sim(0);
