@@ -2,17 +2,9 @@ use estimate::combine::{self, combine};
 use estimate::discipline::{Cause, Discipline};
 use estimate::{Filter, Measurement, Slew};
 use types::hash::Map;
-use types::time::{Interval, Monotonic, Span};
+use types::time::{Interval, Monotonic};
 
-use crate::{DRIFT, source};
-
-/// The words of the cell that [`Reader`]s read: a [`Discipline`] as its kind, a
-/// [`Slew`], and a [`combine::Error`].
-const WORDS: usize = 9;
-
-/// The words of the cell that holds the first slew: 1 when it is there, then the
-/// [`Slew`].
-const FIRST_WORDS: usize = 6;
+use crate::{DRIFT, cell, source};
 
 /// The mesh clock of one node. It lives on one shard, and [`Reader`]s read it from
 /// any.
@@ -22,8 +14,7 @@ pub struct Clock {
     sources: Map<source::Key, Filter>,
     next: u64,
     discipline: Discipline,
-    cell: ring::latest::Writer<WORDS>,
-    first: ring::latest::Writer<FIRST_WORDS>,
+    cell: cell::Writer,
 }
 
 impl Clock {
@@ -33,12 +24,10 @@ impl Clock {
     #[must_use]
     pub fn new(monotonic: env::clock::Clock) -> (Self, Reader) {
         let discipline = Discipline::Unsynced(combine::Error::NoSources);
-        let (cell, cell_reader) = ring::latest::new(encode(discipline));
-        let (first, first_reader) = ring::latest::new(encode_first(None));
+        let (cell, cell_reader) = cell::new(discipline);
         let reader = Reader {
             monotonic: monotonic.clone(),
             cell: cell_reader,
-            first: first_reader,
         };
         let clock = Self {
             monotonic,
@@ -46,7 +35,6 @@ impl Clock {
             next: 0,
             discipline,
             cell,
-            first,
         };
         (clock, reader)
     }
@@ -112,17 +100,11 @@ impl Clock {
         let Some(change) = self.discipline.next(estimate, DRIFT) else {
             return;
         };
-        let unsynced = self.discipline.slew().is_none();
         // A slew keeps mesh time from going back only against reads before its `now`,
         // so the clock reads inside the update.
-        self.cell.update(|_| {
+        self.cell.update(|| {
             self.discipline = change.at(self.monotonic.now(), DRIFT);
-            // Inside this update, so a read of `cell` that shows the first slew comes
-            // after it.
-            if unsynced && let Some(slew) = self.discipline.slew() {
-                self.first.update(|_| encode_first(Some(slew)));
-            }
-            encode(self.discipline)
+            self.discipline
         });
     }
 }
@@ -147,8 +129,7 @@ pub enum Status {
 #[derive(Clone, Debug)]
 pub struct Reader {
     monotonic: env::clock::Clock,
-    cell: ring::latest::Reader<WORDS>,
-    first: ring::latest::Reader<FIRST_WORDS>,
+    cell: cell::Reader,
 }
 
 impl Reader {
@@ -159,8 +140,8 @@ impl Reader {
     /// first agree.
     #[must_use]
     pub fn now(&self) -> Option<Interval> {
-        self.cell.read(|words| {
-            let slew = decode(words).slew()?;
+        self.cell.read(|discipline| {
+            let slew = discipline.slew()?;
             Some(slew.at(self.monotonic.now(), DRIFT).interval())
         })
     }
@@ -171,9 +152,9 @@ impl Reader {
     /// [`Status::Unsynced`] until a majority of the sources first agree.
     #[must_use]
     pub fn status(&self) -> Status {
-        self.cell.read(|words| {
+        self.cell.read(|discipline| {
             let at = |slew: Slew| slew.at(self.monotonic.now(), DRIFT);
-            match decode(words) {
+            match discipline {
                 Discipline::Unsynced(error) => Status::Unsynced(error),
                 Discipline::Synced(slew) => Status::Synced(at(slew)),
                 Discipline::Holdover(slew, cause) => Status::Holdover(at(slew), cause),
@@ -191,181 +172,7 @@ impl Reader {
     /// [`Reader::now`] gave an interval gives one.
     #[must_use]
     pub fn first(&self, reading: Monotonic) -> Option<Interval> {
-        let slew = self.first.read(decode_first)?;
+        let slew = self.cell.first()?;
         Some(slew.at(reading, DRIFT).interval())
-    }
-}
-
-// A push that slews changes only words 1 to 5, and an update stores only the words
-// that change.
-fn encode(discipline: Discipline) -> [u64; WORDS] {
-    let count = |n: usize| u64::try_from(n).expect("invariant: a count fits in u64");
-    let (kind, slew, failure) = match discipline {
-        Discipline::Unsynced(failure) => (0, None, Some(failure)),
-        Discipline::Synced(slew) => (1, Some(slew), None),
-        Discipline::Holdover(slew, Cause::NoEstimate(failure)) => {
-            (2, Some(slew), Some(failure))
-        }
-        Discipline::Holdover(slew, Cause::UnknownEstimate) => (3, Some(slew), None),
-    };
-    let [start, from, at, offset, error] = slew.map_or([0; 5], encode_slew);
-    let [sources, agreeing, empty] = match failure {
-        Some(combine::Error::NoMajority {
-            sources,
-            agreeing,
-            empty,
-        }) => [count(sources), count(agreeing), count(empty)],
-        Some(combine::Error::NoSources) | None => [0; 3],
-    };
-    [
-        kind, start, from, at, offset, error, sources, agreeing, empty,
-    ]
-}
-
-fn decode(words: [u64; WORDS]) -> Discipline {
-    let [
-        kind,
-        start,
-        from,
-        at,
-        offset,
-        error,
-        sources,
-        agreeing,
-        empty,
-    ] = words;
-    let slew = || decode_slew([start, from, at, offset, error]);
-    let count =
-        |word: u64| usize::try_from(word).expect("invariant: a count from a usize");
-    // `NoMajority` has at least 1 source.
-    let failure = || match sources {
-        0 => combine::Error::NoSources,
-        _ => combine::Error::NoMajority {
-            sources: count(sources),
-            agreeing: count(agreeing),
-            empty: count(empty),
-        },
-    };
-    match kind {
-        0 => Discipline::Unsynced(failure()),
-        1 => Discipline::Synced(slew()),
-        2 => Discipline::Holdover(slew(), Cause::NoEstimate(failure())),
-        3 => Discipline::Holdover(slew(), Cause::UnknownEstimate),
-        _ => panic!("invariant: the cell holds discipline {kind}"),
-    }
-}
-
-fn encode_first(first: Option<Slew>) -> [u64; FIRST_WORDS] {
-    let [start, from, at, offset, error] = first.map_or([0; 5], encode_slew);
-    [u64::from(first.is_some()), start, from, at, offset, error]
-}
-
-fn decode_first(words: [u64; FIRST_WORDS]) -> Option<Slew> {
-    let [present, slew @ ..] = words;
-    match present {
-        0 => None,
-        1 => Some(decode_slew(slew)),
-        _ => panic!("invariant: the first cell holds presence {present}"),
-    }
-}
-
-fn encode_slew(slew: Slew) -> [u64; 5] {
-    let span = |span: Span| span.nanos().cast_unsigned();
-    let target = slew.target;
-    [
-        slew.start.0,
-        span(slew.from),
-        target.at().0,
-        span(target.offset()),
-        span(target.error()),
-    ]
-}
-
-fn decode_slew(words: [u64; 5]) -> Slew {
-    let [start, from, at, offset, error] = words;
-    let span = |word: u64| Span::from_nanos(word.cast_signed());
-    let Some(target) = Measurement::new(Monotonic(at), span(offset), span(error))
-    else {
-        panic!("invariant: the cell holds a measurement");
-    };
-    Slew {
-        start: Monotonic(start),
-        from: span(from),
-        target,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use estimate::combine::Error;
-    use estimate::discipline::{Cause, Discipline};
-    use estimate::{Measurement, Slew};
-    use proptest::prelude::*;
-    use types::time::{Monotonic, Span};
-
-    use super::{decode, decode_first, encode, encode_first};
-
-    /// The largest error a measurement has.
-    const UNKNOWN: Span = Measurement::unknown(Monotonic(0), Span::ZERO).error();
-
-    fn slew() -> impl Strategy<Value = Slew> {
-        let error = 0..=UNKNOWN.nanos();
-        let words = (
-            any::<u64>(),
-            any::<i64>(),
-            any::<u64>(),
-            any::<i64>(),
-            error,
-        );
-        words.prop_map(|(start, from, at, offset, error)| {
-            let target = Measurement::new(
-                Monotonic(at),
-                Span::from_nanos(offset),
-                Span::from_nanos(error),
-            );
-            Slew {
-                start: Monotonic(start),
-                from: Span::from_nanos(from),
-                target: target.expect("at most 36500 days"),
-            }
-        })
-    }
-
-    fn error() -> impl Strategy<Value = Error> {
-        let counts = (1..=usize::MAX, any::<usize>(), any::<usize>());
-        prop_oneof![
-            Just(Error::NoSources),
-            counts.prop_map(|(sources, agreeing, empty)| Error::NoMajority {
-                sources,
-                agreeing,
-                empty,
-            }),
-        ]
-    }
-
-    fn discipline() -> impl Strategy<Value = Discipline> {
-        let cause = prop_oneof![
-            error().prop_map(Cause::NoEstimate),
-            Just(Cause::UnknownEstimate)
-        ];
-        prop_oneof![
-            error().prop_map(Discipline::Unsynced),
-            slew().prop_map(Discipline::Synced),
-            (slew(), cause).prop_map(|(slew, cause)| Discipline::Holdover(slew, cause)),
-        ]
-    }
-
-    proptest! {
-        #[test]
-        fn a_discipline_round_trips_through_the_cell(discipline in discipline()) {
-            prop_assert_eq!(decode(encode(discipline)), discipline);
-        }
-
-        #[test]
-        fn the_first_slew_round_trips_through_its_cell(
-            first in prop::option::of(slew()),
-        ) {
-            prop_assert_eq!(decode_first(encode_first(first)), first);
-        }
     }
 }
