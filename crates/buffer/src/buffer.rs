@@ -24,7 +24,7 @@ use types::frame::Path;
 use types::time::Span;
 
 use crate::entry::{self, ENTRIES_MAX, Entry};
-use crate::group::{Closed, Group, Limit, META_LEN, Rejected, Sealed};
+use crate::group::{self, Closed, Group, Limit, META_LEN, Sealed};
 use crate::header::{self, Header};
 use crate::log::{self, Logs, Tail};
 use crate::record::{self, ALIGN, AREA_START, Body};
@@ -53,25 +53,19 @@ pub struct Config {
     pub commit: Span,
 }
 
-/// Why a call failed.
+/// Why an open or a commit failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The batch alone is over a limit of one record, so it never fits this ring.
-    /// The limit is the first one it is over, in the order of [`Limit`]. Nothing
-    /// is queued.
-    Large(Limit),
-    /// The ring has no room for the batch. The caller records a gap. Room returns
-    /// at a commit, or never when the offsets left before their end are under
-    /// `needed`.
+    /// The ring has no room for its restart record.
     Full {
-        /// Bytes of the area that the batch's record needs, with the rest of the
+        /// Bytes of the area that the restart record needs, with the rest of the
         /// area it must skip.
         needed: u64,
         /// Bytes the record may take: the area not in use, or the offsets left
         /// before their end, whichever is less.
         free: u64,
     },
-    /// The pool has no block for a record header or a recovery read.
+    /// The pool has no block for a header, a recovery read, or the restart record.
     Pool(block::Error),
     /// A file call failed. After a failed sync, every call fails with it.
     Files(files::Error),
@@ -103,11 +97,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Large(limit) => write!(f, "{limit}"),
             Self::Full { needed, free } => write!(
                 f,
-                "the ring has no room for the batch: it needs {needed} bytes and \
-                 {free} are free"
+                "the ring has no room for its restart record: it needs {needed} \
+                 bytes and {free} are free"
             ),
             Self::Pool(error) => write!(f, "the pool has no block: {error}"),
             Self::Files(error) => write!(f, "a file call failed: {error}"),
@@ -139,6 +132,47 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Why an append took no entry. Nothing is queued, no tail moves, and the parts of
+/// the entries are dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Rejected {
+    /// The batch alone is over a limit of one record, so it never fits this ring.
+    /// The limit is the first one it is over, in the order of [`Limit`].
+    Large(Limit),
+    /// The ring has no room for the batch. The caller records a gap. Room returns
+    /// at a commit, or never when the offsets left before their end are under
+    /// `needed`.
+    Full {
+        /// Bytes of the area that the batch's record needs, with the rest of the
+        /// area it must skip.
+        needed: u64,
+        /// Bytes the record may take: the area not in use, or the offsets left
+        /// before their end, whichever is less.
+        free: u64,
+    },
+    /// The pool has no block for the record header.
+    Pool(block::Error),
+    /// A file call of a commit failed, which ended the buffer.
+    Files(files::Error),
+}
+
+impl fmt::Display for Rejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Large(limit) => write!(f, "{limit}"),
+            Self::Full { needed, free } => write!(
+                f,
+                "the ring has no room for the batch: it needs {needed} bytes and \
+                 {free} are free"
+            ),
+            Self::Pool(error) => write!(f, "the pool has no block: {error}"),
+            Self::Files(error) => write!(f, "a file call failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for Rejected {}
 
 impl From<block::Error> for Error {
     fn from(error: block::Error) -> Self {
@@ -223,7 +257,7 @@ struct State {
     /// Whether the handle dropped. The task ends when it next decides.
     closed: bool,
     /// The error that ended the task.
-    failed: Option<Error>,
+    failed: Option<files::Error>,
 }
 
 impl State {
@@ -378,11 +412,7 @@ impl Buffer {
     ///
     /// # Errors
     ///
-    /// [`Error::Large`] when no record holds the entries together, [`Error::Full`]
-    /// when the ring has no room for the whole call, and [`Error::Pool`] when the
-    /// pool has no block for the record header; nothing is queued and no tail
-    /// moves. [`Error::Files`] after a failed sync. An append that fails takes no
-    /// part: the parts of `entries` are dropped.
+    /// [`Rejected`] as each variant says.
     ///
     /// # Panics
     ///
@@ -391,7 +421,7 @@ impl Buffer {
     pub fn append(
         &self,
         entries: impl IntoIterator<Item = Entry>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Rejected> {
         let mut batch = self.batch.take();
         batch.extend(entries);
         let queued = self.queue(&mut batch);
@@ -402,16 +432,16 @@ impl Buffer {
     }
 
     /// Takes `batch` into a group, or leaves its entries in it.
-    fn queue(&self, batch: &mut Vec<Entry>) -> Result<(), Error> {
+    fn queue(&self, batch: &mut Vec<Entry>) -> Result<(), Rejected> {
         let shared = &*self.shared;
         let mut guard = shared.state.borrow_mut();
         let state = &mut *guard;
         if let Some(error) = &state.failed {
-            return Err(error.clone());
+            return Err(Rejected::Files(error.clone()));
         }
         let taken = match state.open.push(&shared.pool, &state.writer, batch) {
             Ok(taken) => taken,
-            Err(Rejected::Record) => {
+            Err(group::Rejected::Record) => {
                 state.close_open();
                 state
                     .open
@@ -446,12 +476,15 @@ impl Buffer {
 }
 
 /// The error of a push that a new group refuses too.
-fn rejected(rejected: Rejected) -> Error {
+fn rejected(rejected: group::Rejected) -> Rejected {
     match rejected {
-        Rejected::Large(limit) => Error::Large(limit),
-        Rejected::Ring(full) => full.into(),
-        Rejected::Pool(error) => error.into(),
-        Rejected::Record => {
+        group::Rejected::Large(limit) => Rejected::Large(limit),
+        group::Rejected::Ring(full) => Rejected::Full {
+            needed: full.needed,
+            free: full.free,
+        },
+        group::Rejected::Pool(error) => Rejected::Pool(error),
+        group::Rejected::Record => {
             unreachable!("invariant: an empty group takes a batch under the maximum")
         }
     }
@@ -613,7 +646,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         let mut state = shared.state.borrow_mut();
         match result {
             Ok(()) => state.synced(sealed.drain(..)),
-            Err(error) => state.failed = Some(error.into()),
+            Err(error) => state.failed = Some(error),
         }
         woken.append(&mut state.wakers);
         drop(state);
@@ -652,7 +685,7 @@ impl Future for Commit<'_> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.shared.state.borrow_mut();
         if let Some(error) = &state.failed {
-            return Poll::Ready(Err(error.clone()));
+            return Poll::Ready(Err(Error::Files(error.clone())));
         }
         if state.commits > self.since {
             return Poll::Ready(Ok(()));

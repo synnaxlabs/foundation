@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Parts, Tail, Unfit};
+use buffer::{
+    Buffer, Config, Entry, Error, Layout, Limit, Parts, Rejected, Tail, Unfit,
+};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{Error as FileError, Mode, Operation, SECTOR};
@@ -491,7 +493,7 @@ fn a_full_ring_queues_nothing() {
         let full = buffer.append([entry(1, a, Path::Live, 2, 1, None, parts.clone())]);
         assert_eq!(
             full,
-            Err(Error::Full {
+            Err(Rejected::Full {
                 needed: 4096,
                 free: 0
             })
@@ -522,7 +524,7 @@ fn a_batch_is_queued_whole_or_not_at_all() {
         ]);
         assert_eq!(
             full,
-            Err(Error::Full {
+            Err(Rejected::Full {
                 needed: 12288,
                 free: 4096
             }),
@@ -581,8 +583,8 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
         ];
         for (batch, limit, message) in cases {
             let large = buffer.append(batch);
-            assert_eq!(large, Err(Error::Large(limit)));
-            assert_eq!(Error::Large(limit).to_string(), message);
+            assert_eq!(large, Err(Rejected::Large(limit)));
+            assert_eq!(Rejected::Large(limit).to_string(), message);
             assert_eq!(buffer.tail(a, Path::Live), tail(1, None));
         }
         buffer
@@ -624,7 +626,7 @@ fn a_failed_append_holds_no_part() {
         let large = buffer.append([entry(1, a, Path::Live, 0, 1, None, body)]);
         assert_eq!(
             large,
-            Err(Error::Large(Limit::Body {
+            Err(Rejected::Large(Limit::Body {
                 len: 200_055,
                 max: BODY_MAX,
             }))
@@ -651,19 +653,20 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
-        let failed = Err(Error::Files(FileError::Io {
+        let failed = FileError::Io {
             path: PathBuf::from(RING),
             operation: Operation::Sync,
             code: 5,
-        }));
-        assert_eq!(buffer.committed().await, failed);
+        };
+        let ended = Err(Error::Files(failed.clone()));
+        assert_eq!(buffer.committed().await, ended);
         assert_eq!(buffer.durable(a, Path::Live), Tail::default());
         assert_eq!(
             buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
-            failed
+            Err(Rejected::Files(failed))
         );
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
-        assert_eq!(buffer.committed().await, failed);
+        assert_eq!(buffer.committed().await, ended);
         assert_eq!(shard.memory.syncs(), 2, "the task ended at the failed sync");
     });
 }
@@ -1377,7 +1380,8 @@ fn an_error_says_what_went_wrong() {
     let texts = [
         (
             Error::Full { needed: 1, free: 0 },
-            "the ring has no room for the batch: it needs 1 bytes and 0 are free",
+            "the ring has no room for its restart record: it needs 1 bytes and 0 \
+             are free",
         ),
         (
             pool,
@@ -1416,6 +1420,33 @@ fn an_error_says_what_went_wrong() {
     ];
     for (error, text) in texts {
         assert_eq!(error.to_string(), text);
+    }
+}
+
+/// The text of `Large` is the text of its limit, checked with each limit above.
+#[test]
+fn a_rejected_append_says_why() {
+    let pool = Rejected::Pool(block::Error::TooLarge {
+        requested: 1,
+        largest: 0,
+    });
+    let files = Rejected::Files(FileError::NotFound {
+        path: PathBuf::from(RING),
+    });
+    let texts = [
+        (
+            Rejected::Full { needed: 1, free: 0 },
+            "the ring has no room for the batch: it needs 1 bytes and 0 are free",
+        ),
+        (
+            pool,
+            "the pool has no block: block of 1 bytes is above the largest block of \
+             0 bytes",
+        ),
+        (files, "a file call failed: path shard-0/ring is not there"),
+    ];
+    for (rejected, text) in texts {
+        assert_eq!(rejected.to_string(), text);
     }
 }
 

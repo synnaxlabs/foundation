@@ -142,9 +142,9 @@ impl Layout {
 
     /// The most bytes of parts in a batch of one entry that
     /// [`Buffer::append`](crate::Buffer::append) takes: one byte more gives
-    /// [`Error::Large`](crate::Error::Large) with [`Limit::Body`](crate::Limit::Body).
-    /// Each entry of a larger batch adds to the record's table, so its entries hold
-    /// less in all.
+    /// [`Rejected::Large`](crate::Rejected::Large) with
+    /// [`Limit::Body`](crate::Limit::Body). Each entry of a larger batch adds to the
+    /// record's table, so its entries hold less in all.
     #[must_use]
     pub fn entry_max(self) -> usize {
         self.body_max - BODY_MIN
