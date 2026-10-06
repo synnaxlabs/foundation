@@ -45,6 +45,8 @@ struct Wake {
     listed: Vec<bool>,
     /// Each reader to wake, with a frame to take. A key can repeat.
     keys: Vec<reader::Key>,
+    /// The commits the buffer had ended at the last settle.
+    commits: u64,
 }
 
 /// The shard's state for an open writer.
@@ -397,14 +399,20 @@ impl Shard {
     /// Replaces `keys` with the readers to wake since the last call, sorted, each
     /// once. Complete readers first get the live frames now on disk. A key is a hint:
     /// take from each until [`take`](Self::take) gives `None`. Call it after each
-    /// write and each commit. It takes time linear in the indexes with live frames
-    /// not yet on disk.
+    /// write and each commit. When a commit ended since the last call, it takes time
+    /// linear in the indexes with live frames not yet on disk; else constant time.
     pub(crate) fn woken(&mut self, keys: &mut Vec<reader::Key>) {
         self.wake.settle(&self.buffer, &mut self.indexes);
         keys.clear();
         mem::swap(keys, &mut self.wake.keys);
         keys.sort_unstable();
         keys.dedup();
+    }
+
+    /// Whether a complete reader waits for a live frame not yet released. While one
+    /// does, await [`committed`](Self::committed), then call [`woken`](Self::woken).
+    pub(crate) fn waiting(&self) -> bool {
+        !self.wake.pending.is_empty()
     }
 
     fn index(&mut self, key: reader::Key) -> &mut Index {
@@ -463,8 +471,13 @@ impl Wake {
         }
     }
 
-    /// Gives complete readers the live frames on disk.
+    /// Gives complete readers the live frames on disk. Reads no index when no commit
+    /// ended since the last settle, as only a commit moves `durable`.
     fn settle(&mut self, buffer: &Buffer, indexes: &mut [Index]) {
+        let commits = buffer.commits();
+        if mem::replace(&mut self.commits, commits) == commits {
+            return;
+        }
         let mut pending = mem::take(&mut self.pending);
         pending.retain(|&(slot, place)| {
             let durable = buffer.durable(slot, Path::Live).seq;
@@ -2160,6 +2173,43 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(shard.wake.pending, Vec::new());
+            });
+        }
+
+        #[test]
+        fn releases_a_frame_at_the_first_woken_after_its_commit() {
+            run(50, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(woken(&mut shard), []);
+                shard.committed().await.expect("the commit ends");
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                assert_eq!(woken(&mut shard), []);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn waits_only_while_a_complete_reader_waits_for_a_live_frame() {
+            run(51, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                assert!(!shard.waiting());
+                let reader = shard.open_reader(Slot::new(0), COMPLETE, MESH);
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                write(&test, &mut shard, a, &[10]);
+                assert!(shard.waiting());
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert!(!shard.waiting());
             });
         }
 
