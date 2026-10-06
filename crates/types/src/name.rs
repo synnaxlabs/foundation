@@ -300,8 +300,7 @@ pub enum Error {
 }
 
 impl Error {
-    /// What to do instead: a sentence with no final period, the same for every error of
-    /// one variant.
+    /// What to do instead: a sentence with no final period.
     #[must_use]
     pub fn fix(&self) -> &'static str {
         match self {
@@ -309,11 +308,11 @@ impl Error {
             Self::Long { .. } => "Use fewer or shorter segments",
             Self::NoInclude => "Add a pattern without a leading `!`",
             Self::Segment { .. } => {
-                "Use ASCII letters, digits, `_`, and `-` in each segment, and separate \
-                 segments with dots"
+                "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
+                 and no other character"
             }
             Self::Wildcard { .. } => {
-                "Use `*` and `**` only as whole segments of a pattern"
+                "Use `*` and `**` only as whole segments of a pattern, never in a name"
             }
         }
     }
@@ -438,8 +437,16 @@ mod tests {
             );
             assert_eq!(
                 error.fix(),
-                "Use ASCII letters, digits, `_`, and `-` in each segment, and separate \
-                 segments with dots"
+                "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
+                 and no other character"
+            );
+        }
+
+        #[test]
+        fn escapes_the_text_in_the_message() {
+            assert_eq!(
+                "a.\"b".parse::<Name>().unwrap_err().to_string(),
+                r#""a.\"b" has a segment that is not valid: "\"b""#
             );
         }
 
@@ -452,7 +459,7 @@ mod tests {
             assert_eq!(error.to_string(), "\"a.*\" uses a wildcard where it cannot");
             assert_eq!(
                 error.fix(),
-                "Use `*` and `**` only as whole segments of a pattern"
+                "Use `*` and `**` only as whole segments of a pattern, never in a name"
             );
         }
 
@@ -501,6 +508,20 @@ mod tests {
             for input in ["a*", "a.***", "a.**b", "*a.b"] {
                 assert_eq!(input.parse::<Pattern>(), Err(wildcard_error(input)));
             }
+            assert_eq!(
+                "a*".parse::<Pattern>().unwrap_err().fix(),
+                "Use `*` and `**` only as whole segments of a pattern, never in a name"
+            );
+        }
+
+        #[test]
+        fn shows_only_the_bad_segment() {
+            let error = "site.*.t c".parse::<Pattern>().unwrap_err();
+            assert_eq!(error, segment_error("site.*.t c", "t c"));
+            assert_eq!(
+                error.to_string(),
+                "\"site.*.t c\" has a segment that is not valid: \"t c\""
+            );
         }
 
         #[test]
@@ -689,7 +710,7 @@ mod tests {
     proptest! {
         #[test]
         fn every_error_is_a_clause_and_a_sentence_with_no_final_period(
-            text in "[a.*!@ ]{0,8}|a{256}",
+            text in r#"[a.*!@ "\\]{0,8}|a{256}"#,
         ) {
             let errors = [
                 text.parse::<Name>().err(),
