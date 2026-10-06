@@ -256,12 +256,11 @@ impl Shard {
     ///
     /// # Errors
     ///
-    /// [`Error::Resend`] for a frame labeled resend. [`Error::Full`] for a backfill
-    /// frame when the ring or the pool has no room, and [`Error::Large`] for a frame
-    /// whose bodies no record or no block of the pool holds; no seq moves for either.
-    /// A handoff with no room decides first: the frame is lost or gets
-    /// [`Error::Full`] before its size is checked. [`Error::Disk`] after a failed
-    /// commit.
+    /// [`Error::Resend`] for a frame labeled resend. [`Error::Large`] for a frame
+    /// whose bodies no record or no block of the pool holds, whatever the room.
+    /// [`Error::Full`] for a backfill frame when the ring or the pool has no room. No
+    /// seq moves for either. The waiting handoffs are appended first, also for a frame
+    /// too large. [`Error::Disk`] after a failed commit, before the others.
     ///
     /// # Panics
     ///
@@ -288,6 +287,10 @@ impl Shard {
             let checked = index.check(claim.key, path, stamps, now, mesh);
             scratch.checks.push((group, checked, None));
         }
+        let sizes = scratch.checks.iter().filter_map(|(group, checked, _)| {
+            checked.as_ref().ok().map(|_| split.size(*group))
+        });
+        let large = !fits(&self.pool, self.buffer.layout(), sizes);
         let groups = scratch.checks.iter().map(|&(group, ..)| group);
         let recorded = record(
             &self.buffer,
@@ -297,6 +300,10 @@ impl Shard {
             groups,
             mesh,
         );
+        if large {
+            scratch.checks.clear();
+            return recorded.and(Err(Error::Large));
+        }
         let entries = &mut scratch.entries;
         let made = freeze(
             entries,
@@ -313,13 +320,8 @@ impl Shard {
         if !ready {
             entries.clear();
         }
-        let appended = match made {
-            Err(block::Error::TooLarge { .. }) if recorded == Ok(true) => {
-                Err(Error::Large)
-            }
-            // An empty append still reports a failed commit.
-            _ => room(self.buffer.append(entries.drain(..))),
-        };
+        // An empty append still reports a failed commit.
+        let appended = room(self.buffer.append(entries.drain(..)));
         let room =
             recorded
                 .and(appended)
@@ -510,13 +512,39 @@ impl Session {
     }
 }
 
+/// Whether the index frame and the stored entry of each of `sizes` each fit a block of
+/// `pool`, and the entries fit one record of `layout`. Takes no block.
+fn fits(
+    pool: &block::Pool,
+    layout: buffer::Layout,
+    sizes: impl Iterator<Item = split::Size>,
+) -> bool {
+    let largest = pool.largest();
+    let (mut entries, mut bytes) = (0, 0_usize);
+    for size in sizes {
+        let entry = stored::head_len(size.series).saturating_add(size.body);
+        if size.block.is_some_and(|block| block > largest) || entry > largest {
+            return false;
+        }
+        entries += 1;
+        bytes = bytes.saturating_add(entry);
+    }
+    layout
+        .check(entries, entries * stored::PARTS, bytes)
+        .is_ok()
+}
+
 /// Freezes the index frame from `split` of each accepted group of `checks` into its
 /// check, and pushes its stored entry onto `entries`, in group order, at mesh time
 /// `stored_at`.
 ///
 /// # Errors
 ///
-/// [`block::Error`] when `pool` has no block for an index frame or a header.
+/// [`block::Error`] when `pool` has no room for an index frame or a header.
+///
+/// # Panics
+///
+/// If no block of `pool` holds one, which a batch that passed [`fits`] never has.
 fn freeze(
     entries: &mut Vec<Entry>,
     pool: &block::Pool,
@@ -526,11 +554,19 @@ fn freeze(
     stored_at: Stamp,
 ) -> Result<(), block::Error> {
     for (group, checked, frozen) in checks {
-        if let Ok(accepted) = checked {
-            let draft = split.frame(pool, *group)?;
+        let Ok(accepted) = checked else {
+            continue;
+        };
+        let entry = split.frame(pool, *group).and_then(|draft| {
             let frame = frozen.insert(accepted.freeze(draft, *group));
-            let last = accepted.last();
-            entries.push(stored::entry(pool, frame, set, last, stored_at)?);
+            stored::entry(pool, frame, set, accepted.last(), stored_at)
+        });
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(error @ block::Error::TooLarge { .. }) => {
+                panic!("invariant: the size check holds each block: {error}")
+            }
+            Err(error) => return Err(error),
         }
     }
     Ok(())
@@ -569,9 +605,6 @@ fn record(
                 panic!("invariant: the pool of the ring holds a handoff: {error}")
             }
         };
-        if let Err(buffer::Rejected::Large(limit)) = appended {
-            panic!("invariant: a record holds one handoff: {limit}");
-        }
         if room(appended)? {
             index.gate.recorded();
         } else {
@@ -634,13 +667,19 @@ fn range(seq: &Range<u64>) -> frame::Range {
 ///
 /// # Errors
 ///
-/// [`Error::Large`] when no record holds the batch, and [`Error::Disk`] after a
-/// failed commit.
+/// [`Error::Disk`] after a failed commit.
+///
+/// # Panics
+///
+/// If the buffer never takes the batch, which a handoff alone and a batch that
+/// passed [`fits`] never are.
 fn room(appended: Result<(), buffer::Rejected>) -> Result<bool, Error> {
     match appended {
         Ok(()) => Ok(true),
         Err(buffer::Rejected::Full { .. } | buffer::Rejected::Pool(_)) => Ok(false),
-        Err(buffer::Rejected::Large(_)) => Err(Error::Large),
+        Err(buffer::Rejected::Large(limit)) => {
+            panic!("invariant: the buffer takes the batch: {limit}")
+        }
         Err(buffer::Rejected::Files(error)) => Err(Error::Disk(error)),
     }
 }
@@ -1493,6 +1532,123 @@ mod tests {
         });
     }
 
+    /// Group 0 of slot 0 with no data, then group 1 of slot 2 with an `i64` channel at
+    /// slot 3.
+    fn index_then_data() -> Arc<KeySet> {
+        interner().intern(&[
+            Group {
+                index: key(Slot::new(0)),
+                data: &[],
+            },
+            Group {
+                index: key(Slot::new(2)),
+                data: &[(key(Slot::new(3)), Type::Scalar(Scalar::I64))],
+            },
+        ])
+    }
+
+    #[test]
+    fn refuses_a_large_frame_when_an_earlier_group_finds_no_block() {
+        run(74, |test| async move {
+            let set = index_then_data();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let writers = pool(4 * POOL);
+            let len = 240_000;
+            let stamps: Vec<i64> = (10..).take(len).collect();
+            let values = scattered(len);
+            let series: [(usize, &[i64]); 3] = [(0, &[10]), (1, &stamps), (2, &values)];
+            let large = || frame(&writers, &set, &series);
+            for label in [LIVE, BACKFILL] {
+                assert_eq!(shard.write(a, label, large()), Err(Error::Large));
+                let blocks = test.fill();
+                let written = shard.write(a, label, large()).map(<[_]>::to_vec);
+                drop(blocks);
+                assert_eq!(written, Err(Error::Large));
+            }
+            let small = frame(&test.pool, &set, &[(1, &[300_000]), (2, &[1])]);
+            assert_eq!(shard.write(a, LIVE, small), Ok(&[applied(2, 0, 1)][..]));
+        });
+    }
+
+    #[test]
+    fn refuses_a_frame_no_record_holds_when_an_earlier_group_finds_no_block() {
+        run(75, |test| async move {
+            let set = index_then_data();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let writers = pool(POOL);
+            let stamps: Vec<i64> = (10..610).collect();
+            let values = scattered(600);
+            let series: [(usize, &[i64]); 3] = [(0, &[10]), (1, &stamps), (2, &values)];
+            for label in [LIVE, BACKFILL] {
+                let large = frame(&writers, &set, &series);
+                let blocks = test.fill();
+                let written = shard.write(a, label, large).map(<[_]>::to_vec);
+                drop(blocks);
+                assert_eq!(written, Err(Error::Large));
+            }
+            let small = frame(&test.pool, &set, &[(0, &[700]), (1, &[700]), (2, &[1])]);
+            assert_eq!(
+                shard.write(a, LIVE, small),
+                Ok(&[applied(0, 0, 1), applied(2, 0, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_two_groups_that_no_record_holds_together() {
+        run(76, |test| async move {
+            let set = interner().intern(&[
+                Group {
+                    index: key(Slot::new(0)),
+                    data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
+                },
+                Group {
+                    index: key(Slot::new(2)),
+                    data: &[(key(Slot::new(3)), Type::Scalar(Scalar::I64))],
+                },
+            ]);
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let writers = pool(POOL);
+            let stamps: Vec<i64> = (10..310).collect();
+            let values = scattered(300);
+            let both: [(usize, &[i64]); 4] =
+                [(0, &stamps), (1, &values), (2, &stamps), (3, &values)];
+            for full in [false, true] {
+                let large = frame(&writers, &set, &both);
+                let blocks = full.then(|| test.fill());
+                let written = shard.write(a, LIVE, large).map(<[_]>::to_vec);
+                drop(blocks);
+                assert_eq!(written, Err(Error::Large));
+            }
+            for (slot, apart) in [(0, &both[..2]), (2, &both[2..])] {
+                let write = frame(&test.pool, &set, apart);
+                assert_eq!(
+                    shard.write(a, LIVE, write),
+                    Ok(&[applied(slot, 0, 300)][..])
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn takes_no_block_for_a_frame_too_large_for_one_write() {
+        run(77, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            shard.committed().await.expect("the commit ends");
+            let writers = pool(POOL);
+            let stamps: Vec<i64> = (10..610).collect();
+            let large = frame(&writers, &set, &[(0, &stamps), (1, &scattered(600))]);
+            let committed = test.pool.committed();
+            assert_eq!(shard.write(a, LIVE, large), Err(Error::Large));
+            assert_eq!(test.pool.committed(), committed);
+        });
+    }
+
     #[test]
     fn records_a_waiting_handoff_before_a_frame_too_large_for_one_write() {
         run(39, |test| async move {
@@ -1517,7 +1673,7 @@ mod tests {
     }
 
     #[test]
-    fn loses_a_large_live_frame_whose_handoff_finds_no_room() {
+    fn refuses_a_large_frame_whose_handoff_finds_no_room() {
         run(40, |test| async move {
             let set = two_indexes();
             let mut shard = test.shard(1 << 16).await;
@@ -1538,19 +1694,75 @@ mod tests {
             assert_eq!(shard.write(a, LIVE, large()), Err(Error::Large));
             let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
             assert!(shard.indexes[0].handoff().is_some(), "no room at the open");
-            // The handoff is appended before the bodies, so the size is never checked.
-            assert_eq!(shard.write(b, LIVE, large()), Ok(&[lost(0, 0, 600)][..]));
+            for label in [LIVE, BACKFILL] {
+                assert_eq!(shard.write(b, label, large()), Err(Error::Large));
+            }
             let len = 240_000;
             let stamps: Vec<i64> = (1000..).take(len).collect();
             let values = scattered(len);
             let series: [(usize, &[i64]); 3] =
                 [(0, &stamps), (1, &values), (2, &[stamp])];
             let huge = frame(&pool(4 * POOL), &set, &series);
-            assert_eq!(
-                shard.write(b, LIVE, huge),
-                Ok(&[lost(0, 600, 240_000), lost(2, 16, 1)][..])
-            );
+            assert_eq!(shard.write(b, LIVE, huge), Err(Error::Large));
+            assert!(shard.indexes[0].handoff().is_some(), "still no room");
+            let small = frame(&test.pool, &set, &[(0, &[700]), (1, &[1])]);
+            assert_eq!(shard.write(b, LIVE, small), Ok(&[lost(0, 0, 1)][..]));
         });
+    }
+
+    mod fits {
+        use super::*;
+
+        /// A layout whose records hold more than any block of [`pool`]`(POOL)`.
+        fn layout() -> Layout {
+            Layout::new(1 << 24, 1 << 22).expect("a ring")
+        }
+
+        fn size(block: Option<usize>, body: usize, series: usize) -> split::Size {
+            split::Size {
+                block,
+                body,
+                series,
+            }
+        }
+
+        #[test]
+        fn takes_an_index_frame_up_to_the_largest_block() {
+            let pool = pool(POOL);
+            let largest = pool.largest();
+
+            let at = fits(&pool, layout(), iter::once(size(Some(largest), 0, 1)));
+            let over = fits(&pool, layout(), iter::once(size(Some(largest + 1), 0, 1)));
+
+            assert_eq!((at, over), (true, false));
+        }
+
+        #[test]
+        fn takes_a_stored_entry_up_to_the_largest_block() {
+            let pool = pool(POOL);
+            let body = pool.largest() - stored::head_len(1);
+
+            for block in [None, Some(1)] {
+                let at = fits(&pool, layout(), iter::once(size(block, body, 1)));
+                let over = fits(&pool, layout(), iter::once(size(block, body + 1, 1)));
+
+                assert_eq!((at, over), (true, false), "block {block:?}");
+            }
+        }
+
+        #[test]
+        fn takes_the_entries_of_one_record() {
+            let pool = pool(POOL);
+            let layout = Layout::new(1 << 16, 1 << 13).expect("a ring");
+            let body = layout.entry_max() - stored::head_len(1);
+
+            let at = fits(&pool, layout, iter::once(size(None, body, 1)));
+            let over = fits(&pool, layout, iter::once(size(None, body + 1, 1)));
+            let two = fits(&pool, layout, [size(None, body / 2, 1); 2].into_iter());
+
+            assert_eq!((at, over, two), (true, false, false));
+            assert!(fits(&pool, layout, iter::empty()));
+        }
     }
 
     #[test]

@@ -17,6 +17,14 @@ const COUNT: usize = 4;
 /// Bytes of one series descriptor: channel, kind, element, `n`, and end.
 const DESCRIPTOR: usize = 26;
 
+/// The parts of a data entry: its header, then the frame's body.
+pub(crate) const PARTS: usize = 2;
+
+/// Bytes of the header of a data entry of `series` series.
+pub(crate) fn head_len(series: usize) -> usize {
+    COUNT + DESCRIPTOR * series
+}
+
 /// Offsets in a descriptor.
 mod at {
     pub(super) const KIND: usize = 16;
@@ -78,7 +86,7 @@ fn body(
     pool: &block::Pool,
     frame: &Frame,
     set: &KeySet,
-) -> Result<[Block; 2], block::Error> {
+) -> Result<[Block; PARTS], block::Error> {
     assert_eq!(frame.form(), Form::Encoded, "the frame is not encoded");
     assert_eq!(
         frame.key_set(),
@@ -88,7 +96,7 @@ fn body(
     let entries = set.entries();
     let group = frame.ends().next().map(|(entry, _)| entries[entry].group);
     let count = frame.ends().count();
-    let mut head = pool.alloc(COUNT + DESCRIPTOR * count)?;
+    let mut head = pool.alloc(head_len(count))?;
     let (start, descriptors) = head.split_at_mut(COUNT);
     start.copy_from_slice(&to_u32(count).to_le_bytes());
     let (descriptors, _) = descriptors.as_chunks_mut::<DESCRIPTOR>();
@@ -133,7 +141,7 @@ pub(crate) fn read(body: &[u8]) -> impl Iterator<Item = Series<'_>> {
     let Some(count) = body.first_chunk() else {
         panic!("the stored body of {} bytes has no count", body.len());
     };
-    let header = COUNT + DESCRIPTOR * to_usize(u32::from_le_bytes(*count));
+    let header = head_len(to_usize(u32::from_le_bytes(*count)));
     let Some((head, series)) = body.split_at_checked(header) else {
         panic!(
             "the stored body of {} bytes is shorter than its header of {header} bytes",

@@ -11,8 +11,18 @@ use types::sample::{Scalar, Type};
 
 /// The buffers of [`Split`], kept from one frame to the next, so that a split makes no
 /// heap allocation once they are large enough.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct Scratch {
+    groups: Groups,
+    /// The entry and length of each series in [`Groups::series`], in the same order,
+    /// for [`frame::Layout::new`]. Apart from `groups`, so that a [`Split`] keeps a
+    /// layout that borrows it.
+    lens: Vec<(usize, usize)>,
+}
+
+/// The present groups of a frame, and their checked series.
+#[derive(Debug)]
+struct Groups {
     /// Each series that fits its group's count, and each encoded index before its
     /// check, sorted by group and then entry once all are checked.
     series: Vec<Series>,
@@ -25,11 +35,9 @@ pub(crate) struct Scratch {
     bytes: Vec<u8>,
     /// One vector of the stamps of an encoded index, decoded.
     vector: Box<[[u8; 8]; codec::VECTOR_LEN]>,
-    /// The entries and lengths of one index frame, for [`Draft::new`].
-    lens: Vec<(usize, usize)>,
 }
 
-impl Default for Scratch {
+impl Default for Groups {
     fn default() -> Self {
         Self {
             series: Vec::new(),
@@ -37,7 +45,6 @@ impl Default for Scratch {
             places: Vec::new(),
             bytes: Vec::new(),
             vector: Box::new([[0; 8]; codec::VECTOR_LEN]),
-            lens: Vec::new(),
         }
     }
 }
@@ -59,7 +66,7 @@ struct Series {
 struct Part {
     group: u32,
     count: u32,
-    /// Its series in [`Scratch::series`].
+    /// Its series in [`Groups::series`].
     series: Range<usize>,
     /// The entry of its index series.
     index: usize,
@@ -67,7 +74,7 @@ struct Part {
     /// index is checked last: by its [`Stamps`] as they decode, else by
     /// [`validate_index`].
     check: Result<(), Error>,
-    /// Its encoded index is not checked yet: [`Scratch::check`] passed over it.
+    /// Its encoded index is not checked yet: [`Groups::check`] passed over it.
     pending: bool,
     made: bool,
 }
@@ -93,17 +100,22 @@ impl Scratch {
             draft.key_set().get(),
             set.key().get()
         );
-        self.collect(set, &mut draft);
-        self.check(set, &mut draft);
-        self.gather();
+        let Self { groups, lens } = self;
+        groups.collect(set, &mut draft);
+        groups.check(set, &mut draft);
+        groups.gather(lens);
         Split {
-            scratch: self,
+            groups,
+            lens,
             set,
             draft: Some(draft),
             next: 0,
+            layout: None,
         }
     }
+}
 
+impl Groups {
     /// Records each present group of `draft` with its count.
     fn collect(&mut self, set: &KeySet, draft: &mut Draft) {
         self.series.clear();
@@ -178,10 +190,13 @@ impl Scratch {
         }
     }
 
-    /// Sorts the checked series by group and entry, and gives each part its series.
-    fn gather(&mut self) {
+    /// Sorts the checked series by group and entry, gives each part its series, and
+    /// fills `lens` with the entry and length of each.
+    fn gather(&mut self, lens: &mut Vec<(usize, usize)>) {
         self.series
             .sort_unstable_by_key(|series| (series.group, series.entry));
+        lens.clear();
+        lens.extend(self.series.iter().map(|series| (series.entry, series.len)));
         let mut next = 0;
         for part in &mut self.parts {
             let len = self.series[next..]
@@ -197,14 +212,30 @@ impl Scratch {
 /// A writer's frame, checked, to make into one index frame per present group.
 #[derive(Debug)]
 pub(crate) struct Split<'a> {
-    scratch: &'a mut Scratch,
+    groups: &'a mut Groups,
+    lens: &'a [(usize, usize)],
     set: &'a KeySet,
     /// The writer's frame. A raw frame is held for the stamps of its indexes, until
     /// [`Split::next`] has given every group. An encoded frame is held for its
     /// series, until it is given out as the frame of its one group.
     draft: Option<Draft>,
-    /// The place in [`Scratch::parts`] of the group that [`Split::next`] gives next.
+    /// The place in [`Groups::parts`] of the group that [`Split::next`] gives next.
     next: usize,
+    /// The group that [`Split::size`] sized last and its layout, until
+    /// [`Split::frame`] makes it, so that its rules run once.
+    layout: Option<(u32, frame::Layout<'a>)>,
+}
+
+/// The bytes of the index frame of a group, before it is made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Size {
+    /// Bytes of the block it takes from the pool, or `None` when it is the writer's
+    /// frame, with no copy.
+    pub(crate) block: Option<usize>,
+    /// Bytes of its [`Frame::body`](frame::Frame::body).
+    pub(crate) body: usize,
+    /// Its series.
+    pub(crate) series: usize,
 }
 
 /// The stamps of a group's index series, one vector at a time.
@@ -275,8 +306,8 @@ impl Split<'_> {
     ///
     /// If the index frame of the group was made already.
     pub(crate) fn next(&mut self) -> Option<(u32, Result<Stamps<'_>, Error>)> {
-        let scratch = &mut *self.scratch;
-        let Some(part) = scratch.parts.get_mut(self.next) else {
+        let groups = &mut *self.groups;
+        let Some(part) = groups.parts.get_mut(self.next) else {
             self.draft.take_if(|draft| draft.form() == Form::Raw);
             return None;
         };
@@ -302,12 +333,34 @@ impl Split<'_> {
                     to_usize(part.count),
                     index,
                 ),
-                vector: &mut scratch.vector,
+                vector: &mut groups.vector,
                 set: self.set,
                 part,
             },
         };
         Some((group, Ok(Stamps(stamps))))
+    }
+
+    /// The size of the index frame of `group`, which [`Split::frame`] makes. Takes no
+    /// block. Time is linear in the group's series, and a [`Split::frame`] of `group`
+    /// after it does not repeat that work. It checks an encoded index as
+    /// [`Split::frame`] does.
+    ///
+    /// # Panics
+    ///
+    /// If `group` is absent, failed its check, or was made already.
+    pub(crate) fn size(&mut self, group: u32) -> Size {
+        let at = self.place(group);
+        let lens = &self.lens[self.groups.parts[at].series.clone()];
+        let layout = layout(self.set, lens);
+        let whole = self.whole();
+        let size = Size {
+            block: (!whole).then(|| layout.block_len()),
+            body: layout.body_len(),
+            series: lens.len(),
+        };
+        self.layout = (!whole).then_some((group, layout));
+        size
     }
 
     /// The index frame of `group`: the writer's key set with only `group` present, its
@@ -327,24 +380,50 @@ impl Split<'_> {
         pool: &block::Pool,
         group: u32,
     ) -> Result<Draft, block::Error> {
-        let scratch = &mut *self.scratch;
-        let at = scratch.places.get(to_usize(group)).copied().filter(|&at| {
-            scratch
-                .parts
-                .get(at)
-                .is_some_and(|part| part.group == group)
-        });
-        let Some(at) = at else {
+        let at = self.place(group);
+        if self.whole() {
+            let draft = self.draft.take();
+            self.groups.parts[at].made = true;
+            return Ok(draft.expect("invariant: a whole frame is held"));
+        }
+        let (set, lens) = (self.set, self.lens);
+        let range = self.groups.parts[at].series.clone();
+        let mut index = self
+            .layout
+            .take_if(|(kept, _)| *kept == group)
+            .map_or_else(|| layout(set, &lens[range.clone()]), |(_, kept)| kept)
+            .draft(pool, Form::Encoded)?;
+        let groups = &mut *self.groups;
+        for ((_, out), &series) in index.iter_mut().zip(&groups.series[range]) {
+            out.copy_from_slice(checked(&mut self.draft, &groups.bytes, series));
+        }
+        let part = &mut groups.parts[at];
+        index.set_count(group, part.count);
+        part.made = true;
+        Ok(index)
+    }
+
+    /// The place in [`Groups::parts`] of `group`. Checks its encoded index when its
+    /// stamps did not run to their end.
+    ///
+    /// # Panics
+    ///
+    /// If `group` is absent, failed its check, or was made already.
+    fn place(&mut self, group: u32) -> usize {
+        let groups = &mut *self.groups;
+        let parts = &mut groups.parts;
+        let at = groups.places.get(to_usize(group)).copied();
+        let Some(at) = at.filter(|&at| parts.get(at).is_some_and(|p| p.group == group))
+        else {
             panic!("group {group} is absent from the frame");
         };
-        let part = &mut scratch.parts[at];
+        let part = &mut parts[at];
         if part.pending {
             let Some(draft) = self.draft.as_mut() else {
                 panic!("invariant: an encoded frame is held until it is made");
             };
             validate_index(part, self.set, draft);
         }
-        let part = &scratch.parts[at];
         if let Err(error) = &part.check {
             panic!("group {group} failed its check: {error}");
         }
@@ -352,32 +431,25 @@ impl Split<'_> {
             !part.made,
             "the index frame of group {group} was made already"
         );
-        if scratch.parts.len() == 1
-            && let Some(draft) =
-                self.draft.take_if(|draft| draft.form() == Form::Encoded)
-        {
-            scratch.parts[at].made = true;
-            return Ok(draft);
-        }
-        let series = &scratch.series[part.series.clone()];
-        scratch.lens.clear();
-        scratch
-            .lens
-            .extend(series.iter().map(|series| (series.entry, series.len)));
-        let mut index = match Draft::new(pool, self.set, Form::Encoded, &scratch.lens) {
-            Ok(index) => index,
-            Err(frame::Error::Pool(error)) => return Err(error),
-            Err(error) => {
-                panic!("invariant: a group's checked series make a frame: {error}")
-            }
-        };
-        for ((_, out), &series) in index.iter_mut().zip(series) {
-            out.copy_from_slice(checked(&mut self.draft, &scratch.bytes, series));
-        }
-        index.set_count(group, part.count);
-        scratch.parts[at].made = true;
-        Ok(index)
+        at
     }
+
+    /// Whether the writer's frame is the index frame of its one group: encoded, and
+    /// held until that frame is made.
+    fn whole(&self) -> bool {
+        self.groups.parts.len() == 1
+            && self
+                .draft
+                .as_ref()
+                .is_some_and(|draft| draft.form() == Form::Encoded)
+    }
+}
+
+/// The layout of an index frame of `set` with `lens`, the checked series of a group.
+fn layout<'a>(set: &'a KeySet, lens: &'a [(usize, usize)]) -> frame::Layout<'a> {
+    frame::Layout::new(set, lens).unwrap_or_else(|error| {
+        panic!("invariant: a group's checked series make a frame: {error}")
+    })
 }
 
 /// The encoded bytes of `series`: in `draft` when the frame is encoded, else in
@@ -1323,18 +1395,38 @@ mod tests {
         }
     }
 
+    mod size {
+        use super::*;
+
+        #[test]
+        #[should_panic(expected = "group 0 failed its check: channel \
+                                   01000000-0000-0000-0000-000000000001: vector 0 \
+                                   has tag 9")]
+        fn panics_on_a_group_whose_encoded_index_is_not_valid() {
+            let set = one_index();
+            let pool = pool(1 << 16);
+            let mut index = encoded(&set, 0, &5_u64.to_le_bytes());
+            index[0] = 9;
+            let mut scratch = Scratch::default();
+            let mut split = scratch.split(&set, encoded_index(&pool, &set, 1, &index));
+
+            split.size(0);
+        }
+    }
+
     mod scratch {
         use super::*;
 
         /// The address and capacity of each buffer of `scratch`.
         fn buffers(scratch: &Scratch) -> [(usize, usize); 6] {
+            let Scratch { groups, lens } = scratch;
             [
-                (scratch.series.as_ptr().addr(), scratch.series.capacity()),
-                (scratch.parts.as_ptr().addr(), scratch.parts.capacity()),
-                (scratch.places.as_ptr().addr(), scratch.places.capacity()),
-                (scratch.bytes.as_ptr().addr(), scratch.bytes.capacity()),
-                (scratch.vector.as_ptr().addr(), scratch.vector.len()),
-                (scratch.lens.as_ptr().addr(), scratch.lens.capacity()),
+                (groups.series.as_ptr().addr(), groups.series.capacity()),
+                (groups.parts.as_ptr().addr(), groups.parts.capacity()),
+                (groups.places.as_ptr().addr(), groups.places.capacity()),
+                (groups.bytes.as_ptr().addr(), groups.bytes.capacity()),
+                (groups.vector.as_ptr().addr(), groups.vector.len()),
+                (lens.as_ptr().addr(), lens.capacity()),
             ]
         }
 
@@ -1489,6 +1581,38 @@ mod tests {
             for &group in write.keys() {
                 let frame = split.frame(&pool, group).expect("room");
                 assert_index_frame(&set, &write, group, &frame.freeze(Path::Live));
+            }
+        }
+
+        #[test]
+        fn sizes_the_index_frame_of_any_write(
+            (set, write) in writes(),
+            raw in any::<bool>(),
+            ahead in any::<bool>(),
+        ) {
+            let form = if raw { Form::Raw } else { Form::Encoded };
+            let pool = pool(1 << 20);
+            let mut scratch = Scratch::default();
+            let mut split = scratch.split(&set, draft(&pool, &set, form, &write));
+            drain(&mut split);
+
+            // Ahead, as the shard does: each group is sized before any frame is made.
+            let sizes: Vec<_> = write
+                .keys()
+                .map(|&group| (group, ahead.then(|| split.size(group))))
+                .collect();
+            let whole = !raw && write.len() == 1;
+            for (group, size) in sizes {
+                let size = size.unwrap_or_else(|| split.size(group));
+                let frame = split.frame(&pool, group).expect("room").freeze(Path::Live);
+
+                prop_assert_eq!(size.block.is_none(), whole);
+                if let Some(len) = size.block {
+                    let footprint = u64::try_from(block::footprint(len)).ok();
+                    prop_assert_eq!(footprint, Some(frame.charge()));
+                }
+                prop_assert_eq!(size.body, frame.body().len());
+                prop_assert_eq!(size.series, frame.ends().count());
             }
         }
 

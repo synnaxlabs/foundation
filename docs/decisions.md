@@ -511,9 +511,13 @@ How to read this record:
   still recorded (HANDOFF RECORD). The writer splits the frame by samples or by indexes
   and writes each part. The home never splits a frame, because a frame applies whole
   (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
-  size is checked only when the bodies are appended, after the handoffs: a frame whose
-  handoff finds no room is lost (live) or refused with `Full` (backfill) before its size
-  is known. Decided by the `write-path` builder (#191).
+  home checks the size of each accepted group (its index frame block, and its stored
+  entry's parts joined) against the pool's largest block, and the batch against one
+  record, before its first append, handoffs included. So `Large` depends only on the
+  frame, the pool, and the layout, never on room, and a pool or ring error after the
+  check means only that there is no room. `buffer::Rejected::Large` from an append is
+  an invariant panic. Decided by the `write-path` builder (#191); the check before the
+  first append decided by the advisor on #770.
 - **HOME CLOCKS (#191)** A shard reads monotonic time and mesh time itself, from the
   clocks in its `Config`, in each call that needs them. Before the node first has mesh
   time, it opens no writer and no reader, with `Unsynced`. A write needs an open writer,
