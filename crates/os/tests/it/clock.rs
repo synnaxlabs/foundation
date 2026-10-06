@@ -238,7 +238,17 @@ fn a_deadline_at_the_end_of_the_clock_is_pending() {
 
 #[test]
 #[should_panic(expected = "must be called from the context of a Tokio 1.x runtime")]
-fn a_sleep_panics_on_a_thread_that_os_did_not_start() {
+fn a_sleep_panics_where_no_runtime_is_current() {
     let clock: Clock = os::clock();
     drop(clock.sleep_until(Monotonic(0)));
+}
+
+#[test]
+#[should_panic(expected = "A Tokio 1.x context was found, but timers are disabled")]
+fn a_sleep_panics_in_a_runtime_with_no_timer() {
+    let clock: Clock = os::clock();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async { drop(clock.sleep_until(Monotonic(0))) });
 }

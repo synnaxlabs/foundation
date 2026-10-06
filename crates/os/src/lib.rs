@@ -30,7 +30,9 @@ pub use files::Disk;
 /// call starts a new clock at `Monotonic(0)`. Clones read the same clock. Never
 /// compare readings of clocks from two calls.
 ///
-/// A sleep needs a thread that `os` started. It completes about 2 ms late on an idle
+/// A sleep is made on the Tokio runtime current at the call, and panics when there is
+/// none or it has no timer. Each thread that `os` starts has one with a timer, but a
+/// runtime that its body starts may not. A sleep completes about 2 ms late on an idle
 /// machine, and later under load. A sleep that waits across a suspend completes up to
 /// 1 s late.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
