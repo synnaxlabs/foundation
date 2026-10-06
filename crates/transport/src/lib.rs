@@ -90,8 +90,11 @@ impl Transport {
     /// }
     /// ```
     pub fn new(config: Config) -> Result<Self, Error> {
+        check(&config)?;
         drop(config);
-        todo!("#68")
+        Ok(Self {
+            _shard: PhantomData,
+        })
     }
 
     /// Connects to `peer` at one of `addresses`, and checks that the peer holds
@@ -147,6 +150,24 @@ impl Transport {
     pub async fn accept(&self) -> Result<Session, Error> {
         todo!("#68")
     }
+}
+
+/// The first rule of [`Transport::new`] that `config` breaks, in the order of its
+/// doc.
+fn check(config: &Config) -> Result<(), Error> {
+    let message_bytes_max = config.message_bytes_max.get();
+    let (field, rule) = if config.idle <= Span::ZERO {
+        ("idle", "must be positive")
+    } else if config.window_bytes < message_bytes_max {
+        ("window_bytes", "must be at least message_bytes_max")
+    } else if message_bytes_max < usize::from(quic::PAYLOAD_IPV4) {
+        ("message_bytes_max", "must be at least 1472")
+    } else if message_bytes_max > config.pool.largest() {
+        ("message_bytes_max", "must be at most pool.largest()")
+    } else {
+        return Ok(());
+    };
+    Err(Error::Config { field, rule })
 }
 
 /// The inputs of a [`Transport`].
@@ -221,26 +242,50 @@ mod tests {
     use crate::quic::testing::{self, Shard};
 
     /// A config of `shard` with these limits.
-    fn config(
-        shard: &Shard,
-        idle: Span,
-        window_bytes: usize,
-        message_bytes: usize,
-    ) -> Config {
+    fn config(shard: &Shard, idle: Span, window: usize, message: usize) -> Config {
         let mut config = shard.config(PrivateKey([1; 32]), idle);
-        config.window_bytes = window_bytes;
-        config.message_bytes_max = NonZeroUsize::new(message_bytes).expect("not zero");
+        config.window_bytes = window;
+        config.message_bytes_max = NonZeroUsize::new(message).expect("not zero");
         config
+    }
+
+    /// The most bytes one block of the pool of `shard` holds.
+    fn largest(shard: &Shard) -> usize {
+        shard
+            .config(PrivateKey([1; 32]), Span::SECOND)
+            .pool
+            .largest()
+    }
+
+    /// The first rule in the doc of [`Transport::new`] that these limits break.
+    fn broken(
+        idle: Span,
+        window: usize,
+        message: usize,
+        largest: usize,
+    ) -> Option<Error> {
+        let rules = [
+            (idle <= Span::ZERO, "idle", "must be positive"),
+            (
+                window < message,
+                "window_bytes",
+                "must be at least message_bytes_max",
+            ),
+            (message < 1472, "message_bytes_max", "must be at least 1472"),
+            (
+                message > largest,
+                "message_bytes_max",
+                "must be at most pool.largest()",
+            ),
+        ];
+        let (_, field, rule) = rules.into_iter().find(|&(broken, ..)| broken)?;
+        Some(Error::Config { field, rule })
     }
 
     #[test]
     fn new_takes_each_limit_at_its_edge() {
         testing::run(0, |shard| {
-            let largest = shard
-                .config(PrivateKey([1; 32]), Span::SECOND)
-                .pool
-                .largest();
-            for message in [1472, largest] {
+            for message in [1472, largest(shard)] {
                 let config = config(shard, Span::NANOSECOND, message, message);
                 assert_eq!(Transport::new(config).err(), None, "{message} bytes");
             }
@@ -250,41 +295,16 @@ mod tests {
     #[test]
     fn new_gives_the_first_rule_its_config_breaks() {
         testing::run(0, |shard| {
-            let largest = shard
-                .config(PrivateKey([1; 32]), Span::SECOND)
-                .pool
-                .largest();
+            let largest = largest(shard);
             let idles = [-1, 0, 1, Span::MINUTE.nanos()].map(Span::from_nanos);
             let messages = [1, 1471, 1472, 1473, largest - 1, largest, largest + 1];
             for idle in idles {
                 for message in messages {
                     for window in [0, message - 1, message, message + 1, 2 * largest] {
-                        let rules = [
-                            (idle <= Span::ZERO, "idle", "must be positive"),
-                            (
-                                window < message,
-                                "window_bytes",
-                                "must be at least message_bytes_max",
-                            ),
-                            (
-                                message < 1472,
-                                "message_bytes_max",
-                                "must be at least 1472",
-                            ),
-                            (
-                                message > largest,
-                                "message_bytes_max",
-                                "must be at most pool.largest()",
-                            ),
-                        ];
-                        let expected = rules
-                            .into_iter()
-                            .find(|&(broken, ..)| broken)
-                            .map(|(_, field, rule)| Error::Config { field, rule });
                         let config = config(shard, idle, window, message);
                         assert_eq!(
                             Transport::new(config).err(),
-                            expected,
+                            broken(idle, window, message, largest),
                             "idle {idle:?}, window {window}, message {message}"
                         );
                     }

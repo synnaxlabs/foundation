@@ -32,7 +32,7 @@ pub(super) const MTU_MIN: u16 = 1200;
 
 /// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
 /// node takes.
-pub(super) const PAYLOAD_IPV4: u16 = 1472;
+pub(crate) const PAYLOAD_IPV4: u16 = 1472;
 
 /// Ethernet's 1500 bytes less the IPv6 and UDP headers: the largest datagram MTU
 /// discovery tries, so it fits both IP versions.

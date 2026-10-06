@@ -26,6 +26,8 @@ use noq_proto::{
 use types::node::PublicKey;
 use types::time::Monotonic;
 
+pub(crate) use self::settings::PAYLOAD_IPV4;
+
 use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
