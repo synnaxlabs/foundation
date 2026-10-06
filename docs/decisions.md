@@ -2123,6 +2123,7 @@ Storage classes used in the table:
 | Document | Memory: made by a front end from files, or by SDK code | Front ends | `config`, kinds | `document` (X21) |
 | Diagnostic | Memory: made from a producer's error | Front ends, kinds, `document` | `config`, `ops` (text, `--json`, MCP) | `document` (DIAGNOSTICS) |
 | Selector | A value inside policies, readers, connectors, and access | Files, sessions | Every matcher | `types` (one matcher) |
+| Patterns | The patterns of a selector as written, in order, with the `Selector` they read as. Stored in each definition that selects | `document::read::selector` | `spec` encoding, `config` | `types` (#836) |
 | Plan | A JSON artifact with stable change kinds | `ops plan` | `ops apply` (commits exactly it) | `config`, `ops` |
 
 ### 2.5 Connectors, time, status, and node-local state

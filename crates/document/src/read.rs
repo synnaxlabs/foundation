@@ -4,7 +4,7 @@
 use std::slice;
 
 use types::byte;
-use types::name::{Error, Name, Selector};
+use types::name::{Error, Name, Patterns, Selector};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::value::{Kind, Value};
@@ -88,8 +88,8 @@ pub fn name(label: &Label) -> Result<Name, Diagnostic> {
         .map_err(|error| diagnose(BAD_NAME, label.span, &error))
 }
 
-/// Reads a selector from one pattern or a list of patterns, each a string or a
-/// reference, such as `"site_a.*"` or `["site_a.*", "!site_a.test"]`.
+/// Reads the [`Patterns`] of a selector from one pattern or a list of patterns, each a
+/// string or a reference, such as `"site_a.*"` or `["site_a.*", "!site_a.test"]`.
 ///
 /// # Errors
 ///
@@ -97,7 +97,7 @@ pub fn name(label: &Label) -> Result<Name, Diagnostic> {
 /// pattern that is not a string or a reference; at a pattern that [`Selector`]
 /// refuses, with the message and the fix of its [`Error`]; or at the value when no
 /// pattern includes names, with those of [`Error::NoInclude`].
-pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
+pub fn selector(value: &Value) -> Result<Patterns, Diagnostic> {
     let patterns = patterns(value);
     let mut texts = Vec::with_capacity(patterns.len());
     for pattern in patterns {
@@ -122,7 +122,7 @@ pub fn selector(value: &Value) -> Result<Selector, Diagnostic> {
             _ => texts.push(text),
         }
     }
-    Selector::new(texts).map_err(|error| diagnose(BAD_SELECTOR, value.span, &error))
+    Patterns::new(texts).map_err(|error| diagnose(BAD_SELECTOR, value.span, &error))
 }
 
 /// The patterns of a selector value, at the positions that [`Selector`] gives: the
@@ -475,7 +475,7 @@ mod tests {
         #[test]
         fn reads_each_form() {
             let expected =
-                |patterns: &[&str]| Ok(Selector::new(patterns.to_vec()).unwrap());
+                |patterns: &[&str]| Ok(Patterns::new(patterns.to_vec()).unwrap());
             assert_eq!(selector(&string("site_a.*")), expected(&["site_a.*"]));
             assert_eq!(
                 selector(&value(reference("site_a.plc_7"))),
@@ -561,7 +561,7 @@ mod tests {
             let exclusion = format!("!{}", "a".repeat(255));
             assert_eq!(
                 selector(&list(vec![text("b"), text(&exclusion)])),
-                Ok(Selector::new(["b", exclusion.as_str()]).unwrap())
+                Ok(Patterns::new(["b", exclusion.as_str()]).unwrap())
             );
         }
 
@@ -618,11 +618,11 @@ mod tests {
 
         proptest! {
             #[test]
-            fn reads_as_selector_new_does(
+            fn reads_as_patterns_new_does(
                 texts in prop::collection::vec(pattern(), 0..4),
             ) {
                 let read = selector(&list(texts.iter().map(|t| text(t)).collect()));
-                match (read, Selector::new(texts.iter().map(String::as_str))) {
+                match (read, Patterns::new(texts.iter().map(String::as_str))) {
                     (Ok(read), Ok(parsed)) => prop_assert_eq!(read, parsed),
                     (Err(diagnostic), Err(error)) => {
                         prop_assert_eq!(&diagnostic.message, &error.to_string());

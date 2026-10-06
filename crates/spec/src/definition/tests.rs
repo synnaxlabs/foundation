@@ -238,13 +238,6 @@ fn refuses_an_authority_without_write() {
     );
 }
 
-#[test]
-fn shows_patterns_as_written() {
-    let patterns = patterns(&["a.**.**", "!a.b"]);
-    assert_eq!(format!("{patterns:?}"), r#"["a.**.**", "!a.b"]"#);
-    assert_eq!(patterns.texts().collect::<Vec<_>>(), ["a.**.**", "!a.b"]);
-}
-
 fn pattern() -> impl Strategy<Value = String> {
     let segment = prop_oneof![
         Just("*".to_owned()),

@@ -4,8 +4,7 @@
 use std::fmt;
 
 use types::authority::Authority;
-
-use crate::patterns::Patterns;
+use types::name::Patterns;
 
 /// What a subject may do on a name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

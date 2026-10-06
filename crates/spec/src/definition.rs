@@ -27,10 +27,9 @@
 use std::{fmt, str};
 
 use types::authority::Authority;
-use types::name;
+use types::name::{self, Patterns};
 
 use crate::access::{Action, Actions, Policy};
-use crate::patterns::Patterns;
 
 const VERSION: u8 = 1;
 const ACCESS: u8 = 1;
