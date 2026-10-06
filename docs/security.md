@@ -278,6 +278,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
+| `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
@@ -299,5 +300,6 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
-(#64), `types::time::Rate`, and each connector's protocol parser.
+and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
+messages (their encoding is in `mesh`), `spec` tree chunks (#64),
+`types::time::Rate`, and each connector's protocol parser.
