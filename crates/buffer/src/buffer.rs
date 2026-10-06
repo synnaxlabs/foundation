@@ -420,14 +420,14 @@ impl Buffer {
             }
             Err(other) => return Err(rejected(other)),
         };
-        if taken.is_empty() {
-            return Ok(());
-        }
         for (slot, header) in state.open.entries(taken) {
             state
                 .logs
                 .append(slot, header)
                 .unwrap_or_else(|invalid| panic!("invariant: {invalid}"));
+        }
+        if state.idle() {
+            return Ok(());
         }
         let parked = state.parked.take();
         drop(guard);
@@ -563,8 +563,8 @@ fn small_record(
     Ok(block.freeze().skip(start))
 }
 
-/// The commit task. It parks while the state idles; a push, a `Commit` poll, or
-/// the drop wakes it. Each deadline takes the closed groups and the open one,
+/// The commit task. It parks while the state idles; a push that takes an entry, a
+/// `Commit` poll, or the drop wakes it. Each deadline takes the closed groups and the open one,
 /// seals them in order from `chain`, the value of the restart record, writes
 /// them, syncs once, and wakes the waiters. A failed file call or the drop ends
 /// the task.

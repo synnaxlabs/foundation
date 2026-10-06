@@ -328,8 +328,8 @@ fn an_idle_buffer_wakes_no_task() {
 }
 
 /// Runs a buffer that idles while its shard wakes every one and a half commits,
-/// with an empty append at each wake when `appends`. Returns the digest of the run.
-fn idle_with_wakes(appends: bool) -> u64 {
+/// with `empty` empty appends at each wake. Returns the digest of the run.
+fn idle_with_wakes(empty: usize) -> u64 {
     let (mut sim, handle) = start(27, Memory::default(), move |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
@@ -338,7 +338,7 @@ fn idle_with_wakes(appends: bool) -> u64 {
             .expect("opens");
         for _ in 0..8 {
             shard.clock.sleep(commits(3)).await;
-            if appends {
+            for _ in 0..empty {
                 buffer.append(Vec::new()).expect("takes an empty batch");
             }
         }
@@ -353,7 +353,7 @@ fn idle_with_wakes(appends: bool) -> u64 {
 /// appends.
 #[test]
 fn empty_appends_wake_no_task() {
-    assert_eq!(idle_with_wakes(true), idle_with_wakes(false));
+    assert_eq!(idle_with_wakes(2), idle_with_wakes(0));
 }
 
 #[test]
