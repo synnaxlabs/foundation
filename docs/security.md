@@ -299,5 +299,6 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
 
 No target yet, because the decoder is private or not built: `transport::message`
-and `tls` (#55), `raft` messages (their encoding is in `mesh`), `spec` tree chunks
-(#64), `types::time::Rate`, and each connector's protocol parser.
+and `tls` (#55), the QUIC hello (`transport::quic::hello::Hello::decode`), `raft`
+messages (their encoding is in `mesh`), `spec` tree chunks (#64),
+`types::time::Rate`, and each connector's protocol parser.
