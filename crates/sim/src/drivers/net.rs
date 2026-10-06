@@ -11,7 +11,6 @@ use env::net::{Connect, Error, listener, tcp};
 use types::time::Monotonic;
 
 use super::{Node, Owner};
-use crate::net::node;
 use crate::net::tcp::{Key, Tcp};
 use crate::net::udp::Bound;
 use crate::state::lock;
@@ -53,7 +52,8 @@ impl env::net::Driver for Node {
     fn connect<'a>(&'a self, config: &'a tcp::Config) -> Connect<'a> {
         let (remote, options) = (config.remote, config.options);
         assert!(!options.delayed, "{DELAYED}");
-        assert!(node(remote.ip()).is_some(), "{NO_NODE}");
+        let hosted = lock(&self.shared).hosts(remote.ip());
+        assert!(hosted, "{NO_NODE}");
         Box::pin(async move {
             let connect =
                 |tcp: &mut Tcp<'_>, now| tcp.connect(self.node, now, remote, options);

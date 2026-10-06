@@ -12,7 +12,7 @@ use env::net::{Error, tcp};
 use types::time::Monotonic;
 
 use super::wire::{Packet, Wire};
-use super::{EPHEMERAL, Fate, NOT_AVAILABLE, addresses, covers, node};
+use super::{EPHEMERAL, Fate, NOT_AVAILABLE, addresses, node, receives};
 
 /// The IPv4 and TCP header bytes of a segment.
 const V4_HEADERS: usize = 40;
@@ -177,16 +177,6 @@ struct Listening {
     waker: Option<Waker>,
 }
 
-impl Listening {
-    /// Whether a SYN to `destination` comes to it.
-    fn receives(&self, destination: SocketAddr) -> bool {
-        let (local, ip) = (self.local.ip(), destination.ip());
-        self.local.port() == destination.port()
-            && covers(local, ip)
-            && node(ip) == Some(self.node)
-    }
-}
-
 /// The order of the segments in flight in each direction, and the first case that
 /// sim does not simulate yet.
 #[derive(Default)]
@@ -226,11 +216,13 @@ impl Lanes {
 
     /// Notes the arrival of a segment from `source` to `destination`.
     fn arrive(&mut self, source: SocketAddr, destination: SocketAddr) {
-        if let Entry::Occupied(mut floor) = self.floors.entry((source, destination)) {
-            floor.get_mut().1 -= 1;
-            if floor.get().1 == 0 {
-                floor.remove();
-            }
+        let Entry::Occupied(mut floor) = self.floors.entry((source, destination))
+        else {
+            panic!("invariant: a segment in flight has its floor");
+        };
+        floor.get_mut().1 -= 1;
+        if floor.get().1 == 0 {
+            floor.remove();
         }
     }
 }
@@ -282,29 +274,10 @@ impl<'a> Tcp<'a> {
         node: usize,
         config: &tcp::Listen,
     ) -> Result<(u64, SocketAddr), Error> {
-        let local = config.local;
-        let ip = local.ip();
-        if !ip.is_unspecified() && !addresses(node).contains(&ip) {
-            return Err(Error::Io {
-                code: NOT_AVAILABLE,
-            });
-        }
-        let taken = |port: u16| {
-            (self.sockets.listeners.values()).any(|listening| {
-                let other = listening.local.ip();
-                listening.node == node
-                    && listening.local.port() == port
-                    && (covers(ip, other) || covers(other, ip))
-            })
-        };
-        let port = match local.port() {
-            0 => (EPHEMERAL..=u16::MAX).find(|&port| !taken(port)),
-            port => Some(port).filter(|&port| !taken(port)),
-        };
-        let Some(port) = port else {
-            return Err(Error::AddressInUse { local });
-        };
-        let local = SocketAddr::new(ip, port);
+        let bound = (self.sockets.listeners.values())
+            .filter(|listening| listening.node == node)
+            .map(|listening| listening.local);
+        let local = super::bind(node, config.local, &bound)?;
         let backlog = usize::try_from(config.backlog).unwrap_or(usize::MAX);
         let listening = Listening {
             node,
@@ -448,7 +421,7 @@ impl<'a> Tcp<'a> {
         }
         end.read += n;
         let recv = end.options.recv_buffer_bytes;
-        let edge = end.read + recv;
+        let edge = end.read.saturating_add(recv);
         if !end.reset && edge - end.advertised >= mss.min(recv / 2) {
             end.advertised = edge;
             let ack = end.ack();
@@ -604,8 +577,9 @@ impl<'a> Tcp<'a> {
             self.sockets.lanes.yet.get_or_insert(REOPENED);
             return;
         }
-        let listener = (self.sockets.listeners.iter_mut())
-            .find(|(_, listening)| listening.receives(key.local));
+        let listener = (self.sockets.listeners.iter_mut()).find(|(_, listening)| {
+            receives(listening.node, listening.local, key.local)
+        });
         let Some((&listener, listening)) = listener else {
             self.sockets.lanes.send(self.wire, at, key, Kind::Rst);
             return;

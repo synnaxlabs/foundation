@@ -200,12 +200,10 @@ impl Sim {
     ///   each message as [`Error::Panicked`] does.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
-        let (tasks, starts) = lock(&self.shared).stop(node);
-        let streams = (crash == Crash::Power)
-            .then(|| lock(&self.shared).net().tcp().cut_power(node));
+        let (tasks, starts, wakers) = lock(&self.shared).stop(node, crash);
         let panics = self.drop_futures(&tasks);
         drop(starts);
-        drop(streams);
+        drop(wakers);
         let orphans = lock(&self.shared).crash(node, crash);
         drop(orphans);
         assert!(panics.is_empty(), "{}", panics.join(THEN));
@@ -237,7 +235,8 @@ impl Sim {
     /// # Panics
     ///
     /// When a TCP segment, or the drop of a stream, meets a case that sim does not
-    /// simulate yet, as [`Node::net`](node::Node::net) lists.
+    /// simulate yet, as [`Node::net`](node::Node::net) lists. A case met between
+    /// runs, as in a drop or a crash, panics at the start of the next run.
     pub fn run(&mut self) -> Result<(), Error> {
         self.drive(None)
     }
@@ -325,7 +324,12 @@ impl Sim {
     fn drive(&mut self, end: Option<Monotonic>) -> Result<(), Error> {
         let mut steps = self.config.steps_max;
         loop {
-            let next = lock(&self.shared).next(end);
+            let mut state = lock(&self.shared);
+            let (yet, next) = (state.net().yet(), state.next(end));
+            drop(state);
+            if let Some(yet) = yet {
+                panic!("{yet}");
+            }
             let Some(next) = next else { break };
             steps = steps.checked_sub(1).ok_or(Error::Steps {
                 max: self.config.steps_max,
@@ -338,10 +342,6 @@ impl Sim {
                     wakers.into_iter().for_each(Waker::wake);
                     drop(orphans);
                 }
-            }
-            let yet = lock(&self.shared).net().yet();
-            if let Some(yet) = yet {
-                panic!("{yet}");
             }
         }
         let threads = lock(&self.shared).live();

@@ -13,30 +13,13 @@ use env::net::{Ecn, Error as Net};
 use env::thread::Handle;
 use types::time::{Monotonic, Span};
 
-use super::{millis, shard, sim};
+use super::{after, at, delay, millis, pair, panicked, shard, sim};
 use crate::drivers::yield_now;
 use crate::net::addresses;
 use crate::{Config, Error, Sim, link, node};
 
 /// Arrivals: the receiver's clock, the meta, and the bytes of each batch.
 type Log = Arc<Mutex<Vec<(Monotonic, Meta, Vec<u8>)>>>;
-
-/// A run of two nodes, `a` and `b`, with `link` between them.
-pub(super) fn pair(seed: u64, link: link::Config) -> (Sim, node::Node, node::Node) {
-    let mut sim = Sim::new(Config {
-        seed,
-        steps_max: 1_000_000,
-        link,
-    });
-    let a = sim.node(node::Config::default());
-    let b = sim.node(node::Config::default());
-    (sim, a, b)
-}
-
-/// The address of `port` on the IPv4 address of `node`.
-pub(super) fn at(node: &node::Node, port: u16) -> SocketAddr {
-    SocketAddr::new(node.addresses()[0], port)
-}
 
 /// A socket of `node` on `local`, whose receive queue holds 10,000 small datagrams.
 fn bind(node: &node::Node, local: SocketAddr) -> Result<(Sender, Receiver), Net> {
@@ -118,16 +101,6 @@ fn datagrams(log: &Log) -> Vec<Vec<u8>> {
 /// The times at which the datagrams in `log` arrived.
 fn times(log: &Log) -> Vec<Monotonic> {
     log.lock().unwrap().iter().map(|&(time, ..)| time).collect()
-}
-
-/// The receiver's clock `span` after the run starts.
-pub(super) fn after(span: Span) -> Monotonic {
-    node::Config::default().monotonic + span
-}
-
-/// The default delay.
-pub(super) fn delay() -> Span {
-    link::Config::default().delay
 }
 
 /// Sends `datagrams` from `a` to `b` on one link, runs for a second, and gives the
@@ -790,15 +763,6 @@ fn stray(poll: fn(&mut Sender, &mut Receiver)) -> Error {
         poll(&mut sender, &mut receiver);
     });
     sim.run().unwrap_err()
-}
-
-/// The error of a run whose thread `thread` panicked with `message`.
-pub(super) fn panicked(thread: &str, message: &str) -> Error {
-    Error::Panicked {
-        thread: thread.into(),
-        message: message.into(),
-        seed: 0,
-    }
 }
 
 #[test]

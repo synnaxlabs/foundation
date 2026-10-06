@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem;
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Wake, Waker};
@@ -16,7 +17,7 @@ use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
 use crate::files::{Files, Held};
-use crate::net::Network;
+use crate::net::{self, Network};
 use crate::serial::Serial;
 use crate::{Crash, node, shard};
 
@@ -289,6 +290,11 @@ impl State {
         self.now
     }
 
+    /// Whether a node of the run has address `ip`.
+    pub(crate) fn hosts(&self, ip: IpAddr) -> bool {
+        net::node(ip).is_some_and(|node| node < self.nodes.len())
+    }
+
     pub(crate) fn net(&mut self) -> &mut Network {
         &mut self.net
     }
@@ -457,10 +463,16 @@ impl State {
         (wakers, orphans)
     }
 
-    /// Ends each live thread of `node` in a crash. Returns the tasks whose futures
-    /// the caller drops, and the starts of the threads that had not run, for the
-    /// caller to drop after it releases the lock.
-    pub(crate) fn stop(&mut self, node: usize) -> (Vec<u64>, Vec<Start>) {
+    /// Ends each live thread of `node` in a crash, and its network as the crash
+    /// does. Returns the tasks whose futures the caller drops, the starts of the
+    /// threads that had not run, and the wakers of the network, for the caller to
+    /// drop after it releases the lock.
+    pub(crate) fn stop(
+        &mut self,
+        node: usize,
+        crash: Crash,
+    ) -> (Vec<u64>, Vec<Start>, Vec<Waker>) {
+        let wakers = self.net.crash(node, crash);
         let live: Vec<(u64, u64)> = (self.threads.iter())
             .filter(|(_, thread)| thread.node == node && thread.outcome.is_none())
             .map(|(&key, thread)| (key, thread.main))
@@ -470,7 +482,7 @@ impl State {
             starts.extend(self.starts.remove(&main));
             tasks.extend(self.end(thread, Outcome::Crashed));
         }
-        (tasks, starts)
+        (tasks, starts, wakers)
     }
 
     /// Ends the file calls in flight of `node`, whose threads a crash ended. After a
