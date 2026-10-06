@@ -16,10 +16,9 @@ fn policy(subjects: &str, select: &str, allow: &[Action], authority: u8) -> Poli
     )
 }
 
-fn rules(policies: &[(&str, Policy)], regions: &[&str], connectors: &[&str]) -> Rules {
+fn rules(policies: &[(Option<&str>, Policy)], connectors: &[&str]) -> Rules {
     Rules::new(
-        policies.iter().map(|(n, p)| (name(n), p.clone())),
-        regions.iter().copied().map(name),
+        policies.iter().map(|(r, p)| (r.map(name), p.clone())),
         connectors.iter().copied().map(name),
     )
 }
@@ -30,7 +29,7 @@ fn grant(rules: &Rules, subject: &str, on: &str) -> Grant {
 
 #[test]
 fn denies_every_action_with_no_policy() {
-    let rules = rules(&[], &[], &[]);
+    let rules = rules(&[], &[]);
     let grant = grant(&rules, "ops.ana", "site_a.pt_1");
     assert_eq!(grant.actions(), Actions::NONE);
     assert_eq!(grant.authority(), None);
@@ -40,13 +39,9 @@ fn denies_every_action_with_no_policy() {
 fn allows_the_union_of_the_matching_policies() {
     let rules = rules(
         &[
-            ("readers", policy("ops.*", "site_a.**", &[Action::Read], 0)),
-            (
-                "planners",
-                policy("ops.ana", "site_a.**", &[Action::Plan], 0),
-            ),
+            (None, policy("ops.*", "site_a.**", &[Action::Read], 0)),
+            (None, policy("ops.ana", "site_a.**", &[Action::Plan], 0)),
         ],
-        &[],
         &[],
     );
     let actions = grant(&rules, "ops.ana", "site_a.pt_1").actions();
@@ -58,8 +53,7 @@ fn allows_the_union_of_the_matching_policies() {
 #[test]
 fn gives_nothing_from_a_policy_that_does_not_match() {
     let rules = rules(
-        &[("readers", policy("ops.*", "site_a.**", &[Action::Read], 0))],
-        &[],
+        &[(None, policy("ops.*", "site_a.**", &[Action::Read], 0))],
         &[],
     );
     assert_eq!(
@@ -76,11 +70,10 @@ fn gives_nothing_from_a_policy_that_does_not_match() {
 fn caps_authority_at_the_highest_write_allow() {
     let rules = rules(
         &[
-            ("low", policy("ops.*", "site_a.**", &[Action::Write], 3)),
-            ("high", policy("ops.ana", "site_a.**", &[Action::Write], 9)),
-            ("read", policy("ops.*", "site_a.**", &[Action::Read], 200)),
+            (None, policy("ops.*", "site_a.**", &[Action::Write], 3)),
+            (None, policy("ops.ana", "site_a.**", &[Action::Write], 9)),
+            (None, policy("ops.*", "site_a.**", &[Action::Read], 200)),
         ],
-        &[],
         &[],
     );
     assert_eq!(
@@ -96,8 +89,7 @@ fn caps_authority_at_the_highest_write_allow() {
 #[test]
 fn gives_no_authority_without_write() {
     let rules = rules(
-        &[("read", policy("ops.*", "site_a.**", &[Action::Read], 200))],
-        &[],
+        &[(None, policy("ops.*", "site_a.**", &[Action::Read], 200))],
         &[],
     );
     assert_eq!(grant(&rules, "ops.ana", "site_a.pt_1").authority(), None);
@@ -105,7 +97,7 @@ fn gives_no_authority_without_write() {
 
 #[test]
 fn lets_a_connector_write_under_its_own_name() {
-    let rules = rules(&[], &[], &["site_a.daq"]);
+    let rules = rules(&[], &["site_a.daq"]);
     let write = [Action::Write].into_iter().collect();
     let under = grant(&rules, "site_a.daq", "site_a.daq.ai_0");
     assert_eq!(under.actions(), write);
@@ -122,27 +114,28 @@ fn lets_a_connector_write_under_its_own_name() {
 }
 
 #[test]
+fn gives_no_default_write_to_a_subject_that_is_not_a_connector() {
+    let rules = rules(&[], &["site_a.daq"]);
+    let under = grant(&rules, "ops.ana", "ops.ana.pt_1");
+    assert_eq!(under.actions(), Actions::NONE);
+    assert_eq!(under.authority(), None);
+}
+
+#[test]
 fn reaches_only_the_region_of_the_policy_and_below() {
     let read = policy("ops.*", "**", &[Action::Read], 0);
-    let in_site_a = rules(
-        &[("site_a.readers", read.clone())],
-        &["site_a", "site_b"],
-        &[],
-    );
-    let at_root = rules(&[("readers", read)], &["site_a", "site_b"], &[]);
+    let in_site_a = rules(&[(Some("site_a"), read.clone())], &[]);
+    let at_root = rules(&[(None, read)], &[]);
     let readable = [Action::Read].into_iter().collect();
-    assert_eq!(
-        grant(&in_site_a, "ops.ana", "site_a.cell.pt_1").actions(),
-        readable
-    );
-    assert_eq!(
-        grant(&in_site_a, "ops.ana", "site_b.pt_1").actions(),
-        Actions::NONE
-    );
-    assert_eq!(
-        grant(&in_site_a, "ops.ana", "pt_1").actions(),
-        Actions::NONE
-    );
+    for (on, actions) in [
+        ("site_a", readable),
+        ("site_a.cell.pt_1", readable),
+        ("site_b.pt_1", Actions::NONE),
+        ("site_ab.pt_1", Actions::NONE),
+        ("pt_1", Actions::NONE),
+    ] {
+        assert_eq!(grant(&in_site_a, "ops.ana", on).actions(), actions, "{on}");
+    }
     assert_eq!(
         grant(&at_root, "ops.ana", "site_b.pt_1").actions(),
         readable
@@ -150,42 +143,25 @@ fn reaches_only_the_region_of_the_policy_and_below() {
 }
 
 #[test]
-fn places_a_policy_in_the_longest_region_that_holds_it() {
-    let rules = rules(
-        &[(
-            "site_a.cell.readers",
-            policy("*.*", "**", &[Action::Read], 0),
-        )],
-        &["site_a", "site_a.cell"],
-        &[],
-    );
-    let in_cell = grant(&rules, "ops.ana", "site_a.cell.pt_1").actions();
-    assert_eq!(in_cell, [Action::Read].into_iter().collect());
-    let outside = grant(&rules, "ops.ana", "site_a.pt_1").actions();
-    assert_eq!(outside, Actions::NONE);
-}
-
-#[test]
 fn matches_subjects_in_any_region() {
     let rules = rules(
         &[(
-            "site_a.readers",
+            Some("site_a"),
             policy("site_b.**", "**", &[Action::Read], 0),
         )],
-        &["site_a", "site_b"],
         &[],
     );
     let actions = grant(&rules, "site_b.bot", "site_a.pt_1").actions();
     assert_eq!(actions, [Action::Read].into_iter().collect());
 }
 
-fn arbitrary_policy() -> impl Strategy<Value = (Name, Policy)> {
-    let names = prop::sample::select(vec!["a", "a.p", "b.p", "p", "a.b.p"]);
+fn arbitrary_policy() -> impl Strategy<Value = (Option<Name>, Policy)> {
+    let regions = prop::sample::select(vec![None, Some("a"), Some("a.b"), Some("b")]);
     let selects = prop::sample::select(vec!["**", "a.**", "b.*", "a.b.**", "*.x"]);
     let subjects = prop::sample::select(vec!["**", "s.*", "s.x", "t.*"]);
     let allow = prop::sample::subsequence(spec_actions(), 0..=6);
-    (names, subjects, selects, allow, any::<u8>())
-        .prop_map(|(n, s, sel, a, auth)| (name(n), policy(s, sel, &a, auth)))
+    (regions, subjects, selects, allow, any::<u8>())
+        .prop_map(|(r, s, sel, a, auth)| (r.map(name), policy(s, sel, &a, auth)))
 }
 
 fn spec_actions() -> Vec<Action> {
@@ -199,9 +175,9 @@ fn spec_actions() -> Vec<Action> {
     ]
 }
 
-type Named = Vec<(Name, Policy)>;
+type Placed = Vec<(Option<Name>, Policy)>;
 
-fn policies_and_shuffle() -> impl Strategy<Value = (Named, Named)> {
+fn policies_and_shuffle() -> impl Strategy<Value = (Placed, Placed)> {
     prop::collection::vec(arbitrary_policy(), 0..8)
         .prop_flat_map(|p| (Just(p.clone()), Just(p).prop_shuffle()))
 }
@@ -211,8 +187,8 @@ proptest! {
     fn decides_the_same_for_any_order_of_policies(
         (policies, shuffled) in policies_and_shuffle(),
     ) {
-        let build = |p: Named| {
-            Rules::new(p, [name("a"), name("a.b")], [name("s.x")])
+        let build = |p: Placed| {
+            Rules::new(p, [name("s.x")])
         };
         let (one, two) = (build(policies), build(shuffled));
         for subject in ["s.x", "s.y", "t.z"] {
