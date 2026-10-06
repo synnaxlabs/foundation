@@ -76,10 +76,14 @@ state on `main`.
   size takes the budget of a size with no block in use (#270). Still open: a test
   that a stream on another connection reads while one connection holds its budget,
   and many connections before admission (#563).
-- Open: #298 (datagrams that are not valid, from one address, stop every stateless
-  reset; a small datagram of an unknown version gets a reply).
+- Open: #607 (a stranger keeps the ID from a failed dial and makes the node send a
+  reset to each address it spoofs, with no limit), #620 (a stop after the peer's
+  reset gives the peer the stream's window twice, so a peer grows the connection's
+  receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
-  session). A chain is one certificate of at most 1 KiB.
+  session). A chain is one certificate of at most 1 KiB. #298 (datagrams that are
+  not valid, from one address, stopped every stateless reset; a small datagram of an
+  unknown version got a reply).
 - Not decided: a limit on handshakes before admission. Each one costs the node a key
   exchange and one signature, and one signature check more when the peer sends a
   certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
