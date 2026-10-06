@@ -12,7 +12,7 @@ oracle.
 | `main.go`, `values.go`, `go.mod`, `go.sum` | The program that writes `verdicts.txt` and `values.txt`. `go.mod` pins the HCL version. |
 | `verdicts.txt` | Made by the program. A line for each text: `<name> refused`, `<name> accepted`, or `<name> accepted <code>...`. The first line names the HCL version. |
 | `values.txt` | Made by the program. A line for each text that is accepted with no code: `<name> <values>`, the values HCL reads from it. The first line names the HCL version. |
-| `differences.txt` | A line for each text where `read` differs from HCL on purpose: `<name> <outcome> <decision>`. The outcome is `ok` or one diagnostic code. |
+| `differences.txt` | A line for each text where `read` differs from HCL on purpose: `<name> <outcome> <decision>`. The outcome is `ok`, one diagnostic code, or `values <transform>`: `read` gives a Document with the values HCL reads after the transform. The one transform is `crlf`: each `\r\n` in a string becomes `\n`. |
 | `verdicts.rs` | The test. |
 
 ## What the test checks
@@ -23,6 +23,9 @@ oracle.
   has one of those codes.
 - For a text in `differences.txt`, `read` gives the outcome there, and that outcome is
   not what the verdict asks. So a difference that stops must be removed.
+- For a `values` difference, `read` gives a Document, and `values.txt` has a line for
+  the text. The values of the Document are the values there after the transform, and
+  not the values there. An unknown transform stops the test.
 - `values.txt` has a line for each text that is accepted with no code, and no other
   line. For each such text that is not in `differences.txt` and reads, the Document
   has the values in `values.txt`.

@@ -1,0 +1,3 @@
+a = <<EOT
+line
+EOT

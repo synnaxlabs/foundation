@@ -33,6 +33,7 @@ for-after-item {"a" = {"for" = 2, "k" = 1}, "b" = [$c, $for]}
 for-in-block-written {"h" {"for" = 1}}
 for-in-block {"h" {"for" = 1}}
 for-quoted-key {"a" = {"for" = 1}}
+heredoc-crlf {"a" = "line\u{d}\u{a}"}
 heredoc-indented-written {"a" = "line\u{a}  more\u{a}"}
 heredoc-indented {"a" = "line\u{a}  more\u{a}"}
 heredoc {"a" = "line\u{a}"}

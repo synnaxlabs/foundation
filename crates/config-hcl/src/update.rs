@@ -15,6 +15,10 @@ use crate::{Error, Unwritable, read, write};
 /// cut and written again. A new attribute or block goes into its body, and a removed
 /// one is cut with its lines and the comments directly above it.
 ///
+/// New text takes the line end of the first line of `text`, or `\n` when it has none.
+/// A string that [`write`] gives as a heredoc is quoted when a comment or the end of a
+/// text with no line end follows it, or when the line end is `\r\n`.
+///
 /// # Errors
 ///
 /// Returns [`Refusal::Text`] when `read` refuses `text`. Otherwise, returns

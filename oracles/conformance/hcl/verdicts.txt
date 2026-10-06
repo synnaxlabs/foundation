@@ -49,6 +49,7 @@ for-nested refused
 for-object accepted hcl.for
 for-quoted-key accepted
 heredoc-closer-at-end refused
+heredoc-crlf accepted
 heredoc-indented-written accepted
 heredoc-indented accepted
 heredoc accepted

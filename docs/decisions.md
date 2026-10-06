@@ -1529,6 +1529,13 @@ How to read this record:
   a fix-it hint. r3
   section 2 names this fallback. The person chose "Own reader". Supersedes: `hcl-edit`
   in `docs/dependencies.md`.
+  A heredoc's line ends read as `\n`, whatever the file uses, and HCL keeps the `\r`
+  (`heredoc-crlf` in HCL VERDICTS). A Document must not change with the file's line
+  ends: Git (`core.autocrlf`) and editors change them, and the same file would then give
+  another spec hash and a plan with changes. A heredoc is the only value that holds a
+  line end as written. XML 1.0 (section 2.11) and YAML 1.2 (section 5.4) read each line
+  end as `\n`, and TOML lets a reader do so. Lost: keep the `\r` as HCL does. The person
+  approved on 2026-10-06: "As long as thats the industry standard I approve" (#560).
 - **HCL IDENTIFIERS (2026-10-05)** The reader accepts identifiers outside ASCII as HCL
   does (Unicode `XID_Start` and `XID_Continue`, through `unicode-ident`), so
   `température = 1` reads. A new error for each such identifier lost: a valid HCL file
@@ -1593,6 +1600,10 @@ How to read this record:
   some floats; Rust that reads the form into a Document, which is more code than a
   printer; and Go that writes `document::encoding`, a second implementation of the
   encoding. Decided by the `config` builder (#497).
+  For a text with the outcome `values` in `differences.txt`, the Document has the values
+  HCL reads after the transform the line names, and not the values HCL reads. The person
+  approved the transform on 2026-10-06: "As long as thats the industry standard I
+  approve" (#560).
 - **HCL UPDATE (2026-10-05)** `config_hcl::update` changes a file so that it reads as
   a new Document. Each attribute and block that keeps its value and its place keeps its
   bytes, comments, and blank lines. A changed value and a changed block on one line
@@ -1601,12 +1612,17 @@ How to read this record:
   kept attribute before it in key order, and a new block after the kept block before
   it. The k-th block of a keyword and labels pairs with the k-th new one, and the
   longest run of pairs in the same order stays, so a moved block is cut and written
-  again. New text takes the file's line end. Lost: an edit list by span, which puts
-  the diff on each caller; returning edits, which each caller must apply; a lossless
-  syntax tree with comments as trivia, which needs a second tree type in the reader;
-  writing the whole file with comments attached to items, which loses the layout; and
-  moving the bytes of a moved block, which a caller that changes the Document it read
-  never needs. Decided by the `config` builder; approved by the coordinator (#249).
+  again. Lost: an edit list by span, which puts the diff on each caller; returning
+  edits, which each caller must apply; a lossless syntax tree with comments as trivia,
+  which needs a second tree type in the reader; writing the whole file with comments
+  attached to items, which loses the layout; and moving the bytes of a moved block,
+  which a caller that changes the Document it read never needs. Decided by the `config`
+  builder; approved by the coordinator (#249). New text takes the line end of the file's
+  first line, or `\n` when it has none. A string that `write` gives as a heredoc is
+  quoted when a comment or the end of a file with no line end follows it, or when the
+  line end is `\r\n`: HCL keeps the `\r` in a heredoc, and `read` does not (HCL READER).
+  The person approved on 2026-10-06: "As long as thats the industry standard I approve"
+  (#560).
 - **HCL ERRORS (2026-10-05)** Each function of `config-hcl` gives only the errors it
   can have. `read` gives a list of `Error`, `write` a list of `Unwritable`, and
   `update` a `Refusal`: the problems in the old text, or else the parts of the new

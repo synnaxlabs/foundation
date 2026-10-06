@@ -26,6 +26,17 @@ enum Verdict {
 /// What `read` gives: a Document, or the codes of its errors.
 type Outcome = Result<(), BTreeSet<String>>;
 
+/// How `read` differs from HCL on a text in `differences.txt`.
+enum Difference {
+    /// `read` gives this outcome.
+    Outcome(Outcome),
+    /// `read` gives a Document with the values HCL reads after this change.
+    Values(Transform),
+}
+
+/// A change to values in the form of `values.txt`.
+type Transform = fn(&str) -> String;
+
 fn directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../oracles/conformance/hcl")
 }
@@ -76,27 +87,48 @@ fn verdicts() -> Vec<(String, Verdict)> {
 
 /// Each line of `differences.txt` as a name and the outcome `read` gives, in file
 /// order. The decision after the outcome is for people.
-fn differences() -> Vec<(String, Outcome)> {
+fn differences() -> Vec<(String, Difference)> {
     lines("differences.txt")
         .iter()
-        .map(|line| {
-            let mut words = line.splitn(3, ' ');
-            let (Some(name), Some(outcome), Some(decision)) =
-                (words.next(), words.next(), words.next())
-            else {
-                panic!("differences.txt: {line:?} has no outcome or no decision")
-            };
-            assert!(
-                !decision.trim().is_empty(),
-                "differences.txt: {line:?} has no decision"
-            );
-            let outcome = match outcome {
-                "ok" => Ok(()),
-                code => Err(BTreeSet::from([code.to_owned()])),
-            };
-            (name.to_owned(), outcome)
-        })
+        .map(|line| difference(line))
         .collect()
+}
+
+/// A line of `differences.txt` as a name and how `read` differs.
+fn difference(line: &str) -> (String, Difference) {
+    let mut words = line.splitn(3, ' ');
+    let (Some(name), Some(outcome), Some(mut decision)) =
+        (words.next(), words.next(), words.next())
+    else {
+        panic!("differences.txt: {line:?} has no outcome or no decision")
+    };
+    let difference = match outcome {
+        "ok" => Difference::Outcome(Ok(())),
+        "values" => {
+            let transform;
+            (transform, decision) = decision.split_once(' ').unwrap_or((decision, ""));
+            Difference::Values(match transform {
+                "crlf" => crlf,
+                _ => panic!("differences.txt: {line:?} names no known transform"),
+            })
+        }
+        code => Difference::Outcome(Err(BTreeSet::from([code.to_owned()]))),
+    };
+    assert!(
+        !decision.trim().is_empty(),
+        "differences.txt: {line:?} has no decision"
+    );
+    (name.to_owned(), difference)
+}
+
+/// `values` with each `\r\n` in a string as `\n`.
+fn crlf(values: &str) -> String {
+    // After a split at each escaped `\`, each `\` left starts an escape.
+    values
+        .split(r"\\")
+        .map(|part| part.replace(r"\u{d}\u{a}", r"\u{a}"))
+        .collect::<Vec<_>>()
+        .join(r"\\")
 }
 
 /// Each line of `values.txt` as a name and the values HCL reads, in file order.
@@ -163,21 +195,49 @@ fn join(codes: &BTreeSet<String>) -> String {
 }
 
 /// The failures of `read` against `values.txt`: each text in `data()` that `read`
-/// reads must give the values HCL reads.
+/// reads must give the values HCL reads. Each `values` difference must give the
+/// values after its transform, which are not the values HCL reads.
 fn value_failures(read: impl Fn(&str) -> Option<Document>) -> Vec<String> {
     let texts = texts();
     let data = data();
+    let transforms = transforms();
     let mut failures = Vec::new();
-    for (name, hcl) in values().into_iter().filter(|(name, _)| data.contains(name)) {
+    for (name, hcl) in values() {
+        let transform = transforms.get(&name);
+        if transform.is_none() && !data.contains(&name) {
+            continue;
+        }
         let Some(document) = texts.get(&name).and_then(|text| read(text)) else {
             continue;
         };
         let ours = body(&document);
-        if ours != hcl {
-            failures.push(format!("{name}: read gives {ours}, and HCL reads {hcl}"));
-        }
+        let failure = match transform {
+            Some(_) if ours == hcl => Some(format!(
+                "{name}: read gives the values HCL reads; remove the difference"
+            )),
+            Some(transform) if ours != transform(&hcl) => Some(format!(
+                "{name}: read gives {ours}, and the difference asks {}",
+                transform(&hcl)
+            )),
+            None if ours != hcl => {
+                Some(format!("{name}: read gives {ours}, and HCL reads {hcl}"))
+            }
+            _ => None,
+        };
+        failures.extend(failure);
     }
     failures
+}
+
+/// The transform of each text with a `values` difference.
+fn transforms() -> BTreeMap<String, Transform> {
+    differences()
+        .into_iter()
+        .filter_map(|(name, difference)| match difference {
+            Difference::Values(transform) => Some((name, transform)),
+            Difference::Outcome(_) => None,
+        })
+        .collect()
 }
 
 /// The form of `values.txt` for a document. `README.md` tells the form.
@@ -279,6 +339,14 @@ fn each_text_has_one_verdict() {
     listed("differences.txt", names, &texts, &mut failures);
     let names = values().into_iter().map(|(name, _)| name);
     let valued = listed("values.txt", names, &texts, &mut failures);
+    for name in transforms()
+        .into_keys()
+        .filter(|name| !valued.contains(name))
+    {
+        failures.push(format!(
+            "{name}: differences.txt lists values, and values.txt has no line"
+        ));
+    }
     let data: BTreeSet<String> = verdicts
         .into_iter()
         .filter_map(|(name, verdict)| match verdict {
@@ -303,11 +371,17 @@ fn reads_as_hcl_does() {
         };
         let got = outcome(text);
         let failure = match differences.get(&name) {
-            Some(listed) if agrees(&verdict, listed) => Some(format!(
-                "{name}: the difference {} is what HCL asks; remove it",
-                show(listed)
+            Some(Difference::Values(_)) if got.is_err() => Some(format!(
+                "{name}: read gives {}, and differences.txt lists values",
+                show(&got)
             )),
-            Some(listed) if got != *listed => Some(format!(
+            Some(Difference::Outcome(listed)) if agrees(&verdict, listed) => {
+                Some(format!(
+                    "{name}: the difference {} is what HCL asks; remove it",
+                    show(listed)
+                ))
+            }
+            Some(Difference::Outcome(listed)) if got != *listed => Some(format!(
                 "{name}: read gives {}, and differences.txt lists {}",
                 show(&got),
                 show(listed)
@@ -404,4 +478,47 @@ fn finds_a_read_that_gives_references_for_bools() {
     let hcl = r#"{"a" = true, "b" = false}"#;
     let expected = format!("bool: read gives {ours}, and HCL reads {hcl}");
     assert!(failures.contains(&expected), "{failures:#?}");
+}
+
+#[test]
+fn finds_a_values_difference_that_stops() {
+    let failures = value_failures(|text| {
+        let quoted = text.replace("<<EOT\r\nline\r\nEOT", r#""line\r\n""#);
+        read(Source(0), &quoted).ok()
+    });
+    let expected =
+        "heredoc-crlf: read gives the values HCL reads; remove the difference";
+    assert!(
+        failures.iter().any(|failure| failure == expected),
+        "{failures:#?}"
+    );
+}
+
+#[test]
+fn finds_a_read_that_differs_from_the_transform() {
+    let failures =
+        value_failures(|text| read(Source(0), &text.replace("line", "lime")).ok());
+    let expected = concat!(
+        r#"heredoc-crlf: read gives {"a" = "lime\u{a}"}, "#,
+        r#"and the difference asks {"a" = "line\u{a}"}"#,
+    );
+    assert!(
+        failures.iter().any(|failure| failure == expected),
+        "{failures:#?}"
+    );
+}
+
+#[test]
+fn takes_each_crlf_in_a_string_to_lf() {
+    let values = r#"{"a\u{d}\u{a}" = "\\u{d}\u{a}\u{d}\u{d}\u{a}\"\u{d}"}"#;
+    let expected = r#"{"a\u{a}" = "\\u{d}\u{a}\u{d}\u{a}\"\u{d}"}"#;
+    assert_eq!(crlf(values), expected);
+}
+
+#[test]
+#[should_panic(
+    expected = r#"differences.txt: "a values lf x" names no known transform"#
+)]
+fn refuses_an_unknown_transform() {
+    difference("a values lf x");
 }
