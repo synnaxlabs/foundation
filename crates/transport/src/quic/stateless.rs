@@ -65,6 +65,7 @@ impl Limit {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use proptest::prelude::*;
@@ -137,6 +138,18 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn admits_one_reset_for_each_bucket_in_a_window(
+            hosts in prop::collection::vec(any::<u32>(), 1..512),
+        ) {
+            let (epoch, mut limit) = create();
+            let mut sent = HashSet::new();
+            for host in hosts {
+                let ip = IpAddr::V4(Ipv4Addr::from(host));
+                prop_assert_eq!(limit.admit(epoch, ip), sent.insert(limit.bucket(ip)));
+            }
+        }
+
         #[test]
         fn admits_a_reset_to_one_address_only_after_a_window_without_one(
             steps in prop::collection::vec((0..30_000_000u64, any::<bool>()), 1..64),
