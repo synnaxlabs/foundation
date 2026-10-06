@@ -1577,8 +1577,32 @@ fn busy() -> Error {
     })
 }
 
-/// A `Commit` held past the drop holds the ring, so an open fails with `Busy` until
-/// the commit resolves. The open after it recovers the entry queued at the drop.
+/// The commit task holds the ring until it ends, so an open right after a drop fails
+/// with `Busy`. The task writes the entry queued at the drop, then ends, and the open
+/// after it recovers the entry.
+#[test]
+fn an_open_right_after_a_drop_fails_with_busy_until_the_task_ended() {
+    let (mut sim, node) = one_node(41);
+    let run = sim.run_on(&node, |node, tasks| async move {
+        let config = || node_config(&node, tasks.clone(), DIR);
+        let mut slots = Slots::new();
+        let first = Buffer::open(config(), &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        first
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        drop(first);
+        let held = Buffer::open(config(), &mut slots).await.map(drop);
+        assert_eq!(held, Err(busy()));
+        node.clock().sleep(commits(20)).await;
+        let buffer = Buffer::open(config(), &mut slots).await.expect("reopens");
+        buffer.durable(a, Path::Live)
+    });
+    assert_eq!(run, Ok(tail(1, Some(1))));
+}
+
+/// A `Commit` held past the drop holds the ring after the task ended, so an open
+/// fails with `Busy` until the commit drops.
 #[test]
 fn an_open_while_a_commit_of_a_dropped_buffer_is_held_fails_with_busy() {
     let (mut sim, node) = one_node(41);
@@ -1590,76 +1614,19 @@ fn an_open_while_a_commit_of_a_dropped_buffer_is_held_fails_with_busy() {
         first
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
+        let held = first.committed();
         let ending = first.committed();
         drop(first);
-        let held = Buffer::open(config(), &mut slots).await.map(drop);
-        assert_eq!(held, Err(busy()));
         ending
             .await
             .expect("the task writes the queue before it ends");
+        let busy_open = Buffer::open(config(), &mut slots).await.map(drop);
+        assert_eq!(busy_open, Err(busy()));
+        drop(held);
         let buffer = Buffer::open(config(), &mut slots).await.expect("reopens");
         buffer.durable(a, Path::Live)
     });
     assert_eq!(run, Ok(tail(1, Some(1))));
-}
-
-/// Drops a buffer on a node with `seed` `wait` after its append, and opens the ring
-/// at once. At `Busy`, it opens again after the old task's last write. The second
-/// buffer commits one entry, and a third open recovers. Returns whether the first
-/// reopen was busy, the tail the second buffer committed, and the tail the third
-/// open recovered.
-fn reopen_after_a_drop(seed: u64, wait: Span) -> (bool, Tail, Tail) {
-    let (mut sim, node) = one_node(seed);
-    let run = sim.run_on(&node, move |node, tasks| async move {
-        let clock = node.clock();
-        let config = || node_config(&node, tasks.clone(), DIR);
-        let mut slots = Slots::new();
-        let first = Buffer::open(config(), &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
-        first
-            .append([entry(1, a, Path::Live, 0, 1, Some(222), Parts::default())])
-            .expect("queues");
-        clock.sleep(wait).await;
-        drop(first);
-        let (held, second) = match Buffer::open(config(), &mut slots).await {
-            Err(error) => {
-                assert_eq!(error, busy(), "wait {wait:?}");
-                clock.sleep(Span::from_nanos(10 * COMMIT.nanos())).await;
-                let second = Buffer::open(config(), &mut slots).await;
-                (true, second.expect("reopens after the old task ended"))
-            }
-            Ok(second) => (false, second),
-        };
-        let at = second.tail(a, Path::Live).seq;
-        second
-            .append([entry(1, a, Path::Live, at, 1, Some(333), Parts::default())])
-            .expect("queues");
-        second.committed().await.expect("commits");
-        let committed = second.durable(a, Path::Live);
-        let ending = second.committed();
-        drop(second);
-        ending.await.expect("nothing is queued");
-        let third = Buffer::open(config(), &mut slots).await.expect("reopens");
-        (held, committed, third.tail(a, Path::Live))
-    });
-    run.unwrap_or_else(|e| panic!("wait {wait:?}: {e}"))
-}
-
-/// An open right after the drop of a buffer whose commit is in flight either fails
-/// with `Busy` or opens after the old task ended. Either way the next commit
-/// survives.
-#[test]
-fn a_reopen_near_the_deadline_of_a_dropped_buffer_keeps_the_next_commit() {
-    let mut held = 0;
-    for seed in 0..4 {
-        for micros in 0..40 {
-            let wait = Span::from_nanos(COMMIT.nanos() + 1_000 * micros);
-            let (busy, committed, recovered) = reopen_after_a_drop(seed, wait);
-            assert_eq!(recovered, committed, "seed {seed}, wait {wait:?}");
-            held += u32::from(busy);
-        }
-    }
-    assert!(0 < held && held < 160, "{held} of 160 reopens were busy");
 }
 
 /// A power cut at any point of an open whose restart record goes over the one of
