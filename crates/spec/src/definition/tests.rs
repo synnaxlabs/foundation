@@ -88,10 +88,10 @@ fn refuses_an_unknown_kind() {
         Definition::decode(&bytes),
         Err(Error::Kind { at: 1, tag: 0 })
     );
-    let bytes = [VERSION, 2];
+    let bytes = [VERSION, 5];
     assert_eq!(
         Definition::decode(&bytes),
-        Err(Error::Kind { at: 1, tag: 2 })
+        Err(Error::Kind { at: 1, tag: 5 })
     );
 }
 
@@ -238,6 +238,53 @@ fn refuses_an_authority_without_write() {
     );
 }
 
+fn settings(disk: Option<u64>, pool: Option<u64>) -> Definition {
+    let size = |b: Option<u64>| b.map(byte::Size::from_bytes);
+    let policy = node_settings::Policy::new(
+        selector(&["site_a.**", "!site_a.gw"]),
+        size(disk),
+        size(pool),
+    );
+    Definition::NodeSettings(policy.unwrap())
+}
+
+/// The bytes of a node settings policy, from its parts.
+fn settings_bytes(disk: u64, pool: u64) -> Vec<u8> {
+    let mut bytes = vec![VERSION, NODE_SETTINGS];
+    bytes.extend_from_slice(&2_u64.to_le_bytes());
+    text(&mut bytes, b"site_a.**");
+    text(&mut bytes, b"!site_a.gw");
+    bytes.extend_from_slice(&disk.to_le_bytes());
+    bytes.extend_from_slice(&pool.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn writes_the_documented_node_settings_layout() {
+    let both = settings(Some(1 << 30), Some(1 << 20));
+    assert_eq!(both.encode(), settings_bytes(1 << 30, 1 << 20));
+    assert_eq!(Definition::decode(&both.encode()), Ok(both));
+}
+
+#[test]
+fn writes_and_reads_no_budget_as_zero() {
+    let disk = settings(Some(7), None);
+    assert_eq!(disk.encode(), settings_bytes(7, 0));
+    assert_eq!(Definition::decode(&settings_bytes(7, 0)), Ok(disk));
+    let none = settings(None, None);
+    assert_eq!(Definition::decode(&settings_bytes(0, 0)), Ok(none));
+}
+
+#[test]
+fn refuses_node_settings_that_end_early() {
+    let bytes = settings_bytes(7, 9);
+    let end = bytes.len();
+    assert_eq!(
+        Definition::decode(&bytes[..end - 1]),
+        Err(Error::Truncated { at: end - 8 })
+    );
+}
+
 fn pattern() -> impl Strategy<Value = String> {
     let segment = prop_oneof![
         Just("*".to_owned()),
@@ -258,7 +305,16 @@ fn selectors() -> impl Strategy<Value = Selector> {
     })
 }
 
-fn definition() -> impl Strategy<Value = Definition> {
+fn settings_strategy() -> impl Strategy<Value = Definition> {
+    let budget = prop::option::of(1..=u64::MAX);
+    (selectors(), budget.clone(), budget).prop_map(|(select, disk, pool)| {
+        let size = |b: Option<u64>| b.map(byte::Size::from_bytes);
+        let policy = node_settings::Policy::new(select, size(disk), size(pool));
+        Definition::NodeSettings(policy.unwrap())
+    })
+}
+
+fn access_strategy() -> impl Strategy<Value = Definition> {
     (
         selectors(),
         selectors(),
@@ -274,6 +330,10 @@ fn definition() -> impl Strategy<Value = Definition> {
                 Authority(authority),
             ))
         })
+}
+
+fn definition() -> impl Strategy<Value = Definition> {
+    prop_oneof![access_strategy(), settings_strategy()]
 }
 
 proptest! {

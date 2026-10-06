@@ -5,10 +5,11 @@
 //! Format, with every integer little-endian:
 //!
 //! ```text
-//! definition := version:u8 tag:u8 body
-//! access     := subjects:patterns select:patterns allow:u8 authority:u8   tag 1
-//! patterns   := count:u64 pattern*
-//! pattern    := excluded:u8 length:u64 UTF-8 bytes
+//! definition    := version:u8 tag:u8 body
+//! access        := subjects:patterns select:patterns allow:u8 authority:u8   tag 1
+//! node_settings := select:patterns disk:u64 pool:u64                       tag 4
+//! patterns      := count:u64 pattern*
+//! pattern       := excluded:u8 length:u64 UTF-8 bytes
 //! ```
 //!
 //! `excluded` is 1 for an exclusion, which a file writes with a leading `!`, and 0
@@ -18,6 +19,8 @@
 //!
 //! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
 //! admin 5. `authority` is zero when `allow` does not hold write.
+//!
+//! A node settings budget of 0 bytes is no budget, because a policy cannot hold zero.
 
 #![deny(
     clippy::indexing_slicing,
@@ -29,12 +32,15 @@
 use std::{fmt, str};
 
 use types::authority::Authority;
+use types::byte;
 use types::name::{self, Selector, Written};
 
 use crate::access::{Action, Actions, Policy};
+use crate::node_settings;
 
 const VERSION: u8 = 1;
 const ACCESS: u8 = 1;
+const NODE_SETTINGS: u8 = 4;
 /// The fewest bytes a pattern takes: its flag and its length.
 const PATTERN_MIN: usize = 9;
 
@@ -44,6 +50,8 @@ const PATTERN_MIN: usize = 9;
 pub enum Definition {
     /// An access policy.
     Access(Policy),
+    /// A node settings policy.
+    NodeSettings(node_settings::Policy),
 }
 
 impl Definition {
@@ -58,6 +66,14 @@ impl Definition {
                 patterns(&mut out, policy.select());
                 out.push(policy.allow().bits());
                 out.push(policy.authority().map_or(0, |a| a.0));
+            }
+            Self::NodeSettings(policy) => {
+                out.push(NODE_SETTINGS);
+                patterns(&mut out, policy.select());
+                for budget in [policy.disk(), policy.pool()] {
+                    let bytes = budget.map_or(0, byte::Size::bytes);
+                    out.extend_from_slice(&bytes.to_le_bytes());
+                }
             }
         }
         out
@@ -83,6 +99,7 @@ impl Definition {
         let at = reader.at();
         let definition = match reader.byte()? {
             ACCESS => Self::Access(reader.access()?),
+            NODE_SETTINGS => Self::NodeSettings(reader.node_settings()?),
             tag => return Err(Error::Kind { at, tag }),
         };
         if !reader.rest.is_empty() {
@@ -132,6 +149,16 @@ impl<'a> Reader<'a> {
         Ok(taken)
     }
 
+    fn u64(&mut self) -> Result<u64, Error> {
+        let at = self.at();
+        let (&bytes, rest) = self
+            .rest
+            .split_first_chunk()
+            .ok_or(Error::Truncated { at })?;
+        self.rest = rest;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
     fn byte(&mut self) -> Result<u8, Error> {
         let at = self.at();
         let (&byte, rest) = self.rest.split_first().ok_or(Error::Truncated { at })?;
@@ -143,12 +170,7 @@ impl<'a> Reader<'a> {
     /// items cannot fit in the bytes left is refused before anything is allocated.
     fn count(&mut self, size: usize) -> Result<usize, Error> {
         let at = self.at();
-        let (&bytes, rest) = self
-            .rest
-            .split_first_chunk()
-            .ok_or(Error::Truncated { at })?;
-        self.rest = rest;
-        usize::try_from(u64::from_le_bytes(bytes))
+        usize::try_from(self.u64()?)
             .ok()
             .filter(|n| n.checked_mul(size).is_some_and(|b| b <= self.rest.len()))
             .ok_or(Error::Truncated { at })
@@ -183,6 +205,22 @@ impl<'a> Reader<'a> {
         }
         Selector::new(texts.iter().map(|t| &**t))
             .map_err(|error| Error::Pattern { at, error })
+    }
+
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a budget read as 0 is `None`, so no budget is zero"
+    )]
+    fn node_settings(&mut self) -> Result<node_settings::Policy, Error> {
+        let select = self.patterns()?;
+        let mut budget = || {
+            self.u64()
+                .map(|bytes| (bytes != 0).then_some(byte::Size::from_bytes(bytes)))
+        };
+        let disk = budget()?;
+        let pool = budget()?;
+        Ok(node_settings::Policy::new(select, disk, pool)
+            .expect("invariant: no budget is zero"))
     }
 
     fn access(&mut self) -> Result<Policy, Error> {
