@@ -648,7 +648,10 @@ mod tests {
     }
 
     /// What the log of `node` holds when it opens.
-    #[expect(clippy::unwrap_in_result, reason = "the run has no fault")]
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a sim error is a test failure, not a log error"
+    )]
     fn stored(sim: &mut Sim, node: &sim::node::Node) -> Result<Stored, Error> {
         sim.run_on(node, |node, _| async move {
             open(&node).await.map(|(_, stored)| stored)
