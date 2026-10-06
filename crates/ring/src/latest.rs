@@ -314,7 +314,7 @@ mod model {
             // Word 0 holds the store of the first update.
             writer.update(|_| [1, 1]);
             let value = reads.join().unwrap();
-            assert!(matches!(value, [0, 0] | [1, 0] | [1, 1]), "torn: {value:?}");
+            assert!(matches!(value, [0 | 1, 0] | [1, 1]), "torn: {value:?}");
             assert_eq!(reader.read(|value| value), [1, 1]);
         });
     }
