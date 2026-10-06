@@ -10,8 +10,8 @@ use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
 use std::pin::pin;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use block::{Block, Heap, Pool};
@@ -1287,20 +1287,6 @@ where
     node.shards().start(config, main).expect("the shard starts")
 }
 
-/// Runs `main` on a shard named `name` of `node` until it returns.
-fn run_on<F>(
-    sim: &mut sim::Sim,
-    node: &sim::node::Node,
-    name: &str,
-    main: impl FnOnce(Tasks) -> F + Send + 'static,
-) where
-    F: Future<Output = ()> + 'static,
-{
-    let handle = on_node(node, name, main);
-    sim.run().expect("the run ends");
-    handle.join().expect("the shard ended");
-}
-
 /// A buffer config for the ring in `dir` on the files of `node`.
 fn node_config(node: &sim::node::Node, tasks: Tasks, dir: &str) -> Config {
     let config = block::Config { budget: POOL };
@@ -1372,10 +1358,9 @@ fn commit_cut_and_recover(
     node: &sim::node::Node,
     dir: &'static str,
 ) -> Tail {
-    let own = node.clone();
-    run_on(sim, node, "commit", move |tasks| async move {
+    sim.run_on(node, move |node, tasks| async move {
         let mut slots = Slots::new();
-        let config = node_config(&own, tasks, dir);
+        let config = node_config(&node, tasks, dir);
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
         buffer
@@ -1383,20 +1368,16 @@ fn commit_cut_and_recover(
             .expect("queues");
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
-    });
+    })
+    .expect("the commit ends");
     sim.crash(node, sim::Crash::Power);
-    let recovered = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&recovered);
-    let own = node.clone();
-    run_on(sim, node, "recover", move |tasks| async move {
+    let recovered = sim.run_on(node, move |node, tasks| async move {
         let mut slots = Slots::new();
-        let config = node_config(&own, tasks, dir);
+        let config = node_config(&node, tasks, dir);
         let buffer = Buffer::open(config, &mut slots).await.expect("opens again");
-        let a = slots.assign(key(1));
-        *out.lock().expect("no panic held the lock") = Some(buffer.tail(a, Path::Live));
+        buffer.tail(slots.assign(key(1)), Path::Live)
     });
-    let recovered = recovered.lock().expect("no panic held the lock").take();
-    recovered.expect("the last open ended")
+    recovered.expect("the last open ends")
 }
 
 /// A power cut at any point of the first open leaves a ring that opens again
@@ -1406,17 +1387,12 @@ fn commit_cut_and_recover(
 fn a_power_cut_during_the_first_open_leaves_a_ring_that_opens() {
     each_cut(0..64, 10_000, |seed, cut| {
         let (mut sim, node, ended) = cut_the_first_open(seed, cut, sim::Crash::Power);
-        let opened = Arc::new(Mutex::new(None));
-        let out = Arc::clone(&opened);
-        let own = node.clone();
-        run_on(&mut sim, &node, "second", move |tasks| async move {
-            let config = node_config(&own, tasks, DIR);
+        let opened = sim.run_on(&node, |node, tasks| async move {
+            let config = node_config(&node, tasks, DIR);
             let buffer = Buffer::open(config, &mut Slots::new()).await;
-            let layout = buffer.map(|buffer| buffer.layout());
-            *out.lock().expect("no panic held the lock") = Some(layout);
+            buffer.map(|buffer| buffer.layout())
         });
-        let opened = opened.lock().expect("no panic held the lock").take();
-        let opened = opened.expect("the second open ended");
+        let opened = opened.expect("the second open ends");
         assert_eq!(
             opened,
             Ok(layout(AREA, BODY_MAX)),
@@ -1580,9 +1556,8 @@ fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
     for dir in ["", DIR] {
         let (mut sim, node) = one_node(1);
         node.fail_file(FilePath::new(dir), Operation::SyncDir);
-        let own = node.clone();
-        run_on(&mut sim, &node, "first", move |tasks| async move {
-            let config = node_config(&own, tasks, DIR);
+        sim.run_on(&node, move |node, tasks| async move {
+            let config = node_config(&node, tasks, DIR);
             let opened = Buffer::open(config, &mut Slots::new()).await;
             let error = FileError::Io {
                 path: PathBuf::from(dir),
@@ -1590,7 +1565,8 @@ fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
                 code: 5,
             };
             assert_eq!(opened.map(drop), Err(Error::Files(error)));
-        });
+        })
+        .expect("the first open ends");
         let recovered = commit_cut_and_recover(&mut sim, &node, DIR);
         assert_eq!(recovered, tail(3, Some(30)), "{dir:?}");
     }
@@ -1600,9 +1576,8 @@ fn a_failed_directory_sync_fails_the_open_and_the_next_one_keeps_its_commits() {
 #[test]
 fn a_ring_in_a_nested_directory_keeps_its_commits_across_a_power_cut() {
     let (mut sim, node) = one_node(1);
-    let own = node.clone();
-    run_on(&mut sim, &node, "parent", move |_| async move {
-        let files = own.files();
+    sim.run_on(&node, |node, _tasks| async move {
+        let files = node.files();
         files
             .create_dir(FilePath::new("a"))
             .await
@@ -1611,7 +1586,8 @@ fn a_ring_in_a_nested_directory_keeps_its_commits_across_a_power_cut() {
             .sync_dir(FilePath::new(""))
             .await
             .expect("the dir is durable");
-    });
+    })
+    .expect("the parent is made");
     let recovered = commit_cut_and_recover(&mut sim, &node, "a/shard-0");
     assert_eq!(recovered, tail(3, Some(30)));
 }
@@ -1935,13 +1911,12 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
 #[test]
 fn a_failed_record_write_ends_the_buffer_with_its_error() {
     let (mut sim, node) = one_node(111);
-    let own = node.clone();
-    run_on(&mut sim, &node, "write", move |tasks| async move {
-        let config = node_config(&own, tasks, DIR);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
-        own.fail_file(FilePath::new(RING), Operation::WriteAt);
+        node.fail_file(FilePath::new(RING), Operation::WriteAt);
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -1956,7 +1931,8 @@ fn a_failed_record_write_ends_the_buffer_with_its_error() {
             buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
             Err(Rejected::Files(failed))
         );
-    });
+    })
+    .expect("the buffer ends");
 }
 
 #[test]
@@ -2272,6 +2248,9 @@ fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
     });
 }
 
+/// A record under `body_max` but over the largest block of the pool is recovered:
+/// the walk reads it in pieces of one block. The walk reads the first thirteen
+/// blocks of a record on their own, so the rest is over the largest block too.
 #[test]
 fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
     run(101, Memory::default(), |mut shard| async move {
@@ -2280,11 +2259,11 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 80 << 10);
-        let ring = layout(64 * BLOCK, 100_000);
+        let ring = layout(128 * BLOCK, 150_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
         let a = slots.assign(key(1));
-        let mut part = parts_pool.alloc(30_000).expect("the pool has a block");
+        let mut part = parts_pool.alloc(48_000).expect("the pool has a block");
         part.fill(7);
         let parts = Parts::from(part.freeze());
         buffer
@@ -2301,6 +2280,42 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         let opened = shard.open(ring, &mut slots).await;
         let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
         assert_eq!(tails, Ok(tail(3, Some(3))));
+    });
+}
+
+/// The walk reads a long record in pieces of the pool's largest block. An open
+/// with no such block free fails with [`Error::Pool`] and leaves the ring as it
+/// is; the next open recovers the record.
+#[test]
+fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
+    run(143, Memory::default(), |mut shard| async move {
+        let config = block::Config { budget: 640 << 10 };
+        shard.pool =
+            Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+        assert_eq!(shard.pool.largest(), 512 << 10);
+        let ring = layout(320 * BLOCK, 600_000);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let parts = Parts::from([shard.block(512 << 10), shard.block(60_000)]);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), parts)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
+        drop(buffer);
+        let held = shard.pool.alloc(150_000).expect("the pool has a block");
+        let opened = shard.open(ring, &mut Slots::new()).await;
+        let exhausted = block::Error::Exhausted {
+            requested: 512 << 10,
+            available: 306_688,
+        };
+        assert_eq!(opened.map(drop), Err(Error::Pool(exhausted)));
+        drop(held);
+        let mut slots = Slots::new();
+        let opened = shard.open(ring, &mut slots).await;
+        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        assert_eq!(tails, Ok(tail(1, Some(1))));
     });
 }
 

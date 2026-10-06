@@ -11,7 +11,7 @@ use env::net::{Connect, Error, listener, tcp};
 use types::time::Monotonic;
 
 use super::{Node, Owner};
-use crate::net::tcp::{Key, Tcp};
+use crate::net::tcp::{Pair, Tcp};
 use crate::net::udp::Bound;
 use crate::state::lock;
 
@@ -64,9 +64,9 @@ impl env::net::Driver for Node {
             let connect =
                 |tcp: &mut Tcp<'_>, now| tcp.connect(self.node, now, remote, options);
             let life = lock(&self.shared).life(self.node);
-            let key = self.tcp(|tcp, now| (connect(tcp, now), ()))?;
+            let (key, pair) = self.tcp(|tcp, now| (connect(tcp, now), ()))?;
             let stream: Box<dyn tcp::Driver> =
-                Box::new(Stream::new(self.clone(), key, life));
+                Box::new(Stream::new(self.clone(), key, pair, life));
             poll_fn(|cx| self.tcp(|tcp, _| tcp.connected(key, cx.waker()))).await?;
             Ok(stream)
         })
@@ -108,8 +108,9 @@ impl listener::Driver for Listener {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Box<dyn tcp::Driver>, Error>> {
         self.owner.check(&self.node);
-        let key = ready!(self.node.tcp(|tcp, _| tcp.accept(self.key, cx.waker())));
-        let stream = Stream::new(self.node.clone(), key, self.owner.life);
+        let (key, pair) =
+            ready!(self.node.tcp(|tcp, _| tcp.accept(self.key, cx.waker())));
+        let stream = Stream::new(self.node.clone(), key, pair, self.owner.life);
         Poll::Ready(Ok(Box::new(stream)))
     }
 }
@@ -128,16 +129,18 @@ impl Drop for Listener {
 /// after a close.
 struct Stream {
     node: Node,
-    key: Key,
+    key: u64,
+    pair: Pair,
     owner: Owner,
 }
 
 impl Stream {
-    /// The end `key` of `node`, opened in `life` of the node.
-    fn new(node: Node, key: Key, life: u64) -> Self {
+    /// The end `key` of `node` at `pair`, opened in `life` of the node.
+    fn new(node: Node, key: u64, pair: Pair, life: u64) -> Self {
         Self {
             node,
             key,
+            pair,
             owner: Owner::new(STREAM, life),
         }
     }
@@ -145,11 +148,11 @@ impl Stream {
 
 impl tcp::Driver for Stream {
     fn local(&self) -> SocketAddr {
-        self.key.local
+        self.pair.local
     }
 
     fn peer(&self) -> SocketAddr {
-        self.key.peer
+        self.pair.peer
     }
 
     fn poll_read(
