@@ -104,6 +104,21 @@ impl Node {
         env::net::Net::new(self.0.clone())
     }
 
+    /// The node's serial ports: one at each end of a line that
+    /// [`Sim::line`](crate::Sim::line) joins to the node.
+    ///
+    /// - An open ends at once.
+    /// - Each port holds at most 4 KiB of bytes written that have not arrived: a
+    ///   write queues up to that and then waits for room. Each port also holds at
+    ///   most 4 KiB of bytes not read, and loses the bytes past that.
+    /// - A byte that arrives at an end that is not open is lost, and so are the
+    ///   bytes in flight from a port that drops.
+    /// - A port panics when it polls outside the node's threads.
+    #[must_use]
+    pub fn serial(&self) -> env::serial::Serial {
+        env::serial::Serial::new(self.0.clone())
+    }
+
     /// The node's disk: [`Config::disk_bytes`] bytes, with an empty data directory.
     ///
     /// - Each call takes up to 100 us of true time and takes effect when it ends.

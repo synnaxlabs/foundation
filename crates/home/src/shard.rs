@@ -59,11 +59,9 @@ struct Scratch {
     outcomes: Vec<Outcome>,
 }
 
-/// The entries of one append. Empty between appends.
+/// The stored bodies of one frame's append. Empty between appends.
 #[derive(Debug, Default)]
 struct Batch {
-    /// Each handoff to record: its group, the seq it goes in at, and its body.
-    handoffs: Vec<(u32, u64, Option<Block>)>,
     /// The stored body of each accepted group, in group order.
     bodies: Vec<Body>,
 }
@@ -109,8 +107,8 @@ pub(crate) enum Outcome {
 pub(crate) enum Error {
     /// The frame is labeled resend, which the home does not take yet.
     Resend,
-    /// A backfill frame found no room in the ring or the pool. Nothing is spent, and
-    /// the writer writes the frame again later.
+    /// A backfill frame found no room in the ring or the pool. No seq moves, and the
+    /// writer writes the frame again later.
     Full,
     /// A commit failed. The shard takes no more frames.
     Disk(env::files::Error),
@@ -201,7 +199,7 @@ impl Shard {
             })
             .collect();
         let session = Session { set, claims };
-        self.record(&session, mesh);
+        self.record_all(&session, mesh);
         let key = writer::Key(self.next);
         self.next += 1;
         self.writers.insert(key, session);
@@ -226,13 +224,13 @@ impl Shard {
         for claim in &session.claims {
             self.indexes[claim.place].gate.close(claim.key, now);
         }
-        self.record(&session, mesh);
+        self.record_all(&session, mesh);
     }
 
-    /// Applies `frame` to each index it holds, whole or not at all per index, in one
-    /// append, at monotonic time `now` and mesh time `mesh`. Returns the outcome of
-    /// each present group, in group order. An index's unrecorded handoff goes in
-    /// before its frame.
+    /// Applies `frame` to each index it holds, whole or not at all per index, at
+    /// monotonic time `now` and mesh time `mesh`. The frame's bodies go in one append,
+    /// after the unrecorded handoff of each of its indexes. Returns the outcome of
+    /// each present group, in group order.
     ///
     /// # Errors
     ///
@@ -265,23 +263,33 @@ impl Shard {
             let checked = index.check(claim.key, path, stamps, now, mesh);
             scratch.checks.push((group, checked));
         }
+        let groups = scratch.checks.iter().map(|&(group, _)| group);
+        let recorded = record(
+            &self.buffer,
+            &self.pool,
+            &mut self.indexes,
+            session,
+            groups,
+            mesh,
+        );
         let batch = &mut scratch.batch;
-        let made = batch
-            .bodies(&self.pool, &mut split, &session.set, &mut scratch.checks)
-            .and_then(|()| {
-                let groups = scratch.checks.iter().map(|&(group, _)| group);
-                batch.handoffs(&self.pool, &self.indexes, session, groups)
-            });
+        let made =
+            batch.bodies(&self.pool, &mut split, &session.set, &mut scratch.checks);
         drop(split);
-        if made.is_err() {
+        // Made also when a handoff found no room: freezing gives a lost live frame to
+        // latest readers.
+        let ready = made.is_ok() && recorded == Ok(true);
+        if !ready {
             batch.clear();
         }
-        let appended =
-            batch.append(&self.buffer, &mut self.indexes, session, path, mesh);
-        let room = appended.and_then(|room| match (room && made.is_ok(), path) {
-            (false, Path::Backfill) => Err(Error::Full),
-            (room, _) => Ok(room),
-        });
+        let appended = batch.append(&self.buffer, session, path, mesh);
+        let room =
+            recorded
+                .and(appended)
+                .and_then(|room| match (room && ready, path) {
+                    (false, Path::Backfill) => Err(Error::Full),
+                    (room, _) => Ok(room),
+                });
         match room {
             Ok(room) => Ok(spend(
                 &mut scratch.checks,
@@ -308,19 +316,19 @@ impl Shard {
     }
 
     /// Appends the unrecorded handoff of each index of `session`.
-    fn record(&mut self, session: &Session, mesh: Interval) {
+    fn record_all(&mut self, session: &Session, mesh: Interval) {
         let groups = (0..session.claims.len()).map(|group| {
             u32::try_from(group).expect("invariant: a key set has u32 groups")
         });
-        let batch = &mut self.scratch.batch;
-        if batch
-            .handoffs(&self.pool, &self.indexes, session, groups)
-            .is_err()
-        {
-            batch.clear();
-        }
         // A handoff with no room waits, and a failed commit fails the next write.
-        drop(batch.append(&self.buffer, &mut self.indexes, session, Path::Live, mesh));
+        drop(record(
+            &self.buffer,
+            &self.pool,
+            &mut self.indexes,
+            session,
+            groups,
+            mesh,
+        ));
     }
 }
 
@@ -359,28 +367,8 @@ impl Batch {
         Ok(())
     }
 
-    /// Adds the handoff of the index of each of `groups` that has one to record.
-    fn handoffs(
-        &mut self,
-        pool: &block::Pool,
-        indexes: &[Index],
-        session: &Session,
-        groups: impl Iterator<Item = u32>,
-    ) -> Result<(), block::Error> {
-        for group in groups {
-            let (claim, _) = session.claim(group);
-            if let Some((handoff, first)) = indexes[claim.place].handoff() {
-                self.handoffs
-                    .push((group, first, handoff::body(pool, handoff)?));
-            }
-        }
-        Ok(())
-    }
-
-    /// Appends the batch as one record at mesh time `mesh`: each handoff on the live
-    /// path, then each body on `path`. Marks each handoff recorded when the batch
-    /// found room, and empties the batch. Returns whether it found room. An empty
-    /// batch appends nothing.
+    /// Appends the batch as one record on `path` at mesh time `mesh`, and empties
+    /// it. Returns whether it found room. An empty batch appends nothing.
     ///
     /// # Errors
     ///
@@ -388,25 +376,10 @@ impl Batch {
     fn append(
         &mut self,
         buffer: &Buffer,
-        indexes: &mut [Index],
         session: &Session,
         path: Path,
         mesh: Interval,
     ) -> Result<bool, Error> {
-        let handoffs = self.handoffs.iter_mut().map(|(group, first, parts)| {
-            let (_, entry) = session.claim(*group);
-            Entry {
-                index: entry.key,
-                slot: entry.slot,
-                path: Path::Live,
-                first: *first,
-                len: 0,
-                stored_at: mesh.latest,
-                last: None,
-                tag: handoff::TAG,
-                parts: parts.take().into(),
-            }
-        });
         let bodies = self.bodies.drain(..).map(|body| {
             let (_, entry) = session.claim(body.group);
             Entry {
@@ -421,20 +394,60 @@ impl Batch {
                 parts: body.parts.into(),
             }
         });
-        let room = room(buffer.append(handoffs.chain(bodies)));
-        for (group, _, _) in self.handoffs.drain(..) {
-            if room == Ok(true) {
-                indexes[session.claim(group).0.place].gate.recorded();
-            }
-        }
-        room
+        room(buffer.append(bodies))
     }
 
-    /// Empties the batch. Each handoff waits for the next append on its index.
+    /// Empties the batch.
     fn clear(&mut self) {
-        self.handoffs.clear();
         self.bodies.clear();
     }
+}
+
+/// Appends the unrecorded handoff of the index of each of `groups` of `session`, each
+/// alone, on the live path at mesh time `mesh`, and marks it recorded. A handoff that
+/// finds no room in the ring or the pool waits for the next append on its index.
+/// Returns whether every handoff was recorded.
+///
+/// # Errors
+///
+/// [`Error::Disk`] after a failed commit.
+fn record(
+    buffer: &Buffer,
+    pool: &block::Pool,
+    indexes: &mut [Index],
+    session: &Session,
+    groups: impl Iterator<Item = u32>,
+    mesh: Interval,
+) -> Result<bool, Error> {
+    let mut all = true;
+    for group in groups {
+        let (claim, entry) = session.claim(group);
+        let index = &mut indexes[claim.place];
+        let Some((handoff, first)) = index.handoff() else {
+            continue;
+        };
+        let Ok(parts) = handoff::body(pool, handoff) else {
+            all = false;
+            continue;
+        };
+        let appended = buffer.append([Entry {
+            index: entry.key,
+            slot: entry.slot,
+            path: Path::Live,
+            first,
+            len: 0,
+            stored_at: mesh.latest,
+            last: None,
+            tag: handoff::TAG,
+            parts: parts.into(),
+        }]);
+        if room(appended)? {
+            index.gate.recorded();
+        } else {
+            all = false;
+        }
+    }
+    Ok(all)
 }
 
 /// Spends the seq of each accepted group of `checks`, and makes the outcome of each
@@ -507,7 +520,7 @@ mod tests {
     use env::files::{Mode, Operation};
     use env::tasks::Tasks;
     use types::authority::Authority;
-    use types::channel::Slots;
+    use types::channel::{self, Slots};
     use types::frame::Form;
     use types::frame::Range;
     use types::frame::key_set::Group;
@@ -537,6 +550,9 @@ mod tests {
     };
     const LIVE: Label = Label::Path(Path::Live);
     const BACKFILL: Label = Label::Path(Path::Backfill);
+    /// Indexes whose handoffs to a 255-byte subject no record of `BODY_MAX` holds
+    /// together.
+    const WIDE: u32 = 14;
 
     /// What one test gets on its shard.
     struct Test {
@@ -549,8 +565,8 @@ mod tests {
 
     impl Test {
         /// A shard over the ring of the node, made with `area` bytes when it is new,
-        /// that carries the indexes of [`two_indexes`].
-        async fn shard(&self, area: u64) -> Shard {
+        /// with slots 0 to `slots` assigned and no index carried.
+        async fn open(&self, area: u64, slots: u32) -> Shard {
             let config = buffer::Config {
                 files: self.node.files(),
                 dir: PathBuf::from(DIR),
@@ -561,15 +577,37 @@ mod tests {
                 layout: Layout::new(area, BODY_MAX).expect("a ring"),
                 commit: COMMIT,
             };
-            let mut slots = Slots::new();
-            for n in 0..4 {
-                slots.assign(key(Slot::new(n)));
+            let mut assigned = Slots::new();
+            for n in 0..slots {
+                assigned.assign(key(Slot::new(n)));
             }
-            let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-            let mut shard = Shard::new(buffer, Rc::clone(&self.pool), LIMITS);
+            let buffer = Buffer::open(config, &mut assigned).await.expect("opens");
+            Shard::new(buffer, Rc::clone(&self.pool), LIMITS)
+        }
+
+        /// A shard as [`open`](Self::open) makes, that carries the indexes of
+        /// [`two_indexes`].
+        async fn shard(&self, area: u64) -> Shard {
+            let mut shard = self.open(area, 4).await;
             shard.carry(Slot::new(0));
             shard.carry(Slot::new(2));
             shard
+        }
+
+        /// A shard that carries `count` indexes with no data channels, at slots 0 to
+        /// `count`, and their key set.
+        async fn wide(&self, count: u32) -> (Shard, Arc<KeySet>) {
+            let mut shard = self.open(AREA, count).await;
+            let groups: Vec<_> = (0..count)
+                .map(|n| {
+                    shard.carry(Slot::new(n));
+                    Group {
+                        index: key(Slot::new(n)),
+                        data: &[],
+                    }
+                })
+                .collect();
+            (shard, interner().intern(&groups))
         }
 
         /// The bytes of the ring file.
@@ -680,7 +718,7 @@ mod tests {
             .collect();
         let mut draft = Draft::new(pool, set, Form::Raw, &lens).expect("a frame");
         for &(entry, values) in series {
-            let bytes = draft.series(entry).expect("the series is present");
+            let bytes = draft.series_mut(entry).expect("the series is present");
             for (bytes, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(values) {
                 *bytes = value.to_le_bytes();
             }
@@ -725,6 +763,62 @@ mod tests {
     /// The bytes of a handoff to `subject` at authority 1.
     fn handoff_to(subject: &str) -> Vec<u8> {
         [&[1], subject.as_bytes()].concat()
+    }
+
+    /// The length of an entry header in a record's table.
+    const HEADER_LEN: usize = 51;
+    /// Where the `stored_at` stamp starts in an entry header.
+    const STAMP_AT: usize = 29;
+    /// A mesh time whose stamp bytes appear nowhere else in a ring.
+    const MARKED: Interval = Interval {
+        earliest: Stamp::from_nanos(1),
+        latest: Stamp::from_nanos(0x0FED_CBA9_8765_4321),
+    };
+
+    /// The entry header in `ring` whose `stored_at` stamp starts at `stamp`.
+    fn header(ring: &[u8], stamp: usize) -> &[u8; HEADER_LEN] {
+        let start = stamp
+            .checked_sub(STAMP_AT)
+            .expect("a header holds the stamp");
+        ring[start..].first_chunk().expect("a whole header")
+    }
+
+    /// The index, path byte, first, len, and tag of each entry header in `ring`
+    /// stamped `stored_at`, in ring order.
+    fn headers(ring: &[u8], stored_at: Stamp) -> Vec<(u128, u8, u64, u32, u8)> {
+        find(ring, &stored_at.nanos().to_le_bytes())
+            .into_iter()
+            .map(|at| {
+                let header = header(ring, at);
+                (
+                    u128::from_le_bytes(header[..16].try_into().expect("16 bytes")),
+                    header[16],
+                    u64::from_le_bytes(header[17..25].try_into().expect("8 bytes")),
+                    u32::from_le_bytes(header[25..29].try_into().expect("4 bytes")),
+                    header[46],
+                )
+            })
+            .collect()
+    }
+
+    /// The tag and body of each entry of the one record in `ring` whose entries are
+    /// all stamped `stored_at`, in order.
+    fn bodies(ring: &[u8], stored_at: Stamp) -> Vec<(u8, Vec<u8>)> {
+        let stamps = find(ring, &stored_at.nanos().to_le_bytes());
+        let table = stamps[0] - STAMP_AT;
+        let count = u32::from_le_bytes(ring[table - 4..table].try_into().expect("4"));
+        assert_eq!(usize::try_from(count), Ok(stamps.len()), "one record");
+        let mut at = table + stamps.len() * HEADER_LEN;
+        stamps
+            .iter()
+            .map(|&stamp| {
+                let header = header(ring, stamp);
+                let len = u32::from_le_bytes(header[47..].try_into().expect("4 bytes"));
+                let body = &ring[at..][..usize::try_from(len).expect("a short body")];
+                at += body.len();
+                (header[46], body.to_vec())
+            })
+            .collect()
     }
 
     #[test]
@@ -1009,6 +1103,126 @@ mod tests {
     }
 
     #[test]
+    fn records_each_handoff_at_open_when_no_record_holds_them_together() {
+        run(17, |test| async move {
+            let (mut shard, set) = test.wide(WIDE).await;
+            let long = "b".repeat(255);
+            shard.open_writer(writer(&long, 1, &set), NOW, MESH);
+            shard.committed().await.expect("the commit ends");
+            let waiting = shard
+                .indexes
+                .iter()
+                .filter(|index| index.handoff().is_some());
+            let handoffs = find(&test.ring().await, &handoff_to(&long));
+            assert_eq!((waiting.count(), handoffs.len()), (0, 14));
+        });
+    }
+
+    #[test]
+    fn records_a_handoff_with_room_at_close_when_an_earlier_one_has_none() {
+        run(25, |test| async move {
+            let set = two_indexes();
+            let zero = interner().intern(&[Group {
+                index: key(Slot::new(0)),
+                data: &[],
+            }]);
+            let two = interner().intern(&[Group {
+                index: key(Slot::new(2)),
+                data: &[],
+            }]);
+            let mut shard = test.shard(AREA).await;
+            // Writer a holds both indexes and leaves an open record, so an append
+            // needs a block only for its handoff body.
+            let a = shard.open_writer(writer("subject-a", 4, &set), NOW, MESH);
+            let long = "c".repeat(200);
+            shard.open_writer(writer(&long, 2, &zero), NOW, MESH);
+            shard.open_writer(writer("subject-x", 1, &two), NOW, MESH);
+            // A block for the handoff to x, and none for the handoff to c.
+            let to_x = handoff_to("subject-x");
+            let room = test.pool.alloc(to_x.len()).expect("a block");
+            let blocks = test.fill();
+            drop(room);
+            shard.close_writer(a, NOW, MESH);
+            drop(blocks);
+            // The next input on index 2: y outranks x and takes control.
+            shard.open_writer(writer("subject-y", 3, &two), NOW, MESH);
+            shard.committed().await.expect("the commit ends");
+            let ring = test.ring().await;
+            let to_y = [&[3], "subject-y".as_bytes()].concat();
+            assert_eq!(find(&ring, &to_y).len(), 1, "y takes index 2");
+            assert_eq!(
+                find(&ring, &to_x).len(),
+                1,
+                "x held index 2 between the close of a and the open of y"
+            );
+        });
+    }
+
+    #[test]
+    fn records_the_handoff_of_a_write_refused_for_an_expired_lease() {
+        run(26, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let lease = control::Lease::new(Span::from_nanos(10)).expect("a lease");
+            let a = Writer {
+                lease: Some(lease),
+                ..writer("subject-a", 2, &set)
+            };
+            let a = shard.open_writer(a, NOW, MESH);
+            shard.open_writer(writer("subject-b", 1, &set), NOW, MESH);
+            let write = frame(&test.pool, &set, &[(2, &[10])]);
+            let expired = refused(2, Refusal::Control(control::Error::Expired));
+            assert_eq!(
+                shard.write(a, LIVE, write, Monotonic(20), MESH),
+                Ok(&[expired][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let handoffs = find(&test.ring().await, &handoff_to("subject-b"));
+            assert_eq!(
+                handoffs.len(),
+                1,
+                "b takes index 2 when the lease of a ends"
+            );
+        });
+    }
+
+    #[test]
+    fn records_each_handoff_at_close_when_no_record_holds_them_together() {
+        run(18, |test| async move {
+            let (mut shard, set) = test.wide(WIDE).await;
+            let a = shard.open_writer(writer("a", 2, &set), NOW, MESH);
+            let long = "b".repeat(255);
+            shard.open_writer(writer(&long, 1, &set), NOW, MESH);
+            shard.close_writer(a, NOW, MESH);
+            shard.committed().await.expect("the commit ends");
+            let handoffs = find(&test.ring().await, &handoff_to(&long));
+            assert_eq!(handoffs.len(), 14, "the next writer takes each index");
+        });
+    }
+
+    #[test]
+    fn applies_a_frame_after_waiting_handoffs_that_no_record_holds_together() {
+        run(19, |test| async move {
+            let (mut shard, set) = test.wide(WIDE).await;
+            let long = "b".repeat(255);
+            let blocks = test.fill();
+            let a = shard.open_writer(writer(&long, 1, &set), NOW, MESH);
+            drop(blocks);
+            let series: Vec<(usize, &[i64])> = set
+                .groups()
+                .iter()
+                .map(|&entry| (entry, &[10][..]))
+                .collect();
+            let write = frame(&test.pool, &set, &series);
+            let each: Vec<_> = (0..WIDE).map(|slot| applied(slot, 0, 1)).collect();
+            assert_eq!(shard.write(a, LIVE, write, NOW, MESH), Ok(&each[..]));
+            shard.committed().await.expect("the commit ends");
+            let handoffs = find(&test.ring().await, &handoff_to(&long));
+            assert_eq!(handoffs.len(), 14);
+        });
+    }
+
+    #[test]
     fn keeps_a_handoff_waiting_while_the_ring_has_no_room() {
         run(13, |test| async move {
             let set = two_indexes();
@@ -1060,6 +1274,67 @@ mod tests {
             let count = |stamp: Stamp| find(&ring, &stamp.nanos().to_le_bytes()).len();
             assert_eq!(count(mesh.latest), 4, "two handoffs and two bodies");
             assert_eq!(count(mesh.earliest), 0);
+        });
+    }
+
+    #[test]
+    fn loses_a_frame_whose_index_has_a_handoff_with_no_block() {
+        run(20, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            // Writer a leaves an open record, so the frame needs a block only for its
+            // body.
+            let _a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let live = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            let again = frame(&test.pool, &set, &[(0, &[20]), (1, &[2])]);
+            let room = test.pool.alloc(80).expect("a block");
+            let blocks = test.fill();
+            let subject = "b".repeat(200);
+            let b = shard.open_writer(writer(&subject, 2, &set), NOW, MESH);
+            drop(room);
+            assert_eq!(
+                shard.write(b, LIVE, live, NOW, MESH),
+                Ok(&[lost(0, 0, 1)][..])
+            );
+            drop(blocks);
+            assert_eq!(
+                shard.write(b, LIVE, again, NOW, MESH),
+                Ok(&[applied(0, 1, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let ring = test.ring().await;
+            let handoffs = find(&ring, &[&[2], subject.as_bytes()].concat());
+            assert_eq!(handoffs.len(), 1, "only the index of the frame records it");
+            let series = find(&ring, &key(Slot::new(1)).as_u128().to_le_bytes());
+            assert_eq!(series.len(), 1, "the lost frame stores nothing");
+            assert!(
+                handoffs[0] < series[0],
+                "the handoff goes in before the frame"
+            );
+        });
+    }
+
+    #[test]
+    fn records_a_waiting_handoff_before_its_frame_takes_the_blocks() {
+        run(24, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let _a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let live = frame(&test.pool, &set, &[(0, &[10]), (1, &[1])]);
+            // The handoff and the frame's body each need the one free block.
+            let room = test.pool.alloc(80).expect("a block");
+            let blocks = test.fill();
+            let subject = "b".repeat(70);
+            let b = shard.open_writer(writer(&subject, 2, &set), NOW, MESH);
+            drop(room);
+            assert_eq!(
+                shard.write(b, LIVE, live, NOW, MESH),
+                Ok(&[lost(0, 0, 1)][..])
+            );
+            drop(blocks);
+            shard.committed().await.expect("the commit ends");
+            let handoff = [&[2], subject.as_bytes()].concat();
+            assert_eq!(find(&test.ring().await, &handoff).len(), 1);
         });
     }
 
@@ -1179,5 +1454,95 @@ mod tests {
                 seed: 12,
             })
         );
+    }
+
+    #[test]
+    fn tags_each_handoff_and_each_body() {
+        run(21, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MARKED);
+            let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
+            shard.write(a, LIVE, write, NOW, MARKED).expect("written");
+            shard.committed().await.expect("the commit ends");
+            let zero = key(Slot::new(0)).as_u128();
+            let two = key(Slot::new(2)).as_u128();
+            assert_eq!(
+                headers(&test.ring().await, MARKED.latest),
+                [
+                    (zero, 0, 0, 0, 1),
+                    (two, 0, 0, 0, 1),
+                    (zero, 0, 0, 1, 0),
+                    (two, 0, 0, 1, 0),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn records_a_waiting_handoff_on_the_live_path_before_a_backfill_frame() {
+        run(22, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let live = frame(&test.pool, &set, &[(0, &[10, 20]), (1, &[1, 2])]);
+            shard.write(a, LIVE, live, NOW, MESH).expect("written");
+            let backfill = frame(&test.pool, &set, &[(0, &[1]), (1, &[1])]);
+            let blocks = test.fill();
+            let b = shard.open_writer(writer("b", 2, &set), NOW, MESH);
+            drop(blocks);
+            assert_eq!(
+                shard.write(b, BACKFILL, backfill, NOW, MARKED),
+                Ok(&[applied(0, 0, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let zero = key(Slot::new(0)).as_u128();
+            assert_eq!(
+                headers(&test.ring().await, MARKED.latest),
+                [(zero, 0, 2, 0, 1), (zero, 1, 0, 1, 0)]
+            );
+        });
+    }
+
+    #[test]
+    fn stores_the_series_of_each_frame() {
+        run(23, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MARKED);
+            let values: [i64; 2] = [0x0123_4567_89AB_CDEF, -5];
+            let write = frame(&test.pool, &set, &[(0, &[10, 20]), (1, &values)]);
+            shard.write(a, LIVE, write, NOW, MARKED).expect("written");
+            shard.committed().await.expect("the commit ends");
+            let ring = test.ring().await;
+            let data: Vec<_> = bodies(&ring, MARKED.latest)
+                .into_iter()
+                .filter(|(tag, _)| *tag == 0)
+                .collect();
+            assert_eq!(data.len(), 1, "one data entry");
+            let decoded: Vec<(channel::Key, Vec<u8>)> = stored::read(&data[0].1)
+                .map(|series| {
+                    let Type::Scalar(scalar) = series.data_type else {
+                        panic!("a scalar series");
+                    };
+                    let mut out = vec![0; 16];
+                    codec::decode(scalar, 2, series.bytes, &mut out).expect("decodes");
+                    (series.channel, out)
+                })
+                .collect();
+            let le = |values: &[i64]| -> Vec<u8> {
+                values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect()
+            };
+            assert_eq!(
+                decoded,
+                [
+                    (key(Slot::new(0)), le(&[10, 20])),
+                    (key(Slot::new(1)), le(&values)),
+                ]
+            );
+        });
     }
 }
