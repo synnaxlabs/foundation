@@ -2805,7 +2805,7 @@ mod tests {
         let Some(transmit) = from.endpoint.transmit(now, &mut buffer) else {
             return false;
         };
-        let meta = testing::meta(from.address, transmit.contents);
+        let meta = pair::meta(from.address, transmit.contents);
         to.endpoint.receive(now, &meta, transmit.contents);
         true
     }
