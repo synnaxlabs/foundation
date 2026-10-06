@@ -85,6 +85,7 @@ pub(super) struct Functions {
         *mut u32,
     ) -> i32,
     pub(super) error: unsafe extern "system" fn(*mut c_char, u32) -> i32,
+    pub(super) describe: unsafe extern "system" fn(i32, *mut c_char, u32) -> i32,
 }
 
 /// `DAQmx_Val_Cfg_Default`.
@@ -130,6 +131,7 @@ impl Functions {
             read_digital: find!("DAQmxReadDigitalLines"),
             write_digital: find!("DAQmxWriteDigitalLines"),
             error: find!("DAQmxGetExtendedErrorInfo"),
+            describe: find!("DAQmxGetErrorString"),
         })
     }
 }

@@ -3,12 +3,12 @@
 //! etcd source: `README.md` lists each source and the changes.
 
 use raft::{
-    Body, Data, Entry, Error, Hard, Message, Position, Raft, Ready, Role, Term,
+    Body, Data, Entry, Error, Grant, Hard, Message, Position, Raft, Ready, Role, Term,
 };
 
 use crate::common::{
-    Disk, ELECTION, Network, accept, accept_all, at_term, count, elect, key, leader,
-    noop, position, reply, start,
+    Disk, ELECTION, Network, VOTERS, accept, accept_all, at_term, count, elect, key,
+    leader, noop, position, proof, reply, start,
 };
 
 /// A log with one entry per term in `terms`, from index 1, with no data.
@@ -39,9 +39,16 @@ fn commit_noop(raft: &mut Raft, disk: &mut Disk) {
     disk.store(raft.ready());
 }
 
+/// Node 2 leads: its message carries its votes.
+fn led(term: u64, body: Body) -> Message {
+    Message {
+        proof: Some(proof(Grant::Vote, 2, VOTERS)),
+        ..reply(2, term, body)
+    }
+}
+
 fn append(term: u64, prev: Position, entries: Vec<Entry>, commit: u64) -> Message {
-    reply(
-        2,
+    led(
         term,
         Body::Append {
             prev,
@@ -346,8 +353,7 @@ fn handle_heartbeat() {
     {
         let (mut raft, mut disk) =
             start(1, &[1, 2], 5, at_term(3), log(&[1, 2, 3]), commit);
-        raft.step(reply(2, 3, Body::Heartbeat { commit: sent }))
-            .unwrap();
+        raft.step(led(3, Body::Heartbeat { commit: sent })).unwrap();
         let messages = disk.store(raft.ready());
         assert_eq!(disk.committed(), expected, "#{i}");
         let [message] = &messages[..] else {
