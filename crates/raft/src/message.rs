@@ -18,8 +18,9 @@ pub struct Message {
     pub body: Body,
     /// The proof of `term` the message carries, if any. A [`Body::Vote`] carries the
     /// sender's pre-votes. A leader's [`Body::Heartbeat`] or [`Body::Append`] carries
-    /// its votes until the receiver answers once in the term. An answer to a message
-    /// of a lower term carries the proof of the sender's term.
+    /// its votes until the receiver answers an append, and again after the receiver
+    /// is silent through a quorum check. An answer to a message of a lower term
+    /// carries the proof of the sender's term.
     pub proof: Option<Proof>,
 }
 

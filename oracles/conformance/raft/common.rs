@@ -5,23 +5,37 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Body, Config, Data, Entry, Hard, Message, Position, Raft, Ready, Role, Start, Term,
-    Voters,
+    Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft, Ready,
+    Role, Start, Term, Voters,
 };
 use types::node;
 
 pub(crate) const ELECTION: u32 = 10;
 
+/// The voters of the largest group a scenario builds: a quorum of each configuration.
+pub(crate) const VOTERS: &[u8] = &[1, 2, 3, 4, 5];
+
 pub(crate) fn key(id: u8) -> node::Key {
     node::Key::from_u128(u128::from(id))
 }
 
+/// `grant` for `candidate` from the voters `ids`.
+pub(crate) fn proof(grant: Grant, candidate: u8, ids: &[u8]) -> Proof {
+    Proof {
+        grant,
+        candidate: key(candidate),
+        voters: set(ids),
+    }
+}
+
+/// A node in `term` that heard its leader, with the proof of the term it answers a
+/// stale message with.
 pub(crate) fn at_term(term: u64) -> Hard {
     Hard {
         term: Term(term),
         vote: None,
         leader: None,
-        proof: None,
+        proof: (term > 0).then(|| proof(Grant::Vote, 1, VOTERS)),
     }
 }
 
@@ -243,13 +257,14 @@ impl Network {
     }
 }
 
+/// A leader's heartbeat with its votes.
 pub(crate) fn heartbeat(from: u8, to: u8, term: Term) -> Message {
     Message {
         from: key(from),
         to: key(to),
         term,
         body: Body::Heartbeat { commit: 0 },
-        proof: None,
+        proof: Some(proof(Grant::Vote, from, VOTERS)),
     }
 }
 

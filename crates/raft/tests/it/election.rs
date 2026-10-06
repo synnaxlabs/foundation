@@ -3,7 +3,7 @@
 
 use proptest::prelude::*;
 use proptest::sample::Index;
-use raft::{Body, Message, Position, Role, Term};
+use raft::{Body, Grant, Message, Position, Proof, Role, Term};
 
 use crate::network::{Action, ELECTION, Network, run, run_of_many};
 
@@ -87,7 +87,7 @@ proptest! {
             network.round();
         }
         network.cut[cut] = false;
-        network.deliver(Message {
+        network.deliver(&Message {
             from: Network::key(other),
             to: Network::key(cut),
             term: Term(term.0 + 1),
@@ -109,12 +109,17 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
     let mut network = Network::new(&[Position::default(); 3], 0);
     let agreed = network.settle(&[]).unwrap();
     let follower = (agreed.0 + 1) % 3;
-    network.deliver(Message {
-        from: Network::key((agreed.0 + 2) % 3),
+    let from = Network::key((agreed.0 + 2) % 3);
+    network.deliver(&Message {
+        from,
         to: Network::key(follower),
         term: Term(u64::MAX),
         body: Body::Heartbeat { commit: 0 },
-        proof: None,
+        proof: Some(Proof {
+            grant: Grant::Vote,
+            candidate: from,
+            voters: (0..3).map(Network::key).collect(),
+        }),
     });
     for _ in 0..10 * ELECTION {
         network.round();
@@ -142,7 +147,7 @@ fn a_prevote_grant_from_an_earlier_term_does_not_depose_the_leader() {
         network.round();
     }
     network.cut[cut] = false;
-    network.deliver(Message {
+    network.deliver(&Message {
         from: Network::key(other),
         to: Network::key(cut),
         term: agreed.1,

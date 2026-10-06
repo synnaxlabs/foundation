@@ -39,16 +39,16 @@ fn forged_append(
     (append, entry)
 }
 
-// A known gap until #750: checks that `node` takes `append`. It follows the sender in
-// the append's term, and writes and commits `entry`.
-fn check_taken(node: &mut Raft, append: Message, entry: Entry) {
-    let (term, sender) = (append.term, append.from);
-    node.step(append).unwrap();
-    let state = (node.role(), node.term(), node.leader());
-    assert_eq!(state, (Role::Follower, term, Some(sender)));
-    let ready = node.ready();
-    assert_eq!(ready.entries, [entry]);
-    assert_eq!(ready.committed, ready.entries);
+// Checks that `node` refuses `append` as unproven, and keeps its state and its log.
+fn check_refused(node: &mut Raft, append: Message) {
+    let before = (node.role(), node.term(), node.leader(), node.hard());
+    let (term, from) = (append.term, append.from);
+    assert_eq!(node.step(append), Err(Error::Unproven { term, from }));
+    assert_eq!(
+        (node.role(), node.term(), node.leader(), node.hard()),
+        before
+    );
+    assert_eq!(node.ready().entries, []);
 }
 
 #[test]
@@ -58,9 +58,7 @@ fn a_voter_that_does_not_lead_cannot_make_a_follower_commit_alone_in_its_term() 
     let victim = (leader + 1) % 3;
     let sender = (leader + 2) % 3;
     let (append, _) = forged_append(&network, sender, victim, term);
-    let err = network.nodes[victim].step(append).unwrap_err();
-    let from = Network::key(sender);
-    assert_eq!(err, Error::SecondLeader { term, from });
+    check_refused(&mut network.nodes[victim], append);
     network.apply(&Action::Campaign { node: victim });
     // The network checks log matching and state machine safety from here.
     network.propose(leader).unwrap();
@@ -70,51 +68,49 @@ fn a_voter_that_does_not_lead_cannot_make_a_follower_commit_alone_in_its_term() 
 }
 
 #[test]
-fn a_voter_that_does_not_lead_can_make_a_follower_commit_alone_in_a_new_term() {
+fn a_voter_that_does_not_lead_cannot_make_a_follower_commit_alone_in_a_new_term() {
     let mut network = Network::new(&[Position::default(); 3], 0);
     let (leader, term) = network.settle(&[]).unwrap();
     let victim = (leader + 1) % 3;
     let sender = (leader + 2) % 3;
-    let (append, entry) = forged_append(&network, sender, victim, Term(term.0 + 1));
-    check_taken(&mut network.nodes[victim], append, entry);
+    let (append, _) = forged_append(&network, sender, victim, Term(term.0 + 1));
+    check_refused(&mut network.nodes[victim], append);
+    network.propose(leader).unwrap();
+    for _ in 0..4 * ELECTION {
+        network.round();
+    }
 }
 
-// A reply of a higher term ends the leader's term and its lease, so a lease that drops
-// a forged `Append` cannot close the gap.
+// A reply of a higher term with no proof does not end the leader's term, so the
+// leader keeps its lease and refuses the forged `Append` like the reply.
 #[test]
-fn a_voter_that_does_not_lead_can_make_the_leader_commit_alone_in_a_new_term() {
+fn a_voter_that_does_not_lead_cannot_move_the_leader_to_a_new_term() {
     let mut network = Network::new(&[Position::default(); 3], 0);
     let (leader, term) = network.settle(&[]).unwrap();
     let sender = (leader + 1) % 3;
     let forged = Term(term.0 + 1);
-    let (append, entry) = forged_append(&network, sender, leader, forged);
+    let (append, _) = forged_append(&network, sender, leader, forged);
     let reply = Message {
         body: Body::HeartbeatReply,
         ..append.clone()
     };
     let node = &mut network.nodes[leader];
-    node.step(reply).unwrap();
-    let state = (node.role(), node.term(), node.leader());
-    assert_eq!(state, (Role::Follower, forged, None));
-    check_taken(node, append, entry);
+    let from = Network::key(sender);
+    let unproven = Error::Unproven { term: forged, from };
+    assert_eq!(node.step(reply), Err(unproven));
+    assert_eq!((node.role(), node.term()), (Role::Leader, term));
+    check_refused(node, append);
 }
 
-// A known gap until #750. The forged voter set is in force once written, so the victim
-// wins an election alone and commits it on the nodes it reaches.
 #[test]
-fn a_voter_that_does_not_lead_can_take_the_group_over_in_a_new_term() {
+fn a_voter_that_does_not_lead_cannot_take_the_group_over_in_a_new_term() {
     let mut network = Network::new(&[Position::default(); 5], 0);
     let (leader, term) = network.settle(&[]).unwrap();
     let victim = (leader + 1) % 5;
     let sender = (leader + 2) % 5;
-    let (mut append, entry) = forged_append(&network, sender, victim, Term(term.0 + 1));
-    // A forged commit makes the network panic on leader completeness first.
-    let Body::Append { commit, .. } = &mut append.body else {
-        unreachable!()
-    };
-    *commit = 0;
+    let (append, entry) = forged_append(&network, sender, victim, Term(term.0 + 1));
     network.apply(&Action::Cut { node: sender });
-    network.nodes[victim].step(append).unwrap();
+    check_refused(&mut network.nodes[victim], append);
     network.propose(leader).unwrap();
     for _ in 0..4 * ELECTION {
         network.round();
@@ -122,6 +118,7 @@ fn a_voter_that_does_not_lead_can_take_the_group_over_in_a_new_term() {
     let taken = network
         .disks
         .iter()
-        .filter(|disk| disk.applied >= entry.at.index && disk.entries.contains(&entry));
-    assert_eq!(taken.count(), 4);
+        .filter(|disk| disk.entries.contains(&entry));
+    assert_eq!(taken.count(), 0);
+    assert_eq!(network.voters(leader).count(), 5);
 }

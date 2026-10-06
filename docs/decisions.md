@@ -1033,10 +1033,26 @@ How to read this record:
   signatures. `Message.proof` carries one: a `Vote` carries the candidate's
   pre-votes; a leader's `Heartbeat` or `Append` carries its votes until the receiver
   answers once in the term, and a late vote joins them; an answer to a message of a
-  lower term carries the sender's hard proof. The rules that check a proof, and
-  `Error::Unproven`, follow in the second PR of #750; until then a received proof is
-  stored, not checked. The advisor required a proof on every message and on each
-  refusal, signatures only, and the proof in the hard state (#750, 2026-10-05).
+  lower term carries the sender's hard proof. `step` checks a proof before anything
+  changes. A `PreVote`, or a granted `PreVoteReply`, of a higher term needs none.
+  Every other message of a higher term needs a proof that fits its body (a `Vote`
+  the sender's pre-votes, a `Heartbeat` or `Append` the sender's votes, a reply any
+  proof of the term) whose voters are a quorum of this node's configuration in
+  force or last committed; else `Error::Unproven`, and nothing changes or is sent. A
+  `Heartbeat` or `Append` of this node's term from a node other than the leader it
+  knows is `Unproven`; when it knows none, the message needs a quorum of votes for
+  the sender. A node with no proof of its term sends no refusal. A candidate adds a
+  late pre-vote of its term to its proof and asks the voters that have not answered
+  again; a leader carries its votes again to a peer that was silent through a
+  quorum check. The known gap: a voter that was down through a change holds the old
+  configuration and refuses a leader whose votes are no quorum of it until an
+  election whose grants are. When a second node fails first, the group waits for an
+  operator, who wipes the voter and starts it with no configuration (a node with no
+  voters proves anything). The chain of proofs over configuration entries closes it
+  (#881, a release blocker). `raft/tests/it/stale.rs` pins both, and the random
+  runs skip exactly such a voter until #881. The advisor required a proof on every
+  message and on each refusal, signatures only, and the proof in the hard state
+  (#750, 2026-10-05). The signatures follow in the third PR of #750.
   `Raft` takes `tick(random)`,
   `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
   when it changed), `entries` to write, `committed` entries to apply, and `messages`
@@ -1079,18 +1095,15 @@ How to read this record:
   above the message's term is `Error::TermBehindLog`: no leader sends one, so the
   sender is faulty. The conformance oracle changed to match; the person decided on
   2026-10-05 ("a is fine", #232). A heartbeat or an append of this node's term from a
-  node other than the leader it knows is `Error::SecondLeader`: one term has one
-  leader, and a node keeps the leader of its term until the term ends, through a
-  step-down and a campaign. A node that knows no leader of its term, after its vote,
-  takes the first; `Hard.leader` keeps it through a restart (#750). The person approved
-  it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing. A forged
-  message that passes these checks
-  does, until a leader proves its election (#750). After a heartbeat or an `Append`
-  of a higher term from a voter that does not lead, or a reply of a higher term and
-  then either, a node follows the sender and writes and commits what it sends. So
-  two nodes can apply different entries at one index, and a forged voter set can
-  take the group over. The first leader after a vote is the same gap. Tests pin it.
-  Lost: a lease that drops a heartbeat or an `Append` of a higher term from a node
+  node other than the leader it knows is `Error::Unproven` (RAFT SURFACE): one term
+  has one leader, and a node keeps the leader of its term until the term ends,
+  through a step-down and a campaign. A node that knows no leader of its term takes
+  the first that proves a quorum of votes; `Hard.leader` keeps it through a restart
+  (#750). The person approved it on 2026-10-05 ("Yeah that's fine", #391). A bad
+  message changes nothing. A voter that does not lead cannot make a node follow it:
+  a leader claim needs a quorum of grants (RAFT SURFACE, #750). A false
+  `AppendReply` still counts as held (#882). Lost: a lease that drops a heartbeat or
+  an `Append` of a higher term from a node
   that is not the leader. A reply of a higher term ends any node's lease, and a
   leader must step down on one; the lease also changed three etcd oracle tests. The
   coordinator decided on 2026-10-06 under the person's delegation (#391). The person

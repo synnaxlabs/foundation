@@ -99,6 +99,17 @@ impl Log {
         self.voters().0.index <= self.committed
     }
 
+    // The last committed configuration: the one in force, or the one before it
+    // while that one is not committed yet.
+    pub(crate) fn committed_voters(&self) -> &Voters {
+        let (at, voters) = self.voters();
+        if at.index <= self.committed {
+            voters
+        } else {
+            self.voters_before(at.index)
+        }
+    }
+
     // The configuration before `index`: `base` with no configuration entry before.
     fn voters_before(&self, index: u64) -> &Voters {
         let end = usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX);

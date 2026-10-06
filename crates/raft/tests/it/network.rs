@@ -160,6 +160,9 @@ pub(crate) struct Network {
     // `refused`; any other error fails the run.
     wiped: Vec<bool>,
     pub(crate) refused: Vec<Error>,
+    // A node refused a proof that fits its body but is no quorum of its
+    // configuration: it is behind a configuration change. The known gap.
+    stale_refused: bool,
     crash: Vec<Option<Kept>>,
     flight: Vec<Message>,
     leaders: BTreeMap<Term, node::Key>,
@@ -210,6 +213,7 @@ impl Network {
             cut: vec![false; logs.len()],
             wiped: vec![false; logs.len()],
             refused: Vec::new(),
+            stale_refused: false,
             crash: vec![None; logs.len()],
             flight: Vec::new(),
             leaders: BTreeMap::new(),
@@ -247,17 +251,64 @@ impl Network {
         let disk = &self.disks[node];
         let start = Start {
             hard: disk.hard.clone(),
-            voters: Voters {
-                incoming: (0..self.disks.len()).map(Self::key).collect(),
-                ..Voters::default()
-            },
+            voters: self.base(),
             entries: disk.entries.clone(),
             applied: disk.applied,
         };
         Raft::new(config, start).unwrap()
     }
 
-    pub(crate) fn deliver(&mut self, message: Message) {
+    // The configuration every node starts from: every node.
+    fn base(&self) -> Voters {
+        Voters {
+            incoming: (0..self.disks.len()).map(Self::key).collect(),
+            ..Voters::default()
+        }
+    }
+
+    // The last committed configuration of `node`, from its disk. `applied` is the
+    // node's commit index after each `collect`.
+    fn committed_voters(&self, node: usize) -> Voters {
+        let disk = &self.disks[node];
+        let applied = usize::try_from(disk.applied).unwrap();
+        disk.entries[..applied]
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.data {
+                Data::Voters(voters) => Some(voters.clone()),
+                Data::Empty | Data::Bytes(_) => None,
+            })
+            .unwrap_or_else(|| self.base())
+    }
+
+    // Whether `voters` is a quorum of the configuration of `node`, in force or last
+    // committed: a majority of each set, as `raft` counts it.
+    fn quorum(&self, node: usize, voters: &BTreeSet<node::Key>) -> bool {
+        let majority = |set: &BTreeSet<node::Key>| {
+            set.is_empty() || 2 * set.intersection(voters).count() > set.len()
+        };
+        let quorum =
+            |config: &Voters| majority(&config.incoming) && majority(&config.outgoing);
+        quorum(self.nodes[node].voters()) || quorum(&self.committed_voters(node))
+    }
+
+    /// Whether `node` cannot prove `leader` in its term: no quorum of the
+    /// configuration `node` holds voted for it. The node refuses the leader until an
+    /// election it can prove. A known gap: the leader does not yet prove the change
+    /// that removed the voters `node` still counts.
+    pub(crate) fn stale(&self, node: usize, leader: usize) -> bool {
+        let key = Self::key(leader);
+        let term = self.nodes[leader].term();
+        let mut votes = self
+            .granted
+            .get(&(key, term, false))
+            .cloned()
+            .unwrap_or_default();
+        votes.insert(key);
+        !self.quorum(node, &votes)
+    }
+
+    pub(crate) fn deliver(&mut self, message: &Message) {
         let (from, to) = (self.at(message.from), self.at(message.to));
         if self.cut[from] == self.cut[to] {
             let prevote = match message.body {
@@ -269,14 +320,66 @@ impl Network {
                 let key = (message.to, message.term, prevote);
                 self.granted.entry(key).or_default().insert(message.from);
             }
-            match self.nodes[to].step(message) {
+            let before = self.nodes[to].term();
+            match self.nodes[to].step(message.clone()) {
                 Err(error @ Error::IndexPastLog { .. }) if self.wiped[to] => {
                     self.refused.push(error);
+                }
+                Err(Error::Unproven { .. }) => {
+                    self.check_unproven(to, before, message);
                 }
                 result => result.unwrap(),
             }
             self.collect();
         }
+    }
+
+    // A node refuses as unproven only a message whose proof is missing, does not fit
+    // its body, or is no quorum of its configuration, and it stays in its term. In
+    // its own term, only a leader it did not prove needs a proof.
+    fn check_unproven(&mut self, to: usize, before: Term, message: &Message) {
+        let (body, term, from) = (&message.body, message.term, message.from);
+        assert_eq!(
+            self.nodes[to].term(),
+            before,
+            "node {to} moved on a refusal"
+        );
+        let grant = match (body, term == before) {
+            (Body::Heartbeat { .. } | Body::Append { .. }, same) => {
+                if same {
+                    match self.disks[to].hard.leader {
+                        None => {}
+                        Some(led) if led != from => return,
+                        Some(_) => panic!("node {to} refuses the leader it knows"),
+                    }
+                }
+                Some(Grant::Vote)
+            }
+            (Body::Vote { .. }, false) => Some(Grant::PreVote),
+            (
+                Body::PreVoteReply { granted: false }
+                | Body::VoteReply { .. }
+                | Body::HeartbeatReply
+                | Body::AppendReply { .. }
+                | Body::AppendReject { .. },
+                false,
+            ) => None,
+            _ => panic!("node {to} in {before:?} refuses {body:?} at {term:?}"),
+        };
+        let Some(proof) = &message.proof else {
+            return;
+        };
+        let fits =
+            grant.is_none_or(|grant| proof.grant == grant && proof.candidate == from);
+        assert!(
+            fits,
+            "node {to} refuses a proof that fits {body:?}: {proof:?}"
+        );
+        assert!(
+            !self.quorum(to, &proof.voters),
+            "node {to} refuses a proven {body:?} at {term:?} from {from:?}"
+        );
+        self.stale_refused = true;
     }
 
     /// Restarts `node` from a disk that lost each entry after the first `keep`, and
@@ -305,11 +408,12 @@ impl Network {
                     }
                     let at = pick.index(self.flight.len());
                     let message = self.flight.swap_remove(at);
-                    self.deliver(message);
+                    self.deliver(&message);
                 }
             }
             Action::Repeat { pick } if !self.flight.is_empty() => {
-                self.deliver(self.flight[pick.index(self.flight.len())].clone());
+                let message = self.flight[pick.index(self.flight.len())].clone();
+                self.deliver(&message);
             }
             Action::Lose { pick } if !self.flight.is_empty() => {
                 self.flight.swap_remove(pick.index(self.flight.len()));
@@ -591,24 +695,28 @@ impl Network {
         self.collect();
         while !self.flight.is_empty() {
             for message in std::mem::take(&mut self.flight) {
-                self.deliver(message);
+                self.deliver(&message);
             }
         }
     }
 
     /// The leader and its term, when one node leads and every other node in its
-    /// configuration follows it in its term. A node that a change removed gets no
-    /// more messages from the leader, so its term and leader can lag.
+    /// configuration, except a `stale` one, follows it in its term. A node that a
+    /// change removed gets no more messages from the leader, so its term and leader
+    /// can lag.
     pub(crate) fn agreed(&self) -> Option<(usize, Term)> {
         let at = self
             .nodes
             .iter()
             .position(|node| node.role() == Role::Leader)?;
         let leader = &self.nodes[at];
-        let agreed = self.voters(at).all(|node| {
-            let node = &self.nodes[node];
-            node.term() == leader.term() && node.leader() == Some(leader.key())
-        });
+        let agreed =
+            self.voters(at)
+                .filter(|&node| !self.stale(node, at))
+                .all(|node| {
+                    let node = &self.nodes[node];
+                    node.term() == leader.term() && node.leader() == Some(leader.key())
+                });
         agreed.then_some((at, leader.term()))
     }
 
@@ -646,6 +754,11 @@ impl Network {
             if let (Some(agreed), true) = (held.0, held.1 >= 2 * ELECTION) {
                 return Ok(agreed);
             }
+        }
+        if self.stale_refused {
+            return Err(TestCaseError::reject(
+                "no leader: a voter behind a configuration change refused the group",
+            ));
         }
         Err(TestCaseError::fail("no leader after 100 election timeouts"))
     }

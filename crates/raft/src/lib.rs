@@ -63,7 +63,8 @@ pub struct Hard {
     pub leader: Option<node::Key>,
     /// The proof that moved this node to `term`: its own pre-votes when it
     /// campaigned, else the proof of the message that moved it. `None` at term zero,
-    /// or when the log alone put the node in `term`.
+    /// or when the log alone put the node in `term`, until it proves a leader: then
+    /// the leader's votes. A node with no proof answers no message of a lower term.
     pub proof: Option<Proof>,
 }
 
@@ -132,13 +133,14 @@ pub enum Error {
     },
     /// A message names this node as its sender.
     Loopback,
-    /// A heartbeat or an append of this node's term from a node other than the
-    /// leader of the term it knows: the one it heard, or itself. Election safety is
-    /// broken, or the sender is faulty.
-    SecondLeader {
-        /// The term with two leaders.
+    /// A message that claims a term this node is not in, or a leader of its term
+    /// this node did not prove, with no proof that a quorum of this node's
+    /// configuration, in force or last committed, granted it. The sender is faulty,
+    /// or it holds a configuration this node lacks.
+    Unproven {
+        /// The term the message claims.
         term: Term,
-        /// The other leader.
+        /// The sender.
         from: node::Key,
     },
 }
@@ -201,9 +203,9 @@ impl fmt::Display for Error {
                 to.as_u128()
             ),
             Self::Loopback => f.write_str("a message names this node as its sender"),
-            Self::SecondLeader { term, from } => write!(
+            Self::Unproven { term, from } => write!(
                 f,
-                "node {:032x} also claims to lead term {term}",
+                "node {:032x} claims term {term} with no proof",
                 from.as_u128()
             ),
         }
