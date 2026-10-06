@@ -313,6 +313,31 @@ fn a_write_in_flight_at_a_crash_keeps_any_subset_of_its_sectors() {
     }
 }
 
+/// [`write_in_flight`] with no fault, and with the file, the block, and the write
+/// leaked.
+async fn leaked_write_in_flight(node: node::Node) {
+    let (file, pool) = (create_synced(&node).await, pool());
+    until_crash(&node).await;
+    let file = Box::leak(Box::new(file));
+    let parts = Box::leak(Box::new([block(&pool, &[9; 1_024])]));
+    hang(Box::leak(Box::new(Box::pin(file.write_at(0, parts))))).await;
+}
+
+#[test]
+fn a_leaked_write_in_flight_at_a_crash_keeps_any_subset_of_its_sectors() {
+    let all = BTreeSet::from([vec![1, 1], vec![1, 9], vec![9, 1], vec![9, 9]]);
+    for crash in [Crash::Process, Crash::Power] {
+        let outcomes: BTreeSet<Vec<u8>> = (0..128)
+            .map(|seed| {
+                let (mut sim, node) = disk(seed);
+                crash_after(&mut sim, &node, crash, leaked_write_in_flight);
+                sectors_of(&mut sim, &node)
+            })
+            .collect();
+        assert_eq!(outcomes, all, "{crash:?}");
+    }
+}
+
 #[test]
 fn a_crash_frees_each_file_that_a_write_handle_held() {
     for (crash, value) in [Crash::Process, Crash::Power]
