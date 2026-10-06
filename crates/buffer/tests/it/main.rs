@@ -1894,3 +1894,121 @@ fn one_entry_of_the_entry_max_commits_and_is_recovered() {
         assert_eq!(tails, Ok(tail(2, Some(1))));
     });
 }
+
+#[test]
+fn probe_774() {
+    use std::time::Instant;
+    let n = 300;
+    let out = std::cell::RefCell::new(String::new());
+    let report = |name: &str, start: Instant, count: u32| {
+        let each = start.elapsed() / count;
+        out.borrow_mut()
+            .push_str(&format!("{name}: {each:?} each over {count}\n"));
+    };
+    out.borrow_mut().push_str(&format!(
+        "parallelism {:?}\n",
+        std::thread::available_parallelism()
+    ));
+    let start = Instant::now();
+    for _ in 0..1_000_000 {
+        std::hint::black_box(Instant::now());
+    }
+    report("instant_now", start, 1_000_000);
+    let config = block::Config { budget: POOL };
+    let start = Instant::now();
+    for _ in 0..n {
+        drop(std::hint::black_box(Heap::new(config.reservation())));
+    }
+    report("heap_new", start, n);
+    let start = Instant::now();
+    for _ in 0..n {
+        let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
+        let mut blocks = Vec::new();
+        while let Ok(mut block) = pool.alloc(4096) {
+            block.as_mut()[0] = 1;
+            blocks.push(block);
+        }
+        drop((blocks, pool));
+    }
+    report("heap_touch", start, n);
+    let start = Instant::now();
+    for _ in 0..n {
+        let mut v = vec![0u8; config.reservation()];
+        for at in (0..v.len()).step_by(4096) {
+            v[at] = 1;
+        }
+        drop(std::hint::black_box(v));
+    }
+    report("vec_touch", start, n);
+    let start = Instant::now();
+    for _ in 0..n {
+        drop(Pool::new(config.clone(), Heap::new(config.reservation())));
+    }
+    report("pool_new", start, n);
+    let start = Instant::now();
+    for seed in 0..n as u64 {
+        drop(one_node(seed));
+    }
+    report("one_node", start, n);
+    let start = Instant::now();
+    for seed in 0..n as u64 {
+        let (mut sim, node) = one_node(seed);
+        drop(on_node(&node, "idle", |_| std::future::pending::<()>()));
+        sim.run_for(Span::from_nanos(50_000)).expect("runs");
+        sim.crash(&node, sim::Crash::Power);
+        drop((sim, node));
+    }
+    report("sim_idle_power", start, n);
+    let (mut t_node, mut t_start, mut t_run, mut t_crash, mut t_drop) =
+        (0u128, 0u128, 0u128, 0u128, 0u128);
+    for seed in 0..n as u64 {
+        let at = Instant::now();
+        let (mut sim, node) = one_node(seed);
+        t_node += at.elapsed().as_nanos();
+        let at = Instant::now();
+        let own = node.clone();
+        drop(on_node(&node, "cut", move |tasks| async move {
+            let config = node_config(&own, tasks, DIR);
+            let _buffer = Buffer::open(config, &mut Slots::new())
+                .await
+                .expect("the open ends well");
+            std::future::pending::<()>().await;
+        }));
+        t_start += at.elapsed().as_nanos();
+        let at = Instant::now();
+        sim.run_for(Span::from_nanos(50_000)).expect("runs");
+        t_run += at.elapsed().as_nanos();
+        let at = Instant::now();
+        sim.crash(&node, sim::Crash::Power);
+        t_crash += at.elapsed().as_nanos();
+        let at = Instant::now();
+        drop((sim, node));
+        t_drop += at.elapsed().as_nanos();
+    }
+    let n128 = u128::from(n);
+    out.borrow_mut().push_str(&format!(
+        "cut_power: node {}us start {}us run {}us crash {}us drop {}us each\n",
+        t_node / n128 / 1000,
+        t_start / n128 / 1000,
+        t_run / n128 / 1000,
+        t_crash / n128 / 1000,
+        t_drop / n128 / 1000
+    ));
+    let start = Instant::now();
+    for seed in 0..n as u64 {
+        let (mut sim, node, _) = cut_the_first_open(seed, 50_000, sim::Crash::Power);
+        let own = node.clone();
+        run_on(&mut sim, &node, "second", move |tasks| async move {
+            let config = node_config(&own, tasks, DIR);
+            drop(Buffer::open(config, &mut Slots::new()).await.expect("opens"));
+        });
+    }
+    report("power_then_second_open", start, n);
+    let start = Instant::now();
+    for seed in 0..n as u64 {
+        let (mut sim, node, _) = cut_the_first_open(seed, 50_000, sim::Crash::Process);
+        drop(commit_cut_and_recover(&mut sim, &node, DIR));
+    }
+    report("kill_then_recover", start, n);
+    panic!("PROBE\n{}", out.borrow());
+}
