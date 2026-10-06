@@ -320,15 +320,25 @@ fn a_sync_after_a_write_succeeds() {
 #[test]
 fn free_drops_by_the_bytes_of_a_synced_write() {
     const LEN: u64 = 64 << 20;
+    // Other tests write to the same disk at the same time, and an attempt counts
+    // their bytes too.
+    const ATTEMPTS: usize = 8;
     run(|files, _| async move {
         let pool = pool();
         let part = block(&pool, &vec![1; 512 << 10]);
-        let before = files.free().await.unwrap();
-        let file = create(&files, "a", LEN).await;
-        file.write_at(0, &vec![part; 128]).await.unwrap();
-        file.sync().await.unwrap();
-        let taken = before.saturating_sub(files.free().await.unwrap());
-        assert!(taken.abs_diff(LEN) < LEN / 4, "{taken} is not {LEN}");
+        let mut seen = Vec::new();
+        for attempt in 0..ATTEMPTS {
+            let before = files.free().await.unwrap();
+            let file = create(&files, &attempt.to_string(), LEN).await;
+            file.write_at(0, &vec![part.clone(); 128]).await.unwrap();
+            file.sync().await.unwrap();
+            let taken = before.saturating_sub(files.free().await.unwrap());
+            if taken.abs_diff(LEN) < LEN / 4 {
+                return;
+            }
+            seen.push(taken);
+        }
+        panic!("{seen:?} are not {LEN}");
     });
 }
 
