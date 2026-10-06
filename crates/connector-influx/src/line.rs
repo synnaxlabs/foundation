@@ -187,7 +187,8 @@ impl fmt::Display for Error {
             Self::Empty(Part::FieldKey) => write!(f, "a field key is empty"),
             Self::Character { name, character } => write!(
                 f,
-                "the name {name:?} holds {character:?}, which line protocol cannot carry"
+                "the name {name:?} holds {character:?}, \
+                 which line protocol cannot carry"
             ),
             Self::Reserved(name) => {
                 write!(f, "InfluxDB keeps the name {name:?} for itself")

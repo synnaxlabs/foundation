@@ -302,7 +302,9 @@ proptest! {
         ),
         time in any::<i64>(),
     ) {
-        let (mut tags, mut fields, mut keys_of_fields) = (Vec::new(), Vec::new(), Vec::new());
+        let mut tags = Vec::new();
+        let mut fields = Vec::new();
+        let mut keys_of_fields = Vec::new();
         for (key, (tag, value, field)) in &keys {
             if *tag {
                 tags.push((key.clone(), value.clone()));
