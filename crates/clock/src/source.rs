@@ -117,8 +117,8 @@ mod tests {
 
     use super::Wall;
 
-    /// 36500 days, the largest error a measurement has.
-    const UNKNOWN: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
+    /// The largest error a measurement has.
+    const UNKNOWN: Span = Measurement::unknown(Monotonic(0), Span::ZERO).error();
 
     /// A simulated node whose OS gives `wall_error`, with the default clocks.
     fn node(wall_error: Option<Span>) -> (sim::Sim, Node) {

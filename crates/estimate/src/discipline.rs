@@ -2,7 +2,6 @@
 
 use types::time::Monotonic;
 
-use crate::measurement::MAX_ERROR;
 use crate::{Drift, Measurement, Slew, combine};
 
 /// What mesh time follows: no time before the first estimate, a slew toward the
@@ -48,15 +47,14 @@ impl Discipline {
         estimate: Result<Measurement, combine::Error>,
         drift: Drift,
     ) -> Option<Change> {
-        // As `combine` sorts a bound.
-        let known = |m: Measurement, at| m.error_at(at, drift) < MAX_ERROR;
+        let known = |m: Measurement, at| m.known_at(at, drift);
         let step = match (self.slew(), estimate) {
             (None, Err(e)) => Step::To(Self::Unsynced(e)),
             (Some(slew), Err(e)) => {
                 Step::To(Self::Holdover(slew, Cause::NoEstimate(e)))
             }
             (None, Ok(m)) => Step::To(Self::Synced(Slew::new(m))),
-            (Some(slew), Ok(m)) if known(slew.target, m.at()) && !known(m, m.at()) => {
+            (Some(slew), Ok(m)) if known(slew.target, m.at()) && !m.known() => {
                 Step::To(Self::Holdover(slew, Cause::UnknownEstimate))
             }
             (Some(slew), Ok(m)) => Step::Toward(slew, m),

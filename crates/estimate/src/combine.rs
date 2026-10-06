@@ -59,7 +59,7 @@ pub fn combine<'a>(
             empty += 1;
             continue;
         };
-        let edges = if m.error_at(now, drift) < MAX_ERROR {
+        let edges = if m.known_at(now, drift) {
             &mut known
         } else {
             &mut unknown
