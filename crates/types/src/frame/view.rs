@@ -5,7 +5,7 @@ use std::iter;
 
 use super::key_set::{self, KeySet};
 use super::{
-    Form, Frame, Path, Range, body_start, bounds, charge_of, lead, next_end, split,
+    Form, Frame, Path, Range, body_start, bounds, charge_of, lead, next_end, parts,
     to_u32, to_usize,
 };
 use crate::channel;
@@ -134,7 +134,7 @@ impl<'a> View<'a> {
         let Held::Listed { entries, .. } = &self.mask.held else {
             return Series::Every(self.frame.iter());
         };
-        let (_, descriptors, body) = split(&self.frame.0);
+        let (_, descriptors, body) = parts(&self.frame.0);
         Series::Listed(join(descriptors, entries).map(move |n| {
             let (start, end) = bounds(descriptors, n);
             (to_usize(lead(&descriptors[n])), &body[start..end])
@@ -150,7 +150,7 @@ impl<'a> View<'a> {
         let Held::Listed { entries, groups } = &self.mask.held else {
             return self.frame.charge();
         };
-        let (ranges, descriptors, _) = split(&self.frame.0);
+        let (ranges, descriptors, _) = parts(&self.frame.0);
         let ranges = join(ranges, groups).count();
         let (mut series, mut bytes) = (0, 0);
         for n in join(descriptors, entries) {
