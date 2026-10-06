@@ -307,7 +307,8 @@ impl Endpoint {
     /// stream took all of it. Else `sender` holds the rest: call
     /// [`Endpoint::flush`] after [`Event::Writable`]. `Pending` also when the
     /// connection ended. The streams that wait for the connection take turns, by
-    /// class and then oldest first, so a write behind one waits.
+    /// class with `Complete` ahead of `Latest` while it is owed bytes, then oldest
+    /// first, so a write behind one waits.
     ///
     /// # Errors
     ///

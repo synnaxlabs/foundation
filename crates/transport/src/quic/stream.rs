@@ -101,6 +101,8 @@ pub(super) struct Streams {
     sending: Budget,
     /// The senders whose message noq-proto has not taken in full.
     turns: Turns,
+    /// The `Complete` share of the turn and of the send budget.
+    share: Share,
     /// The messages that hold a block and have not gone to the caller.
     receiving: Budget,
 }
@@ -112,8 +114,10 @@ pub(super) struct Streams {
 struct Budget {
     max: usize,
     used: usize,
-    /// The claims of each class, by rank, that hold or wait for room.
-    claims: [usize; 4],
+    /// The claims of each class, by rank, that hold room their stream took.
+    held: [usize; 4],
+    /// The claims of each class, by rank, that got room their stream has not taken.
+    given: [usize; 4],
     /// The claims that wait for room, by class rank, oldest first.
     waiting: [VecDeque<Wait>; 4],
     /// The next ticket of each class.
@@ -155,19 +159,25 @@ enum State {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Order([Class; 4]);
 
-/// The senders that wait for noq-proto to take more of their message, and the bytes
-/// that `Complete` is owed. Only the first in turn writes.
+/// The senders that wait for noq-proto to take more of their message. Only the
+/// first in turn writes.
 #[derive(Debug, Default)]
 struct Turns {
     /// The senders that wait, by class rank, oldest first.
     queues: [VecDeque<Key>; 4],
+}
+
+/// The bytes that `Complete` is owed, which order the turn and the room of the send
+/// budget.
+#[derive(Debug, Default)]
+struct Share {
     /// [`LATEST_COST`] for each byte of `Latest` that noq-proto took, less each byte
     /// of `Complete`. `Complete` goes ahead of `Latest` while it is positive.
     owed: isize,
 }
 
 /// The bytes of `Complete` that noq-proto takes for each byte of `Latest`, while both
-/// have a message in hand.
+/// compete for the send budget.
 const LATEST_COST: isize = 3;
 
 impl Sender {
@@ -322,7 +332,8 @@ impl Budget {
         Self {
             max,
             used: 0,
-            claims: [0; 4],
+            held: [0; 4],
+            given: [0; 4],
             waiting: Default::default(),
             tickets: [0; 4],
             granted: [0; 4],
@@ -337,14 +348,14 @@ impl Budget {
         }
     }
 
-    /// Whether a claim of `class` holds or waits for room.
-    fn wants(&self, class: Class) -> bool {
-        self.claims[class.rank()] > 0
+    /// Whether a claim of `class` holds room, taken or not.
+    fn holds(&self, class: Class) -> bool {
+        self.held[class.rank()] + self.given[class.rank()] > 0
     }
 
-    /// Whether a claim of `class` holds room.
-    fn holds(&self, class: Class) -> bool {
-        self.claims[class.rank()] > self.waiting[class.rank()].len()
+    /// Whether a claim of `class` holds room its stream took, or waits for room.
+    fn competes(&self, class: Class) -> bool {
+        self.held[class.rank()] > 0 || !self.waiting[class.rank()].is_empty()
     }
 
     /// Charges `bytes` to `claim`, which holds none, when they fit now and no claim
@@ -355,7 +366,7 @@ impl Budget {
         let fits = first && bytes <= self.max - self.used;
         if fits {
             self.used += bytes;
-            self.claims[claim.class.rank()] += 1;
+            self.held[claim.class.rank()] += 1;
             claim.state = State::Held(bytes);
         }
         fits
@@ -379,6 +390,8 @@ impl Budget {
         match claim.state {
             State::Held(_) => true,
             State::Queued { bytes, .. } if !self.waits(claim) => {
+                self.given[claim.class.rank()] -= 1;
+                self.held[claim.class.rank()] += 1;
                 claim.state = State::Held(bytes);
                 true
             }
@@ -395,7 +408,6 @@ impl Budget {
                 let rank = claim.class.rank();
                 let ticket = self.tickets[rank];
                 self.tickets[rank] += 1;
-                self.claims[rank] += 1;
                 self.waiting[rank].push_back(Wait {
                     stream,
                     ticket,
@@ -417,21 +429,21 @@ impl Budget {
         mut woken: impl FnMut(Key),
     ) {
         let rank = claim.class.rank();
-        let state = mem::replace(&mut claim.state, State::Idle);
-        if !matches!(state, State::Idle) {
-            self.claims[rank] -= 1;
-        }
-        match state {
+        match mem::replace(&mut claim.state, State::Idle) {
             State::Idle => {}
             State::Queued { ticket, bytes } if ticket < self.granted[rank] => {
                 self.used -= bytes;
+                self.given[rank] -= 1;
             }
             State::Queued { ticket, .. } => {
                 let waiting = &mut self.waiting[rank];
                 let at = waiting.binary_search_by_key(&ticket, |wait| wait.ticket);
                 waiting.remove(at.expect("invariant: a waiting claim is queued"));
             }
-            State::Held(bytes) => self.used -= bytes,
+            State::Held(bytes) => {
+                self.used -= bytes;
+                self.held[rank] -= 1;
+            }
         }
         for class in classes {
             let waiting = &mut self.waiting[class.rank()];
@@ -441,6 +453,7 @@ impl Budget {
                     return;
                 }
                 self.used += next.bytes;
+                self.given[class.rank()] += 1;
                 *granted = next.ticket + 1;
                 woken(next.stream);
                 waiting.pop_front();
@@ -469,33 +482,34 @@ impl Order {
     fn through(self, class: Class) -> impl Iterator<Item = Class> {
         let at = self.0.iter().position(|&other| other == class);
         let at = at.expect("invariant: an order holds each class");
-        self.0.into_iter().take(at + 1)
+        self.into_iter().take(at + 1)
+    }
+}
+
+impl IntoIterator for Order {
+    type Item = Class;
+    type IntoIter = std::array::IntoIter<Class, 4>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
 impl Turns {
-    /// The order of the turn and of room in the send budget.
-    fn order(&self) -> Order {
-        if self.owed > 0 {
-            Order::COMPLETE_FIRST
-        } else {
-            Order::RANK
-        }
+    /// The first sender in turn in `order`, if any waits.
+    fn first(&self, order: Order) -> Option<Key> {
+        order
+            .into_iter()
+            .find_map(|class| self.queues[class.rank()].front().copied())
     }
 
-    /// The first sender in turn, if any waits.
-    fn first(&self) -> Option<Key> {
-        let queues = self.order().0.map(|class| &self.queues[class.rank()]);
-        queues.iter().find_map(|queue| queue.front().copied())
-    }
-
-    /// Whether `sender` may write now: it is first in turn, or it does not wait and
-    /// no sender of its class or a class ahead of it waits.
-    fn allows(&self, sender: &Sender) -> bool {
+    /// Whether `sender` may write now in `order`: it is first in turn, or it does not
+    /// wait and no sender of its class or a class ahead of it waits.
+    fn allows(&self, sender: &Sender, order: Order) -> bool {
         if sender.waiting {
-            self.first() == Some(sender.key)
+            self.first(order) == Some(sender.key)
         } else {
-            let mut ahead = self.order().through(sender.claim.class);
+            let mut ahead = order.through(sender.claim.class);
             ahead.all(|class| self.queues[class.rank()].is_empty())
         }
     }
@@ -516,9 +530,37 @@ impl Turns {
             queue.remove(at.expect("invariant: a waiting sender is queued"));
         }
     }
+}
+
+impl Share {
+    /// The order of the turn and of room in the send budget.
+    fn order(&self) -> Order {
+        if self.owed > 0 {
+            Order::COMPLETE_FIRST
+        } else {
+            Order::RANK
+        }
+    }
+
+    /// The classes, in order, that get the room a message of `class` frees. Room that
+    /// a class owed bytes frees waits for its next message while the other class
+    /// holds room in `sending`, which frees room for all when it ends.
+    fn room(
+        &self,
+        class: Class,
+        sending: &Budget,
+    ) -> impl Iterator<Item = Class> + use<> {
+        let kept = match class {
+            Class::Latest => self.owed < 0 && sending.holds(Class::Complete),
+            Class::Complete => self.owed > 0 && sending.holds(Class::Latest),
+            Class::Command | Class::CatchUp => false,
+        };
+        let last = if kept { class } else { Class::CatchUp };
+        self.order().through(last)
+    }
 
     /// Counts `bytes` of a message of `class` that noq-proto took. `paired` when
-    /// both `Latest` and `Complete` have a message in hand. Else the bytes move
+    /// both `Latest` and `Complete` compete for the send budget. Else the bytes move
     /// `owed` toward 0 and never past it, so a class alone makes no debt or credit.
     fn took(&mut self, class: Class, bytes: usize, paired: bool) {
         let bytes = isize::try_from(bytes).expect("invariant: a write fits in memory");
@@ -552,6 +594,7 @@ impl Streams {
             senders: Vec::new(),
             sending: Budget::new(0),
             turns: Turns::default(),
+            share: Share::default(),
             receiving: Budget::new(window_bytes.saturating_add(bytes_max)),
         }
     }
@@ -671,7 +714,8 @@ impl Streams {
                 Ok(self.classify(inner, id)?.then_some(Event::Incoming { key }))
             }
             StreamEvent::Writable { .. } => {
-                Ok(self.turns.first().map(|stream| Event::Writable { stream }))
+                let first = self.turns.first(self.share.order());
+                Ok(first.map(|stream| Event::Writable { stream }))
             }
             StreamEvent::Stopped { id, error_code } => {
                 let code = reset_stopped(inner, id, error_code)?;
@@ -741,7 +785,7 @@ impl Streams {
         events: &mut VecDeque<Event>,
     ) -> Result<Poll<()>, Error> {
         // A push can change the turn order, so the first sender is read before it.
-        let first = self.turns.first();
+        let first = self.turns.first(self.share.order());
         let flushed = self.push(inner, sender);
         if !matches!(flushed, Ok(Poll::Pending)) {
             self.release(sender, first, events);
@@ -768,7 +812,8 @@ impl Streams {
         if sender.holds() && self.flush(inner, sender, events)?.is_pending() {
             return Ok(());
         }
-        let (allowed, order) = (self.turns.allows(sender), self.turns.order());
+        let order = self.share.order();
+        let allowed = self.turns.allows(sender, order);
         let admitted = |next: &mut Block| {
             allowed && self.sending.admit(next.len(), &mut sender.claim, order)
         };
@@ -790,16 +835,16 @@ impl Streams {
         if !sender.holds() {
             return Ok(Poll::Ready(()));
         }
-        let (id, order) = (sender.key.id, self.turns.order());
+        let (id, order) = (sender.key.id, self.share.order());
         let bytes = sender.body.len();
         let charged = self
             .sending
             .charge(sender.key, bytes, &mut sender.claim, order);
-        let blocked = if charged && self.turns.allows(sender) {
+        let blocked = if charged && self.turns.allows(sender, order) {
             let left = sender.left();
             let written = sender.write(&mut inner.send_stream(id));
             let paired = self.paired();
-            self.turns
+            self.share
                 .took(sender.claim.class, left - sender.left(), paired);
             // A reset stream gives `Blocked` while the connection's window is shut.
             match written {
@@ -838,22 +883,11 @@ impl Streams {
         first: Option<Key>,
         events: &mut VecDeque<Event>,
     ) {
-        let order = self.turns.order();
-        // Room that an owed `Complete` frees waits for its next message while a
-        // `Latest` message holds room, which frees room for all when it ends.
-        let owed = sender.claim.class == Class::Complete
-            && order == Order::COMPLETE_FIRST
-            && self.sending.holds(Class::Latest);
-        let last = if owed {
-            Class::Complete
-        } else {
-            Class::CatchUp
-        };
+        let room = self.share.room(sender.claim.class, &self.sending);
         let woken = |stream| events.push_back(Event::Writable { stream });
-        self.sending
-            .release(&mut sender.claim, order.through(last), woken);
+        self.sending.release(&mut sender.claim, room, woken);
         self.turns.leave(sender);
-        let next = self.turns.first();
+        let next = self.turns.first(self.share.order());
         if next != first
             && let Some(stream) = next
         {
@@ -861,9 +895,9 @@ impl Streams {
         }
     }
 
-    /// Whether both `Latest` and `Complete` have a message in hand.
+    /// Whether both `Latest` and `Complete` compete for the send budget.
     fn paired(&self) -> bool {
-        self.sending.wants(Class::Latest) && self.sending.wants(Class::Complete)
+        self.sending.competes(Class::Latest) && self.sending.competes(Class::Complete)
     }
 
     /// Ends stream `id` of `inner` after what it holds.
@@ -904,7 +938,7 @@ impl Streams {
         events: &mut VecDeque<Event>,
     ) {
         let id = sender.key.id;
-        let first = self.turns.first();
+        let first = self.turns.first(self.share.order());
         if let Some(at) = self.senders.iter().position(|&(other, _)| other == id) {
             self.senders.swap_remove(at);
         }
@@ -930,7 +964,7 @@ impl Streams {
         }
         let woken = |stream| events.push_back(Event::Readable { stream });
         self.receiving
-            .release(&mut receiver.claim, Order::RANK.0, woken);
+            .release(&mut receiver.claim, Order::RANK, woken);
     }
 
     /// Ends the wait of `receiver`'s next message for room in the receive budget, and
@@ -944,7 +978,7 @@ impl Streams {
         if let State::Queued { .. } = receiver.claim.state {
             let woken = |stream| events.push_back(Event::Readable { stream });
             self.receiving
-                .release(&mut receiver.claim, Order::RANK.0, woken);
+                .release(&mut receiver.claim, Order::RANK, woken);
         }
     }
 
@@ -995,7 +1029,7 @@ impl Streams {
             result = Err(reset_error(error));
         }
         if !matches!(result, Ok(Poll::Pending)) {
-            receiving.release(claim, Order::RANK.0, |stream| {
+            receiving.release(claim, Order::RANK, |stream| {
                 events.push_back(Event::Readable { stream });
             });
         }
@@ -1892,7 +1926,7 @@ mod tests {
     /// Releases `claim` with room in `order`, and returns the streams that got room.
     fn release(budget: &mut Budget, claim: &mut Claim, order: Order) -> Vec<Key> {
         let mut woken = Vec::new();
-        budget.release(claim, order.0, |stream| woken.push(stream));
+        budget.release(claim, order, |stream| woken.push(stream));
         woken
     }
 
@@ -2038,27 +2072,34 @@ mod tests {
     }
 
     #[test]
-    fn a_budget_tells_whether_a_class_holds_or_waits_for_room() {
+    fn a_budget_tells_whether_a_class_holds_room_and_whether_it_competes() {
         let mut budget = Budget::new(10);
         let [mut latest, mut late] = claims(Class::Latest);
         let [mut complete] = claims(Class::Complete);
         let state = |budget: &Budget| {
             [Class::Latest, Class::Complete]
-                .map(|class| (budget.holds(class), budget.wants(class)))
+                .map(|class| (budget.holds(class), budget.competes(class)))
         };
         assert!(budget.charge(stream(0), 10, &mut latest, Order::RANK));
         assert!(!budget.charge(stream(1), 5, &mut complete, Order::RANK));
         assert_eq!(state(&budget), [(true, true), (false, true)]);
         assert_eq!(release(&mut budget, &mut latest, Order::RANK), [stream(1)]);
-        assert_eq!(state(&budget), [(false, false), (true, true)]);
+        // Room that its stream has not taken holds, and does not compete.
+        assert_eq!(state(&budget), [(false, false), (true, false)]);
         assert!(!budget.charge(stream(2), 6, &mut late, Order::RANK));
-        assert_eq!(state(&budget), [(false, true), (true, true)]);
+        assert_eq!(state(&budget), [(false, true), (true, false)]);
+        assert_eq!(
+            release(&mut budget, &mut complete, Order::RANK),
+            [stream(2)]
+        );
+        assert_eq!(state(&budget), [(true, false), (false, false)]);
+        assert!(budget.charge(stream(2), 6, &mut late, Order::RANK));
+        assert_eq!(state(&budget), [(true, true), (false, false)]);
         assert_eq!(release(&mut budget, &mut late, Order::RANK), []);
-        assert_eq!(release(&mut budget, &mut complete, Order::RANK), []);
         assert_eq!(state(&budget), [(false, false), (false, false)]);
     }
 
-    mod turns {
+    mod owed {
         use proptest::collection::vec;
         use proptest::prelude::*;
 
@@ -2068,8 +2109,8 @@ mod tests {
         const WRITE_MAX: usize = 1 << 10;
 
         /// The class that writes when both `Latest` and `Complete` have a message.
-        fn first(turns: &Turns) -> Class {
-            if turns.order() == Order::COMPLETE_FIRST {
+        fn first(share: &Share) -> Class {
+            if share.order() == Order::COMPLETE_FIRST {
                 Class::Complete
             } else {
                 Class::Latest
@@ -2078,44 +2119,70 @@ mod tests {
 
         #[test]
         fn complete_alone_pays_what_it_is_owed_and_gains_no_credit() {
-            let mut turns = Turns::default();
-            turns.took(Class::Latest, 100, true);
-            turns.took(Class::Complete, 299, false);
-            assert_eq!(turns.order(), Order::COMPLETE_FIRST);
-            turns.took(Class::Complete, 1, false);
-            assert_eq!(turns.order(), Order::RANK);
-            turns.took(Class::Complete, 50, false);
-            assert_eq!(turns.owed, 0);
+            let mut share = Share::default();
+            share.took(Class::Latest, 100, true);
+            share.took(Class::Complete, 299, false);
+            assert_eq!(share.order(), Order::COMPLETE_FIRST);
+            share.took(Class::Complete, 1, false);
+            assert_eq!(share.order(), Order::RANK);
+            share.took(Class::Complete, 50, false);
+            assert_eq!(share.owed, 0);
         }
 
         #[test]
         fn latest_alone_spends_its_credit_and_makes_no_debt() {
-            let mut turns = Turns::default();
-            turns.took(Class::Complete, 300, true);
-            turns.took(Class::Latest, 99, false);
-            assert_eq!(turns.owed, -3);
-            turns.took(Class::Latest, 50, false);
-            assert_eq!(turns.owed, 0);
-            assert_eq!(turns.order(), Order::RANK);
+            let mut share = Share::default();
+            share.took(Class::Complete, 300, true);
+            share.took(Class::Latest, 99, false);
+            assert_eq!(share.owed, -3);
+            share.took(Class::Latest, 50, false);
+            assert_eq!(share.owed, 0);
+            assert_eq!(share.order(), Order::RANK);
         }
 
         #[test]
         fn latest_owes_three_bytes_of_complete_for_each_of_its_own() {
-            let mut turns = Turns::default();
-            turns.took(Class::Latest, 10, true);
-            assert_eq!(turns.order(), Order::COMPLETE_FIRST);
-            turns.took(Class::Complete, 29, true);
-            assert_eq!(turns.order(), Order::COMPLETE_FIRST);
-            turns.took(Class::Complete, 1, true);
-            assert_eq!(turns.order(), Order::RANK);
+            let mut share = Share::default();
+            share.took(Class::Latest, 10, true);
+            assert_eq!(share.order(), Order::COMPLETE_FIRST);
+            share.took(Class::Complete, 29, true);
+            assert_eq!(share.order(), Order::COMPLETE_FIRST);
+            share.took(Class::Complete, 1, true);
+            assert_eq!(share.order(), Order::RANK);
+        }
+
+        #[test]
+        fn room_an_owed_class_frees_waits_while_the_other_holds_room() {
+            /// The classes that get room a message of `class` frees.
+            fn room(owed: isize, class: Class, sending: &Budget) -> Vec<Class> {
+                Share { owed }.room(class, sending).collect()
+            }
+            let mut budget = Budget::new(10);
+            let [mut latest] = claims(Class::Latest);
+            let [mut complete] = claims(Class::Complete);
+            assert!(budget.charge(stream(0), 5, &mut latest, Order::RANK));
+            assert!(budget.charge(stream(1), 5, &mut complete, Order::RANK));
+            let (rank, first) = (Order::RANK.0, Order::COMPLETE_FIRST.0);
+            let kept = |class| [Class::Command, class];
+            assert_eq!(room(-1, Class::Latest, &budget), kept(Class::Latest));
+            assert_eq!(room(-1, Class::Complete, &budget), rank);
+            assert_eq!(room(0, Class::Latest, &budget), rank);
+            assert_eq!(room(0, Class::Complete, &budget), rank);
+            assert_eq!(room(1, Class::Complete, &budget), kept(Class::Complete));
+            assert_eq!(room(1, Class::Latest, &budget), first);
+            assert_eq!(room(1, Class::Command, &budget), first);
+            assert_eq!(release(&mut budget, &mut complete, Order::RANK), []);
+            assert_eq!(room(-1, Class::Latest, &budget), rank);
+            assert_eq!(release(&mut budget, &mut latest, Order::RANK), []);
+            assert_eq!(room(1, Class::Complete, &budget), first);
         }
 
         #[test]
         fn other_classes_owe_nothing() {
-            let mut turns = Turns::default();
-            turns.took(Class::Command, 10, true);
-            turns.took(Class::CatchUp, 10, true);
-            assert_eq!(turns.owed, 0);
+            let mut share = Share::default();
+            share.took(Class::Command, 10, true);
+            share.took(Class::CatchUp, 10, true);
+            assert_eq!(share.owed, 0);
         }
 
         proptest! {
@@ -2124,20 +2191,20 @@ mod tests {
                 history in vec((0..3_u8, 1..=WRITE_MAX), 0..64),
                 run in vec(1..=WRITE_MAX, 1..256),
             ) {
-                let mut turns = Turns::default();
+                let mut share = Share::default();
                 let max = isize::try_from(WRITE_MAX).expect("fits");
                 for (writer, bytes) in history {
                     match writer {
-                        0 => turns.took(Class::Latest, bytes, false),
-                        1 => turns.took(Class::Complete, bytes, false),
-                        _ => turns.took(first(&turns), bytes, true),
+                        0 => share.took(Class::Latest, bytes, false),
+                        1 => share.took(Class::Complete, bytes, false),
+                        _ => share.took(first(&share), bytes, true),
                     }
-                    prop_assert!(-max < turns.owed && turns.owed <= 3 * max);
+                    prop_assert!(-max < share.owed && share.owed <= 3 * max);
                 }
                 let mut took = [0; 4];
                 for bytes in run {
-                    let class = first(&turns);
-                    turns.took(class, bytes, true);
+                    let class = first(&share);
+                    share.took(class, bytes, true);
                     took[class.rank()] += bytes;
                 }
                 let [_, latest, complete, _] = took;
@@ -4120,6 +4187,119 @@ mod tests {
                     read[Class::Complete.rank()] >= 400 * MESSAGE_MAX,
                     "{read:?}"
                 );
+            });
+        }
+
+        /// The bytes that `Complete` is owed on the client's connection.
+        fn owed(pair: &mut Pair) -> isize {
+            let key = key(&pair.client);
+            let connection =
+                crate::quic::find(&mut pair.client.endpoint.connections, key);
+            connection.expect("a connection").streams.share.owed
+        }
+
+        #[test]
+        fn small_latest_and_bulk_complete_share_the_send_budget_one_to_three() {
+            testing::run(1, |shard| {
+                let mut pair = narrow(shard);
+                let mut completes =
+                    [Class::Complete; 4].map(|class| open_sender(&mut pair, class));
+                let mut latest = open_sender(&mut pair, Class::Latest);
+                let bulk = shard.block(&vec![0; MESSAGE_MAX]);
+                let small = shard.block(&[1; 100]);
+                let (mut receivers, mut read) = (Vec::new(), [0; 4]);
+                let nanos =
+                    |span: Duration| u64::try_from(span.as_nanos()).expect("fits");
+                let warm = pair.now().0 + nanos(2 * RUN);
+                let end = warm + nanos(10 * RUN);
+                while pair.now().0 < end {
+                    pair.run(STEP);
+                    refill(&mut pair, &mut latest, &small);
+                    completes.rotate_left(1);
+                    for complete in &mut completes {
+                        refill(&mut pair, complete, &bulk);
+                        // Room that its caller has not taken counts for neither
+                        // class, so the caller of `Latest` takes it at once.
+                        refill(&mut pair, &mut latest, &small);
+                    }
+                    take(&mut pair, &mut receivers, &mut read);
+                    if pair.now().0 <= warm {
+                        read = [0; 4];
+                    }
+                }
+                assert_share(read, small.len(), 10_000);
+            });
+        }
+
+        #[test]
+        fn room_that_waits_for_its_caller_makes_no_debt_or_credit() {
+            let pairs = [
+                (Class::Complete, Class::Latest),
+                (Class::Latest, Class::Complete),
+            ];
+            for (writer, idle) in pairs {
+                testing::run(1, move |shard| {
+                    let mut pair = narrow(shard);
+                    let mut first = open_sender(&mut pair, writer);
+                    fill(&mut pair, shard, &mut first);
+                    let mut second = open_sender(&mut pair, writer);
+                    let mut idle = open_sender(&mut pair, idle);
+                    let (now, message) =
+                        (pair.now(), shard.block(&vec![1; MESSAGE_MAX]));
+                    for sender in [&mut second, &mut idle] {
+                        let written =
+                            pair.client.endpoint.write(now, sender, message.clone());
+                        assert_eq!(written, Ok(Poll::Pending), "{writer:?}");
+                    }
+                    free(&mut pair);
+                    let writable = Event::Writable { stream: idle.key() };
+                    let (seen, now) = (pair.client.events.len(), pair.now());
+                    let flushed = pair.client.endpoint.flush(now, &mut first);
+                    assert_eq!(flushed, Ok(Poll::Ready(())), "{writer:?}");
+                    pair.run(Duration::ZERO);
+                    assert!(got(&pair.client, seen, &writable), "{writer:?}");
+                    // `idle` got room and has not taken it.
+                    let owed_before = owed(&mut pair);
+                    let flushed = pair.client.endpoint.flush(now, &mut second);
+                    assert_eq!(flushed, Ok(Poll::Ready(())), "{writer:?}");
+                    assert_eq!(owed(&mut pair), owed_before, "{writer:?}");
+                });
+            }
+        }
+
+        #[test]
+        fn room_that_an_owed_complete_frees_goes_to_latest_while_no_latest_holds_room()
+        {
+            testing::run(1, |shard| {
+                let mut pair = narrow(shard);
+                let [mut first, mut second] =
+                    [Class::Complete; 2].map(|class| open_sender(&mut pair, class));
+                fill(&mut pair, shard, &mut first);
+                let [mut owing, mut waiting] =
+                    [Class::Latest; 2].map(|class| open_sender(&mut pair, class));
+                let (now, message) = (pair.now(), shard.block(&vec![1; MESSAGE_MAX]));
+                // `owing` takes the rest of the send budget; the others wait for room.
+                for sender in [&mut owing, &mut second, &mut waiting] {
+                    let written =
+                        pair.client.endpoint.write(now, sender, message.clone());
+                    assert_eq!(written, Ok(Poll::Pending));
+                }
+                free(&mut pair);
+                let now = pair.now();
+                let flushed = pair.client.endpoint.flush(now, &mut owing);
+                assert_eq!(flushed, Ok(Poll::Ready(())));
+                // `second` got the room that `owing` freed, and waits for its turn.
+                let flushed = pair.client.endpoint.flush(now, &mut second);
+                assert_eq!(flushed, Ok(Poll::Pending));
+                let writable = Event::Writable {
+                    stream: waiting.key(),
+                };
+                let seen = pair.client.events.len();
+                let flushed = pair.client.endpoint.flush(now, &mut first);
+                assert_eq!(flushed, Ok(Poll::Ready(())));
+                pair.run(Duration::ZERO);
+                assert!(owed(&mut pair) > 0);
+                assert!(got(&pair.client, seen, &writable));
             });
         }
     }

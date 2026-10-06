@@ -991,20 +991,22 @@ How to read this record:
   Stream credit is twice the connection window, so a stream never waits on its own
   credit while the connection has room. This relies on reader-granted credits (B3): a
   node takes every byte it granted credit for. A peer that gives less stalls only its
-  own connection (#819). The turn goes `Command`, then `Latest` and `Complete` by
-  share, then `CatchUp`. While both `Latest` and `Complete` have a message to send,
+  own connection (#819). The turn goes `Command`, then `Latest` and `Complete` by share,
+  then `CatchUp`. While streams of both `Latest` and `Complete` hold a message to send,
   QUIC takes 3 bytes of `Complete` for each byte of `Latest`, within about one window:
   `Complete` goes ahead while it is owed bytes. A class alone makes no debt and no
-  credit, and pays off what it owes or is owed. The send budget gives room in the
-  order of the turn. Room that an owed `Complete` message frees waits for its next
-  message while a `Latest` message holds room, so `Latest` cannot take the share
-  through the budget (#819). Lost: a connection per class, because four handshakes and
-  four congestion controllers compete on one path (#55). Settled by the advisor and the
-  coordinator under the person's delegation (#789). A node resets a stream with the
-  stop's code when the stop arrives. A peer breaks the protocol when it sends another
-  class byte, ends a stream inside a message, sends a message over the limit, or resets
-  or stops a stream with a code over 32 bits. The node then closes the connection with
-  application code 2^32 and the reason as text, and the caller gets `Error::Broken`.
+  credit, and pays off what it owes or is owed. Room that a stream got and its caller
+  has not taken counts for neither class, and a message that `try_send` gave back is not
+  held. The send budget gives room in the order of the turn. Room that a message of the
+  owed class frees waits for that class's next message while the other class holds room,
+  so neither class can take the share through the budget (#819). Lost: a connection per
+  class, because four handshakes and four congestion controllers compete on one path
+  (#55). Settled by the advisor and the coordinator under the person's delegation
+  (#789). A node resets a stream with the stop's code when the stop arrives. A peer
+  breaks the protocol when it sends another class byte, ends a stream inside a message,
+  sends a message over the limit, or resets or stops a stream with a code over 32 bits.
+  The node then closes the connection with application code 2^32 and the reason as text,
+  and the caller gets `Error::Broken`.
   Each connection keeps two budgets, which count the length of each message. A sender
   starts a message only when the messages it started and the streams have not taken in
   full stay within the peer's `window_bytes`; else the write waits for `Writable`. A
@@ -3041,7 +3043,8 @@ conclusion together". Each one is listed below.
   (starts at 200 ppm, ESTIMATE COMBINE), stamp limits near 1970 and far future (A5).
 - Transport: default carrier per traffic class (QUIC vs TLS over TCP, measured on
   Linux), GSO and GRO, ChaCha20 vs AES by platform, relay selection, the retry
-  interval of a read that waits for a block (RECV WAITS).
+  interval of a read that waits for a block (RECV WAITS), the `Complete` share of the
+  turn (3 to 1, `LATEST_COST`).
 - Compression and reduction defaults; retention defaults; disk budget defaults.
 - Benchmark reruns owed: r1 handoff, r10 codecs, r11 memory on Linux x86-64 (pinned)
   and Raspberry Pi 4; `sim` binary size against P1 (BQ19); binary size and idle memory
