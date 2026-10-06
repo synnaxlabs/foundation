@@ -89,10 +89,10 @@ fn refuses_an_unknown_kind() {
         Definition::decode(&bytes),
         Err(Error::Kind { at: 1, tag: 0 })
     );
-    let bytes = [VERSION, 4];
+    let bytes = [VERSION, u8::MAX];
     assert_eq!(
         Definition::decode(&bytes),
-        Err(Error::Kind { at: 1, tag: 4 })
+        Err(Error::Kind { at: 1, tag: u8::MAX })
     );
 }
 
