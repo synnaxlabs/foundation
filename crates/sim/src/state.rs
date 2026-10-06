@@ -75,7 +75,8 @@ struct Node {
     /// Set from the stop of a crash to the cut, while the sim drops what the crash
     /// ended.
     crashing: bool,
-    /// The crashes of the node so far.
+    /// The crashes of the node so far. A crash ends a life after the futures of the
+    /// node drop, so each of their drops closes its handle in the life of its open.
     life: u64,
 }
 
@@ -504,11 +505,11 @@ impl State {
         (tasks, starts)
     }
 
-    /// Ends the crash of `node` that [`State::stop`] began, the file calls in flight
-    /// of the node, and the life of its open ports. After a `Power` crash, its
-    /// monotonic clock reads its boot value again, and its disk keeps what is
-    /// durable. Returns the wakers of the ports and the blocks of the calls, for the
-    /// caller to drop after it releases the lock.
+    /// Ends the crash of `node` that [`State::stop`] began, its life, and its file
+    /// calls in flight, and closes each serial port of the node. After a `Power`
+    /// crash, its monotonic clock reads its boot value again, and its disk keeps what
+    /// is durable. Returns the wakers of the ports and the blocks of the calls, for
+    /// the caller to drop after it releases the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,

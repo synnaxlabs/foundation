@@ -22,8 +22,7 @@ impl env::serial::Driver for Node {
             Box::new(Port {
                 node: self.clone(),
                 end,
-                life,
-                owner: Owner::new("a serial port"),
+                owner: Owner::new("a serial port", life),
             })
         });
         Box::pin(ready(port))
@@ -34,26 +33,7 @@ impl env::serial::Driver for Node {
 struct Port {
     node: Node,
     end: End,
-    /// The life of the node at the open.
-    life: u64,
     owner: Owner,
-}
-
-impl Port {
-    /// Binds the port to the sim thread that polls it first.
-    ///
-    /// # Panics
-    ///
-    /// After a crash of its node, and as [`Owner::check`] does.
-    fn check(&self) {
-        let node = self.node.node;
-        let life = lock(&self.node.shared).life(node);
-        assert!(
-            life == self.life,
-            "a serial port of node {node} polls after a crash of the node"
-        );
-        self.owner.check(&self.node);
-    }
 }
 
 impl port::Driver for Port {
@@ -62,7 +42,7 @@ impl port::Driver for Port {
         cx: &mut Context<'_>,
         buffer: &mut [u8],
     ) -> Poll<Result<usize, Error>> {
-        self.check();
+        self.owner.check(&self.node);
         let waker = cx.waker().clone();
         let (poll, unused) = lock(&self.node.shared)
             .serial()
@@ -76,7 +56,7 @@ impl port::Driver for Port {
         cx: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<Result<usize, Error>> {
-        self.check();
+        self.owner.check(&self.node);
         let waker = cx.waker().clone();
         let (poll, unused) = {
             let mut state = lock(&self.node.shared);
@@ -92,7 +72,7 @@ impl Drop for Port {
     fn drop(&mut self) {
         let wakers = {
             let mut state = lock(&self.node.shared);
-            let current = state.life(self.node.node) == self.life;
+            let current = self.owner.current(&state, self.node.node);
             current.then(|| state.serial().close(self.end))
         };
         drop(wakers);

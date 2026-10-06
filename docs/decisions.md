@@ -1746,14 +1746,14 @@ How to read this record:
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
   restart finds no file held (#392) and no serial port open, not even by a leaked handle
-  (#535). A serial port from before the crash panics when it polls. A `Power` crash
-  keeps, for each 512-byte sector, its durable bytes or the bytes of any one write since
-  then, a write in flight too. A `sync` makes durable the writes that ended before it
-  started. A failed `sync` makes each sector keep its durable bytes or those of one such
-  write, at random. A `sync_dir` makes durable the entries at its end. A removed file
-  takes space until the removal is durable. The monotonic clock starts again and the
-  wall runs on. `join` on a thread that a crash ended panics, because no process joins
-  its own threads after it dies. Built by `simulation` in #114 and #535.
+  (#535). A socket or serial port from before the crash panics when it polls. A `Power`
+  crash keeps, for each 512-byte sector, its durable bytes or the bytes of any one write
+  since then, a write in flight too. A `sync` makes durable the writes that ended before
+  it started. A failed `sync` makes each sector keep its durable bytes or those of one
+  such write, at random. A `sync_dir` makes durable the entries at its end. A removed
+  file takes space until the removal is durable. The monotonic clock starts again and
+  the wall runs on. `join` on a thread that a crash ended panics, because no process
+  joins its own threads after it dies. Built by `simulation` in #114 and #535.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes

@@ -14,11 +14,17 @@ use crate::state::lock;
 
 impl env::net::Driver for Node {
     fn udp(&self, config: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
-        let bound = lock(&self.shared).net().udp().bind(self.node, config)?;
+        let (life, bound) = {
+            let mut state = lock(&self.shared);
+            (
+                state.life(self.node),
+                state.net().udp().bind(self.node, config),
+            )
+        };
         Ok(Box::new(Socket {
             node: self.clone(),
-            bound,
-            owner: Owner::new(HALF),
+            bound: bound?,
+            owner: Owner::new(HALF, life),
         }))
     }
 
@@ -58,7 +64,7 @@ impl udp::Driver for Socket {
         Box::new(Sender {
             node: self.node.clone(),
             key: self.bound.key,
-            owner: Owner::new(HALF),
+            owner: Owner::new(HALF, self.owner.life),
         })
     }
 
