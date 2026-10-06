@@ -39,11 +39,21 @@ fn read() -> Reading {
     let mut ntp: libc::ntptimeval = unsafe { std::mem::zeroed() };
     // SAFETY: `ntp` is one ntptimeval, which the call writes.
     let rc = unsafe { libc::ntp_gettime(&raw mut ntp) };
-    assert_eq!(rc, 0, "ntp_gettime failed: {}", io::Error::last_os_error());
+    let error = io::Error::last_os_error();
+    let refused = rc != 0 && !written(error.raw_os_error(), ntp.time_state);
+    assert!(!refused, "ntp_gettime failed: {error}");
     Reading {
         time: stamp(ntp.time.tv_sec, ntp.time.tv_nsec, true),
         error: bound(ntp.time_state, ntp.maxerror),
     }
+}
+
+/// Whether a call of `ntp_gettime` that failed with `error` wrote a reading with
+/// clock state `state`. xnu writes the reading, then gives each state but `TIME_OK`
+/// as the error number.
+#[cfg(any(test, target_os = "macos"))]
+fn written(error: Option<i32>, state: c_int) -> bool {
+    error == Some(state)
 }
 
 /// The stamp of `seconds` and a fraction in nanoseconds when `nano`, else in
@@ -79,6 +89,14 @@ mod tests {
     fn a_nano_fraction_is_nanoseconds_and_a_micro_fraction_is_microseconds() {
         assert_eq!(stamp(2i64, 5i64, true), Stamp::from_nanos(2_000_000_005));
         assert_eq!(stamp(2i64, 5i64, false), Stamp::from_nanos(2_000_005_000));
+    }
+
+    #[test]
+    fn a_state_given_as_the_error_is_a_reading_and_a_fault_is_not() {
+        assert!(written(Some(libc::TIME_ERROR), libc::TIME_ERROR));
+        assert!(written(Some(libc::TIME_INS), libc::TIME_INS));
+        assert!(!written(Some(libc::EFAULT), libc::TIME_OK));
+        assert!(!written(None, libc::TIME_OK));
     }
 
     #[test]
