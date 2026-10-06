@@ -38,7 +38,8 @@ exception when the patch lands (#55).
 
 We never open issues or PRs on projects outside `synnaxlabs`. To change a dependency,
 carry a local patch through `[patch.crates-io]` in the root `Cargo.toml`, keep the
-change small, and list it here with its reason.
+change small, and list it here with its reason. The patched copy lives in
+`patches/<crate>/` (LOCAL PATCHES in `docs/decisions.md`).
 
 ## Tests, benchmarks, and tools
 

@@ -4,6 +4,7 @@ mod chance;
 mod crash;
 mod files;
 mod net;
+mod run_on;
 mod serial;
 mod shards;
 
@@ -159,10 +160,8 @@ fn run_for_moves_time_by_the_span_and_leaves_waiting_threads() {
 fn a_reset_sleep_fires_at_its_new_deadline() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
-    let clock = node.clock();
-    let reading = Arc::new(Mutex::new(None));
-    let out = Arc::clone(&reading);
-    let handle = node.shards().start(shard("shard-0"), move |_| async move {
+    let reading = sim.run_on(&node, |node, _| async move {
+        let clock = node.clock();
         let start = clock.now();
         let mut sleep = clock.sleep_until(start + Span::SECOND);
         let woke =
@@ -170,11 +169,9 @@ fn a_reset_sleep_fires_at_its_new_deadline() {
         assert_eq!(woke.await, Poll::Pending, "the first deadline is not due");
         sleep.reset(start + Span::MILLISECOND);
         sleep.await;
-        *out.lock().unwrap() = Some(clock.now() - start);
+        clock.now() - start
     });
-    sim.run().unwrap();
-    handle.unwrap().join().unwrap();
-    assert_eq!(*reading.lock().unwrap(), Some(Span::MILLISECOND));
+    assert_eq!(reading, Ok(Span::MILLISECOND));
 }
 
 #[test]
