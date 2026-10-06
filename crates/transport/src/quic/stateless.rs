@@ -65,7 +65,7 @@ impl Limit {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use proptest::prelude::*;
@@ -143,7 +143,7 @@ mod tests {
             hosts in prop::collection::vec(any::<u32>(), 1..512),
         ) {
             let (epoch, mut limit) = create();
-            let mut sent = HashSet::new();
+            let mut sent = BTreeSet::new();
             for host in hosts {
                 let ip = IpAddr::V4(Ipv4Addr::from(host));
                 prop_assert_eq!(limit.admit(epoch, ip), sent.insert(limit.bucket(ip)));
