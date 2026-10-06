@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
 use document::diagnostic::{Code, Diagnostic, Note};
-use document::{Attribute, Block, Document, Span, read};
+use document::{Attribute, Block, Document, Label, read};
 use types::name::Name;
 
 pub use node_settings::NodeSettings;
@@ -71,8 +71,9 @@ pub fn check(documents: &[Document]) -> Result<Definitions, Vec<Diagnostic>> {
 struct Check<'a> {
     definitions: Definitions,
     diagnostics: Vec<Diagnostic>,
-    /// The label span of each policy name so far, by block keyword.
-    names: BTreeMap<(&'a str, Name), Option<Span>>,
+    /// The label of each policy name so far, by block keyword and the name in
+    /// lowercase, so that names that differ only in case collide.
+    names: BTreeMap<(&'a str, Box<str>), &'a Label>,
 }
 
 impl<'a> Check<'a> {
@@ -97,10 +98,11 @@ impl<'a> Check<'a> {
             return None;
         };
         let name = self.report(read::name(label))?;
-        let first = match self.names.entry((keyword, name.clone())) {
+        let folded = name.as_str().to_ascii_lowercase().into();
+        let first = match self.names.entry((keyword, folded)) {
             Entry::Occupied(first) => *first.get(),
             Entry::Vacant(entry) => {
-                entry.insert(label.span);
+                entry.insert(label);
                 return Some(name);
             }
         };
@@ -108,12 +110,15 @@ impl<'a> Check<'a> {
             DUPLICATE_NAME,
             label.span,
             format!(
-                "the name {:?} repeats an earlier `{keyword}` name",
-                name.as_str()
+                "the name {:?} repeats the earlier `{keyword}` name {:?}",
+                name.as_str(),
+                first.text
             ),
-            format!("Give each `{keyword}` block its own name"),
+            format!(
+                "Give each `{keyword}` block a name that differs by more than case"
+            ),
         );
-        diagnostic.notes.extend(first.map(|span| Note {
+        diagnostic.notes.extend(first.span.map(|span| Note {
             span,
             text: "the earlier name".into(),
         }));
@@ -160,7 +165,7 @@ impl<'a> Check<'a> {
 #[cfg(test)]
 mod tests {
     use document::value::{Kind, Value};
-    use document::{Label, Map, Position, Source};
+    use document::{Map, Position, Source, Span};
     use proptest::prelude::*;
     use types::byte;
     use types::name::Selector;
@@ -394,8 +399,30 @@ mod tests {
         let mut repeat = refused(
             "config.duplicate-name",
             at(1, 101),
-            "the name \"site_a.budget\" repeats an earlier `node_settings` name",
-            "Give each `node_settings` block its own name",
+            "the name \"site_a.budget\" repeats the earlier `node_settings` name \
+             \"site_a.budget\"",
+            "Give each `node_settings` block a name that differs by more than case",
+        );
+        repeat.notes.push(Note {
+            span: at(0, 1).unwrap(),
+            text: "the earlier name".into(),
+        });
+        assert_eq!(check(&documents), Err(vec![repeat]));
+    }
+
+    #[test]
+    fn refuses_a_name_that_repeats_in_other_case() {
+        let select = [("select", string("site_a.*"))];
+        let documents = [
+            document(vec![settings(0, 0, "site_a.budget", &select)]),
+            document(vec![settings(1, 0, "Site_A.budget", &select)]),
+        ];
+        let mut repeat = refused(
+            "config.duplicate-name",
+            at(1, 1),
+            "the name \"Site_A.budget\" repeats the earlier `node_settings` name \
+             \"site_a.budget\"",
+            "Give each `node_settings` block a name that differs by more than case",
         );
         repeat.notes.push(Note {
             span: at(0, 1).unwrap(),
