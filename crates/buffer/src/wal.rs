@@ -159,7 +159,8 @@ impl Layout {
     /// [`ENTRY_MAX_MIN`](Self::ENTRY_MAX_MIN): one byte more gives
     /// [`Rejected::Large`](crate::Rejected::Large) with
     /// [`Limit::Body`](crate::Limit::Body). Each entry of a larger batch adds to the
-    /// record's table, so its entries hold less in all.
+    /// record's table, so its entries hold less in all. A shard's pool can bound an
+    /// entry lower, with [`Limit::Block`](crate::Limit::Block).
     #[must_use]
     pub fn entry_max(self) -> usize {
         self.body_max - entry::table_len(1)
@@ -168,6 +169,8 @@ impl Layout {
     /// Checks a batch of `entries` entries, with `parts` parts and `bytes` bytes of
     /// parts in all, against the limits of one record of this ring, as
     /// [`Buffer::append`](crate::Buffer::append) does before it queues the batch.
+    /// It does not check [`Limit::Block`](crate::Limit::Block), which depends on
+    /// the pool.
     ///
     /// # Errors
     ///
@@ -202,7 +205,7 @@ impl Layout {
     }
 }
 
-/// A limit of one record.
+/// A limit of one record, or of the pool block that holds one entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limit {
     /// More entries than one record holds.
@@ -220,6 +223,14 @@ pub enum Limit {
         /// Bytes of the body, or `usize::MAX` when the body is past it.
         len: usize,
         /// The layout's `body_max`.
+        max: usize,
+    },
+    /// An entry whose parts, joined, no block of the shard's pool holds. A read
+    /// gives each entry in one block.
+    Block {
+        /// Bytes of the entry's parts.
+        len: usize,
+        /// The pool's largest block payload.
         max: usize,
     },
 }
@@ -240,6 +251,11 @@ impl fmt::Display for Limit {
                 f,
                 "the batch needs a record body of {len} bytes, and a record of this \
                  ring holds at most {max}"
+            ),
+            Self::Block { len, max } => write!(
+                f,
+                "an entry has {len} bytes of parts, and a block of the pool holds at \
+                 most {max}"
             ),
         }
     }
@@ -450,7 +466,7 @@ pub(crate) enum Step<'a> {
 /// A record that follows the chain but that this version cannot read: a kind it
 /// does not know, a wrap or restart record of the wrong shape, or a record that
 /// ends past the end of the offsets. The ring is from another version or a defect
-/// wrote it, so it must not be written to.
+/// wrote it, so the open fails before it writes a record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Invalid {
     pub(crate) offset: u64,
@@ -511,8 +527,9 @@ enum Phase {
 
 /// Walks the records of a ring from its tail at each open. Loop: read the bytes of
 /// [`window`](Self::window) from the area, give them to [`next`](Self::next), and
-/// stop at [`Step::End`]. Then [`writer`](Self::writer) continues the ring. It
-/// ends within one lap of the area on any bytes.
+/// stop at [`Step::End`]. Each place must read the same each time, so the caller
+/// writes back each window it reads. Then [`writer`](Self::writer) continues the
+/// ring. It ends within one lap of the area on any bytes.
 ///
 /// A window is one block, or a piece of a record longer than one block, at most
 /// `piece` bytes. The cursor reads such a record in three parts: its first block,
@@ -612,8 +629,8 @@ impl Cursor {
     /// # Panics
     ///
     /// When `bytes` is not the window, or when the start of a record reads
-    /// differently the second time: no writer runs during a walk, so the bytes
-    /// the CRC covered must come back.
+    /// differently the second time: the caller writes back each window it reads,
+    /// so the bytes the CRC covered must come back.
     pub(crate) fn next<'a>(&mut self, bytes: &'a [u8]) -> Result<Step<'a>, Invalid> {
         let Window { place, len } = self.window();
         assert!(

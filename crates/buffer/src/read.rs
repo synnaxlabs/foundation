@@ -3,6 +3,7 @@
 
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
+use std::mem;
 use std::ops::Range;
 
 use block::{Block, Pool, Unique};
@@ -12,7 +13,7 @@ use types::frame::Path;
 use types::time::Stamp;
 
 use crate::buffer::Error;
-use crate::entry;
+use crate::entry::{self, Header};
 use crate::log::{Mark, Run};
 use crate::record::{self, ALIGN, AREA_START, HEADER_LEN};
 use crate::wal::Layout;
@@ -70,6 +71,10 @@ pub(crate) struct Reading<'a> {
     /// Pool bytes that the blocks of the entries given take.
     spent: usize,
     read: Read,
+    /// The entries of one record to give, with their body offsets and the marks
+    /// after them. The read drops the record's table before it takes an entry's
+    /// block, so an entry of the pool's largest block reads.
+    wanted: Vec<(Header, usize, Mark)>,
 }
 
 impl<'a> Reading<'a> {
@@ -95,6 +100,7 @@ impl<'a> Reading<'a> {
                 entries: Vec::new(),
                 next: from,
             },
+            wanted: Vec::new(),
         }
     }
 
@@ -129,25 +135,9 @@ impl<'a> Reading<'a> {
 
     async fn entries(&mut self, index: channel::Key, run: Run) -> Result<bool, Error> {
         let place = AREA_START + self.layout.place(run.offset);
-        let table = self.table(place).await?;
-        let head = record::head(&table).expect("invariant: a run names a record");
-        let body = table
-            .get(HEADER_LEN..)
-            .expect("invariant: the table holds the record header");
-        let start = body.get(..head.len).unwrap_or(body);
-        let headers =
-            entry::parse(start, head.len).expect("invariant: a run names a record");
-        let mut at = run.start;
-        for header in headers {
-            let (header, offset) = header.expect("invariant: a run names a record");
-            if (header.index, header.path) != (index, self.path) {
-                continue;
-            }
-            let after = at.after(header.first, header.len);
-            at = after;
-            if after <= self.read.next {
-                continue;
-            }
+        let mut wanted = mem::take(&mut self.wanted);
+        self.scan(place, index, run, &mut wanted).await?;
+        for (header, offset, after) in wanted.drain(..) {
             if self.spent >= self.budget {
                 return Ok(false);
             }
@@ -169,7 +159,39 @@ impl<'a> Reading<'a> {
             });
             self.read.next = after;
         }
+        self.wanted = wanted;
         Ok(true)
+    }
+
+    /// Puts in `wanted` the entries of `index` on the path in the record of `run`
+    /// at `place` that end after the read's mark.
+    async fn scan(
+        &self,
+        place: u64,
+        index: channel::Key,
+        run: Run,
+        wanted: &mut Vec<(Header, usize, Mark)>,
+    ) -> Result<(), Error> {
+        let table = self.table(place).await?;
+        let head = record::head(&table).expect("invariant: a run names a record");
+        let body = table
+            .get(HEADER_LEN..)
+            .expect("invariant: the table holds the record header");
+        let start = body.get(..head.len).unwrap_or(body);
+        let headers =
+            entry::parse(start, head.len).expect("invariant: a run names a record");
+        let mut at = run.start;
+        for header in headers {
+            let (header, offset) = header.expect("invariant: a run names a record");
+            if (header.index, header.path) != (index, self.path) {
+                continue;
+            }
+            at = at.after(header.first, header.len);
+            if at > self.read.next {
+                wanted.push((header, offset, at));
+            }
+        }
+        Ok(())
     }
 
     /// The header and entry table of the record at `place` in the ring file.

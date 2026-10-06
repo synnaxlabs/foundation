@@ -11,13 +11,11 @@ use env::net::{Ecn, Error};
 use types::time::Monotonic;
 
 use super::wire::Wire;
-use super::{Fate, NOT_AVAILABLE, addresses, receives};
+use super::{Fate, NOT_AVAILABLE, addresses, ip_header, receives};
 use crate::EIO;
 
-/// The IPv4 and UDP header bytes of a datagram.
-const V4_HEADERS: usize = 28;
-/// The IPv6 and UDP header bytes of a datagram.
-const V6_HEADERS: usize = 48;
+/// The bytes of the UDP header of a datagram.
+const HEADER: usize = 8;
 /// The bytes of a receive queue that a datagram takes past its length. Linux also
 /// charges each datagram for its buffer (`truesize`), about this much for a small one.
 const OVERHEAD: usize = 768;
@@ -198,12 +196,8 @@ impl<'a> Udp<'a> {
     ) -> Result<(), Error> {
         let binding = &self.sockets.bindings[&key];
         let (source, destination) = route(binding.node, binding.local, transmit)?;
-        let link = self.wire.path(binding.node, destination.ip());
-        let header = if destination.is_ipv4() {
-            V4_HEADERS
-        } else {
-            V6_HEADERS
-        };
+        let path = self.wire.path(binding.node, destination.ip());
+        let header = HEADER + ip_header(destination.ip());
         let contents = transmit.contents;
         let size = transmit.segment.map_or(usize::MAX, NonZeroUsize::get);
         for n in 0..contents.len().div_ceil(size).max(1) {
@@ -215,10 +209,15 @@ impl<'a> Udp<'a> {
                 ecn: transmit.ecn,
                 contents: part.to_vec(),
             };
-            let fate = if part.len() + header > link.mtu {
-                Fate::Lost
+            let bytes = part.len() + header;
+            let departure = if bytes > path.link.mtu {
+                None
             } else {
-                self.wire.fly(now, &link, datagram)
+                self.wire.depart(now, &path, bytes)
+            };
+            let fate = match departure {
+                Some(departure) => self.wire.fly(&path, departure, datagram),
+                None => Fate::Lost,
             };
             (self.wire).record((now, source, destination, part.len(), fate));
         }

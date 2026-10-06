@@ -55,6 +55,21 @@ impl Voters {
         }
     }
 
+    // The configuration this one replaced, as far as it shows: a joint
+    // configuration's outgoing set. Any other stands for the joint phase it ends,
+    // since each quorum of that phase is a quorum of it.
+    pub(crate) fn replaced(&self) -> Self {
+        let voters = if self.joint() {
+            &self.outgoing
+        } else {
+            &self.incoming
+        };
+        Self {
+            incoming: voters.clone(),
+            outgoing: BTreeSet::new(),
+        }
+    }
+
     // Whether `key` is in either set.
     pub(crate) fn contains(&self, key: node::Key) -> bool {
         self.incoming.contains(&key) || self.outgoing.contains(&key)
@@ -164,6 +179,18 @@ mod tests {
         };
         assert!(!voters.quorum(|node| node <= key(3)));
         assert!(voters.quorum(|node| node <= key(4)));
+    }
+
+    #[test]
+    fn replaced_gives_the_set_that_a_joint_configuration_replaced() {
+        let start = Voters {
+            incoming: BTreeSet::from([key(1), key(2), key(3)]),
+            outgoing: BTreeSet::new(),
+        };
+        let joint = start.enter(BTreeSet::from([key(2), key(3), key(4)]));
+        assert_eq!(joint.replaced(), start);
+        let leave = joint.leave();
+        assert_eq!(leave.replaced(), leave);
     }
 }
 
