@@ -1,4 +1,4 @@
-//! Shards on OS threads, each with a Tokio `LocalRuntime`.
+//! Shards, and dedicated threads, on OS threads, each with a Tokio `LocalRuntime`.
 
 use std::cell::Cell;
 use std::future::poll_fn;
@@ -36,38 +36,47 @@ impl env::shards::Driver for Driver {
         !self.0.cpus.is_empty()
     }
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "os starts threads, and a start blocks until its thread runs"
-    )]
     fn start(&self, config: Config, main: Main) -> Result<Handle, Error> {
         let Config { name, core } = config;
-        let pin = core.map(|core| (Arc::clone(&self.0), core));
-        let (report, started) = mpsc::sync_channel(1);
-        let shard = name.clone();
-        let thread_name = name
-            .split_once('\0')
-            .map_or(name.as_str(), |(head, _)| head);
-        let thread = thread::Builder::new()
-            .name(thread_name.to_owned())
-            .spawn(move || run(&shard, pin, main, &report))
-            .map_err(|e| Error::Start {
-                name: name.clone(),
-                reason: e.to_string(),
-            })?;
-        match started.recv() {
-            Ok(Ok(())) => Ok(Handle::new(move || match thread.join() {
-                Ok(false) => Ok(()),
-                Ok(true) | Err(_) => Err(Panicked { name }),
-            })),
-            // The thread holds nothing after its report, and ends.
-            Ok(Err(e)) => Err(e),
-            Err(_) => panic::resume_unwind(
-                thread
-                    .join()
-                    .expect_err("a shard that did not report panicked"),
-            ),
-        }
+        start(name, core.map(|core| (Arc::clone(&self.0), core)), main)
+    }
+}
+
+/// Starts thread `name`, pinned to `pin` when it has one, and serves `main` on it.
+/// Blocks until the thread runs.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "os starts threads, and a start blocks until its thread runs"
+)]
+pub(crate) fn start(
+    name: String,
+    pin: Option<(Arc<Cores>, usize)>,
+    main: Main,
+) -> Result<Handle, Error> {
+    let (report, started) = mpsc::sync_channel(1);
+    let shard = name.clone();
+    let thread_name = name
+        .split_once('\0')
+        .map_or(name.as_str(), |(head, _)| head);
+    let thread = thread::Builder::new()
+        .name(thread_name.to_owned())
+        .spawn(move || run(&shard, pin, main, &report))
+        .map_err(|e| Error::Start {
+            name: name.clone(),
+            reason: e.to_string(),
+        })?;
+    match started.recv() {
+        Ok(Ok(())) => Ok(Handle::new(move || match thread.join() {
+            Ok(false) => Ok(()),
+            Ok(true) | Err(_) => Err(Panicked { name }),
+        })),
+        // The thread holds nothing after its report, and ends.
+        Ok(Err(e)) => Err(e),
+        Err(_) => panic::resume_unwind(
+            thread
+                .join()
+                .expect_err("a shard that did not report panicked"),
+        ),
     }
 }
 

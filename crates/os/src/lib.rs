@@ -9,6 +9,7 @@ mod cores;
 #[expect(unsafe_code, reason = "a pool's memory is an OS mapping")]
 pub mod memory;
 mod shards;
+mod threads;
 
 /// Shards on OS threads, each with its own Tokio runtime. The core count is read once
 /// from the thread that calls this. On Linux it is the size of the affinity set, and
@@ -24,6 +25,14 @@ mod shards;
 pub fn shards() -> Result<env::shards::Shards, Error> {
     let cores = cores::Cores::read().map_err(Error::Cores)?;
     Ok(env::shards::Shards::new(shards::Driver::new(cores)))
+}
+
+/// Dedicated threads, each on its own OS thread with a current-thread Tokio runtime.
+/// A panic of a body, in its call, its poll, or its drop, makes its join give
+/// [`env::thread::Panicked`], where panics unwind.
+#[must_use]
+pub fn threads() -> env::threads::Threads {
+    env::threads::Threads::new(threads::Driver)
 }
 
 /// Why `os` could not build a seam.
