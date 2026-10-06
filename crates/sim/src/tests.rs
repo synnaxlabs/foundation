@@ -946,6 +946,17 @@ impl Drop for Thrower {
 /// A panic payload whose drop panics with another one, forever.
 struct Relay;
 
+/// A panic payload whose drop panics with a `Countdown` of one less, or with "last"
+/// at 0.
+struct Countdown(usize);
+
+impl Drop for Countdown {
+    fn drop(&mut self) {
+        assert!(self.0 > 0, "last");
+        panic::panic_any(Countdown(self.0 - 1));
+    }
+}
+
 impl Drop for Relay {
     fn drop(&mut self) {
         panic::panic_any(Relay);
@@ -1008,7 +1019,20 @@ fn a_payload_whose_drop_always_panics_ends_the_run_after_the_chain() {
     let handle = node.shards().start(shard("shard-0"), |_| async {
         panic::panic_any(Relay);
     });
-    let chain = ["a payload that is not a string"; crate::CHAIN];
+    let chain = ["a payload that is not a string"; crate::CHAIN + 1];
+    let message = chain.join(", then a drop panicked: ");
+    assert_panicked(&mut sim, handle.unwrap(), &message);
+}
+
+#[test]
+fn a_panic_in_the_last_drop_of_the_chain_gives_its_message() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let handle = node.shards().start(shard("shard-0"), |_| async {
+        panic::panic_any(Countdown(crate::CHAIN - 1));
+    });
+    let mut chain = vec!["a payload that is not a string"; crate::CHAIN];
+    chain.push("last");
     let message = chain.join(", then a drop panicked: ");
     assert_panicked(&mut sim, handle.unwrap(), &message);
 }

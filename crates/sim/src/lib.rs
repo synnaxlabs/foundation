@@ -469,7 +469,7 @@ fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
 /// The Linux code for an I/O error (`EIO`), which a fault of a file or a port gives.
 const EIO: i32 = 5;
 
-/// The most payloads that [`messages`] reads in one chain.
+/// The most payloads that [`messages`] drops in one chain.
 const CHAIN: usize = 16;
 
 /// What joins the messages of two panics.
@@ -487,17 +487,19 @@ fn message(payload: &(dyn Any + Send)) -> String {
 }
 
 /// The message of `payload`, then of each panic in the drop of the payload before
-/// it, up to [`CHAIN`] payloads. Each drop is caught. A payload past them is
-/// forgotten, so that a drop that always panics cannot hang the run.
+/// it. It drops at most [`CHAIN`] payloads, each in a catch, and forgets the payload
+/// past them, so that a drop that always panics cannot hang the run.
 fn messages(payload: Box<dyn Any + Send>) -> Vec<String> {
-    let mut messages = Vec::new();
-    let mut next = Some(payload);
+    let mut messages = vec![message(&*payload)];
+    let mut next = payload;
     for _ in 0..CHAIN {
-        let Some(payload) = next else {
-            return messages;
-        };
-        messages.push(message(&*payload));
-        next = panic::catch_unwind(AssertUnwindSafe(|| drop(payload))).err();
+        match panic::catch_unwind(AssertUnwindSafe(|| drop(next))) {
+            Ok(()) => return messages,
+            Err(payload) => {
+                messages.push(message(&*payload));
+                next = payload;
+            }
+        }
     }
     #[expect(clippy::mem_forget, reason = "its drop may panic again")]
     mem::forget(next);
