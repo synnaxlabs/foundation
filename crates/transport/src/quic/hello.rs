@@ -28,7 +28,7 @@ impl Hello {
             (WINDOW, self.window_bytes),
             (MESSAGE, self.message_bytes_max),
         ];
-        let mut bytes = Vec::with_capacity(4 * Varint::MAX.len());
+        let mut bytes = Vec::with_capacity(4 * varint::BYTES_MAX);
         for (id, value) in pairs {
             bytes.extend_from_slice(&Varint::new(id).expect("an id is a varint"));
             bytes.extend_from_slice(&Varint::new(value).unwrap_or(Varint::MAX));

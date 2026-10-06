@@ -1,5 +1,5 @@
 //! QUIC variable-length integers: a value under 2^62 in 1, 2, 4, or 8 bytes,
-//! big-endian, with the size in the top two bits of the first byte.
+//! big-endian, with the length in the top two bits of the first byte.
 
 #![deny(
     clippy::indexing_slicing,
@@ -10,18 +10,21 @@
 
 use std::ops::Deref;
 
+/// The most bytes of one varint.
+pub(crate) const BYTES_MAX: usize = 8;
+
 /// A value in the fewest varint bytes. It derefs to them.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Varint {
-    bytes: [u8; 8],
+    bytes: [u8; BYTES_MAX],
     len: usize,
 }
 
 impl Varint {
     /// 2^62 − 1, the largest value, in 8 bytes.
     pub(crate) const MAX: Self = Self {
-        bytes: [0xff; 8],
-        len: 8,
+        bytes: [0xff; BYTES_MAX],
+        len: BYTES_MAX,
     };
 
     /// `value` in the fewest bytes, or `None` when it is 2^62 or more.
@@ -49,7 +52,7 @@ impl Deref for Varint {
 }
 
 /// The bytes of the varint whose first byte is `first`.
-pub(crate) fn size(first: u8) -> usize {
+pub(crate) fn len(first: u8) -> usize {
     match first >> 6 {
         0 => 1,
         1 => 2,
@@ -62,19 +65,29 @@ pub(crate) fn size(first: u8) -> usize {
 ///
 /// # Panics
 ///
-/// When `bytes` is empty or its length is not the [`size`] of its first byte.
+/// When the length of `bytes` is not the [`len`] of its first byte.
 pub(crate) fn value(bytes: &[u8]) -> u64 {
-    let (&first, rest) = bytes.split_first().expect("a varint has a first byte");
-    assert_eq!(bytes.len(), size(first), "the bytes of one varint");
-    rest.iter().fold(u64::from(first & 0x3f), |value, &byte| {
-        value.wrapping_shl(8) | u64::from(byte)
-    })
+    let (first, value, mask) = match *bytes {
+        [b0] => (b0, u64::from(b0), 0x3f),
+        [b0, b1] => (b0, u64::from(u16::from_be_bytes([b0, b1])), 0x3fff),
+        [b0, b1, b2, b3] => {
+            let value = u32::from_be_bytes([b0, b1, b2, b3]);
+            (b0, u64::from(value), 0x3fff_ffff)
+        }
+        [b0, b1, b2, b3, b4, b5, b6, b7] => {
+            let value = u64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
+            (b0, value, 0x3fff_ffff_ffff_ffff)
+        }
+        _ => panic!("the bytes of one varint: {bytes:?}"),
+    };
+    assert_eq!(bytes.len(), len(first), "the bytes of one varint");
+    value & mask
 }
 
 /// Takes the varint at the front of `bytes`, and moves `bytes` past it. `None` when
 /// `bytes` ends first.
 pub(crate) fn take(bytes: &mut &[u8]) -> Option<u64> {
-    let (varint, rest) = bytes.split_at_checked(size(*bytes.first()?))?;
+    let (varint, rest) = bytes.split_at_checked(len(*bytes.first()?))?;
     *bytes = rest;
     Some(value(varint))
 }
@@ -157,6 +170,12 @@ mod tests {
     #[should_panic(expected = "the bytes of one varint")]
     fn value_panics_when_the_bytes_are_not_one_varint() {
         let _ = value(&[0x40]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the bytes of one varint: [64, 0, 0]")]
+    fn value_panics_at_a_length_no_varint_has() {
+        let _ = value(&[0x40, 0, 0]);
     }
 
     proptest! {

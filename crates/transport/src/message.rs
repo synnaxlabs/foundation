@@ -13,7 +13,18 @@ use std::task::Poll;
 
 use block::{Block, Pool, Unique};
 
-use crate::{Error, varint};
+use crate::Error;
+use crate::varint::{self, Varint};
+
+/// The prefix of a message of `len` bytes.
+///
+/// # Panics
+///
+/// When `len` is 2^62 or more, which no peer's limit allows.
+pub(crate) fn prefix(len: usize) -> Varint {
+    Varint::new(len)
+        .unwrap_or_else(|| panic!("a message of {len} bytes is over the varint limit"))
+}
 
 /// Splits a stream's bytes into whole messages, each in one block from a pool.
 #[derive(Debug)]
@@ -24,12 +35,12 @@ pub(crate) struct Reader {
 
 #[derive(Debug)]
 enum State {
-    /// A length prefix, with `have` of its `size` bytes. `size` is 1 until the first
+    /// A length prefix, with `have` of its `len` bytes. `len` is 1 until the first
     /// byte gives it.
     Prefix {
-        bytes: [u8; 8],
+        bytes: [u8; varint::BYTES_MAX],
         have: usize,
-        size: usize,
+        len: usize,
     },
     /// A message of this many bytes, with no block yet.
     Sized(u64),
@@ -38,9 +49,9 @@ enum State {
 }
 
 const START: State = State::Prefix {
-    bytes: [0; 8],
+    bytes: [0; varint::BYTES_MAX],
     have: 0,
-    size: 1,
+    len: 1,
 };
 
 impl Reader {
@@ -83,8 +94,8 @@ impl Reader {
     ) -> Result<Poll<Option<Block>>, Error> {
         loop {
             match &mut self.state {
-                State::Prefix { bytes, have, size } => {
-                    let prefix = bytes.get_mut(..*size).expect("invariant: size <= 8");
+                State::Prefix { bytes, have, len } => {
+                    let prefix = bytes.get_mut(..*len).expect("invariant: len <= 8");
                     match pull(&mut source, prefix, have)? {
                         Poll::Pending => return Ok(Poll::Pending),
                         Poll::Ready(false) if *have == 0 => {
@@ -94,9 +105,9 @@ impl Reader {
                         Poll::Ready(true) => {}
                     }
                     let [first, ..] = *bytes;
-                    *size = varint::size(first);
-                    if *have == *size {
-                        let prefix = bytes.get(..*size).expect("invariant: size <= 8");
+                    *len = varint::len(first);
+                    if *have == *len {
+                        let prefix = bytes.get(..*len).expect("invariant: len <= 8");
                         self.state = State::Sized(varint::value(prefix));
                     }
                 }
@@ -211,7 +222,6 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::varint::Varint;
 
     fn pool(budget: usize) -> Pool {
         let config = Config { budget };
@@ -223,8 +233,7 @@ mod tests {
     fn encode(messages: &[Vec<u8>]) -> Vec<u8> {
         let mut stream = Vec::new();
         for message in messages {
-            let prefix = Varint::new(message.len()).expect("a varint");
-            stream.extend_from_slice(&prefix);
+            stream.extend_from_slice(&prefix(message.len()));
             stream.extend_from_slice(message);
         }
         stream
@@ -288,6 +297,12 @@ mod tests {
                 Poll::Pending => panic!("a source that is not open is never pending"),
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "a message of 4611686018427387904 bytes")]
+    fn prefix_panics_at_2_to_the_62() {
+        let _ = prefix(1 << 62);
     }
 
     mod reader {
@@ -550,8 +565,7 @@ mod tests {
             let pool = pool(2 * block::footprint(bytes_max));
             let mut readers = Vec::new();
             for _ in 0..2 {
-                let mut source =
-                    Source::new(Varint::new(bytes_max).expect("a varint").to_vec(), 64);
+                let mut source = Source::new(prefix(bytes_max).to_vec(), 64);
                 source.open = true;
                 let mut reader = Reader::new(bytes_max);
                 assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
