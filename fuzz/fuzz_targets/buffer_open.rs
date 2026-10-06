@@ -319,11 +319,11 @@ async fn check(
                 stored_at: Stamp::from_nanos(7),
                 last: Some(Stamp::from_nanos(9)),
                 tag: 0,
-                parts: &[],
+                parts: Parts::default(),
             });
         }
     }
-    match buffer.append(&entries) {
+    match buffer.append(entries) {
         Ok(()) => {}
         Err(Error::Full { .. }) => return,
         Err(other) => panic!("append failed: {other}"),

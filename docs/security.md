@@ -144,11 +144,13 @@ state on `main`.
   also break safety, because a false `AppendReply` counts as held, so `raft` trusts
   its voters. No change in `raft` for that (RAFT SURFACE, #352 item 2). Proof of
   election closes the `u64::MAX` case (#750).
-- A voter that does not lead can forge a term. After a heartbeat or an `Append` of
-  a higher term, or a reply of a higher term and then either, a node follows the
-  voter and writes and commits what it sends. So two nodes can apply different
-  entries at one index, and a forged voter set can take the group over (RAFT LOG).
-  Tests pin it (`raft/tests/it/hostile.rs`). Open: #750, proof of election.
+- A voter that does not lead can make a node commit a voter set alone. It sends a
+  heartbeat or an `Append` of a higher term, or a reply of a higher term and then
+  either, or an `Append` in the node's term before the node hears that term's
+  leader. The node follows the voter and writes and commits what it sends. So two
+  nodes can apply different entries at one index, and a forged voter set can take
+  the group over (RAFT LOG). Open by decision; `raft/tests/it/hostile.rs` pins it.
+  The long-term fix is a proof of election (#750).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.

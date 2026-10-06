@@ -59,9 +59,13 @@ fn a_pin_fault_fails_the_start_with_its_core() {
         thread::Error::Pin {
             name: "shard-2".into(),
             core: 2,
+            reason: "injected".into(),
         }
     );
-    assert_eq!(e.to_string(), "cannot pin thread shard-2 to core 2");
+    assert_eq!(
+        e.to_string(),
+        "cannot pin thread shard-2 to core 2: injected"
+    );
     sim.run().unwrap();
 }
 
@@ -176,6 +180,7 @@ fn faults_on_one_core_fire_in_turn() {
         thread::Error::Pin {
             name: "a".into(),
             core: 1,
+            reason: "injected".into(),
         }
     );
     assert_eq!(
