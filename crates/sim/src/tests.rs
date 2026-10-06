@@ -689,23 +689,31 @@ fn a_leaked_sleep_stops_at_the_end_of_its_thread() {
     }
 }
 
-#[test]
-fn a_leaked_sleep_polled_in_a_drop_at_the_end_of_its_thread_stops() {
+/// A leaked sleep that a drop polls at the end of its thread.
+mod polled_in_a_drop {
+    use super::*;
+
     /// Polls its sleep as it drops.
     struct Poller(&'static mut env::clock::Sleep);
+
     impl Drop for Poller {
         fn drop(&mut self) {
             let mut cx = Context::from_waker(std::task::Waker::noop());
             assert!(Pin::new(&mut *self.0).poll(&mut cx).is_pending());
         }
     }
-    #[derive(Clone, Copy, Debug)]
+
+    /// How the thread of the [`Poller`] ends.
+    #[derive(Clone, Copy)]
     enum Ending {
         Finish,
         Panic,
         Crash,
     }
-    for ending in [Ending::Finish, Ending::Panic, Ending::Crash] {
+
+    /// Asserts that the sleep stops when its thread ends by `ending`: no later run
+    /// moves true time.
+    fn check(ending: Ending) {
         let mut sim = sim(0);
         let node = sim.node(node::Config::default());
         let clock = node.clock();
@@ -739,7 +747,22 @@ fn a_leaked_sleep_polled_in_a_drop_at_the_end_of_its_thread_stops() {
             }
         }
         assert_eq!(sim.run(), Ok(()));
-        assert_eq!(node.clock().now(), start, "{ending:?}");
+        assert_eq!(node.clock().now(), start);
+    }
+
+    #[test]
+    fn a_leaked_sleep_stops_at_a_finish() {
+        check(Ending::Finish);
+    }
+
+    #[test]
+    fn a_leaked_sleep_stops_at_a_panic() {
+        check(Ending::Panic);
+    }
+
+    #[test]
+    fn a_leaked_sleep_stops_at_a_crash() {
+        check(Ending::Crash);
     }
 }
 
