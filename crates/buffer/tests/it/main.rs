@@ -16,7 +16,8 @@ use std::task::Poll;
 
 use block::{Block, Heap, Pool};
 use buffer::{
-    Buffer, Config, Entry, Error, Layout, Limit, Parts, Rejected, Tail, Unfit,
+    Buffer, Config, Entry, Error, Layout, Limit, Mark, Parts, Read, Rejected, Stored,
+    Tail, Unfit,
 };
 use env::clock::Clock;
 use env::entropy::Entropy;
@@ -172,6 +173,83 @@ fn tail(seq: u64, stamp: Option<i64>) -> Tail {
         seq,
         stamp: stamp.map(Stamp::from_nanos),
     }
+}
+
+fn mark(seq: u64, given: u64) -> Mark {
+    Mark { seq, given }
+}
+
+/// What a read gives back for an `entry` with tag 0 and `bytes`.
+fn stored(first: u64, len: u32, last: Option<i64>, bytes: Block) -> Stored {
+    Stored {
+        first,
+        len,
+        stored_at: Stamp::from_nanos(7),
+        last: last.map(Stamp::from_nanos),
+        tag: 0,
+        bytes,
+    }
+}
+
+/// A read that gives `entries` with no gap, and continues at `next`.
+fn whole(entries: Vec<Stored>, next: Mark) -> Read {
+    Read {
+        gap: None,
+        entries,
+        next,
+    }
+}
+
+/// Every read of `path` from `from` that follows `next` with `budget`, up to and
+/// including the first that gives nothing. Each read keeps the read rules: a gap
+/// only before its first entry and only when the entry starts past the mark, no
+/// gap between its entries, `next` after its last entry, and at most one entry
+/// past the budget.
+async fn read_all(
+    buffer: &Buffer,
+    slot: Slot,
+    path: Path,
+    from: Mark,
+    budget: usize,
+) -> Vec<Read> {
+    let mut reads = Vec::new();
+    let mut from = from;
+    loop {
+        let read = buffer
+            .read(slot, path, from, budget)
+            .await
+            .expect("the read passes");
+        let mut at = from.seq;
+        let mut given = 0;
+        for (number, entry) in read.entries.iter().enumerate() {
+            assert!(given < budget, "entry {number} came past the budget");
+            given += block::footprint(entry.bytes.len());
+            if number == 0 {
+                let gap = (entry.first > at).then_some(at..entry.first);
+                assert_eq!(read.gap, gap, "the gap before the first entry");
+            } else {
+                assert_eq!(entry.first, at, "a gap before entry {number}");
+            }
+            at = entry.first + u64::from(entry.len);
+        }
+        if read.entries.is_empty() {
+            assert_eq!(read.gap, None, "a gap with no entry");
+            assert_eq!(read.next, from, "an empty read moved the mark");
+        } else {
+            assert_eq!(read.next.seq, at, "next is after the last entry");
+        }
+        let done = read.entries.is_empty();
+        from = read.next;
+        reads.push(read);
+        if done {
+            return reads;
+        }
+    }
+}
+
+/// The entries of every read in `reads`, in order.
+fn entries(reads: &[Read]) -> Vec<Stored> {
+    reads.iter().flat_map(|read| read.entries.clone()).collect()
 }
 
 /// Starts one shard of one node, with the node's files in `memory`, to run `main`
@@ -2709,5 +2787,640 @@ fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
             "its entries were durable before the drop"
         );
         assert_eq!(shard.memory.open_files(), 0, "the task ended");
+    });
+}
+
+/// Three paths over three commits: a read from the start gives each path's entries
+/// in order, with their headers and bytes, and never another path's. A path with
+/// no entry gives nothing.
+#[test]
+fn a_read_gives_the_entries_of_one_path_in_order() {
+    run(144, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let b = slots.assign(key(2));
+        let live = |first, len, last, bytes| {
+            entry(
+                1,
+                a,
+                Path::Live,
+                first,
+                len,
+                last,
+                shard.block(bytes).into(),
+            )
+        };
+        for batch in [
+            vec![
+                live(0, 3, Some(30), 100),
+                entry(1, a, Path::Backfill, 0, 1, Some(1), shard.block(7).into()),
+            ],
+            vec![
+                entry(2, b, Path::Live, 0, 2, None, shard.block(20).into()),
+                live(3, 1, None, 300),
+            ],
+            vec![
+                live(4, 2, Some(60), 0),
+                entry(2, b, Path::Live, 2, 2, Some(4), shard.block(21).into()),
+            ],
+        ] {
+            buffer.append(batch).expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = vec![
+            stored(0, 3, Some(30), shard.block(100)),
+            stored(3, 1, None, shard.block(300)),
+            stored(4, 2, Some(60), shard.block(0)),
+        ];
+        assert_eq!(read, whole(expected, mark(6, 0)));
+        let read = buffer
+            .read(a, Path::Backfill, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = vec![stored(0, 1, Some(1), shard.block(7))];
+        assert_eq!(read, whole(expected, mark(1, 0)));
+        let read = buffer
+            .read(b, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = vec![
+            stored(0, 2, None, shard.block(20)),
+            stored(2, 2, Some(4), shard.block(21)),
+        ];
+        assert_eq!(read, whole(expected, mark(4, 0)));
+        let read = buffer
+            .read(b, Path::Backfill, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        assert_eq!(read, whole(Vec::new(), mark(0, 0)));
+    });
+}
+
+/// A budget of pool bytes splits the log over reads, each passing the budget by
+/// less than one entry's block. An entry with no bytes costs its block. Reads that
+/// follow `next` give each entry once, zero-length entries included, and the last
+/// read gives nothing.
+#[test]
+fn a_budget_splits_the_log_over_reads_that_follow_next() {
+    run(145, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let live = |first, len, last, bytes| {
+            entry(
+                1,
+                a,
+                Path::Live,
+                first,
+                len,
+                last,
+                shard.block(bytes).into(),
+            )
+        };
+        buffer
+            .append([live(0, 3, Some(30), 100), live(3, 0, None, 0)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer
+            .append([live(3, 2, Some(50), 50), live(5, 0, None, 0)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let all = vec![
+            stored(0, 3, Some(30), shard.block(100)),
+            stored(3, 0, None, shard.block(0)),
+            stored(3, 2, Some(50), shard.block(50)),
+            stored(5, 0, None, shard.block(0)),
+        ];
+        let reads = read_all(&buffer, a, Path::Live, Mark::at(0), 1).await;
+        let expected = vec![
+            whole(all[..1].to_vec(), mark(3, 0)),
+            whole(all[1..2].to_vec(), mark(3, 1)),
+            whole(all[2..3].to_vec(), mark(5, 0)),
+            whole(all[3..].to_vec(), mark(5, 1)),
+            whole(Vec::new(), mark(5, 1)),
+        ];
+        assert_eq!(reads, expected, "a budget of one byte");
+        let budget = block::footprint(100) + block::footprint(0);
+        let reads = read_all(&buffer, a, Path::Live, Mark::at(0), budget).await;
+        let expected = vec![
+            whole(all[..2].to_vec(), mark(3, 1)),
+            whole(all[2..].to_vec(), mark(5, 1)),
+            whole(Vec::new(), mark(5, 1)),
+        ];
+        assert_eq!(reads, expected, "a budget of the first two blocks");
+        let reads = read_all(&buffer, a, Path::Live, Mark::at(0), usize::MAX).await;
+        let expected = vec![whole(all, mark(5, 1)), whole(Vec::new(), mark(5, 1))];
+        assert_eq!(reads, expected, "no budget");
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), 0)
+            .await
+            .expect("reads");
+        assert_eq!(read, whole(Vec::new(), mark(0, 0)), "a budget of zero");
+    });
+}
+
+/// A handoff at the tail is given once with its tag. A read from `next` gives
+/// nothing until the next frame is durable.
+#[test]
+fn a_handoff_at_the_tail_is_given_once() {
+    run(146, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
+        buffer.append([frame]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let handoff = Entry {
+            tag: 2,
+            ..entry(1, a, Path::Live, 3, 0, None, Parts::default())
+        };
+        buffer.append([handoff]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let expected = vec![
+            stored(0, 3, Some(30), shard.block(10)),
+            Stored {
+                tag: 2,
+                ..stored(3, 0, None, shard.block(0))
+            },
+        ];
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        assert_eq!(read, whole(expected, mark(3, 1)));
+        let read = buffer
+            .read(a, Path::Live, mark(3, 1), usize::MAX)
+            .await
+            .expect("reads");
+        assert_eq!(read, whole(Vec::new(), mark(3, 1)), "after the handoff");
+        let frame = entry(1, a, Path::Live, 3, 2, Some(50), shard.block(11).into());
+        buffer.append([frame]).expect("queues");
+        let read = buffer
+            .read(a, Path::Live, mark(3, 1), usize::MAX)
+            .await
+            .expect("reads");
+        assert_eq!(
+            read,
+            whole(Vec::new(), mark(3, 1)),
+            "the frame is not durable"
+        );
+        buffer.committed().await.expect("commits");
+        let read = buffer
+            .read(a, Path::Live, mark(3, 1), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = vec![stored(3, 2, Some(50), shard.block(11))];
+        assert_eq!(read, whole(expected, mark(5, 0)), "the frame is durable");
+    });
+}
+
+/// A read stops before a skip ahead. The next read reports the seqs the skip left
+/// out as a gap and gives the entries after it, and so does a read from a mark in
+/// the gap.
+#[test]
+fn a_read_stops_before_a_skip_and_the_next_reports_the_gap() {
+    run(147, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let live = |first, len, last, bytes| {
+            entry(
+                1,
+                a,
+                Path::Live,
+                first,
+                len,
+                last,
+                shard.block(bytes).into(),
+            )
+        };
+        buffer
+            .append([live(0, 3, Some(30), 30), live(5, 2, Some(70), 70)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer.append([live(7, 1, None, 80)]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let before = vec![stored(0, 3, Some(30), shard.block(30))];
+        let after = vec![
+            stored(5, 2, Some(70), shard.block(70)),
+            stored(7, 1, None, shard.block(80)),
+        ];
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        assert_eq!(read, whole(before, mark(3, 0)), "stops before the skip");
+        let read = buffer
+            .read(a, Path::Live, mark(3, 0), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = Read {
+            gap: Some(3..5),
+            entries: after.clone(),
+            next: mark(8, 0),
+        };
+        assert_eq!(read, expected, "reports the gap");
+        let read = buffer
+            .read(a, Path::Live, Mark::at(4), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = Read {
+            gap: Some(4..5),
+            entries: after,
+            next: mark(8, 0),
+        };
+        assert_eq!(read, expected, "from a mark in the gap");
+    });
+}
+
+/// Entries not yet synced are not given. After `committed`, they are.
+#[test]
+fn a_read_gives_only_durable_entries() {
+    run(148, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
+        buffer.append([frame]).expect("queues");
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        assert_eq!(read, whole(Vec::new(), mark(0, 0)), "before the commit");
+        buffer.committed().await.expect("commits");
+        let frame = entry(1, a, Path::Live, 3, 1, Some(40), shard.block(11).into());
+        buffer.append([frame]).expect("queues");
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = vec![stored(0, 3, Some(30), shard.block(10))];
+        assert_eq!(read, whole(expected, mark(3, 0)), "after the first commit");
+        buffer.committed().await.expect("commits");
+        let read = buffer
+            .read(a, Path::Live, mark(3, 0), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = vec![stored(3, 1, Some(40), shard.block(11))];
+        assert_eq!(read, whole(expected, mark(4, 0)), "after the second commit");
+    });
+}
+
+/// A mark inside an entry gives that entry whole. A mark at or past the tail gives
+/// nothing, and `next` is the mark.
+#[test]
+fn a_mark_inside_an_entry_gives_it_whole_and_one_past_the_tail_gives_nothing() {
+    run(149, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let live = |first, len, last, bytes| {
+            entry(
+                1,
+                a,
+                Path::Live,
+                first,
+                len,
+                last,
+                shard.block(bytes).into(),
+            )
+        };
+        buffer.append([live(0, 3, Some(30), 30)]).expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer.append([live(3, 4, Some(70), 70)]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let all = vec![
+            stored(0, 3, Some(30), shard.block(30)),
+            stored(3, 4, Some(70), shard.block(70)),
+        ];
+        for seq in [1, 2] {
+            let read = buffer
+                .read(a, Path::Live, Mark::at(seq), usize::MAX)
+                .await
+                .expect("reads");
+            assert_eq!(read, whole(all.clone(), mark(7, 0)), "from {seq}");
+        }
+        let read = buffer
+            .read(a, Path::Live, Mark::at(5), usize::MAX)
+            .await
+            .expect("reads");
+        assert_eq!(read, whole(all[1..].to_vec(), mark(7, 0)), "from 5");
+        for from in [mark(7, 0), mark(7, 5), mark(9, 0)] {
+            let read = buffer
+                .read(a, Path::Live, from, usize::MAX)
+                .await
+                .expect("reads");
+            assert_eq!(read, whole(Vec::new(), from), "from {from:?}");
+        }
+    });
+}
+
+/// A failed read of the ring gives its error, and a later read passes.
+#[test]
+fn a_failed_ring_read_gives_its_error_and_a_later_read_passes() {
+    let (mut sim, node) = one_node(150);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        node.fail_file(FilePath::new(RING), Operation::ReadAt);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::ReadAt,
+            code: 5,
+        };
+        let read = buffer.read(a, Path::Live, Mark::at(0), usize::MAX).await;
+        assert_eq!(read, Err(Error::Files(failed)));
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("the next read passes");
+        assert_eq!(read.entries.len(), 1);
+        assert_eq!(read.entries[0].first, 0);
+        assert_eq!(read.entries[0].len, 3);
+        assert_eq!(read.entries[0].last, Some(Stamp::from_nanos(30)));
+        assert_eq!(&*read.entries[0].bytes, &[]);
+        assert_eq!(read.next, mark(3, 0));
+    })
+    .expect("the buffer ends");
+}
+
+/// A pool with no block for the table gives `Error::Pool`, and a read after the
+/// blocks come back passes.
+#[test]
+fn a_read_with_no_block_for_the_table_gives_the_pool_error() {
+    run(151, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
+        buffer.append([frame]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        let read = buffer.read(a, Path::Live, Mark::at(0), usize::MAX).await;
+        let exhausted = block::Error::Exhausted {
+            requested: 4096,
+            available: 0,
+        };
+        assert_eq!(read, Err(Error::Pool(exhausted)));
+        let read = buffer.read(a, Path::Live, Mark::at(0), 0).await;
+        let empty = whole(Vec::new(), mark(0, 0));
+        assert_eq!(read, Ok(empty), "a budget of zero takes no block");
+        drop(held);
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("the next read passes");
+        let expected = vec![stored(0, 3, Some(30), shard.block(10))];
+        assert_eq!(read, whole(expected, mark(3, 0)));
+    });
+}
+
+/// After a failed sync, a read gives the error that ended the buffer.
+#[test]
+fn a_read_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
+    run(152, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
+        buffer.append([frame]).expect("queues");
+        buffer.committed().await.expect("commits");
+        shard.memory.fail_syncs();
+        buffer
+            .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(buffer.committed().await, Err(failed.clone()));
+        let read = buffer.read(a, Path::Live, Mark::at(0), usize::MAX).await;
+        assert_eq!(read, Err(Error::Files(failed)));
+    });
+}
+
+/// Reads run back to back while a commit's sync fails. Each read gives its 20
+/// durable entries or, once the sync failed, the error that ended the buffer, also
+/// a read in flight when the sync failed.
+#[test]
+fn a_read_across_a_failed_sync_gives_the_error_that_ended_the_buffer() {
+    let (mut sim, node) = one_node(160);
+    let errors = sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let pool = Rc::clone(&config.pool);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let batch: Vec<Entry> = (0..20)
+            .map(|first| {
+                let bytes = pool.alloc(8).expect("a block").freeze();
+                entry(1, a, Path::Live, first, 1, None, Parts::from(bytes))
+            })
+            .collect();
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        node.fail_file(FilePath::new(RING), Operation::Sync);
+        buffer
+            .append([entry(1, a, Path::Live, 20, 1, None, Parts::default())])
+            .expect("queues");
+        let mut errors = Vec::new();
+        while errors.len() < 2 {
+            match buffer.read(a, Path::Live, Mark::at(0), usize::MAX).await {
+                Ok(read) => assert_eq!(read.entries.len(), 20),
+                Err(error) => errors.push(error),
+            }
+        }
+        errors
+    });
+    let failed = Error::Files(FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::Sync,
+        code: 5,
+    });
+    assert_eq!(errors.expect("the run ends"), [failed.clone(), failed]);
+}
+
+/// A read that holds entries ends where the pool has no block for the next one,
+/// as at its budget, and the next read goes on from there.
+#[test]
+fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
+    run(153, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let first = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
+        buffer.append([first]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let second = entry(1, a, Path::Live, 3, 2, Some(50), shard.block(12).into());
+        buffer.append([second]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let table = shard.pool.alloc(4096).expect("a block for one table");
+        let bytes = shard.pool.alloc(10).expect("a block for one entry");
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        drop((table, bytes));
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("the read keeps the first entry");
+        let expected = vec![stored(0, 3, Some(30), shard.block(10))];
+        assert_eq!(read, whole(expected, mark(3, 0)));
+        drop(held);
+        let read = buffer
+            .read(a, Path::Live, read.next, usize::MAX)
+            .await
+            .expect("the next read passes");
+        let expected = vec![stored(3, 2, Some(50), shard.block(12))];
+        assert_eq!(read, whole(expected, mark(5, 0)));
+    });
+}
+
+/// A record whose header and entry table pass one 4 KiB block is read whole.
+#[test]
+fn a_record_with_a_table_over_one_block_is_read() {
+    run(154, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX * 4), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let batch: Vec<_> = (0..100)
+            .map(|first| entry(1, a, Path::Live, first, 1, None, shard.block(3).into()))
+            .collect();
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        let read = buffer
+            .read(a, Path::Live, Mark::at(0), usize::MAX)
+            .await
+            .expect("reads");
+        let expected = (0..100).map(|first| stored(first, 1, None, shard.block(3)));
+        assert_eq!(read, whole(expected.collect(), mark(100, 0)));
+    });
+}
+
+/// Commits one entry, appends a second, and cuts the power `cut` nanoseconds after
+/// a point at most 100 µs before the deadline of the second commit. Returns the
+/// sim, the node, and whether the second commit had ended.
+fn cut_the_second_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, bool) {
+    let (mut sim, node) = one_node(seed);
+    let committed = Arc::new(AtomicBool::new(false));
+    let commit = Arc::clone(&committed);
+    let first = node.clone();
+    drop(on_node(&node, "first", move |tasks| async move {
+        let mut slots = Slots::new();
+        let config = node_config(&first, tasks, DIR);
+        let buffer = Buffer::open(config, &mut slots)
+            .await
+            .expect("the first open ends well");
+        let a = slots.assign(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        commit.store(true, Ordering::Relaxed);
+        buffer
+            .append([entry(1, a, Path::Live, 3, 2, Some(50), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        commit.store(true, Ordering::Relaxed);
+        std::future::pending::<()>().await;
+    }));
+    let step = 10_000;
+    while !committed.load(Ordering::Relaxed) {
+        sim.run_for(Span::from_nanos(step))
+            .expect("the run goes on");
+    }
+    committed.store(false, Ordering::Relaxed);
+    let rest = Span::from_nanos(COMMIT.nanos() - 10 * step + cut);
+    sim.run_for(rest).expect("the run goes on");
+    sim.crash(&node, sim::Crash::Power);
+    (sim, node, committed.load(Ordering::Relaxed))
+}
+
+/// After a power cut at any point of a commit, a read gives the entries the
+/// recovered tail reports, and nothing else.
+#[test]
+fn a_read_after_a_power_cut_gives_the_entries_the_tail_reports() {
+    each_cut(0..16, 10_000, |seed, cut| {
+        let (mut sim, node, ended) = cut_the_second_commit(seed, cut);
+        let read = sim.run_on(&node, |node, tasks| async move {
+            let mut slots = Slots::new();
+            let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
+                .await
+                .expect("opens after the power cut");
+            let a = slots.assign(key(1));
+            let tail = buffer.tail(a, Path::Live);
+            let reads = read_all(&buffer, a, Path::Live, Mark::at(0), 1).await;
+            (tail, reads)
+        });
+        let (tail, reads) = read.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
+        let firsts: Vec<(u64, u32)> = entries(&reads)
+            .iter()
+            .map(|entry| (entry.first, entry.len))
+            .collect();
+        let expected = if tail.seq == 5 {
+            vec![(0, 3), (3, 2)]
+        } else {
+            vec![(0, 3)]
+        };
+        assert_eq!(
+            firsts, expected,
+            "seed {seed}, cut at {cut} ns, tail {tail:?}"
+        );
+        assert!(cut != 0 || !ended, "seed {seed}: the cut missed the commit");
+        ended
     });
 }
