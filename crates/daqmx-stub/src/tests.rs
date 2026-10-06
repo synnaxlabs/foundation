@@ -5,6 +5,19 @@ use std::ptr;
 use super::*;
 
 #[test]
+fn gives_codes_below_zero_for_errors_as_the_driver_does() {
+    let codes = [FAIL, STOPPED, RANGE, SIZE, ARGUMENT, DIRECTION, WARN];
+    assert_eq!(codes.map(i32::signum), [-1, -1, -1, -1, -1, -1, 1]);
+}
+
+#[test]
+fn takes_the_driver_values_of_its_arguments() {
+    let handle = create();
+    assert_eq!(input(handle, c"Dev1/ai0", -1, 10_348), 0);
+    clear(handle);
+}
+
+#[test]
 fn counts_the_channels_a_name_holds() {
     assert_eq!(count(c"Dev1/ai0"), 1);
     assert_eq!(count(c"Dev1/ai0:3"), 4);
