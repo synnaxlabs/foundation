@@ -4,15 +4,17 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::path::Path;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Pool};
 use env::files::{Error, File, Mode, Operation};
 use env::tasks::Tasks;
 use env::thread::Handle;
-use types::time::Span;
+use types::time::{Monotonic, Span};
 
 use super::{shard, sim};
 use crate::node;
@@ -971,4 +973,151 @@ fn slept_around_end(sleep: Span) -> u64 {
 fn the_digest_holds_the_polls_before_a_file_end() {
     let early = slept_around_end(Span::from_nanos(1));
     assert_ne!(early, slept_around_end(Span::MILLISECOND));
+}
+
+/// Polls `future` once, and checks that it is pending.
+async fn pend(mut future: Pin<&mut impl Future>) {
+    poll_fn(|cx| {
+        assert!(future.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+}
+
+/// What a write open of a file gives after a close of its write handle, whose sync
+/// dropped in flight.
+fn reopen_after_dropped_sync(value: u64) -> Result<(), Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        let file = create(&node, "a", 1_024).await;
+        let mut sync = Box::pin(file.sync());
+        pend(sync.as_mut()).await;
+        drop(sync);
+        let poisoned = Err(Error::Poisoned { path: path.into() });
+        assert_eq!(file.sync().await, poisoned);
+        file.close().await;
+        files.open(path, Mode::Write).await.map(drop)
+    })
+}
+
+#[test]
+fn a_poisoned_file_reopens_at_once_after_a_close() {
+    for value in 0..32 {
+        assert_eq!(reopen_after_dropped_sync(value), Ok(()), "value {value}");
+    }
+}
+
+/// The times before and after a write of a file, which is awaited, or dropped in
+/// flight and then the file closed.
+fn write_span(value: u64, dropped: bool) -> (Monotonic, Monotonic) {
+    run(value, MIB, move |node, _| async move {
+        let (file, pool, clock) =
+            (create(&node, "a", 1_024).await, pool(), node.clock());
+        let parts = [block(&pool, &[1; 1_024])];
+        let start = clock.now();
+        if dropped {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(write.as_mut()).await;
+            drop(write);
+            file.close().await;
+        } else {
+            file.write_at(0, &parts).await.unwrap();
+        }
+        (start, clock.now())
+    })
+}
+
+#[test]
+fn a_close_ends_when_a_dropped_write_ends() {
+    for value in 0..8 {
+        let (start, end) = write_span(value, true);
+        assert!(start < end, "value {value}");
+        assert_eq!((start, end), write_span(value, false), "value {value}");
+    }
+}
+
+#[test]
+fn a_close_with_no_call_in_flight_takes_no_time() {
+    let (start, end) = run(0, MIB, |node, _| async move {
+        let file = create(&node, "a", 1_024).await;
+        let start = node.clock().now();
+        file.close().await;
+        (start, node.clock().now())
+    });
+    assert_eq!(start, end);
+}
+
+#[test]
+fn a_close_waits_only_for_the_calls_of_its_handle() {
+    let (start, end) = run(0, MIB, |node, _| async move {
+        let (files, path, pool) = (node.files(), Path::new("a"), pool());
+        drop(create(&node, "a", 1_024).await);
+        let other = files.open(path, Mode::Read).await.unwrap();
+        let mine = files.open(path, Mode::Read).await.unwrap();
+        let mut read = Box::pin(other.read_at(0, pool.alloc(1_024).unwrap()));
+        pend(read.as_mut()).await;
+        let start = node.clock().now();
+        mine.close().await;
+        (start, node.clock().now())
+    });
+    assert_eq!(start, end);
+}
+
+/// What a write open of a file gives at once after a drop of a close that waits for a
+/// write in flight, and then after a millisecond.
+fn open_after_dropped_close(value: u64) -> (Option<Error>, Option<Error>) {
+    run(value, MIB, |node, _| async move {
+        let (files, path, pool) = (node.files(), Path::new("a"), pool());
+        let file = create(&node, "a", 1_024).await;
+        let parts = [block(&pool, &[1; 1_024])];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        let mut close = Box::pin(file.close());
+        pend(close.as_mut()).await;
+        drop(close);
+        let first = files.open(path, Mode::Write).await.err();
+        node.clock().sleep(Span::MILLISECOND).await;
+        (first, files.open(path, Mode::Write).await.err())
+    })
+}
+
+#[test]
+fn a_dropped_close_closes_the_file_without_a_wait() {
+    let both = [(Some(busy("a")), None), (None, None)];
+    let opens: Vec<_> = (0..32).map(open_after_dropped_close).collect();
+    assert!(opens.iter().all(|open| both.contains(open)), "{opens:?}");
+    assert!(both.iter().all(|end| opens.contains(end)), "{opens:?}");
+}
+
+/// A waker that counts its wakes.
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn a_dropped_close_is_not_woken_when_its_calls_end() {
+    for value in 0..8 {
+        let woken = run(value, MIB, |node, _| async move {
+            let pool = pool();
+            let file = create(&node, "a", 1_024).await;
+            let parts = [block(&pool, &[1; 1_024])];
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(write.as_mut()).await;
+            drop(write);
+            let count = Arc::new(Wakes(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&count));
+            let mut close = Box::pin(file.close());
+            let cx = &mut Context::from_waker(&waker);
+            assert!(close.as_mut().poll(cx).is_pending());
+            drop(close);
+            node.clock().sleep(Span::MILLISECOND).await;
+            count.0.load(Ordering::Relaxed)
+        });
+        assert_eq!(woken, 0, "value {value}");
+    }
 }
