@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::fmt;
 use std::rc::Rc;
 
 use types::node::PublicKey;
@@ -7,6 +7,7 @@ use crate::class::Class;
 use crate::code::Code;
 use crate::datagram;
 use crate::error::Error;
+use crate::quic;
 use crate::stream::{Incoming, Receiver, Sender};
 
 /// A connection to one peer. It carries streams of whole messages and datagrams that
@@ -28,12 +29,14 @@ use crate::stream::{Incoming, Receiver, Sender};
 ///     receiver.recv().await
 /// }
 /// ```
-#[derive(Clone, Debug)]
-pub struct Session {
-    _shard: PhantomData<Rc<()>>,
-}
+#[derive(Clone)]
+pub struct Session(Rc<quic::Session>);
 
 impl Session {
+    pub(crate) fn new(session: quic::Session) -> Self {
+        Self(Rc::new(session))
+    }
+
     /// Who is on the other end.
     ///
     /// ```
@@ -45,7 +48,7 @@ impl Session {
     /// ```
     #[must_use]
     pub fn peer(&self) -> Peer {
-        todo!("#68")
+        self.0.peer()
     }
 
     /// Whether the session runs through a relay node. It never changes: a session is
@@ -59,7 +62,7 @@ impl Session {
     /// ```
     #[must_use]
     pub fn relayed(&self) -> bool {
-        todo!("#68")
+        false
     }
 
     /// Opens a stream in both directions. It waits while the peer allows no more
@@ -149,8 +152,7 @@ impl Session {
     /// }
     /// ```
     pub fn close(&self, code: Code) {
-        let _ = code;
-        todo!("#68")
+        self.0.close(code);
     }
 
     /// Waits until the session ends and returns why.
@@ -161,7 +163,15 @@ impl Session {
     /// }
     /// ```
     pub async fn closed(&self) -> Error {
-        todo!("#68")
+        self.0.closed().await
+    }
+}
+
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session")
+            .field("peer", &self.peer())
+            .finish_non_exhaustive()
     }
 }
 
@@ -184,4 +194,41 @@ pub enum Peer {
     /// A program with no node key, such as an SDK. It proves who it is above the
     /// transport, with a signed hello.
     Client,
+}
+
+#[cfg(test)]
+mod tests {
+    use types::node::PrivateKey;
+    use types::time::Span;
+
+    use crate::testing::{self, IDLE};
+    use crate::tls::public;
+    use crate::{Code, Error};
+
+    const CLIENT: PrivateKey = PrivateKey([1; 32]);
+    const SERVER: PrivateKey = PrivateKey([2; 32]);
+
+    #[test]
+    fn a_session_stays_open_until_its_last_clone_drops() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = testing::address(&server);
+        let held = Span::from_nanos(2 * IDLE.nanos());
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            let session = transport.accept().await.expect("a session");
+            drop(session.clone());
+            node.clock().sleep(held).await;
+            drop(session);
+            // A shard that ends drops its tasks.
+            node.clock().sleep(Span::MILLISECOND).await;
+        });
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            let connected = node.clock().now();
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+            assert!(node.clock().now() - connected >= held);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
 }

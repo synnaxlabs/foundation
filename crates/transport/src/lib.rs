@@ -39,9 +39,14 @@ mod error;
     expect(dead_code, reason = "the QUIC carrier is the first user")
 )]
 mod message;
+pub mod port;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "`Transport::new` is the first user")
+    expect(
+        dead_code,
+        reason = "`Transport::dial` and the streams and datagrams of `Session` are the \
+                  next users (#68)"
+    )
 )]
 mod quic;
 mod session;
@@ -59,7 +64,7 @@ mod tls;
 )]
 mod varint;
 
-use std::marker::PhantomData;
+use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
@@ -70,6 +75,7 @@ pub use address::Address;
 pub use class::Class;
 pub use code::Code;
 pub use error::Error;
+pub use port::Port;
 pub use session::{Peer, Session};
 
 /// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
@@ -77,15 +83,15 @@ pub use session::{Peer, Session};
 const PAYLOAD_IPV4: u16 = 1472;
 
 /// The sessions of one shard. It dials peers and accepts the sessions the node
-/// routes to this shard. It stays on the thread that made it. The node's sockets and
-/// relays belong to one node-level part that every shard shares (#77).
-#[derive(Debug)]
+/// routes to this shard. It stays on the thread that made it. The node's sockets
+/// belong to one [`Port`] that every shard shares.
 pub struct Transport {
-    _shard: PhantomData<Rc<()>>,
+    carrier: quic::Carrier,
 }
 
 impl Transport {
-    /// Starts this shard's part of the transport.
+    /// Starts this shard's part of the transport on `port`, the shard's part of the
+    /// node's [`Port`].
     ///
     /// # Errors
     ///
@@ -94,17 +100,16 @@ impl Transport {
     /// or over `config.pool.largest()`.
     ///
     /// ```
-    /// use transport::{Config, Error, Transport};
+    /// use transport::{Config, Error, Transport, port};
     ///
-    /// fn start(config: Config) -> Result<Transport, Error> {
-    ///     Transport::new(config)
+    /// fn start(config: Config, port: port::Shard) -> Result<Transport, Error> {
+    ///     Transport::new(config, port)
     /// }
     /// ```
-    pub fn new(config: Config) -> Result<Self, Error> {
+    pub fn new(config: Config, port: port::Shard) -> Result<Self, Error> {
         config.check()?;
-        drop(config);
         Ok(Self {
-            _shard: PhantomData,
+            carrier: quic::Carrier::new(config, port),
         })
     }
 
@@ -159,7 +164,13 @@ impl Transport {
     /// }
     /// ```
     pub async fn accept(&self) -> Result<Session, Error> {
-        todo!("#68")
+        self.carrier.accept().await.map(Session::new)
+    }
+}
+
+impl fmt::Debug for Transport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transport").finish_non_exhaustive()
     }
 }
 
@@ -247,6 +258,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::num::NonZeroUsize;
     use std::rc::Rc;
 
@@ -256,6 +268,11 @@ mod tests {
 
     use super::{Config, Error, Transport};
     use crate::testing::{self, Shard};
+    use crate::tls::public;
+    use crate::{Code, Peer, Port};
+
+    const CLIENT: PrivateKey = PrivateKey([1; 32]);
+    const SERVER: PrivateKey = PrivateKey([2; 32]);
 
     const IDLE: Error = Error::Config {
         field: "idle",
@@ -295,7 +312,11 @@ mod tests {
         testing::run(0, |shard| {
             for message in [1472, largest(shard)] {
                 let config = config(shard, Span::NANOSECOND, message, message);
-                assert_eq!(Transport::new(config).err(), None, "{message} bytes");
+                assert_eq!(
+                    Transport::new(config, shard.port()).err(),
+                    None,
+                    "{message} bytes"
+                );
             }
         });
     }
@@ -314,7 +335,7 @@ mod tests {
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
-                    Transport::new(config).err(),
+                    Transport::new(config, shard.port()).err(),
                     Some(error),
                     "idle {idle:?}, window {window}, message {message}"
                 );
@@ -335,7 +356,7 @@ mod tests {
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
-                    Transport::new(config).err(),
+                    Transport::new(config, shard.port()).err(),
                     Some(error),
                     "idle {idle:?}, window {window}, message {message}"
                 );
@@ -354,11 +375,43 @@ mod tests {
                 let mut config = config(shard, Span::SECOND, message, message);
                 config.pool = Rc::clone(&pool);
                 assert_eq!(
-                    Transport::new(config).err(),
+                    Transport::new(config, shard.port()).err(),
                     Some(error),
                     "{message} bytes"
                 );
             }
         });
+    }
+
+    #[test]
+    fn a_refused_config_frees_the_socket() {
+        testing::run(0, |shard| {
+            let at = SocketAddr::new(shard.ip(), testing::PORT);
+            let config = config(shard, Span::ZERO, 1 << 16, 1 << 16);
+            let new = Transport::new(config, testing::part(shard.net(), at));
+            assert_eq!(new.err(), Some(IDLE));
+            assert_eq!(Port::bind(shard.net(), at).err(), None);
+        });
+    }
+
+    #[test]
+    fn accept_gives_the_session_a_peer_dialed() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = testing::address(&server);
+        testing::transport(&server, SERVER, |transport, _| async move {
+            let session = transport.accept().await.expect("a session");
+            assert_eq!(session.peer(), Peer::Node(public(&CLIENT)));
+            assert!(!session.relayed());
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            assert_eq!(session.peer(), Peer::Node(public(&SERVER)));
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+        });
+        assert_eq!(sim.run(), Ok(()));
     }
 }

@@ -33,6 +33,8 @@ use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
 use crate::{Class, Code, Config, Error, Peer};
 
+pub(crate) use self::carrier::{Carrier, Session};
+
 /// The server name a dial sends. The verifiers check the node key, not the name.
 const SERVER_NAME: &str = "foundation";
 
