@@ -843,3 +843,12 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn gives_the_kind_of_each_definition() {
+    use crate::kind::Kind;
+    assert_eq!(policy().kind(), Kind::Access);
+    assert_eq!(connector().kind(), Kind::Connector);
+    assert_eq!(region().kind(), Kind::Region);
+    assert_eq!(settings(Some(1), None).kind(), Kind::NodeSettings);
+}
