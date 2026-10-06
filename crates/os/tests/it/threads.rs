@@ -211,19 +211,20 @@ fn a_thread_started_on_a_pinned_shard_runs_on_every_cpu_of_the_set() {
     use crate::common::affinity;
 
     let (cpus, threads) = (affinity(), threads());
-    let (sent, handles) = mpsc::channel();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let set = Arc::clone(&seen);
+    let (seen, started) =
+        (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(None)));
+    let (record, keep) = (Arc::clone(&seen), Arc::clone(&started));
     let config = env::shards::Config {
         name: "shard-0".into(),
         core: Some(0),
     };
     let shards = os::shards().expect("the OS gives the cores of this process");
     let main = move |_| async move {
-        let body = move || async move { *set.lock().unwrap() = affinity() };
-        sent.send(threads.start("vendor", body)).unwrap();
+        let body = move || async move { *record.lock().unwrap() = affinity() };
+        *keep.lock().unwrap() = Some(threads.start("vendor", body));
     };
     assert_joins(shards.start(config, main).unwrap(), Ok(()));
-    assert_joins(handles.recv().unwrap().unwrap(), Ok(()));
+    let handle = started.lock().unwrap().take();
+    assert_joins(handle.unwrap().unwrap(), Ok(()));
     assert_eq!(*seen.lock().unwrap(), cpus);
 }
