@@ -27,8 +27,8 @@ pub struct Gate {
     seat: Seat,
     next: u64,
     /// The holder named by the newest handoff record in the index log.
-    recorded: Option<Recorded>,
-    /// The holder differs from `recorded`. Kept at each change of seat, so that a
+    record: Option<Record>,
+    /// The holder differs from the record. Kept at each change of seat, so that a
     /// frame does not compare subjects.
     unrecorded: bool,
     /// The writer and time of the newest check that passed on this seat.
@@ -44,10 +44,10 @@ pub struct Permit {
 }
 
 #[derive(Debug)]
-enum Recorded {
+enum Record {
     /// The open writer with this key.
     Open(Key),
-    /// A writer not open in the gate: it closed after the record, or the gate
+    /// A writer with no open claim: it closed after the record, or the gate
     /// recovered it.
     Closed(Writer),
 }
@@ -68,8 +68,9 @@ enum Seat {
         key: Key,
         expiry: Option<Expiry>,
     },
-    /// The recorded holder after a restart, not yet reopened.
+    /// The holder from the index log after a restart, not yet reopened.
     Recovered {
+        writer: Writer,
         until: Monotonic,
     },
 }
@@ -95,9 +96,10 @@ impl Gate {
     pub fn recover(last: Writer, now: Monotonic, grace: Lease) -> Self {
         Self {
             seat: Seat::Recovered {
+                writer: last.clone(),
                 until: deadline(now, grace),
             },
-            recorded: Some(Recorded::Closed(last)),
+            record: Some(Record::Closed(last)),
             ..Self::default()
         }
     }
@@ -115,10 +117,10 @@ impl Gate {
         let key = Key(self.next);
         self.next += 1;
         let authority = writer.authority;
-        let reopened = matches!(self.seat, Seat::Recovered { .. })
-            && self
-                .holder()
-                .is_some_and(|last| last.subject == writer.subject);
+        let reopened = matches!(
+            &self.seat,
+            Seat::Recovered { writer: last, .. } if last.subject == writer.subject
+        );
         let outranks = self.holder().is_none_or(|h| authority > h.authority);
         self.claims.push(Claim {
             key,
@@ -148,8 +150,8 @@ impl Gate {
         self.advance(now);
         let i = self.position(key);
         let claim = self.claims.remove(i);
-        if matches!(self.recorded, Some(Recorded::Open(open)) if open == key) {
-            self.recorded = Some(Recorded::Closed(claim.writer));
+        if matches!(self.record, Some(Record::Open(open)) if open == key) {
+            self.record = Some(Record::Closed(claim.writer));
         }
         if matches!(self.seat, Seat::Held { key: held, .. } if held == key) {
             self.elect(now);
@@ -243,7 +245,7 @@ impl Gate {
         match &self.seat {
             Seat::Empty => None,
             Seat::Held { key, .. } => Some(&self.claim(*key).writer),
-            Seat::Recovered { .. } => self.last(),
+            Seat::Recovered { writer, .. } => Some(writer),
         }
     }
 
@@ -262,10 +264,11 @@ impl Gate {
     pub fn recorded(&mut self) {
         if self.unrecorded {
             match self.seat {
-                Seat::Empty => self.recorded = None,
-                Seat::Held { key, .. } => self.recorded = Some(Recorded::Open(key)),
-                // Its holder is the record.
-                Seat::Recovered { .. } => {}
+                Seat::Empty => self.record = None,
+                Seat::Held { key, .. } => self.record = Some(Record::Open(key)),
+                Seat::Recovered { .. } => {
+                    unreachable!("invariant: a recovered seat is never unrecorded")
+                }
             }
             self.unrecorded = false;
         }
@@ -295,9 +298,9 @@ impl Gate {
 
     /// The holder named by the newest handoff record.
     fn last(&self) -> Option<&Writer> {
-        match self.recorded.as_ref()? {
-            Recorded::Open(key) => Some(&self.claim(*key).writer),
-            Recorded::Closed(writer) => Some(writer),
+        match self.record.as_ref()? {
+            Record::Open(key) => Some(&self.claim(*key).writer),
+            Record::Closed(writer) => Some(writer),
         }
     }
 
@@ -782,12 +785,21 @@ mod tests {
         }
 
         #[test]
-        fn compares_with_the_recovered_holder_after_its_grace() {
+        fn compares_with_a_recovered_holder_that_was_replaced() {
             let mut gate = Gate::recover(writer("a", 100), at(0), lease(10));
             let b = gate.open(writer("b", 101), None, at(1));
             gate.close(b, at(2));
             assert_eq!(gate.handoff(), EMPTY);
             gate.open(writer("a", 100), None, at(3));
+            assert_eq!(gate.handoff(), None);
+        }
+
+        #[test]
+        fn compares_with_a_recovered_holder_after_its_grace() {
+            let mut gate = Gate::recover(writer("a", 100), at(0), lease(10));
+            gate.advance(at(10));
+            assert_eq!(gate.handoff(), EMPTY);
+            gate.open(writer("a", 100), None, at(11));
             assert_eq!(gate.handoff(), None);
         }
 
