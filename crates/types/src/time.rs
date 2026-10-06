@@ -7,7 +7,7 @@ use std::iter;
 use std::ops::{Add, Sub};
 use std::str::FromStr;
 
-use crate::ParseError;
+use crate::{ParseError, quantity};
 
 /// A point in mesh time: nanoseconds since the Unix epoch, UTC.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -339,10 +339,11 @@ impl FromStr for Span {
             Some(body) => (true, body),
             None => (false, s),
         };
-        let split = body
-            .find(|c: char| !c.is_ascii_digit() && c != '.')
-            .ok_or_else(syntax)?;
-        let (number, unit) = body.split_at(split);
+        let quantity::Quantity {
+            whole,
+            fraction,
+            unit,
+        } = quantity::split(body).ok_or_else(syntax)?;
         let unit = match unit {
             "ns" => 1,
             "us" => Self::MICROSECOND.0,
@@ -353,13 +354,6 @@ impl FromStr for Span {
             "d" => Self::DAY.0,
             _ => return Err(syntax()),
         };
-        let (whole, fraction) = number.split_once('.').unwrap_or((number, "0"));
-        let digit_run =
-            |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
-        if !digit_run(whole) || !digit_run(fraction) {
-            return Err(syntax());
-        }
-        let fraction = fraction.trim_end_matches('0');
         // The last digit is not 0, so the mantissa lacks factors of 2 or of 5, and no
         // unit has more than 16 of either. The bound also keeps `scale` in `u128`.
         if fraction.len() > 16 {

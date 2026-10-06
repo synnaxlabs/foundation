@@ -524,14 +524,9 @@ fn a_receive_cuts_a_datagram_at_the_end_of_its_buffer() {
     let (sender, _a) = udp(&a, 4433);
     let (_b, mut receiver) = udp(&b, 4433);
     let _send = send(&a, sender, at(&b, 4433), vec![b"abcde".to_vec()]);
-    let cut = Arc::new(Mutex::new(None));
-    let log = Arc::clone(&cut);
-    let _receive = b.shards().start(shard("receive"), move |_| async move {
-        let batch = recv(&mut receiver, 2).await;
-        *log.lock().unwrap() = Some(batch);
-    });
-    sim.run_for(Span::SECOND).unwrap();
-    let (meta, bytes) = cut.lock().unwrap().clone().unwrap();
+    let (meta, bytes) = sim
+        .run_on(&b, move |_, _| async move { recv(&mut receiver, 2).await })
+        .unwrap();
     assert_eq!((meta.len, meta.stride, bytes), (2, 2, b"ab".to_vec()));
 }
 
@@ -700,14 +695,10 @@ fn sent(
     let (mut sim, a, b) = pair(0, link::Config::default());
     let (mut sender, _a) = bind(&a, local(&a)).unwrap();
     let transmit = make(&a, &b);
-    let result = Arc::new(Mutex::new(None));
-    let log = Arc::clone(&result);
-    let _send = a.shards().start(shard("send"), move |_| async move {
-        let sent = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
-        *log.lock().unwrap() = Some(sent);
+    let sent = sim.run_on(&a, move |_, _| async move {
+        poll_fn(|cx| sender.poll_send(cx, &transmit)).await
     });
-    sim.run_for(Span::SECOND).unwrap();
-    assert_eq!(result.lock().unwrap().clone(), Some(expected));
+    assert_eq!(sent, Ok(expected));
 }
 
 #[test]

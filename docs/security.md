@@ -72,10 +72,14 @@ state on `main`.
   reset for it. The router is not built. #77 asks that it hands such a datagram
   only to the shard that the first byte names, and drops one that names no shard.
 - Open: #228 (a length prefix holds a whole block of the shard's pool before a body
-  byte arrives), #298 (datagrams that are not valid, from one address, stop every
-  stateless reset; a small datagram of an unknown version gets a reply).
+  byte arrives), #607 (a stranger keeps the ID from a failed dial and makes the node
+  send a reset to each address it spoofs, with no limit), #620 (a stop after the
+  peer's reset gives the peer the stream's window twice, so a peer grows the
+  connection's receive memory with no bound).
 - Fixed: #299 (a peer made the node hold certificates that are not valid for a
-  session). A chain is one certificate of at most 1 KiB.
+  session). A chain is one certificate of at most 1 KiB. #298 (datagrams that are
+  not valid, from one address, stopped every stateless reset; a small datagram of an
+  unknown version got a reply).
 - Not decided: a limit on handshakes before admission. Each one costs the node a key
   exchange and one signature, and one signature check more when the peer sends a
   certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
@@ -127,10 +131,14 @@ state on `main`.
   (#483).
 - `raft` counts a reply only from a voter. But it takes a higher term from any
   sender, in every message but a `PreVote` and a granted `PreVoteReply`. Open:
-  #352 (a reply from a node that is not a voter makes the leader step down; one
-  message with term `u64::MAX` stops the group for good, because each node writes
-  that term to disk and none can campaign). #352 asks to change RAFT SURFACE for
-  replies.
+  #352 (a reply from a node that is not a voter makes the leader step down). #352
+  asks to change RAFT SURFACE for replies.
+- A node that may send to a group and lies can stop the group for good with one
+  message in term `u64::MAX`: each node writes that term to disk, and none can
+  campaign. Only a voter can: `mesh` admits a `raft` message only from a voter of the
+  newest configuration (RAFT VOTERS, #654). Not built (`mesh`). A voter that lies can
+  also break safety, because a false `AppendReply` counts as held, so `raft` trusts
+  its voters. No change in `raft` (RAFT SURFACE, #352 item 2).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
@@ -264,6 +272,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_stamp` | `Stamp` | Printed text reads back to the same value |
 | `types_span` | `Span` | Printed text reads back to the same value |
 | `types_range` | `Range` | Printed text reads back to the same value |
+| `types_byte_size` | `byte::Size` | Printed text reads back to the same value |
 | `types_channel` | `channel::Key` | Printed text reads back to the same key |
 | `buffer_open` | `Buffer::open` on an edited ring | An `Err`, or a commit survives a reopen |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
