@@ -1318,6 +1318,8 @@ mod tests {
             ranges,
             [(0, Range::default()), (1, Range { seq: 5, count: 0 })]
         );
+        let frame = draft.freeze(Path::Live);
+        assert_eq!(frame.ranges().collect::<Vec<_>>(), ranges);
     }
 
     #[test]
@@ -1518,16 +1520,13 @@ mod tests {
             drafted.push((entry, bytes.to_vec()));
         }
         prop_assert_eq!(&drafted, &written);
+        let present: Vec<(u32, Range)> = draft.ranges().collect();
         let frame = draft.freeze(case.path);
 
         prop_assert_eq!(frame.key_set(), set.key());
         prop_assert_eq!(frame.path(), case.path);
         prop_assert_eq!(frame.form(), case.form);
         prop_assert_eq!(frame.charge(), taken);
-        let present: Vec<(u32, Range)> = (0_u32..)
-            .zip(&ranges)
-            .filter_map(|(group, range)| Some((group, (*range)?)))
-            .collect();
         prop_assert_eq!(frame.ranges().collect::<Vec<_>>(), present);
         for (group, range) in (0_u32..).zip(ranges) {
             prop_assert_eq!(frame.range(group), range);
