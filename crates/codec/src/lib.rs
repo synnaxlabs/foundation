@@ -1248,6 +1248,35 @@ mod tests {
                 let encoded = check(scalar, &values[..len * scalar.width()]);
                 prop_assert_eq!(encoded[0], vector::RAW);
             }
+
+            #[test]
+            fn constant_series_as_ffor_at_width_zero(
+                scalar in select(&INTS),
+                len in 2..2_100_usize,
+                word in any::<u64>(),
+            ) {
+                let values = bytes(scalar.width(), iter::repeat_n(word.into(), len));
+                let encoded = check(scalar, &values);
+                prop_assert_eq!(&encoded[..2], &[vector::FFOR, 0], "{:?}", scalar);
+            }
+
+            #[test]
+            fn fixed_steps_as_delta_at_width_zero(
+                scalar in select(&INTS),
+                // Under 17 samples, FFOR can cost no more than delta, and wins.
+                len in 17..2_100_u64,
+                first in any::<u64>(),
+                step in any::<u64>(),
+            ) {
+                let width = scalar.width();
+                prop_assume!(step & word::mask(width) != 0);
+                let values = bytes(
+                    width,
+                    (0..len).map(|n| first.wrapping_add(n.wrapping_mul(step)).into()),
+                );
+                let encoded = check(scalar, &values);
+                prop_assert_eq!(&encoded[..2], &[vector::DELTA, 0], "{:?}", scalar);
+            }
         }
     }
 

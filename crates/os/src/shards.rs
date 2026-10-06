@@ -3,7 +3,6 @@
 use std::cell::Cell;
 use std::future::poll_fn;
 use std::num::NonZeroUsize;
-use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -15,7 +14,7 @@ use env::thread::{Error, Handle};
 use tokio::runtime::{Builder, LocalOptions, LocalRuntime};
 
 use crate::cores::Cores;
-use crate::thread;
+use crate::{thread, unwind};
 
 /// Starts each shard on its own thread.
 pub(crate) struct Driver(Arc<Cores>);
@@ -79,9 +78,9 @@ fn serve(runtime: LocalRuntime, main: Main) -> bool {
         })
         .await;
     });
-    // The drop of a task may panic.
-    drop(runtime);
-    alarm.raised.get()
+    // The drop of a task may panic, also of one that the shard spawned without `tasks`.
+    let dropped = unwind::catch(|| drop(runtime)).is_some();
+    alarm.raised.get() || !dropped
 }
 
 /// Tells the main loop of a shard that a task panicked.
@@ -149,8 +148,7 @@ impl Future for Caught {
             .task
             .as_mut()
             .expect("a task is taken only in its drop");
-        let poll = panic::catch_unwind(AssertUnwindSafe(|| task.as_mut().poll(cx)));
-        poll.unwrap_or_else(|_| {
+        unwind::catch(|| task.as_mut().poll(cx)).unwrap_or_else(|| {
             self.alarm.raise();
             Poll::Ready(())
         })
@@ -160,7 +158,7 @@ impl Future for Caught {
 impl Drop for Caught {
     fn drop(&mut self) {
         let task = self.task.take();
-        if panic::catch_unwind(AssertUnwindSafe(|| drop(task))).is_err() {
+        if unwind::catch(|| drop(task)).is_none() {
             self.alarm.raise();
         }
     }
