@@ -240,12 +240,14 @@ How to read this record:
   `buffer` trims below it, past retention (by store time), and under disk pressure. A
   resume takes, per path, the position the reader's `hub` presents, then the position at
   this home, then the home's fallback. A position below the floor or past the head is
-  accepted as is; the `buffer` read reports any gap (B2). Named readers write a position
-  record at once when they open, close, or are taken over, and on the home's interval
-  when the position changed. A session open at a crash restores as closed at the
-  restore. Complete and latest sessions have separate key types, so a call in the
-  wrong mode does not compile (#725). Supersedes the B3 single position. Basis: A6,
-  A8, B2, B3, S10, X14, #41.
+  accepted as is; the `buffer` read reports any gap (B2). A resume starts a `buffer`
+  read at `Mark::at(position)`, so the entries with no samples at the position come
+  again. Between reads, the caller keeps the mark the last read gave, in memory
+  (#510). Named readers write a position record at once when they open, close, or are
+  taken over, and on the home's interval when the position changed. A session open at
+  a crash restores as closed at the restore. Complete and latest sessions have
+  separate key types, so a call in the wrong mode does not compile (#725). Supersedes
+  the B3 single position. Basis: A6, A8, B2, B3, S10, X14, #41.
 - **CREDIT RULES (write-path, advisor, and data-path, 2026-10-05)** A complete reader's
   `hub` grants credit to each session on one index as an absolute byte limit since the
   session opened, in a `Credit` message apart from the ack. Both sides count from zero
@@ -401,10 +403,17 @@ How to read this record:
   over 1023, an unknown path or presence byte, or bytes after the last entry is a
   wrong shape.
   For each path, memory holds one run per data record with an entry of it: the
-  `first` of the path's first entry in the record and the record's offset, oldest
-  first, 16 bytes per record and path in a deque that doubles, so at most 32/51
-  of the area. The recovery walk and each sync feed the runs in ring order; a
-  read starts from them (#510).
+  mark before the path's first entry in the record and the record's offset, oldest
+  first, 24 bytes per record and path in a deque that doubles, so at most 48/51
+  of the area. A mark is a seq and the count of entries with no samples at it
+  already given, so a read resumes between two such entries. The recovery walk
+  and each sync feed the runs in ring order; a read starts from them. A read does
+  not check the record CRC: the open's walk checked each record, and a record
+  this process wrote is read as written. A read's budget counts the pool bytes
+  that its entries' blocks take (`block::footprint`), so an entry with no bytes
+  still costs its block. A read holds no record while it waits for a file read,
+  so a change that frees ring space must first hold the records of each read in
+  progress (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
@@ -1454,6 +1463,15 @@ How to read this record:
   runtime-loaded bindings, NI functions declared by hand. Codecs: built. Crypto: rustls
   with aws-lc-rs and blake3. Tooling: clap, schemars, toml_edit, tracing. Our own thin
   MCP server, Prometheus text output, and InfluxDB line protocol. FIPS build later.
+  HTTP: one client for all connectors, on `hyper` (HTTP/1.1 and HTTP/2) over the `env`
+  network seam with `rustls`, in the connector component library. InfluxDB, a general
+  HTTP connector, alarms, webhooks, and remote write use it. No HTTP parser of our own.
+  Every clock read and name lookup of the client goes through `env`, and no Tokio
+  feature of `hyper` or `hyper-util` is on. TLS takes a configured CA, and no setting
+  turns verification off. Lost: a sans-I/O HTTP/1.1 module in `connector-influx`. The
+  person decided on 2026-10-06 ("Approved." "Adding a bunch of crates is fine. Making a
+  binary larger is fine." "we should be careful about writing raw HTTP transports.",
+  relayed by `advisor`; "Yes I approve", to the coordinator) (#341).
 - **REDUCTION** Deadband is a policy, `reduction { select, deadband }`, unit-checked,
   most specific wins. Connectors read it through a library component and pass it to
   devices that support it. Frames carry only channels that moved. Swinging door is a
@@ -1983,23 +2001,27 @@ How to read this record:
   run drops the same way, after the futures. A thread that a drop starts on the
   crashing node ends in the crash and never runs. Built by `simulation` in #548, #666,
   and #870.
-- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A
-  segment is never lost or duplicated. It arrives after the delay and a jitter draw of
-  its link, and never before an earlier segment in its direction, so each direction
-  keeps its order. Each segment carries the key of its stream, and only the end of
-  that stream takes it, so a late segment of an older stream on the same pair meets a
-  closed port. A connect is ready after one round trip and its accept after one
-  and a half. The receive buffer sets the window, the send buffer holds the bytes that
-  the peer has not received, and a write waits while `unsent_bytes_max` bytes are not
-  sent. A drop before close, or with bytes unread, sends an RST; a drop after close
-  sends the bytes and the FIN. A process crash drops each stream. A power cut sends
-  nothing, so the peer gets an RST only when it sends. A case that `sim` does not
-  model panics with "sim does not simulate ... yet": a link with loss, `delayed`
-  sends, a connect to an address with no node, a full backlog, and a SYN to a live
-  stream. Rejected: retransmission over a lossy link (a full TCP state machine to
-  test before a carrier needs it), and a pipe of bytes with no segments (no window,
-  so no test of a writer that a slow reader stops). Built by `simulation` in #113
-  and #944.
+- **SIM TCP (2026-10-05)** `sim` models TCP segments on the same links as UDP. A segment
+  is never lost or duplicated. It arrives after the delay and a jitter draw of its link,
+  and never before an earlier segment in its direction, so each direction keeps its
+  order. Each segment carries the key of its stream, and only the end of that stream
+  takes it, so a late segment of an older stream on the same pair meets a closed port. A
+  connect is ready after one round trip and its accept after one and a half. The receive
+  buffer sets the window, the send buffer holds the bytes that the peer has not
+  received, and a write waits while `unsent_bytes_max` bytes are not sent. A drop before
+  close, or with bytes unread, sends an RST; a drop after close sends the bytes and the
+  FIN. A stream is done when an RST arrived, or each FIN arrived and its own is acked. A
+  drop of it sends nothing. An end that is done leaves its pair, as a Linux socket
+  leaves its table: a segment to the pair then meets a closed port, a SYN opens a new
+  stream, and a connect may take its port, also while a driver holds the old end. A
+  process crash drops each stream. A power cut sends nothing, so the peer gets an RST
+  only when it sends. A case that `sim` does not model panics with "sim does not
+  simulate ... yet": a link with loss, `delayed` sends, a connect to an address with no
+  node, a full backlog, and a SYN to a live stream. Rejected: retransmission over a
+  lossy link (a full TCP state machine to test before a carrier needs it), and a pipe of
+  bytes with no segments (no window, so no test of a writer that a slow reader stops).
+  Built by `simulation` in #113 and #944. Amended (2026-10-06, #874): a stream that is
+  done sends no RST at its drop and leaves its pair.
 - **SIM DROP (2026-10-06)** The drop of a `Sim` drops each live future in its own
   `catch_unwind`. If any panicked, it then panics once with every message, the first
   one first, but only when the thread is not already panicking. This is the one

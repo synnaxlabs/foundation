@@ -102,29 +102,94 @@ impl Tail {
     }
 }
 
-/// A record that holds entries of one path: the `first` of the path's first
+/// Where a read of a path stands: before the entries that end past `seq`, and
+/// past the first `given` entries with no samples at `seq`. Marks order as reads
+/// do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Mark {
+    /// The seq that the entries the read has not given end past.
+    pub seq: u64,
+    /// How many entries with no samples at `seq` the read gave.
+    pub given: u64,
+}
+
+impl Mark {
+    /// The mark before every entry that ends past `seq`.
+    #[must_use]
+    pub const fn at(seq: u64) -> Self {
+        Self { seq, given: 0 }
+    }
+
+    /// The mark after an entry of `len` samples from `first` that comes at this
+    /// mark on its path.
+    ///
+    /// # Panics
+    ///
+    /// When `first + len` passes `u64::MAX`: the tail checked the entry. When
+    /// `given` passes `u64::MAX`: a ring holds fewer entries.
+    pub(crate) fn after(self, first: u64, len: u32) -> Self {
+        if len != 0 {
+            let seq = first
+                .checked_add(u64::from(len))
+                .expect("invariant: the tail checked the entry");
+            return Self::at(seq);
+        }
+        let given = if first == self.seq { self.given } else { 0 };
+        Self {
+            seq: first,
+            given: given
+                .checked_add(1)
+                .expect("invariant: a ring holds fewer entries"),
+        }
+    }
+}
+
+/// A record that holds entries of one path: the mark before the path's first
 /// entry in it, and the record's offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Run {
-    pub(crate) first: u64,
+    pub(crate) start: Mark,
     pub(crate) offset: u64,
 }
 
 /// One path of an index: where it stands with every appended entry, where it
 /// stands on disk, and the records that hold it, oldest first.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 struct Log {
+    index: channel::Key,
     appended: Tail,
     durable: Tail,
+    /// How many durable entries with no samples are at `durable.seq`.
+    empty: u64,
     runs: VecDeque<Run>,
 }
 
 impl Log {
+    fn new(index: channel::Key) -> Self {
+        Self {
+            index,
+            appended: Tail::default(),
+            durable: Tail::default(),
+            empty: 0,
+            runs: VecDeque::new(),
+        }
+    }
+
+    /// The mark after the newest durable entry.
+    fn end(&self) -> Mark {
+        Mark {
+            seq: self.durable.seq,
+            given: self.empty,
+        }
+    }
+
     /// Moves the durable tail past the entry and adds the record at `offset` to
     /// the runs when it is not the newest.
     fn sync(&mut self, header: &Header, offset: u64) -> Result<(), Invalid> {
+        let start = self.end();
         self.durable.advance(header)?;
+        self.empty = start.after(header.first, header.len).given;
         if let Some(newest) = self.runs.back() {
             assert!(
                 newest.offset <= offset,
@@ -135,10 +200,7 @@ impl Log {
                 return Ok(());
             }
         }
-        self.runs.push_back(Run {
-            first: header.first,
-            offset,
-        });
+        self.runs.push_back(Run { start, offset });
         Ok(())
     }
 }
@@ -164,12 +226,32 @@ impl Logs {
     }
 
     /// The records that hold `path` of the index at `slot`, oldest first.
-    #[cfg_attr(not(test), expect(dead_code, reason = "a read starts from the runs"))]
+    #[cfg(test)]
     pub(crate) fn runs(&self, slot: Slot, path: Path) -> impl Iterator<Item = Run> {
         self.0
             .get(&(slot, path))
             .into_iter()
             .flat_map(|log| log.runs.iter().copied())
+    }
+
+    /// The oldest record with a durable entry of `path` of the index at `slot`
+    /// that ends past `from`, with the index, or `None` when no entry does.
+    pub(crate) fn run(
+        &self,
+        slot: Slot,
+        path: Path,
+        from: Mark,
+    ) -> Option<(channel::Key, Run)> {
+        let log = self.0.get(&(slot, path))?;
+        // The newest run that starts at or before `from`, else the oldest.
+        let chosen = log
+            .runs
+            .partition_point(|run| run.start <= from)
+            .saturating_sub(1);
+        let mut runs = log.runs.range(chosen..);
+        let run = *runs.next()?;
+        let end = runs.next().map_or_else(|| log.end(), |next| next.start);
+        (end > from).then_some((log.index, run))
     }
 
     /// Moves the appended tail of the header's path past the entry, as
@@ -183,7 +265,7 @@ impl Logs {
         slot: Slot,
         header: &Header,
     ) -> Result<(), Invalid> {
-        self.change((slot, header.path), |log| log.appended.advance(header))
+        self.change(slot, header, |log| log.appended.advance(header))
     }
 
     /// Moves the durable tail of the header's path past the entry, as
@@ -203,20 +285,34 @@ impl Logs {
         header: &Header,
         offset: u64,
     ) -> Result<(), Invalid> {
-        self.change((slot, header.path), |log| log.sync(header, offset))
+        self.change(slot, header, |log| log.sync(header, offset))
     }
 
-    /// Applies `change` to the log at `key`, which starts empty when the path is
-    /// new. A change that fails on a new path adds nothing.
+    /// Applies `change` to the log of the header's path, which starts empty when
+    /// the path is new. A change that fails on a new path adds nothing.
+    ///
+    /// # Panics
+    ///
+    /// When the log of `slot` on the header's path holds another index than the
+    /// header's.
     fn change(
         &mut self,
-        key: (Slot, Path),
+        slot: Slot,
+        header: &Header,
         change: impl FnOnce(&mut Log) -> Result<(), Invalid>,
     ) -> Result<(), Invalid> {
+        let key = (slot, header.path);
         if let Some(log) = self.0.get_mut(&key) {
+            assert!(
+                log.index == header.index,
+                "invariant: slot {} holds index {} and index {}",
+                slot.get(),
+                log.index,
+                header.index,
+            );
             return change(log);
         }
-        let mut log = Log::default();
+        let mut log = Log::new(header.index);
         change(&mut log)?;
         self.0.insert(key, log);
         Ok(())
@@ -252,8 +348,15 @@ mod tests {
         }
     }
 
-    fn run(first: u64, offset: u64) -> Run {
-        Run { first, offset }
+    fn run(seq: u64, given: u64, offset: u64) -> Run {
+        Run {
+            start: Mark { seq, given },
+            offset,
+        }
+    }
+
+    fn mark(seq: u64, given: u64) -> Mark {
+        Mark { seq, given }
     }
 
     /// One entry of a model log: which path it is on, how far past the tail it
@@ -287,11 +390,19 @@ mod tests {
     /// The entries of the model, each with the offset of its record.
     type Fed = [(Slot, Header, u64)];
 
-    /// The entries of one path, in log order.
-    fn on(fed: &Fed, slot: Slot, path: Path) -> impl Iterator<Item = &Header> {
+    /// The entries of one path, in log order, with their slot and offset.
+    fn on_fed(
+        fed: &Fed,
+        slot: Slot,
+        path: Path,
+    ) -> impl Iterator<Item = &(Slot, Header, u64)> {
         fed.iter()
             .filter(move |(at, header, _)| (*at, header.path) == (slot, path))
-            .map(|(_, header, _)| header)
+    }
+
+    /// The entries of one path, in log order.
+    fn on(fed: &Fed, slot: Slot, path: Path) -> impl Iterator<Item = &Header> {
+        on_fed(fed, slot, path).map(|(_, header, _)| header)
     }
 
     /// The tail the model expects for one path: the seq past its newest entry,
@@ -307,18 +418,26 @@ mod tests {
     }
 
     /// The runs the model expects for one path: one per record that holds an
-    /// entry of it, with the `first` of its first entry there.
-    fn expected(fed: &Fed, slot: Slot, path: Path) -> Vec<Run> {
+    /// entry of it, with the mark before its first entry there. Also gives the
+    /// mark before each entry of the path, in order.
+    fn expected(fed: &Fed, slot: Slot, path: Path) -> (Vec<Run>, Vec<Mark>) {
         let mut runs: Vec<Run> = Vec::new();
-        for (at, header, offset) in fed {
-            if (*at, header.path) != (slot, path) {
+        let mut marks = Vec::new();
+        let mut at = Mark::at(0);
+        for (slot_of, header, offset) in fed {
+            if (*slot_of, header.path) != (slot, path) {
                 continue;
             }
             if runs.last().is_none_or(|run| run.offset != *offset) {
-                runs.push(run(header.first, *offset));
+                runs.push(Run {
+                    start: at,
+                    offset: *offset,
+                });
             }
+            marks.push(at);
+            at = at.after(header.first, header.len);
         }
-        runs
+        (runs, marks)
     }
 
     proptest! {
@@ -352,9 +471,23 @@ mod tests {
             for index in 0..3 {
                 for path in [Path::Live, Path::Backfill] {
                     let runs: Vec<Run> = logs.runs(slot(index), path).collect();
-                    prop_assert_eq!(runs, expected(&fed, slot(index), path));
+                    let (expected, marks) = expected(&fed, slot(index), path);
+                    prop_assert_eq!(&runs, &expected);
                     prop_assert_eq!(logs.appended(slot(index), path), tail(&fed, slot(index), path));
                     prop_assert_eq!(logs.durable(slot(index), path), tail(&fed, slot(index), path));
+                    let key = channel::Key::from_u128(u128::from(index));
+                    let mut end = Mark::at(0);
+                    let fed_on = on_fed(&fed, slot(index), path);
+                    for ((_, header, offset), before) in fed_on.zip(&marks) {
+                        let found = runs
+                            .iter()
+                            .rev()
+                            .find(|run| run.offset == *offset)
+                            .map(|run| (key, *run));
+                        prop_assert_eq!(logs.run(slot(index), path, *before), found);
+                        end = before.after(header.first, header.len);
+                    }
+                    prop_assert_eq!(logs.run(slot(index), path, end), None);
                 }
             }
         }
@@ -488,9 +621,9 @@ mod tests {
         logs.sync(slot(1), &header(1, Path::Live, 4, 0, None), 8192)
             .expect("syncs");
         let live: Vec<Run> = logs.runs(slot(1), Path::Live).collect();
-        assert_eq!(live, [run(0, 4096), run(4, 8192)]);
+        assert_eq!(live, [run(0, 0, 4096), run(4, 0, 8192)]);
         let backfill: Vec<Run> = logs.runs(slot(1), Path::Backfill).collect();
-        assert_eq!(backfill, [run(0, 4096)]);
+        assert_eq!(backfill, [run(0, 0, 4096)]);
         assert_eq!(logs.durable(slot(1), Path::Live).seq, 4);
         assert_eq!(logs.appended(slot(1), Path::Live), Tail::default());
         assert_eq!(logs.runs(slot(2), Path::Live).count(), 0);
@@ -540,5 +673,63 @@ mod tests {
             .expect("syncs");
         logs.sync(slot(1), &header(1, Path::Live, 3, 1, None), 4096)
             .expect("the invariant panics first");
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: slot 1 holds index \
+        00000000-0000-0000-0000-000000000001 and index \
+        00000000-0000-0000-0000-000000000002")]
+    fn a_slot_with_a_second_index_is_a_broken_invariant() {
+        let mut logs = Logs::default();
+        logs.append(slot(1), &header(1, Path::Live, 0, 3, None))
+            .expect("appends");
+        logs.append(slot(1), &header(2, Path::Live, 3, 2, None))
+            .expect("the invariant panics first");
+    }
+
+    #[test]
+    fn a_mark_moves_past_an_entry_as_a_read_does() {
+        assert_eq!(mark(0, 0).after(0, 3), mark(3, 0));
+        assert_eq!(mark(1, 0).after(0, 3), mark(3, 0), "inside the entry");
+        assert_eq!(mark(3, 0).after(5, 2), mark(7, 0), "a skip ahead");
+        assert_eq!(mark(3, 0).after(3, 0), mark(3, 1), "no samples");
+        assert_eq!(mark(3, 1).after(3, 0), mark(3, 2), "no samples again");
+        assert_eq!(
+            mark(3, 2).after(5, 0),
+            mark(5, 1),
+            "no samples after a skip"
+        );
+        assert!(mark(3, 0) < mark(3, 1) && mark(3, 1) < mark(4, 0));
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: the tail checked the entry")]
+    fn a_mark_past_the_last_seq_is_a_broken_invariant() {
+        let _ = mark(0, 0).after(u64::MAX, 1);
+    }
+
+    /// Record 1 holds [2, 5) and an entry with no samples at 5; record 2 starts at
+    /// 5. A read from 5 starts in record 1, for the entry with no samples.
+    #[test]
+    fn a_read_from_the_seq_an_empty_entry_stands_at_starts_in_its_record() {
+        let mut logs = Logs::default();
+        logs.sync(slot(1), &header(1, Path::Live, 2, 3, None), 4096)
+            .expect("syncs");
+        logs.sync(slot(1), &header(1, Path::Live, 5, 0, None), 4096)
+            .expect("syncs");
+        logs.sync(slot(1), &header(1, Path::Live, 5, 2, None), 8192)
+            .expect("syncs");
+        let key = channel::Key::from_u128(1);
+        let first = (key, run(0, 0, 4096));
+        let second = (key, run(5, 1, 8192));
+        assert_eq!(logs.run(slot(1), Path::Live, mark(0, 0)), Some(first));
+        assert_eq!(logs.run(slot(1), Path::Live, mark(3, 0)), Some(first));
+        assert_eq!(logs.run(slot(1), Path::Live, mark(5, 0)), Some(first));
+        assert_eq!(logs.run(slot(1), Path::Live, mark(5, 1)), Some(second));
+        assert_eq!(logs.run(slot(1), Path::Live, mark(6, 0)), Some(second));
+        assert_eq!(logs.run(slot(1), Path::Live, mark(7, 0)), None);
+        assert_eq!(logs.run(slot(1), Path::Live, mark(7, 3)), None);
+        assert_eq!(logs.run(slot(1), Path::Backfill, mark(0, 0)), None);
+        assert_eq!(logs.run(slot(2), Path::Live, mark(0, 0)), None);
     }
 }
