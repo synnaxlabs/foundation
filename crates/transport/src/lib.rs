@@ -312,11 +312,9 @@ mod tests {
         testing::run(0, |shard| {
             for message in [1472, largest(shard)] {
                 let config = config(shard, Span::NANOSECOND, message, message);
-                assert_eq!(
-                    Transport::new(config, shard.port()).err(),
-                    None,
-                    "{message} bytes"
-                );
+                let new = Transport::new(config, shard.port());
+                let shown = new.map(|transport| format!("{transport:?}"));
+                assert_eq!(shown, Ok("Transport { .. }".into()), "{message} bytes");
             }
         });
     }
@@ -400,7 +398,12 @@ mod tests {
         let at = testing::address(&server);
         testing::transport(&server, SERVER, |transport, _| async move {
             let session = transport.accept().await.expect("a session");
-            assert_eq!(session.peer(), Peer::Node(public(&CLIENT)));
+            let peer = Peer::Node(public(&CLIENT));
+            assert_eq!(session.peer(), peer);
+            assert_eq!(
+                format!("{session:?}"),
+                format!("Session {{ peer: {peer:?}, .. }}")
+            );
             assert!(!session.relayed());
             session.close(Code(5));
             assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
