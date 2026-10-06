@@ -608,15 +608,20 @@ fn a_dropped_sleep_does_not_move_time() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
     let clock = node.clock();
-    let handle = node.shards().start(shard("shard-0"), move |_| async move {
+    let _waits = node.shards().start(shard("shard-0"), move |_| async move {
         let mut sleep = clock.sleep(Span::SECOND);
         let poll =
             std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut sleep).poll(cx)));
         assert_eq!(poll.await, Poll::Pending, "the sleep is not due");
+        drop(sleep);
+        pending::<()>().await;
     });
     let start = node.clock().now();
-    sim.run().unwrap();
-    handle.unwrap().join().unwrap();
+    let stuck = Error::Stuck {
+        threads: vec!["shard-0".into()],
+        seed: 0,
+    };
+    assert_eq!(sim.run(), Err(stuck));
     assert_eq!(node.clock().now(), start, "no timer waits");
 }
 
