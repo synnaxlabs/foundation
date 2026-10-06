@@ -1024,8 +1024,20 @@ How to read this record:
   ranges it uses.
 - **RAFT SURFACE (#5, #91)** `raft::Raft::new(Config, Start)` builds a follower.
   `Config` holds the fixed inputs (key, tick counts). `Start` holds what the node had
-  on disk: `hard` (term and vote), `voters`, `entries` (the log from index 1), and
-  `applied` (the last index the caller applied). `Raft` takes `tick(random)`,
+  on disk: `hard`, `voters`, `entries` (the log from index 1), and `applied` (the
+  last index the caller applied). `Hard` holds the term, the vote, the leader of the
+  term (this node when it led), and the proof that moved the node to the term: its
+  own pre-votes when it campaigned, else the proof of the message that moved it. A
+  `Proof` is a `Grant` (pre-vote or vote), the candidate, and the voter keys, the
+  candidate included; `raft` counts the keys, and `mesh` holds and checks the
+  signatures. `Message.proof` carries one: a `Vote` carries the candidate's
+  pre-votes; a leader's `Heartbeat` or `Append` carries its votes until the receiver
+  answers once in the term, and a late vote joins them; an answer to a message of a
+  lower term carries the sender's hard proof. The rules that check a proof, and
+  `Error::Unproven`, follow in the second PR of #750; until then a received proof is
+  stored, not checked. The advisor required a proof on every message and on each
+  refusal, signatures only, and the proof in the hard state (#750, 2026-10-05).
+  `Raft` takes `tick(random)`,
   `step(message)`, and `campaign()`, and gives `ready()`: a `Ready` with `hard` (only
   when it changed), `entries` to write, `committed` entries to apply, and `messages`
   to send. The caller writes, then sends, then applies, as etcd does: to apply first
@@ -1069,19 +1081,20 @@ How to read this record:
   2026-10-05 ("a is fine", #232). A heartbeat or an append of this node's term from a
   node other than the leader it knows is `Error::SecondLeader`: one term has one
   leader, and a node keeps the leader of its term until the term ends, through a
-  step-down and a campaign. A node that knows no leader of its term, after a restart or
-  its vote, takes the first. The person approved it on 2026-10-05 ("Yeah that's fine",
-  #391). A bad message changes nothing. A forged message that passes these checks
+  step-down and a campaign. A node that knows no leader of its term, after its vote,
+  takes the first; `Hard.leader` keeps it through a restart (#750). The person approved
+  it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing. A forged
+  message that passes these checks
   does, until a leader proves its election (#750). After a heartbeat or an `Append`
   of a higher term from a voter that does not lead, or a reply of a higher term and
   then either, a node follows the sender and writes and commits what it sends. So
   two nodes can apply different entries at one index, and a forged voter set can
-  take the group over. The first leader after a restart or a vote is the same gap.
-  Tests pin it. Lost: a lease that drops a heartbeat or an `Append` of a higher term
-  from a node that is not the leader. A reply of a higher term ends any node's
-  lease, and a leader must step down on one; the lease also changed three etcd
-  oracle tests. The coordinator decided on 2026-10-06 under the person's delegation
-  (#391). The person may change it.
+  take the group over. The first leader after a vote is the same gap. Tests pin it.
+  Lost: a lease that drops a heartbeat or an `Append` of a higher term from a node
+  that is not the leader. A reply of a higher term ends any node's lease, and a
+  leader must step down on one; the lease also changed three etcd oracle tests. The
+  coordinator decided on 2026-10-06 under the person's delegation (#391). The person
+  may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1153,8 +1166,13 @@ How to read this record:
   `types::digest::Digest::of`), the format version (1, C9d), the record's number, the
   body length, and an 8-byte check of the body. The body holds the hard state, when it
   changed, and the entries, so one sync makes both durable; two slots for the hard state
-  lost, because they need a second sync and a second torn-write rule. A later record
-  replaces the entries from its first index. A file is 1 MiB, or the length of its first
+  lost, because they need a second sync and a second torn-write rule. The hard state is
+  the term, then the vote, the leader, and the proof, each behind a presence byte; the
+  proof is a grant byte, the candidate, and the voter keys as a count and the keys in
+  rising order (#750). A `raft` message on the wire carries its proof in the same
+  form, after the term and before the body. The signatures follow in the third PR of
+  #750. The format version stays 1: no log has shipped. A later record replaces the
+  entries from its first index. A file is 1 MiB, or the length of its first
   record when that is more, and a record that does not fit starts the next file. In a
   file with no record, it makes that file again, larger, so each file but the last
   holds a record. A failed or dropped write poisons the log (`Error::Poisoned`). A
@@ -1417,15 +1435,28 @@ How to read this record:
   reads a traversal: identifiers joined by `.`, with spaces around each `.` and new
   lines inside `[` and `(`. A first part `true`, `false`, or `null` is a value, so
   `true.x` is an index. After a `.`, a number is an index (`site_a.1` is `Form::Index`),
-  `*` is a splat, and any other token is a syntax error. A name with a segment that
-  starts with a digit or `-` (`plc.40001`) gets its own HCL form, such as
-  `plc["40001"]`, which HCL accepts (#536). Until then `write` refuses it. Lost: A3
-  segments that start with a letter or `_`, which shrinks the name model to fit one file
-  format. The person decided on 2026-10-05 ("a is fine"), #519. The coordinator ruled on
-  #363 that a file writes a reserved name (`site_a.@changes`) as a string; #536 decides
-  which reader turns that string into a name. Lost: a new `Expected` variant for a name
-  after `.`, a public change when the error already names what may come at the `.`.
-  #363.
+  `*` is a splat, and any other token is a syntax error. An index that is a string with
+  no template, quoted or heredoc, is one more segment: `plc["40001"]` is `plc.40001`,
+  `a["b"]` is `a.b`, and `plc["a.b"]` is `plc.a.b`. Any other index is `Form::Index`.
+  `write` gives each later segment that is not an identifier as a string index
+  (`plc["40001"]`, `site_a["@changes"]`). A first segment that does not start with a
+  letter or `_`, or that is `true`, `false`, or `null`, has no reference form, and
+  `write` refuses it with `Unwritable::Reference`. A file writes such a name as a string
+  where a kind takes a name: a kind reads a string or a reference as the same `Name`,
+  through one reader in `document::read` (#474). `export` and `discover` write every
+  name as a string (`"site_a.pt_1"`): they need no HCL rule, and a generated file reads
+  back as exactly the Document it came from. This replaces the #363 ruling that a file
+  writes a reserved name only as a string. The advisor decided (names and architecture
+  delegations, 2026-10-05), #536 and #701. Lost: a reserved call `name("40001.x")`,
+  which reserves a function name and adds an error for names that a string already
+  carries; it can be added later without breaking a file. Lost: bare names in generated
+  files, which changes only how a file looks. Lost: `export` and `discover` write only
+  such a name as a string, which copies HCL's identifier rule into `config` and layer 3.
+  Lost: `write` gives such a reference as a string, which reads back as a `String` and
+  changes the spec hash. Lost: A3 segments that start with a letter or `_`, which
+  shrinks the name model to fit one file format. The person decided on 2026-10-05 ("a is
+  fine"), #519. Lost: a new `Expected` variant for a name after `.`, a public change
+  when the error already names what may come at the `.`. #363.
 - **HCL VERDICTS (2026-10-05)** `oracles/conformance/hcl/` holds HCL texts, each with
   the verdict of a pinned HCL version: accepted or refused. For each accepted text, a
   small Go program next to the texts lists the diagnostic code that `read` gives for
@@ -2751,8 +2782,9 @@ conclusion together". Each one is listed below.
   after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
   voter's state when it sent the answer.").
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
-  tree key `<label>.@<kind>` of a policy (#729), and `frame::split`, which cuts a
-  frame body at its ends and gives each part (#632).
+  tree key `<label>.@<kind>` of a policy (#729), `frame::split`, which cuts a frame
+  body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
+  and generated names as strings (#701).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611),
   the STREAM WIRE hello (#55).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,

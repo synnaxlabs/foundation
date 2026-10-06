@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use types::node;
 
 use crate::{Entry, Position, Term};
@@ -14,6 +16,34 @@ pub struct Message {
     pub term: Term,
     /// What the message says.
     pub body: Body,
+    /// The proof of `term` the message carries, if any. A [`Body::Vote`] carries the
+    /// sender's pre-votes. A leader's [`Body::Heartbeat`] or [`Body::Append`] carries
+    /// its votes until the receiver answers once in the term. An answer to a message
+    /// of a lower term carries the proof of the sender's term.
+    pub proof: Option<Proof>,
+}
+
+/// What a voter granted a candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grant {
+    /// A pre-vote: the voter would vote for the candidate. It binds nothing.
+    PreVote,
+    /// A vote in the candidate's term.
+    Vote,
+}
+
+/// A quorum of signed pre-votes or votes for one candidate in one term. A `Raft`
+/// counts the keys against its own configuration. The caller holds the signatures:
+/// it adds them to a message it sends and checks them on a message it steps, so the
+/// voters of a stepped proof are only the ones whose signature held.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proof {
+    /// What the voters granted.
+    pub grant: Grant,
+    /// The node they granted it to.
+    pub candidate: node::Key,
+    /// The voters that signed, the candidate included.
+    pub voters: BTreeSet<node::Key>,
 }
 
 /// What a [`Message`] says.
