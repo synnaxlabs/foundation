@@ -608,7 +608,7 @@ mod tests {
         let mut out = String::new();
         let mut at = 0;
         let mut heredoc = false;
-        let mut closed = false;
+        let mut ends_at_closer = false;
         loop {
             let token = tokens.next();
             let (start, end) = (offset(token.span.start()), offset(token.span.end()));
@@ -627,14 +627,13 @@ mod tests {
             let lines = ["", "", "\n", "# c\n", "  // c\n", "/* c\nc */\n"];
             let line = lines.get(usize::from(picks.pick(6))).unwrap();
             out.push_str(line);
-            closed = heredoc && line.is_empty();
+            ends_at_closer = heredoc && line.is_empty();
             at = end;
             heredoc = false;
         }
         out.push_str(text.get(at..).unwrap());
         // A heredoc needs the line end after its closer.
-        let closed = closed && at == text.len();
-        if !closed && picks.pick(4) == 0 && out.ends_with('\n') {
+        if !ends_at_closer && picks.pick(4) == 0 && out.ends_with('\n') {
             out.pop();
         }
         if picks.pick(4) == 0 {
