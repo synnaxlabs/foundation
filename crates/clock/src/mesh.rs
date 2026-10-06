@@ -101,13 +101,13 @@ impl Clock {
     fn steer(&mut self) {
         let estimate = combine(self.monotonic.now(), DRIFT, self.sources.values());
         // A write that changes nothing makes the reads that overlap it run again.
-        let Some(next) = self.discipline.next(estimate) else {
+        let Some(change) = self.discipline.next(estimate) else {
             return;
         };
         // A slew keeps mesh time from going back only against reads before its `now`,
         // so the clock reads inside the update.
         self.cell.update(|_| {
-            self.discipline = next.at(self.monotonic.now(), DRIFT);
+            self.discipline = change.at(self.monotonic.now(), DRIFT);
             encode(self.discipline)
         });
     }
@@ -124,8 +124,8 @@ pub enum Status {
     /// monotonic clock with its error. The error can be unknown
     /// ([`Measurement::unknown`]).
     Synced(Measurement),
-    /// No majority agrees now, or no source is left. Mesh time keeps its slew, and its
-    /// error grows by drift. Holds mesh time now and why.
+    /// No majority agrees now, or no source is left. Mesh time keeps its slew, and the
+    /// error of the slew's target grows by drift. Holds mesh time now and why.
     Holdover(Measurement, combine::Error),
 }
 
@@ -143,11 +143,9 @@ impl Reader {
     /// an unknown error). `None` until a majority of the clock's sources first agree.
     #[must_use]
     pub fn now(&self) -> Option<Interval> {
-        self.cell.read(|words| match decode(words) {
-            Discipline::Unsynced(_) => None,
-            Discipline::Synced(slew) | Discipline::Holdover(slew, _) => {
-                Some(slew.at(self.monotonic.now(), DRIFT).interval())
-            }
+        self.cell.read(|words| {
+            let slew = decode(words).slew()?;
+            Some(slew.at(self.monotonic.now(), DRIFT).interval())
         })
     }
 
@@ -168,8 +166,8 @@ impl Reader {
     }
 }
 
-// A slew changes only words 1 to 5. They share the first cache line with the cell's
-// sequence number, so a push leaves the line of the last words in readers' caches.
+// A push that slews changes only words 1 to 5, and an update stores only the words
+// that change.
 fn encode(discipline: Discipline) -> [u64; WORDS] {
     let count = |n: usize| u64::try_from(n).expect("invariant: a count fits in u64");
     let (kind, slew, cause) = match discipline {

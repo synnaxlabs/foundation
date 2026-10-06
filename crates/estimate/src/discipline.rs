@@ -29,8 +29,8 @@ pub enum Discipline {
     Unsynced(combine::Error),
     /// Mesh time slews toward the estimate of a majority.
     Synced(Slew),
-    /// No majority agrees now. Mesh time keeps its slew, and its error grows by drift.
-    /// Holds why.
+    /// No majority agrees now. Mesh time keeps its slew, and the error of the slew's
+    /// target grows by drift. Holds why.
     Holdover(Slew, combine::Error),
 }
 
@@ -40,42 +40,47 @@ impl Discipline {
     /// the slew in holdover, or stays unsynced before the first estimate. `None` only
     /// when an error leaves the discipline as it is: every estimate gives a change.
     #[must_use]
-    pub fn next(self, estimate: Result<Measurement, combine::Error>) -> Option<Next> {
-        let slew = match self {
+    pub fn next(self, estimate: Result<Measurement, combine::Error>) -> Option<Change> {
+        let step = match (self.slew(), estimate) {
+            (None, Err(e)) => Step::To(Self::Unsynced(e)),
+            (Some(slew), Err(e)) => Step::To(Self::Holdover(slew, e)),
+            (None, Ok(m)) => Step::To(Self::Synced(Slew::new(m))),
+            (Some(slew), Ok(m)) => Step::Toward(slew, m),
+        };
+        (step != Step::To(self)).then_some(Change(step))
+    }
+
+    /// The slew that mesh time follows, or `None` before the first estimate.
+    #[must_use]
+    pub const fn slew(self) -> Option<Slew> {
+        match self {
             Self::Unsynced(_) => None,
             Self::Synced(slew) | Self::Holdover(slew, _) => Some(slew),
-        };
-        let change = match (slew, estimate) {
-            (None, Err(e)) => Change::To(Self::Unsynced(e)),
-            (Some(slew), Err(e)) => Change::To(Self::Holdover(slew, e)),
-            (None, Ok(m)) => Change::To(Self::Synced(Slew::new(m))),
-            (Some(slew), Ok(m)) => Change::Toward(slew, m),
-        };
-        (change != Change::To(self)).then_some(Next(change))
+        }
     }
 }
 
 /// A change of [`Discipline`] that takes effect at a local time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Next(Change);
+pub struct Change(Step);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Change {
+enum Step {
     /// The same at any local time.
     To(Discipline),
     /// A slew toward a new target.
     Toward(Slew, Measurement),
 }
 
-impl Next {
+impl Change {
     /// The discipline from `now` on, for a local clock that drifts from mesh time by
     /// at most `drift`. Mesh time from it at or after `now` is never earlier than mesh
     /// time from the last discipline at or before `now`.
     #[must_use]
     pub fn at(self, now: Monotonic, drift: Drift) -> Discipline {
         match self.0 {
-            Change::To(discipline) => discipline,
-            Change::Toward(slew, target) => {
+            Step::To(discipline) => discipline,
+            Step::Toward(slew, target) => {
                 Discipline::Synced(slew.toward(now, drift, target))
             }
         }
@@ -125,9 +130,9 @@ mod tests {
             now in 0..TIME_NS,
             drift in drift(),
         ) {
-            let next = Discipline::Unsynced(cause).next(Ok(m)).expect("a change");
+            let change = Discipline::Unsynced(cause).next(Ok(m)).expect("a change");
             let synced = Discipline::Synced(Slew::new(m));
-            prop_assert_eq!(next.at(Monotonic(now), drift), synced);
+            prop_assert_eq!(change.at(Monotonic(now), drift), synced);
         }
 
         #[test]
@@ -137,9 +142,9 @@ mod tests {
             now in 0..TIME_NS,
             drift in drift(),
         ) {
-            let next = Discipline::Unsynced(old).next(Err(new));
+            let change = Discipline::Unsynced(old).next(Err(new));
             let changed = (old != new).then_some(Discipline::Unsynced(new));
-            prop_assert_eq!(next.map(|n| n.at(Monotonic(now), drift)), changed);
+            prop_assert_eq!(change.map(|c| c.at(Monotonic(now), drift)), changed);
         }
 
         #[test]
@@ -151,8 +156,8 @@ mod tests {
         ) {
             let holdover = Discipline::Holdover(slew, cause);
             let changed = (old != holdover).then_some(holdover);
-            let next = old.next(Err(cause));
-            prop_assert_eq!(next.map(|n| n.at(Monotonic(now), drift)), changed);
+            let change = old.next(Err(cause));
+            prop_assert_eq!(change.map(|c| c.at(Monotonic(now), drift)), changed);
         }
 
         #[test]
@@ -163,9 +168,9 @@ mod tests {
             drift in drift(),
         ) {
             let now = Monotonic(now);
-            let next = old.next(Ok(m)).expect("a change");
+            let change = old.next(Ok(m)).expect("a change");
             let synced = Discipline::Synced(slew.toward(now, drift, m));
-            prop_assert_eq!(next.at(now, drift), synced);
+            prop_assert_eq!(change.at(now, drift), synced);
         }
     }
 }
