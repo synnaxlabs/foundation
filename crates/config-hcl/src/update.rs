@@ -155,23 +155,23 @@ impl<'a> File<'a> {
         start..self.mark(self.token(offsets(last).1)).end
     }
 
-    /// Widens a run of cut lines to take the blank lines after it when it starts
-    /// the body or a blank line is above it. Then, when the run ends the body, it
-    /// takes the blank lines above it. So one blank line stays between the items left,
-    /// and none at the end of the body.
+    /// Widens a run of cut lines to take blank lines around it, so one blank line
+    /// stays between the items left and none at the start or end of the body.
     fn widen(&self, run: Range<usize>, body: &Body) -> Range<usize> {
-        let Range { mut start, mut end } = run;
-        if start == body.start || self.blank_above(start).is_some() {
-            while let Some(below) = self.blank_below(end) {
-                end = below;
-            }
+        let (mut above, mut below) = (run.start, run.end);
+        while let Some(line) = self.blank_above(above) {
+            above = line;
         }
-        if end == body.end {
-            while let Some(above) = self.blank_above(start) {
-                start = above;
-            }
+        while let Some(line) = self.blank_below(below) {
+            below = line;
         }
-        start..end
+        if above == body.start || below == body.end {
+            above..below
+        } else if above < run.start {
+            run.start..below
+        } else {
+            run
+        }
     }
 
     /// The end of the line at `at` when only spaces are between `at` and the line
@@ -876,8 +876,18 @@ mod tests {
     }
 
     #[test]
-    fn leaves_no_blank_line_at_the_end_of_a_body() {
+    fn leaves_no_blank_line_at_the_edges_of_a_body() {
         assert_eq!(updated("a = 1\n\nb = 2\n\n", "a = 1"), "a = 1\n");
+        assert_eq!(updated("a = 1\nb = 2\n\n", "a = 1"), "a = 1\n");
+        assert_eq!(updated("\n\na = 1\n\nb = 2\n", "b = 2"), "b = 2\n");
+        assert_eq!(
+            updated("x {\n  a = 1\n  b = 2\n\n}\n", "x { a = 1 }"),
+            "x {\n  a = 1\n}\n"
+        );
+        assert_eq!(
+            updated("x {\n\n  a = 1\n\n  b = 2\n}\n", "x { b = 2 }"),
+            "x {\n  b = 2\n}\n"
+        );
         assert_eq!(updated("a {}\n\nb {}\n\n", "a {}"), "a {}\n");
         assert_eq!(updated("a = 1\n\nb = 2\n", "a = 1"), "a = 1\n");
         assert_eq!(updated("a = 1\r\n\r\nb = 2\r\n\r\n", "a = 1"), "a = 1\r\n");
