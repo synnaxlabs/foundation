@@ -119,6 +119,17 @@ pub enum Status {
     Holdover(Measurement, Cause),
 }
 
+/// The node's two clocks at one instant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Time {
+    /// A reading of the node's monotonic clock.
+    pub monotonic: Monotonic,
+    /// Mesh time at `monotonic`. The true time is inside the interval, and its
+    /// midpoint is the clock's best guess. `None` until a majority of the clock's
+    /// sources first agree.
+    pub mesh: Option<Interval>,
+}
+
 /// Reads mesh time from any thread with no lock. Clones read the same clock.
 #[derive(Clone, Debug)]
 pub struct Reader {
@@ -127,16 +138,18 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Mesh time now. The true time is inside the interval. Its midpoint is the
-    /// clock's best guess, and it never goes back: a call that starts after another
+    /// Reads the node's monotonic clock, and gives mesh time at that reading. The
+    /// midpoint of mesh time never goes back: a call that starts after another
     /// returns gives a midpoint no earlier, while both edges fit a stamp (from 1777 to
-    /// 2162 with an unknown error). `None` until a majority of the clock's sources
-    /// first agree.
+    /// 2162 with an unknown error).
     #[must_use]
-    pub fn now(&self) -> Option<Interval> {
+    pub fn now(&self) -> Time {
         self.cell.read(|discipline| {
-            let slew = discipline.slew()?;
-            Some(slew.at(self.monotonic.now(), DRIFT).interval())
+            let monotonic = self.monotonic.now();
+            let mesh = discipline
+                .slew()
+                .map(|slew| slew.at(monotonic, DRIFT).interval());
+            Time { monotonic, mesh }
         })
     }
 
@@ -158,12 +171,12 @@ impl Reader {
 
     /// The clock's first estimate at `reading`, a reading of the node's monotonic
     /// clock: its offset, with its error grown by drift to `reading` (200 ppm, 0.72 s
-    /// in one hour). Later estimates never change it. It stamps a reading taken
-    /// before a call to [`Reader::now`] that gave `None`: its midpoint is then never
-    /// later than the midpoint of an interval from [`Reader::now`], while the edges
-    /// of both fit a stamp (from 1777 to 2162 with an unknown error). `None` until a
-    /// majority of the clock's sources first agree. A call that starts after
-    /// [`Reader::now`] gave an interval gives one.
+    /// in one hour). Later estimates never change it. It stamps the `monotonic` of a
+    /// [`Time`] with no mesh time: its midpoint is then never later than the midpoint
+    /// of mesh time from a later [`Reader::now`], while the edges of both fit a stamp
+    /// (from 1777 to 2162 with an unknown error). `None` until a majority of the
+    /// clock's sources first agree. A call that starts after [`Reader::now`] gave
+    /// mesh time gives an interval.
     #[must_use]
     pub fn first(&self, reading: Monotonic) -> Option<Interval> {
         let slew = self.cell.first()?;

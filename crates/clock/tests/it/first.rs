@@ -23,12 +23,11 @@ fn measure(node: &Node, offset: Span, error: Span) -> Measurement {
     Measurement::new(at, offset, error).expect("at most 36500 days")
 }
 
-/// A reading of the node's monotonic clock, taken before a read of `reader` that
-/// gives no time.
-fn unsynced(node: &Node, reader: &Reader) -> Monotonic {
-    let reading = node.clock().now();
-    assert_eq!(reader.now(), None, "no time yet");
-    reading
+/// The monotonic reading of a read of `reader` that gives no mesh time.
+fn unsynced(reader: &Reader) -> Monotonic {
+    let time = reader.now();
+    assert_eq!(time.mesh, None, "no time yet");
+    time.monotonic
 }
 
 /// Mesh time at `reading` with `offset` and `error`.
@@ -53,11 +52,11 @@ fn center(interval: Interval) -> i64 {
 fn gives_nothing_before_the_first_estimate() {
     let (_sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
-    let reading = unsynced(&node, &reader);
+    let reading = unsynced(&reader);
     assert_eq!(reader.first(reading), None);
     let [a, _] = [clock.add(), clock.add()];
     clock.push(a, measure(&node, Span::HOUR, ms(2)));
-    assert_eq!(reader.now(), None);
+    assert_eq!(reader.now().mesh, None);
     assert_eq!(reader.first(reading), None);
 }
 
@@ -66,9 +65,9 @@ fn grows_the_error_of_the_first_estimate_back_to_each_earlier_reading() {
     let (mut sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
     let source = clock.add();
-    let start = unsynced(&node, &reader);
+    let start = unsynced(&reader);
     sim.run_for(HALF_HOUR).expect("the run ends");
-    let half = unsynced(&node, &reader);
+    let half = unsynced(&reader);
     sim.run_for(HALF_HOUR).expect("the run ends");
     clock.push(source, measure(&node, Span::HOUR, ms(2)));
     // Drift adds 720 ms in an hour, and 360 ms in half an hour.
@@ -92,7 +91,7 @@ fn keeps_the_first_estimate_after_a_step_a_holdover_and_no_sources() {
     let (mut sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
     let source = clock.add();
-    let reading = unsynced(&node, &reader);
+    let reading = unsynced(&reader);
     sim.run_for(Span::SECOND).expect("the run ends");
     clock.push(source, measure(&node, Span::HOUR, ms(2)));
     // A second of drift adds 200 us.
@@ -104,7 +103,7 @@ fn keeps_the_first_estimate_after_a_step_a_holdover_and_no_sources() {
         measure(&node, plus(Span::HOUR, Span::SECOND), ms(1)),
     );
     let stepped = at(node.clock().now(), plus(Span::HOUR, ms(999)), ms(2));
-    assert_eq!(reader.now(), stepped);
+    assert_eq!(reader.now().mesh, stepped);
     assert_eq!(reader.first(reading), first);
     let other = clock.add();
     let alone = Error::NoMajority {
@@ -125,7 +124,7 @@ fn an_unknown_first_estimate_gives_unknown_time_at_the_reading() {
     let (mut sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
     let source = clock.add();
-    let reading = unsynced(&node, &reader);
+    let reading = unsynced(&reader);
     sim.run_for(Span::HOUR).expect("the run ends");
     clock.push(source, Measurement::unknown(node.clock().now(), Span::HOUR));
     let unknown = Measurement::unknown(reading, Span::HOUR);
@@ -146,17 +145,17 @@ fn stamps_an_earlier_reading_before_mesh_time_from_1777_to_2162() {
             for [before, after] in [[wide, ms(1)], [ms(1), wide]] {
                 let (mut sim, node) = node();
                 let (mut clock, reader) = Clock::new(node.clock());
-                let reading = unsynced(&node, &reader);
+                let reading = unsynced(&reader);
                 let old = clock.add();
                 sim.run_for(Span::SECOND).expect("the run ends");
                 clock.push(old, measure(&node, offset, before));
-                let mut centers = vec![center(reader.now().expect("synced"))];
+                let mut centers = vec![center(reader.now().mesh.expect("synced"))];
                 let new = clock.add();
                 clock.push(new, measure(&node, offset, after));
                 clock.remove(old);
                 sim.run_for(Span::SECOND).expect("the run ends");
                 clock.push(new, measure(&node, offset, after));
-                centers.push(center(reader.now().expect("synced")));
+                centers.push(center(reader.now().mesh.expect("synced")));
                 let first = center(reader.first(reading).expect("synced"));
                 assert!(centers.iter().all(|&c| first <= c), "{first} {centers:?}");
                 assert!(centers.is_sorted(), "{centers:?}");
@@ -195,13 +194,13 @@ proptest! {
         let mut readings = Vec::new();
         for gap in gaps {
             sim.run_for(gap).expect("the run ends");
-            readings.push(unsynced(&node, &reader));
+            readings.push(unsynced(&reader));
         }
         let mut stamps = None;
         for (gap, offset, error) in iter::once(first).chain(later) {
             sim.run_for(gap).expect("the run ends");
             clock.push(source, measure(&node, offset, error));
-            let now = center(reader.now().expect("synced"));
+            let now = center(reader.now().mesh.expect("synced"));
             let firsts: Vec<_> = readings
                 .iter()
                 .map(|&reading| reader.first(reading).expect("synced"))
