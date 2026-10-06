@@ -37,8 +37,8 @@ pub enum Discipline {
 impl Discipline {
     /// The change that `estimate`, a result of [`combine::combine`], makes. The first
     /// estimate is served at once, and later ones are slewed toward. An error keeps
-    /// the slew in holdover, or stays unsynced before the first estimate. `None` when
-    /// the discipline stays the same. A slew toward an estimate is always a change.
+    /// the slew in holdover, or stays unsynced before the first estimate. `None` only
+    /// when an error leaves the discipline as it is: every estimate gives a change.
     #[must_use]
     pub fn next(self, estimate: Result<Measurement, combine::Error>) -> Option<Next> {
         let slew = match self {

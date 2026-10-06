@@ -1,4 +1,4 @@
-//! A simulated true offset for property tests.
+//! Strategies for property tests: a simulated true offset, measurements, and slews.
 
 use proptest::collection::vec;
 use proptest::prelude::*;
