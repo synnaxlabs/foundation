@@ -3,6 +3,7 @@
 mod cid;
 pub(crate) mod connection;
 mod datagram;
+mod hello;
 #[cfg(test)]
 mod pair;
 mod settings;
@@ -81,7 +82,9 @@ pub(crate) enum Event {
     Closed { key: connection::Key, error: Error },
     /// [`Endpoint::accept`] has a stream for `key`.
     Incoming { key: connection::Key },
-    /// [`Endpoint::open`] and [`Endpoint::open_sender`] may now give a stream.
+    /// [`Endpoint::open`] and [`Endpoint::open_sender`] may now give a stream. It
+    /// comes first when the peer's hello arrives. A peer may never send its hello:
+    /// the caller bounds that wait.
     Available { key: connection::Key },
     /// `stream` may have more to read. It can repeat, and it can name a stream the
     /// caller no longer holds or has not accepted yet.
@@ -248,10 +251,10 @@ impl Endpoint {
         self.drive(key.handle, now);
     }
 
-    /// Opens a stream of `class` that goes both ways. `None` before
-    /// [`Event::Connected`], when the peer allows no more streams now
-    /// ([`Event::Available`] follows), or when the connection ended. The peer sees
-    /// the stream at its first message.
+    /// Opens a stream of `class` that goes both ways. `None` until the peer's hello
+    /// arrives or while the peer allows no more streams ([`Event::Available`]
+    /// follows), and when the connection ended. The peer sees the stream at its first
+    /// message.
     pub(crate) fn open(
         &mut self,
         now: Monotonic,
@@ -278,7 +281,7 @@ impl Endpoint {
     /// connection ended.
     pub(crate) fn accept(&mut self, key: connection::Key) -> Option<Incoming> {
         let connection = find(&mut self.connections, key).filter(|c| c.live())?;
-        connection.streams.accept(key, self.message_bytes_max)
+        connection.streams.accept(key)
     }
 
     /// Puts `message` on the stream after the messages before it. `Ready` when the
@@ -289,19 +292,20 @@ impl Endpoint {
     /// # Errors
     ///
     /// [`Error::Stopped`] when the peer stopped the stream. Each later write gives it
-    /// too.
+    /// too. [`Error::TooLarge`] when `message` is over the peer's largest message.
+    /// Nothing of it is sent.
     ///
     /// # Panics
     ///
-    /// When `sender` holds part of a message, after [`Endpoint::finish`], or when
-    /// `message` is over the largest message (this side's own until the hello).
+    /// When `sender` holds part of a message, or after [`Endpoint::finish`].
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
         sender: &mut Sender,
         message: Block,
     ) -> Result<Poll<()>, Error> {
-        self.check_size(&message);
+        sender.check();
+        sender.check_size(&message)?;
         sender.load(message);
         self.flush(now, sender)
     }
@@ -316,20 +320,20 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// [`Error::Stopped`] when the peer stopped the stream.
+    /// [`Error::Stopped`] when the peer stopped the stream. [`Error::TooLarge`] when
+    /// `message` is over the peer's largest message. Nothing of it is sent.
     ///
     /// # Panics
     ///
-    /// After [`Endpoint::finish`], or when `message` is over the largest message
-    /// (this side's own until the hello).
+    /// After [`Endpoint::finish`].
     pub(crate) fn try_write(
         &mut self,
         now: Monotonic,
         sender: &mut Sender,
         message: Block,
     ) -> Result<Option<Block>, Error> {
-        self.check_size(&message);
         sender.check_unfinished();
+        sender.check_size(&message)?;
         let key = sender.key().connection;
         let mut message = Some(message);
         self.streams(now, key, (), |streams, inner, _, events| {
@@ -465,18 +469,6 @@ impl Endpoint {
         self.events.pop_front()
     }
 
-    /// # Panics
-    ///
-    /// When `message` is over the largest message.
-    fn check_size(&self, message: &Block) {
-        assert!(
-            message.len() <= self.message_bytes_max,
-            "a message of {} bytes is over the largest message, {} bytes",
-            message.len(),
-            self.message_bytes_max
-        );
-    }
-
     fn instant(&self, now: Monotonic) -> Instant {
         self.epoch + Duration::from_nanos(now.0)
     }
@@ -522,7 +514,7 @@ impl Endpoint {
         let Connection { inner, streams, .. } = connection;
         let result = match call(streams, inner, &self.pool, &mut self.events) {
             Err(Error::Broken { reason }) => {
-                self.events.push_back(connection.fault(now, reason));
+                self.events.extend(connection.fault(now, reason));
                 Ok(ended)
             }
             result => result,
@@ -770,6 +762,11 @@ mod tests {
         side.events.iter().map(|(_, event)| event).collect()
     }
 
+    fn available(side: &Side) -> Event {
+        let key = side.key.expect("a connection");
+        Event::Available { key }
+    }
+
     fn closed(side: &Side, error: Error) -> Event {
         let key = side.key.expect("a connection");
         Event::Closed { key, error }
@@ -809,9 +806,11 @@ mod tests {
                     peer: Peer::Node(tls::public(key)),
                 };
                 let client = connected(&pair.client, &pair::SERVER_KEY);
-                assert_eq!(events(&pair.client), [&client]);
+                let available = available(&pair.client);
+                assert_eq!(events(&pair.client), [&client, &available]);
                 let server = connected(&pair.server, &pair::CLIENT_KEY);
-                assert_eq!(events(&pair.server), [&server]);
+                let available = super::available(&pair.server);
+                assert_eq!(events(&pair.server), [&server, &available]);
             });
         }
 
@@ -854,9 +853,9 @@ mod tests {
                 pair.client.endpoint.close(now, key.expect("a key"), code);
                 pair.run(Duration::from_millis(100));
                 let client = closed(&pair.client, Error::Closed { code });
-                assert_eq!(events(&pair.client)[1..], [&client]);
+                assert_eq!(events(&pair.client)[2..], [&client]);
                 let server = closed(&pair.server, Error::PeerClosed { code });
-                assert_eq!(events(&pair.server)[1..], [&server]);
+                assert_eq!(events(&pair.server)[2..], [&server]);
             });
         }
 
@@ -887,7 +886,7 @@ mod tests {
                 pair.client.endpoint.close(now, key, Code(8));
                 pair.run(Duration::from_secs(1));
                 let error = Error::Closed { code: Code(7) };
-                assert_eq!(events(&pair.client)[1..], [&closed(&pair.client, error)]);
+                assert_eq!(events(&pair.client)[2..], [&closed(&pair.client, error)]);
             });
         }
 
@@ -901,7 +900,7 @@ mod tests {
                 pair.client.endpoint.close(now, key, Code(7));
                 pair.run(Duration::from_secs(1));
                 let error = Error::TimedOut;
-                assert_eq!(events(&pair.client)[1..], [&closed(&pair.client, error)]);
+                assert_eq!(events(&pair.client)[2..], [&closed(&pair.client, error)]);
             });
         }
 
@@ -914,7 +913,7 @@ mod tests {
                 pair.client.endpoint.close(now, key, Code(7));
                 pair.run(Duration::from_secs(1));
                 let error = Error::Closed { code: Code(7) };
-                assert_eq!(events(&pair.client)[1..], [&closed(&pair.client, error)]);
+                assert_eq!(events(&pair.client)[2..], [&closed(&pair.client, error)]);
             });
         }
 
@@ -932,7 +931,8 @@ mod tests {
                 pair.run(Duration::from_millis(100));
                 let peer = Peer::Node(server());
                 let connected = Event::Connected { key: new, peer };
-                assert_eq!(events(&pair.client)[2..], [&connected]);
+                let available = available(&pair.client);
+                assert_eq!(events(&pair.client)[3..], [&connected, &available]);
             });
         }
 
@@ -946,7 +946,7 @@ mod tests {
                 pair.run(Duration::from_millis(100));
                 let reason = "closed by peer: 4294967296".into();
                 let server = closed(&pair.server, Error::Broken { reason });
-                assert_eq!(events(&pair.server)[1..], [&server]);
+                assert_eq!(events(&pair.server)[2..], [&server]);
             });
         }
     }

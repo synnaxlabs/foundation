@@ -163,7 +163,7 @@ mod tests {
                 }
                 let (_, receiver) = sides(&mut pair);
                 let key = receiver.key.expect("a connection");
-                let events = receiver.events[1..].iter().map(|(_, event)| event);
+                let events = receiver.events[2..].iter().map(|(_, event)| event);
                 let datagram = Event::Datagram { key };
                 assert_eq!(events.collect::<Vec<_>>(), [&datagram, &datagram]);
             }
