@@ -6,7 +6,8 @@
 use raft::{Body, Position, Term};
 use types::node;
 
-use crate::entry::{self, key, position, take, take_position};
+use crate::bytes::{put_key, put_position, take, take_key, take_position};
+use crate::entry;
 use crate::region::Change;
 
 const RAFT: u8 = 1;
@@ -33,22 +34,22 @@ pub(crate) enum Message {
     /// Asks the leader to propose `change`.
     Propose {
         /// Pairs the answer with this message. The sender picks it.
-        id: u64,
+        request: u64,
         /// The change.
         change: Change,
     },
     /// Answers a [`Message::Propose`] that the receiver proposed.
     Proposed {
-        /// The `id` of the [`Message::Propose`].
-        id: u64,
+        /// The `request` of the [`Message::Propose`].
+        request: u64,
         /// The position of the entry. A new leader can replace it.
         at: Position,
     },
     /// Answers a [`Message::Propose`] that the receiver did not propose, because it
     /// does not lead.
     NotLeader {
-        /// The `id` of the [`Message::Propose`].
-        id: u64,
+        /// The `request` of the [`Message::Propose`].
+        request: u64,
         /// The leader that the receiver knows.
         leader: Option<node::Key>,
     },
@@ -61,25 +62,27 @@ impl Message {
         match self {
             Self::Raft(message) => {
                 out.push(RAFT);
-                out.extend(message.from.as_u128().to_le_bytes());
-                out.extend(message.to.as_u128().to_le_bytes());
+                put_key(message.from, &mut out);
+                put_key(message.to, &mut out);
                 out.extend(message.term.0.to_le_bytes());
                 body(&message.body, &mut out);
             }
-            Self::Propose { id, change } => {
+            Self::Propose { request, change } => {
                 out.push(PROPOSE);
-                out.extend(id.to_le_bytes());
-                out.extend(change.encode());
+                out.extend(request.to_le_bytes());
+                change.encode(&mut out);
             }
-            Self::Proposed { id, at } => {
+            Self::Proposed { request, at } => {
                 out.push(PROPOSED);
-                out.extend(id.to_le_bytes());
-                position(*at, &mut out);
+                out.extend(request.to_le_bytes());
+                put_position(*at, &mut out);
             }
-            Self::NotLeader { id, leader } => {
+            Self::NotLeader { request, leader } => {
                 out.push(leader.map_or(NOT_LEADER, |_| NOT_LEADER_WITH_LEADER));
-                out.extend(id.to_le_bytes());
-                out.extend(leader.iter().flat_map(|key| key.as_u128().to_le_bytes()));
+                out.extend(request.to_le_bytes());
+                if let Some(leader) = leader {
+                    put_key(*leader, &mut out);
+                }
             }
         }
         out
@@ -91,25 +94,25 @@ impl Message {
         let bytes = &mut bytes;
         let message = match u8::from_le_bytes(take(bytes)?) {
             RAFT => Self::Raft(raft::Message {
-                from: key(bytes)?,
-                to: key(bytes)?,
+                from: take_key(bytes)?,
+                to: take_key(bytes)?,
                 term: Term(u64::from_le_bytes(take(bytes)?)),
                 body: take_body(bytes)?,
             }),
             PROPOSE => {
-                let id = u64::from_le_bytes(take(bytes)?);
+                let request = u64::from_le_bytes(take(bytes)?);
                 let change = Change::decode(std::mem::take(bytes)).ok()?;
-                Self::Propose { id, change }
+                Self::Propose { request, change }
             }
             PROPOSED => Self::Proposed {
-                id: u64::from_le_bytes(take(bytes)?),
+                request: u64::from_le_bytes(take(bytes)?),
                 at: take_position(bytes)?,
             },
             kind @ (NOT_LEADER | NOT_LEADER_WITH_LEADER) => Self::NotLeader {
-                id: u64::from_le_bytes(take(bytes)?),
+                request: u64::from_le_bytes(take(bytes)?),
                 leader: match kind {
                     NOT_LEADER => None,
-                    _ => Some(key(bytes)?),
+                    _ => Some(take_key(bytes)?),
                 },
             },
             _ => return None,
@@ -122,14 +125,14 @@ fn body(body: &Body, out: &mut Vec<u8>) {
     match body {
         Body::PreVote { last } => {
             out.push(PRE_VOTE);
-            position(*last, out);
+            put_position(*last, out);
         }
         Body::PreVoteReply { granted } => {
             out.extend([PRE_VOTE_REPLY, u8::from(*granted)]);
         }
         Body::Vote { last } => {
             out.push(VOTE);
-            position(*last, out);
+            put_position(*last, out);
         }
         Body::VoteReply { granted } => {
             out.extend([VOTE_REPLY, u8::from(*granted)]);
@@ -145,7 +148,7 @@ fn body(body: &Body, out: &mut Vec<u8>) {
             commit,
         } => {
             out.push(APPEND);
-            position(*prev, out);
+            put_position(*prev, out);
             out.extend(commit.to_le_bytes());
             for entry in entries {
                 entry::encode(entry, out);
@@ -288,8 +291,8 @@ mod tests {
             },
         );
         let propose = (any::<u64>(), any::<u128>(), any::<u128>()).prop_map(
-            |(id, index, home)| Message::Propose {
-                id,
+            |(request, index, home)| Message::Propose {
+                request,
                 change: Change::Home {
                     index: channel::Key::from_u128(index),
                     home: node(home),
@@ -297,60 +300,111 @@ mod tests {
             },
         );
         let proposed = (any::<u64>(), a_position())
-            .prop_map(|(id, at)| Message::Proposed { id, at });
-        let not_leader =
-            (any::<u64>(), prop::option::of(any::<u128>())).prop_map(|(id, leader)| {
-                Message::NotLeader {
-                    id,
-                    leader: leader.map(node),
-                }
-            });
+            .prop_map(|(request, at)| Message::Proposed { request, at });
+        let not_leader = (any::<u64>(), prop::option::of(any::<u128>())).prop_map(
+            |(request, leader)| Message::NotLeader {
+                request,
+                leader: leader.map(node),
+            },
+        );
         prop_oneof![4 => raft, 1 => propose, 1 => proposed, 1 => not_leader]
+    }
+
+    fn le(number: u64) -> [u8; 8] {
+        number.to_le_bytes()
+    }
+
+    fn key(low: u8) -> Vec<u8> {
+        let mut key = vec![low];
+        key.extend([0; 15]);
+        key
+    }
+
+    fn raft(body: Body) -> Message {
+        Message::Raft(raft::Message {
+            from: node(1),
+            to: node(2),
+            term: Term(3),
+            body,
+        })
+    }
+
+    /// The bytes of [`raft`] before the body.
+    fn head() -> Vec<u8> {
+        [&[RAFT][..], &key(1), &key(2), &le(3)].concat()
+    }
+
+    #[test]
+    fn each_body_has_a_fixed_byte_form() {
+        let cases: [(Body, &[&[u8]]); 8] = [
+            (Body::PreVote { last: at(2, 4) }, &[&[1], &le(2), &le(4)]),
+            (Body::PreVoteReply { granted: true }, &[&[2, 1]]),
+            (Body::Vote { last: at(2, 4) }, &[&[3], &le(2), &le(4)]),
+            (Body::VoteReply { granted: false }, &[&[4, 0]]),
+            (Body::Heartbeat { commit: 6 }, &[&[5], &le(6)]),
+            (Body::HeartbeatReply, &[&[6]]),
+            (Body::AppendReply { last: 8 }, &[&[8], &le(8)]),
+            (Body::AppendReject { hint: 9 }, &[&[9], &le(9)]),
+        ];
+        for (body, tail) in cases {
+            let message = raft(body);
+            let expected = [head(), tail.concat()].concat();
+            assert_eq!(message.encode(), expected, "{message:?}");
+            assert_eq!(Message::decode(&expected), Some(message));
+        }
     }
 
     #[test]
     fn an_append_has_a_fixed_byte_form() {
-        let message = Message::Raft(raft::Message {
-            from: node(1),
-            to: node(2),
-            term: Term(3),
-            body: Body::Append {
-                prev: at(2, 4),
-                entries: vec![Entry {
-                    at: at(3, 5),
-                    data: Data::Bytes(vec![0xAA, 0xBB]),
-                }],
-                commit: 4,
-            },
+        let message = raft(Body::Append {
+            prev: at(2, 4),
+            entries: vec![Entry {
+                at: at(3, 5),
+                data: Data::Bytes(vec![0xAA, 0xBB]),
+            }],
+            commit: 4,
         });
-        let mut expected = vec![1, 1];
-        expected.extend([0; 15]);
-        expected.push(2);
-        expected.extend([0; 15]);
-        for number in [3_u64, 7 << 56, 2, 4, 4, 3, 5] {
-            expected.extend(number.to_le_bytes());
-        }
-        // The kind of the body sits in the top byte of the second number.
-        expected.drain(41..48);
-        expected.extend([1, 2, 0, 0, 0, 0, 0, 0, 0, 0xAA, 0xBB]);
+        let prev = [le(2), le(4)].concat();
+        let commit = le(4);
+        let entry = [&le(3)[..], &le(5), &[1], &le(2), &[0xAA, 0xBB]].concat();
+        let expected = [&head()[..], &[7], &prev, &commit, &entry].concat();
         assert_eq!(message.encode(), expected);
         assert_eq!(Message::decode(&expected), Some(message));
     }
 
     #[test]
-    fn a_not_leader_has_a_fixed_byte_form() {
+    fn a_proposal_and_its_answers_have_a_fixed_byte_form() {
+        let propose = Message::Propose {
+            request: 9,
+            change: Change::Home {
+                index: channel::Key::from_u128(7),
+                home: node(8),
+            },
+        };
+        let expected = [&[2][..], &le(9), &[1], &key(7), &key(8)].concat();
+        assert_eq!(propose.encode(), expected);
+        assert_eq!(Message::decode(&expected), Some(propose));
+        let proposed = Message::Proposed {
+            request: 9,
+            at: at(2, 4),
+        };
+        let expected = [&[3][..], &le(9), &le(2), &le(4)].concat();
+        assert_eq!(proposed.encode(), expected);
+        assert_eq!(Message::decode(&expected), Some(proposed));
         let none = Message::NotLeader {
-            id: 9,
+            request: 9,
             leader: None,
         };
-        assert_eq!(none.encode(), [4, 9, 0, 0, 0, 0, 0, 0, 0]);
+        let expected = [&[4][..], &le(9)].concat();
+        assert_eq!(none.encode(), expected);
+        assert_eq!(Message::decode(&expected), Some(none));
         let known = Message::NotLeader {
-            id: 9,
+            request: 9,
             leader: Some(node(7)),
         };
-        let mut expected = vec![5, 9, 0, 0, 0, 0, 0, 0, 0, 7];
-        expected.extend([0; 15]);
+        let expected = [&[5][..], &le(9), &key(7)].concat();
         assert_eq!(known.encode(), expected);
+        assert_eq!(Message::decode(&expected), Some(known));
     }
 
     #[test]
