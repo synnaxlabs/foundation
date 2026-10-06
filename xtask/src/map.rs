@@ -19,7 +19,7 @@ pub(crate) enum Deps {
 
 /// Crates any crate may use as a dev-dependency, for tests. A normal dependency on
 /// one must be named in the crate's [`Deps`].
-pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
+pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting", "connector-ni-stub"];
 
 /// Every crate with its layer and the workspace crates it may depend on.
 pub(crate) const CRATES: &[Crate] = &[
