@@ -76,8 +76,9 @@ pub enum Error {
         /// more.
         available: usize,
     },
-    /// The socket under the session broke. Every session on it ends with this, and
-    /// the transport accepts and dials no more.
+    /// The socket under the session broke. Every session on it ends with this. Each
+    /// later dial gets it, and so does each accept once it gave the sessions that
+    /// connected before the break.
     Network {
         /// What the socket gave.
         error: env::net::Error,
