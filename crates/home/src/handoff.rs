@@ -15,7 +15,6 @@ use types::time::Stamp;
 const TAG: u8 = 1;
 
 /// The most bytes in the body of a handoff: the authority and the longest subject.
-/// One entry of a record holds it alone, since it fits `Layout::ENTRY_MAX_MIN`.
 pub(crate) const MAX_BYTES: usize = 1 + Name::MAX_BYTES;
 const _: () = assert!(
     MAX_BYTES <= Layout::ENTRY_MAX_MIN,
