@@ -78,9 +78,7 @@ fn complete(frame: &impl Fn() -> Frame) {
             live,
             backfill: None,
         });
-        let key = readers.open(Reader::Unnamed, start).key;
-        readers.grant(key, u64::MAX);
-        key
+        readers.open(Reader::Unnamed, start, u64::MAX).key
     };
     let mut keys: Vec<_> = (0..SESSIONS).map(|_| open(&mut readers, 0)).collect();
     let mut seq = 0;

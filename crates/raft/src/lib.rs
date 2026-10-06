@@ -21,7 +21,7 @@ use types::node;
 pub use config::{Config, Start};
 pub use log::{Data, Entry};
 pub use machine::{Raft, Ready, Role};
-pub use message::{Body, Message};
+pub use message::{Body, Grant, Message, Proof};
 pub use voters::Voters;
 
 /// An election term. A term has at most one leader.
@@ -52,12 +52,19 @@ pub struct Position {
 
 /// The state a node must have on disk before it sends a message, and must give back
 /// to [`Raft::new`] after a restart.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Hard {
     /// The highest term the node has seen.
     pub term: Term,
     /// The node that has this node's vote in `term`.
     pub vote: Option<node::Key>,
+    /// The leader of `term` that this node heard, or this node when it led. It
+    /// stays through a step-down until the term ends.
+    pub leader: Option<node::Key>,
+    /// The proof that moved this node to `term`: its own pre-votes when it
+    /// campaigned, else the proof of the message that moved it. `None` at term zero,
+    /// or when the log alone put the node in `term`.
+    pub proof: Option<Proof>,
 }
 
 /// Why a [`Raft`] rejected an input.

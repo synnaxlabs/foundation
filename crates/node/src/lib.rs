@@ -24,6 +24,10 @@ use crate::stop::Stop;
 pub struct Config {
     /// Where shards run. One shard starts per core.
     pub shards: env::shards::Shards,
+    /// The monotonic clock. Mesh time runs on it.
+    pub clock: env::clock::Clock,
+    /// The OS clock, a source of mesh time.
+    pub wall: env::wall::Wall,
 }
 
 /// A running node. Call [`Node::stop`] to end it, then [`Node::join`].
@@ -35,25 +39,41 @@ pub struct Node {
 }
 
 impl Node {
-    /// Starts one shard per core, named `shard-<i>` and pinned to core `i`. Returns
-    /// once each shard runs or one has failed to start. A failed start stops the
-    /// node, and [`Node::join`] returns its error.
+    /// Starts one shard per core, named `shard-<i>`. Each is pinned to core `i` when
+    /// the host can pin ([`env::shards::Shards::pinnable`]); else the OS places it.
+    /// Returns once each shard runs or one has failed to start. A failed start stops
+    /// the node, and [`Node::join`] returns its error.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start(config: Config) -> Self {
-        let Config { shards } = config;
+        let Config {
+            shards,
+            clock: monotonic,
+            wall,
+        } = config;
+        let (mesh, _reader) = clock::Clock::new(monotonic);
+        let mut mesh = Some((mesh, wall));
         let stop = Stop::default();
         let mut node = Self {
             stop: stop.clone(),
             handles: Vec::new(),
             failed: None,
         };
+        let pinnable = shards.pinnable();
         for core in 0..shards.cores().get() {
             let shard = env::shards::Config {
                 name: format!("shard-{core}"),
-                core: Some(core),
+                core: pinnable.then_some(core),
             };
+            // Only the first shard gets the mesh clock.
+            let mesh = mesh.take();
             let guard = stop.guard();
-            match shards.start(shard, move |_tasks| guard) {
+            let main = move |tasks: env::tasks::Tasks| {
+                if let Some((mesh, wall)) = mesh {
+                    tasks.spawn(async { mesh.run(wall).await });
+                }
+                guard
+            };
+            match shards.start(shard, main) {
                 Ok(handle) => node.handles.push(handle),
                 Err(e) => {
                     // The driver dropped `main` and its guard, which stopped the node.
