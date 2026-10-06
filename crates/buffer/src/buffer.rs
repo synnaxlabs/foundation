@@ -344,21 +344,12 @@ impl Buffer {
         }
         files.sync_dir(&dir).await?;
         let header = read_header(&file, &pool, &entropy, layout).await?;
-        let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
-        let mut logs = Logs::default();
-        loop {
-            let Window { place, len } = cursor.window();
-            let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
-            let offset = cursor.offset();
-            match cursor.next(&bytes)? {
-                Step::Data(body) => recover(body, offset, slots, &mut logs)?,
-                Step::Moved | Step::More => {}
-                Step::End => break,
-            }
-        }
+        let (cursor, logs) = walk(&file, &pool, &header, slots).await?;
         let chain = random(&entropy);
         let (writer, sealed) = cursor.writer(header.tail.offset(), chain)?;
         write_restart(&file, &pool, sealed, chain).await?;
+        // A killed process may have written records that it never synced.
+        file.sync().await?;
         let shared = Rc::new(Shared {
             file,
             pool,
@@ -552,6 +543,29 @@ async fn read_header(
     Ok(header)
 }
 
+/// Recovers the tail of every path from the records after the tail of `header`.
+/// Returns the cursor at the end of the walk and the logs.
+async fn walk(
+    file: &File,
+    pool: &Pool,
+    header: &Header,
+    slots: &mut Slots,
+) -> Result<(Cursor, Logs), Error> {
+    let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
+    let mut logs = Logs::default();
+    loop {
+        let Window { place, len } = cursor.window();
+        let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
+        let offset = cursor.offset();
+        match cursor.next(&bytes)? {
+            Step::Data(body) => recover(body, offset, slots, &mut logs)?,
+            Step::Moved | Step::More => {}
+            Step::End => break,
+        }
+    }
+    Ok((cursor, logs))
+}
+
 /// Feeds the logs the entries of a record body at `offset`, as appended and
 /// synced.
 fn recover(
@@ -618,6 +632,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
     let mut woken: Vec<Waker> = Vec::new();
     let mut sleep = clock.sleep(commit);
     loop {
+        let mut idled = false;
         let ended = poll_fn(|cx| {
             let mut state = shared.state.borrow_mut();
             if state.closed {
@@ -627,13 +642,16 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
                 return Poll::Ready(false);
             }
             state.parked = Some(cx.waker().clone());
+            idled = true;
             Poll::Pending
         })
         .await;
         if ended {
             return;
         }
-        if sleep.deadline() < clock.now() {
+        // After an idle span a passed deadline restarts, so the first entry of a burst
+        // waits for others. Without one it fires now.
+        if idled && sleep.deadline() < clock.now() {
             sleep.reset(clock.now() + commit);
         }
         (&mut sleep).await;
@@ -697,11 +715,12 @@ impl Future for Commit<'_> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.shared.state.borrow_mut();
-        if let Some(error) = &state.failed {
-            return Poll::Ready(Err(error.clone()));
-        }
+        // Before `failed`: a commit that synced stays well after a later sync fails.
         if state.commits > self.since {
             return Poll::Ready(Ok(()));
+        }
+        if let Some(error) = &state.failed {
+            return Poll::Ready(Err(error.clone()));
         }
         if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
             state.wakers.push(cx.waker().clone());
