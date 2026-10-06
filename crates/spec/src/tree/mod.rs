@@ -89,11 +89,20 @@ impl Chunks {
         Node::read(digest, bytes)
     }
 
-    // Reads the child of `parent` that `entry` names, and checks that it fits there.
-    fn child(&self, parent: &Node<'_>, entry: &Entry<'_>) -> Result<Node<'_>, Error> {
+    // Reads the child that entry `index` of `parent` names, and checks that it fits
+    // there: one level down, with keys above the entry before and up to the entry.
+    fn child(&self, parent: &Node<'_>, index: usize) -> Result<Node<'_>, Error> {
+        let entry = parent
+            .entries
+            .get(index)
+            .ok_or(Error::Corrupt(parent.digest))?;
+        let before = index.checked_sub(1).and_then(|at| parent.entries.get(at));
         let child = self.node(entry.child())?;
+        let above =
+            |first: &Entry<'_>| before.is_none_or(|before| before.key < first.key);
         let fits = parent.level.checked_sub(1) == Some(child.level)
-            && child.last_key() == Some(entry.key);
+            && child.last_key() == Some(entry.key)
+            && child.entries.first().is_some_and(above);
         if fits {
             Ok(child)
         } else {
@@ -123,7 +132,7 @@ pub fn get<'a>(
         if node.level == 0 {
             return Ok((entry.key == key).then_some(entry.payload));
         }
-        node = chunks.child(&node, entry)?;
+        node = chunks.child(&node, index)?;
     }
 }
 

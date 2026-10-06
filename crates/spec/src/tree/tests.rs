@@ -287,6 +287,22 @@ fn a_child_with_another_last_key_is_named() {
 }
 
 #[test]
+fn a_child_with_a_key_not_above_its_sibling_is_named() {
+    for first in ["a", "b"] {
+        let mut chunks = Chunks::default();
+        let left = raw(&mut chunks, 0, &[("b", b"v")]);
+        let right = raw(&mut chunks, 0, &[(first, b"v"), ("c", b"v")]);
+        let root = raw(&mut chunks, 1, &[("b", &left.0), ("c", &right.0)]);
+        let corrupt = Error::Corrupt(right);
+        assert_eq!(diff(&chunks, empty(), root), Err(corrupt), "{first}");
+        let c = "c".parse().unwrap();
+        assert_eq!(get(&chunks, root, &c), Err(corrupt), "{first}");
+        let change = [Change::Set(c, vec![1])];
+        assert_eq!(apply(&mut chunks, root, change), Err(corrupt), "{first}");
+    }
+}
+
+#[test]
 fn a_value_longer_than_four_scales_is_alone_in_its_leaf() {
     let mut chunks = Chunks::default();
     let mut model: Model = (1..200).map(|id| (id, vec![1; 8])).collect();

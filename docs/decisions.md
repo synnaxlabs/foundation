@@ -1025,8 +1025,9 @@ How to read this record:
   never a root, so the tree is a function of its entries. The empty tree has the root
   `tree::empty()` and no stored chunk. Chunks come from peers, so a reader checks
   each chunk that it reads: keys in order, each length in its shortest form, and a
-  child at the level below with the last key that its parent gives. A chunk that
-  fails gives `Error::Corrupt(hash)`. A reader does not check the boundaries, and
+  child at the level below with the last key that its parent gives and a first key
+  above the entry before it in the parent (#684). A chunk that fails gives
+  `Error::Corrupt(hash)`. A reader does not check the boundaries, and
   only `diff` checks that a leaf key is a name, so "a function of its entries" holds
   for trees that `apply` made. The tree does no I/O: the caller fills a
   `tree::Chunks`, and `get`, `apply`, and `diff` return `Error::Missing(hash)` for a

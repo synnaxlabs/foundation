@@ -148,7 +148,7 @@ fn canonical(
             break;
         }
         if !fresh.contains_key(&only.child()) {
-            chunks.child(&node, only)?;
+            chunks.child(&node, 0)?;
         }
         passed.push(root);
         root = only.child();
@@ -242,7 +242,7 @@ impl<'a> Cursor<'a> {
         while node.level > level {
             let index = node.entries.partition_point(|entry| entry.key < key);
             let index = index.min(node.entries.len().saturating_sub(1));
-            let child = Self::child(chunks, &node, index)?;
+            let child = chunks.child(&node, index)?;
             path.push((node, index));
             node = child;
         }
@@ -262,22 +262,13 @@ impl<'a> Cursor<'a> {
         let Some((node, index)) = self.path.last() else {
             return Ok(false);
         };
-        let mut child = Self::child(self.chunks, node, *index)?;
+        let mut child = self.chunks.child(node, *index)?;
         while child.level > self.node.level {
-            let first = Self::child(self.chunks, &child, 0)?;
+            let first = self.chunks.child(&child, 0)?;
             self.path.push((child, 0));
             child = first;
         }
         self.node = child;
         Ok(true)
-    }
-
-    fn child(
-        chunks: &'a Chunks,
-        node: &Node<'_>,
-        index: usize,
-    ) -> Result<Node<'a>, Error> {
-        let entry = node.entries.get(index).ok_or(Error::Corrupt(node.digest))?;
-        chunks.child(node, entry)
     }
 }
