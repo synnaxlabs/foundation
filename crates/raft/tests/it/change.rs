@@ -725,3 +725,47 @@ fn a_new_node_follows_a_leader_elected_by_the_outgoing_set() {
         (Role::Follower, Term(2), Some(key(2)))
     );
 }
+
+// The leader of term 1 won under the founding configuration and then added node 4.
+// Its votes still prove the term to node 4 while its commit is below the change.
+#[test]
+fn a_new_node_that_holds_the_leave_follows_a_leader_elected_before_the_change() {
+    let joint = Voters {
+        incoming: set(&[1, 2, 3, 4]),
+        outgoing: set(&[1, 2, 3]),
+    };
+    let left = Voters {
+        incoming: joint.incoming.clone(),
+        ..Voters::default()
+    };
+    let entries = [Data::Empty, Data::Voters(joint), Data::Voters(left)]
+        .into_iter()
+        .zip(1..)
+        .map(|(data, index)| Entry {
+            at: Position {
+                term: Term(1),
+                index,
+            },
+            data,
+        })
+        .collect();
+    let config = Config {
+        key: key(4),
+        election_ticks: ELECTION,
+        heartbeat_ticks: 1,
+    };
+    let start = Start {
+        hard: Hard {
+            term: Term(1),
+            ..Hard::default()
+        },
+        entries,
+        ..Start::default()
+    };
+    let mut node = Raft::new(config, start).unwrap();
+    node.step(heartbeat(1, 1, &[1, 2])).unwrap();
+    assert_eq!(
+        (node.role(), node.term(), node.leader()),
+        (Role::Follower, Term(1), Some(key(1)))
+    );
+}

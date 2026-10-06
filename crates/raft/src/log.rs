@@ -123,8 +123,8 @@ impl Log {
     }
 
     // The configuration before the entries. A node that starts with no voters takes
-    // it from its first configuration entry. For a leave that is a stand-in: it
-    // proves as the joint phase would, but lacks the nodes only in its outgoing set.
+    // it from its first configuration entry: from index 1, the joint entry whose
+    // outgoing set is the founding configuration. A leave stands for its joint phase.
     fn before_entries(&self) -> Voters {
         if !self.base.incoming.is_empty() {
             return self.base.clone();

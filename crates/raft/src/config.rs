@@ -23,8 +23,9 @@ pub struct Start {
     /// The stored term and vote.
     pub hard: Hard,
     /// The configuration before `entries`: the last `Voters` entry in them replaces
-    /// it. When it is empty, the first `Voters` entry shows it instead: a joint
-    /// entry's outgoing set, or a leave's own set. A node that is not a voter never
+    /// it. Empty for a node that joins: it takes any proof until it holds a `Voters`
+    /// entry, and the first one then shows the configuration before it, a joint
+    /// entry's outgoing set or a leave's own set. A node that is not a voter never
     /// starts an election while its configuration is committed, but it still votes
     /// and follows.
     pub voters: Voters,
