@@ -76,7 +76,7 @@ pub(super) fn at(elapsed: Duration) -> Monotonic {
 }
 
 /// What one sim shard gives a [`Config`].
-pub(super) struct Shard {
+pub(crate) struct Shard {
     clock: Clock,
     entropy: Entropy,
     tasks: Tasks,
@@ -86,7 +86,7 @@ pub(super) struct Shard {
 
 impl Shard {
     /// A config for a node with `private_key` and `idle`, on this shard.
-    pub(super) fn config(&self, private_key: PrivateKey, idle: Span) -> Config {
+    pub(crate) fn config(&self, private_key: PrivateKey, idle: Span) -> Config {
         Config {
             private_key,
             message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
@@ -114,7 +114,7 @@ impl Shard {
 }
 
 /// Runs `test` on one shard of a sim run made from `value`, and gives its result.
-pub(super) fn run<T: Send + 'static>(
+pub(crate) fn run<T: Send + 'static>(
     value: u64,
     test: impl FnOnce(&Shard) -> T + Send + 'static,
 ) -> T {

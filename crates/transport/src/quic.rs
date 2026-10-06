@@ -7,7 +7,7 @@ mod settings;
 mod stateless;
 pub(crate) mod stream;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
