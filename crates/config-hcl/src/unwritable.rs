@@ -81,8 +81,8 @@ impl From<&Unwritable> for Diagnostic {
             Unwritable::For { span } => (
                 FOR,
                 span,
-                "a list cannot start with the word `for`, because HCL reads `[for` as a \
-                 `for` expression",
+                "a list cannot start with the word `for`, because HCL reads `[for` as \
+                 a `for` expression",
                 "Put another item first, or rename it",
             ),
             Unwritable::TooDeep(too_deep) => return Self::from(&too_deep),
