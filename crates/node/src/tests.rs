@@ -222,13 +222,8 @@ fn a_host_that_cannot_pin_starts_shards_on_no_core() {
         starts(&run),
         [("shard-0".to_string(), None), ("shard-1".to_string(), None)]
     );
-    assert_eq!(
-        run.sim.run(),
-        Err(sim::Error::Stuck {
-            threads: vec!["shard-0".into(), "shard-1".into()],
-            seed: 7,
-        })
-    );
+    assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
+    assert_eq!(run.node.stop.waiting(), 2);
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
