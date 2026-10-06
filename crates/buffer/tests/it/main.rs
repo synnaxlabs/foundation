@@ -134,6 +134,11 @@ fn commits(halves: i64) -> Span {
     Span::from_nanos(COMMIT.nanos() / 2 * halves)
 }
 
+/// `count` tenths of a commit span.
+fn tenths(count: i64) -> Span {
+    Span::from_nanos(COMMIT.nanos() / 10 * count)
+}
+
 fn layout(area: u64, body_max: usize) -> Layout {
     Layout::new(area, body_max).expect("the sizes make a ring")
 }
@@ -408,7 +413,6 @@ fn a_busy_buffer_keeps_one_deadline_per_commit() {
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        let tenths = |count: i64| Span::from_nanos(COMMIT.nanos() / 10 * count);
         shard.memory.slow_syncs(shard.clock.clone(), tenths(2));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
@@ -844,7 +848,6 @@ fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
             .await
             .expect("opens");
         let a = slots.assign(key(1));
-        let tenths = |count: i64| Span::from_nanos(COMMIT.nanos() / 10 * count);
         shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
@@ -865,9 +868,8 @@ fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
     });
 }
 
-/// `durable` changes only at a commit that moves `commits`, and before the count
-/// moves: two reads with one count see one `durable`, and a read that shows a new
-/// count sees the entries of that commit durable.
+/// Two reads with one count see one `durable`, and a read that shows a new count
+/// sees the entries of that commit durable, across every record of the commit.
 #[test]
 fn durable_changes_only_at_a_commit_that_moves_commits() {
     run(132, Memory::default(), |shard| async move {
@@ -878,7 +880,6 @@ fn durable_changes_only_at_a_commit_that_moves_commits() {
             .expect("opens");
         let a = slots.assign(key(1));
         let b = slots.assign(key(2));
-        let tenths = |count: i64| Span::from_nanos(COMMIT.nanos() / 10 * count);
         let read = |buffer: &Buffer| {
             (
                 buffer.commits(),
@@ -890,21 +891,31 @@ fn durable_changes_only_at_a_commit_that_moves_commits() {
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
-        let empty = read(&buffer);
-        shard.clock.sleep(tenths(12)).await;
-        assert_eq!(read(&buffer), empty, "the first sync runs");
-        buffer
-            .append([entry(2, b, Path::Live, 0, 1, Some(2), Parts::default())])
-            .expect("queues during the sync");
-        shard.clock.sleep(tenths(1)).await;
+        let empty = (0, tail(0, None), tail(0, None));
         assert_eq!(read(&buffer), empty, "an append moves nothing");
+        shard.clock.sleep(tenths(12)).await;
+        assert_eq!(shard.memory.syncs(), 3, "the first sync runs");
+        assert_eq!(read(&buffer), empty, "a sync in flight moves nothing");
+        let big = Parts::from(shard.block(2000));
+        let rest = Parts::from(shard.block(1500));
+        buffer
+            .append([entry(2, b, Path::Live, 0, 1, Some(2), big)])
+            .expect("queues during the sync");
+        buffer
+            .append([
+                entry(2, b, Path::Live, 1, 1, Some(3), rest.clone()),
+                entry(2, b, Path::Live, 2, 1, Some(4), rest),
+            ])
+            .expect("starts a second record during the sync");
+        shard.clock.sleep(tenths(1)).await;
+        assert_eq!(read(&buffer), empty, "an append in the sync moves nothing");
         shard.clock.sleep(tenths(3)).await;
         let first = (1, tail(1, Some(1)), empty.2);
         assert_eq!(read(&buffer), first, "the count shows the commit durable");
         shard.clock.sleep(tenths(6)).await;
         assert_eq!(read(&buffer), first, "the second sync runs");
         shard.clock.sleep(tenths(4)).await;
-        let second = (2, tail(1, Some(1)), tail(1, Some(2)));
+        let second = (2, tail(1, Some(1)), tail(3, Some(4)));
         assert_eq!(read(&buffer), second, "the count shows the commit durable");
     });
 }
