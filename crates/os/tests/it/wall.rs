@@ -40,17 +40,15 @@ fn gives_a_bound_under_sixteen_seconds_when_a_daemon_runs() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_refused_read_fails_at_construction() {
-    let result = std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                refuse_adjtimex();
-                os::wall().map(drop).map_err(|e| e.to_string())
-            })
-            .join()
-            .unwrap()
+    let threads = os::threads().expect("the OS gives the cores of this process");
+    let handle = threads.start("wall", || async {
+        refuse_adjtimex();
+        let refused =
+            "cannot read the wall clock: Operation not permitted (os error 1)";
+        let result = os::wall().map(drop).map_err(|e| e.to_string());
+        assert_eq!(result, Err(refused.to_owned()));
     });
-    let refused = "cannot read the wall clock: Operation not permitted (os error 1)";
-    assert_eq!(result, Err(refused.to_owned()));
+    crate::common::assert_joins(handle.unwrap(), Ok(()));
 }
 
 /// Makes the OS refuse `adjtimex` and `clock_adjtime` on this thread, as systemd's

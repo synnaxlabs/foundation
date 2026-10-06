@@ -131,6 +131,7 @@ mod tests {
     fn a_bound_past_the_end_of_a_span_is_none() {
         assert_eq!(bound(libc::TIME_OK, i64::MAX / 1_000 + 1), None);
         assert_eq!(bound(libc::TIME_OK, i64::MAX), None);
+        assert_eq!(bound(libc::TIME_OK, i64::MIN), None);
     }
 
     #[test]
@@ -150,12 +151,17 @@ mod tests {
         }
 
         #[test]
-        fn a_bound_out_of_range_or_an_error_state_gives_none(
-            state in 0..=libc::TIME_ERROR,
-            maxerror in any::<i64>(),
+        fn an_error_state_gives_none_at_any_bound(
+            maxerror in -(i64::MAX / 1_000)..=i64::MAX / 1_000,
         ) {
-            let out = !(0..=i64::MAX / 1_000).contains(&maxerror);
-            prop_assume!(state == libc::TIME_ERROR || out);
+            prop_assert_eq!(bound(libc::TIME_ERROR, maxerror), None);
+        }
+
+        #[test]
+        fn a_negative_bound_gives_none_in_any_state(
+            state in 0..=libc::TIME_ERROR,
+            maxerror in -(i64::MAX / 1_000)..0,
+        ) {
             prop_assert_eq!(bound(state, maxerror), None);
         }
     }
