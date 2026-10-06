@@ -145,14 +145,16 @@ impl Sim {
     /// Crashes `node` now, between runs. Each thread of the node ends at once: no
     /// task of it polls again, its futures and its threads that have not run drop,
     /// so its sockets close and its timers stop, and
-    /// [`env::thread::Handle::join`] on one of them panics. The node keeps its disk
-    /// and its addresses: start new threads on it to restart it.
+    /// [`env::thread::Handle::join`] on one of them panics. A thread that one of
+    /// these drops starts on the node also ends in the crash and never runs. The
+    /// node keeps its disk and its addresses: start new threads on it to restart it.
     ///
     /// # Panics
     ///
     /// - When `node` belongs to another run.
     /// - When the drop of a future or of a thread that has not run panics. The crash
-    ///   still ends, and the panic gives each message as [`Error::Panicked`] does.
+    ///   still ends, and the panic gives each message as [`Error::Panicked`] does:
+    ///   those of the futures first, then those of the threads, each in start order.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
         let (tasks, starts) = lock(&self.shared).stop(node);
@@ -382,7 +384,7 @@ fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
         .collect()
 }
 
-/// What joins the messages of two panics of one thread.
+/// What joins the messages of two panics.
 const THEN: &str = ", then a drop panicked: ";
 
 /// The message of a panic payload.

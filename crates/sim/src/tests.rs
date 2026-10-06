@@ -817,10 +817,10 @@ fn two_panics_in_drops_at_a_crash_panic_after_the_crash() {
     });
     sim.run_for(Span::SECOND).unwrap();
     let message = "bomb, then a drop panicked: bomb";
-    assert_eq!(crash(&mut sim, &node, crate::Crash::Power), message);
+    assert_eq!(crash_panic(&mut sim, &node, crate::Crash::Power), message);
     assert_eq!(node.clock().now(), node::Config::default().monotonic);
     drop(handle);
-    restarts(&mut sim, &node);
+    assert_restarts(&mut sim, &node);
 }
 
 #[test]
@@ -842,10 +842,10 @@ fn a_panic_in_the_drop_of_an_unstarted_thread_at_a_power_cut_still_ends_the_cut(
             let _late = late;
         });
     let message = "bomb, then a drop panicked: late";
-    assert_eq!(crash(&mut sim, &node, crate::Crash::Power), message);
+    assert_eq!(crash_panic(&mut sim, &node, crate::Crash::Power), message);
     assert_eq!(node.clock().now(), node::Config::default().monotonic);
     drop((running, unstarted));
-    restarts(&mut sim, &node);
+    assert_restarts(&mut sim, &node);
 }
 
 #[test]
@@ -859,19 +859,32 @@ fn two_panics_in_drops_of_unstarted_threads_at_a_crash_give_one_panic() {
         })
     });
     let message = "first, then a drop panicked: second";
-    assert_eq!(crash(&mut sim, &node, crate::Crash::Process), message);
+    assert_eq!(crash_panic(&mut sim, &node, crate::Crash::Process), message);
     drop(handles);
-    restarts(&mut sim, &node);
+    assert_restarts(&mut sim, &node);
+}
+
+#[test]
+fn a_crash_leaves_an_unstarted_thread_of_another_node() {
+    let mut sim = sim(0);
+    let (a, b) = (
+        sim.node(node::Config::default()),
+        sim.node(node::Config::default()),
+    );
+    let handle = b.shards().start(shard("b-0"), |_| async {});
+    sim.crash(&a, crate::Crash::Process);
+    sim.run().unwrap();
+    handle.unwrap().join().unwrap();
 }
 
 /// Crashes `node` and gives the message of the panic that the crash must raise.
-fn crash(sim: &mut Sim, node: &node::Node, crash: crate::Crash) -> String {
+fn crash_panic(sim: &mut Sim, node: &node::Node, crash: crate::Crash) -> String {
     let crashed = panic::catch_unwind(AssertUnwindSafe(|| sim.crash(node, crash)));
     crate::message(&*crashed.unwrap_err())
 }
 
-/// Checks that a thread started on `node` after a crash runs to its end.
-fn restarts(sim: &mut Sim, node: &node::Node) {
+/// Asserts that a thread started on `node` after a crash runs to its end.
+fn assert_restarts(sim: &mut Sim, node: &node::Node) {
     let handle = node.shards().start(shard("restart"), |_| async {});
     sim.run().unwrap();
     handle.unwrap().join().unwrap();
@@ -1313,4 +1326,50 @@ fn a_pause_past_the_range_of_true_time_never_ends() {
             seed: 0,
         })
     );
+}
+
+/// Starts a shard named `late` on its node when dropped, and sets `ran` when that
+/// shard runs.
+struct Restarter {
+    node: node::Node,
+    ran: Arc<AtomicBool>,
+}
+
+impl Drop for Restarter {
+    fn drop(&mut self) {
+        let ran = Arc::clone(&self.ran);
+        let handle = self
+            .node
+            .shards()
+            .start(shard("late"), move |_| async move {
+                ran.store(true, Ordering::Relaxed);
+            });
+        drop(handle.unwrap());
+    }
+}
+
+#[test]
+fn a_thread_started_by_a_drop_at_a_crash_never_runs() {
+    for started in [false, true] {
+        let mut sim = sim(0);
+        let node = sim.node(node::Config::default());
+        let ran = Arc::new(AtomicBool::new(false));
+        let restarter = Restarter {
+            node: node.clone(),
+            ran: Arc::clone(&ran),
+        };
+        let shard = node
+            .shards()
+            .start(shard("restarter"), move |_| async move {
+                let _restarter = restarter;
+                pending::<()>().await;
+            });
+        if started {
+            sim.run_for(Span::SECOND).unwrap();
+        }
+        sim.crash(&node, crate::Crash::Process);
+        sim.run().unwrap();
+        assert!(!ran.load(Ordering::Relaxed), "started: {started}");
+        drop(shard);
+    }
 }
