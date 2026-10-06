@@ -45,11 +45,7 @@ pub enum Unwritable {
     },
     /// A block or a value nested deeper than [`document::encoding::DEPTH_MAX`], which
     /// [`read`](crate::read) refuses.
-    Depth {
-        /// Where the first level past the limit starts, or `None` for a level with no
-        /// span.
-        span: Option<Span>,
-    },
+    TooDeep(TooDeep),
 }
 
 /// Gives each part a diagnostic with a stable `hcl.unwritable-*` code, or `document`'s
@@ -89,7 +85,7 @@ impl From<&Unwritable> for Diagnostic {
                  `for` expression",
                 "Put another item first, or rename it",
             ),
-            Unwritable::Depth { span } => return Self::from(&TooDeep { span }),
+            Unwritable::TooDeep(too_deep) => return Self::from(&too_deep),
         };
         Self::new(code, span, message.into(), fix.into())
     }
@@ -125,7 +121,7 @@ pub(crate) mod tests {
             Unwritable::Function { span },
             Unwritable::Reference { span },
             Unwritable::For { span },
-            Unwritable::Depth { span },
+            Unwritable::TooDeep(TooDeep { span }),
         ];
         for part in every {
             // A new variant fails this match, so it joins `every`.
@@ -135,7 +131,7 @@ pub(crate) mod tests {
                 | Unwritable::Function { .. }
                 | Unwritable::Reference { .. }
                 | Unwritable::For { .. }
-                | Unwritable::Depth { .. } => {}
+                | Unwritable::TooDeep(_) => {}
             }
         }
         every
@@ -190,10 +186,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn depth_keeps_documents_diagnostic() {
+    fn too_deep_keeps_documents_diagnostic() {
         for span in [Some(span()), None] {
             assert_eq!(
-                Diagnostic::from(&Unwritable::Depth { span }),
+                Diagnostic::from(&Unwritable::TooDeep(TooDeep { span })),
                 Diagnostic::from(&TooDeep { span })
             );
         }

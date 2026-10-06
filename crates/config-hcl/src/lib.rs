@@ -803,7 +803,7 @@ mod tests {
         }
         for part in unwritable::tests::every(None) {
             let code = Diagnostic::from(&part).code.as_str();
-            if matches!(part, Unwritable::Depth { .. }) {
+            if matches!(part, Unwritable::TooDeep(_)) {
                 assert_eq!(code, "document.too-deep");
             } else {
                 assert!(codes.insert(code), "{code} repeats: {part:?}");

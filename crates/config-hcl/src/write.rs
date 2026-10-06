@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use document::encoding::{self, TooDeep};
+use document::encoding;
 use document::value::{Call, Kind, Value};
 use document::{Attribute, Block, Document, Map};
 
@@ -42,12 +42,11 @@ pub(crate) enum After {
 /// # Errors
 ///
 /// Returns each part that HCL text cannot hold, in Document order. A Document nested
-/// deeper than [`encoding::DEPTH_MAX`] gives only [`Unwritable::Depth`], at the first
-/// level past the limit.
+/// deeper than [`encoding::DEPTH_MAX`] gives only [`Unwritable::TooDeep`], at the
+/// first level past the limit.
 pub fn write(document: &Document) -> Result<String, Vec<Unwritable>> {
-    if let Err(TooDeep { span }) = encoding::check(document) {
-        return Err(vec![Unwritable::Depth { span }]);
-    }
+    encoding::check(document)
+        .map_err(|too_deep| vec![Unwritable::TooDeep(too_deep)])?;
     let mut writer = Writer::default();
     writer.body(document.attributes.iter(), &document.blocks, 0, false);
     writer.finish()
@@ -432,6 +431,7 @@ fn opens_template(c: char, next: Option<&char>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use document::encoding::TooDeep;
     use document::value::Float;
     use document::{Label, Position, Source, Span};
     use proptest::prelude::*;
@@ -907,9 +907,9 @@ mod tests {
             })
         };
         written(&nest(63, "a"));
-        let refused = Err(vec![Unwritable::Depth {
+        let refused = Err(vec![Unwritable::TooDeep(TooDeep {
             span: Some(on(1, 2)),
-        }]);
+        })]);
         assert_eq!(write(&nest(64, "a")), refused);
         // A key too long for `[]` to fit on its line.
         assert_eq!(write(&nest(64, &"k".repeat(90))), refused);
@@ -944,7 +944,8 @@ mod tests {
         for _ in 0..64 {
             lists = value(Kind::List(vec![lists]));
         }
-        let refused = |span| Err(vec![Unwritable::Depth { span: Some(span) }]);
+        let refused =
+            |span| Err(vec![Unwritable::TooDeep(TooDeep { span: Some(span) })]);
         let document = Document {
             attributes: Map::new(vec![Attribute {
                 key: "a".into(),
@@ -1045,9 +1046,9 @@ mod tests {
         };
         assert_eq!(
             write(&document),
-            Err(vec![Unwritable::Depth {
+            Err(vec![Unwritable::TooDeep(TooDeep {
                 span: Some(on(64, 65))
-            }])
+            })])
         );
     }
 
@@ -1063,9 +1064,9 @@ mod tests {
             std::mem::forget(document);
             assert_eq!(
                 written,
-                Err(vec![Unwritable::Depth {
+                Err(vec![Unwritable::TooDeep(TooDeep {
                     span: Some(on(64, 65))
-                }]),
+                })]),
                 "{level:?}"
             );
         }

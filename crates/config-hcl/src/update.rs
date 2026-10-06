@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::ops::Range;
 
+use document::diagnostic::Diagnostic;
 use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
@@ -47,6 +48,16 @@ pub enum Refusal {
     Text(Vec<Error>),
     /// The parts of the Document that HCL text cannot hold, as [`write()`] gives them.
     Document(Vec<Unwritable>),
+}
+
+/// Gives the diagnostic of each problem, in the order of the refusal.
+impl From<&Refusal> for Vec<Diagnostic> {
+    fn from(refusal: &Refusal) -> Self {
+        match refusal {
+            Refusal::Text(errors) => errors.iter().map(Diagnostic::from).collect(),
+            Refusal::Document(parts) => parts.iter().map(Diagnostic::from).collect(),
+        }
+    }
 }
 
 /// A token's place in the text.
@@ -552,6 +563,7 @@ fn offset(position: Position) -> usize {
 #[cfg(test)]
 mod tests {
     use document::Map;
+    use document::encoding::TooDeep;
     use document::value::{Kind, Value};
     use proptest::prelude::*;
 
@@ -1006,6 +1018,56 @@ mod tests {
         assert_eq!(
             update(Source(0), "a = 1\n", &document),
             Err(Refusal::Document(vec![Unwritable::Key { span: None }]))
+        );
+
+        let mut deep = Value {
+            kind: Kind::List(Vec::new()),
+            span: None,
+        };
+        for _ in 0..64 {
+            deep = Value {
+                kind: Kind::List(vec![deep]),
+                span: None,
+            };
+        }
+        let document = Document {
+            attributes: Map::new(vec![Attribute {
+                key: "a".into(),
+                key_span: None,
+                value: deep,
+            }])
+            .unwrap(),
+            blocks: Vec::new(),
+        };
+        assert_eq!(
+            update(Source(0), "a = 1\n", &document),
+            Err(Refusal::Document(vec![Unwritable::TooDeep(TooDeep {
+                span: None
+            })]))
+        );
+    }
+
+    #[test]
+    fn gives_the_diagnostic_of_each_problem_in_order() {
+        let at = |offset| Position {
+            offset,
+            line: 0,
+            column: offset,
+        };
+        let errors = [3, 1].map(|offset| Error::TooDeep {
+            span: Span::new(Source(0), at(offset), at(offset)).unwrap(),
+        });
+        assert_eq!(
+            Vec::<Diagnostic>::from(&Refusal::Text(errors.to_vec())),
+            errors.iter().map(Diagnostic::from).collect::<Vec<_>>()
+        );
+        let parts = [
+            Unwritable::For { span: None },
+            Unwritable::Key { span: None },
+        ];
+        assert_eq!(
+            Vec::<Diagnostic>::from(&Refusal::Document(parts.to_vec())),
+            parts.iter().map(Diagnostic::from).collect::<Vec<_>>()
         );
     }
 }
