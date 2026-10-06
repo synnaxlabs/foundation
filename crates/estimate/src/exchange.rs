@@ -30,9 +30,10 @@ use crate::{Drift, Measurement};
 pub struct Exchange {
     /// The local monotonic reading when the request left.
     pub sent: Monotonic,
-    /// The other clock's mesh time when the request arrived.
+    /// The other clock's mesh time, read after the request arrived and not after
+    /// `answered`.
     pub received: Interval,
-    /// The other clock's mesh time when it answered.
+    /// The other clock's mesh time, read before the answer left.
     pub answered: Interval,
     /// The local monotonic reading when the answer arrived.
     pub returned: Monotonic,
@@ -42,7 +43,7 @@ impl Exchange {
     /// The offset of the local monotonic clock at `returned`, for a clock that drifts
     /// from mesh time by at most `drift`. When both intervals hold the other clock's
     /// true mesh time, it holds the true offset whatever the delay in each direction.
-    /// An error over 36500 days gives an unknown measurement
+    /// An error of 36500 days or more gives an unknown measurement
     /// ([`Measurement::unknown`]), centered between the edges or at the nearest span.
     /// `None` when the exchange allows no offset: an interval is inverted, the other
     /// clock goes back, the local clock drifts more than the drift bound, or `sent` is

@@ -37,10 +37,10 @@ pub(crate) fn answer(reader: &Reader, os: &source::Wall, request: Request) -> An
     }
 }
 
-/// The measurement from `answer`, which arrived at `returned`. An error over 36500
-/// days, or a [`Time::Unknown`], gives an unknown measurement. `None` when the answer
-/// allows no offset: an interval is inverted, the peer's time goes back, or `sent` is
-/// after `returned`.
+/// The measurement from `answer`, which arrived at `returned`. An error of 36500 days
+/// or more, or a [`Time::Unknown`], gives an unknown measurement. `None` when the
+/// answer allows no offset: an interval is inverted, the peer's time goes back or moves
+/// on more than the round trip allows, or `sent` is after `returned`.
 pub(crate) fn measure(answer: Answer, returned: Monotonic) -> Option<Measurement> {
     let exchange = |received, answered| Exchange {
         sent: answer.sent,
@@ -76,8 +76,8 @@ mod tests {
     use super::{answer, measure};
     use crate::{Clock, DRIFT, Reader, source};
 
-    /// 36500 days, the error of an unknown measurement.
-    const UNKNOWN: Span = Span::from_nanos(36_500 * Span::DAY.nanos());
+    /// The error of an unknown measurement.
+    const UNKNOWN: Span = Measurement::unknown(Monotonic(0), Span::ZERO).error();
 
     /// 1 January 2026.
     const TODAY: i64 = 1_767_225_600 * 1_000_000_000;
@@ -266,6 +266,8 @@ mod tests {
             assert_eq!(measure(known_answer(0, peer, inverted), returned), None);
             let back = stamps(TODAY - 1, TODAY - 1);
             assert_eq!(measure(known_answer(0, peer, back), returned), None);
+            let on = stamps(TODAY + 2_000, TODAY + 2_000);
+            assert_eq!(measure(known_answer(0, peer, on), returned), None);
             assert_eq!(measure(known_answer(1_001, peer, peer), returned), None);
             assert_eq!(measure(unknown_answer(1_001, TODAY), returned), None);
         }
@@ -303,23 +305,51 @@ mod tests {
             assert_eq!(ask(&node, &reader), Some(m));
         }
 
+        /// Before 1777 the early edge of an unknown interval stops at the first stamp.
+        #[test]
+        fn is_unknown_before_1777_with_an_unknown_estimate() {
+            let early = i64::MIN + Span::DAY.nanos();
+            let m = Measurement::unknown(at(), Span::from_nanos(early));
+            let (_sim, node, _clock, reader) = synced(at(), m);
+            assert_eq!(ask(&node, &reader), Some(m));
+        }
+
+        fn fits(ns: i128) -> bool {
+            i64::try_from(ns).is_ok()
+        }
+
         proptest! {
             #[test]
-            fn measures_its_status_while_mesh_time_fits_a_stamp(
+            fn measures_a_known_status_while_its_interval_fits_stamps(
                 monotonic in any::<u64>(),
                 offset in any::<i64>(),
-                error in 0..=UNKNOWN.nanos(),
+                error in 0..UNKNOWN.nanos(),
             ) {
                 let (at, offset) = (Monotonic(monotonic), Span::from_nanos(offset));
                 let m = Measurement::new(at, offset, Span::from_nanos(error));
                 let m = m.expect("valid");
                 let (_sim, node, _clock, reader) = synced(at, m);
                 let time = i128::from(monotonic) + i128::from(offset.nanos());
-                let reach = if m.known() { i128::from(error) } else { 0 };
-                let fits = |ns: i128| i64::try_from(ns).is_ok();
                 let asked = ask(&node, &reader);
                 prop_assert!(asked.is_some());
-                if fits(time - reach) && fits(time + reach) {
+                let error = i128::from(error);
+                if fits(time - error) && fits(time + error) {
+                    prop_assert_eq!(asked, Some(m));
+                }
+            }
+
+            #[test]
+            fn measures_an_unknown_status_while_its_guess_fits_a_stamp(
+                monotonic in any::<u64>(),
+                offset in any::<i64>(),
+            ) {
+                let (at, offset) = (Monotonic(monotonic), Span::from_nanos(offset));
+                let m = Measurement::unknown(at, offset);
+                let (_sim, node, _clock, reader) = synced(at, m);
+                let time = i128::from(monotonic) + i128::from(offset.nanos());
+                let asked = ask(&node, &reader);
+                prop_assert!(asked.is_some());
+                if fits(time) {
                     prop_assert_eq!(asked, Some(m));
                 }
             }

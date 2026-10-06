@@ -71,6 +71,11 @@ impl Measurement {
         self.error.nanos() < MAX_ERROR.nanos()
     }
 
+    /// Whether the error at `now` is known: [`Measurement::error_at`] under 36500 days.
+    pub(crate) fn known_at(self, now: Monotonic, drift: Drift) -> bool {
+        self.error_at(now, drift) < MAX_ERROR
+    }
+
     /// The error bound at `now`, earlier or later than `at`: `error` plus what `drift`
     /// can add between them, up to 36500 days.
     #[must_use]
@@ -84,7 +89,7 @@ impl Measurement {
     /// when mesh time is past that range, both edges are its end.
     #[must_use]
     pub fn interval(self) -> Interval {
-        let time = self.sum();
+        let time = self.time_nanos();
         let error = i128::from(self.error.nanos());
         Interval {
             earliest: Stamp::from_nanos(clamped(time - error)),
@@ -97,10 +102,10 @@ impl Measurement {
     /// [`Measurement::interval`], it does not move when only one edge stops there.
     #[must_use]
     pub fn time(self) -> Stamp {
-        Stamp::from_nanos(clamped(self.sum()))
+        Stamp::from_nanos(clamped(self.time_nanos()))
     }
 
-    fn sum(self) -> i128 {
+    fn time_nanos(self) -> i128 {
         i128::from(self.at.0) + i128::from(self.offset.nanos())
     }
 
