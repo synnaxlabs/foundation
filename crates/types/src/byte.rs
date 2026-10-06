@@ -94,8 +94,9 @@ pub enum Error {
     Syntax,
     /// The unit is letters, but not `B`, `KiB`, `MiB`, `GiB`, or `TiB`.
     Unit {
-        /// The unit that the text likely means: `GiB` for `gib` or `GB`. `None` for
-        /// `Gb` or `b`, which mean bits, and for a unit with no match, such as `PiB`.
+        /// The unit that the text likely means: `GiB` for `GB`, `GIB`, `gb`, or `gib`.
+        /// A `b` after an uppercase letter means bits, as in `Gb` or `Gib`, so it
+        /// gives `None`, as do a lone `b` and a unit with no match, such as `PiB`.
         meant: Option<&'static str>,
     },
     /// The number gives part of a byte, such as `0.3B`.
@@ -129,9 +130,12 @@ fn unknown(unit: &str) -> Error {
     if !unit.bytes().all(|b| b.is_ascii_alphabetic()) {
         return Error::Syntax;
     }
+    if unit.ends_with('b') && unit.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Error::Unit { meant: None };
+    }
     let decimal = |name: &str| {
         unit.len() == 2
-            && unit.ends_with('B')
+            && unit.as_bytes()[1].eq_ignore_ascii_case(&b'B')
             && unit.as_bytes()[0].eq_ignore_ascii_case(&name.as_bytes()[0])
     };
     let meant = UNITS
@@ -276,8 +280,11 @@ mod tests {
             ("1MB", Some("MiB")),
             ("1TB", Some("TiB")),
             ("1tib", Some("TiB")),
+            ("200gb", Some("GiB")),
             ("200Gb", None),
-            ("200gb", None),
+            ("200Gib", None),
+            ("1Kib", None),
+            ("1GIb", None),
             ("1b", None),
             ("1PiB", None),
             ("1PB", None),
@@ -295,7 +302,11 @@ mod tests {
         let past = format!("0.{}1TiB", "0".repeat(40));
         let half = "0.00000000000045474735088646411895751953125TiB";
         let not_five = "0.0000000000009094947017729282379150390624TiB";
-        for text in ["0.5B", "0.3KiB", "1.0000001KiB", half, not_five, &past] {
+        let both = ["99999999999999999999.3B", "16777216.3TiB"];
+        for text in ["0.5B", "0.3KiB", "1.0000001KiB", half, not_five, &past]
+            .into_iter()
+            .chain(both)
+        {
             assert_eq!(text.parse::<Size>(), Err(Error::Fraction), "{text}");
         }
     }
