@@ -2,9 +2,9 @@
 //! Authors, Apache License 2.0, see `LICENSE`). This file is modified from the etcd
 //! source: `README.md` lists each source and the changes.
 
-use raft::{Body, Hard, Message, Position, Raft, Role, Term};
+use raft::{Answer, Body, Grant, Hard, Message, Position, Raft, Role, Term};
 
-use crate::common::{ELECTION, Network, at_term, build, heartbeat, key};
+use crate::common::{ELECTION, Network, at_term, build, heartbeat, key, proof};
 
 fn drain(raft: &mut Raft) -> Vec<Message> {
     raft.ready().messages
@@ -71,11 +71,16 @@ fn in_role(role: Role) -> Raft {
         raft.campaign();
     }
     if matches!(role, Role::Candidate | Role::Leader) {
-        raft.step(reply(Body::PreVoteReply { granted: true }))
-            .unwrap();
+        raft.step(reply(Body::PreVoteReply {
+            answer: Answer::Granted(None),
+        }))
+        .unwrap();
     }
     if role == Role::Leader {
-        raft.step(reply(Body::VoteReply { granted: true })).unwrap();
+        raft.step(reply(Body::VoteReply {
+            answer: Answer::Granted(None),
+        }))
+        .unwrap();
     }
     assert_eq!(raft.role(), role);
     drain(&mut raft);
@@ -101,12 +106,13 @@ fn vote_from_any_state() {
             term: new,
             index: 42,
         };
+        let pre_votes = proof(Grant::PreVote, 2, &[2, 3]);
         raft.step(Message {
             from: key(2),
             to: key(1),
             term: new,
             body: Body::Vote { last },
-            proof: None,
+            proof: Some(pre_votes.clone()),
         })
         .unwrap();
         let replies = drain(&mut raft);
@@ -119,7 +125,9 @@ fn vote_from_any_state() {
             from: key(1),
             to: key(2),
             term: new,
-            body: Body::VoteReply { granted: true },
+            body: Body::VoteReply {
+                answer: Answer::Granted(None),
+            },
             proof: None,
         };
         assert_eq!(replies, [reply], "{role:?}");
@@ -128,7 +136,7 @@ fn vote_from_any_state() {
             term: new,
             vote: Some(key(2)),
             leader: None,
-            proof: None,
+            proof: Some(pre_votes),
         };
         assert_eq!(raft.hard(), hard, "{role:?}");
     }
@@ -162,7 +170,9 @@ fn prevote_from_any_state() {
                 from: key(1),
                 to: key(2),
                 term: new,
-                body: Body::PreVoteReply { granted: true },
+                body: Body::PreVoteReply {
+                    answer: Answer::Granted(None),
+                },
                 proof: None,
             };
             assert_eq!(replies, [reply], "{role:?}");
@@ -205,10 +215,8 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
         .map(|(index, log_term, vote)| {
             let term = Term(log_term.max(2));
             let hard = Hard {
-                term,
                 vote: vote.map(key),
-                leader: None,
-                proof: None,
+                ..at_term(term.0)
             };
             let (mut raft, _) = build(1, &[1], ELECTION, hard, own);
             let last = Position {
@@ -227,8 +235,8 @@ fn recv(request: fn(Position) -> Body) -> Vec<bool> {
                 panic!("expected one reply");
             };
             match &reply.body {
-                Body::VoteReply { granted } | Body::PreVoteReply { granted } => {
-                    *granted
+                Body::VoteReply { answer } | Body::PreVoteReply { answer } => {
+                    matches!(answer, Answer::Granted(_))
                 }
                 Body::Vote { .. }
                 | Body::PreVote { .. }
@@ -401,8 +409,12 @@ fn leader_of_three() -> Raft {
     let (mut raft, _) = build(1, &[1, 2, 3], 5, Hard::default(), Position::default());
     raft.campaign();
     for body in [
-        Body::PreVoteReply { granted: true },
-        Body::VoteReply { granted: true },
+        Body::PreVoteReply {
+            answer: Answer::Granted(None),
+        },
+        Body::VoteReply {
+            answer: Answer::Granted(None),
+        },
     ] {
         raft.step(Message {
             from: key(2),
@@ -479,7 +491,7 @@ fn free_stuck_candidate_with_check_quorum() {
         term: Term(3),
         vote: Some(key(3)),
         leader: None,
-        proof: None,
+        proof: Some(proof(Grant::PreVote, 3, &[1, 2, 3])),
     };
     let first = Position {
         term: Term(1),

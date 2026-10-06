@@ -28,6 +28,7 @@ mod tests;
 use std::any::Any;
 use std::cell::RefCell;
 use std::fmt;
+use std::mem;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::rc::Rc;
@@ -42,7 +43,7 @@ use crate::files::Files;
 use crate::net::Network;
 use crate::node::Node;
 use crate::serial::Serial;
-use crate::state::{Futures, Next, Outcome, Shared, Start, State, lock};
+use crate::state::{Ended, Futures, Next, Outcome, Shared, Start, State, lock};
 
 /// Settings for one run. Build it with `..Config::default()`: fields get added.
 ///
@@ -373,17 +374,18 @@ impl Sim {
                 return Vec::new();
             }
             let done = lock(&self.shared).finish(task, thread);
-            self.drop_futures(&done)
+            self.drop_ended(done)
         }));
         lock(&self.shared).release();
-        let mut panics = run.unwrap_or_else(|payload| vec![message(&*payload)]);
-        if panics.is_empty() {
+        if matches!(&run, Ok(panics) if panics.is_empty()) {
             return Ok(());
         }
         let name = lock(&self.shared).name(thread);
         let panicked = env::thread::Panicked { name: name.clone() };
-        let tasks = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
-        panics.extend(self.drop_futures(&tasks));
+        let ended = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
+        // The payload drops after the thread ends, as the thread's futures do.
+        let mut panics = run.unwrap_or_else(messages);
+        panics.extend(self.drop_ended(ended));
         Err(Error::Panicked {
             thread: name,
             message: panics.join(THEN),
@@ -440,31 +442,36 @@ impl Sim {
     /// started, outside the lock. Returns the message of each drop that panicked, in
     /// order.
     fn stop(&self, stopped: impl Fn(usize) -> bool) -> Vec<String> {
-        let (tasks, starts) = lock(&self.shared).stop(stopped);
-        let mut panics = self.drop_futures(&tasks);
+        let (ended, starts) = lock(&self.shared).stop(stopped);
+        let mut panics = self.drop_ended(ended);
         panics.extend(drop_each(starts));
         panics
     }
 
-    /// Drops the futures of `tasks`, outside the borrow, since a drop may spawn.
-    /// Returns the message of each drop that panicked, in order.
-    fn drop_futures(&self, tasks: &[u64]) -> Vec<String> {
-        let futures = self.futures.borrow_mut().remove(tasks);
+    /// Drops the timer wakers of `ended`, and the futures of its tasks outside the
+    /// borrow, since a drop may spawn. Returns the message of each drop that panicked,
+    /// in order.
+    fn drop_ended(&self, ended: Ended) -> Vec<String> {
+        drop(ended.timers);
+        let futures = self.futures.borrow_mut().remove(&ended.tasks);
         drop_each(futures)
     }
 }
 
 /// Drops each item on its own, as a second panic in one unwind aborts the process.
-/// Returns the message of each drop that panicked, in order.
+/// Returns the [`messages`] of each drop that panicked, in order.
 fn drop_each<T>(items: impl IntoIterator<Item = T>) -> Vec<String> {
     (items.into_iter())
         .filter_map(|item| panic::catch_unwind(AssertUnwindSafe(|| drop(item))).err())
-        .map(|payload| message(&*payload))
+        .flat_map(messages)
         .collect()
 }
 
-/// The Linux code for an I/O error (`EIO`), which a fault of a file or a port gives.
+/// The Linux code for an I/O error (`EIO`).
 const EIO: i32 = 5;
+
+/// The most payloads that [`messages`] drops in one chain.
+const CHAIN: usize = 16;
 
 /// What joins the messages of two panics.
 const THEN: &str = ", then a drop panicked: ";
@@ -478,6 +485,26 @@ fn message(payload: &(dyn Any + Send)) -> String {
     } else {
         "a payload that is not a string".to_owned()
     }
+}
+
+/// The message of `payload`, then of each panic in the drop of the payload before
+/// it. It drops at most [`CHAIN`] payloads, each in a catch, and forgets the payload
+/// past them, so that a drop that always panics cannot hang the run.
+fn messages(payload: Box<dyn Any + Send>) -> Vec<String> {
+    let mut messages = vec![message(&*payload)];
+    let mut next = payload;
+    for _ in 0..CHAIN {
+        match panic::catch_unwind(AssertUnwindSafe(|| drop(next))) {
+            Ok(()) => return messages,
+            Err(payload) => {
+                messages.push(message(&*payload));
+                next = payload;
+            }
+        }
+    }
+    #[expect(clippy::mem_forget, reason = "its drop may panic again")]
+    mem::forget(next);
+    messages
 }
 
 impl Drop for Sim {
@@ -538,8 +565,9 @@ pub enum Error {
     Panicked {
         /// The thread's name.
         thread: String,
-        /// The panic message. When drops of the thread's futures panic after it, the
-        /// message of each follows, after ", then a drop panicked: ".
+        /// The panic message. When drops of the thread's futures or of a panic
+        /// payload panic after it, the message of each follows, after ", then a drop
+        /// panicked: ".
         message: String,
         /// The seed that replays the run.
         seed: u64,

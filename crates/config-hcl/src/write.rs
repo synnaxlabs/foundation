@@ -102,7 +102,7 @@ pub(crate) struct Writer<'a> {
     /// The column where the first line starts.
     start: usize,
     /// The text goes in a file whose lines end in `\r\n`. A heredoc there keeps a
-    /// `\r` in its value, so each string is quoted.
+    /// `\r` in its value, so each string is quoted, and each `\n` written ends a line.
     crlf: bool,
 }
 
@@ -118,13 +118,17 @@ impl<'a> Writer<'a> {
         }
     }
 
-    /// The text written, or each part that HCL text cannot hold.
+    /// The text written, with `\r\n` line ends for a file whose lines end in `\r\n`,
+    /// or each part that HCL text cannot hold.
     pub(crate) fn finish(self) -> Result<String, Vec<Unwritable>> {
-        if self.errors.is_empty() {
-            Ok(self.out)
-        } else {
-            Err(self.errors)
+        if !self.errors.is_empty() {
+            return Err(self.errors);
         }
+        Ok(if self.crlf {
+            self.out.replace('\n', "\r\n")
+        } else {
+            self.out
+        })
     }
 
     /// Writes each attribute on its own lines, then each block after a blank line,
@@ -153,7 +157,7 @@ impl<'a> Writer<'a> {
         }
         for block in blocks {
             if written {
-                self.gap();
+                self.end_line();
             }
             self.pad(indent);
             self.block(block, indent);
@@ -360,8 +364,8 @@ impl<'a> Writer<'a> {
         self.errors.push(Unwritable::For { span });
     }
 
-    /// Writes the blank line between an item and a block after it.
-    pub(crate) fn gap(&mut self) {
+    /// Writes a line end: the blank line between an item and a block after it.
+    pub(crate) fn end_line(&mut self) {
         self.out.push('\n');
     }
 
@@ -733,6 +737,28 @@ mod tests {
             written(&attributes(vec![(&key, list(Vec::new()))])),
             format!("{key} = []\n")
         );
+    }
+
+    #[test]
+    fn ends_each_line_in_crlf_for_a_crlf_file() {
+        let fits = "é".repeat(80);
+        let long = "é".repeat(81);
+        let document = Document {
+            attributes: map(vec![
+                ("a", list(vec![string(&fits)])),
+                ("b", list(vec![string(&long)])),
+            ]),
+            blocks: vec![block("d", &[], attributes(vec![("c", string("x\n"))]))],
+        };
+        let mut writer = Writer::new("", 0, true);
+        writer.body(document.attributes.iter(), &document.blocks, 0, false);
+        let expected = format!(
+            "a = [\"{fits}\"]\r\n\
+             b = [\r\n  \"{long}\",\r\n]\r\n\
+             \r\n\
+             d {{\r\n  c = \"x\\n\"\r\n}}\r\n"
+        );
+        assert_eq!(writer.finish().unwrap(), expected);
     }
 
     #[test]

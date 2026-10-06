@@ -4,7 +4,7 @@
 use std::str;
 
 use block::Block;
-use buffer::Entry;
+use buffer::{Entry, Layout};
 use control::{Handoff, Writer};
 use types::authority::Authority;
 use types::frame::{Path, key_set};
@@ -15,9 +15,11 @@ use types::time::Stamp;
 const TAG: u8 = 1;
 
 /// The most bytes in the body of a handoff: the authority and the longest subject.
-/// One entry of a record holds it alone, since `Layout::entry_max` is at least 4032.
 pub(crate) const MAX_BYTES: usize = 1 + Name::MAX_BYTES;
-const _: () = assert!(MAX_BYTES <= 4032, "a handoff fits one entry of any ring");
+const _: () = assert!(
+    MAX_BYTES <= Layout::ENTRY_MAX_MIN,
+    "a handoff fits one entry of any ring"
+);
 
 /// The buffer entry that records `handoff` on the live path of `index` at seq `first`,
 /// at mesh time `stored_at`. Its body is a block from `pool`, or no part when no
@@ -242,8 +244,8 @@ mod tests {
 
             #[test]
             #[should_panic(
-                expected = "the handoff subject is not a name: \"a..b\" has \
-                                       a segment that is not valid: \"\""
+                expected = "the handoff subject is not a name: a segment is not \
+                                       valid: \"\" in \"a..b\""
             )]
             fn panics_on_a_subject_that_is_not_a_name() {
                 read(b"\x07a..b");

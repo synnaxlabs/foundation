@@ -24,11 +24,12 @@ use types::frame::Path;
 use types::time::Span;
 
 use crate::entry::{self, ENTRIES_MAX, Entry};
-use crate::group::{self, Closed, Group, Limit, META_LEN, Sealed};
+use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
-use crate::log::{self, Logs, Tail};
+use crate::log::{self, Logs, Mark, Tail};
+use crate::read::{Read, Reading};
 use crate::record::{self, ALIGN, AREA_START, Body};
-use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
+use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
 
 /// What one shard's buffer is given at open.
 #[derive(Debug)]
@@ -49,11 +50,12 @@ pub struct Config {
     /// The sizes of a new ring. An existing ring keeps the sizes in its header; a
     /// change takes effect at the next create.
     pub layout: Layout,
-    /// The longest time an entry waits for its group commit.
+    /// The longest time an entry waits for its group commit to start. An entry
+    /// queued during a commit longer than `commit` waits until that commit ends.
     pub commit: Span,
 }
 
-/// Why an open failed.
+/// Why an open or a read failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The ring has no room for its restart record.
@@ -65,7 +67,8 @@ pub enum Error {
         /// before their end, whichever is less.
         free: u64,
     },
-    /// The pool has no block for a header, a recovery read, or the restart record.
+    /// The pool has no block for a header, a recovery read, the restart record, or
+    /// a read.
     Pool(block::Error),
     /// A file call failed.
     Files(files::Error),
@@ -217,8 +220,9 @@ impl From<header::Error> for Error {
 
 /// One shard's logs. It lives on its shard: the commit task runs on the shard's
 /// `tasks`. The task idles while nothing is queued. A drop ends the task at once
-/// when it idles, else at its next deadline. Entries queued and not yet committed
-/// at the drop are not written.
+/// when it idles, else at its next deadline, after it wrote the entries queued at
+/// the drop. A [`Commit`] held past the drop resolves once the task ended: await it
+/// before a reopen, and before the shard ends, which cancels the task.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -264,8 +268,10 @@ struct State {
     wakers: Vec<Waker>,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
     parked: Option<Waker>,
-    /// Whether the handle dropped. The task ends when it next decides.
+    /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
+    /// Whether the task ended. A [`Commit`] held past the drop waits for it.
+    ended: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
 }
@@ -380,6 +386,7 @@ impl Buffer {
                 wakers: Vec::new(),
                 parked: None,
                 closed: false,
+                ended: false,
                 failed: None,
             }),
         });
@@ -408,6 +415,61 @@ impl Buffer {
         self.shared.state.borrow().logs.durable(slot, path)
     }
 
+    /// The durable entries of `path` of the index at `slot` from `from`, in
+    /// order, until their blocks take `budget` pool bytes, by
+    /// [`block::footprint`] of each, a skip ahead starts, or the pool has no block
+    /// for the next entry. The last entry may pass the budget. An entry that holds
+    /// `from` comes whole. A read from a mark at or in the seqs a skip ahead left
+    /// out reports them as `gap` and goes on after them. The first read starts at
+    /// `Mark::at(0)`; each read continues at `next`, which a read that gives
+    /// nothing does not move. A read makes one file read for the table of each
+    /// record it visits, two when the record header and table pass 4 KiB, and one
+    /// per entry with bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Files`] when a ring read fails and [`Error::Pool`] when the pool
+    /// has no block for the first entry or its table; the buffer goes on. When a
+    /// commit's file call fails before the read ends, the error that ended the
+    /// buffer.
+    pub async fn read(
+        &self,
+        slot: Slot,
+        path: Path,
+        from: Mark,
+        budget: usize,
+    ) -> Result<Read, Error> {
+        let Shared {
+            file, pool, layout, ..
+        } = &*self.shared;
+        let mut reading = Reading::new(file, pool, *layout, path, from, budget);
+        let walked = self.walk(&mut reading, slot, path).await;
+        // After the walk: a ring read after a failed sync gives `Poisoned`.
+        if let Some(failed) = &self.shared.state.borrow().failed {
+            return Err(Error::Files(failed.clone()));
+        }
+        walked.map(|()| reading.finish())
+    }
+
+    /// Gives `reading` the records of `path` of the index at `slot` until it ends.
+    async fn walk(
+        &self,
+        reading: &mut Reading<'_>,
+        slot: Slot,
+        path: Path,
+    ) -> Result<(), Error> {
+        while let Some(from) = reading.next() {
+            let found = self.shared.state.borrow().logs.run(slot, path, from);
+            let Some((index, run)) = found else {
+                break;
+            };
+            if !reading.record(index, run).await? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// How many group commits ended since the open. It moves before the [`Commit`]
     /// futures that the commit resolves wake, and a failed commit does not move it.
     /// [`durable`](Self::durable) changes only at a commit that moves the count, and
@@ -434,7 +496,8 @@ impl Buffer {
     /// # Panics
     ///
     /// When a `first` is below the tail of its path, with the index, the path,
-    /// `first`, and the tail, or when `first + len` passes `u64::MAX`.
+    /// `first`, and the tail, when `first + len` passes `u64::MAX`, or when an
+    /// entry's slot held another index on its path before.
     pub fn append(
         &self,
         entries: impl IntoIterator<Item = Entry>,
@@ -484,11 +547,12 @@ impl Buffer {
     /// Resolves when every entry appended before the call is durable: at once when
     /// none waits, else at the end of the group commit that holds the last of them.
     /// Gives the file error that ended the buffer when it ended before they were
-    /// durable.
+    /// durable. Held past the drop, it resolves once the task ended, after it wrote
+    /// the entries queued at the drop.
     #[must_use]
-    pub fn committed(&self) -> Commit<'_> {
+    pub fn committed(&self) -> Commit {
         Commit {
-            shared: &self.shared,
+            shared: Rc::clone(&self.shared),
             until: self.shared.state.borrow().durable_at(),
         }
     }
@@ -592,7 +656,7 @@ fn recover(
     let unread = |_: entry::Invalid| Error::Invalid { offset };
     let misplaced = |_: log::Invalid| Error::Invalid { offset };
     for header in entry::parse(body.start, body.len).map_err(unread)? {
-        let header = header.map_err(unread)?;
+        let (header, _) = header.map_err(unread)?;
         let slot = slots.assign(header.index);
         logs.append(slot, &header).map_err(misplaced)?;
         logs.sync(slot, &header, offset).map_err(misplaced)?;
@@ -638,7 +702,8 @@ fn small_record(
 /// The commit task. It parks while the state idles; a push that takes an entry or
 /// the drop wakes it. Each deadline takes the closed groups and the open one, seals
 /// them in order from `chain`, the value of the restart record, writes them, syncs
-/// once, and wakes the waiters. A failed file call or the drop ends the task.
+/// once, and wakes the waiters. A failed file call ends the task, and so does the
+/// drop once nothing is queued.
 async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
     let mut chain = chain;
     let mut taken: Vec<Closed> = Vec::new();
@@ -649,11 +714,11 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         let mut idled = false;
         let ended = poll_fn(|cx| {
             let mut state = shared.state.borrow_mut();
-            if state.closed {
-                return Poll::Ready(true);
-            }
             if !state.idle() {
                 return Poll::Ready(false);
+            }
+            if state.closed {
+                return Poll::Ready(true);
             }
             state.parked = Some(cx.waker().clone());
             idled = true;
@@ -661,6 +726,13 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         })
         .await;
         if ended {
+            let mut state = shared.state.borrow_mut();
+            state.ended = true;
+            woken.append(&mut state.wakers);
+            drop(state);
+            for waker in woken.drain(..) {
+                waker.wake();
+            }
             return;
         }
         // After an idle span a passed deadline restarts, so the first entry of a burst
@@ -672,9 +744,6 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         sleep.reset(clock.now() + commit);
         {
             let mut state = shared.state.borrow_mut();
-            if state.closed {
-                return;
-            }
             state.taken += 1;
             if !state.open.is_empty() {
                 state.close_open();
@@ -691,7 +760,10 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         let mut state = shared.state.borrow_mut();
         match result {
             Ok(()) => state.synced(sealed.drain(..)),
-            Err(error) => state.failed = Some(error),
+            Err(error) => {
+                state.failed = Some(error);
+                state.ended = true;
+            }
         }
         woken.append(&mut state.wakers);
         drop(state);
@@ -714,21 +786,22 @@ async fn write(shared: &Shared, sealed: &[Sealed]) -> Result<(), files::Error> {
     shared.file.sync().await
 }
 
-/// The future of [`Buffer::committed`].
+/// The future of [`Buffer::committed`]. It does not borrow the buffer, and it holds
+/// the ring open until it drops.
 #[derive(Debug)]
-pub struct Commit<'a> {
-    shared: &'a Shared,
+pub struct Commit {
+    shared: Rc<Shared>,
     /// The count of `commits` that resolves it.
     until: u64,
 }
 
-impl Future for Commit<'_> {
+impl Future for Commit {
     type Output = Result<(), files::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.shared.state.borrow_mut();
         // Before `failed`: a commit that synced stays well after a later sync fails.
-        if state.commits >= self.until {
+        if state.commits >= self.until && (!state.closed || state.ended) {
             return Poll::Ready(Ok(()));
         }
         if let Some(error) = &state.failed {
@@ -817,8 +890,8 @@ mod tests {
     }
 
     /// Three commits, the first with two appends in one record, make one run per
-    /// record and path. An open of the same ring walks the records into the same
-    /// runs.
+    /// record and path, each from the mark after the record before. An open of the
+    /// same ring walks the records into the same runs.
     #[test]
     fn the_walk_makes_the_runs_the_syncs_made() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -847,9 +920,12 @@ mod tests {
                 buffer
             },
         );
-        let run = |first, offset| Run { first, offset };
+        let run = |seq, offset| Run {
+            start: Mark::at(seq),
+            offset,
+        };
         let live: Vec<Run> = written.runs(Slot::new(0), Path::Live).collect();
-        assert_eq!(live, [run(0, 4096), run(6, 8192), run(12, 12288)]);
+        assert_eq!(live, [run(0, 4096), run(6, 8192), run(9, 12288)]);
         let backfill: Vec<Run> = written.runs(Slot::new(1), Path::Backfill).collect();
         assert_eq!(backfill, [run(0, 4096), run(3, 8192), run(6, 12288)]);
         assert_eq!(written.durable(Slot::new(0), Path::Live).seq, 15);

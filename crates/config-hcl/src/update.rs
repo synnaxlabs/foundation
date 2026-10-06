@@ -68,7 +68,7 @@ struct Mark {
     newline: bool,
 }
 
-/// Text to put in place of a range of the old text. An empty range inserts.
+/// Text to put in place of a range of the old text. An empty range inserts lines.
 struct Edit {
     range: Range<usize>,
     text: String,
@@ -112,34 +112,26 @@ struct File<'a> {
 
 impl<'a> File<'a> {
     fn new(source: Source, text: &'a str) -> Self {
-        let mut tokens =
-            Tokens::new(source, text).expect("invariant: `read` took the text");
-        let mut marks = Vec::new();
-        // Each pass takes a token or returns.
-        for _ in 0..=text.len() {
-            let token = tokens.next();
-            marks.push(Mark {
+        let marks = Tokens::new(source, text)
+            .expect("invariant: `read` took the text")
+            .map(|token| Mark {
                 start: offset(token.span.start()),
                 end: offset(token.span.end()),
                 newline: token.kind == lex::Kind::Newline,
-            });
-            if token.kind != lex::Kind::End {
-                continue;
-            }
-            // Not from the tokens: a heredoc or a comment can hold the first line end.
-            let crlf = text
-                .split_once('\n')
-                .is_some_and(|(line, _)| line.ends_with('\r'));
-            return Self {
-                text,
-                marks,
-                floor: text
-                    .strip_prefix('\u{feff}')
-                    .map_or(0, |_| '\u{feff}'.len_utf8()),
-                crlf,
-            };
+            })
+            .collect();
+        // Not from the tokens: a heredoc or a comment can hold the first line end.
+        let crlf = text
+            .split_once('\n')
+            .is_some_and(|(line, _)| line.ends_with('\r'));
+        Self {
+            text,
+            marks,
+            floor: text
+                .strip_prefix('\u{feff}')
+                .map_or(0, |_| '\u{feff}'.len_utf8()),
+            crlf,
         }
-        unreachable!("invariant: each token but the last covers a byte")
     }
 
     /// The lines of an item from the start of `first` to the end of `last`, with
@@ -182,10 +174,13 @@ impl<'a> File<'a> {
     }
 
     /// The end of the line at `at` when only spaces are between `at` and the line
-    /// end. `None` at the end of a text with no line end.
+    /// end, or the end of the text when the last line has no line end. `None` at the
+    /// end of the text.
     fn blank_below(&self, at: usize) -> Option<usize> {
         let mark = self.mark(self.token(at));
-        (mark.newline && self.blank(at, mark.start)).then_some(mark.end)
+        // Only the end token starts at the end of the text.
+        let last = mark.start == self.text.len() && at < mark.start;
+        ((mark.newline || last) && self.blank(at, mark.start)).then_some(mark.end)
     }
 
     /// The start of the line that ends at `end` when that line is blank.
@@ -251,35 +246,21 @@ impl<'a> File<'a> {
             .expect("invariant: the last token is the end")
     }
 
-    /// The edit that puts the text of `writer` at `at`, before the item below when
-    /// `below`. At the end of a text with no final new line, the text starts a new
-    /// line, so no other insert may go there.
-    fn insert(&self, at: usize, writer: Writer<'_>, below: bool) -> Edit {
-        let mut text = written(writer);
-        let open =
-            at == self.text.len() && at > self.floor && !self.text.ends_with('\n');
-        if open {
-            text.insert(0, '\n');
-        }
-        Edit {
-            range: at..at,
-            text,
-            below,
-        }
-    }
-
     /// Applies `edits`, which do not overlap, to the text.
     fn apply(&self, mut edits: Vec<Edit>) -> String {
         // At one place, inserts after the item above come first, then inserts before
         // the item below, each in the order made, then a cut.
         edits.sort_by_key(|edit| (edit.range.start, edit.range.end, edit.below));
-        let line_end = if self.crlf { "\r\n" } else { "\n" };
         let mut out = String::with_capacity(self.text.len());
         let mut at = 0;
         for Edit { range, text, .. } in edits {
             let kept = self.text.get(at..range.start);
             out.push_str(kept.expect("invariant: edits do not overlap"));
-            out.push_str(&text.replace('\n', line_end));
+            // Only the end of a text can leave a line with no line end.
+            if range.is_empty() && out.len() > self.floor && !out.ends_with('\n') {
+                out.push_str(if self.crlf { "\r\n" } else { "\n" });
+            }
+            out.push_str(&text);
             at = range.end;
         }
         out.push_str(
@@ -385,10 +366,13 @@ impl Diff<'_, '_> {
             (pending.attributes.drain(..), pending.blocks.drain(..));
         writer.body(attributes, blocks, 0, pending.ends.contains(&at));
         if gap {
-            writer.gap();
+            writer.end_line();
         }
-        let below = pending.anchor != Some(at);
-        self.edits.push(self.file.insert(at, writer, below));
+        self.edits.push(Edit {
+            range: at..at,
+            text: written(writer),
+            below: pending.anchor != Some(at),
+        });
     }
 
     /// Cuts the lines of removed items, as runs that merge across blank lines.
@@ -413,7 +397,8 @@ impl Diff<'_, '_> {
     fn value(&mut self, old: &Attribute, new: &Attribute) {
         let file = self.file;
         let (start, end) = offsets(old.value.span);
-        let after = if file.blank_below(end).is_some() {
+        let mark = file.mark(file.token(end));
+        let after = if mark.newline && file.blank(end, mark.start) {
             After::Line
         } else {
             After::Other
@@ -627,17 +612,12 @@ mod tests {
     /// Adds blank lines and comments to `text`, which `write` gave, and maybe a byte
     /// order mark, `\r\n` line ends, or no final new line.
     fn annotate(text: &str, picks: &mut Picks) -> String {
-        let mut tokens = Tokens::new(Source(0), text).unwrap();
         let mut out = String::new();
         let mut at = 0;
         let mut heredoc = false;
         let mut ends_at_closer = false;
-        loop {
-            let token = tokens.next();
+        for token in Tokens::new(Source(0), text).unwrap() {
             let (start, end) = (offset(token.span.start()), offset(token.span.end()));
-            if token.kind == lex::Kind::End {
-                break;
-            }
             if token.kind != lex::Kind::Newline {
                 heredoc = matches!(token.kind, lex::Kind::Heredoc(_));
                 continue;
@@ -647,8 +627,8 @@ mod tests {
                 out.push_str(" # t");
             }
             out.push('\n');
-            let lines = ["", "", "\n", "# c\n", "  // c\n", "/* c\nc */\n"];
-            let line = lines.get(usize::from(picks.pick(6))).unwrap();
+            let lines = ["", "", "\n", "  \n", "# c\n", "  // c\n", "/* c\nc */\n"];
+            let line = lines.get(usize::from(picks.pick(7))).unwrap();
             out.push_str(line);
             ends_at_closer = heredoc && line.is_empty();
             at = end;
@@ -666,6 +646,15 @@ mod tests {
             out.insert(0, '\u{feff}');
         }
         out
+    }
+
+    /// Each heredoc of `text` as written, through the first error.
+    fn heredocs(text: &str) -> Vec<&str> {
+        Tokens::new(Source(0), text)
+            .unwrap()
+            .filter(|token| matches!(token.kind, lex::Kind::Heredoc(_)))
+            .map(|token| token.text)
+            .collect()
     }
 
     /// Mixes `b` into `a`: keeps, cuts, or changes each attribute of `a` to a value of
@@ -772,6 +761,14 @@ mod tests {
             prop_assert_eq!(read(Source(0), &out), Ok(document), "{}\n{}", text, out);
             if text.contains('\r') {
                 prop_assert!(!out.replace("\r\n", "").contains('\n'), "{}", out);
+                // HCL keeps the `\r` in a heredoc, and `read` does not, so the round
+                // trip cannot see a new heredoc. Each one is kept from `text`.
+                let mut kept = heredocs(&text);
+                for heredoc in heredocs(&out) {
+                    let at = kept.iter().position(|kept| *kept == heredoc);
+                    let new = || TestCaseError::fail(format!("{text}\n{out}"));
+                    kept.swap_remove(at.ok_or_else(new)?);
+                }
             } else {
                 prop_assert!(!out.contains('\r'), "{}", out);
             }
@@ -803,6 +800,35 @@ mod tests {
             prop_assert!(out.starts_with(text.get(..start).unwrap()), "{}", out);
             prop_assert!(out.ends_with(text.get(end..).unwrap()), "{}", out);
             prop_assert_eq!(read(Source(0), &out), Ok(document), "{}", out);
+        }
+
+        #[test]
+        fn updates_an_unended_text_as_the_ended_text(
+            a in document().prop_filter("a text with a last line", |a| {
+                a.attributes.iter().len() > 0 || !a.blocks.is_empty()
+            }),
+            b in document(),
+            picks in prop::collection::vec(any::<u8>(), 0..256),
+            attributes_last in any::<bool>(),
+        ) {
+            let mut picks = Picks(picks.into_iter());
+            let annotated = annotate(&text_of(&a, attributes_last), &mut picks);
+            let text = annotated.trim_end_matches(['\r', '\n']);
+            // `update` takes the line end of the first line.
+            let line_end = if text.contains("\r\n") { "\r\n" } else { "\n" };
+            let ended = format!("{text}{line_end}");
+            // A heredoc needs the line end after its closer.
+            prop_assume!(read(Source(0), text) == Ok(a.clone()));
+            let document = mix(&a, &b, &mut picks);
+            let out = update(Source(0), text, &document).unwrap();
+            let want = update(Source(0), &ended, &document).unwrap();
+            prop_assert!(
+                want == out || want == format!("{out}{line_end}"),
+                "{:?}\n{:?}\n{:?}",
+                text,
+                out,
+                want
+            );
         }
     }
 
@@ -978,6 +1004,35 @@ mod tests {
         assert_eq!(line.chars().count(), 88);
         assert_eq!(updated("a = 1", &line), line);
         assert_eq!(updated("a = 1 # c\n", &line), format!("{line} # c\n"));
+    }
+
+    #[test]
+    fn takes_the_line_end_of_the_first_line() {
+        assert_eq!(
+            updated("a = 1\nb = 2\r\n", "a = 1\nb = \"x\\n\""),
+            "a = 1\nb = <<EOT\nx\nEOT\r\n"
+        );
+        assert_eq!(
+            updated("a = 1\r\nb = 2\n", "a = 1\nb = 2\nc = \"x\\n\""),
+            "a = 1\r\nb = 2\nc = \"x\\n\"\r\n"
+        );
+        assert_eq!(
+            updated("a = 1\nb = 2\r\nc = 3", "a = 1\nb = 2\nc = 3\nd = 4"),
+            "a = 1\nb = 2\r\nc = 3\nd = 4\n"
+        );
+    }
+
+    #[test]
+    fn starts_no_blank_line_when_the_last_line_is_cut() {
+        assert_eq!(updated("a = 1\n  ", "b = 2"), "b = 2\n");
+        assert_eq!(updated("a = 1\r\n\t", "b = 2"), "b = 2\r\n");
+        assert_eq!(updated("x {}\n  ", "y {}"), "y {}\n");
+        assert_eq!(updated("a = 1\n  ", ""), "");
+        assert_eq!(updated("a = 1\r\nb = 2\r\n", "c = 3"), "c = 3\r\n");
+        assert_eq!(updated("a = 1\r\nb = 2", "c = 3"), "c = 3\r\n");
+        assert_eq!(updated("a = 1", "b = 2"), "b = 2\n");
+        assert_eq!(updated("\u{feff}a = 1", "b = 1"), "\u{feff}b = 1\n");
+        assert_eq!(updated("# c\r\na = 1", "b = 2"), "b = 2\r\n");
     }
 
     #[test]
