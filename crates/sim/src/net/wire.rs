@@ -60,23 +60,21 @@ impl Wire {
         *(to.and_then(|to| self.links.get(&(from, to)))).unwrap_or(&self.default)
     }
 
-    /// The true time at which a packet of `bytes` that node `from` sends to `ip` on
-    /// `link` at true time `now` leaves the link: at the link's rate, after the
-    /// packets sent on it before. `None` past `u64` nanoseconds, where it never
-    /// leaves.
+    /// The true time at which a packet of `bytes` that node `from` sends to `ip` at
+    /// true time `now` leaves the link: at the link's rate, after the packets sent on
+    /// it before. `None` past `u64` nanoseconds, where it never leaves.
     pub(super) fn depart(
         &mut self,
         now: Monotonic,
         from: usize,
         ip: IpAddr,
-        link: &link::Config,
         bytes: usize,
     ) -> Option<Monotonic> {
-        let Some(rate) = link.rate else {
+        let Some(rate) = self.path(from, ip).rate else {
             return Some(now);
         };
-        let nanos = (u128::try_from(bytes).ok()? * 1_000_000_000)
-            .div_ceil(u128::from(rate.get()));
+        let bytes = u128::try_from(bytes).expect("invariant: a usize fits u128");
+        let nanos = (bytes * 1_000_000_000).div_ceil(u128::from(rate.get()));
         let transmit = Span::from_nanos(i64::try_from(nanos).ok()?);
         let free = self.transmitters.entry((from, node(ip))).or_insert(now);
         *free = (*free).max(now).checked_add(transmit)?;

@@ -217,9 +217,11 @@ impl<'a> Udp<'a> {
                 contents: part.to_vec(),
             };
             let bytes = part.len() + header;
-            let departure = (bytes <= link.mtu)
-                .then(|| self.wire.depart(now, node, destination.ip(), &link, bytes))
-                .flatten();
+            let departure = if bytes > link.mtu {
+                None
+            } else {
+                self.wire.depart(now, node, destination.ip(), bytes)
+            };
             let fate = match departure {
                 Some(departure) => self.wire.fly(departure, &link, datagram),
                 None => Fate::Lost,

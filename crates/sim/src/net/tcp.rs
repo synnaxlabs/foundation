@@ -221,7 +221,7 @@ impl Lanes {
         let tag = mem::discriminant(&kind);
         wire.record((now, source, destination, tag, kind.len(), Fate::Sent));
         let bytes = kind.len() + header(destination);
-        let departure = wire.depart(now, node, destination.ip(), &link, bytes);
+        let departure = wire.depart(now, node, destination.ip(), bytes);
         let Some(at) = departure.and_then(|departure| wire.draw(departure, &link))
         else {
             return;
