@@ -355,7 +355,8 @@ How to read this record:
   that do not hold `count` samples, and `validate` refuses encoded bytes that do not
   parse as `count` samples. The bytes do not carry the count, so a wrong count passes
   when the vectors also parse at it: a vector with bit width 0 holds any count up to
-  1024.
+  1024. `Decoder` decodes one vector at a time, so a reader of a series from a peer
+  needs room for only 1024 samples, whatever the count (#416).
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed

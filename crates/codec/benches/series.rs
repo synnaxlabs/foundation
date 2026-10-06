@@ -1,11 +1,12 @@
 //! The time to encode, validate, and decode series shaped like sensor data, and
-//! series that FFOR and delta pack at chosen bit widths. Before it times anything, it
-//! checks that each full series compresses at least as well as its floor.
+//! series that FFOR and delta pack at chosen bit widths. `decoder` decodes one vector
+//! at a time. Before it times anything, it checks that each full series compresses at
+//! least as well as its floor.
 
 use std::f64::consts::TAU;
 use std::fmt;
 
-use codec::{Encoder, VECTOR_LEN, max_len};
+use codec::{Decoder, Encoder, VECTOR_LEN, max_len};
 use divan::Bencher;
 use divan::counter::ItemsCount;
 use types::sample::Scalar;
@@ -315,5 +316,19 @@ fn decode(bencher: Bencher<'_, '_>, case: Case) {
             divan::black_box(&bytes),
             divan::black_box(&mut out),
         )
+    });
+}
+
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn decoder(bencher: Bencher<'_, '_>, case: Case) {
+    let bytes = case.shape.encoded(case.len);
+    let scalar = case.shape.scalar;
+    let mut out = vec![0; VECTOR_LEN * scalar.width()];
+    bencher.counter(ItemsCount::new(case.len)).bench_local(|| {
+        let len = divan::black_box(case.len);
+        let mut decoder = Decoder::new(scalar, len, divan::black_box(&bytes));
+        while let Some(vector) = decoder.next(divan::black_box(&mut out)) {
+            divan::black_box_drop(vector);
+        }
     });
 }
