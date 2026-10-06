@@ -172,8 +172,8 @@ mod tests {
             ("shuttle", by_cfg("shuttle").unwrap()),
             ("miri", miri::packages(&metadata).unwrap()),
         ];
-        for (task, names) in tasks {
-            for name in names {
+        for (task, packages) in tasks {
+            for select::Package { name, .. } in packages {
                 assert!(
                     models.contains(&format!("'crates/{name}/**'")),
                     "`cargo xtask {task}` runs `{name}`, but the `models` filter in \
@@ -190,10 +190,13 @@ mod tests {
         let (named, checked) = (named.unwrap(), miri::packages(&metadata).unwrap());
         for name in miri::SKIPPED {
             assert!(
-                named.iter().any(|n| n == name),
+                named.iter().any(|package| package.name == name),
                 "`{name}` names no `unsafe_code`"
             );
-            assert!(!checked.iter().any(|n| n == name), "Miri checks `{name}`");
+            assert!(
+                !checked.iter().any(|package| package.name == name),
+                "Miri checks `{name}`"
+            );
         }
     }
 }
