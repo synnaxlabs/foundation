@@ -125,11 +125,12 @@ state on `main`.
   append's term. A node that a change removed and that missed its release can win
   an election once no voter has a lease, and lead until it commits the leave
   (#483).
-- `raft` counts a reply only from a voter, and a reply from a node that is not a peer
-  changes nothing (#352). But it takes a higher term from any sender of a request but
-  a `PreVote`, and from any peer's reply but a granted `PreVoteReply`. Open: #352 (one
-  message with term `u64::MAX` stops the group for good, because each node writes
-  that term to disk and none can campaign).
+- `raft` drops a reply from a node that is not a voter, unless a change removed the
+  node and `raft` still sends to it (#352). But it takes a higher term from any
+  sender of a request but a `PreVote`, or a `Vote` to a node with a lease, and from
+  any reply it keeps but a granted `PreVoteReply`. Open: #352 (one message with term
+  `u64::MAX` stops the group for good, because each node writes that term to disk
+  and none can campaign).
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.

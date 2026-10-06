@@ -906,10 +906,11 @@ How to read this record:
   enters only through `tick`: a node draws its election timeout on the first tick
   after a reset. PreVote and CheckQuorum have no off switch. A node that is not in
   its own voter list votes and follows, but never campaigns while that configuration
-  is committed. `step` does not check
-  that a sender is a voter (a voter can learn late that a peer joined), so the caller
-  authenticates the sender and decides which nodes may send. A reply from a node that
-  is not a peer changes nothing (#352). When the term of the
+  is committed. `step` does not check that the sender of a request is a voter (a voter
+  can learn late that a peer joined), so the caller authenticates the sender and
+  decides which nodes may send. `step` drops a reply with no check when its sender is
+  not in `voters()`, unless the configuration in force removed the sender and the
+  node still sends to it: only `raft` knows whom it asked (#352). When the term of the
   last entry is above `hard.term`, `Raft::new` starts at that term with no vote. The
   node sends nothing before its write, so no peer counted a vote or an answer that a
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no
@@ -924,11 +925,12 @@ How to read this record:
   (its hint for the next `prev`). `step` checks a message against the log before it
   changes state: entries that do not follow `prev` are `Error::EntryOutOfOrder`, and a
   heartbeat's `commit`, an append reply's `last`, or an append reject's `hint` past the
-  log is `Error::IndexPastLog`. An append's `prev` and `commit` and a vote's `last` can
-  be past the log of a node that is behind. An `Append` with an entry whose term is
-  above the message's term is `Error::TermBehindLog`: no leader sends one, so the
-  sender is faulty. The conformance oracle changed to match; the person decided on
-  2026-10-05 ("a is fine", #232). A bad message changes nothing.
+  log is `Error::IndexPastLog`, unless `step` drops the reply (RAFT SURFACE). An
+  append's `prev` and `commit` and a vote's `last` can be past the log of a node that
+  is behind. An `Append` with an entry whose term is above the message's term is
+  `Error::TermBehindLog`: no leader sends one, so the sender is faulty. The
+  conformance oracle changed to match; the person decided on 2026-10-05 ("a is
+  fine", #232). A bad message changes nothing.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last

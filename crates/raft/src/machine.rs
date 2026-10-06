@@ -322,8 +322,9 @@ impl Raft {
     ///   reject names an index past this node's log.
     ///
     /// A message for a lower term is stale: it is answered or dropped with no check.
-    /// A reply from a node that is not a peer changes nothing, because this node sent
-    /// it no request. The node's state does not change on an error.
+    /// A reply is dropped with no check when its sender is not in [`Raft::voters`],
+    /// unless the configuration in force removed the sender and this node still sends
+    /// to it. The node's state does not change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
         let Message {
             from,
@@ -341,7 +342,7 @@ impl Raft {
             self.answer_stale(from, &body);
             return Ok(());
         }
-        if reply(&body) && !self.peers.contains_key(&from) {
+        if body.answers() && !self.peers.contains_key(&from) {
             return Ok(());
         }
         self.check(from, term, &body)?;
@@ -840,6 +841,7 @@ impl Raft {
     // Records one answer to the current campaign and acts when the answers decide it.
     // The first answer of a voter counts.
     fn poll(&mut self, from: node::Key, granted: bool) {
+        // A node can campaign with no peer of its own (#659).
         let Some(peer) = self.peers.get_mut(&from) else {
             return;
         };
@@ -906,21 +908,6 @@ impl Raft {
             term,
             body,
         });
-    }
-}
-
-// Whether `body` answers a request.
-fn reply(body: &Body) -> bool {
-    match body {
-        Body::PreVote { .. }
-        | Body::Vote { .. }
-        | Body::Heartbeat { .. }
-        | Body::Append { .. } => false,
-        Body::PreVoteReply { .. }
-        | Body::VoteReply { .. }
-        | Body::HeartbeatReply
-        | Body::AppendReply { .. }
-        | Body::AppendReject { .. } => true,
     }
 }
 
@@ -1457,17 +1444,41 @@ mod tests {
                 Body::AppendReply { last: 9 },
                 Body::AppendReject { hint: 9 },
             ];
-            for (term, body) in [1, 5]
-                .into_iter()
-                .flat_map(|term| bodies.iter().map(move |body| (term, body.clone())))
-            {
-                raft.step(message(9, term, body.clone())).unwrap();
-                let case = format!("{body:?} in term {term}");
-                assert_eq!((raft.role(), raft.hard()), (Role::Leader, hard), "{case}");
-                assert_eq!(sent(&mut raft), [], "{case}");
+            for term in [1, 5] {
+                for body in &bodies {
+                    raft.step(message(9, term, body.clone())).unwrap();
+                    let case = format!("{body:?} in term {term}");
+                    let state = (raft.role(), raft.hard());
+                    assert_eq!(state, (Role::Leader, hard), "{case}");
+                    assert_eq!(sent(&mut raft), [], "{case}");
+                }
             }
             raft.step(message(3, 5, Body::HeartbeatReply)).unwrap();
             assert_eq!((raft.role(), raft.term()), (Role::Follower, Term(5)));
+        }
+
+        #[test]
+        fn a_campaign_drops_a_reply_from_a_node_that_is_not_a_peer() {
+            for granted in [false, true] {
+                let mut raft = raft(&[1, 2, 3], Hard::default());
+                raft.campaign();
+                if granted {
+                    let reply = Body::PreVoteReply { granted: true };
+                    raft.step(message(2, 1, reply)).unwrap();
+                }
+                let (role, hard) = (raft.role(), raft.hard());
+                sent(&mut raft);
+                let bodies = [
+                    Body::PreVoteReply { granted: false },
+                    Body::VoteReply { granted: false },
+                ];
+                for body in bodies {
+                    raft.step(message(9, 5, body.clone())).unwrap();
+                    let case = format!("{role:?} gets {body:?}");
+                    assert_eq!((raft.role(), raft.hard()), (role, hard), "{case}");
+                    assert_eq!(sent(&mut raft), [], "{case}");
+                }
+            }
         }
     }
 
