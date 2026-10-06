@@ -3,8 +3,8 @@
 //! to look each one up, to give its charge, to view the series bytes, to give the end
 //! of each series, to check and walk the series from stored ends, to make a view
 //! through a full, a narrow, an almost full, and a half full mask and walk or charge
-//! it, and to make a narrow mask, for a dense frame and for frames of 100,000
-//! channels.
+//! it, to walk a narrow view one series at a time, and to make a narrow and an almost
+//! full mask, for a dense frame and for frames of 100,000 channels.
 
 use std::fmt;
 use std::hint::black_box;
@@ -328,6 +328,22 @@ fn narrow_walk(bencher: Bencher<'_, '_>, case: &Case) {
     bencher.bench_local(|| walk_view(View::new(black_box(&frame), black_box(&mask))));
 }
 
+/// Makes a view through a mask that wants only the last present channel, then sums
+/// the length of each of its series one at a time.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn narrow_next(bencher: Bencher<'_, '_>, case: &Case) {
+    let pool = pool();
+    let frame = frame(&pool, case);
+    let mask = Mask::new(&case.set, last(case));
+    bencher.bench_local(|| {
+        let mut len = 0;
+        for (_, bytes) in View::new(black_box(&frame), black_box(&mask)).iter() {
+            len += bytes.len();
+        }
+        len
+    });
+}
+
 /// Makes a view through a mask that wants only the last present channel, then gives
 /// its charge.
 #[divan::bench(args = cases(), sample_count = 1000)]
@@ -384,6 +400,12 @@ fn narrow_mask(bencher: Bencher<'_, '_>, case: &Case) {
     bencher.bench_local(|| Mask::new(black_box(&case.set), last(case)));
 }
 
+/// Makes a mask that wants every channel but one.
+#[divan::bench(args = cases(), sample_count = 1000)]
+fn most_mask(bencher: Bencher<'_, '_>, case: &Case) {
+    bencher.bench_local(|| Mask::new(black_box(&case.set), most(case)));
+}
+
 /// Each channel of `case`.
 fn every(case: &Case) -> impl Iterator<Item = channel::Slot> {
     case.set.entries().iter().map(|entry| entry.slot)
@@ -403,7 +425,7 @@ fn most(case: &Case) -> impl Iterator<Item = channel::Slot> {
         .map(|(_, entry)| entry.slot)
 }
 
-/// The first channel of `case` and every second one after it.
+/// Entry 0 and each odd entry of `case`: just over half of its channels.
 fn alternate(case: &Case) -> impl Iterator<Item = channel::Slot> {
     let entries = case.set.entries().iter().enumerate();
     entries

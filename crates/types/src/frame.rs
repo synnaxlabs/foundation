@@ -649,9 +649,14 @@ fn end_of(descriptor: [u8; DESCRIPTOR]) -> usize {
 fn bounds(descriptors: &[[u8; DESCRIPTOR]], n: usize) -> (usize, usize) {
     let start = match n {
         0 => 0,
-        n => end_of(descriptors[n - 1]).next_multiple_of(SERIES_ALIGN),
+        n => padded(end_of(descriptors[n - 1])),
     };
     (start, end_of(descriptors[n]))
+}
+
+/// Where a series that ends at `end` stops with its padding, and the next one starts.
+const fn padded(end: usize) -> usize {
+    end.next_multiple_of(SERIES_ALIGN)
 }
 
 fn get<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
