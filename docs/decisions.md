@@ -364,6 +364,8 @@ How to read this record:
   encoded form has no padding. `codec` owns the check of the ends, raw and encoded,
   and a view of a raw variable series relies on it. `codec` does not check UTF-8 (the
   owner is #556). Vector numbers in errors count across the ends and the elements.
+  `Decoder` decodes a scalar series one vector at a time, so a reader of a series from
+  a peer needs room for only 1024 samples, whatever the count (#416).
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
