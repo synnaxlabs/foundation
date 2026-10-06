@@ -225,7 +225,7 @@ impl<'a> Reader<'a> {
     fn patterns(&mut self) -> Result<Selector, Error> {
         let at = self.at();
         let n = self.count(PATTERN_MIN)?;
-        let mut texts = Vec::with_capacity(n);
+        let mut written = Vec::with_capacity(n);
         for _ in 0..n {
             let flag = self.at();
             let excluded = match self.byte()? {
@@ -233,21 +233,18 @@ impl<'a> Reader<'a> {
                 1 => true,
                 found => return Err(Error::Excluded { at: flag, found }),
             };
-            let (start, text) = self.text()?;
-            if excluded {
-                texts.push(format!("!{text}"));
-            } else if text.starts_with('!') {
-                return Err(Error::Include { at: start });
+            let text = self.text()?;
+            written.push(if excluded {
+                Written::Exclude(text)
             } else {
-                texts.push(text.to_owned());
-            }
+                Written::Include(text)
+            });
         }
-        Selector::new(texts.iter().map(|t| &**t))
-            .map_err(|error| Error::Pattern { at, error })
+        Selector::from_written(written).map_err(|error| Error::Pattern { at, error })
     }
 
-    /// Reads a length and that many bytes of UTF-8. Returns where the bytes start.
-    fn text(&mut self) -> Result<(usize, &'a str), Error> {
+    /// Reads a length and that many bytes of UTF-8.
+    fn text(&mut self) -> Result<&'a str, Error> {
         let len = self.count(1)?;
         let start = self.at();
         let text = str::from_utf8(self.take(len)?).map_err(|e| Error::Utf8 {
@@ -255,13 +252,12 @@ impl<'a> Reader<'a> {
                 .checked_add(e.valid_up_to())
                 .expect("invariant: an offset into the input fits in usize"),
         })?;
-        Ok((start, text))
+        Ok(text)
     }
 
     fn name(&mut self) -> Result<Name, Error> {
         let at = self.at();
         self.text()?
-            .1
             .parse()
             .map_err(|error| Error::Name { at, error })
     }
@@ -374,11 +370,6 @@ pub enum Error {
         /// The flag.
         found: u8,
     },
-    /// A pattern that is not an exclusion starts with `!`.
-    Include {
-        /// Where the text starts.
-        at: usize,
-    },
     /// The patterns do not read as a selector.
     Pattern {
         /// Where the patterns start.
@@ -459,9 +450,6 @@ impl fmt::Display for Error {
             Self::Utf8 { at } => write!(f, "a text is not UTF-8 at byte {at}"),
             Self::Excluded { at, found } => {
                 write!(f, "the exclusion flag {found} at byte {at} is not 0 or 1")
-            }
-            Self::Include { at } => {
-                write!(f, "the included pattern at byte {at} starts with `!`")
             }
             Self::Pattern { at, error } => {
                 write!(f, "the patterns at byte {at} do not read: {error}")

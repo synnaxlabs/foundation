@@ -112,34 +112,26 @@ struct File<'a> {
 
 impl<'a> File<'a> {
     fn new(source: Source, text: &'a str) -> Self {
-        let mut tokens =
-            Tokens::new(source, text).expect("invariant: `read` took the text");
-        let mut marks = Vec::new();
-        // Each pass takes a token or returns.
-        for _ in 0..=text.len() {
-            let token = tokens.next();
-            marks.push(Mark {
+        let marks = Tokens::new(source, text)
+            .expect("invariant: `read` took the text")
+            .map(|token| Mark {
                 start: offset(token.span.start()),
                 end: offset(token.span.end()),
                 newline: token.kind == lex::Kind::Newline,
-            });
-            if token.kind != lex::Kind::End {
-                continue;
-            }
-            // Not from the tokens: a heredoc or a comment can hold the first line end.
-            let crlf = text
-                .split_once('\n')
-                .is_some_and(|(line, _)| line.ends_with('\r'));
-            return Self {
-                text,
-                marks,
-                floor: text
-                    .strip_prefix('\u{feff}')
-                    .map_or(0, |_| '\u{feff}'.len_utf8()),
-                crlf,
-            };
+            })
+            .collect();
+        // Not from the tokens: a heredoc or a comment can hold the first line end.
+        let crlf = text
+            .split_once('\n')
+            .is_some_and(|(line, _)| line.ends_with('\r'));
+        Self {
+            text,
+            marks,
+            floor: text
+                .strip_prefix('\u{feff}')
+                .map_or(0, |_| '\u{feff}'.len_utf8()),
+            crlf,
         }
-        unreachable!("invariant: each token but the last covers a byte")
     }
 
     /// The lines of an item from the start of `first` to the end of `last`, with
@@ -251,21 +243,10 @@ impl<'a> File<'a> {
             .expect("invariant: the last token is the end")
     }
 
-    /// The edit that puts the text of `writer` at `at`, before the item below when
-    /// `below`. At the end of a text with no final new line, the text starts a new
-    /// line, so no other insert may go there.
-    fn insert(&self, at: usize, writer: Writer<'_>, below: bool) -> Edit {
-        let mut text = written(writer);
-        let open =
-            at == self.text.len() && at > self.floor && !self.text.ends_with('\n');
-        if open {
-            text.insert(0, '\n');
-        }
-        Edit {
-            range: at..at,
-            text,
-            below,
-        }
+    /// Reports whether `at` ends a text whose last line has no line end, so new
+    /// text there first ends that line. Only one insert may go there.
+    fn unended(&self, at: usize) -> bool {
+        at == self.text.len() && at > self.floor && !self.text.ends_with('\n')
     }
 
     /// Applies `edits`, which do not overlap, to the text.
@@ -273,14 +254,12 @@ impl<'a> File<'a> {
         // At one place, inserts after the item above come first, then inserts before
         // the item below, each in the order made, then a cut.
         edits.sort_by_key(|edit| (edit.range.start, edit.range.end, edit.below));
-        let line_end = if self.crlf { "\r\n" } else { "\n" };
         let mut out = String::with_capacity(self.text.len());
         let mut at = 0;
         for Edit { range, text, .. } in edits {
             let kept = self.text.get(at..range.start);
             out.push_str(kept.expect("invariant: edits do not overlap"));
-            // With `\r\n`, the writer writes no heredoc, so each `\n` ends a line.
-            out.push_str(&text.replace('\n', line_end));
+            out.push_str(&text);
             at = range.end;
         }
         out.push_str(
@@ -382,14 +361,20 @@ impl Diff<'_, '_> {
             return;
         }
         let mut writer = Writer::new(&body.margin, 0, self.file.crlf);
+        if self.file.unended(at) {
+            writer.end_line();
+        }
         let (attributes, blocks) =
             (pending.attributes.drain(..), pending.blocks.drain(..));
         writer.body(attributes, blocks, 0, pending.ends.contains(&at));
         if gap {
-            writer.gap();
+            writer.end_line();
         }
-        let below = pending.anchor != Some(at);
-        self.edits.push(self.file.insert(at, writer, below));
+        self.edits.push(Edit {
+            range: at..at,
+            text: written(writer),
+            below: pending.anchor != Some(at),
+        });
     }
 
     /// Cuts the lines of removed items, as runs that merge across blank lines.
@@ -628,17 +613,12 @@ mod tests {
     /// Adds blank lines and comments to `text`, which `write` gave, and maybe a byte
     /// order mark, `\r\n` line ends, or no final new line.
     fn annotate(text: &str, picks: &mut Picks) -> String {
-        let mut tokens = Tokens::new(Source(0), text).unwrap();
         let mut out = String::new();
         let mut at = 0;
         let mut heredoc = false;
         let mut ends_at_closer = false;
-        loop {
-            let token = tokens.next();
+        for token in Tokens::new(Source(0), text).unwrap() {
             let (start, end) = (offset(token.span.start()), offset(token.span.end()));
-            if token.kind == lex::Kind::End {
-                break;
-            }
             if token.kind != lex::Kind::Newline {
                 heredoc = matches!(token.kind, lex::Kind::Heredoc(_));
                 continue;
@@ -671,17 +651,11 @@ mod tests {
 
     /// Each heredoc of `text` as written, through the first error.
     fn heredocs(text: &str) -> Vec<&str> {
-        let mut tokens = Tokens::new(Source(0), text).unwrap();
-        let mut out = Vec::new();
-        for _ in 0..=text.len() {
-            let token = tokens.next();
-            match token.kind {
-                lex::Kind::End | lex::Kind::Error(_) => return out,
-                lex::Kind::Heredoc(_) => out.push(token.text),
-                _ => {}
-            }
-        }
-        panic!("more tokens than bytes in {text:?}")
+        Tokens::new(Source(0), text)
+            .unwrap()
+            .filter(|token| matches!(token.kind, lex::Kind::Heredoc(_)))
+            .map(|token| token.text)
+            .collect()
     }
 
     /// Mixes `b` into `a`: keeps, cuts, or changes each attribute of `a` to a value of
@@ -1013,6 +987,10 @@ mod tests {
         assert_eq!(
             updated("a = 1\r\nb = 2\n", "a = 1\nb = 2\nc = \"x\\n\""),
             "a = 1\r\nb = 2\nc = \"x\\n\"\r\n"
+        );
+        assert_eq!(
+            updated("a = 1\nb = 2\r\nc = 3", "a = 1\nb = 2\nc = 3\nd = 4"),
+            "a = 1\nb = 2\r\nc = 3\nd = 4\n"
         );
     }
 
