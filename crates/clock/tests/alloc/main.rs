@@ -25,7 +25,7 @@ fn main() {
     let source = clock.add();
     let first = Measurement::new(node.clock().now(), Span::HOUR, Span::MILLISECOND);
     let first = first.expect("at most 36500 days");
-    let _ = clock.push(source, first);
+    clock.push(source, first);
     let (interval, allocations) = ALLOCATOR.count(|| reader.now());
     assert_eq!(allocations, 0, "the hot path allocated");
     assert_eq!(

@@ -90,7 +90,8 @@ pub enum Error {
     },
     /// A heartbeat, an append reply, or an append reject names a log index past this
     /// node's last entry. A heartbeat commits only what the follower holds, and a
-    /// follower answers only for entries the leader sent, so the sender is faulty.
+    /// follower answers only for entries the leader sent. So the sender is faulty, or,
+    /// from a heartbeat, this node's disk lost entries it synced.
     IndexPastLog {
         /// The index the message names.
         index: u64,
