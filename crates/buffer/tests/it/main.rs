@@ -2696,3 +2696,30 @@ fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
         assert_eq!(shard.memory.open_files(), 0, "the task ended");
     });
 }
+
+/// A record under `body_max` but over the largest block of the pool opens: the walk
+/// reads it in pieces of one block.
+#[test]
+fn a_record_the_buffer_takes_reopens() {
+    run(142, Memory::default(), |shard| async move {
+        let body_max = 2 << 20;
+        let ring = layout(1100 * BLOCK, body_max);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        let largest = shard.pool.largest();
+        let parts = [shard.block(largest), shard.block(4096)];
+        let len: usize = parts.iter().map(|part| part.len()).sum();
+        assert!(len > largest && len < body_max, "{len} {largest}");
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, None, Parts::from(parts))])
+            .expect("the record is under body_max");
+        buffer.committed().await.expect("commits");
+        assert_eq!(buffer.durable(a, Path::Live), tail(1, None));
+        drop(buffer);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await;
+        let buffer = buffer.expect("the ring with the committed record reopens");
+        assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(1, None));
+    });
+}
