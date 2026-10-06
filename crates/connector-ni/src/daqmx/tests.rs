@@ -30,12 +30,23 @@ fn linked() -> Library {
         read_digital: stub::DAQmxReadDigitalLines,
         write_digital: stub::DAQmxWriteDigitalLines,
         error: stub::DAQmxGetExtendedErrorInfo,
+        describe: stub::DAQmxGetErrorString,
     };
     Library(Arc::new(Loaded {
         functions,
         _library: None,
     }))
 }
+
+/// A read of `values` values with no warning.
+fn clean(values: usize) -> Read {
+    Read {
+        values,
+        warning: None,
+    }
+}
+
+const WRITTEN: Result<Written, Error> = Ok(Written { warning: None });
 
 fn refused(code: i32) -> Error {
     Error::Daqmx {
@@ -66,9 +77,9 @@ fn reads_a_ramp(library: &Library) {
     task.clock(1000.0, 100).unwrap();
     task.start().unwrap();
     let mut out = [0.0; 6];
-    assert_eq!(task.read(&mut out, SECOND), Ok(6));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(6)));
     assert_eq!(out, [0.0, 1000.0, 2000.0, 1.0, 1001.0, 2001.0]);
-    assert_eq!(task.read(&mut out[..3], SECOND), Ok(3));
+    assert_eq!(task.read(&mut out[..3], SECOND), Ok(clean(3)));
     assert_eq!(out[..3], [2.0, 1002.0, 2002.0]);
 }
 
@@ -81,16 +92,48 @@ fn reads_each_channel_by_scan() {
 fn gives_the_values_of_a_short_read() {
     let mut task = input(&linked(), "short/ai0:1");
     let mut out = [0.0; 4];
-    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(2)));
     assert_eq!(out[..2], [0.0, 1000.0]);
 }
 
-#[test]
-fn reads_through_a_warning() {
-    let mut task = input(&linked(), "warn/ai0");
+fn warning() -> Warning {
+    Warning {
+        code: stub::WARN,
+        message: "the stub warns".into(),
+    }
+}
+
+fn warns(library: &Library) {
+    let mut task = input(library, "warn/ai0");
     let mut out = [0.0; 2];
-    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    let read = Read {
+        values: 2,
+        warning: Some(warning()),
+    };
+    assert_eq!(task.read(&mut out, SECOND), Ok(read.clone()));
     assert_eq!(out, [0.0, 1.0]);
+    let mut task = output(library, "warn/ao0");
+    let written = Written {
+        warning: Some(warning()),
+    };
+    assert_eq!(task.write(&[1.0], SECOND), Ok(written.clone()));
+    let mut task = digital::Input::create(library, "lines").unwrap();
+    task.add("warn/port0/line0").unwrap();
+    task.start().unwrap();
+    assert_eq!(task.read(&mut [9; 2], SECOND), Ok(read));
+    let mut task = digital::Output::create(library, "lines").unwrap();
+    task.add("warn/port0/line0").unwrap();
+    task.start().unwrap();
+    assert_eq!(task.write(&[true], SECOND), Ok(written));
+}
+
+#[test]
+fn gives_the_warning_of_a_read_or_a_write() {
+    warns(&linked());
+    assert_eq!(
+        warning().to_string(),
+        "NI-DAQmx warning 201000: the stub warns"
+    );
 }
 
 #[test]
@@ -101,7 +144,7 @@ fn counts_the_channels_a_failed_add_left() {
     assert_eq!(task.add("fail/ai1", -10.0, 10.0), Err(refused(stub::FAIL)));
     task.start().unwrap();
     let mut out = [0.0; 2];
-    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(2)));
     assert_eq!(out, [0.0, 1.0]);
 }
 
@@ -137,7 +180,7 @@ fn refuses_a_clock_the_device_cannot_do() {
 #[test]
 fn writes_each_channel_within_its_range() {
     let mut task = output(&linked(), "Dev1/ao0:1");
-    task.write(&[1.0, 2.0, 3.0, 4.0], SECOND).unwrap();
+    assert_eq!(task.write(&[1.0, 2.0, 3.0, 4.0], SECOND), WRITTEN);
     assert_eq!(task.write(&[1.0, 5.5], SECOND), Err(refused(stub::RANGE)));
 }
 
@@ -187,7 +230,7 @@ fn a_task_outlives_its_library() {
     let mut task = input(&library, "Dev1/ai0");
     drop(library);
     let mut out = [0.0];
-    assert_eq!(task.read(&mut out, SECOND), Ok(1));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(1)));
 }
 
 const _: () = {
@@ -221,9 +264,9 @@ fn reads_digital_lines(library: &Library) {
     task.add("Dev1/port0/line2").unwrap();
     task.start().unwrap();
     let mut out = [9; 6];
-    assert_eq!(task.read(&mut out, SECOND), Ok(6));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(6)));
     assert_eq!(out, [0, 1, 0, 1, 0, 1]);
-    assert_eq!(task.read(&mut out[..3], SECOND), Ok(3));
+    assert_eq!(task.read(&mut out[..3], SECOND), Ok(clean(3)));
     assert_eq!(out[..3], [0, 1, 0]);
 }
 
@@ -241,7 +284,7 @@ fn reads_digital_lines_on_a_clock() {
     assert_eq!(task.clock(-1.0, 100), Err(refused(stub::ARGUMENT)));
     task.start().unwrap();
     let mut out = [9; 4];
-    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(2)));
     assert_eq!(out, [0, 1, 9, 9]);
 }
 
@@ -253,7 +296,7 @@ fn counts_the_lines_a_failed_add_left() {
     assert_eq!(task.add("fail/port0/line1"), Err(refused(stub::FAIL)));
     task.start().unwrap();
     let mut out = [9; 2];
-    assert_eq!(task.read(&mut out, SECOND), Ok(2));
+    assert_eq!(task.read(&mut out, SECOND), Ok(clean(2)));
     assert_eq!(out, [0, 1]);
 }
 
@@ -267,7 +310,7 @@ fn writes_each_line() {
         Err(refused(stub::STOPPED))
     );
     task.start().unwrap();
-    task.write(&[false, true, true, false], SECOND).unwrap();
+    assert_eq!(task.write(&[false, true, true, false], SECOND), WRITTEN);
 }
 
 #[test]
@@ -322,6 +365,7 @@ fn reads_through_the_loaded_driver() {
     let library = unsafe { Library::open(Some(&stub_path())) }.unwrap();
     reads_a_ramp(&library);
     reads_digital_lines(&library);
+    warns(&library);
 }
 
 #[test]

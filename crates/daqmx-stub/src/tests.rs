@@ -181,6 +181,35 @@ fn cuts_the_message_to_the_buffer() {
     // SAFETY: the call wrote a NUL inside `out`.
     let got = unsafe { CStr::from_ptr(out.as_ptr()) };
     assert_eq!(got, c"the stu");
+    let mut out: [c_char; 64] = [1; 64];
+    // SAFETY: `out` holds 64 bytes.
+    let code = unsafe { DAQmxGetErrorString(WARN, out.as_mut_ptr(), 64) };
+    assert_eq!(code, 0);
+    // SAFETY: the call wrote a NUL inside `out`.
+    assert_eq!(unsafe { CStr::from_ptr(out.as_ptr()) }, WARNING);
+}
+
+#[test]
+fn warns_on_a_write() {
+    let handle = create();
+    assert_eq!(output(handle, c"warn/ao0", 5.0), 0);
+    start(handle);
+    let (mut written, mut reserved, value) = (0, 0, 1.0_f64);
+    // SAFETY: a live handle, and `value` is one sample of one channel.
+    let code = unsafe {
+        DAQmxWriteAnalogF64(
+            handle,
+            1,
+            0,
+            1.0,
+            BY_SCAN,
+            &raw const value,
+            &raw mut written,
+            &raw mut reserved,
+        )
+    };
+    assert_eq!((code, written), (WARN, 1));
+    clear(handle);
 }
 
 /// Adds digital lines to the task behind `handle`, and gives the code.

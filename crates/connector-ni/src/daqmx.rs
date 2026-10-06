@@ -1,5 +1,7 @@
-//! NI's driver, loaded at run time, and its tasks.
+//! NI's driver, loaded at run time, and its tasks. A read or a write gives the
+//! driver's [`Warning`]; every other call treats a warning as success.
 
+use std::cmp::Ordering;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::path::Path;
@@ -73,22 +75,44 @@ impl Library {
     /// The driver's description of the last error on this thread.
     fn message(&self) -> String {
         let mut message = [0_u8; MESSAGE];
-        let size = u32::try_from(MESSAGE).expect("the message size fits a u32");
-        // SAFETY: `message` holds `size` bytes.
-        unsafe { (self.functions().error)(message.as_mut_ptr().cast(), size) };
-        CStr::from_bytes_until_nul(&message)
-            .map(|message| message.to_string_lossy().into_owned())
-            .unwrap_or_default()
+        // SAFETY: `message` holds `MESSAGE` bytes.
+        unsafe { (self.functions().error)(message.as_mut_ptr().cast(), size(MESSAGE)) };
+        utf8(&message)
     }
 
-    /// Gives `Ok` for a code of zero or above (success or a warning), and the
+    /// The driver's description of `code`.
+    fn describe(&self, code: i32) -> String {
+        let mut message = [0_u8; MESSAGE];
+        // SAFETY: `message` holds `MESSAGE` bytes.
+        unsafe {
+            (self.functions().describe)(
+                code,
+                message.as_mut_ptr().cast(),
+                size(MESSAGE),
+            )
+        };
+        utf8(&message)
+    }
+
+    /// Gives the driver's warning for a code above zero, `None` for zero, and the
     /// driver's error for a code below zero.
-    fn check(&self, code: i32) -> Result<(), Error> {
-        if code >= 0 {
-            return Ok(());
+    fn outcome(&self, code: i32) -> Result<Option<Warning>, Error> {
+        match code.cmp(&0) {
+            Ordering::Less => Err(Error::Daqmx {
+                code,
+                message: self.message(),
+            }),
+            Ordering::Equal => Ok(None),
+            Ordering::Greater => Ok(Some(Warning {
+                code,
+                message: self.describe(code),
+            })),
         }
-        let message = self.message();
-        Err(Error::Daqmx { code, message })
+    }
+
+    /// As [`Library::outcome`], with a warning dropped.
+    fn check(&self, code: i32) -> Result<(), Error> {
+        self.outcome(code).map(drop)
     }
 }
 
@@ -218,6 +242,13 @@ fn size(len: usize) -> u32 {
     u32::try_from(len).expect("at most u32::MAX values")
 }
 
+/// The NUL-terminated text at the start of `buffer`, or nothing when it has no NUL.
+fn utf8(buffer: &[u8]) -> String {
+    CStr::from_bytes_until_nul(buffer)
+        .map(|text| text.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// `text` as a C string.
 ///
 /// # Panics
@@ -232,6 +263,40 @@ fn text(text: &str) -> CString {
 fn seconds(span: Span) -> f64 {
     let millis = span.nanos().max(0).checked_div(1_000_000).unwrap_or(0);
     f64::from(u32::try_from(millis).unwrap_or(u32::MAX)) / 1000.0
+}
+
+/// A warning from NI's driver: the call did its work and reports a problem, such as
+/// samples lost to a buffer overwrite.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Warning {
+    /// NI's warning code, above zero.
+    pub code: i32,
+    /// NI's description of the warning.
+    pub message: String,
+}
+
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NI-DAQmx warning {}: {}", self.code, self.message)
+    }
+}
+
+/// What a read gave.
+#[must_use]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Read {
+    /// The number of values read into the buffer.
+    pub values: usize,
+    /// The driver's warning, when it gave one.
+    pub warning: Option<Warning>,
+}
+
+/// What a write gave.
+#[must_use]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Written {
+    /// The driver's warning, when it gave one.
+    pub warning: Option<Warning>,
 }
 
 /// Why a call to NI's driver failed.
