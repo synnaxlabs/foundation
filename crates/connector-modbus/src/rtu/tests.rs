@@ -1,3 +1,5 @@
+mod bus;
+
 use proptest::prelude::*;
 
 use super::*;
