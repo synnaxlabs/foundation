@@ -95,6 +95,10 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The least [`entry_max`](Self::entry_max) of any layout: the bytes of parts
+    /// that one entry alone holds in a record at the smallest `body_max`.
+    pub const ENTRY_MAX_MIN: usize = BODY_MIN - entry::table_len(1);
+
     /// A ring of `area` bytes whose records hold a body of at most `body_max` bytes.
     ///
     /// # Errors
@@ -144,11 +148,11 @@ impl Layout {
     }
 
     /// The most bytes of parts in a batch of one entry that
-    /// [`Buffer::append`](crate::Buffer::append) takes, at least 4032: one byte more
-    /// gives [`Error::Large`](crate::Error::Large) with
-    /// [`Limit::Body`](crate::Limit::Body).
-    /// Each entry of a larger batch adds to the record's table, so its entries hold
-    /// less in all.
+    /// [`Buffer::append`](crate::Buffer::append) takes, at least
+    /// [`ENTRY_MAX_MIN`](Self::ENTRY_MAX_MIN): one byte more gives
+    /// [`Rejected::Large`](crate::Rejected::Large) with
+    /// [`Limit::Body`](crate::Limit::Body). Each entry of a larger batch adds to the
+    /// record's table, so its entries hold less in all.
     #[must_use]
     pub fn entry_max(self) -> usize {
         self.body_max - entry::table_len(1)
@@ -961,7 +965,11 @@ mod tests {
 
         #[test]
         fn holds_an_entry_of_4032_bytes_at_the_smallest_body() {
-            assert_eq!(Layout::new(2 * 4096, 4087).map(Layout::entry_max), Ok(4032));
+            assert_eq!(Layout::ENTRY_MAX_MIN, 4032);
+            assert_eq!(
+                Layout::new(2 * 4096, 4087).map(Layout::entry_max),
+                Ok(Layout::ENTRY_MAX_MIN)
+            );
         }
 
         #[test]

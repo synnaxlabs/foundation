@@ -108,6 +108,8 @@ impl Lab {
             shards: host.shards(),
             clock: host.clock(),
             wall: host.wall(),
+            budget: 1 << 20,
+            memory: Box::new(|len| Ok(block::Heap::new(len))),
         });
         self.members.push(Member {
             name: name.into(),

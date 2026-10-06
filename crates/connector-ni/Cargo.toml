@@ -1,0 +1,16 @@
+[package]
+name = "connector-ni"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+libloading.workspace = true
+types = { path = "../types" }
+
+[dev-dependencies]
+daqmx-stub = { path = "../daqmx-stub" }
+
+[lints]
+workspace = true

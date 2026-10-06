@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d9730a15ed918d0cce0a8b457cbe0ed4a0f16da64f071a4c02989394a7860915 # shrinks to seed = 11945060470631404939, steps = [Reopen, Append { index: 0, path: Live, skip: 0, len: 0, bytes: 0, last: None }, Commit, Append { index: 0, path: Live, skip: 0, len: 0, bytes: 0, last: None }, Reopen, Append { index: 0, path: Live, skip: 0, len: 0, bytes: 0, last: Some(-10) }, Commit, Reopen]
