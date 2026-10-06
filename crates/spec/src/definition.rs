@@ -5,13 +5,15 @@
 //! Format, with every integer little-endian:
 //!
 //! ```text
-//! definition := version:u8 tag:u8 body
-//! access     := subjects:patterns select:patterns allow:u8 authority:u8   tag 1
-//! connector  := kind:text node:text length:u64 document                  tag 2
-//! region     := epoch:u64 count:u64 text*                                tag 3
-//! patterns   := count:u64 pattern*
-//! pattern    := excluded:u8 length:u64 UTF-8 bytes
-//! text       := length:u64 UTF-8 bytes
+//! definition  := version:u8 tag:u8 body
+//! access      := subjects:patterns select:patterns allow:u8 authority:u8     tag 1
+//! connector   := kind:text node:text length:u64 document                     tag 2
+//! region      := epoch:u64 count:u64 text*                                   tag 3
+//! compression := select:patterns mode:u8                                     tag 5
+//! reduction   := select:patterns deadband:u64                                tag 6
+//! patterns    := count:u64 pattern*
+//! pattern     := excluded:u8 length:u64 UTF-8 bytes
+//! text        := length:u64 UTF-8 bytes
 //! ```
 //!
 //! A `text` is a name. `document` is the canonical encoding of the connector config.
@@ -24,6 +26,9 @@
 //!
 //! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
 //! admin 5. `authority` is zero when `allow` does not hold write.
+//!
+//! A compression `mode` is 0 auto, 1 raw, or 2 max. A `deadband` is the bits of an
+//! `f64`, finite and above zero.
 
 #![deny(
     clippy::indexing_slicing,
@@ -39,13 +44,17 @@ use types::authority::Authority;
 use types::name::{self, Name, Selector, Written};
 
 use crate::access::{Action, Actions, Policy};
+use crate::compression::{self, Mode};
 use crate::connector::Connector;
+use crate::reduction::{self, Deadband};
 use crate::region::{Delegation, NoVoters};
 
 const VERSION: u8 = 1;
 const ACCESS: u8 = 1;
 const CONNECTOR: u8 = 2;
 const REGION: u8 = 3;
+const COMPRESSION: u8 = 5;
+const REDUCTION: u8 = 6;
 /// The fewest bytes a text takes: its length.
 const TEXT_MIN: usize = 8;
 /// The fewest bytes a pattern takes: its flag and its length.
@@ -61,6 +70,10 @@ pub enum Definition {
     Connector(Connector),
     /// The record of a child region, in its parent's tree.
     Region(Delegation),
+    /// A compression policy.
+    Compression(compression::Policy),
+    /// A reduction policy.
+    Reduction(reduction::Policy),
 }
 
 impl Definition {
@@ -97,6 +110,20 @@ impl Definition {
                     text(&mut out, voter.as_str());
                 }
             }
+            Self::Compression(policy) => {
+                out.push(COMPRESSION);
+                patterns(&mut out, policy.select());
+                out.push(match policy.mode() {
+                    Mode::Auto => 0,
+                    Mode::Raw => 1,
+                    Mode::Max => 2,
+                });
+            }
+            Self::Reduction(policy) => {
+                out.push(REDUCTION);
+                patterns(&mut out, policy.select());
+                out.extend_from_slice(&policy.deadband().to_bits().to_le_bytes());
+            }
         }
         out
     }
@@ -123,6 +150,8 @@ impl Definition {
             ACCESS => Self::Access(reader.access()?),
             CONNECTOR => Self::Connector(reader.connector()?),
             REGION => Self::Region(reader.region()?),
+            COMPRESSION => Self::Compression(reader.compression()?),
+            REDUCTION => Self::Reduction(reader.reduction()?),
             tag => return Err(Error::Kind { at, tag }),
         };
         if !reader.rest.is_empty() {
@@ -279,6 +308,26 @@ impl<'a> Reader<'a> {
         Delegation::new(epoch, voters).map_err(|NoVoters| Error::NoVoters { at })
     }
 
+    fn compression(&mut self) -> Result<compression::Policy, Error> {
+        let select = self.patterns()?;
+        let at = self.at();
+        let mode = match self.byte()? {
+            0 => Mode::Auto,
+            1 => Mode::Raw,
+            2 => Mode::Max,
+            found => return Err(Error::Mode { at, found }),
+        };
+        Ok(compression::Policy::new(select, mode))
+    }
+
+    fn reduction(&mut self) -> Result<reduction::Policy, Error> {
+        let select = self.patterns()?;
+        let at = self.at();
+        let bits = self.u64()?;
+        reduction::Policy::new(select, f64::from_bits(bits))
+            .map_err(|Deadband(_)| Error::Deadband { at, bits })
+    }
+
     fn access(&mut self) -> Result<Policy, Error> {
         let subjects = self.patterns()?;
         let select = self.patterns()?;
@@ -386,6 +435,20 @@ pub enum Error {
         /// Where the count of voters is.
         at: usize,
     },
+    /// A compression mode is not 0, 1, or 2.
+    Mode {
+        /// Where the mode is.
+        at: usize,
+        /// The mode byte.
+        found: u8,
+    },
+    /// A deadband is not a finite number above zero.
+    Deadband {
+        /// Where the deadband is.
+        at: usize,
+        /// The bits of the deadband, as `f64::to_bits` gives them.
+        bits: u64,
+    },
     /// An access policy that does not allow `write` has an authority.
     Authority {
         /// Where the authority is.
@@ -447,6 +510,13 @@ impl fmt::Display for Error {
                 f,
                 "authority {found} at byte {at} is on a policy without write"
             ),
+            Self::Mode { at, found } => {
+                write!(f, "compression mode {found} at byte {at} is not 0, 1, or 2")
+            }
+            Self::Deadband { at, bits } => {
+                let deadband = Deadband(f64::from_bits(*bits));
+                write!(f, "the reduction at byte {at}: {deadband}")
+            }
         }
     }
 }
