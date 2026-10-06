@@ -283,8 +283,8 @@ How to read this record:
 - **B4** Latest mode gives a new reader the current value at once. A slow reader keeps
   at most one waiting frame per index; a newer frame replaces it; frames never split. No
   replay after a disconnect. Frames go out before the disk sync. The current value is
-  the index's newest live frame, even when it holds none of the reader's channels (M3).
-  The person decided on 2026-10-05: "Newest frame" (#139).
+  the index's newest live frame with samples, even when it holds none of the reader's
+  channels (M3). The person decided on 2026-10-05: "Newest frame" (#139).
 - **B5** Live writes never wait. If the disk queue or the pool is full, or the link to a
   remote home cannot take the frame now, the home records an explicit gap and warns; on
   the link, the writer's `hub` drops the frame and sends the gap to the home (RECV
@@ -2173,7 +2173,7 @@ Storage classes used in the table:
 | Gaps | Index log records (explicit gap with a count) | `home`, `buffer` | Complete readers | `home`, `buffer` |
 | Stored and replicated marks | Memory at the home (the replicated mark is the standby's position in `delivery`); published on status channels | `home`, `delivery` | Writers (confirmation), `node` collector | `home`, `delivery` |
 | Latest mailbox | Memory: depth 1 per latest reader per index | `delivery` | The reader session | `delivery` |
-| Current value | Memory: the index's newest live frame, one pinned pool block per index (B4, MEMORY BOUNDS) | `delivery` | A new latest reader | `delivery` |
+| Current value | Memory: the index's newest live frame with samples, one pinned pool block per index (B4, MEMORY BOUNDS) | `delivery` | A new latest reader | `delivery` |
 | Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; `delivery` spends when the home releases a frame | `delivery` | `delivery`, `wire` |
 | Live frames for complete readers | Memory: the index's live frames not yet on disk, and the frames released to each complete session and not taken, as refcount clones (B1, CREDIT RULES, MEMORY BOUNDS) | `delivery`: the home queues each stored live frame and releases them after a commit | The reader session | `delivery` |
 | Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `types` (mask), `delivery` |

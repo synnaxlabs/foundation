@@ -347,7 +347,7 @@ impl Shard {
     }
 
     /// Opens an unnamed latest reader on the index at `slot`, at mesh time `mesh`. It
-    /// gets the index's newest live frame, before its commit.
+    /// gets the index's newest live frame with samples, before its commit.
     ///
     /// # Panics
     ///
@@ -2074,6 +2074,26 @@ mod tests {
                 let reader = latest(&mut shard, Slot::new(0));
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+            });
+        }
+
+        #[test]
+        fn wakes_no_latest_reader_for_an_empty_live_write() {
+            run(56, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+                let reader = latest(&mut shard, Slot::new(0));
+                write(&test, &mut shard, a, &[10]);
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                let empty = frame(&test.pool, &set, &[(0, &[]), (1, &[])]);
+                assert_eq!(
+                    shard.write(a, LIVE, empty, NOW, MESH),
+                    Ok(&[applied(0, 1, 0)][..])
+                );
+                assert_eq!(woken(&mut shard), []);
+                assert_eq!(taken(&mut shard, reader, 0), []);
             });
         }
 

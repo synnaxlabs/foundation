@@ -42,7 +42,7 @@ pub struct Opened {
     /// The session of the same named reader that this one took over, in either mode.
     /// It is closed.
     pub replaced: Option<super::Key>,
-    /// The index's newest live frame waits for the session: wake it.
+    /// The index's newest live frame with samples waits for the session: wake it.
     pub woken: bool,
 }
 
@@ -50,16 +50,16 @@ pub struct Opened {
 pub(super) struct Session {
     pub(super) key: Key,
     pub(super) name: Option<Name>,
-    /// The newest frame waits for the session. Only the newest can wait: each put
-    /// makes it wait for every session.
+    /// The newest frame waits for the session. Only the newest can wait: each put of a
+    /// frame with samples makes it wait for every session.
     waiting: bool,
 }
 
 impl Readers {
-    /// Starts a latest session, which gets the index's newest live frame, if any, at
-    /// once. A named reader's open session in either mode is taken over: a complete one
-    /// closes at `now`, as after [`Readers::close`]. A latest session holds nothing and
-    /// writes no record.
+    /// Starts a latest session, which gets the index's newest live frame with samples,
+    /// if any, at once. A named reader's open session in either mode is taken over: a
+    /// complete one closes at `now`, as after [`Readers::close`]. A latest session
+    /// holds nothing and writes no record.
     pub fn open_latest(&mut self, name: Option<Name>, now: Stamp) -> Opened {
         let replaced = name.as_ref().and_then(|name| self.close_named(name, now));
         let key = Key(self.next_latest);

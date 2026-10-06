@@ -37,9 +37,9 @@ impl From<latest::Key> for Key {
 /// The readers of one index at its home, in both modes. For complete readers: their
 /// positions, the data they hold, the credit each session has, the live frames on
 /// their way to disk and the frames that wait for each session, and the records that
-/// let a new home continue. For latest readers: the index's newest live frame and the
-/// frame that waits for each session. Sans-I/O: the home passes mesh time in, appends
-/// [`Readers::records`] to the index log after each input, and calls
+/// let a new home continue. For latest readers: the index's newest live frame with
+/// samples and the frame that waits for each session. Sans-I/O: the home passes mesh
+/// time in, appends [`Readers::records`] to the index log after each input, and calls
 /// [`Readers::advance`] at [`Readers::deadline`].
 #[derive(Debug)]
 pub struct Readers {
@@ -61,7 +61,7 @@ pub struct Readers {
     closed: Vec<Closed>,
     /// The latest sessions, sorted by key.
     latest: Vec<latest::Session>,
-    /// The index's newest live frame.
+    /// The index's newest live frame with samples.
     newest: Option<Frame>,
     /// The last [`Readers::release`]'s result, kept so that it does not allocate.
     woken_complete: Vec<complete::Key>,
