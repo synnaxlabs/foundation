@@ -73,9 +73,19 @@ impl fmt::Display for Error {
         match self {
             Self::ZeroDisk => f.write_str("the disk budget is zero"),
             Self::ZeroPool => f.write_str("the pool budget is zero"),
-            Self::NoBudget => {
-                f.write_str("the policy sets no budget; set `disk`, `pool`, or both")
-            }
+            Self::NoBudget => f.write_str("the policy sets no budget"),
+        }
+    }
+}
+
+impl Error {
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub const fn fix(&self) -> &'static str {
+        match self {
+            Self::ZeroDisk => "Write a disk budget above zero, or remove it",
+            Self::ZeroPool => "Write a pool budget above zero, or remove it",
+            Self::NoBudget => "Set a disk budget, a pool budget, or both",
         }
     }
 }
@@ -108,9 +118,20 @@ mod tests {
     #[test]
     fn refuses_a_policy_with_no_budget() {
         assert_eq!(Policy::new(select(), None, None), Err(Error::NoBudget));
+        assert_eq!(Error::NoBudget.to_string(), "the policy sets no budget");
+    }
+
+    #[test]
+    fn gives_a_fix_for_each_error() {
+        let zero = "Write a disk budget above zero, or remove it";
+        assert_eq!(Error::ZeroDisk.fix(), zero);
         assert_eq!(
-            Error::NoBudget.to_string(),
-            "the policy sets no budget; set `disk`, `pool`, or both"
+            Error::ZeroPool.fix(),
+            "Write a pool budget above zero, or remove it"
+        );
+        assert_eq!(
+            Error::NoBudget.fix(),
+            "Set a disk budget, a pool budget, or both"
         );
     }
 }
