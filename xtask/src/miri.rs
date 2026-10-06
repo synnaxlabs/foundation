@@ -38,7 +38,7 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
                     "miri",
                     "test",
                     "-p",
-                    package,
+                    &package.id,
                 ])
                 .env("MIRIFLAGS", flags)
                 .stderr(Stdio::inherit())
@@ -47,11 +47,13 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             eprint!("{stdout}");
             if !output.status.success() {
-                problems.push(format!("Miri with `{flags}` failed in `{package}`"));
+                problems
+                    .push(format!("Miri with `{flags}` failed in `{}`", package.name));
             } else if tests_ran(&stdout) == 0 {
                 problems.push(format!(
-                    "`{package}` names `unsafe_code` but runs no tests under Miri. Add \
-                     tests that reach its unsafe code."
+                    "`{}` names `unsafe_code` but runs no tests under Miri. Add tests \
+                     that reach its unsafe code.",
+                    package.name
                 ));
             }
         }

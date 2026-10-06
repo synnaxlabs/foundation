@@ -7,9 +7,18 @@ use serde_json::Value;
 
 use crate::{field, files};
 
-/// The names of the packages in `metadata` with a `.rs` file whose text `matches`.
-/// It reads each file in the directory of each target's root, so it also reads
-/// oracles under `oracles/`. It never picks `xtask`, whose tests hold sample source.
+/// A workspace package that a task picked.
+#[derive(Debug)]
+pub(crate) struct Package {
+    /// The package id from `cargo metadata`. `-p` takes it, and no other package in a
+    /// build shares it, as another package may share the name.
+    pub(crate) id: String,
+    pub(crate) name: String,
+}
+
+/// The packages in `metadata` with a `.rs` file whose text `matches`. It reads each
+/// file in the directory of each target's root, so it also reads oracles under
+/// `oracles/`. It never picks `xtask`, whose tests hold sample source.
 ///
 /// # Errors
 ///
@@ -17,7 +26,7 @@ use crate::{field, files};
 pub(crate) fn packages(
     metadata: &Value,
     matches: impl Fn(&str) -> bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<Package>, String> {
     let mut picked = Vec::new();
     for package in field::list(metadata, "packages")? {
         let name = field::text(package, "name")?;
@@ -33,7 +42,10 @@ pub(crate) fn packages(
             dirs.insert(dir.to_path_buf());
         }
         if any(&dirs, &matches)? {
-            picked.push(name.to_string());
+            picked.push(Package {
+                id: field::text(package, "id")?.to_string(),
+                name: name.to_string(),
+            });
         }
     }
     Ok(picked)
@@ -106,7 +118,17 @@ mod tests {
 
         fn check(matches: impl Fn(&str) -> bool) -> Vec<String> {
             let metadata = crate::metadata(&crate::fixture()).unwrap();
-            packages(&metadata, matches).unwrap()
+            let picked = packages(&metadata, matches).unwrap();
+            picked.into_iter().map(|p| p.name).collect()
+        }
+
+        #[test]
+        fn gives_the_package_id_that_tells_a_member_from_its_twin() {
+            let metadata = crate::metadata(&crate::fixture()).unwrap();
+            let picked = packages(&metadata, |s| names_cfg(s, "loom")).unwrap();
+            let a = &picked[0].id;
+            assert!(a.starts_with("path+file://"), "{a}");
+            assert!(a.ends_with("/fixture/crates/a#0.0.0"), "{a}");
         }
 
         #[test]

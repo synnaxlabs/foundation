@@ -174,7 +174,9 @@ mod tests {
             ("miri", |s| select::has_word(s, "unsafe_code")),
         ];
         for (task, matches) in tasks {
-            for name in select::packages(&metadata, matches).unwrap() {
+            for select::Package { name, .. } in
+                select::packages(&metadata, matches).unwrap()
+            {
                 assert!(
                     models.contains(&format!("'crates/{name}/**'")),
                     "`cargo xtask {task}` runs `{name}`, but the `models` filter in \

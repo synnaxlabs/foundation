@@ -104,7 +104,7 @@ fn build<'a>(
         .current_dir(root)
         .args(["test", "--no-run", "--message-format=json"]);
     for target in targets {
-        cargo.args(["-p", &target.package, "--test", &target.name]);
+        cargo.args(["-p", &target.package_id, "--test", &target.name]);
     }
     let mut built = Vec::new();
     for exe in build::executables(&mut cargo)? {
