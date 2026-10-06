@@ -403,7 +403,7 @@ impl Error {
             Self::NoInclude => "Add a pattern without a leading `!`",
             Self::Segment { .. } => {
                 "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
-                 and no other character"
+                 after an optional leading `@`"
             }
             Self::Wildcard { .. } => {
                 "Use `*` and `**` only as whole segments of a pattern, never in a name"
@@ -424,10 +424,10 @@ impl fmt::Display for Error {
             ),
             Self::NoInclude => f.write_str("a selector includes no names"),
             Self::Segment { input, segment } => {
-                write!(f, "{input:?} has a segment that is not valid: {segment:?}")
+                write!(f, "a segment is not valid: {segment:?} in {input:?}")
             }
             Self::Wildcard { input } => {
-                write!(f, "{input:?} uses a wildcard where it cannot")
+                write!(f, "a wildcard is out of place: {input:?}")
             }
         }
     }
@@ -458,6 +458,24 @@ mod tests {
     fn wildcard_error(input: &str) -> Error {
         Error::Wildcard {
             input: input.into(),
+        }
+    }
+
+    const SEGMENT_FIX: &str = "Use one or more ASCII letters, digits, `_`, and `-` in \
+                               that segment, after an optional leading `@`";
+    const WILDCARD_FIX: &str =
+        "Use `*` and `**` only as whole segments of a pattern, never in a name";
+
+    #[test]
+    fn states_each_problem_and_its_fix() {
+        for error in [
+            Error::Empty,
+            Error::Long { bytes: 256 },
+            Error::NoInclude,
+            segment_error("a.b c", "b c"),
+            wildcard_error("a.*"),
+        ] {
+            crate::common::assert_stated(&error.to_string(), error.fix());
         }
     }
 
@@ -527,21 +545,23 @@ mod tests {
             let error = "a.b c".parse::<Name>().unwrap_err();
             assert_eq!(
                 error.to_string(),
-                "\"a.b c\" has a segment that is not valid: \"b c\""
+                "a segment is not valid: \"b c\" in \"a.b c\""
             );
-            assert_eq!(
-                error.fix(),
-                "Use one or more ASCII letters, digits, `_`, and `-` in that segment, \
-                 and no other character"
-            );
+            assert_eq!(error.fix(), SEGMENT_FIX);
         }
 
         #[test]
-        fn escapes_the_text_in_the_message() {
-            assert_eq!(
-                "a.\"b".parse::<Name>().unwrap_err().to_string(),
-                r#""a.\"b" has a segment that is not valid: "\"b""#
-            );
+        fn escapes_quotes_and_backslashes_in_the_message() {
+            for (input, message) in [
+                ("a.\"b", r#"a segment is not valid: "\"b" in "a.\"b""#),
+                (r"a.b\c", r#"a segment is not valid: "b\\c" in "a.b\\c""#),
+                (
+                    r"a.\u00E9",
+                    r#"a segment is not valid: "\\u00E9" in "a.\\u00E9""#,
+                ),
+            ] {
+                assert_eq!(input.parse::<Name>().unwrap_err().to_string(), message);
+            }
         }
 
         #[test]
@@ -550,11 +570,8 @@ mod tests {
                 assert_eq!(input.parse::<Name>(), Err(wildcard_error(input)));
             }
             let error = wildcard_error("a.*");
-            assert_eq!(error.to_string(), "\"a.*\" uses a wildcard where it cannot");
-            assert_eq!(
-                error.fix(),
-                "Use `*` and `**` only as whole segments of a pattern, never in a name"
-            );
+            assert_eq!(error.to_string(), "a wildcard is out of place: \"a.*\"");
+            assert_eq!(error.fix(), WILDCARD_FIX);
         }
 
         mod reserved {
@@ -572,10 +589,9 @@ mod tests {
                 for (input, segment) in
                     [("@", "@"), ("a.@", "@"), ("a@b", "a@b"), ("@@a", "@@a")]
                 {
-                    assert_eq!(
-                        input.parse::<Name>(),
-                        Err(segment_error(input, segment))
-                    );
+                    let error = input.parse::<Name>().unwrap_err();
+                    assert_eq!(error, segment_error(input, segment));
+                    assert_eq!(error.fix(), SEGMENT_FIX);
                 }
             }
         }
@@ -602,10 +618,7 @@ mod tests {
             for input in ["a*", "a.***", "a.**b", "*a.b"] {
                 assert_eq!(input.parse::<Pattern>(), Err(wildcard_error(input)));
             }
-            assert_eq!(
-                "a*".parse::<Pattern>().unwrap_err().fix(),
-                "Use `*` and `**` only as whole segments of a pattern, never in a name"
-            );
+            assert_eq!("a*".parse::<Pattern>().unwrap_err().fix(), WILDCARD_FIX);
         }
 
         #[test]
@@ -614,7 +627,7 @@ mod tests {
             assert_eq!(error, segment_error("site.*.t c", "t c"));
             assert_eq!(
                 error.to_string(),
-                "\"site.*.t c\" has a segment that is not valid: \"t c\""
+                "a segment is not valid: \"t c\" in \"site.*.t c\""
             );
         }
 
@@ -857,10 +870,7 @@ mod tests {
         fn refuses_an_include_that_starts_with_an_exclamation_mark() {
             let error = Selector::from_written([Written::Include("!a")]).unwrap_err();
             assert_eq!(error, segment_error("!a", "!a"));
-            assert_eq!(
-                error.to_string(),
-                r#""!a" has a segment that is not valid: "!a""#
-            );
+            assert_eq!(error.to_string(), r#"a segment is not valid: "!a" in "!a""#);
             assert_eq!(
                 Selector::from_written([Written::Include("!*")]),
                 Err(wildcard_error("!*"))
@@ -1018,10 +1028,7 @@ mod tests {
                 Selector::new([text.as_str()]).err(),
             ];
             for error in errors.into_iter().flatten() {
-                let (message, fix) = (error.to_string(), error.fix());
-                prop_assert!(!message.starts_with(char::is_uppercase), "{message}");
-                prop_assert!(fix.starts_with(char::is_uppercase), "{fix}");
-                prop_assert!(!message.ends_with('.') && !fix.ends_with('.'));
+                crate::common::assert_stated(&error.to_string(), error.fix());
             }
         }
     }
