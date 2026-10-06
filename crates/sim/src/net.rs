@@ -116,7 +116,7 @@ enum Fate {
     Duplicated,
     /// It arrived in a receive queue.
     Queued,
-    /// It arrived where nothing is bound, or at a full queue.
+    /// It arrived where nothing is bound, at a failed socket, or at a full queue.
     Dropped,
     /// It arrived at a TCP end or listener.
     Arrived,
