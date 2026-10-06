@@ -1,6 +1,7 @@
 //! `os::files` on the real disk, through `env::files`.
 
 use std::future::poll_fn;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::task::Poll;
@@ -134,6 +135,17 @@ fn create_makes_a_zeroed_file_of_its_length_in_the_data_directory() {
         assert_eq!(read(&file, &pool, 0, 12 * 1_024).await, vec![0; 12 * 1_024]);
         let found = std::fs::metadata(data.join("ring/0")).unwrap();
         assert_eq!(found.len(), 12 * KIB);
+    });
+}
+
+#[test]
+#[cfg_attr(target_os = "macos", ignore = "#931")]
+fn create_allocates_each_byte_of_the_file() {
+    const LEN: u64 = 64 << 20;
+    run(|files, data| async move {
+        create(&files, "a", LEN).await.close().await;
+        let allocated = std::fs::metadata(data.join("a")).unwrap().blocks() * 512;
+        assert!(allocated >= LEN, "{allocated} of {LEN} bytes");
     });
 }
 
