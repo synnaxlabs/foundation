@@ -5,10 +5,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::poll_fn;
 use std::io::IoSliceMut;
+use std::mem;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use env::clock::{Clock, Sleep};
@@ -20,12 +21,14 @@ use types::time::Monotonic;
 use super::{Endpoint, Event, connection};
 use crate::{Code, Config, Error, PAYLOAD_IPV4, Peer};
 
-/// The most batches one receive takes.
+/// The most batches one poll of the task takes, so a busy socket does not starve the
+/// shard's other tasks.
 const BATCHES: usize = 8;
 
 /// One shard's QUIC endpoint on a UDP socket. A task on the shard moves its
 /// datagrams and runs its timers until the socket breaks, or until every clone and
-/// every [`Session`] dropped. It stays on the thread that made it.
+/// every [`Session`] dropped and it sent their closes. It stays on the thread that
+/// made it.
 #[derive(Clone)]
 pub(crate) struct Carrier(Rc<RefCell<State>>);
 
@@ -51,7 +54,7 @@ impl Carrier {
             accepting: Vec::new(),
             failed: None,
         }));
-        let task = Task::new(Rc::downgrade(&state), &config.clock, sender, receiver);
+        let task = Task::new(Rc::clone(&state), &config.clock, sender, receiver);
         config.tasks.spawn(task.run());
         Self(state)
     }
@@ -123,13 +126,23 @@ impl Carrier {
     }
 }
 
+impl Drop for Carrier {
+    /// Wakes the task when it holds the last other reference, so it closes what is
+    /// left and ends.
+    fn drop(&mut self) {
+        if Rc::strong_count(&self.0) == 2 {
+            self.0.borrow().wake();
+        }
+    }
+}
+
 /// What a [`Carrier`], its sessions, and its task share.
 struct State {
     endpoint: Endpoint,
     clock: Clock,
-    /// The waker of the task's last poll.
+    /// The waker of the task's last poll, or `None` once the task ended.
     task: Option<Waker>,
-    /// Each connection a [`Session`] holds, or held before the connection ended.
+    /// Each connection that a [`Session`] holds or that no caller accepted yet.
     sessions: BTreeMap<connection::Key, Slot>,
     /// The connections peers dialed, in the order they connected, for
     /// [`Carrier::accept`].
@@ -150,12 +163,13 @@ impl State {
     fn slot(&mut self, key: connection::Key) -> &mut Slot {
         self.sessions
             .get_mut(&key)
-            .expect("invariant: a connection keeps its slot until it ends")
+            .expect("invariant: a session keeps its slot until it drops")
     }
 
     fn dispatch(&mut self, event: Event) {
         match event {
             Event::Connected { key, peer } => {
+                // Only an accept has no slot: a dial's drop ends its connection.
                 if let Some(slot) = self.sessions.get_mut(&key) {
                     slot.peer = Some(peer);
                     slot.wake();
@@ -179,20 +193,17 @@ impl State {
         }
     }
 
+    /// Gives `error` to the session of `key`, unless it dropped.
     fn end(&mut self, key: connection::Key, error: Error) {
-        let slot = self.slot(key);
-        if slot.dropped {
-            self.sessions.remove(&key);
-            return;
+        if let Some(slot) = self.sessions.get_mut(&key) {
+            slot.end = Some(error);
+            slot.wake();
         }
-        slot.end = Some(error);
-        slot.wake();
     }
 
     /// Ends each session with [`Error::Network`], and refuses each later dial and
     /// accept.
     fn fail(&mut self, error: env::net::Error) {
-        self.sessions.retain(|_, slot| !slot.dropped);
         for slot in self.sessions.values_mut() {
             slot.end.get_or_insert_with(|| Error::Network {
                 error: error.clone(),
@@ -201,15 +212,6 @@ impl State {
         }
         self.accepting.drain(..).for_each(Waker::wake);
         self.failed = Some(error);
-    }
-}
-
-impl Drop for State {
-    /// Wakes the task, which ends when it finds no state.
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.wake();
-        }
     }
 }
 
@@ -222,8 +224,6 @@ struct Slot {
     end: Option<Error>,
     /// The wakers of the calls that wait on the session.
     wakers: Vec<Waker>,
-    /// The session dropped before the connection ended.
-    dropped: bool,
 }
 
 impl Slot {
@@ -290,25 +290,95 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let mut state = self.carrier.0.borrow_mut();
-        let slot = state.slot(self.key);
-        if slot.end.is_some() {
-            state.sessions.remove(&self.key);
-            return;
+        let slot = state.sessions.remove(&self.key);
+        let slot = slot.expect("invariant: a session keeps its slot until it drops");
+        if slot.end.is_none() {
+            let now = state.clock.now();
+            state.endpoint.close(now, self.key, Code(0));
+            state.wake();
         }
-        slot.dropped = true;
-        let now = state.clock.now();
-        state.endpoint.close(now, self.key, Code(0));
-        state.wake();
     }
 }
 
 /// Moves the endpoint's datagrams between it and the socket, and runs its timers.
 struct Task {
-    state: Weak<RefCell<State>>,
+    state: Rc<RefCell<State>>,
+    socket: Socket,
+    /// Completes at the endpoint's deadline as of the last poll that changed it.
+    sleep: Sleep,
+}
+
+impl Task {
+    fn new(
+        state: Rc<RefCell<State>>,
+        clock: &Clock,
+        sender: udp::Sender,
+        receiver: udp::Receiver,
+    ) -> Self {
+        Self {
+            state,
+            socket: Socket::new(sender, receiver),
+            sleep: clock.sleep_until(Monotonic(0)),
+        }
+    }
+
+    async fn run(mut self) {
+        poll_fn(|cx| self.poll(cx)).await;
+    }
+
+    /// Ready when the socket broke, or when the carrier and its sessions dropped and
+    /// their closes went to the socket.
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        let mut state = self.state.borrow_mut();
+        let fresh =
+            !(state.task.as_ref()).is_some_and(|task| task.will_wake(cx.waker()));
+        if fresh {
+            state.task = Some(cx.waker().clone());
+        }
+        let now = state.clock.now();
+        let mut more = match self.socket.receive(cx, &mut state.endpoint, now) {
+            Ok(more) => more,
+            Err(error) => {
+                state.fail(error);
+                state.task = None;
+                return Poll::Ready(());
+            }
+        };
+        if self.sleep.deadline() <= now {
+            state.endpoint.timeout(now);
+        }
+        self.socket.send(cx, &mut state.endpoint, now);
+        while let Some(event) = state.endpoint.poll() {
+            state.dispatch(event);
+        }
+        // Every carrier and session dropped.
+        if Rc::strong_count(&self.state) == 1 {
+            for key in mem::take(&mut state.sessions).into_keys() {
+                state.endpoint.close(now, key, Code(0));
+            }
+            self.socket.send(cx, &mut state.endpoint, now);
+            if self.socket.held.is_none() {
+                return Poll::Ready(());
+            }
+        }
+        // Each poll of the sleep arms the timer again.
+        if let Some(deadline) = state.endpoint.deadline()
+            && (fresh || deadline != self.sleep.deadline())
+        {
+            self.sleep.reset(deadline);
+            more |= Pin::new(&mut self.sleep).poll(cx).is_ready();
+        }
+        if more {
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
+    }
+}
+
+/// The task's UDP socket and its buffers.
+struct Socket {
     sender: udp::Sender,
     receiver: udp::Receiver,
-    /// Completes at the endpoint's deadline.
-    sleep: Sleep,
     /// One buffer for each batch of a receive.
     received: [Vec<u8>; BATCHES],
     metas: [Meta; BATCHES],
@@ -318,19 +388,12 @@ struct Task {
     held: Option<Held>,
 }
 
-impl Task {
-    fn new(
-        state: Weak<RefCell<State>>,
-        clock: &Clock,
-        sender: udp::Sender,
-        receiver: udp::Receiver,
-    ) -> Self {
+impl Socket {
+    fn new(sender: udp::Sender, receiver: udp::Receiver) -> Self {
         let bytes = usize::from(PAYLOAD_IPV4) * receiver.batch_max().get();
         Self {
-            state,
             sender,
             receiver,
-            sleep: clock.sleep_until(Monotonic(0)),
             received: std::array::from_fn(|_| vec![0; bytes]),
             metas: std::array::from_fn(|_| Meta::default()),
             out: Vec::new(),
@@ -338,61 +401,31 @@ impl Task {
         }
     }
 
-    async fn run(mut self) {
-        poll_fn(|cx| self.poll(cx)).await;
-    }
-
-    /// Ready when the socket broke, or when the carrier and its sessions dropped.
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        let Some(shared) = self.state.upgrade() else {
-            return Poll::Ready(());
-        };
-        let mut state = shared.borrow_mut();
-        if !state
-            .task
-            .as_ref()
-            .is_some_and(|task| task.will_wake(cx.waker()))
-        {
-            state.task = Some(cx.waker().clone());
-        }
-        let now = state.clock.now();
-        // One receive per poll, so a busy socket does not starve the shard.
-        let mut more = false;
-        match self.receive(cx) {
-            Poll::Ready(Ok(batches)) => {
-                let received = self.metas.iter().zip(&self.received);
-                for (meta, batch) in received.take(batches) {
-                    state.endpoint.receive(now, meta, batch);
-                }
-                more = true;
-            }
-            Poll::Ready(Err(error)) => {
-                state.fail(error);
-                return Poll::Ready(());
-            }
-            Poll::Pending => {}
-        }
-        state.endpoint.timeout(now);
-        self.send(cx, &mut state.endpoint, now);
-        while let Some(event) = state.endpoint.poll() {
-            state.dispatch(event);
-        }
-        if let Some(deadline) = state.endpoint.deadline() {
-            self.sleep.reset(deadline);
-            more |= Pin::new(&mut self.sleep).poll(cx).is_ready();
-        }
-        if more {
-            cx.waker().wake_by_ref();
-        }
-        Poll::Pending
-    }
-
+    /// Gives `endpoint` what the socket has, up to [`BATCHES`] batches. `Ok(true)`
+    /// when it took that many, so the socket may have more.
     fn receive(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<usize, env::net::Error>> {
-        let mut buffers = self.received.each_mut().map(|b| IoSliceMut::new(b));
-        self.receiver.poll_recv(cx, &mut buffers, &mut self.metas)
+        endpoint: &mut Endpoint,
+        now: Monotonic,
+    ) -> Result<bool, env::net::Error> {
+        let mut taken = 0;
+        while taken < BATCHES {
+            let room = BATCHES - taken;
+            let mut buffers = self.received.each_mut().map(|b| IoSliceMut::new(b));
+            let (buffers, metas) = (&mut buffers[..room], &mut self.metas[..room]);
+            let batches = match self.receiver.poll_recv(cx, buffers, metas) {
+                Poll::Ready(Ok(batches)) => batches,
+                Poll::Ready(Err(error)) => return Err(error),
+                Poll::Pending => return Ok(false),
+            };
+            let received = self.metas.iter().zip(&self.received);
+            for (meta, batch) in received.take(batches) {
+                endpoint.receive(now, meta, batch);
+            }
+            taken += batches;
+        }
+        Ok(true)
     }
 
     /// Sends what the endpoint has until the socket has no room. A failed send is a
@@ -414,7 +447,7 @@ impl Task {
     }
 }
 
-/// A [`Transmit`] without its bytes, which wait in [`Task::out`].
+/// A [`Transmit`] without its bytes, which wait in [`Socket::out`].
 struct Held {
     destination: SocketAddr,
     source: Option<IpAddr>,
@@ -459,16 +492,16 @@ mod tests {
     use std::pin::pin;
     use std::task::Poll;
 
-    use env::net::udp;
+    use env::net::udp::{self, Transmit};
     use sim::Sim;
     use sim::node::Node;
     use types::node::PrivateKey;
     use types::time::Span;
 
-    use super::Carrier;
+    use super::{BATCHES, Carrier};
     use crate::testing::Shard;
     use crate::tls::public;
-    use crate::{Code, Error, Peer};
+    use crate::{Code, Config, Error, Peer};
 
     const PORT: u16 = 4433;
     const IDLE: Span = Span::SECOND;
@@ -502,12 +535,11 @@ mod tests {
         Span::from_nanos(span.nanos() * n)
     }
 
-    /// Starts a shard on `node` that runs `body` with a carrier for `key` at
-    /// [`address`].
-    fn start<F: Future<Output = ()> + 'static>(
+    /// Starts a shard on `node` that runs `main` with a config for `key`.
+    fn shard<F: Future<Output = ()> + 'static>(
         node: &Node,
         key: PrivateKey,
-        body: impl FnOnce(Carrier, Node) -> F + Send + 'static,
+        main: impl FnOnce(Config, Node) -> F + Send + 'static,
     ) {
         let own = node.clone();
         let config = env::shards::Config {
@@ -515,11 +547,22 @@ mod tests {
             core: None,
         };
         let started = node.shards().start(config, move |tasks| async move {
-            let config = Shard::new(&own, tasks).config(key, IDLE);
-            let (sender, receiver) = socket(&own).expect("a socket");
-            body(Carrier::new(&config, 0, sender, receiver), own).await;
+            main(Shard::new(&own, tasks).config(key, IDLE), own).await;
         });
         drop(started.expect("a shard"));
+    }
+
+    /// Starts a shard on `node` that runs `body` with a carrier for `key` at
+    /// [`address`].
+    fn start<F: Future<Output = ()> + 'static>(
+        node: &Node,
+        key: PrivateKey,
+        body: impl FnOnce(Carrier, Node) -> F + Send + 'static,
+    ) {
+        shard(node, key, |config, node| async move {
+            let (sender, receiver) = socket(&node).expect("a socket");
+            body(Carrier::new(&config, 0, sender, receiver), node).await;
+        });
     }
 
     /// Runs a dial from `value` that the client closes with code 5, and gives the
@@ -657,6 +700,83 @@ mod tests {
             }
             node.clock().sleep(Span::MILLISECOND).await;
             assert_eq!(carrier.0.borrow().sessions.len(), 0);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_session_dropped_with_the_last_carrier_closes_with_code_0() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        start(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+        });
+        start(&client, CLIENT, move |carrier, node| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            drop(dialed.expect("a session"));
+            drop(carrier);
+            // A shard that ends drops its tasks.
+            node.clock().sleep(Span::MILLISECOND).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn the_last_drop_closes_each_session_no_caller_accepted() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        start(&server, SERVER, |carrier, node| async move {
+            node.clock().sleep(spans(Span::MILLISECOND, 5)).await;
+            drop(carrier);
+            node.clock().sleep(Span::MILLISECOND).await;
+        });
+        start(&client, CLIENT, move |carrier, _| async move {
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_dial_behind_more_batches_than_one_poll_takes_connects() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        shard(&server, SERVER, |config, node| async move {
+            let (sender, receiver) = socket(&node).expect("a socket");
+            node.clock().sleep(Span::MILLISECOND).await;
+            let carrier = Carrier::new(&config, 0, sender, receiver);
+            let session = carrier.accept().await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+        });
+        start(&client, CLIENT, move |carrier, node| async move {
+            let local = SocketAddr::new(node.addresses()[0], PORT + 1);
+            let config = udp::Config {
+                local,
+                send_buffer_bytes: 1 << 20,
+                recv_buffer_bytes: 1 << 20,
+            };
+            let (mut sender, _receiver) = node.net().udp(&config).expect("a socket");
+            // Each longer than the last, so no two join in one batch.
+            for len in 1..=BATCHES {
+                let transmit = Transmit {
+                    destination: at,
+                    source: None,
+                    ecn: None,
+                    contents: &vec![0; len],
+                    segment: None,
+                };
+                let sent = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
+                assert_eq!(sent, Ok(()));
+            }
+            let dialed = carrier.connect(public(&SERVER), at).await;
+            let session = dialed.expect("a session");
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
         });
         assert_eq!(sim.run(), Ok(()));
     }
