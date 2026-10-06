@@ -415,6 +415,41 @@ fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
     });
 }
 
+/// A deadline that passes while a sync runs fires when the sync ends: the task did not
+/// park, so the entries that came during the sync wait no longer.
+#[test]
+fn a_deadline_that_passes_during_a_sync_fires_when_the_sync_ends() {
+    for (tenths, seed) in [(10, 45), (11, 46)] {
+        run(seed, Memory::default(), move |shard| async move {
+            let mut slots = Slots::new();
+            let buffer = shard
+                .open(layout(AREA, BODY_MAX), &mut slots)
+                .await
+                .expect("opens");
+            let a = slots.assign(key(1));
+            let tenth = COMMIT.nanos() / 10;
+            let sync = Span::from_nanos(tenth * tenths);
+            shard.memory.slow_syncs(shard.clock.clone(), sync);
+            let opened = shard.clock.now();
+            buffer
+                .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+                .expect("queues");
+            shard.clock.sleep(Span::from_nanos(tenth * 11)).await;
+            buffer
+                .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+                .expect("queues during the first sync");
+            let end = opened + Span::from_nanos(tenth * (10 + 2 * tenths + 1));
+            shard.clock.sleep_until(end).await;
+            assert_eq!(
+                buffer.durable(a, Path::Live),
+                tail(2, Some(2)),
+                "a sync of {tenths} tenths: the second entry waits for no fresh \
+                 deadline"
+            );
+        });
+    }
+}
+
 #[test]
 fn a_dropped_idle_buffer_ends_its_task_at_once() {
     let memory = Memory::default();

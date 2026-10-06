@@ -572,6 +572,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
     let mut woken: Vec<Waker> = Vec::new();
     let mut sleep = clock.sleep(commit);
     loop {
+        let mut parked = false;
         let ended = poll_fn(|cx| {
             let mut state = shared.state.borrow_mut();
             if state.closed {
@@ -581,13 +582,16 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
                 return Poll::Ready(false);
             }
             state.parked = Some(cx.waker().clone());
+            parked = true;
             Poll::Pending
         })
         .await;
         if ended {
             return;
         }
-        if sleep.deadline() < clock.now() {
+        // A deadline that passed during a sync fires now. One that passed while the
+        // task parked restarts, so the first entry of a burst waits for others.
+        if parked && sleep.deadline() < clock.now() {
             sleep.reset(clock.now() + commit);
         }
         (&mut sleep).await;
