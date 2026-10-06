@@ -464,3 +464,36 @@ fn refuses_a_uri_it_cannot_reach() {
         );
     }
 }
+
+#[test]
+fn stream_writes_a_whole_plain_write() {
+    const HEAD: &[u8] = b"GET / HTTP/1.1\r\nhost: a\r\n\r\n";
+    let mut network = Network::new(14);
+    let seen = network.serve(|stream, _, _| async { Some(stream) });
+    let config = tcp::Config {
+        remote: network.remote(),
+        options: super::OPTIONS,
+    };
+    let (net, clock) = (network.client.net(), network.client.clock());
+    let written = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&written);
+    let handle = network
+        .client
+        .shards()
+        .start(shard("client"), move |_| async move {
+            let tcp = net.connect(&config).await.expect("the server listens");
+            let mut stream = super::Stream(tcp);
+            let n = poll_fn(|cx| {
+                hyper::rt::Write::poll_write(std::pin::Pin::new(&mut stream), cx, HEAD)
+            })
+            .await
+            .expect("the write works");
+            *slot.lock().expect("no panic under the lock") = Some(n);
+            clock.sleep(Span::MINUTE).await;
+            drop(stream);
+        });
+    network.handles.push(handle.expect("the shard starts"));
+    network.sim.run_for(Span::MINUTE).expect("the run ends");
+    assert_eq!(*written.lock().expect("no panic"), Some(HEAD.len()));
+    assert_eq!(text(&seen.lock().expect("no panic")), text(HEAD));
+}
