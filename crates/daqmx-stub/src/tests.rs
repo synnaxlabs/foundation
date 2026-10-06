@@ -13,7 +13,7 @@ fn gives_codes_below_zero_for_errors_as_the_driver_does() {
 #[test]
 fn takes_the_driver_values_of_its_arguments() {
     let handle = create();
-    assert_eq!(input(handle, c"Dev1/ai0", -1, 10_348), 0);
+    assert_eq!(analog_in(handle, c"Dev1/ai0", -1, 10_348), 0);
     clear(handle);
 }
 
