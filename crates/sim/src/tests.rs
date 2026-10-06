@@ -1,5 +1,6 @@
 //! Tests of a simulated run through the `env` handles that production code gets.
 
+mod calls;
 mod chance;
 mod crash;
 mod files;

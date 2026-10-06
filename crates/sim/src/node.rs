@@ -168,8 +168,9 @@ impl Node {
 
     /// The node's disk: [`Config::disk_bytes`] bytes, with an empty data directory.
     ///
-    /// - Each call takes up to 100 us of true time and takes effect when it ends.
-    ///   A file call panics outside the node's threads.
+    /// - Each call takes up to 100 us of true time, or the delay that
+    ///   [`Node::delay_file`] set, and takes effect when it ends. A file call panics
+    ///   outside the node's threads.
     /// - A directory takes 4 KiB. A file takes its length until it is removed, a
     ///   `sync_dir` makes the removal durable, and no descriptor or call in flight
     ///   uses it.
@@ -200,14 +201,50 @@ impl Node {
     ///
     /// When `operation` is `Free` and `path` is not empty: `free` has no path.
     pub fn fail_file(&self, path: &Path, operation: env::files::Operation) {
-        let free = operation == env::files::Operation::Free;
-        assert!(
-            !free || path.as_os_str().is_empty(),
-            "free has no path; aim a fault at it with an empty path"
-        );
+        aimable(path, operation);
         lock(&self.0.shared)
             .files()
             .fail(self.0.node, path, operation);
+    }
+
+    /// Makes each later call of `operation` on `path` on the node take `delay` of
+    /// true time, in place of a random delay of up to 100 us. A later `delay_file` of
+    /// the same path and operation replaces it. The delays of other calls stay the
+    /// same. A call on an open file has the path that opened it.
+    ///
+    /// # Panics
+    ///
+    /// When `delay` is negative, or when `operation` is `Free` and `path` is not
+    /// empty.
+    pub fn delay_file(
+        &self,
+        path: &Path,
+        operation: env::files::Operation,
+        delay: Span,
+    ) {
+        aimable(path, operation);
+        let Ok(nanos) = u64::try_from(delay.nanos()) else {
+            let path = path.display();
+            panic!("the {operation} calls on {path} take a negative delay of {delay}");
+        };
+        lock(&self.0.shared)
+            .files()
+            .delay(self.0.node, path, operation, nanos);
+    }
+
+    /// The count of calls of `operation` on `path` that the node started since it was
+    /// added, across crashes: failed calls and calls in flight too. A call on an open
+    /// file has the path that opened it.
+    ///
+    /// # Panics
+    ///
+    /// When `operation` is `Free` and `path` is not empty.
+    #[must_use]
+    pub fn file_calls(&self, path: &Path, operation: env::files::Operation) -> u64 {
+        aimable(path, operation);
+        lock(&self.0.shared)
+            .files()
+            .calls(self.0.node, path, operation)
     }
 
     /// The node's IPv4 and IPv6 addresses, in that order: node `k`, from 0 in the
@@ -259,6 +296,15 @@ impl fmt::Debug for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Node").field(&self.0.node).finish()
     }
+}
+
+/// Panics when `operation` is `Free` and `path` is not empty: `free` has no path.
+fn aimable(path: &Path, operation: env::files::Operation) {
+    let free = operation == env::files::Operation::Free;
+    assert!(
+        !free || path.as_os_str().is_empty(),
+        "free has no path; aim at it with an empty path"
+    );
 }
 
 /// Settings for one node. Build it with `..Config::default()`: fields get added.

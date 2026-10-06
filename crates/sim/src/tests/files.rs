@@ -333,7 +333,7 @@ fn a_fault_fails_the_next_call_on_its_path_once() {
 }
 
 #[test]
-#[should_panic(expected = "free has no path; aim a fault at it with an empty path")]
+#[should_panic(expected = "free has no path; aim at it with an empty path")]
 fn a_fault_on_free_with_a_path_panics() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());

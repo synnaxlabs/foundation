@@ -570,7 +570,7 @@ impl std::error::Error for Error {}
 /// ```
 /// assert_eq!(env::files::Operation::SyncDir.to_string(), "sync_dir");
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Operation {
     /// [`Files::open`].
     Open,

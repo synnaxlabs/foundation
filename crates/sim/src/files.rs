@@ -107,13 +107,25 @@ struct Flight {
     dropped: bool,
 }
 
+/// What a test aimed at the calls of one operation on one path of one node.
+#[derive(Default)]
+struct Aim {
+    /// Each fails one call, in turn.
+    faults: u64,
+    /// The delay of each call in nanoseconds, in place of its draw.
+    delay: Option<u64>,
+    /// The calls started.
+    calls: u64,
+}
+
 /// The disks of a run and the calls in flight. A call takes effect when it ends,
-/// after a delay of up to 100 us from the run's disk stream.
+/// after a delay of up to 100 us from the run's disk stream, or the delay that a test
+/// set. A set delay still takes its draw, so it moves no other draw.
 pub(crate) struct Files {
     /// The disk of each node.
     disks: Vec<Disk>,
-    /// Each fault fails the next call of its operation on its path on its node.
-    faults: Vec<(usize, PathBuf, Operation)>,
+    /// By node, normal path, and operation.
+    aims: BTreeMap<(usize, PathBuf, Operation), Aim>,
     flights: BTreeMap<u64, Flight>,
     /// The calls in flight by end time, then key.
     queue: BTreeSet<(Monotonic, u64)>,
@@ -137,7 +149,7 @@ impl Files {
     pub(crate) fn new(rng: Rng) -> Self {
         Self {
             disks: Vec::new(),
-            faults: Vec::new(),
+            aims: BTreeMap::new(),
             flights: BTreeMap::new(),
             queue: BTreeSet::new(),
             done: BTreeMap::new(),
@@ -155,7 +167,29 @@ impl Files {
 
     /// Makes the next call of `operation` on `path` on `node` fail with code 5.
     pub(crate) fn fail(&mut self, node: usize, path: &Path, operation: Operation) {
-        self.faults.push((node, disk::normal(path), operation));
+        self.aim(node, path, operation).faults += 1;
+    }
+
+    /// Makes each later call of `operation` on `path` on `node` take `nanos`.
+    pub(crate) fn delay(
+        &mut self,
+        node: usize,
+        path: &Path,
+        operation: Operation,
+        nanos: u64,
+    ) {
+        self.aim(node, path, operation).delay = Some(nanos);
+    }
+
+    /// The count of calls of `operation` on `path` that `node` started.
+    pub(crate) fn calls(&self, node: usize, path: &Path, operation: Operation) -> u64 {
+        let key = (node, disk::normal(path), operation);
+        self.aims.get(&key).map_or(0, |aim| aim.calls)
+    }
+
+    fn aim(&mut self, node: usize, path: &Path, operation: Operation) -> &mut Aim {
+        let key = (node, disk::normal(path), operation);
+        self.aims.entry(key).or_default()
     }
 
     fn tick(&mut self) -> u64 {
@@ -174,10 +208,12 @@ impl Files {
         held: Option<Held>,
     ) -> u64 {
         let key = self.tick();
-        let delay = self.rng.below(DELAYS);
-        let fault = (node, disk::normal(path), call.operation());
-        let fault = self.faults.iter().position(|aimed| *aimed == fault);
-        let failed = fault.map(|at| self.faults.remove(at)).is_some();
+        let draw = self.rng.below(DELAYS);
+        let aim = self.aim(node, path, call.operation());
+        aim.calls += 1;
+        let failed = aim.faults > 0;
+        aim.faults -= u64::from(failed);
+        let delay = aim.delay.unwrap_or(draw);
         let disk = &mut self.disks[node];
         let mut before = Vec::new();
         if let Some(handle) = call.handle() {
