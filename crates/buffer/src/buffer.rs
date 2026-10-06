@@ -324,7 +324,8 @@ impl Drop for Buffer {
 impl Buffer {
     /// Opens the ring in `config.dir`, or creates it, makes the ring and its
     /// directory durable, and recovers the tail of every path from its records. Each
-    /// recovered index gets its slot from `slots`. Starts the commit task.
+    /// recovered index gets its slot from `slots`. Starts the commit task. It writes
+    /// each record it recovers again, so each tail it reports is durable.
     ///
     /// # Errors
     ///
@@ -369,7 +370,6 @@ impl Buffer {
         let chain = random(&entropy);
         let (writer, sealed) = cursor.writer(header.tail.offset(), chain)?;
         write_restart(&file, &pool, sealed, chain).await?;
-        // A killed process may have written records that it never synced.
         file.sync().await?;
         let shared = Rc::new(Shared {
             file,
@@ -622,8 +622,12 @@ async fn read_header(
     Ok(header)
 }
 
-/// Recovers the tail of every path from the records after the tail of `header`.
-/// Returns the cursor at the end of the walk and the logs.
+/// Recovers the tail of every path from the records after the tail of `header`,
+/// and writes each window that holds them again, as read. Returns the cursor at
+/// the end of the walk and the logs.
+///
+/// A read can see writes that a failed sync lost, from the cache. Written again,
+/// they read the same until the open's sync makes them durable.
 async fn walk(
     file: &File,
     pool: &Pool,
@@ -641,6 +645,9 @@ async fn walk(
             Step::Moved | Step::More => {}
             Step::End => break,
         }
+        let bytes = bytes.freeze();
+        file.write_at(AREA_START + place, slice::from_ref(&bytes))
+            .await?;
     }
     Ok((cursor, logs))
 }

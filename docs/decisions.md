@@ -418,11 +418,16 @@ How to read this record:
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
   `first + len` passes `u64::MAX`. The open syncs the ring before it reports a tail
-  durable: a killed process may have written records that it never synced (#657). The
-  restart record needs one free block: an open of a full ring first moves records at
-  the tail to a segment. The walk holds one pool block at a time and reads a longer
-  record in pieces of the pool's largest block, so the pool puts no bound on
-  `body_max`. An open with no such block free fails with `Pool`, and the next open
+  durable: a killed process may have written records that it never synced (#657). Before
+  that sync, the walk writes again, as read, each window up to the end of the chain. A
+  read can see, from the cache, writes that a failed sync of an earlier process in the
+  same boot lost, and the cache can drop them between two reads. So an open writes the
+  records it walks once more, and the start of each record over one block twice (#698).
+  Lost: a walk with direct I/O, which needs a new `env::files` read mode in each driver
+  and in `sim`. The restart record needs one free block: an open of a full ring first
+  moves records at the tail to a segment. The walk holds one pool block at a time and
+  reads a longer record in pieces of the pool's largest block, so the pool puts no bound
+  on `body_max`. An open with no such block free fails with `Pool`, and the next open
   recovers the record (#440, #572).
   Ring header: `[magic: 8][version: u16][area: u64][body_max: u32][tail offset:
   u64][tail chain: u32][seq: u64][crc32c: u32][zero padding]`, one 4096-byte block,
