@@ -416,9 +416,10 @@ How to read this record:
   not check the record CRC: the open's walk checked each record, and a record
   this process wrote is read as written. A read's budget counts the pool bytes
   that its entries' blocks take (`block::footprint`), so an entry with no bytes
-  still costs its block. A read holds no record while it waits for a file read,
-  so a change that frees ring space must first hold the records of each read in
-  progress (#510).
+  still costs its block. A read drops a record's table block before it takes the
+  blocks of the record's entries, so an entry of the pool's largest block reads
+  (#968). A read holds no record while it waits for a file read, so a change that
+  frees ring space must first hold the records of each read in progress (#510).
   Recovery walks from the tail to the first record that does not follow the chain.
   A record that follows the chain but has an unknown kind or a wrong shape fails the
   open, and so does an entry whose `first` is below the tail of its path or whose
@@ -452,13 +453,19 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. An open of a header with a smaller `body_max` fails with `Unfit` (#627).
+  records. It also refuses with `Large` a batch with an entry whose parts, joined,
+  pass the largest block of the shard's pool (`Limit::Block`), because a read gives
+  each entry in one block (#968). An open fails with `Pool(TooLarge)` when a
+  recovered entry passes that block, as after a restart with a smaller budget; a
+  larger pool opens the ring. An open of a header with a smaller `body_max` fails
+  with `Unfit` (#627).
   `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
   one entry, at least `Layout::ENTRY_MAX_MIN` (4032); a batch of more entries holds
   less. `Layout::check` gives the `Limit` that `append` would refuse a batch with,
   from its counts of entries, parts, and bytes, so the home checks a frame before it
-  takes the blocks of its entries (#795). An entry has no part, one, or two; `append`
-  takes them owned and drops them when it fails (#582).
+  takes the blocks of its entries (#795). It does not check `Limit::Block`, which
+  depends on the pool. An entry has no part, one, or two; `append` takes them owned
+  and drops them when it fails (#582).
   A new ring has the same block at `seq` 0 in both places, with the tail at offset 0
   and a random chain value.
 - **INDEX FRAMES (#191)** The home makes one index frame for each present group of a
@@ -498,8 +505,9 @@ How to read this record:
   record takes the next free value here. The buffer does not read the tag.
   Decided by the `write-path` builder; approved by the coordinator (#191).
 - **LARGE FRAME (#191)** The home refuses a write whose bodies no record of the ring or
-  no block of the shard's pool holds, on either path, with `Large`. No seq moves and the
-  home stores no part of the frame. The waiting handoffs of the frame's indexes are
+  no block of the shard's pool holds, on either path, with `Large`. The pool bound is on
+  each entry's parts joined, the home's header part included (#968). No seq moves and
+  the home stores no part of the frame. The waiting handoffs of the frame's indexes are
   still recorded (HANDOFF RECORD). The writer splits the frame by samples or by indexes
   and writes each part. The home never splits a frame, because a frame applies whole
   (B7). Each handoff goes in its own append, so a handoff never makes a frame large. The
