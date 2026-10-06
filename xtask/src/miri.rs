@@ -42,18 +42,7 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
     for flags in PASSES {
         for package in &packages {
-            let output = Command::new("rustup")
-                .current_dir(root)
-                .args([
-                    "run",
-                    nightly.trim(),
-                    "cargo",
-                    "miri",
-                    "test",
-                    "-p",
-                    &package.id,
-                ])
-                .env("MIRIFLAGS", flags)
+            let output = command(root, nightly.trim(), package, flags)
                 .stderr(Stdio::inherit())
                 .output()
                 .map_err(|e| vec![format!("rustup: {e}")])?;
@@ -76,6 +65,22 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     } else {
         Err(problems)
     }
+}
+
+/// The command that runs Miri with `flags` on `package` of the workspace at `root`,
+/// on the toolchain `nightly`.
+fn command(
+    root: &Path,
+    nightly: &str,
+    package: &select::Package,
+    flags: &str,
+) -> Command {
+    let mut command = Command::new("rustup");
+    command
+        .current_dir(root)
+        .args(["run", nightly, "cargo", "miri", "test", "-p", &package.id])
+        .env("MIRIFLAGS", flags);
+    command
 }
 
 /// The sum of N over the `running N tests` lines of libtest output.
@@ -104,6 +109,28 @@ mod tests {
         let picked = packages(&metadata).unwrap();
         let names: Vec<_> = picked.into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["model"]);
+    }
+
+    #[test]
+    fn selects_the_package_by_its_id() {
+        let package = select::Package {
+            id: "path+file:///w/crates/model#0.0.0".to_string(),
+            name: "model".to_string(),
+        };
+        let command = command(Path::new("/w"), "nightly-x", &package, PASSES[0]);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "run",
+                "nightly-x",
+                "cargo",
+                "miri",
+                "test",
+                "-p",
+                &package.id
+            ]
+        );
     }
 
     #[test]

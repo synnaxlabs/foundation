@@ -7,13 +7,12 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::{build, field, files};
+use crate::{build, field, files, select};
 
 /// A test target whose root file is under `oracles/`.
 #[derive(Debug, PartialEq, Eq)]
 struct Target {
-    package_id: String,
-    package: String,
+    package: select::Package,
     name: String,
 }
 
@@ -41,7 +40,7 @@ fn problems(root: &Path) -> Result<Vec<String>, String> {
             problems.push(format!(
                 "oracle test target `{}` of `{}` runs no tests. An oracle must run at \
                  least one test that is not ignored.",
-                target.name, target.package
+                target.name, target.package.name
             ));
         }
     }
@@ -73,15 +72,14 @@ fn targets(
                 continue;
             }
             let found = Target {
-                package_id: field::text(package, "id")?.to_string(),
-                package: field::text(package, "name")?.to_string(),
+                package: select::Package::read(package)?,
                 name: field::text(target, "name")?.to_string(),
             };
             if !field::flag(target, "test")? {
                 problems.push(format!(
                     "oracle test target `{}` of `{}` sets `test = false`, so `cargo \
                      test` skips it. Remove the setting.",
-                    found.name, found.package
+                    found.name, found.package.name
                 ));
             }
             targets.push(found);
@@ -104,13 +102,13 @@ fn build<'a>(
         .current_dir(root)
         .args(["test", "--no-run", "--message-format=json"]);
     for target in targets {
-        cargo.args(["-p", &target.package_id, "--test", &target.name]);
+        cargo.args(["-p", &target.package.id, "--test", &target.name]);
     }
     let mut built = Vec::new();
     for exe in build::executables(&mut cargo)? {
         if let Some(target) = targets
             .iter()
-            .find(|t| t.package_id == exe.package_id && t.name == exe.target)
+            .find(|t| t.package.id == exe.package_id && t.name == exe.target)
         {
             built.push((target, exe.path));
         }
@@ -194,8 +192,10 @@ mod tests {
 
         fn conformance() -> Target {
             Target {
-                package_id: "raft-id".to_string(),
-                package: "raft".to_string(),
+                package: select::Package {
+                    id: "raft-id".to_string(),
+                    name: "raft".to_string(),
+                },
                 name: "conformance".to_string(),
             }
         }

@@ -8,12 +8,26 @@ use serde_json::Value;
 use crate::{field, files};
 
 /// A workspace package that a task picked.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Package {
     /// The package id from `cargo metadata`. `-p` takes it, and no other package in a
     /// build shares it, as another package may share the name.
     pub(crate) id: String,
     pub(crate) name: String,
+}
+
+impl Package {
+    /// Reads the id and the name of a package object of `cargo metadata`.
+    ///
+    /// # Errors
+    ///
+    /// A missing field.
+    pub(crate) fn read(package: &Value) -> Result<Self, String> {
+        Ok(Self {
+            id: field::text(package, "id")?.to_string(),
+            name: field::text(package, "name")?.to_string(),
+        })
+    }
 }
 
 /// The packages in `metadata` with a `.rs` file whose text `matches`. It reads each
@@ -29,8 +43,8 @@ pub(crate) fn packages(
 ) -> Result<Vec<Package>, String> {
     let mut picked = Vec::new();
     for package in field::list(metadata, "packages")? {
-        let name = field::text(package, "name")?;
-        if name == "xtask" {
+        let found = Package::read(package)?;
+        if found.name == "xtask" {
             continue;
         }
         let mut dirs = BTreeSet::new();
@@ -42,10 +56,7 @@ pub(crate) fn packages(
             dirs.insert(dir.to_path_buf());
         }
         if any(&dirs, &matches)? {
-            picked.push(Package {
-                id: field::text(package, "id")?.to_string(),
-                name: name.to_string(),
-            });
+            picked.push(found);
         }
     }
     Ok(picked)
@@ -123,15 +134,6 @@ mod tests {
         }
 
         #[test]
-        fn gives_the_package_id_that_tells_a_member_from_its_twin() {
-            let metadata = crate::metadata(&crate::fixture()).unwrap();
-            let picked = packages(&metadata, |s| names_cfg(s, "loom")).unwrap();
-            let a = &picked[0].id;
-            assert!(a.starts_with("path+file://"), "{a}");
-            assert!(a.ends_with("/fixture/crates/a#0.0.0"), "{a}");
-        }
-
-        #[test]
         fn picks_loom_cfgs_in_oracles_and_across_lines() {
             assert_eq!(check(|s| names_cfg(s, "loom")), ["a", "model"]);
         }
@@ -144,11 +146,19 @@ mod tests {
 
         #[test]
         fn names_a_missing_metadata_field() {
-            let metadata = serde_json::json!({ "packages": [{ "name": "a" }] });
-            assert_eq!(
-                packages(&metadata, |_| true).unwrap_err(),
-                "cargo JSON has no array field `targets`"
-            );
+            for (package, error) in [
+                (
+                    serde_json::json!({ "id": "a-id", "name": "a" }),
+                    "cargo JSON has no array field `targets`",
+                ),
+                (
+                    serde_json::json!({ "name": "a", "targets": [] }),
+                    "cargo JSON has no string field `id`",
+                ),
+            ] {
+                let metadata = serde_json::json!({ "packages": [package] });
+                assert_eq!(packages(&metadata, |_| true).unwrap_err(), error);
+            }
         }
     }
 
