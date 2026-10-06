@@ -5,39 +5,21 @@ use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::num::NonZeroUsize;
-use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use env::net::udp::{Config as Udp, Meta, Receiver, Sender, Transmit};
-use env::net::{Ecn, Error as Net, tcp};
+use env::net::{Ecn, Error as Net};
 use env::thread::Handle;
 use types::time::{Monotonic, Span};
 
-use super::{millis, shard, sim};
+use super::{after, at, delay, millis, pair, panicked, shard, sim};
 use crate::drivers::yield_now;
 use crate::net::addresses;
-use crate::{Config, Error, Sim, link, node};
+use crate::{Config, Crash, Error, Sim, link, node};
 
 /// Arrivals: the receiver's clock, the meta, and the bytes of each batch.
 type Log = Arc<Mutex<Vec<(Monotonic, Meta, Vec<u8>)>>>;
-
-/// A run of two nodes, `a` and `b`, with `link` between them.
-fn pair(seed: u64, link: link::Config) -> (Sim, node::Node, node::Node) {
-    let mut sim = Sim::new(Config {
-        seed,
-        steps_max: 1_000_000,
-        link,
-    });
-    let a = sim.node(node::Config::default());
-    let b = sim.node(node::Config::default());
-    (sim, a, b)
-}
-
-/// The address of `port` on the IPv4 address of `node`.
-fn at(node: &node::Node, port: u16) -> SocketAddr {
-    SocketAddr::new(node.addresses()[0], port)
-}
 
 /// A socket of `node` on `local`, whose receive queue holds 10,000 small datagrams.
 fn bind(node: &node::Node, local: SocketAddr) -> Result<(Sender, Receiver), Net> {
@@ -119,16 +101,6 @@ fn datagrams(log: &Log) -> Vec<Vec<u8>> {
 /// The times at which the datagrams in `log` arrived.
 fn times(log: &Log) -> Vec<Monotonic> {
     log.lock().unwrap().iter().map(|&(time, ..)| time).collect()
-}
-
-/// The receiver's clock `span` after the run starts.
-fn after(span: Span) -> Monotonic {
-    node::Config::default().monotonic + span
-}
-
-/// The default delay.
-fn delay() -> Span {
-    link::Config::default().delay
 }
 
 /// Sends `datagrams` from `a` to `b` on one link, runs for a second, and gives the
@@ -793,15 +765,6 @@ fn stray(poll: fn(&mut Sender, &mut Receiver)) -> Error {
     sim.run().unwrap_err()
 }
 
-/// The error of a run whose thread `thread` panicked with `message`.
-fn panicked(thread: &str, message: &str) -> Error {
-    Error::Panicked {
-        thread: thread.into(),
-        message: message.into(),
-        seed: 0,
-    }
-}
-
 #[test]
 fn a_socket_half_polled_on_a_second_thread_panics() {
     let message = "a socket half polls only on thread \"first\" of its first poll";
@@ -827,6 +790,30 @@ fn a_socket_polled_on_a_thread_of_another_node_panics() {
     assert_eq!(foreign(recv_once), panicked("b", message));
 }
 
+/// Polls the halves of a socket of `a` with `poll` on a shard of `a` after a crash
+/// of `a`, with a sender clone made after the crash when `cloned`, and gives the
+/// error of the run.
+fn crashed(poll: fn(&mut Sender, &mut Receiver), cloned: bool) -> Error {
+    let (mut sim, a, _b) = pair(0, link::Config::default());
+    let (mut sender, mut receiver) = udp(&a, 4433);
+    sim.crash(&a, Crash::Process);
+    if cloned {
+        sender = sender.clone();
+    }
+    let _after = a.shards().start(shard("after"), move |_| async move {
+        poll(&mut sender, &mut receiver);
+    });
+    sim.run().unwrap_err()
+}
+
+#[test]
+fn a_socket_half_from_before_a_crash_panics_when_it_polls() {
+    let message = "a socket half of node 0 polls after a crash of the node";
+    assert_eq!(crashed(send_once, false), panicked("after", message));
+    assert_eq!(crashed(send_once, true), panicked("after", message));
+    assert_eq!(crashed(recv_once, false), panicked("after", message));
+}
+
 /// Polls the halves of a socket with `poll` on a thread that the sim did not start.
 fn outside(poll: fn(&mut Sender, &mut Receiver)) {
     let (_sim, a, _b) = pair(0, link::Config::default());
@@ -844,41 +831,6 @@ fn a_socket_sending_outside_the_sim_panics() {
 #[should_panic(expected = "a socket half needs a thread that the sim started")]
 fn a_socket_receiving_outside_the_sim_panics() {
     outside(recv_once);
-}
-
-/// TCP options with buffers of 1 MiB.
-fn options() -> tcp::Options {
-    tcp::Options {
-        send_buffer_bytes: 1 << 20,
-        recv_buffer_bytes: 1 << 20,
-        unsent_bytes_max: 1 << 14,
-        delayed: false,
-    }
-}
-
-#[test]
-#[should_panic(expected = "sim does not simulate TCP yet")]
-fn a_tcp_connect_panics() {
-    let (_sim, a, b) = pair(0, link::Config::default());
-    let config = tcp::Config {
-        remote: at(&b, 4433),
-        options: options(),
-    };
-    let net = a.net();
-    let connect = pin!(net.connect(&config));
-    let _tcp = connect.poll(&mut Context::from_waker(Waker::noop()));
-}
-
-#[test]
-#[should_panic(expected = "sim does not simulate TCP yet")]
-fn a_tcp_listen_panics() {
-    let (_sim, a, _b) = pair(0, link::Config::default());
-    let listen = tcp::Listen {
-        local: at(&a, 4433),
-        backlog: 1,
-        options: options(),
-    };
-    let _listener = a.net().listen(&listen);
 }
 
 #[test]
@@ -977,4 +929,137 @@ fn polled_around_arrival(early: bool) -> u64 {
 #[test]
 fn the_digest_holds_the_polls_before_an_arrival() {
     assert_ne!(polled_around_arrival(true), polled_around_arrival(false));
+}
+
+/// The error of a receive of a failed socket.
+const EIO: Net = Net::Io { code: 5 };
+
+/// The results of receives into a buffer of 8 bytes.
+type Results = Arc<Mutex<Vec<Result<usize, Net>>>>;
+
+/// Starts a shard on `node` that receives from `receiver` into `results` three
+/// times, whatever each result.
+fn receive_three(
+    node: &node::Node,
+    mut receiver: Receiver,
+    results: &Results,
+) -> Handle {
+    let results = Arc::clone(results);
+    let handle = node.shards().start(shard("receive"), move |_| async move {
+        for _ in 0..3 {
+            let (mut bytes, mut meta) = ([0; 8], [Meta::default()]);
+            let result = poll_fn(|cx| {
+                let mut buffers = [IoSliceMut::new(&mut bytes)];
+                receiver.poll_recv(cx, &mut buffers, &mut meta)
+            })
+            .await;
+            results.lock().unwrap().push(result);
+        }
+    });
+    handle.unwrap()
+}
+
+/// Fails the socket of `b` on port 4433 `faults` times after three datagrams from
+/// `a` arrive at it, then gives the results of its receives.
+fn results_after(faults: usize) -> Vec<Result<usize, Net>> {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (sender, _a) = udp(&a, 4433);
+    let (_b, receiver) = udp(&b, 4433);
+    let _send = send(&a, sender, at(&b, 4433), numbered(3));
+    sim.run_for(Span::SECOND).unwrap();
+    for _ in 0..faults {
+        b.fail_udp(at(&b, 4433));
+    }
+    let results = Results::default();
+    let _receive = receive_three(&b, receiver, &results);
+    sim.run_for(Span::SECOND).unwrap();
+    results.lock().unwrap().clone()
+}
+
+#[test]
+fn each_receive_of_a_failed_socket_gives_eio_and_never_its_queue() {
+    assert_eq!(results_after(0).first(), Some(&Ok(1)));
+    assert_eq!(results_after(1), [Err(EIO), Err(EIO), Err(EIO)]);
+}
+
+#[test]
+fn a_second_fault_does_nothing() {
+    assert_eq!(results_after(2), [Err(EIO), Err(EIO), Err(EIO)]);
+}
+
+#[test]
+fn a_receive_that_waits_wakes_with_the_fault() {
+    let (mut sim, _a, b) = pair(0, link::Config::default());
+    let (_b, receiver) = udp(&b, 4433);
+    let results = Results::default();
+    let _receive = receive_three(&b, receiver, &results);
+    sim.run_for(millis(10)).unwrap();
+    b.fail_udp(at(&b, 4433));
+    sim.run_for(millis(10)).unwrap();
+    assert_eq!(*results.lock().unwrap(), [Err(EIO), Err(EIO), Err(EIO)]);
+}
+
+#[test]
+fn a_send_of_a_failed_socket_still_arrives() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (sender, _a) = udp(&a, 4433);
+    a.fail_udp(at(&a, 4433));
+    let (_b, receiver) = udp(&b, 4433);
+    let log = Log::default();
+    let _receive = receive(&b, receiver, &log);
+    let _send = send(&a, sender, at(&b, 4433), numbered(2));
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(datagrams(&log), numbered(2));
+}
+
+#[test]
+fn a_socket_bound_after_a_failed_socket_drops_works() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (sender, _a) = udp(&a, 4433);
+    let socket = udp(&b, 4433);
+    b.fail_udp(at(&b, 4433));
+    drop(socket);
+    let (_b, receiver) = udp(&b, 4433);
+    let log = Log::default();
+    let _receive = receive(&b, receiver, &log);
+    let _send = send(&a, sender, at(&b, 4433), numbered(2));
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(datagrams(&log), numbered(2));
+}
+
+/// The digest of a run that sends two datagrams from `a` to port 4433 of `b`, where
+/// `b` binds a socket that nothing reads at port `bound`, and fails it first when
+/// `faulted`.
+fn arrivals_digest(bound: u16, faulted: bool) -> u64 {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let (sender, _a) = udp(&a, 4433);
+    let _b = udp(&b, bound);
+    if faulted {
+        b.fail_udp(at(&b, bound));
+    }
+    let _send = send(&a, sender, at(&b, 4433), numbered(2));
+    sim.run_for(Span::SECOND).unwrap();
+    sim.digest()
+}
+
+#[test]
+fn the_datagrams_that_arrive_at_a_failed_socket_drop_as_where_none_is_bound() {
+    let dropped = arrivals_digest(4434, false);
+    assert_eq!(arrivals_digest(4433, true), dropped);
+    assert_ne!(arrivals_digest(4433, false), dropped);
+}
+
+#[test]
+#[should_panic(expected = "no UDP socket of node 0 is bound at 10.0.0.1:4433")]
+fn a_fault_where_no_socket_is_bound_panics() {
+    let (_sim, a, _b) = pair(0, link::Config::default());
+    a.fail_udp(at(&a, 4433));
+}
+
+#[test]
+#[should_panic(expected = "no UDP socket of node 0 is bound at 10.0.0.2:4433")]
+fn a_fault_on_a_socket_of_another_node_panics() {
+    let (_sim, a, b) = pair(0, link::Config::default());
+    let _b = udp(&b, 4433);
+    a.fail_udp(at(&b, 4433));
 }

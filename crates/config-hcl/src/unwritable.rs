@@ -29,9 +29,10 @@ pub enum Unwritable {
         /// Where the function name is, or `None` for a name with no span.
         span: Option<Span>,
     },
-    /// A name that HCL does not read as a reference: a segment does not start with a
-    /// letter or `_`, or the first segment is `true`, `false`, or `null`, such as
-    /// `a.7b`, `site_a.@changes`, or `true.x`.
+    /// A name whose first segment does not start a reference in HCL: it does not
+    /// start with a letter or `_`, or it is `true`, `false`, or `null`, such as
+    /// `7a.b`, `@a.b`, or `true.x`. A later segment is never refused: it is written
+    /// as a string index, such as `plc["40001"]`.
     Reference {
         /// Where the reference is, or `None` for a reference with no span.
         span: Option<Span>,
@@ -74,9 +75,9 @@ impl From<&Unwritable> for Diagnostic {
             Unwritable::Reference { span } => (
                 REFERENCE,
                 span,
-                "the name does not read as a reference in HCL",
-                "Start each segment with a letter or `_`, and do not make `true`, \
-                 `false`, or `null` the first segment",
+                "the first segment of a reference in HCL starts with a letter or `_` \
+                 and is not `true`, `false`, or `null`",
+                "Write the name as a quoted string where a kind takes a name",
             ),
             Unwritable::For { span } => (
                 FOR,
@@ -157,9 +158,9 @@ pub(crate) mod tests {
             ),
             (
                 "hcl.unwritable-reference",
-                "the name does not read as a reference in HCL",
-                "Start each segment with a letter or `_`, and do not make `true`, \
-                 `false`, or `null` the first segment",
+                "the first segment of a reference in HCL starts with a letter or `_` \
+                 and is not `true`, `false`, or `null`",
+                "Write the name as a quoted string where a kind takes a name",
             ),
             (
                 "hcl.unwritable-for",

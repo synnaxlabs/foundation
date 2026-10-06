@@ -6,7 +6,7 @@ use document::{Attribute, Block, Document, Map};
 
 use crate::Unwritable;
 use crate::lex;
-use crate::parse::{opens_for, reference};
+use crate::parse::{opens_for, rooted};
 
 /// The widest line, in characters, that holds a list, a map, or a call on one line.
 const WIDTH: usize = 88;
@@ -102,7 +102,7 @@ pub(crate) struct Writer<'a> {
     /// The column where the first line starts.
     start: usize,
     /// The text goes in a file whose lines end in `\r\n`. A heredoc there keeps a
-    /// `\r` in its value, so each string is quoted.
+    /// `\r` in its value, so each string is quoted, and each `\n` written ends a line.
     crlf: bool,
 }
 
@@ -118,13 +118,17 @@ impl<'a> Writer<'a> {
         }
     }
 
-    /// The text written, or each part that HCL text cannot hold.
+    /// The text written, with `\r\n` line ends for a file whose lines end in `\r\n`,
+    /// or each part that HCL text cannot hold.
     pub(crate) fn finish(self) -> Result<String, Vec<Unwritable>> {
-        if self.errors.is_empty() {
-            Ok(self.out)
-        } else {
-            Err(self.errors)
+        if !self.errors.is_empty() {
+            return Err(self.errors);
         }
+        Ok(if self.crlf {
+            self.out.replace('\n', "\r\n")
+        } else {
+            self.out
+        })
     }
 
     /// Writes each attribute on its own lines, then each block after a blank line,
@@ -153,7 +157,7 @@ impl<'a> Writer<'a> {
         }
         for block in blocks {
             if written {
-                self.gap();
+                self.end_line();
             }
             self.pad(indent);
             self.block(block, indent);
@@ -268,10 +272,22 @@ impl<'a> Writer<'a> {
             }
             Kind::String(text) => return quoted(&mut self.out, text),
             Kind::Reference(name) => {
-                if !reference(name) {
+                if !rooted(name) {
                     self.errors.push(Unwritable::Reference { span: value.span });
                 }
-                return self.out.push_str(name.as_str());
+                let mut segments = name.segments();
+                self.out.extend(segments.next());
+                for segment in segments {
+                    if lex::identifier(segment) {
+                        self.out.push('.');
+                        self.out.push_str(segment);
+                    } else {
+                        self.out.push('[');
+                        quoted(&mut self.out, segment);
+                        self.out.push(']');
+                    }
+                }
+                return;
             }
             Kind::List(values) => Items::List(values),
             Kind::Call(call) => Items::Call(call),
@@ -348,8 +364,9 @@ impl<'a> Writer<'a> {
         self.errors.push(Unwritable::For { span });
     }
 
-    /// Writes the blank line between an item and a block after it.
-    pub(crate) fn gap(&mut self) {
+    /// Writes a line end: the blank line between an item and a block after it, or
+    /// the end of a last line that has none.
+    pub(crate) fn end_line(&mut self) {
         self.out.push('\n');
     }
 
@@ -532,7 +549,7 @@ mod tests {
     /// Any name, with segments that start with a digit, `-`, or `@`, and a first
     /// segment that may be a literal.
     fn any_name() -> impl Strategy<Value = Name> {
-        "(true|null|@?[a-z0-9_-]{1,3})(\\.@?[a-z0-9_-]{1,3}){0,2}"
+        "(true|false|null|@?[a-zA-Z0-9_-]{1,3})(\\.@?[a-zA-Z0-9_-]{1,3}){0,2}"
             .prop_map(|name| name.parse().unwrap())
     }
 
@@ -544,15 +561,23 @@ mod tests {
         }
 
         #[test]
-        fn writes_a_name_exactly_when_it_reads_back(name in any_name()) {
+        fn writes_a_name_exactly_when_its_first_segment_starts_a_reference(
+            name in any_name(),
+        ) {
             let document = attributes(vec![("a", Kind::Reference(name.clone()))]);
-            let text = format!("a = {name}\n");
-            let expected = if read(Source(0), &text).as_ref() == Ok(&document) {
-                Ok(text)
-            } else {
-                Err(vec![Unwritable::Reference { span: None }])
-            };
-            prop_assert_eq!(write(&document), expected);
+            let first = name.segments().next().unwrap();
+            let root = first.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && !["true", "false", "null"].contains(&first);
+            match write(&document) {
+                Ok(text) => {
+                    prop_assert!(root, "{}", text);
+                    prop_assert_eq!(read(Source(0), &text), Ok(document), "{}", text);
+                }
+                Err(errors) => {
+                    prop_assert!(!root, "{}", name);
+                    prop_assert_eq!(errors, vec![Unwritable::Reference { span: None }]);
+                }
+            }
         }
     }
 
@@ -716,6 +741,28 @@ mod tests {
     }
 
     #[test]
+    fn ends_each_line_in_crlf_for_a_crlf_file() {
+        let fits = "é".repeat(80);
+        let long = "é".repeat(81);
+        let document = Document {
+            attributes: map(vec![
+                ("a", list(vec![string(&fits)])),
+                ("b", list(vec![string(&long)])),
+            ]),
+            blocks: vec![block("d", &[], attributes(vec![("c", string("x\n"))]))],
+        };
+        let mut writer = Writer::new("", 0, true);
+        writer.body(document.attributes.iter(), &document.blocks, 0, false);
+        let expected = format!(
+            "a = [\"{fits}\"]\r\n\
+             b = [\r\n  \"{long}\",\r\n]\r\n\
+             \r\n\
+             d {{\r\n  c = \"x\\n\"\r\n}}\r\n"
+        );
+        assert_eq!(writer.finish().unwrap(), expected);
+    }
+
+    #[test]
     fn counts_the_comma_after_an_item_in_its_line() {
         let fits = "a".repeat(81);
         let long = "a".repeat(82);
@@ -822,8 +869,21 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_reference_that_hcl_reads_as_another_form() {
-        let names = ["@a.b", "a.@b", "a.7b", "a.-b", "true.x", "null.x"];
+    fn writes_a_later_segment_that_is_not_an_identifier_as_a_string_index() {
+        for (name, text) in [
+            ("plc.40001", "a = plc[\"40001\"]\n"),
+            ("a.-1.x", "a = a[\"-1\"].x\n"),
+            ("site_a.@changes", "a = site_a[\"@changes\"]\n"),
+            ("a.true.for", "a = a.true.for\n"),
+        ] {
+            let document = attributes(vec![("a", reference(name))]);
+            assert_eq!(written(&document), text, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_reference_whose_first_segment_hcl_reads_as_another_form() {
+        let names = ["@a.b", "7b.a", "-b", "true.x", "null.x", "false"];
         for name in names {
             let document = attributes(vec![("a", reference(name))]);
             assert_eq!(

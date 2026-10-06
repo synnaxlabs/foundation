@@ -106,6 +106,10 @@ impl Lab {
         let host = self.sim.node(sim::node::Config::default());
         let node = node::Node::start(node::Config {
             shards: host.shards(),
+            clock: host.clock(),
+            wall: host.wall(),
+            budget: 1 << 20,
+            memory: Box::new(|len| Ok(block::Heap::new(len))),
         });
         self.members.push(Member {
             name: name.into(),

@@ -5,21 +5,37 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Body, Config, Data, Entry, Hard, Message, Position, Raft, Ready, Role, Start, Term,
-    Voters,
+    Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft, Ready,
+    Role, Start, Term, Voters,
 };
 use types::node;
 
 pub(crate) const ELECTION: u32 = 10;
 
+/// The voters of the largest group a scenario builds: a quorum of each configuration.
+pub(crate) const VOTERS: &[u8] = &[1, 2, 3, 4, 5];
+
 pub(crate) fn key(id: u8) -> node::Key {
     node::Key::from_u128(u128::from(id))
 }
 
+/// `grant` for `candidate` from the voters `ids`.
+pub(crate) fn proof(grant: Grant, candidate: u8, ids: &[u8]) -> Proof {
+    Proof {
+        grant,
+        candidate: key(candidate),
+        voters: set(ids),
+    }
+}
+
+/// A node that a refusal from node 2 moved to `term`, with the proof it answers a
+/// stale message with.
 pub(crate) fn at_term(term: u64) -> Hard {
     Hard {
         term: Term(term),
         vote: None,
+        leader: None,
+        proof: (term > 0).then(|| proof(Grant::PreVote, 2, VOTERS)),
     }
 }
 
@@ -105,7 +121,7 @@ pub(crate) fn start(
         heartbeat_ticks: 1,
     };
     let start = Start {
-        hard,
+        hard: hard.clone(),
         voters: Voters {
             incoming: voters.iter().copied().map(key).collect(),
             ..Voters::default()
@@ -146,12 +162,12 @@ impl Network {
     }
 
     /// `size` voters, all with the stored state `hard`. Only `present` have a peer.
-    pub(crate) fn of(size: u8, present: &[u8], hard: Hard) -> Self {
+    pub(crate) fn of(size: u8, present: &[u8], hard: &Hard) -> Self {
         let voters: Vec<u8> = (1..=size).collect();
         Self::new(
-            present
-                .iter()
-                .map(|&id| build(id, &voters, ELECTION, hard, Position::default())),
+            present.iter().map(|&id| {
+                build(id, &voters, ELECTION, hard.clone(), Position::default())
+            }),
         )
     }
 
@@ -241,12 +257,14 @@ impl Network {
     }
 }
 
+/// A leader's heartbeat with its votes.
 pub(crate) fn heartbeat(from: u8, to: u8, term: Term) -> Message {
     Message {
         from: key(from),
         to: key(to),
         term,
         body: Body::Heartbeat { commit: 0 },
+        proof: Some(proof(Grant::Vote, from, VOTERS)),
     }
 }
 
@@ -275,6 +293,7 @@ pub(crate) fn elect(raft: &mut Raft, disk: &mut Disk, others: &[u8]) {
                 to: key(1),
                 term,
                 body: granted.clone(),
+                proof: None,
             })
             .unwrap();
         }
@@ -306,6 +325,7 @@ pub(crate) fn accept(message: &Message) -> Message {
         body: Body::AppendReply {
             last: prev.index + count(entries.len()),
         },
+        proof: None,
     }
 }
 
@@ -332,6 +352,7 @@ pub(crate) fn reply(from: u8, term: u64, body: Body) -> Message {
         to: key(1),
         term: Term(term),
         body,
+        proof: None,
     }
 }
 

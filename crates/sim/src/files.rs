@@ -117,8 +117,9 @@ pub(crate) struct Files {
     flights: BTreeMap<u64, Flight>,
     /// The calls in flight by end time, then key.
     queue: BTreeSet<(Monotonic, u64)>,
-    /// The calls that ended, until their futures take the result.
-    done: BTreeMap<u64, Ended>,
+    /// The node and result of each call that ended, until its future takes the
+    /// result.
+    done: BTreeMap<u64, (usize, Ended)>,
     /// The waker of each close that waits for the calls of its descriptor, by the key
     /// of its handle.
     closes: BTreeMap<u64, Waker>,
@@ -232,7 +233,7 @@ impl Files {
             if dropped {
                 orphans.extend(self.discard(node, ended));
             } else {
-                self.done.insert(key, ended);
+                self.done.insert(key, (node, ended));
                 wakers.extend(waker);
             }
         }
@@ -316,7 +317,7 @@ impl Files {
         key: u64,
         waker: Waker,
     ) -> (Poll<Ended>, Option<Waker>) {
-        if let Some(ended) = self.done.remove(&key) {
+        if let Some((_, ended)) = self.done.remove(&key) {
             return (Poll::Ready(ended), Some(waker));
         }
         let flight = (self.flights.get_mut(&key))
@@ -324,18 +325,14 @@ impl Files {
         (Poll::Pending, flight.waker.replace(waker))
     }
 
-    /// The future of call `key` of `node` dropped before it took the result. A call
-    /// in flight still ends. Returns what to drop after the lock is released.
-    pub(crate) fn abandon(
-        &mut self,
-        node: usize,
-        key: u64,
-    ) -> (Option<Waker>, Option<Held>) {
+    /// The future of call `key` dropped before it took the result. A call in flight
+    /// still ends. Returns what to drop after the lock is released.
+    pub(crate) fn abandon(&mut self, key: u64) -> (Option<Waker>, Option<Held>) {
         if let Some(flight) = self.flights.get_mut(&key) {
             flight.dropped = true;
             return (flight.waker.take(), None);
         }
-        let ended = (self.done.remove(&key))
+        let (node, ended) = (self.done.remove(&key))
             .expect("invariant: a call whose result was not taken has ended");
         (None, self.discard(node, ended))
     }
@@ -350,28 +347,30 @@ impl Files {
         ended.held
     }
 
-    /// Crashes `node` by `crash` at true time `at`. Each call in flight of the node
-    /// ends now as one whose future dropped, a leaked one too, in the order of its
-    /// end time: after a `Process` crash each takes effect, and after a `Power` crash
-    /// only each write does, and the disk keeps what is durable. Then each file of
-    /// the node loses its holds, those of leaked descriptors too. Returns the blocks
-    /// of the calls, for the caller to drop after it releases the lock.
+    /// Crashes `node` by `crash` at true time `at`: each call, result, close, and
+    /// hold of the node ends, a leaked one too. A call in flight ends as one whose
+    /// future dropped, in the order of its end time. After a `Power` crash only each
+    /// write takes effect, and the disk keeps what is durable. Returns the wakers of
+    /// the closes and the blocks of the calls, for the caller to drop after it
+    /// releases the lock.
     pub(crate) fn crash(
         &mut self,
         node: usize,
         at: Monotonic,
         crash: Crash,
-    ) -> Vec<Held> {
+    ) -> (Vec<Waker>, Vec<Held>) {
         let flights = &self.flights;
         let (cut, queue): (BTreeSet<_>, _) = mem::take(&mut self.queue)
             .into_iter()
             .partition(|(_, key)| flights[key].node == node);
         self.queue = queue;
-        let mut orphans = Vec::new();
+        let (mut closes, mut orphans) = (Vec::new(), Vec::new());
         for (_, key) in cut {
             let mut flight = (self.flights.remove(&key))
                 .expect("invariant: a queued call is in flight");
             flight.dropped = true;
+            let close = flight.call.handle().map(|handle| handle.key);
+            closes.extend(close.and_then(|key| self.closes.remove(&key)));
             let kind = mem::discriminant(&flight.call);
             let applied =
                 crash == Crash::Process || matches!(flight.call, Call::Write { .. });
@@ -384,8 +383,14 @@ impl Files {
             (at, key, kind, ok).hash(&mut self.digest);
             orphans.extend(held);
         }
+        let leaked: Vec<_> = (self.done)
+            .extract_if(.., |_, (owner, _)| *owner == node)
+            .collect();
+        for (_, (_, ended)) in leaked {
+            orphans.extend(self.discard(node, ended));
+        }
         self.disks[node].crash(crash, &mut self.rng);
-        orphans
+        (closes, orphans)
     }
 
     /// Polls the close of descriptor `handle`: ready when none of its calls is in

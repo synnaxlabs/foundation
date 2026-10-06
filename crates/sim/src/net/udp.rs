@@ -11,7 +11,8 @@ use env::net::{Ecn, Error};
 use types::time::Monotonic;
 
 use super::wire::Wire;
-use super::{EPHEMERAL, Fate, NOT_AVAILABLE, addresses, covers, node};
+use super::{Fate, NOT_AVAILABLE, addresses, receives};
+use crate::EIO;
 
 /// The IPv4 and UDP header bytes of a datagram.
 const V4_HEADERS: usize = 28;
@@ -71,22 +72,17 @@ struct Binding {
     queued: usize,
     /// The waker of the last receive that found the queue empty.
     waker: Option<Waker>,
+    /// From a fault until the socket drops: each receive gives `EIO`, and each
+    /// arrival drops.
+    failed: bool,
 }
 
 impl Binding {
-    /// Whether the socket receives a datagram to `destination`.
-    fn receives(&self, destination: SocketAddr) -> bool {
-        let (local, ip) = (self.local.ip(), destination.ip());
-        self.local.port() == destination.port()
-            && covers(local, ip)
-            && node(ip) == Some(self.node)
-    }
-
-    /// Queues `datagram` while the queue takes at most `capacity` bytes, so that, as
-    /// on Linux, the last datagram may go past it. Returns its fate, and the waker of
-    /// a receive to wake.
+    /// Queues `datagram` while the socket works and the queue takes at most
+    /// `capacity` bytes, so that, as on Linux, the last datagram may go past it.
+    /// Returns its fate, and the waker of a receive to wake.
     fn push(&mut self, datagram: Datagram) -> (Fate, Option<Waker>) {
-        if self.queued > self.capacity {
+        if self.failed || self.queued > self.capacity {
             return (Fate::Dropped, None);
         }
         self.queued += datagram.charge();
@@ -146,29 +142,10 @@ impl<'a> Udp<'a> {
         node: usize,
         config: &Config,
     ) -> Result<Bound, Error> {
-        let local = config.local;
-        let ip = local.ip();
-        if !ip.is_unspecified() && !addresses(node).contains(&ip) {
-            return Err(Error::Io {
-                code: NOT_AVAILABLE,
-            });
-        }
-        let taken = |port: u16| {
-            (self.sockets.bindings.values()).any(|binding| {
-                let other = binding.local.ip();
-                binding.node == node
-                    && binding.local.port() == port
-                    && (covers(ip, other) || covers(other, ip))
-            })
-        };
-        let port = match local.port() {
-            0 => (EPHEMERAL..=u16::MAX).find(|&port| !taken(port)),
-            port => Some(port).filter(|&port| !taken(port)),
-        };
-        let Some(port) = port else {
-            return Err(Error::AddressInUse { local });
-        };
-        let local = SocketAddr::new(ip, port);
+        let bound = (self.sockets.bindings.values())
+            .filter(|binding| binding.node == node)
+            .map(|binding| binding.local);
+        let local = super::bind(node, config.local, &bound)?;
         let [send_batch_max, recv_batch_max] = [(); 2].map(|()| {
             let index = self.wire.rng().below(3);
             let index = usize::try_from(index).expect("invariant: below 3 fits usize");
@@ -182,6 +159,7 @@ impl<'a> Udp<'a> {
             queue: VecDeque::new(),
             queued: 0,
             waker: None,
+            failed: false,
         };
         self.sockets.next += 1;
         let key = self.sockets.next;
@@ -198,6 +176,17 @@ impl<'a> Udp<'a> {
     /// releases the lock.
     pub(crate) fn close(&mut self, key: u64) -> Option<Waker> {
         (self.sockets.bindings.remove(&key)).and_then(|binding| binding.waker)
+    }
+
+    /// Makes the socket of `node` bound at `local` fail. Returns a waker for the
+    /// caller to wake after it releases the lock: that of a receive that waits, or
+    /// one that does nothing. Returns `None` when no socket of `node` is bound at
+    /// `local`.
+    pub(crate) fn fail(&mut self, node: usize, local: SocketAddr) -> Option<Waker> {
+        let binding = (self.sockets.bindings.values_mut())
+            .find(|binding| binding.node == node && binding.local == local)?;
+        binding.failed = true;
+        Some((binding.waker.take()).unwrap_or_else(|| Waker::noop().clone()))
     }
 
     /// Sends the datagrams of `transmit` from socket `key` at true time `now`.
@@ -242,7 +231,7 @@ impl<'a> Udp<'a> {
         let (source, destination) = (datagram.source, datagram.destination);
         let len = datagram.contents.len();
         let binding = (self.sockets.bindings.values_mut())
-            .find(|binding| binding.receives(destination));
+            .find(|binding| receives(binding.node, binding.local, destination));
         let (fate, waker) = match binding {
             Some(binding) => binding.push(datagram),
             None => (Fate::Dropped, None),
@@ -252,17 +241,21 @@ impl<'a> Udp<'a> {
     }
 
     /// Receives batches from socket `key` into `buffers`, one per buffer, or keeps
-    /// `waker` when the queue is empty. Returns the count of batches, and a waker for
-    /// the caller to drop after it releases the lock.
+    /// `waker` when the queue is empty. Returns the count of batches, or `EIO` when
+    /// the socket failed, and a waker for the caller to drop after it releases the
+    /// lock.
     pub(crate) fn recv(
         &mut self,
         key: u64,
         waker: Waker,
         buffers: &mut [IoSliceMut<'_>],
         meta: &mut [Meta],
-    ) -> (Poll<usize>, Option<Waker>) {
+    ) -> (Poll<Result<usize, Error>>, Option<Waker>) {
         let binding = (self.sockets.bindings.get_mut(&key))
             .expect("invariant: a socket lives while its driver does");
+        if binding.failed {
+            return (Poll::Ready(Err(Error::Io { code: EIO })), Some(waker));
+        }
         if binding.queue.is_empty() {
             return (Poll::Pending, binding.waker.replace(waker));
         }
@@ -274,7 +267,7 @@ impl<'a> Udp<'a> {
             *meta = binding.batch(buffer);
             count += 1;
         }
-        (Poll::Ready(count), Some(waker))
+        (Poll::Ready(Ok(count)), Some(waker))
     }
 }
 

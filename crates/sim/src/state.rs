@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Wake, Waker};
@@ -15,7 +16,7 @@ use env::threads::Body;
 use types::time::{Monotonic, Span, Stamp};
 
 use crate::files::{Files, Held};
-use crate::net::Network;
+use crate::net::{self, Network};
 use crate::serial::Serial;
 use crate::{Crash, node, shard};
 
@@ -38,8 +39,8 @@ pub(crate) struct State {
     /// The thread of each live task.
     tasks: BTreeMap<u64, u64>,
     ready: BTreeSet<u64>,
-    /// Wakers by true deadline, then timer key.
-    timers: BTreeMap<(Monotonic, u64), Waker>,
+    /// Threads and wakers by true deadline, then timer key.
+    timers: BTreeMap<(Monotonic, u64), (u64, Waker)>,
     /// The first task of each thread that has not run yet.
     starts: BTreeMap<u64, Start>,
     /// The thread whose task the scheduler polls now: set by `pick`, cleared by
@@ -74,6 +75,9 @@ struct Node {
     /// Set from the stop of a crash to the cut, while the sim drops what the crash
     /// ended.
     crashing: bool,
+    /// The crashes of the node so far. A crash ends a life after the futures of the
+    /// node drop, so each of their drops closes its handle in the life of its open.
+    life: u64,
 }
 
 impl Node {
@@ -100,6 +104,16 @@ pub(crate) enum Outcome {
     Done(Result<(), Panicked>),
     /// A crash of its node ended it.
     Crashed,
+}
+
+/// What threads leave at their end, for the caller to drop after it releases the
+/// lock.
+#[derive(Default)]
+pub(crate) struct Ended {
+    /// The tasks whose futures the caller drops, in key order.
+    pub(crate) tasks: Vec<u64>,
+    /// The wakers of the timers of the threads.
+    pub(crate) timers: Vec<Waker>,
 }
 
 /// The next step of a run.
@@ -176,6 +190,7 @@ impl State {
             shards: shard::Starts::default(),
             boot: config.monotonic,
             crashing: false,
+            life: 0,
         };
         self.nodes.push(node);
         self.files.add(config.disk_bytes);
@@ -196,6 +211,11 @@ impl State {
     /// True time since the base of `node`.
     fn since(&self, node: usize) -> u64 {
         self.now.0 - self.nodes[node].base.0
+    }
+
+    /// The life of `node`: its crashes so far.
+    pub(crate) fn life(&self, node: usize) -> u64 {
+        self.nodes[node].life
     }
 
     pub(crate) fn monotonic(&self, node: usize) -> Monotonic {
@@ -276,15 +296,27 @@ impl State {
         }
     }
 
-    /// Adds timer `key`, which wakes `waker` at true time `at`.
-    pub(crate) fn arm(&mut self, at: Monotonic, key: u64, waker: Waker) {
-        self.timers.insert((at, key), waker);
+    /// Adds timer `key` of `thread`, which wakes `waker` at true time `at`. A timer of
+    /// a thread that has ended never fires: it gives `waker` back, for the caller to
+    /// drop after it releases the lock.
+    pub(crate) fn arm(
+        &mut self,
+        thread: u64,
+        at: Monotonic,
+        key: u64,
+        waker: Waker,
+    ) -> Option<Waker> {
+        if self.threads[&thread].outcome.is_some() {
+            return Some(waker);
+        }
+        self.timers.insert((at, key), (thread, waker));
+        None
     }
 
     /// Removes timer `key` at true time `at`, and returns its waker for the caller to
     /// drop after it releases the lock.
     pub(crate) fn disarm(&mut self, at: Monotonic, key: u64) -> Option<Waker> {
-        self.timers.remove(&(at, key))
+        self.timers.remove(&(at, key)).map(|(_, waker)| waker)
     }
 
     /// The thread that the scheduler polls now and its node, if any.
@@ -296,6 +328,11 @@ impl State {
     /// True time now.
     pub(crate) fn now(&self) -> Monotonic {
         self.now
+    }
+
+    /// Whether a node of the run has address `ip`.
+    pub(crate) fn hosts(&self, ip: IpAddr) -> bool {
+        net::node(ip).is_some_and(|node| node < self.nodes.len())
     }
 
     pub(crate) fn net(&mut self) -> &mut Network {
@@ -428,20 +465,21 @@ impl State {
     }
 
     /// Removes `task` of `thread`, which completed; it may have woken itself as it
-    /// completed. The first task of a thread ends the thread. Returns the tasks whose
-    /// futures the caller drops.
-    pub(crate) fn finish(&mut self, task: u64, thread: u64) -> Vec<u64> {
+    /// completed. The first task of a thread ends the thread, as [`State::end`] does.
+    pub(crate) fn finish(&mut self, task: u64, thread: u64) -> Ended {
         if task == self.threads[&thread].main {
             return self.end(thread, Outcome::Done(Ok(())));
         }
         self.tasks.remove(&task);
         self.ready.remove(&task);
-        vec![task]
+        Ended {
+            tasks: vec![task],
+            timers: Vec::new(),
+        }
     }
 
-    /// Ends `thread` with `outcome` and returns the keys of its tasks, whose futures
-    /// the caller drops.
-    pub(crate) fn end(&mut self, thread: u64, outcome: Outcome) -> Vec<u64> {
+    /// Ends `thread` with `outcome`, and its timers, leaked ones too.
+    pub(crate) fn end(&mut self, thread: u64, outcome: Outcome) -> Ended {
         self.threads
             .get_mut(&thread)
             .expect("invariant: an ending thread exists")
@@ -453,7 +491,11 @@ impl State {
             self.tasks.remove(task);
             self.ready.remove(task);
         }
-        tasks
+        let timers = (self.timers)
+            .extract_if(.., |_, (owner, _)| *owner == thread)
+            .map(|(_, (_, waker))| waker)
+            .collect();
+        Ended { tasks, timers }
     }
 
     /// Moves true time to `at`, delivers the datagrams and bytes that arrive by then,
@@ -468,7 +510,7 @@ impl State {
             if timer.key().0 > at {
                 break;
             }
-            wakers.push(timer.remove());
+            wakers.push(timer.remove().1);
         }
         wakers.extend(self.net.deliver(at));
         wakers.extend(self.serial.deliver(at));
@@ -478,13 +520,13 @@ impl State {
     }
 
     /// Ends each live thread of the nodes whose index `stopped` picks in a crash, and
-    /// makes those nodes crashing until [`State::crash`]. Returns the tasks whose
-    /// futures the caller drops, and the starts of the threads that had not run, each
-    /// in start order, for the caller to drop after it releases the lock.
+    /// makes those nodes crashing until [`State::crash`]. Returns what the threads
+    /// leave, and the starts of the threads that had not run in start order, for the
+    /// caller to drop after it releases the lock.
     pub(crate) fn stop(
         &mut self,
         stopped: impl Fn(usize) -> bool,
-    ) -> (Vec<u64>, Vec<Start>) {
+    ) -> (Ended, Vec<Start>) {
         for (key, node) in self.nodes.iter_mut().enumerate() {
             node.crashing |= stopped(key);
         }
@@ -492,28 +534,39 @@ impl State {
             .filter(|(_, thread)| stopped(thread.node) && thread.outcome.is_none())
             .map(|(&key, thread)| (key, thread.main))
             .collect();
-        let (mut tasks, mut starts) = (Vec::new(), Vec::new());
+        let (mut ended, mut starts) = (Ended::default(), Vec::new());
         for (thread, main) in live {
             starts.extend(self.starts.remove(&main));
-            tasks.extend(self.end(thread, Outcome::Crashed));
+            let Ended { tasks, timers } = self.end(thread, Outcome::Crashed);
+            ended.tasks.extend(tasks);
+            ended.timers.extend(timers);
         }
-        tasks.sort_unstable();
-        (tasks, starts)
+        ended.tasks.sort_unstable();
+        (ended, starts)
     }
 
-    /// Ends the crash of `node` that [`State::stop`] began, and the file calls in
-    /// flight of the node. After a `Power` crash, its monotonic clock reads its boot
-    /// value again, and its disk keeps what is durable. Returns the blocks of the
-    /// calls, for the caller to drop after it releases the lock.
-    pub(crate) fn crash(&mut self, node: usize, crash: Crash) -> Vec<Held> {
+    /// Ends the crash of `node` that [`State::stop`] began, its life, and its file
+    /// calls in flight, and closes each serial port of the node. After a `Power`
+    /// crash, its monotonic clock reads its boot value again, and its disk keeps what
+    /// is durable. Returns the wakers of the ports and the closes, and the blocks of
+    /// the calls, for the caller to drop after it releases the lock.
+    pub(crate) fn crash(
+        &mut self,
+        node: usize,
+        crash: Crash,
+    ) -> (Vec<Waker>, Vec<Held>) {
         self.nodes[node].crashing = false;
+        self.nodes[node].life += 1;
+        let mut wakers = self.serial.crash(node);
         let now = self.now;
         if crash == Crash::Power {
             let wall = self.wall(node).time;
             let booted = &mut self.nodes[node];
             (booted.base, booted.monotonic, booted.wall) = (now, booted.boot, wall);
         }
-        self.files.crash(node, now, crash)
+        let (closes, held) = self.files.crash(node, now, crash);
+        wakers.extend(closes);
+        (wakers, held)
     }
 
     /// The names of the threads that have not ended, in start order.

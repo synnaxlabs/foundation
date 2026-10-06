@@ -90,4 +90,4 @@ disallowed-macros = [
   { path = "std::prelude::v1::global_allocator", reason = "only a test or benchmark root lifts this (COUNTING ALLOCATOR)" },
 ]
 
-doc-valid-idents = ["UUIDv7", "PreVote", "CheckQuorum", "OpenSSH", ".."]
+doc-valid-idents = ["UUIDv7", "PreVote", "CheckQuorum", "OpenSSH", "InfluxDB", ".."]

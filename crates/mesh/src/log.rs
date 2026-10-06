@@ -23,7 +23,9 @@ use env::files::{self, File, Files, Mode};
 use raft::{Entry, Hard, Term};
 use types::digest::Digest;
 
-use crate::bytes::{put_key, take, take_key};
+use crate::bytes::{
+    put_optional_key, put_optional_proof, take, take_key, take_present, take_proof,
+};
 use crate::entry;
 
 const VERSION: u16 = 1;
@@ -40,7 +42,6 @@ const CHUNK: usize = 64 << 10;
 
 const NO_HARD: u8 = 0;
 const HARD: u8 = 1;
-const HARD_WITH_VOTE: u8 = 2;
 
 /// What a [`Log`] holds: the input of `raft::Raft::new` after a restart.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -541,12 +542,12 @@ fn encode(number: u64, hard: Option<Hard>, entries: &[Entry]) -> Vec<u8> {
     let mut body = Vec::new();
     match hard {
         None => body.push(NO_HARD),
-        Some(Hard { term, vote }) => {
-            body.push(vote.map_or(HARD, |_| HARD_WITH_VOTE));
-            body.extend(term.0.to_le_bytes());
-            if let Some(vote) = vote {
-                put_key(vote, &mut body);
-            }
+        Some(hard) => {
+            body.push(HARD);
+            body.extend(hard.term.0.to_le_bytes());
+            put_optional_key(hard.vote, &mut body);
+            put_optional_key(hard.leader, &mut body);
+            put_optional_proof(hard.proof.as_ref(), &mut body);
         }
     }
     for entry in entries {
@@ -569,13 +570,29 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
     let body = &mut body;
     match u8::from_le_bytes(take(body)?) {
         NO_HARD => {}
-        kind @ (HARD | HARD_WITH_VOTE) => {
+        HARD => {
             let term = Term(u64::from_le_bytes(take(body)?));
-            let vote = match kind {
-                HARD_WITH_VOTE => Some(take_key(body)?),
-                _ => None,
+            let vote = if take_present(body)? {
+                Some(take_key(body)?)
+            } else {
+                None
             };
-            stored.hard = Hard { term, vote };
+            let leader = if take_present(body)? {
+                Some(take_key(body)?)
+            } else {
+                None
+            };
+            let proof = if take_present(body)? {
+                Some(take_proof(body)?)
+            } else {
+                None
+            };
+            stored.hard = Hard {
+                term,
+                vote,
+                leader,
+                proof,
+            };
         }
         _ => return None,
     }
@@ -615,12 +632,13 @@ mod tests {
 
     use env::files::Operation;
     use proptest::prelude::*;
-    use raft::{Data, Voters};
+    use raft::{Data, Grant, Proof, Voters};
     use sim::{Crash, Sim};
     use types::node;
     use types::time::Span;
 
     use super::*;
+    use crate::bytes::{PRESENT, VOTE};
 
     const DIR: &str = "mesh";
 
@@ -680,6 +698,16 @@ mod tests {
         Hard {
             term: Term(term),
             vote: vote.map(key),
+            leader: None,
+            proof: None,
+        }
+    }
+
+    fn proof(grant: Grant, candidate: u128, voters: &[u128]) -> Proof {
+        Proof {
+            grant,
+            candidate: key(candidate),
+            voters: voters.iter().copied().map(key).collect(),
         }
     }
 
@@ -1065,6 +1093,51 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_hard_record_with_a_byte_it_cannot_read() {
+        // The presence byte of the vote, then the grant byte of the proof.
+        for at in [HEADER + 9, HEADER + 44] {
+            let (mut sim, node) = sim(0);
+            sim.run_on(&node, move |node, _| async move {
+                drop(open(&node).await.unwrap());
+                let hard = Hard {
+                    leader: Some(key(2)),
+                    proof: Some(proof(Grant::Vote, 2, &[2, 3])),
+                    ..hard(5, Some(2))
+                };
+                let mut record = encode(0, Some(hard), &[]);
+                record[at] = 2;
+                sign(&mut record);
+                put(&node, "log-0", 0, &record).await;
+            })
+            .unwrap();
+            let expected = Error::Corrupt {
+                path: file("log-0"),
+                offset: 0,
+            };
+            assert_eq!(stored(&mut sim, &node), Err(expected), "byte {at}");
+        }
+    }
+
+    #[test]
+    fn a_hard_record_has_one_byte_form() {
+        let hard = Hard {
+            leader: Some(key(2)),
+            proof: Some(proof(Grant::Vote, 2, &[2, 3])),
+            ..hard(5, Some(2))
+        };
+        let record = encode(0, Some(hard), &[]);
+        let two = 2_u128.to_le_bytes();
+        let mut expected = vec![HARD];
+        expected.extend(5_u64.to_le_bytes());
+        expected.extend([PRESENT].into_iter().chain(two));
+        expected.extend([PRESENT].into_iter().chain(two));
+        expected.extend([PRESENT, VOTE].into_iter().chain(two));
+        expected.extend(2_u64.to_le_bytes());
+        expected.extend(two.into_iter().chain(3_u128.to_le_bytes()));
+        assert_eq!(record[HEADER..], expected);
+    }
+
+    #[test]
     fn refuses_a_record_of_another_format_version() {
         let (mut sim, node) = sim(0);
         sim.run_on(&node, |node, _| async move {
@@ -1447,9 +1520,30 @@ mod tests {
         })
     }
 
+    fn proofs() -> impl Strategy<Value = Option<Proof>> {
+        let grant = prop::bool::ANY
+            .prop_map(|vote| if vote { Grant::Vote } else { Grant::PreVote });
+        let voters = prop::collection::btree_set(any::<u128>(), 0..4);
+        prop::option::of((grant, any::<u128>(), voters)).prop_map(|proof| {
+            proof.map(|(grant, candidate, voters)| Proof {
+                grant,
+                candidate: key(candidate),
+                voters: voters.into_iter().map(key).collect(),
+            })
+        })
+    }
+
     fn hards() -> impl Strategy<Value = Option<Hard>> {
-        prop::option::of((any::<u64>(), prop::option::of(any::<u128>())))
-            .prop_map(|hard| hard.map(|(term, vote)| self::hard(term, vote)))
+        let keys = prop::option::of(any::<u128>());
+        prop::option::of((any::<u64>(), keys.clone(), keys, proofs())).prop_map(
+            |hard| {
+                hard.map(|(term, vote, leader, proof)| Hard {
+                    leader: leader.map(key),
+                    proof,
+                    ..self::hard(term, vote)
+                })
+            },
+        )
     }
 
     proptest! {
@@ -1459,7 +1553,7 @@ mod tests {
             hard in hards(),
             entries in entries(),
         ) {
-            let bytes = encode(number, hard, &entries);
+            let bytes = encode(number, hard.clone(), &entries);
             let At::Header(head) = header(&bytes) else {
                 panic!("a record starts with a header");
             };
