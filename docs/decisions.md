@@ -945,7 +945,8 @@ How to read this record:
   loss that keeps `applied` fails at `Raft::new` with `Error::AppliedPastLog`. `node`
   shows the error in its status (#648). Lost: the leader sends again from below what
   it counted, which lowers its count under a commit that a quorum may no longer
-  hold. Decided on 2026-10-05 (#352 item 3).
+  hold. Decided on 2026-10-05 (#352 item 3). Later, at low priority: the leader
+  learns the follower's real last index and stops counting lost entries (#663).
 - **RAFT VOTERS (#193)** `Start.voters` is a `raft::Voters { incoming, outgoing }`,
   the etcd joint configuration: `incoming` is the voter set, and `outgoing` is the
   set a joint phase replaces, else empty. An election, a commit, and a leader's
