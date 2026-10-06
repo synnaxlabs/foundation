@@ -3,11 +3,11 @@
 mod cid;
 pub(crate) mod connection;
 mod datagram;
+#[cfg(test)]
+mod pair;
 mod settings;
 mod stateless;
 pub(crate) mod stream;
-#[cfg(test)]
-mod testing;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -732,7 +732,8 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::quic::testing::{self, Pair, Side};
+    use crate::quic::pair::{self, Pair, Side};
+    use crate::testing;
     use crate::tls;
 
     /// The link delay each way in [`dial`].
@@ -747,7 +748,7 @@ mod tests {
     }
 
     fn server() -> PublicKey {
-        tls::public(&testing::SERVER_KEY)
+        tls::public(&pair::SERVER_KEY)
     }
 
     fn events(side: &Side) -> Vec<&Event> {
@@ -767,7 +768,7 @@ mod tests {
             let meta = Meta {
                 destination,
                 ecn,
-                ..testing::meta(testing::CLIENT, transmit.contents)
+                ..pair::meta(pair::CLIENT, transmit.contents)
             };
             pair.server.endpoint.receive(now, &meta, transmit.contents);
         }
@@ -792,9 +793,9 @@ mod tests {
                     key: side.key.expect("a connection"),
                     peer: Peer::Node(tls::public(key)),
                 };
-                let client = connected(&pair.client, &testing::SERVER_KEY);
+                let client = connected(&pair.client, &pair::SERVER_KEY);
                 assert_eq!(events(&pair.client), [&client]);
-                let server = connected(&pair.server, &testing::CLIENT_KEY);
+                let server = connected(&pair.server, &pair::CLIENT_KEY);
                 assert_eq!(events(&pair.server), [&server]);
             });
         }
@@ -818,9 +819,9 @@ mod tests {
         )]
         fn to_port_zero_panics() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let mut endpoint =
-                    Endpoint::new(&config, testing::CLIENT_SHARD, NonZeroUsize::MIN);
+                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
                 let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
                 endpoint.connect(Monotonic(0), server(), remote);
             });
@@ -941,15 +942,15 @@ mod tests {
         #[test]
         fn stays_at_the_earliest_timer_when_a_later_dial_starts() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let mut endpoint =
-                    Endpoint::new(&config, testing::CLIENT_SHARD, NonZeroUsize::MIN);
+                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
                 let mut buffer = Vec::new();
-                endpoint.connect(Monotonic(0), server(), testing::SERVER);
+                endpoint.connect(Monotonic(0), server(), pair::SERVER);
                 while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
                 let earliest = endpoint.deadline().expect("a deadline");
-                let later = testing::at(Duration::from_millis(500));
-                endpoint.connect(later, server(), testing::SERVER);
+                let later = pair::at(Duration::from_millis(500));
+                endpoint.connect(later, server(), pair::SERVER);
                 while endpoint.transmit(later, &mut buffer).is_some() {}
                 assert_eq!(endpoint.deadline(), Some(earliest));
             });
@@ -967,11 +968,11 @@ mod tests {
         #[test]
         fn writes_a_response_into_the_callers_buffer() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
-                    Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let initial = testing::draft_29();
-                let meta = testing::meta(testing::CLIENT, &initial);
+                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let initial = pair::draft_29();
+                let meta = pair::meta(pair::CLIENT, &initial);
                 endpoint.receive(Monotonic(0), &meta, &initial);
                 let mut buffer = Vec::with_capacity(1 << 16);
                 let start = buffer.as_ptr();
@@ -1015,8 +1016,7 @@ mod tests {
                 let second = pair.client.key.expect("a key");
                 pair.run(Duration::from_millis(100));
                 for key in [first, second] {
-                    let connection =
-                        testing::connection(&mut pair.client.endpoint, key);
+                    let connection = pair::connection(&mut pair.client.endpoint, key);
                     let stream = connection.streams().open(Dir::Uni).expect("a stream");
                     let mut send = connection.send_stream(stream);
                     send.write(&[0; 10_000]).expect("written");
@@ -1076,21 +1076,21 @@ mod tests {
         #[test]
         fn answers_a_refused_first_initial_with_a_close() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
                 let mut server =
-                    Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
-                let (_, mut client) = Settings::new(&config, testing::CLIENT_SHARD);
+                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
+                let (_, mut client) = Settings::new(&config, pair::CLIENT_SHARD);
                 let now = server.instant(Monotonic(0));
                 let dial =
-                    client.connect(now, other_protocol(), testing::SERVER, SERVER_NAME);
+                    client.connect(now, other_protocol(), pair::SERVER, SERVER_NAME);
                 let (_, mut connection) = dial.expect("a dial");
                 let mut buffer = Vec::new();
                 let initial =
                     connection.poll_transmit(now, NonZeroUsize::MIN, &mut buffer);
                 let len = initial.expect("an Initial").size;
                 let meta = Meta {
-                    source: testing::CLIENT,
+                    source: pair::CLIENT,
                     destination: None,
                     ecn: None,
                     len,
@@ -1099,9 +1099,9 @@ mod tests {
                 server.receive(Monotonic(0), &meta, &buffer);
                 let close =
                     server.transmit(Monotonic(0), &mut buffer).expect("a close");
-                assert_eq!(close.destination, testing::CLIENT);
+                assert_eq!(close.destination, pair::CLIENT);
                 let datagram = BytesMut::from(close.contents);
-                let path = FourTuple::new(testing::SERVER, None);
+                let path = FourTuple::new(pair::SERVER, None);
                 let event = client.handle(now, path, None, datagram, &mut Vec::new());
                 let Some(DatagramEvent::ConnectionEvent(_, event)) = event else {
                     panic!("no event for the dial");
@@ -1137,14 +1137,14 @@ mod tests {
         #[should_panic(expected = "invariant: a batch of 10 bytes has a stride")]
         fn with_no_stride_panics() {
             testing::run(1, |shard| {
-                let config = shard.config(testing::SERVER_KEY, Span::SECOND);
+                let config = shard.config(pair::SERVER_KEY, Span::SECOND);
                 let mut endpoint =
-                    Endpoint::new(&config, testing::SERVER_SHARD, NonZeroUsize::MIN);
-                let initial = testing::draft_29();
+                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let initial = pair::draft_29();
                 let meta = Meta {
                     len: 10,
                     stride: 0,
-                    ..testing::meta(testing::CLIENT, &initial)
+                    ..pair::meta(pair::CLIENT, &initial)
                 };
                 endpoint.receive(Monotonic(0), &meta, &initial);
             });
@@ -1154,10 +1154,10 @@ mod tests {
         fn splits_a_batch_into_its_datagrams() {
             testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-                let config = shard.config(testing::CLIENT_KEY, Span::SECOND);
+                let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let batch = NonZeroUsize::new(10).expect("not zero");
                 pair.client.endpoint =
-                    Endpoint::new(&config, testing::CLIENT_SHARD, batch);
+                    Endpoint::new(&config, pair::CLIENT_SHARD, batch);
                 pair.dial(server());
                 pair.run(Duration::from_millis(100));
                 let sent: Vec<u8> = (0..=u8::MAX).cycle().take(20_000).collect();
