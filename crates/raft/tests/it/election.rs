@@ -114,6 +114,7 @@ fn a_group_keeps_its_leader_after_a_reply_from_a_node_that_is_not_a_peer() {
         to: Network::key(follower),
         term: Term(agreed.1.0 + 1),
         body: Body::HeartbeatReply,
+        proof: None,
     };
     network.nodes[follower].step(reply).unwrap();
     for _ in 0..4 * ELECTION {

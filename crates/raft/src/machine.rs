@@ -1694,7 +1694,7 @@ mod tests {
                     raft.step(message(9, term, body.clone())).unwrap();
                     let case = format!("{body:?} in term {term}");
                     let state = (raft.role(), raft.hard());
-                    assert_eq!(state, (Role::Leader, hard), "{case}");
+                    assert_eq!(state, (Role::Leader, hard.clone()), "{case}");
                     assert_eq!(sent(&mut raft), [], "{case}");
                 }
             }
@@ -1720,7 +1720,8 @@ mod tests {
                 for body in bodies {
                     raft.step(message(9, 5, body.clone())).unwrap();
                     let case = format!("{role:?} gets {body:?}");
-                    assert_eq!((raft.role(), raft.hard()), (role, hard), "{case}");
+                    let state = (raft.role(), raft.hard());
+                    assert_eq!(state, (role, hard.clone()), "{case}");
                     assert_eq!(sent(&mut raft), [], "{case}");
                 }
             }
