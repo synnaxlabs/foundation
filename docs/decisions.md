@@ -499,7 +499,12 @@ How to read this record:
   (slots, keys, and types, R9-D1). Frames point at the key set id. Supersedes: S1
   frame struct. Approved by the coordinator (#390).
 - **M2** Readers get a view: the frame plus a mask cached per key set and reader. The
-  home routes by key set.
+  home routes by key set. A mask holds the index of each channel it holds, so the
+  series of a view make a frame, and `View::charge` is its charge (CREDIT RULES). A
+  mask is a sorted list, or no list when it holds every entry, so a view's cost grows
+  with the smaller of its frame's series and its mask's entries (rule 11). A view
+  borrows its frame and mask, so making one takes no reference count. Approved by the
+  coordinator (#157).
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
@@ -527,9 +532,9 @@ How to read this record:
   their order and padding are part of the disk and wire format version (C9d). A change
   to either needs a new version. The padding is at most 7 bytes for each present
   series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
-  (measured on #317). `frame::series` reads a body from `(entry, end)` pairs and panics
-  on ends that do not fit. Copy mode runs `frame::check` once where remote records
-  enter (X43). Decided by the coordinator (#306).
+  (measured on #317). `frame::split` cuts a body at its `(tag, end)` pairs and
+  panics on ends that do not fit. Copy mode runs `frame::check` once where remote
+  records enter (X43). Decided by the coordinator (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -1019,8 +1024,8 @@ How to read this record:
   `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
   as it is. It trusts its voters: one that lies can already break safety, because a
   false `AppendReply` counts as held, so a bound on the term would guard nothing. No
-  bound on a term jump spares an honest node that was down, either. Lost: a sender
-  proves a term jump with a signed term, which needs `mesh`. The person decided on
+  bound on a term jump spares an honest node that was down, either. Later: a sender
+  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
   2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
   `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
   before its write, so no peer counted a vote or an answer that a lost `hard` held. The
@@ -1045,7 +1050,18 @@ How to read this record:
   leader, and a node keeps the leader of its term until the term ends, through a
   step-down and a campaign. A node that knows no leader of its term, after its vote,
   takes the first; `Hard.leader` keeps it through a restart (#750). The person approved
-  it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing.
+  it on 2026-10-05 ("Yeah that's fine", #391). A bad message changes nothing. A forged
+  message that passes these checks
+  does, until a leader proves its election (#750). After a heartbeat or an `Append`
+  of a higher term from a voter that does not lead, or a reply of a higher term and
+  then either, a node follows the sender and writes and commits what it sends. So
+  two nodes can apply different entries at one index, and a forged voter set can
+  take the group over. The first leader after a vote is the same gap. Tests pin it.
+  Lost: a lease that drops a heartbeat or an `Append` of a higher term from a node
+  that is not the leader. A reply of a higher term ends any node's lease, and a
+  leader must step down on one; the lease also changed three etcd oracle tests. The
+  coordinator decided on 2026-10-06 under the person's delegation (#391). The person
+  may change it.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
@@ -1120,9 +1136,10 @@ How to read this record:
   lost, because they need a second sync and a second torn-write rule. The hard state is
   the term, then the vote, the leader, and the proof, each behind a presence byte; the
   proof is a grant byte, the candidate, and the voter keys as a count and the keys in
-  rising order (#750). The signatures follow in the third PR of #750. The format
-  version stays 1: no log has shipped. A later record
-  replaces the entries from its first index. A file is 1 MiB, or the length of its first
+  rising order (#750). A `raft` message on the wire carries its proof in the same
+  form, after the term and before the body. The signatures follow in the third PR of
+  #750. The format version stays 1: no log has shipped. A later record replaces the
+  entries from its first index. A file is 1 MiB, or the length of its first
   record when that is more, and a record that does not fit starts the next file. In a
   file with no record, it makes that file again, larger, so each file but the last
   holds a record. A failed or dropped write poisons the log (`Error::Poisoned`). A
@@ -1140,6 +1157,15 @@ How to read this record:
   search past the end for a record lost: a body can hold the bytes of a record, so a
   power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
+- **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
+  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a
+  proposal that a follower forwards to the leader, and its two answers (the position
+  of the entry, or "not the leader" with the leader the receiver knows). `wire` does
+  not carry them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and
+  `wire` must not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the
+  format version. A message has one byte form, and a decode takes nothing else. The
+  log (MESH LOG) and the messages share the byte form of an entry. Decided by
+  `consensus`, approved by the coordinator (#471).
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -1424,6 +1450,17 @@ How to read this record:
   writing the whole file with comments attached to items, which loses the layout; and
   moving the bytes of a moved block, which a caller that changes the Document it read
   never needs. Decided by the `config` builder; approved by the coordinator (#249).
+- **HCL ERRORS (2026-10-05)** Each function of `config-hcl` gives only the errors it
+  can have. `read` gives a list of `Error`, `write` a list of `Unwritable`, and
+  `update` a `Refusal`: the problems in the old text, or else the parts of the new
+  Document that HCL text cannot hold. Nesting past the depth limit is
+  `Error::TooDeep` from `read` and `Unwritable::TooDeep` from `write`, and both give
+  `document`'s diagnostic. Lost: one `Error` for all three, so each caller of `read`
+  handled a variant that `read` never gives; one `TooDeep` for both, which needs that
+  shared type (#370); a checked Document type, which gives each caller two calls; and
+  an `update` that takes the Document that `read` gave for the text, so it gives only
+  `Unwritable`, but writes wrong text with no error when a caller gives another
+  Document. Decided by the `config` builder; approved by the coordinator (#330).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -1834,7 +1871,12 @@ How to read this record:
   price cap of 0.20 USD/h, and a hard stop on 2026-10-08 at 03:00 UTC. With it, the
   hosts and the factory host cost at most 99.73 USD a day (#15). The person said:
   "Once you are sure of costs provision and set strict limits on whatever you need
-  please".
+  please". With 51 runs still queued, a fourth host joined with twelve runners
+  (`foundation-arm-m` to `-x`): one 32-vCPU spot machine from a fleet over eight
+  Graviton types and five zones (launch template `foundation-arm-spot-32`). Limits: a
+  spot price cap of 0.60 USD/h, a hard stop with the factory host on 2026-10-07 at
+  07:03 UTC, and a cap of 18 USD (#15). Until that stop, the daily cap is 115 USD; then
+  it is 100 USD again. The person said: "Yes thats fine".
 - **LINUX CI (2026-10-05)** For the alpha, tests run only on Linux (x86-64 and ARM).
   No CI job runs on macOS or Windows. The design stays cross-OS: each C9d target must
   still be a valid build, so OS-specific code goes only in `os`. The person said: "As
@@ -2013,7 +2055,7 @@ Storage classes used in the table:
 | Current value | Memory: the index's newest live frame, one pinned pool block per index (B4, MEMORY BOUNDS) | `delivery` | A new latest reader | `delivery` |
 | Credits | Memory per session per index; credit messages on the wire | The reader's `hub` grants; `delivery` spends when the home releases a frame | `delivery` | `delivery`, `wire` |
 | Live frames for complete readers | Memory: the index's live frames not yet on disk, and the frames released to each complete session and not taken, as refcount clones (B1, CREDIT RULES, MEMORY BOUNDS) | `delivery`: the home queues each stored live frame and releases them after a commit | The reader session | `delivery` |
-| Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `delivery` |
+| Masks and routes | Memory: mask per key set and reader; route per key set | `delivery` | The home's fan-out | `types` (mask), `delivery` |
 | Death records | Quality channel samples (X19) | `home` | Sinks | `home` |
 | Read copy data | The copy node's index log | `replica` | The copy's readers, served by `home` in copy mode (X43) | `replica`, `home` |
 
@@ -2024,7 +2066,7 @@ Storage classes used in the table:
 | Frame | Memory: one pool block (FRAME LAYOUT): a header (key set key, form, path), a range `{ group, count, seq }` for each present index group (X8), and a descriptor `{ entry, end }` for each present series, each list sorted. Wire form per connection. Never stored as a frame on disk | Writers, through `hub.block` or the frame builder; `home` (INDEX FRAMES) | `delivery` views, `hub`, `codec` | `types` (layout), `block` (memory) |
 | Series | Memory: a slice of the frame's block. Encoded: tagged 1024-value vectors | Writers; `codec` | Readers | `types`, `codec` |
 | Block | Memory: per-shard pools that `node` injects | Writers fill a `Unique`, then freeze it | Every holder, by refcount | `block` |
-| View | Memory: frame plus mask | `delivery` | The reader session | `types` (value), `delivery` |
+| View | Memory: none; borrows a frame and a mask | `delivery` | The reader session | `types` (value), `delivery` |
 | Reader session | Memory: `hub` session (selector expansion, max-age check); per-index state in `delivery` at the home or copy | The reader (SDK, CLI, connector) | `hub`, `delivery` | `hub`, `delivery` |
 | Writer session | Memory: `hub` session (key set, routing, confirmation); gate in `control`; seq and dedup in `home` | The writer | `hub`, `control`, `home` | `hub`, `control`, `home` |
 | Subscription | The selector of a reader session, kept live in `hub` against `mesh` watches | The reader | `hub` | `hub` |
@@ -2598,7 +2640,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, control authority, content digests, and the one selector matcher. | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |
@@ -2606,7 +2648,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
 | 1 | `delivery` | Keeps each reader's state per index: positions, credits, live frames for complete readers, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
-| 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
+| 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY). | `env`, `types`, `block` |
@@ -2675,7 +2717,8 @@ Parameters and later choices, recorded and not asked:
   after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
   voter's state when it sent the answer.").
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
-  tree key `<label>.@<kind>` of a policy (#729).
+  tree key `<label>.@<kind>` of a policy (#729), and `frame::split`, which cuts a
+  frame body at its ends and gives each part (#632).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,

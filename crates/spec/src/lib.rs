@@ -2,4 +2,7 @@
 //! regions, policies, open folders), the prolly tree, hashes, diffs, and
 //! `spec::resolve`.
 
+pub mod access;
+pub mod definition;
+pub mod patterns;
 pub mod tree;
