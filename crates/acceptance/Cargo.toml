@@ -10,6 +10,7 @@ publish.workspace = true
 [dev-dependencies]
 env = { path = "../env" }
 node = { path = "../node" }
+os = { path = "../os" }
 sim = { path = "../sim" }
 types = { path = "../types" }
 

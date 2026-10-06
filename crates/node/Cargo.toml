@@ -10,8 +10,10 @@ name = "foundation"
 path = "src/main.rs"
 
 [dependencies]
+block = { path = "../block" }
 env = { path = "../env" }
 ops = { path = "../ops" }
+os = { path = "../os" }
 
 [dev-dependencies]
 sim = { path = "../sim" }
