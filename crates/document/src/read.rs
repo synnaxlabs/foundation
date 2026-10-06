@@ -26,24 +26,49 @@ pub fn size(value: &Value) -> Result<byte::Size, Diagnostic> {
         ));
     };
     text.parse::<byte::Size>().map_err(|error| {
-        let words: Vec<&str> = text.split_whitespace().collect();
-        // `1 5GiB` may mean `15GiB` or `1.5GiB`, so it gets no `Write` fix.
-        let joins_digits = words.iter().zip(words.iter().skip(1)).any(|(a, b)| {
-            a.ends_with(|c: char| c.is_ascii_digit())
-                && b.starts_with(|c: char| c.is_ascii_digit())
-        });
-        let compact = words.concat();
-        let fix = if !joins_digits && compact.parse::<byte::Size>().is_ok() {
-            format!("Write \"{compact}\"")
-        } else {
-            format!(
-                "Use a whole number of bytes, at most {}, with no space before the \
-                 unit, such as \"200GiB\" or \"1.5GiB\"",
-                byte::Size::from_bytes(u64::MAX)
-            )
-        };
-        bad(format!("cannot read the byte size {text:?}: {error}"), fix)
+        bad(
+            format!("cannot read the byte size {text:?}: {error}"),
+            fix(text),
+        )
     })
+}
+
+/// The fix for `text`, which `byte::Size` refuses. It comes from the text with no
+/// whitespace and with the unit that the text likely means, so `"200 GB"` gets
+/// `Write "200GiB"`.
+fn fix(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    // `1 5GiB` may mean `15GiB` or `1.5GiB`, so it keeps its space.
+    let joins_digits = words.iter().zip(words.iter().skip(1)).any(|(a, b)| {
+        a.ends_with(|c: char| c.is_ascii_digit())
+            && b.starts_with(|c: char| c.is_ascii_digit())
+    });
+    let mut written = if joins_digits {
+        text.to_owned()
+    } else {
+        words.concat()
+    };
+    let mut parsed = written.parse::<byte::Size>();
+    if let Err(byte::Error::Unit {
+        start,
+        meant: Some(meant),
+    }) = parsed
+    {
+        written.truncate(start);
+        written.push_str(meant);
+        parsed = written.parse::<byte::Size>();
+    }
+    match parsed {
+        Ok(_) => format!("Write \"{written}\""),
+        Err(byte::Error::Syntax) => {
+            "Write a size such as \"200GiB\" or \"1.5GiB\"".into()
+        }
+        Err(byte::Error::Unit { .. }) => {
+            "Use a unit such as \"MiB\" or \"GiB\", with exact case".into()
+        }
+        Err(byte::Error::Fraction) => "Round the number, or use a smaller unit".into(),
+        Err(byte::Error::Range { largest }) => format!("Use at most {largest}"),
+    }
 }
 
 /// The noun for a kind of value, with its article.
@@ -67,8 +92,9 @@ mod tests {
     use crate::{Map, Position, Source, Span};
     use proptest::prelude::*;
 
-    const FIX: &str = "Use a whole number of bytes, at most 18446744073709551615B, \
-                       with no space before the unit, such as \"200GiB\" or \"1.5GiB\"";
+    const SYNTAX: &str = "Write a size such as \"200GiB\" or \"1.5GiB\"";
+    const UNIT: &str = "Use a unit such as \"MiB\" or \"GiB\", with exact case";
+    const FRACTION: &str = "Round the number, or use a smaller unit";
 
     /// The message for `text`, which is not a number and a unit with no space.
     fn syntax(text: &str) -> String {
@@ -169,26 +195,58 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_text_that_byte_size_refuses() {
-        for text in ["200 GB", "", "1 5GiB", "1 024B"] {
-            assert_eq!(size(&string(text)), refused(&syntax(text), FIX), "{text:?}");
-        }
+    fn gives_the_unit_that_the_text_likely_means() {
+        let unit = |text: &str| {
+            format!("cannot read the byte size {text:?}: expected the unit GiB")
+        };
         assert_refused(&[
+            ("200GB", &unit("200GB"), "Write \"200GiB\""),
+            ("1.5gib", &unit("1.5gib"), "Write \"1.5GiB\""),
+            ("200 gb", &syntax("200 gb"), "Write \"200GiB\""),
+            ("0.3GB", &unit("0.3GB"), FRACTION),
             (
-                "200GB",
-                "cannot read the byte size \"200GB\": expected the unit GiB",
-                FIX,
+                "20000000000GB",
+                &unit("20000000000GB"),
+                "Use at most 17179869183GiB",
             ),
+        ]);
+    }
+
+    #[test]
+    fn gives_a_fix_for_each_cause() {
+        for text in ["", "GiB", "1e3B", "-1B", "1 5GiB", "1 024B"] {
+            assert_eq!(
+                size(&string(text)),
+                refused(&syntax(text), SYNTAX),
+                "{text:?}"
+            );
+        }
+        let units = |text: &str| {
+            format!(
+                "cannot read the byte size {text:?}: expected the unit B, KiB, MiB, \
+                 GiB, or TiB"
+            )
+        };
+        assert_refused(&[
+            ("200Gb", &units("200Gb"), UNIT),
+            ("200PiB", &units("200PiB"), UNIT),
+            ("200 Gb", &syntax("200 Gb"), UNIT),
             (
                 "0.3B",
                 "cannot read the byte size \"0.3B\": expected a whole number of bytes",
-                FIX,
+                FRACTION,
             ),
             (
                 "16777216TiB",
                 "cannot read the byte size \"16777216TiB\": expected a size of at most \
                  16777215TiB",
-                FIX,
+                "Use at most 16777215TiB",
+            ),
+            (
+                "18446744073709551616B",
+                "cannot read the byte size \"18446744073709551616B\": expected a size \
+                 of at most 18446744073709551615B",
+                "Use at most 18446744073709551615B",
             ),
         ]);
     }
@@ -213,7 +271,7 @@ mod tests {
             any::<String>(),
             concat!(
                 "[ \t\u{a0}]?[0-9]{0,22}[ .\t]{0,2}[0-9]{0,2}[ \t]?",
-                "(B|KiB|MiB|GiB|TiB|GB|gib|)[ \t]?",
+                "(B|KiB|MiB|GiB|TiB|GB|gib|gb|Gb|PiB|)[ \t]?",
             ),
         ]
     }
@@ -236,14 +294,17 @@ mod tests {
                         diagnostic.message,
                         format!("cannot read the byte size {text:?}: {error}")
                     );
-                    let written = diagnostic
-                        .fix
+                    let fix = diagnostic.fix.as_str();
+                    let written = fix
                         .strip_prefix("Write \"")
                         .and_then(|rest| rest.strip_suffix('"'));
                     if let Some(written) = written {
                         prop_assert!(size(&string(written)).is_ok(), "{:?}", text);
+                    } else if let Some(largest) = fix.strip_prefix("Use at most ") {
+                        prop_assert!(size(&string(largest)).is_ok(), "{:?}", text);
                     } else {
-                        prop_assert_eq!(diagnostic.fix, FIX);
+                        let fixes = [SYNTAX, UNIT, FRACTION];
+                        prop_assert!(fixes.contains(&fix), "{:?}", text);
                     }
                 }
                 (read, parsed) => {
