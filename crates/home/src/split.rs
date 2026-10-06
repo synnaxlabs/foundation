@@ -15,8 +15,8 @@ use types::sample::{Scalar, Type};
 pub(crate) struct Scratch {
     groups: Groups,
     /// The entry and length of each series in [`Groups::series`], in the same order,
-    /// for [`frame::Layout::new`]. Apart from `groups`, so that a [`Split`] keeps a
-    /// layout that borrows it.
+    /// for [`frame::Layout::new`]. Apart from `groups`, so that a [`Split`] keeps
+    /// layouts that borrow it.
     lens: Vec<(usize, usize)>,
 }
 
@@ -110,7 +110,7 @@ impl Scratch {
             set,
             draft: Some(draft),
             next: 0,
-            layout: None,
+            layouts: [const { None }; LAYOUTS],
         }
     }
 }
@@ -221,10 +221,14 @@ pub(crate) struct Split<'a> {
     draft: Option<Draft>,
     /// The place in [`Groups::parts`] of the group that [`Split::next`] gives next.
     next: usize,
-    /// The group that [`Split::size`] sized last and its layout, until
+    /// The layout of each group that [`Split::size`] sized, by place, until
     /// [`Split::frame`] makes it, so that its rules run once.
-    layout: Option<(u32, frame::Layout<'a>)>,
+    layouts: [Option<frame::Layout<'a>>; LAYOUTS],
 }
+
+/// The places of the groups that keep their layout from [`Split::size`] to
+/// [`Split::frame`]. A group at a later place is laid out twice.
+const LAYOUTS: usize = 16;
 
 /// The bytes of the index frame of a group, before it is made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,9 +346,9 @@ impl Split<'_> {
     }
 
     /// The size of the index frame of `group`, which [`Split::frame`] makes. Takes no
-    /// block. Time is linear in the group's series, and a [`Split::frame`] of `group`
-    /// after it does not repeat that work. It checks an encoded index as
-    /// [`Split::frame`] does.
+    /// block. Time is linear in the group's series. For the first [`LAYOUTS`] groups of
+    /// a frame, a [`Split::frame`] of `group` after it does not repeat that work. It
+    /// checks an encoded index as [`Split::frame`] does.
     ///
     /// # Panics
     ///
@@ -359,7 +363,9 @@ impl Split<'_> {
             body: layout.body_len(),
             series: lens.len(),
         };
-        self.layout = (!whole).then_some((group, layout));
+        if !whole && let Some(kept) = self.layouts.get_mut(at) {
+            *kept = Some(layout);
+        }
         size
     }
 
@@ -389,9 +395,10 @@ impl Split<'_> {
         let (set, lens) = (self.set, self.lens);
         let range = self.groups.parts[at].series.clone();
         let mut index = self
-            .layout
-            .take_if(|(kept, _)| *kept == group)
-            .map_or_else(|| layout(set, &lens[range.clone()]), |(_, kept)| kept)
+            .layouts
+            .get_mut(at)
+            .and_then(Option::take)
+            .unwrap_or_else(|| layout(set, &lens[range.clone()]))
             .draft(pool, Form::Encoded)?;
         let groups = &mut *self.groups;
         for ((_, out), &series) in index.iter_mut().zip(&groups.series[range]) {
@@ -1397,6 +1404,54 @@ mod tests {
 
     mod size {
         use super::*;
+
+        #[test]
+        fn makes_each_of_many_groups_sized_before_any_frame() {
+            let data: Vec<[(channel::Key, Type); 1]> = (21..41)
+                .map(|slot| [(key(Slot::new(slot)), Type::Scalar(Scalar::U8))])
+                .collect();
+            let shapes: Vec<Group<'_>> = (1..21)
+                .zip(&data)
+                .map(|(slot, data)| Group {
+                    index: key(Slot::new(slot)),
+                    data,
+                })
+                .collect();
+            let set = interner().intern(&shapes);
+            // Groups 1, 4, 7, ... are absent, so a group's place is not its number.
+            let write: BTreeMap<u32, Samples> = (0..20_u32)
+                .filter(|group| group % 3 != 1)
+                .map(|group| {
+                    let count = 1 + group;
+                    let series = (0..set.entries().len())
+                        .filter(|&entry| set.entries()[entry].group == group)
+                        .map(|entry| {
+                            let width = scalar_of(&set, entry).width();
+                            (entry, values(u64::from(count), count, width))
+                        })
+                        .collect();
+                    (group, Samples { count, series })
+                })
+                .collect();
+            let pool = pool(1 << 20);
+            let mut scratch = Scratch::default();
+            let mut split = scratch.split(&set, draft(&pool, &set, Form::Raw, &write));
+            drain(&mut split);
+
+            let sizes: Vec<(u32, Size)> = write
+                .keys()
+                .map(|&group| (group, split.size(group)))
+                .collect();
+            for (group, size) in sizes {
+                let frame = split.frame(&pool, group).expect("room").freeze(Path::Live);
+                let len = size.block.expect("a raw frame is copied");
+                let footprint = u64::try_from(block::footprint(len)).expect("small");
+                assert_eq!(footprint, frame.charge(), "group {group}");
+                assert_eq!(size.body, frame.body().len(), "group {group}");
+                assert_eq!(size.series, frame.ends().count(), "group {group}");
+                assert_index_frame(&set, &write, group, &frame);
+            }
+        }
 
         #[test]
         #[should_panic(expected = "group 0 failed its check: channel \
