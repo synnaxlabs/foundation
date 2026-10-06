@@ -11,13 +11,18 @@
 //! region        := epoch:u64 count:u64 text*                                tag 3
 //! node_settings := select:patterns disk:u64 pool:u64                       tag 4
 //! compression   := select:patterns mode:u8                                  tag 5
+//! placement     := select:patterns standby:optional copies:names            tag 6
+//! time          := select:patterns peers:optional_names                     tag 7
 //! patterns      := count:u64 pattern*
 //! pattern       := excluded:u8 length:u64 UTF-8 bytes
 //! text          := length:u64 UTF-8 bytes
+//! names         := count:u64 text*
+//! optional      := 0 | 1 text
+//! optional_names := 0 | 1 names
 //! ```
 //!
 //! A `text` is a name. `document` is the canonical encoding of the connector config.
-//! The voters of a region are in strict name order, and there is at least one.
+//! The `names` of a list are in strict name order. A region has at least one voter.
 //!
 //! `excluded` is 1 for an exclusion, which a file writes with a leading `!`, and 0
 //! otherwise. The stored text has no `!`. Patterns keep the order and form written,
@@ -50,7 +55,9 @@ use crate::access::{Action, Actions, Policy};
 use crate::compression::{self, Mode};
 use crate::connector::Connector;
 use crate::node_settings;
+use crate::placement;
 use crate::region::{Delegation, NoVoters};
+use crate::time;
 
 const VERSION: u8 = 1;
 const ACCESS: u8 = 1;
@@ -58,6 +65,8 @@ const CONNECTOR: u8 = 2;
 const REGION: u8 = 3;
 const NODE_SETTINGS: u8 = 4;
 const COMPRESSION: u8 = 5;
+const PLACEMENT: u8 = 6;
+const TIME: u8 = 7;
 /// The fewest bytes a text takes: its length.
 const TEXT_MIN: usize = 8;
 /// The fewest bytes a pattern takes: its flag and its length.
@@ -77,6 +86,10 @@ pub enum Definition {
     NodeSettings(node_settings::Policy),
     /// A compression policy.
     Compression(compression::Policy),
+    /// A placement policy.
+    Placement(placement::Policy),
+    /// A time policy.
+    Time(time::Policy),
 }
 
 impl Definition {
@@ -108,10 +121,7 @@ impl Definition {
             Self::Region(delegation) => {
                 out.push(REGION);
                 out.extend_from_slice(&delegation.epoch().to_le_bytes());
-                count(&mut out, delegation.initial_voters().len());
-                for voter in delegation.initial_voters() {
-                    text(&mut out, voter.as_str());
-                }
+                names(&mut out, delegation.initial_voters());
             }
             Self::NodeSettings(policy) => {
                 out.push(NODE_SETTINGS);
@@ -125,6 +135,29 @@ impl Definition {
                 out.push(COMPRESSION);
                 patterns(&mut out, &policy.select);
                 out.push(mode_byte(policy.mode));
+            }
+            Self::Placement(policy) => {
+                out.push(PLACEMENT);
+                patterns(&mut out, policy.select());
+                match policy.standby() {
+                    None => out.push(0),
+                    Some(node) => {
+                        out.push(1);
+                        text(&mut out, node.as_str());
+                    }
+                }
+                names(&mut out, policy.copies());
+            }
+            Self::Time(policy) => {
+                out.push(TIME);
+                patterns(&mut out, policy.select());
+                match policy.peers() {
+                    time::Peers::Voters => out.push(0),
+                    time::Peers::Listed(peers) => {
+                        out.push(1);
+                        names(&mut out, peers);
+                    }
+                }
             }
         }
         out
@@ -154,6 +187,8 @@ impl Definition {
             REGION => Self::Region(reader.region()?),
             NODE_SETTINGS => Self::NodeSettings(reader.node_settings()?),
             COMPRESSION => Self::Compression(reader.compression()?),
+            PLACEMENT => Self::Placement(reader.placement()?),
+            TIME => Self::Time(reader.time()?),
             tag => return Err(Error::Kind { at, tag }),
         };
         if !reader.rest.is_empty() {
@@ -185,6 +220,13 @@ fn patterns(out: &mut Vec<u8>, selector: &Selector) {
         out.push(excluded);
         count(out, body.len());
         out.extend_from_slice(body.as_bytes());
+    }
+}
+
+fn names(out: &mut Vec<u8>, names: &[Name]) {
+    count(out, names.len());
+    for name in names {
+        text(out, name.as_str());
     }
 }
 
@@ -237,6 +279,15 @@ impl<'a> Reader<'a> {
         Ok(byte)
     }
 
+    fn flag(&mut self) -> Result<bool, Error> {
+        let at = self.at();
+        match self.byte()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            found => Err(Error::Flag { at, found }),
+        }
+    }
+
     /// Reads a count of items that take at least `size` bytes each. A count whose
     /// items cannot fit in the bytes left is refused before anything is allocated.
     fn count(&mut self, size: usize) -> Result<usize, Error> {
@@ -252,12 +303,7 @@ impl<'a> Reader<'a> {
         let n = self.count(PATTERN_MIN)?;
         let mut written = Vec::with_capacity(n);
         for _ in 0..n {
-            let flag = self.at();
-            let excluded = match self.byte()? {
-                0 => false,
-                1 => true,
-                found => return Err(Error::Excluded { at: flag, found }),
-            };
+            let excluded = self.flag()?;
             let text = self.text()?;
             written.push(if excluded {
                 Written::Exclude(text)
@@ -287,6 +333,21 @@ impl<'a> Reader<'a> {
             .map_err(|error| Error::Name { at, error })
     }
 
+    /// Reads a list of names in strict name order.
+    fn names(&mut self) -> Result<Vec<Name>, Error> {
+        let n = self.count(TEXT_MIN)?;
+        let mut names = Vec::with_capacity(n);
+        for _ in 0..n {
+            let at = self.at();
+            let name = self.name()?;
+            if names.last().is_some_and(|last| *last >= name) {
+                return Err(Error::Order { at });
+            }
+            names.push(name);
+        }
+        Ok(names)
+    }
+
     #[expect(
         clippy::unwrap_in_result,
         reason = "`decode` refuses a document that nests deeper than `encode` writes"
@@ -305,16 +366,7 @@ impl<'a> Reader<'a> {
     fn region(&mut self) -> Result<Delegation, Error> {
         let epoch = self.u64()?;
         let at = self.at();
-        let n = self.count(TEXT_MIN)?;
-        let mut voters = Vec::with_capacity(n);
-        for _ in 0..n {
-            let at = self.at();
-            let voter = self.name()?;
-            if voters.last().is_some_and(|last| *last >= voter) {
-                return Err(Error::Order { at });
-            }
-            voters.push(voter);
-        }
+        let voters = self.names()?;
         Delegation::new(epoch, voters).map_err(|NoVoters| Error::NoVoters { at })
     }
 
@@ -340,6 +392,29 @@ impl<'a> Reader<'a> {
             .find(|mode| mode_byte(*mode) == found)
             .ok_or(Error::Mode { at, found })?;
         Ok(compression::Policy { select, mode })
+    }
+
+    fn placement(&mut self) -> Result<placement::Policy, Error> {
+        let select = self.patterns()?;
+        let at = self.at();
+        let standby = if self.flag()? {
+            Some(self.name()?)
+        } else {
+            None
+        };
+        let copies = self.names()?;
+        placement::Policy::new(select, standby, copies)
+            .map_err(|error| Error::Placement { at, error })
+    }
+
+    fn time(&mut self) -> Result<time::Policy, Error> {
+        let select = self.patterns()?;
+        let peers = if self.flag()? {
+            time::Peers::Listed(self.names()?)
+        } else {
+            time::Peers::Voters
+        };
+        Ok(time::Policy::new(select, peers))
     }
 
     fn access(&mut self) -> Result<Policy, Error> {
@@ -399,8 +474,8 @@ pub enum Error {
         /// The first byte that is not UTF-8.
         at: usize,
     },
-    /// A pattern's exclusion flag is not 0 or 1.
-    Excluded {
+    /// A pattern's exclusion flag or a presence flag is not 0 or 1.
+    Flag {
         /// Where the flag is.
         at: usize,
         /// The flag.
@@ -434,9 +509,9 @@ pub enum Error {
         /// Why it is not a document.
         error: encoding::Error,
     },
-    /// A region's voters are not in strict name order.
+    /// A list of names is not in strict name order.
     Order {
-        /// Where the voter that is out of order is.
+        /// Where the name that is out of order is.
         at: usize,
     },
     /// A region has no voter.
@@ -466,6 +541,13 @@ pub enum Error {
         /// Why they make no policy.
         error: node_settings::Error,
     },
+    /// A placement's standby and copies make no policy.
+    Placement {
+        /// Where the standby presence flag is.
+        at: usize,
+        /// Why they make no policy.
+        error: placement::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -491,8 +573,8 @@ impl fmt::Display for Error {
                 write!(f, "tag {tag} at byte {at} names no kind of definition")
             }
             Self::Utf8 { at } => write!(f, "a text is not UTF-8 at byte {at}"),
-            Self::Excluded { at, found } => {
-                write!(f, "the exclusion flag {found} at byte {at} is not 0 or 1")
+            Self::Flag { at, found } => {
+                write!(f, "the flag {found} at byte {at} is not 0 or 1")
             }
             Self::Pattern { at, error } => {
                 write!(f, "the patterns at byte {at} do not read: {error}")
@@ -507,7 +589,7 @@ impl fmt::Display for Error {
                 )
             }
             Self::Order { at } => {
-                write!(f, "the voter at byte {at} is not after the voter before it")
+                write!(f, "the name at byte {at} is not after the name before it")
             }
             Self::NoVoters { at } => write!(f, "the region at byte {at} has no voter"),
             Self::Actions { at, bits } => {
@@ -519,6 +601,9 @@ impl fmt::Display for Error {
             ),
             Self::Budget { at, error } => {
                 write!(f, "the budgets at byte {at}: {error}")
+            }
+            Self::Placement { at, error } => {
+                write!(f, "the placement at byte {at}: {error}")
             }
             Self::Mode { at, found } => {
                 write!(
