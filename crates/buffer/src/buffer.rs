@@ -35,7 +35,8 @@ use crate::wal::{self, Cursor, Layout, Step, Unfit, Window, Writer};
 pub struct Config {
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
-    /// The directory of this shard's ring, relative to the data directory.
+    /// The directory of this shard's ring, relative to the data directory. Its parent
+    /// must be there and durable.
     pub dir: PathBuf,
     /// Blocks for record headers and recovery reads. It needs a class of 64 KiB.
     pub pool: Rc<Pool>,
@@ -268,9 +269,9 @@ impl Drop for Buffer {
 }
 
 impl Buffer {
-    /// Opens the ring in `config.dir`, or creates it, and recovers the tail of
-    /// every path from its records. Each recovered index gets its slot from `slots`.
-    /// Starts the commit task.
+    /// Opens the ring in `config.dir`, or creates it, makes the ring and its
+    /// directory durable, and recovers the tail of every path from its records. Each
+    /// recovered index gets its slot from `slots`. Starts the commit task.
     ///
     /// # Errors
     ///
@@ -301,12 +302,15 @@ impl Buffer {
             Err(files::Error::NotFound { .. }) => {
                 files.create_dir(&dir).await?;
                 let len = layout.file_len();
-                let file = files.open(&path, Mode::Create { len }).await?;
-                files.sync_dir(&dir).await?;
-                file
+                files.open(&path, Mode::Create { len }).await?
             }
             Err(error) => return Err(error.into()),
         };
+        // An open that stopped after it made the ring may not have made it durable.
+        if let Some(parent) = dir.parent() {
+            files.sync_dir(parent).await?;
+        }
+        files.sync_dir(&dir).await?;
         let header = read_header(&file, &pool, &entropy, layout).await?;
         let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
         let mut tails = Tails::default();
