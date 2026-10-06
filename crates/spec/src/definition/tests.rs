@@ -84,9 +84,9 @@ fn refuses_a_newer_or_unknown_version() {
 
 #[test]
 fn refuses_an_unknown_kind() {
-    for tag in (0..=u8::MAX)
-        .filter(|t| ![ACCESS, CONNECTOR, REGION, NODE_SETTINGS].contains(t))
-    {
+    for tag in (0..=u8::MAX).filter(|t| {
+        ![ACCESS, CONNECTOR, REGION, NODE_SETTINGS, COMPRESSION].contains(t)
+    }) {
         assert_eq!(
             Definition::decode(&[VERSION, tag]),
             Err(Error::Kind { at: 1, tag })
@@ -502,6 +502,59 @@ fn refuses_node_settings_that_end_early() {
     );
 }
 
+/// The bytes of a policy with one selector, from its parts.
+fn select_bytes(tag: u8, rest: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![VERSION, tag];
+    length(&mut bytes, 2);
+    text(&mut bytes, b"site_a.**");
+    text(&mut bytes, b"!site_a.gw");
+    bytes.extend_from_slice(rest);
+    bytes
+}
+
+fn select() -> Selector {
+    selector(&["site_a.**", "!site_a.gw"])
+}
+
+#[test]
+fn writes_the_documented_compression_layout() {
+    for (mode, byte) in [(Mode::Auto, 0), (Mode::Raw, 1), (Mode::Max, 2)] {
+        let definition = Definition::Compression(compression::Policy {
+            select: select(),
+            mode,
+        });
+        let expected = select_bytes(COMPRESSION, &[byte]);
+        assert_eq!(definition.encode(), expected);
+        assert_eq!(Definition::decode(&expected), Ok(definition));
+    }
+}
+
+#[test]
+fn refuses_an_unknown_compression_mode() {
+    let bytes = select_bytes(COMPRESSION, &[3]);
+    let at = bytes.len() - 1;
+    let error = Error::Mode { at, found: 3 };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        format!("compression mode 3 at byte {at} is not a known mode")
+    );
+}
+
+#[test]
+fn refuses_a_compression_that_ends_early() {
+    let bytes = select_bytes(COMPRESSION, &[]);
+    assert_eq!(
+        Definition::decode(&bytes),
+        Err(Error::Truncated { at: bytes.len() })
+    );
+}
+
+#[test]
+fn defaults_to_the_auto_mode() {
+    assert_eq!(Mode::default(), Mode::Auto);
+}
+
 fn pattern() -> impl Strategy<Value = String> {
     let segment = prop_oneof![
         Just("*".to_owned()),
@@ -574,12 +627,20 @@ fn region_strategy() -> impl Strategy<Value = Definition> {
     })
 }
 
+fn compression_strategy() -> impl Strategy<Value = Definition> {
+    let mode = prop_oneof![Just(Mode::Auto), Just(Mode::Raw), Just(Mode::Max)];
+    (selectors(), mode).prop_map(|(select, mode)| {
+        Definition::Compression(compression::Policy { select, mode })
+    })
+}
+
 fn definition() -> impl Strategy<Value = Definition> {
     prop_oneof![
         access_strategy(),
         connector_strategy(),
         region_strategy(),
-        settings_strategy()
+        settings_strategy(),
+        compression_strategy(),
     ]
 }
 
