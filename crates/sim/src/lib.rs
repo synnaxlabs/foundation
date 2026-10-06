@@ -377,13 +377,14 @@ impl Sim {
             self.drop_ended(done)
         }));
         lock(&self.shared).release();
-        let mut panics = run.unwrap_or_else(messages);
-        if panics.is_empty() {
+        if matches!(&run, Ok(panics) if panics.is_empty()) {
             return Ok(());
         }
         let name = lock(&self.shared).name(thread);
         let panicked = env::thread::Panicked { name: name.clone() };
         let ended = lock(&self.shared).end(thread, Outcome::Done(Err(panicked)));
+        // The payload drops after the thread ends, as the thread's futures do.
+        let mut panics = run.unwrap_or_else(messages);
         panics.extend(self.drop_ended(ended));
         Err(Error::Panicked {
             thread: name,

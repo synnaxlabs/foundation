@@ -1037,6 +1037,31 @@ fn a_panic_in_the_last_drop_of_the_chain_gives_its_message() {
     assert_panicked(&mut sim, handle.unwrap(), &message);
 }
 
+/// A panic payload whose drop joins the thread it holds, and panics with the result.
+struct Joiner(Arc<Mutex<Option<thread::Handle>>>);
+
+impl Drop for Joiner {
+    fn drop(&mut self) {
+        let handle = self.0.lock().unwrap().take().unwrap();
+        panic!("joined: {:?}", handle.join());
+    }
+}
+
+#[test]
+fn a_payload_drops_after_its_thread_ends() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let slot = Arc::new(Mutex::new(None));
+    let own = Arc::clone(&slot);
+    let handle = node.shards().start(shard("shard-0"), move |_| async move {
+        panic::panic_any(Joiner(own));
+    });
+    *slot.lock().unwrap() = Some(handle.unwrap());
+    let message = "a payload that is not a string, then a drop panicked: joined: \
+        Err(Panicked { name: \"shard-0\" })";
+    assert_eq!(sim.run(), Err(panicked("shard-0", message)));
+}
+
 /// Spawns on `tasks` a task that holds `value` and waits forever.
 fn spawn_holding<T: 'static>(tasks: &env::tasks::Tasks, value: T) {
     tasks.spawn(async move {
