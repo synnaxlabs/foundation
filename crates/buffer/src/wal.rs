@@ -26,6 +26,7 @@ const RESTART_LEN: usize = 4;
 /// The smallest body a layout allows: the rest of a block after the record header.
 /// A record takes whole blocks, so a smaller body saves no disk.
 const BODY_MIN: usize = ALIGN - HEADER_LEN;
+const _: () = assert!(entry::table_len(1) <= BODY_MIN, "a body holds one entry");
 
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
@@ -135,8 +136,9 @@ impl Layout {
     }
 
     /// The most bytes of parts in a batch of one entry that
-    /// [`Buffer::append`](crate::Buffer::append) takes: one byte more gives
-    /// [`Error::Large`](crate::Error::Large) with [`Limit::Body`](crate::Limit::Body).
+    /// [`Buffer::append`](crate::Buffer::append) takes, at least 4032: one byte more
+    /// gives [`Error::Large`](crate::Error::Large) with
+    /// [`Limit::Body`](crate::Limit::Body).
     /// Each entry of a larger batch adds to the record's table, so its entries hold
     /// less in all.
     #[must_use]
@@ -921,7 +923,7 @@ mod tests {
 
         #[test]
         fn holds_an_entry_of_4032_bytes_at_the_smallest_body() {
-            assert_eq!(Layout::new(4096, 4087).map(Layout::entry_max), Ok(4032));
+            assert_eq!(Layout::new(2 * 4096, 4087).map(Layout::entry_max), Ok(4032));
         }
 
         #[test]

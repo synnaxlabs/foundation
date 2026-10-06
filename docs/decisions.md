@@ -371,7 +371,8 @@ How to read this record:
   is the offset modulo the area length. The area is at least twice the largest record
   less one block, so an empty ring takes any record. A ring whose head reaches the
   end of the offsets is full for good. A body is at most `u32::MAX` bytes and at
-  least the table of one entry.
+  least one block less the record header (4087 bytes): a record takes whole blocks,
+  so a smaller one saves no disk and only holds less per commit.
   Data body: `[count: u32][count entry headers][bytes of entry 1][bytes of entry
   2]...`. An entry header is `index: u128, path: u8 (live 0, backfill 1), first:
   u64, len: u32, stored_at: i64, last: u8 + i64, tag: u8, bytes: u32`, 51 bytes,
@@ -415,9 +416,7 @@ How to read this record:
   the next create. The open reports the effective layout, and the node shows it in
   status. `append` refuses a batch that no one record holds (over 1023 entries or
   parts, or a body over `body_max`) with `Large`, and never splits a batch over
-  records. `body_max` is at least one block less the record header (4087 bytes): a
-  record takes whole blocks, so a smaller one saves no disk and only holds less per
-  commit. An open of a header under that fails with `Unfit` (#627).
+  records. An open of a header with a smaller `body_max` fails with `Unfit` (#627).
   `Layout::entry_max` is the most bytes of parts that `append` takes in a batch of
   one entry, at least 4032; a batch of more entries holds less. An entry has no
   part, one, or two; `append` takes them owned and drops them when it fails (#582).
