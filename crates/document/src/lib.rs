@@ -18,6 +18,7 @@ mod block;
 pub mod diagnostic;
 pub mod encoding;
 mod map;
+pub mod read;
 mod span;
 pub mod value;
 

@@ -2094,9 +2094,10 @@ an opaque document in `spec` (layer 1). KINDS OWN THEIR CONFIG gives kinds (laye
 shared Document reader with positions, name and unit parsing, and diagnostics. KINDS
 OWN also says "`config` parses files to Documents", but K1 says front ends parse.
 Resolution: a layer-1 crate `document` holds the Document, source positions,
-diagnostics, and readers for durations and rates. Unit names live in `spec::unit`, name
-syntax in `types::name`. Front ends (`config-hcl`) parse files; `config` reads only
-Documents. Basis: K1, BQ2, KINDS OWN, "decide the best architecture".
+diagnostics, and readers for durations, rates, and byte sizes. Channel unit names live
+in `spec::unit`, name syntax in `types::name`. Front ends (`config-hcl`) parse files;
+`config` reads only Documents. Basis: K1, BQ2, KINDS OWN, "decide the best
+architecture".
 
 **X22. Where a connector runs: the connector's `node` vs placement.**
 Conflict: C3 and C5 SHAPE give each connector a `node` attribute. BQ10 says a placement
