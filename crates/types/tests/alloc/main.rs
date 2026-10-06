@@ -1,12 +1,12 @@
-//! Building and reading a frame makes no heap allocation. This binary has no test
-//! harness: the count covers each thread, and a harness allocates on its own thread at
-//! any time.
+//! Building and reading a frame or a view makes no heap allocation. This binary has
+//! no test harness: the count covers each thread, and a harness allocates on its own
+//! thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use types::channel::Key;
-use types::frame::key_set::{Group, Interner};
-use types::frame::{self, Draft, Form, Path, Range};
+use types::frame::key_set::{Group, Interner, KeySet};
+use types::frame::{self, Draft, Form, Mask, Path, Range, View};
 use types::sample::{Scalar, Type};
 
 #[global_allocator]
@@ -35,9 +35,16 @@ fn main() {
     let set = Interner::new().intern(&groups);
     let config = block::Config { budget: 1 << 16 };
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
-    let series = [(0, 16), (2, 16)];
+    read_a_frame(&pool, &set);
+    read_a_view(&pool, &set);
+}
+
+const SERIES: [(usize, usize); 2] = [(0, 16), (2, 16)];
+
+fn read_a_frame(pool: &block::Pool, set: &KeySet) {
+    let series = SERIES;
     let (sum, allocations) = ALLOCATOR.count(|| {
-        let mut draft = Draft::new(&pool, &set, Form::Raw, &series)
+        let mut draft = Draft::new(pool, set, Form::Raw, &series)
             .expect("the pool holds the frame");
         for (entry, bytes) in draft.iter_mut() {
             bytes.fill(u8::try_from(entry).expect("entries are small"));
@@ -85,4 +92,27 @@ fn main() {
         16 + 32 + 9,
         "the frame reads back what the draft wrote"
     );
+}
+
+fn read_a_view(pool: &block::Pool, set: &KeySet) {
+    let frame = Draft::new(pool, set, Form::Raw, &SERIES)
+        .expect("the pool holds the frame")
+        .freeze(Path::Live);
+    let narrow = Mask::new(set, [set.entries()[2].slot]);
+    let full = Mask::new(set, set.entries().iter().map(|entry| entry.slot));
+    let (read, allocations) = ALLOCATOR.count(|| {
+        let view = View::new(&frame, &narrow);
+        let read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
+        assert_eq!(view.charge(), 192, "the view charges both series");
+        let view = View::new(&frame, &full);
+        let full_read: usize = view.iter().map(|(_, bytes)| bytes.len()).sum();
+        assert_eq!(
+            view.charge(),
+            frame.charge(),
+            "a full view charges the frame"
+        );
+        (read, full_read)
+    });
+    assert_eq!(allocations, 0, "the view allocated");
+    assert_eq!(read, (32, 32), "each view reads the index and key 3");
 }
