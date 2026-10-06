@@ -72,6 +72,9 @@ struct Node {
     shards: shard::Starts,
     /// The monotonic reading at boot.
     boot: Monotonic,
+    /// Set from the stop of a crash to the cut, while the sim drops what the crash
+    /// ended.
+    crashing: bool,
 }
 
 impl Node {
@@ -172,6 +175,7 @@ impl State {
             entropy,
             shards: shard::Starts::default(),
             boot: config.monotonic,
+            crashing: false,
         };
         self.nodes.push(node);
         self.files.add(config.disk_bytes);
@@ -319,11 +323,19 @@ impl State {
         [self.net.digest(), self.files.digest(), self.serial.digest()]
     }
 
-    /// Adds a thread whose first task is ready, and returns the thread's key.
-    pub(crate) fn start(&mut self, node: usize, name: String, start: Start) -> u64 {
+    /// Adds a thread whose first task is ready, and returns the thread's key. On a
+    /// crashing node the thread is born ended in the crash, and `start` comes back
+    /// for the caller to drop after it releases the lock.
+    pub(crate) fn start(
+        &mut self,
+        node: usize,
+        name: String,
+        start: Start,
+    ) -> (u64, Option<Start>) {
         let thread = self.key();
         let main = self.key();
-        let outcome = None;
+        let crashing = self.nodes[node].crashing;
+        let outcome = crashing.then_some(Outcome::Crashed);
         self.threads.insert(
             thread,
             Thread {
@@ -333,10 +345,13 @@ impl State {
                 outcome,
             },
         );
+        if crashing {
+            return (thread, Some(start));
+        }
         self.tasks.insert(main, thread);
         self.ready.insert(main);
         self.starts.insert(main, start);
-        thread
+        (thread, None)
     }
 
     pub(crate) fn name(&self, thread: u64) -> String {
@@ -464,14 +479,16 @@ impl State {
     }
 
     /// Ends each live thread of `node` in a crash, and its network as the crash
-    /// does. Returns the tasks whose futures the caller drops, the starts of the
-    /// threads that had not run, and the wakers of the network, for the caller to
-    /// drop after it releases the lock.
+    /// does, and makes the node crashing until [`State::crash`]. Returns the tasks
+    /// whose futures the caller drops, the starts of the threads that had not run,
+    /// and the wakers of the network, for the caller to drop after it releases the
+    /// lock.
     pub(crate) fn stop(
         &mut self,
         node: usize,
         crash: Crash,
     ) -> (Vec<u64>, Vec<Start>, Vec<Waker>) {
+        self.nodes[node].crashing = true;
         let wakers = self.net.crash(node, crash);
         let live: Vec<(u64, u64)> = (self.threads.iter())
             .filter(|(_, thread)| thread.node == node && thread.outcome.is_none())
@@ -485,11 +502,12 @@ impl State {
         (tasks, starts, wakers)
     }
 
-    /// Ends the file calls in flight of `node`, whose threads a crash ended. After a
-    /// `Power` crash, its monotonic clock reads its boot value again, and its disk
-    /// keeps what is durable. Returns the blocks of the calls, for the caller to drop
-    /// after it releases the lock.
+    /// Ends the crash of `node` that [`State::stop`] began, and the file calls in
+    /// flight of the node. After a `Power` crash, its monotonic clock reads its boot
+    /// value again, and its disk keeps what is durable. Returns the blocks of the
+    /// calls, for the caller to drop after it releases the lock.
     pub(crate) fn crash(&mut self, node: usize, crash: Crash) -> Vec<Held> {
+        self.nodes[node].crashing = false;
         let now = self.now;
         if crash == Crash::Power {
             let wall = self.wall(node).time;

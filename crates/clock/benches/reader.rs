@@ -45,7 +45,7 @@ fn monotonic() -> env::clock::Clock {
 /// Pushes one measurement from one source.
 fn push(clock: &mut Clock, source: clock::source::Key, monotonic: &env::clock::Clock) {
     let m = Measurement::new(monotonic.now(), Span::HOUR, Span::MILLISECOND);
-    let _ = clock.push(source, m.expect("at most 36500 days"));
+    clock.push(source, m.expect("at most 36500 days"));
 }
 
 fn read_all(reader: &Reader) {
