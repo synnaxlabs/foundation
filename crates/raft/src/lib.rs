@@ -61,9 +61,10 @@ pub struct Hard {
     /// The leader of `term` that this node heard, or this node when it led. It
     /// stays through a step-down until the term ends.
     pub leader: Option<node::Key>,
-    /// The proof that moved this node to `term`: its own pre-votes when it
-    /// campaigned, else the proof of the message that moved it. `None` at term zero,
-    /// or when the log alone put the node in `term`.
+    /// The proof of `term`: this node's pre-votes when it campaigned, else the proof
+    /// of the message that moved it, else its leader's votes. `None` at term zero,
+    /// and until one arrives. A node with no proof answers no message of a lower
+    /// term.
     pub proof: Option<Proof>,
 }
 
@@ -136,9 +137,19 @@ pub enum Error {
     /// leader of the term it knows: the one it heard, or itself. Election safety is
     /// broken, or the sender is faulty.
     SecondLeader {
-        /// The term with two leaders.
+        /// The term.
         term: Term,
-        /// The other leader.
+        /// The sender.
+        from: node::Key,
+    },
+    /// A message that claims a term this node is not in, or a leader of its term
+    /// while this node knows none, with no proof that a quorum of this node's
+    /// configuration, in force or last committed, granted it. The sender is faulty,
+    /// or it holds a configuration this node lacks.
+    Unproven {
+        /// The term the message claims.
+        term: Term,
+        /// The sender.
         from: node::Key,
     },
 }
@@ -204,6 +215,11 @@ impl fmt::Display for Error {
             Self::SecondLeader { term, from } => write!(
                 f,
                 "node {:032x} also claims to lead term {term}",
+                from.as_u128()
+            ),
+            Self::Unproven { term, from } => write!(
+                f,
+                "node {:032x} claims term {term} with no proof this node accepts",
                 from.as_u128()
             ),
         }

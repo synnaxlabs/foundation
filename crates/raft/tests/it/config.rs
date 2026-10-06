@@ -5,7 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Body, Config, Data, Entry, Hard, Message, Position, Raft, Role, Start, Term, Voters,
+    Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft, Role,
+    Start, Term, Voters,
 };
 use types::node;
 
@@ -124,7 +125,11 @@ fn restarted(id: u8, old: Voters, log: &[Entry]) -> Raft {
             entries: rest.to_vec(),
             commit: 2,
         },
-        proof: None,
+        proof: Some(Proof {
+            grant: Grant::Vote,
+            candidate: key(1),
+            voters: set(&[1, 2]),
+        }),
     };
     raft.step(append).unwrap();
     let ready = raft.ready();

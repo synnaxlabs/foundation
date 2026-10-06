@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 419d1686ca86ba8d964b0493472fd7f9c276719e5639b0c29421b96d6b162c5a # shrinks to monotonic = 0, wall = 0, error = None
 cc 31c1bc386933fa0e6cc488c8cd54ffdf1bd55ac23bc4d2b3092e763009ca9a8e # shrinks to monotonic = 10056161625402926241, wall = 0, error = Some(0)
+cc d29133a09c5a70be2b870778b7c40351bf6d12d427d46a68a9eb5b2cf058b73d # shrinks to monotonic = 0, wall = 7497099748832797431, error = Some(1726272288021978377)

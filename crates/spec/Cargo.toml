@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+document = { path = "../document" }
 types = { path = "../types" }
 
 [dev-dependencies]
