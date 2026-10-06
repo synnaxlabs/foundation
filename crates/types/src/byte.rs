@@ -69,7 +69,10 @@ impl FromStr for Size {
         let (unit, _) = UNITS
             .into_iter()
             .find(|&(_, name)| name == number.unit)
-            .ok_or_else(|| unknown(number.unit))?;
+            .ok_or_else(|| Error::Unit {
+                start: s.len() - number.unit.len(),
+                meant: meant(number.unit),
+            })?;
         let part = fraction(number.fraction, unit.0.trailing_zeros())
             .ok_or(Error::Fraction)?;
         number
@@ -89,11 +92,13 @@ impl FromStr for Size {
 /// Why a text is not a byte size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The text is not digits, an optional `.` and digits, then a unit of letters,
-    /// such as `GiB`, `200 GiB`, or `1e3B`.
+    /// The text is not digits, an optional `.` and digits, then a unit of ASCII
+    /// letters. `GiB`, `200 GiB`, and `1e3B` give this error.
     Syntax,
-    /// The unit is letters, but not `B`, `KiB`, `MiB`, `GiB`, or `TiB`.
+    /// The unit is ASCII letters, but not `B`, `KiB`, `MiB`, `GiB`, or `TiB`.
     Unit {
+        /// The byte index where the unit starts, so `&text[..start]` is the number.
+        start: usize,
         /// The unit that the text likely means: `GiB` for `GB`, `GIB`, `gb`, or `gib`.
         /// A `b` after an uppercase letter means bits, as in `Gb` or `Gib`, so it
         /// gives `None`, as do a lone `b` and a unit with no match, such as `PiB`.
@@ -111,39 +116,41 @@ pub enum Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Syntax | Self::Unit { .. } => {
-                "expected a number and a unit, such as 1023B, 1.5GiB, or 200GiB"
+        match self {
+            Self::Syntax => f.write_str(
+                "expected a number and a unit, such as 1023B, 1.5GiB, or 200GiB",
+            ),
+            Self::Unit {
+                meant: Some(meant), ..
+            } => write!(f, "expected the unit {meant}"),
+            Self::Unit { meant: None, .. } => {
+                f.write_str("expected the unit B, KiB, MiB, GiB, or TiB")
             }
-            Self::Fraction => "expected a whole number of bytes",
-            Self::Range { .. } => {
-                "expected a size that fits in a 64-bit count of bytes"
+            Self::Fraction => f.write_str("expected a whole number of bytes"),
+            Self::Range { largest } => {
+                write!(f, "expected a size of at most {largest}")
             }
-        })
+        }
     }
 }
 
 impl std::error::Error for Error {}
 
-/// The error for the unit text `unit`, which is not a unit name.
-fn unknown(unit: &str) -> Error {
-    if !unit.bytes().all(|b| b.is_ascii_alphabetic()) {
-        return Error::Syntax;
-    }
+/// The unit name that the letters `unit`, which are not a unit name, likely mean.
+fn meant(unit: &str) -> Option<&'static str> {
     if unit.ends_with('b') && unit.bytes().any(|b| b.is_ascii_uppercase()) {
-        return Error::Unit { meant: None };
+        return None;
     }
     let decimal = |name: &str| {
         unit.len() == 2
             && unit.as_bytes()[1].eq_ignore_ascii_case(&b'B')
             && unit.as_bytes()[0].eq_ignore_ascii_case(&name.as_bytes()[0])
     };
-    let meant = UNITS
+    UNITS
         .into_iter()
         .map(|(_, name)| name)
         .filter(|name| name.len() == 3)
-        .find(|&name| unit.eq_ignore_ascii_case(name) || decimal(name));
-    Error::Unit { meant }
+        .find(|&name| unit.eq_ignore_ascii_case(name) || decimal(name))
 }
 
 /// The bytes that the fraction digits `digits` give of a unit of `1 << shift` bytes,
@@ -261,7 +268,7 @@ mod tests {
     fn rejects_bad_syntax() {
         for text in [
             "", "200", "GiB", "200 GiB", "-1B", "+1B", "1e3B", "1_000B", "1.GiB",
-            ".5GiB", "1.5.5B", "1 B", "1B ", "1µB",
+            ".5GiB", "1.5.5B", "1 B", "1B ", "1µB", "1GiB!",
         ] {
             assert_eq!(text.parse::<Size>(), Err(Error::Syntax), "{text}");
         }
@@ -281,6 +288,7 @@ mod tests {
             ("1TB", Some("TiB")),
             ("1tib", Some("TiB")),
             ("200gb", Some("GiB")),
+            ("1.5gb", Some("GiB")),
             ("200Gb", None),
             ("200Gib", None),
             ("1Kib", None),
@@ -293,8 +301,25 @@ mod tests {
             ("1GiBs", None),
             ("1bytes", None),
         ] {
-            assert_eq!(text.parse::<Size>(), Err(Error::Unit { meant }), "{text}");
+            let start = text
+                .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+                .len();
+            let error = Error::Unit { start, meant };
+            assert_eq!(text.parse::<Size>(), Err(error), "{text}");
         }
+    }
+
+    #[test]
+    fn an_unknown_unit_gives_the_text_it_likely_means() {
+        let text = "1.5gb";
+        let Err(Error::Unit {
+            start,
+            meant: Some(meant),
+        }) = text.parse::<Size>()
+        else {
+            panic!("{text} has a unit that likely means another");
+        };
+        assert_eq!(format!("{}{meant}", &text[..start]), "1.5GiB");
     }
 
     #[test]
@@ -353,17 +378,31 @@ mod tests {
 
     #[test]
     fn displays_what_each_error_expected() {
-        let syntax = "expected a number and a unit, such as 1023B, 1.5GiB, or 200GiB";
         for (error, text) in [
-            (Error::Syntax, syntax),
-            (Error::Unit { meant: Some("GiB") }, syntax),
-            (Error::Unit { meant: None }, syntax),
+            (
+                Error::Syntax,
+                "expected a number and a unit, such as 1023B, 1.5GiB, or 200GiB",
+            ),
+            (
+                Error::Unit {
+                    start: 3,
+                    meant: Some("GiB"),
+                },
+                "expected the unit GiB",
+            ),
+            (
+                Error::Unit {
+                    start: 1,
+                    meant: None,
+                },
+                "expected the unit B, KiB, MiB, GiB, or TiB",
+            ),
             (Error::Fraction, "expected a whole number of bytes"),
             (
                 Error::Range {
-                    largest: Size::from_bytes(u64::MAX),
+                    largest: Size::from_bytes(u64::MAX / (1 << 40) * (1 << 40)),
                 },
-                "expected a size that fits in a 64-bit count of bytes",
+                "expected a size of at most 16777215TiB",
             ),
         ] {
             assert_eq!(error.to_string(), text);
