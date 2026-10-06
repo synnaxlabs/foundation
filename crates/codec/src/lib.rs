@@ -87,9 +87,13 @@ impl Encoder {
             "out holds {} bytes, fewer than the {max} that {count} samples may need",
             out.len()
         );
-        let len = Layout::END.write(ends, out);
-        let rest = out.split_at_mut(len).1;
-        Ok(len.strict_add(self.shape.element().write(elements, rest)))
+        Ok(match self.shape {
+            Shape::Fixed { element, .. } => element.write(elements, out),
+            Shape::Variable { element, .. } => {
+                let len = Layout::END.write(ends, out);
+                len.strict_add(element.write(elements, out.split_at_mut(len).1))
+            }
+        })
     }
 }
 
@@ -256,17 +260,26 @@ fn ends<'a>(
     max: u32,
     out: Option<&mut [u8]>,
 ) -> Result<(usize, &'a [u8]), Error> {
-    let mut buffer = [0; Layout::END.width().strict_mul(VECTOR_LEN)];
-    let mut outs = out.map(|out| out.chunks_mut(buffer.len()));
+    const VECTOR: usize = Layout::END.width().strict_mul(VECTOR_LEN);
     let mut ends = Ends::new(max);
     let mut rest = bytes;
-    for (index, count) in counts(count).enumerate() {
-        let out = match outs.as_mut() {
-            Some(outs) => outs.next().expect("invariant: out holds `count` ends"),
-            None => buffer.split_at_mut(Layout::END.raw_len(count)?).0,
-        };
+    let mut each = |index, count, out: &mut [u8]| {
         rest = Layout::END.fill(count, rest, index, out)?;
-        ends.check(out)?;
+        ends.check(out)
+    };
+    if let Some(out) = out {
+        let mut outs = out.chunks_mut(VECTOR);
+        for (index, count) in counts(count).enumerate() {
+            let out = outs.next().expect("invariant: out holds `count` ends");
+            each(index, count, out)?;
+        }
+    } else {
+        // Zeroing the scratch takes about 20 ns, so only `validate` makes it.
+        let mut buffer = [0; VECTOR];
+        for (index, count) in counts(count).enumerate() {
+            let out = buffer.split_at_mut(Layout::END.raw_len(count)?).0;
+            each(index, count, out)?;
+        }
     }
     Ok((ends.elements(), rest))
 }
@@ -299,12 +312,6 @@ impl Shape {
                 element: Layout::of(Scalar::U8),
                 max: u32::MAX,
             },
-        }
-    }
-
-    fn element(self) -> Layout {
-        match self {
-            Self::Fixed { element, .. } | Self::Variable { element, .. } => element,
         }
     }
 
