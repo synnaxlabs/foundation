@@ -621,7 +621,9 @@ How to read this record:
   approve", #479). The units are `B`, `KiB`, `MiB`, `GiB`, and `TiB`, with exact case:
   `GB` and `Gb` are errors, because they mean other sizes. Input takes no sign. Output
   uses the largest unit that divides the size, with no fraction: `1.5GiB` is written
-  `1536MiB`, and zero is `0B` (#505).
+  `1536MiB`, and zero is `0B` (#505). The reader's `byte::Error` gives the data for a
+  fix: the unit a text likely means (`GiB` for `gib` or `GB`, none for `Gb`), and the
+  largest size in the text's unit (#650).
 - **ESTIMATE FIT (2026-10-04)** `Overlap` is the oscillator fit for one device clock. It
   keeps the offsets that every reading of that clock allows, each widened by drift, so
   it holds only the reading with the highest low edge and the one with the lowest high
