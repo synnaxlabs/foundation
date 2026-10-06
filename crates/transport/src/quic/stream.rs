@@ -140,7 +140,7 @@ pub(super) struct Fault(pub(super) String);
 
 impl Sender {
     /// A sender for `key` that starts the stream with `class`'s byte.
-    pub(super) fn new(key: Key, class: Class) -> Self {
+    fn new(key: Key, class: Class) -> Self {
         let mut header = [0; 9];
         header[0] = byte(class);
         Self {
@@ -418,15 +418,20 @@ impl Streams {
         }
     }
 
-    /// Opens a stream of `inner` in `dir`. `None` when the peer allows no more now.
+    /// Opens a stream of `class` of `connection`'s `inner` in `dir`, and gives its
+    /// sender. `None` when the peer allows no more now.
     pub(super) fn open(
         &mut self,
         inner: &mut noq_proto::Connection,
+        connection: connection::Key,
         dir: Dir,
-    ) -> Option<StreamId> {
+        class: Class,
+    ) -> Option<Sender> {
         let id = inner.streams().open(dir)?;
+        let prioritized = inner.send_stream(id).set_priority(priority(class));
+        prioritized.expect("invariant: a stream that opens has a send half");
         self.senders.push((id, None));
-        Some(id)
+        Some(Sender::new(Key { connection, id }, class))
     }
 
     /// The next stream the peer opened, highest class first.
@@ -692,9 +697,10 @@ impl Streams {
         self.senders.iter().find(|&&(other, _)| other == id)?.1
     }
 
-    /// Reads the class byte of new stream `id`. Returns whether the stream is now
-    /// queued for [`Streams::accept`]. A stream that ends or resets before its class
-    /// byte drops, and the reply half of a two-way one resets with code 0.
+    /// Reads the class byte of new stream `id`, and gives the reply half of a two-way
+    /// one the priority of the class. Returns whether the stream is now queued for
+    /// [`Streams::accept`]. A stream that ends or resets before its class byte drops,
+    /// and the reply half of a two-way one resets with code 0.
     #[expect(
         clippy::unwrap_in_result,
         reason = "a stream noq-proto just gave is open and gives no empty chunk"
@@ -715,8 +721,15 @@ impl Streams {
                     .bytes
                     .first()
                     .expect("invariant: chunks are not empty");
-                if class(byte).is_none() {
+                let Some(class) = class(byte) else {
                     return Err(Fault(format!("a stream of class {byte}")));
+                };
+                if id.dir() == Dir::Bi {
+                    // A stop resets the reply half at once, and noq-proto frees it once
+                    // the peer has the reset. Its first write then gives `Stopped`.
+                    match inner.send_stream(id).set_priority(priority(class)) {
+                        Ok(()) | Err(ClosedStream { .. }) => {}
+                    }
                 }
                 self.incoming[usize::from(byte)].push_back(id);
                 Ok(true)
@@ -753,6 +766,13 @@ fn byte(class: Class) -> u8 {
         Class::Complete => 2,
         Class::CatchUp => 3,
     }
+}
+
+/// The noq-proto priority of a stream of `class`. noq-proto sends a higher priority
+/// first, and 0, its default, is the lowest class.
+fn priority(class: Class) -> i32 {
+    let priority = Class::CatchUp.rank() - class.rank();
+    i32::try_from(priority).expect("invariant: a rank is at most 3")
 }
 
 /// The class whose streams start with `byte`, if any.
@@ -2775,5 +2795,359 @@ mod tests {
             let flushed = pair.client.endpoint.flush(now, &mut empty);
             assert_eq!(flushed, Ok(Poll::Ready(())));
         });
+    }
+
+    /// A message that needs more than one datagram.
+    const BULK: usize = 2 << 10;
+
+    /// Gives the next datagram that `from` has at `now` to `to`. `false` when `from`
+    /// has none.
+    fn step(from: &mut Side, to: &mut Side, now: Monotonic) -> bool {
+        let mut buffer = Vec::new();
+        let Some(transmit) = from.endpoint.transmit(now, &mut buffer) else {
+            return false;
+        };
+        let meta = pair::meta(from.address, transmit.contents);
+        to.endpoint.receive(now, &meta, transmit.contents);
+        true
+    }
+
+    /// Gives each datagram that `from` has at `now` to `to`, one at a time, and reads
+    /// `receivers` and each stream `to` accepts after each. Gives, for each datagram
+    /// after which messages are whole at `to`, the class of each of them.
+    fn arrivals(
+        from: &mut Side,
+        to: &mut Side,
+        now: Monotonic,
+        mut receivers: Vec<(Class, Receiver)>,
+    ) -> Vec<Vec<Class>> {
+        let key = key(to);
+        let mut arrivals = Vec::new();
+        while step(from, to, now) {
+            let accepted = iter::from_fn(|| to.endpoint.accept(key));
+            receivers
+                .extend(accepted.map(|incoming| (incoming.class, incoming.receiver)));
+            let mut whole = Vec::new();
+            for (class, receiver) in &mut receivers {
+                let (messages, _) = drain(to, now, receiver);
+                whole.extend(messages.iter().map(|_| *class));
+            }
+            if !whole.is_empty() {
+                arrivals.push(whole);
+            }
+        }
+        arrivals
+    }
+
+    #[test]
+    fn messages_leave_highest_class_first_whatever_order_they_were_written() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let now = pair.now();
+            for class in [
+                Class::CatchUp,
+                Class::Complete,
+                Class::Latest,
+                Class::Command,
+            ] {
+                let mut sender = open_sender(&mut pair, class);
+                write(
+                    &mut pair.client,
+                    now,
+                    &mut sender,
+                    &[shard.block(&[0; BULK])],
+                );
+            }
+            let whole = arrivals(&mut pair.client, &mut pair.server, now, Vec::new());
+            let expected = [
+                [Class::Command],
+                [Class::Latest],
+                [Class::Complete],
+                [Class::CatchUp],
+            ];
+            assert_eq!(whole, expected);
+        });
+    }
+
+    #[test]
+    fn a_two_way_stream_sends_at_the_priority_of_its_class() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.client));
+            let mut latest = open_sender(&mut pair, Class::Latest);
+            let opened = pair.client.endpoint.open(now, key, Class::Command);
+            let (mut command, _receiver) = opened.expect("a stream");
+            let bulk = shard.block(&[0; BULK]);
+            write(&mut pair.client, now, &mut latest, slice::from_ref(&bulk));
+            write(&mut pair.client, now, &mut command, &[bulk]);
+            let whole = arrivals(&mut pair.client, &mut pair.server, now, Vec::new());
+            assert_eq!(whole, [[Class::Command], [Class::Latest]]);
+        });
+    }
+
+    #[test]
+    fn streams_of_one_class_share_in_turn() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let now = pair.now();
+            let mut first = open_sender(&mut pair, Class::CatchUp);
+            let mut second = open_sender(&mut pair, Class::CatchUp);
+            write(
+                &mut pair.client,
+                now,
+                &mut first,
+                &[shard.block(&[1; 4 * BULK])],
+            );
+            write(&mut pair.client, now, &mut second, &[shard.block(b"b")]);
+            assert!(step(&mut pair.client, &mut pair.server, now));
+            assert!(step(&mut pair.client, &mut pair.server, now));
+            let key = key(&pair.server);
+            let accepted = iter::from_fn(|| pair.server.endpoint.accept(key));
+            let ids: Vec<_> = accepted
+                .map(|incoming| incoming.receiver.key().id)
+                .collect();
+            assert_eq!(ids, [first.key().id, second.key().id]);
+        });
+    }
+
+    // The priority orders only the bytes that noq-proto holds. A full send window
+    // makes a `Command` wait for `CatchUp` bytes to be acknowledged (#797).
+    #[test]
+    fn a_command_written_after_bulk_that_fills_the_window_waits() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let mut bulk = open_sender(&mut pair, Class::CatchUp);
+            fill(&mut pair, shard, &mut bulk);
+            let mut command = open_sender(&mut pair, Class::Command);
+            let now = pair.now();
+            let written =
+                pair.client
+                    .endpoint
+                    .write(now, &mut command, shard.block(b"go"));
+            assert_eq!(written, Ok(Poll::Pending));
+        });
+    }
+
+    #[test]
+    fn a_reply_sends_at_the_priority_of_its_class() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.client));
+            let opened = pair.client.endpoint.open(now, key, Class::Command);
+            let (mut sender, receiver) = opened.expect("a stream");
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let incoming = accept(&mut pair.server);
+            let mut reply = incoming.sender.expect("a two-way stream");
+            let (now, key) = (pair.now(), self::key(&pair.server));
+            let latest = pair.server.endpoint.open_sender(now, key, Class::Latest);
+            let mut latest = latest.expect("a stream");
+            let bulk = shard.block(&[0; BULK]);
+            write(&mut pair.server, now, &mut latest, slice::from_ref(&bulk));
+            write(&mut pair.server, now, &mut reply, &[bulk]);
+            let receivers = vec![(Class::Command, receiver)];
+            let whole = arrivals(&mut pair.server, &mut pair.client, now, receivers);
+            assert_eq!(whole, [[Class::Command], [Class::Latest]]);
+        });
+    }
+
+    #[test]
+    fn a_catch_up_reply_waits_for_a_complete_stream() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.client));
+            let opened = pair.client.endpoint.open(now, key, Class::CatchUp);
+            let (mut sender, receiver) = opened.expect("a stream");
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let incoming = accept(&mut pair.server);
+            let mut reply = incoming.sender.expect("a two-way stream");
+            let (now, key) = (pair.now(), self::key(&pair.server));
+            let complete = pair.server.endpoint.open_sender(now, key, Class::Complete);
+            let mut complete = complete.expect("a stream");
+            let bulk = shard.block(&[0; BULK]);
+            write(&mut pair.server, now, &mut reply, slice::from_ref(&bulk));
+            write(&mut pair.server, now, &mut complete, &[bulk]);
+            let receivers = vec![(Class::CatchUp, receiver)];
+            let whole = arrivals(&mut pair.server, &mut pair.client, now, receivers);
+            assert_eq!(whole, [[Class::Complete], [Class::CatchUp]]);
+        });
+    }
+
+    #[test]
+    fn a_reply_that_the_peer_stopped_before_its_class_fails_the_first_write() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, key) = (pair.now(), key(&pair.client));
+            let opened = pair.client.endpoint.open(now, key, Class::Command);
+            let (mut sender, receiver) = opened.expect("a stream");
+            pair.client.endpoint.stop(now, receiver, Code(9));
+            pair.run(RUN);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+            pair.run(RUN);
+            let incoming = accept(&mut pair.server);
+            let mut reply = incoming.sender.expect("a two-way stream");
+            let (now, message) = (pair.now(), shard.block(b"b"));
+            let written = pair.server.endpoint.write(now, &mut reply, message);
+            assert_eq!(written, Err(Error::Stopped { code: Code(9) }));
+        });
+    }
+
+    mod carry {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// The bytes of message `index` of the stream of `class`, `len` long.
+        fn message(class: Class, index: usize, len: usize) -> Vec<u8> {
+            let start = usize::from(byte(class)) * 8 + index;
+            let bytes = (start..).map(|at| u8::try_from(at % 251).expect("fits"));
+            bytes.take(len).collect()
+        }
+
+        /// Sends each of `streams` (its class and the length of each message) from the
+        /// client, then finishes it. Before each round of [`DELAY`], the link drops
+        /// as many of the client's next batches as the next count in `drops`. Gives
+        /// the class, the messages, and whether it ended of each stream the server
+        /// accepted.
+        fn carry(
+            value: u64,
+            streams: Vec<(Class, Vec<usize>)>,
+            drops: Vec<usize>,
+        ) -> Vec<(Class, Vec<Vec<u8>>, bool)> {
+            testing::run(value, move |shard| {
+                let mut pair = connected(shard);
+                let mut senders: Vec<_> = streams
+                    .iter()
+                    .map(|&(class, ref lengths)| {
+                        let sender = open_sender(&mut pair, class);
+                        let messages = lengths.iter().enumerate();
+                        let messages =
+                            messages.map(|(index, &len)| (class, index, len));
+                        (sender, messages.collect::<VecDeque<_>>(), false, false)
+                    })
+                    .collect();
+                let mut read = Vec::new();
+                let mut drops = drops.into_iter();
+                for _ in 0..ROUNDS {
+                    let now = pair.now();
+                    for (sender, messages, held, finished) in &mut senders {
+                        let client = &mut pair.client.endpoint;
+                        if *held {
+                            let flushed = client.flush(now, sender).expect("flushed");
+                            *held = flushed.is_pending();
+                        }
+                        while !*held
+                            && let Some((class, index, len)) = messages.pop_front()
+                        {
+                            let message = shard.block(&message(class, index, len));
+                            let written = client.write(now, sender, message);
+                            *held = written.expect("written").is_pending();
+                        }
+                        if !*held && !*finished {
+                            client.finish(now, sender).expect("finished");
+                            *finished = true;
+                        }
+                    }
+                    pair.client.drops = drops.next().unwrap_or(0);
+                    pair.run(DELAY);
+                    let (now, key) = (pair.now(), key(&pair.server));
+                    let accepted = iter::from_fn(|| pair.server.endpoint.accept(key));
+                    read.extend(accepted.map(|incoming| {
+                        (incoming.class, incoming.receiver, Vec::new(), false)
+                    }));
+                    for (_, receiver, messages, ended) in &mut read {
+                        let (more, end) = drain(&mut pair.server, now, receiver);
+                        messages.extend(more);
+                        *ended |= end;
+                    }
+                    let done = |(.., ended): &(_, _, _, bool)| *ended;
+                    if read.len() == streams.len() && read.iter().all(done) {
+                        break;
+                    }
+                }
+                let read = read.into_iter();
+                read.map(|(class, _, messages, ended)| (class, messages, ended))
+                    .collect()
+            })
+        }
+
+        /// The most rounds of [`DELAY`] that [`carry`] runs.
+        const ROUNDS: usize = 2000;
+
+        /// The length of a message: often short, sometimes the largest.
+        fn length() -> impl Strategy<Value = usize> {
+            prop_oneof![
+                2 => 0..=64_usize,
+                1 => 0..=MESSAGE_MAX,
+                1 => Just(MESSAGE_MAX),
+            ]
+        }
+
+        /// One to three streams, each of a different class, with one to eight
+        /// messages each.
+        fn streams() -> impl Strategy<Value = Vec<(Class, Vec<usize>)>> {
+            let classes = [
+                Class::Command,
+                Class::Latest,
+                Class::Complete,
+                Class::CatchUp,
+            ];
+            let classes = prop::sample::subsequence(classes.to_vec(), 1..=3);
+            classes.prop_flat_map(|classes| {
+                let lengths = prop::collection::vec(length(), 1..=8);
+                let lengths = prop::collection::vec(lengths, classes.len());
+                lengths.prop_map(move |lengths| {
+                    classes.iter().copied().zip(lengths).collect()
+                })
+            })
+        }
+
+        /// The lengths of each stream's messages and whether it ended, which stay
+        /// short in a failed assert.
+        fn lengths(
+            streams: &[(Class, Vec<Vec<u8>>, bool)],
+        ) -> Vec<(Class, Vec<usize>, bool)> {
+            let lengths = |(class, messages, ended): &(Class, Vec<Vec<u8>>, bool)| {
+                (*class, messages.iter().map(Vec::len).collect(), *ended)
+            };
+            streams.iter().map(lengths).collect()
+        }
+
+        /// How many of the client's next batches the link drops in each round:
+        /// often none.
+        fn drops() -> impl Strategy<Value = Vec<usize>> {
+            let count = prop_oneof![3 => Just(0_usize), 1 => 1..=3_usize];
+            prop::collection::vec(count, 0..=32)
+        }
+
+        /// What the client sends on `stream`: its class, its messages, and the end.
+        fn sent((class, lengths): &(Class, Vec<usize>)) -> (Class, Vec<Vec<u8>>, bool) {
+            let messages = lengths.iter().enumerate();
+            let messages = messages.map(|(index, &len)| message(*class, index, len));
+            (*class, messages.collect(), true)
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(32))]
+
+            #[test]
+            fn every_message_arrives_whole_and_in_order_then_the_end(
+                value: u64,
+                streams in streams(),
+                drops in drops(),
+            ) {
+                let mut read = carry(value, streams.clone(), drops);
+                read.sort_by_key(|(class, ..)| byte(*class));
+                let sent: Vec<_> = streams.iter().map(sent).collect();
+                prop_assert!(
+                    read == sent,
+                    "read {:?}, sent {:?}",
+                    lengths(&read),
+                    lengths(&sent),
+                );
+            }
+        }
     }
 }
