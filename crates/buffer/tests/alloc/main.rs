@@ -92,8 +92,10 @@ fn main() {
                 let wide: Vec<Entry> = (2..WIDE)
                     .map(|index| entry(index, commit, Parts::default()))
                     .collect();
-                let batches: [Vec<Entry>; 4] = [
+                let batches: [Vec<Entry>; 6] = [
+                    Vec::new(),
                     vec![entry(0, seq, parts.clone()), entry(1, seq, parts.clone())],
+                    Vec::new(),
                     wide,
                     vec![entry(0, seq + 1, half.clone())],
                     vec![

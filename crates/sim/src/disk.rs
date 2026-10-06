@@ -9,6 +9,8 @@ use std::path::{Component, Path, PathBuf};
 use env::files::Mode;
 use env::rng::Rng;
 
+use crate::Crash;
+
 /// The key of the data directory.
 pub(crate) const ROOT: u64 = 0;
 /// [`env::files::SECTOR`] as a file offset.
@@ -37,6 +39,9 @@ pub(crate) enum Cause {
 pub(crate) struct Handle {
     pub(crate) inode: u64,
     pub(crate) writable: bool,
+    /// The key of the open that made it. No other handle of the run has it. `files`
+    /// finds the calls and the close of a descriptor by it.
+    pub(crate) key: u64,
 }
 
 pub(crate) struct Disk {
@@ -194,7 +199,11 @@ impl Disk {
             return Err(Cause::Busy);
         }
         let len = file.len;
-        let handle = Handle { inode, writable };
+        let handle = Handle {
+            inode,
+            writable,
+            key,
+        };
         self.hold(handle);
         Ok((handle, len))
     }
@@ -263,6 +272,24 @@ impl Disk {
         self.collect(handle.inode);
     }
 
+    /// Crashes the disk by `crash`. Each hold drops, as at the death of the process
+    /// that held the files, and each file that only a hold kept is freed. After a
+    /// `Power` crash, each directory goes back to its durable entries, what they no
+    /// longer reach is freed, and each sector keeps its durable bytes or those of
+    /// one write since then, by `rng`.
+    pub(crate) fn crash(&mut self, crash: Crash, rng: &mut Rng) {
+        let inodes: Vec<u64> = self.inodes.keys().copied().collect();
+        for inode in inodes {
+            if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
+                (file.holds, file.writers) = (0, 0);
+                self.collect(inode);
+            }
+        }
+        if crash == Crash::Power {
+            self.cut_power(rng);
+        }
+    }
+
     /// Frees file `inode` when no entry, no durable entry, and no hold keeps it.
     fn collect(&mut self, inode: u64) {
         let file = self.file(inode);
@@ -293,11 +320,8 @@ impl Disk {
         Ok(())
     }
 
-    /// Cuts the power: each directory goes back to its durable entries, what they no
-    /// longer reach is freed, and each sector keeps its durable bytes or those of
-    /// one write since then, by `rng`. No descriptor and no call in flight may hold
-    /// a file.
-    pub(crate) fn cut_power(&mut self, rng: &mut Rng) {
+    /// Cuts the power, as [`Disk::crash`] says.
+    fn cut_power(&mut self, rng: &mut Rng) {
         let mut reached = BTreeSet::from([ROOT]);
         let mut next = vec![ROOT];
         while let Some(at) = next.pop() {
