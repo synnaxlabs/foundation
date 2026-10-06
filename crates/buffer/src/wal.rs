@@ -167,7 +167,8 @@ impl Layout {
     /// # Errors
     ///
     /// The first [`Limit`] the batch is over, in the order of [`Limit`]. `append`
-    /// then gives [`Rejected::Large`](crate::Rejected::Large) with the same limit.
+    /// then gives [`Rejected::Large`](crate::Rejected::Large) with the same limit,
+    /// unless the buffer ended with a file error, which `append` reports first.
     pub fn check(
         self,
         entries: usize,
@@ -211,7 +212,7 @@ pub enum Limit {
     },
     /// A record body, the entry table and the parts, over the layout's `body_max`.
     Body {
-        /// Bytes of the body.
+        /// Bytes of the body, or `usize::MAX` when the body is past it.
         len: usize,
         /// The layout's `body_max`.
         max: usize,

@@ -686,8 +686,8 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
     });
 }
 
-/// `append` refuses a batch with `Rejected::Large(limit)` exactly when
-/// `Layout::check` gives `Err(limit)` for its counts, so a caller can check a
+/// `append` on a live buffer refuses a batch with `Rejected::Large(limit)` exactly
+/// when `Layout::check` gives `Err(limit)` for its counts, so a caller can check a
 /// batch before it takes the blocks of its entries.
 #[test]
 fn an_append_is_large_exactly_when_the_layout_check_fails() {

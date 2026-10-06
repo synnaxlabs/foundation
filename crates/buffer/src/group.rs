@@ -9,7 +9,7 @@ use std::slice;
 use block::{Block, Pool, Unique};
 use types::channel::Slot;
 
-use crate::entry::{self, ENTRIES_MAX, Entry, Header};
+use crate::entry::{self, Entry, Header};
 use crate::record;
 use crate::wal::{Full, Limit, Plan, Writer};
 
@@ -41,10 +41,9 @@ pub(crate) struct Group {
 pub(crate) enum Rejected {
     /// The batch alone is over `Limit`, so no record holds it.
     Large(Limit),
-    /// The record with the batch and the group's entries would be over the
-    /// layout's maximum body, over [`ENTRIES_MAX`] entries or parts, or past the
-    /// room in the ring. The caller closes the group and pushes the batch into the
-    /// next one.
+    /// The record with the batch and the group's entries would be over a
+    /// [`Limit`] or past the room in the ring. The caller closes the group and
+    /// pushes the batch into the next one.
     Record,
     /// The ring has no room for the batch's own record. The group is empty.
     Ring(Full),
@@ -93,14 +92,14 @@ impl Group {
         let len = batch.iter().map(|entry| entry.parts.bytes()).sum::<usize>();
         let layout = writer.layout();
         layout.check(count, parts, len).map_err(Rejected::Large)?;
+        layout
+            .check(
+                start.saturating_add(count),
+                self.writes.len().saturating_add(parts),
+                self.bytes.saturating_add(len),
+            )
+            .map_err(|_over: Limit| Rejected::Record)?;
         let body = self.body_len_with(count, len);
-        let over = |have: usize, more: usize| have.saturating_add(more) > ENTRIES_MAX;
-        if body > layout.body_max()
-            || over(self.headers.len(), count)
-            || over(self.writes.len(), parts)
-        {
-            return Err(Rejected::Record);
-        }
         if let Err(full) = writer.fits(body) {
             return Err(if self.is_empty() {
                 Rejected::Ring(full)
@@ -306,7 +305,7 @@ mod tests {
     use types::hash;
     use types::time::Stamp;
 
-    use crate::entry::{Parts, table_len};
+    use crate::entry::{ENTRIES_MAX, Parts, table_len};
     use crate::record::HEADER_LEN;
     use crate::wal::{self, Cursor, Layout, Position, Step, Window};
 
