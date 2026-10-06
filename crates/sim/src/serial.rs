@@ -214,6 +214,21 @@ impl Serial {
         [open.reader, open.writer]
     }
 
+    /// Closes each open end of `node`, as its crash does. Returns their wakers, for
+    /// the caller to drop after it releases the lock.
+    pub(crate) fn crash(&mut self, node: usize) -> Vec<Waker> {
+        let open: Vec<End> = (self.ends.iter())
+            .filter(|&((owner, _), end)| {
+                *owner == node && self.lines[end.line].ends[end.side].is_some()
+            })
+            .map(|(_, &end)| end)
+            .collect();
+        (open.into_iter())
+            .flat_map(|end| self.close(end))
+            .flatten()
+            .collect()
+    }
+
     /// Makes the open port at `path` of `node` fail and loses its bytes in flight,
     /// or else makes the next open of it fail. Returns the wakers of the port, for
     /// the caller to wake after it releases the lock, or `None` when no line joins

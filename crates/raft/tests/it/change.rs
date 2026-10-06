@@ -5,7 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Body, Config, Data, Entry, Hard, Message, Position, Raft, Role, Start, Term, Voters,
+    Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft, Role,
+    Start, Term, Voters,
 };
 use types::node;
 
@@ -94,6 +95,7 @@ fn sent(round: u32, from: u8, to: u8, term: u64, body: Body) -> Sent {
             to,
             term,
             body,
+            proof: None,
         },
     )
 }
@@ -275,6 +277,7 @@ fn lose_the_release(count: u8) -> BTreeMap<node::Key, Raft> {
             to: removed,
             term: Term(1),
             body: release,
+            proof: None,
         }]
     );
     let new = Voters {
@@ -511,13 +514,25 @@ fn leased_voters_refuse_a_removed_node_that_missed_a_new_term() {
         term: Term(1),
         index: 3,
     };
-    let refuse = |id| sent(ELECTION, id, 4, 2, Body::PreVoteReply { granted: false });
+    // Each refusal carries the proof of term 2: node 1 holds the votes of the
+    // heartbeat that moved it, nodes 2 and 3 the pre-votes of the election.
+    let refuse = |id, grant| {
+        let mut refusal =
+            sent(ELECTION, id, 4, 2, Body::PreVoteReply { granted: false });
+        refusal.1.proof = Some(Proof {
+            grant,
+            candidate: key(2),
+            voters: set(&[2, 3]),
+        });
+        refusal
+    };
     let mut expected = vec![
         sent(0, 1, 4, 1, Body::Heartbeat { commit: 2 }),
         sent(0, 4, 1, 1, Body::HeartbeatReply),
     ];
     expected.extend(campaign(ELECTION, 4, &[1, 2, 3], 2, end));
-    expected.extend([1, 2, 3].map(refuse));
+    expected.push(refuse(1, Grant::Vote));
+    expected.extend([2, 3].map(|id| refuse(id, Grant::PreVote)));
     expected.extend((2..8).flat_map(|n| campaign(n * ELECTION, 4, &[1, 2, 3], 3, end)));
     assert_eq!(with_4, expected);
     assert_eq!(

@@ -1,10 +1,10 @@
-//! Encoding, checking, and decoding a series make no heap allocation. This binary has
-//! no test harness: the count covers each thread, and a harness allocates on its own
-//! thread at any time.
+//! Encoding, checking, and decoding a series, whole or one vector at a time, make no
+//! heap allocation. This binary has no test harness: the count covers each thread, and
+//! a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use codec::{Encoder, Error, VECTOR_LEN, max_len};
+use codec::{Decoder, Encoder, Error, VECTOR_LEN, max_len};
 use types::sample::{Scalar, Type};
 
 #[global_allocator]
@@ -109,6 +109,10 @@ fn round_trip(scalar: Scalar) -> [bool; 4] {
                 .collect();
             let case = format!("{scalar:?}, {shape:?}, {count} samples");
             let bytes = check(&mut encoder, data_type, count, &values, &case);
+            let (read, allocations) =
+                ALLOCATOR.count(|| by_vector(scalar, count, &bytes, &values));
+            assert_eq!(allocations, 0, "decoding {case} by vector allocated");
+            assert_eq!(read, Ok(values.len()), "{case} decodes by vector");
             if let Some(&tag) = bytes.first() {
                 tags[usize::from(tag)] = true;
             }
@@ -263,10 +267,15 @@ fn refuse() {
             (
                 codec::validate(Type::Scalar(Scalar::U16), 1, bytes),
                 codec::decode(Type::Scalar(Scalar::U16), 1, bytes, &mut out),
+                by_vector(Scalar::U16, 1, bytes, &[7, 0]),
             )
         });
         assert_eq!(allocations, 0, "refusing {bytes:?} allocated");
-        assert_eq!(results, (Err(error.clone()), Err(error)), "{bytes:?}");
+        assert_eq!(
+            results,
+            (Err(error.clone()), Err(error.clone()), Err(error)),
+            "{bytes:?}"
+        );
     }
     let (result, allocations) = ALLOCATOR.count(|| {
         Encoder::new(Type::Scalar(Scalar::U16)).encode(2, &[1, 2, 3], &mut out)
@@ -340,6 +349,29 @@ fn refuse_ends() {
         let expected = (Err(error.clone()), Err(error.clone()), Err(error));
         assert_eq!(results, expected, "{data_type:?}");
     }
+}
+
+/// Decodes `bytes` with a [`Decoder`] and checks each vector against the next samples
+/// of `values`. Returns the bytes read, or the first error.
+fn by_vector(
+    scalar: Scalar,
+    count: usize,
+    bytes: &[u8],
+    values: &[u8],
+) -> Result<usize, Error> {
+    let mut out = [0; VECTOR_LEN * 16];
+    let mut decoder = Decoder::new(scalar, count, bytes);
+    let mut read = 0;
+    while let Some(vector) = decoder.next(&mut out) {
+        let vector = vector?;
+        assert_eq!(
+            vector,
+            &values[read..read + vector.len()],
+            "the vector at byte {read}"
+        );
+        read += vector.len();
+    }
+    Ok(read)
 }
 
 /// A fixed pseudo-random value for `i` (the splitmix64 finalizer).

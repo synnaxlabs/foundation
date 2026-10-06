@@ -7,7 +7,7 @@ use std::iter;
 use std::ops::{Add, Sub};
 use std::str::FromStr;
 
-use crate::{ParseError, quantity};
+use crate::quantity;
 
 /// A point in mesh time: nanoseconds since the Unix epoch, UTC.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -126,38 +126,33 @@ impl fmt::Display for Stamp {
 }
 
 impl FromStr for Stamp {
-    type Err = ParseError;
+    type Err = Error;
 
     /// Reads RFC 3339 with any offset and up to nine fraction digits.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let syntax = || ParseError {
-            input: s.into(),
-            expected: "an RFC 3339 time with an offset and up to nine fraction digits, \
-                       such as 2026-10-04T12:00:00Z",
-        };
         let mut r = Reader(s.as_bytes());
-        let year = r.digits(4).ok_or_else(syntax)?;
-        r.byte(b"-").ok_or_else(syntax)?;
-        let month = r.digits(2).ok_or_else(syntax)?;
-        r.byte(b"-").ok_or_else(syntax)?;
-        let day = r.digits(2).ok_or_else(syntax)?;
-        r.byte(b"Tt").ok_or_else(syntax)?;
-        let hour = r.digits(2).ok_or_else(syntax)?;
-        r.byte(b":").ok_or_else(syntax)?;
-        let minute = r.digits(2).ok_or_else(syntax)?;
-        r.byte(b":").ok_or_else(syntax)?;
-        let second = r.digits(2).ok_or_else(syntax)?;
+        let year = r.digits(4).ok_or(Error::Stamp)?;
+        r.byte(b"-").ok_or(Error::Stamp)?;
+        let month = r.digits(2).ok_or(Error::Stamp)?;
+        r.byte(b"-").ok_or(Error::Stamp)?;
+        let day = r.digits(2).ok_or(Error::Stamp)?;
+        r.byte(b"Tt").ok_or(Error::Stamp)?;
+        let hour = r.digits(2).ok_or(Error::Stamp)?;
+        r.byte(b":").ok_or(Error::Stamp)?;
+        let minute = r.digits(2).ok_or(Error::Stamp)?;
+        r.byte(b":").ok_or(Error::Stamp)?;
+        let second = r.digits(2).ok_or(Error::Stamp)?;
         let nanos = if r.byte(b".").is_some() {
-            r.fraction().ok_or_else(syntax)?
+            r.fraction().ok_or(Error::Stamp)?
         } else {
             0
         };
-        let offset = match r.byte(b"Zz+-").ok_or_else(syntax)? {
+        let offset = match r.byte(b"Zz+-").ok_or(Error::Stamp)? {
             b'Z' | b'z' => 0,
             sign => {
-                let hours = r.digits(2).filter(|h| *h < 24).ok_or_else(syntax)?;
-                r.byte(b":").ok_or_else(syntax)?;
-                let minutes = r.digits(2).filter(|m| *m < 60).ok_or_else(syntax)?;
+                let hours = r.digits(2).filter(|h| *h < 24).ok_or(Error::Stamp)?;
+                r.byte(b":").ok_or(Error::Stamp)?;
+                let minutes = r.digits(2).filter(|m| *m < 60).ok_or(Error::Stamp)?;
                 let offset = hours * 3600 + minutes * 60;
                 if sign == b'-' { -offset } else { offset }
             }
@@ -168,13 +163,10 @@ impl FromStr for Stamp {
             && minute < 60
             && second < 60;
         if !r.0.is_empty() {
-            return Err(syntax());
+            return Err(Error::Stamp);
         }
         if !valid {
-            return Err(ParseError {
-                input: s.into(),
-                expected: "a date and time that exist, with seconds from 00 to 59",
-            });
+            return Err(Error::Date);
         }
         let seconds = calendar::days(year, month, day) * SECONDS_PER_DAY
             + hour * 3600
@@ -186,11 +178,7 @@ impl FromStr for Stamp {
             i128::from(seconds) * i128::from(NANOS_PER_SECOND) + i128::from(nanos);
         i64::try_from(nanos)
             .map(Self)
-            .map_err(|_overflow| ParseError {
-                input: s.into(),
-                expected: "a time from 1677-09-21T00:12:43.145224192Z to \
-                           2262-04-11T23:47:16.854775807Z",
-            })
+            .map_err(|_overflow| Error::Era)
     }
 }
 
@@ -324,17 +312,12 @@ impl fmt::Display for Span {
 }
 
 impl FromStr for Span {
-    type Err = ParseError;
+    type Err = Error;
 
     /// Reads a number and a unit: `ns`, `us`, `ms`, `s`, `m`, `h`, or `d`. The number
     /// may have a decimal fraction and a leading `-`, and must give a whole number of
     /// nanoseconds.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let error = |expected| ParseError {
-            input: s.into(),
-            expected,
-        };
-        let syntax = || error("a number and a unit, such as 250us, 1.5s, or 3d");
         let (negative, body) = match s.strip_prefix('-') {
             Some(body) => (true, body),
             None => (false, s),
@@ -343,7 +326,7 @@ impl FromStr for Span {
             whole,
             fraction,
             unit,
-        } = quantity::split(body).ok_or_else(syntax)?;
+        } = quantity::split(body).ok_or(Error::Span)?;
         let unit = match unit {
             "ns" => 1,
             "us" => Self::MICROSECOND.0,
@@ -352,31 +335,32 @@ impl FromStr for Span {
             "m" => Self::MINUTE.0,
             "h" => Self::HOUR.0,
             "d" => Self::DAY.0,
-            _ => return Err(syntax()),
+            _ => return Err(Error::Span),
         };
         // The last digit is not 0, so the mantissa lacks factors of 2 or of 5, and no
         // unit has more than 16 of either. The bound also keeps `scale` in `u128`.
         if fraction.len() > 16 {
-            return Err(error("a whole number of nanoseconds"));
+            return Err(Error::Fraction);
         }
-        let range = || error("a span that fits in 64-bit nanoseconds");
         let mantissa = whole
             .bytes()
             .chain(fraction.bytes())
             .try_fold(0_u128, |n, b| {
                 n.checked_mul(10)?.checked_add(u128::from(b - b'0'))
             })
-            .ok_or_else(range)?;
+            .ok_or(Error::Long)?;
         let scale = fraction.bytes().fold(1_u128, |scale, _| scale * 10);
         let scaled = mantissa
             .checked_mul(unit.unsigned_abs().into())
-            .ok_or_else(range)?;
+            .ok_or(Error::Long)?;
         if scaled % scale != 0 {
-            return Err(error("a whole number of nanoseconds"));
+            return Err(Error::Fraction);
         }
-        let nanos = i128::try_from(scaled / scale).map_err(|_overflow| range())?;
+        let nanos = i128::try_from(scaled / scale).map_err(|_overflow| Error::Long)?;
         let nanos = if negative { -nanos } else { nanos };
-        i64::try_from(nanos).map(Self).map_err(|_overflow| range())
+        i64::try_from(nanos)
+            .map(Self)
+            .map_err(|_overflow| Error::Long)
     }
 }
 
@@ -427,20 +411,14 @@ impl fmt::Display for Range {
 }
 
 impl FromStr for Range {
-    type Err = ParseError;
+    type Err = Error;
 
-    /// Reads `<start>/<end>`, each in the [`Stamp`] grammar. An `end` before `start`
-    /// is an error; a stamp that does not read returns that stamp's error.
+    /// Reads `<start>/<end>`, each in the [`Stamp`] grammar. It gives [`Error::Range`]
+    /// with no `/`, [`Error::Reversed`] for an `end` before `start`, and the error of a
+    /// stamp that does not read.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let error = |expected| ParseError {
-            input: s.into(),
-            expected,
-        };
-        let (start, end) = s
-            .split_once('/')
-            .ok_or_else(|| error("a range written <start>/<end>"))?;
-        Self::new(start.parse()?, end.parse()?)
-            .ok_or_else(|| error("a range whose end is not before its start"))
+        let (start, end) = s.split_once('/').ok_or(Error::Range)?;
+        Self::new(start.parse()?, end.parse()?).ok_or(Error::Reversed)
     }
 }
 
@@ -541,17 +519,12 @@ impl Rate {
     ///
     /// # Errors
     ///
-    /// When `num` or `den` is zero, or when one sample period is under 1 ns or does not
-    /// fit in a [`Span`]. Under 1 ns, two samples would share a [`Stamp`].
-    pub fn new(num: u64, den: u64) -> Result<Self, ParseError> {
-        let refusal = |expected| ParseError {
-            input: format!("{num}/{den}"),
-            expected,
-        };
+    /// [`Error::Zero`] when `num` or `den` is zero. [`Error::Period`] when one sample
+    /// period is under 1 ns or does not fit in a [`Span`]. Under 1 ns, two samples
+    /// would share a [`Stamp`].
+    pub fn new(num: u64, den: u64) -> Result<Self, Error> {
         if num == 0 || den == 0 {
-            return Err(refusal(
-                "a rate whose numerator and denominator are above zero",
-            ));
+            return Err(Error::Zero);
         }
         let divisor = gcd(num, den);
         let rate = Self {
@@ -560,9 +533,7 @@ impl Rate {
         };
         let period = rate.nanos(1).and_then(|nanos| i64::try_from(nanos).ok());
         if period.is_none_or(|period| period < 1) {
-            return Err(refusal(
-                "a rate whose sample period is from 1 ns to 9223372036854775807 ns",
-            ));
+            return Err(Error::Period);
         }
         Ok(rate)
     }
@@ -661,7 +632,7 @@ impl fmt::Display for Rate {
 }
 
 impl FromStr for Rate {
-    type Err = ParseError;
+    type Err = Error;
 
     /// Reads a rate in hertz, with an optional `k` or `M` prefix or a fraction.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -670,29 +641,149 @@ impl FromStr for Rate {
     }
 }
 
+/// A time value that could not be read or made. `Display` gives the message: a
+/// lower-case clause with no final period. [`Error::fix`] gives what to do instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Error {
+    /// The text is not RFC 3339 with an offset and up to nine fraction digits.
+    Stamp,
+    /// The text is RFC 3339, but its date does not exist, such as `2026-02-30`, or a
+    /// field is past its limit, such as the leap second `23:59:60`.
+    Date,
+    /// The time is before 1677-09-21T00:12:43.145224192Z or after
+    /// 2262-04-11T23:47:16.854775807Z, which a [`Stamp`] cannot hold.
+    Era,
+    /// The text is not a number and a unit: `ns`, `us`, `ms`, `s`, `m`, `h`, or `d`.
+    Span,
+    /// The span is not a whole number of nanoseconds, such as `0.5ns`.
+    Fraction,
+    /// The span does not fit in 64-bit nanoseconds.
+    Long,
+    /// The text has no `/` between two times.
+    Range,
+    /// The range ends before it starts.
+    Reversed,
+    /// The numerator or the denominator of a rate is zero.
+    Zero,
+    /// The sample period of a rate is under 1 ns or does not fit in a [`Span`].
+    Period,
+}
+
+impl Error {
+    /// What to do instead: a sentence with no final period.
+    #[must_use]
+    pub const fn fix(self) -> &'static str {
+        match self {
+            Self::Stamp => "Write a time such as 2026-10-04T12:00:00Z",
+            Self::Date => {
+                "Use a date that exists, an hour to 23, and minutes and seconds to 59"
+            }
+            Self::Era => {
+                "Use a time from 1677-09-21T00:12:43.145224192Z to \
+                 2262-04-11T23:47:16.854775807Z"
+            }
+            Self::Span => "Write a span such as 250us, 1.5s, or 3d",
+            Self::Fraction => "Use fewer fraction digits or a smaller unit",
+            Self::Long => "Use a span from -106751d to 106751d",
+            Self::Range => "Write a range as `<start>/<end>`",
+            Self::Reversed => "Put the earlier time first",
+            Self::Zero => "Use a numerator and a denominator above zero",
+            Self::Period => "Use a rate from one sample in 106751d to 1000MHz",
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Stamp => {
+                "a time is not RFC 3339 with an offset and up to nine fraction digits"
+            }
+            Self::Date => "a date does not exist, or a field is past its limit",
+            Self::Era => "a time is outside the range of a stamp",
+            Self::Span => "a span is not a number and a unit",
+            Self::Fraction => "a span is not a whole number of nanoseconds",
+            Self::Long => "a span does not fit in 64-bit nanoseconds",
+            Self::Range => "a range has no `/` between two times",
+            Self::Reversed => "a range ends before it starts",
+            Self::Zero => "a rate has a zero numerator or denominator",
+            Self::Period => {
+                "the sample period of a rate is under 1 ns or longer than a span"
+            }
+        })
+    }
+}
+
+impl std::error::Error for Error {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    const STAMP_SYNTAX: &str = "an RFC 3339 time with an offset and up to nine \
-                                fraction digits, such as 2026-10-04T12:00:00Z";
-    const STAMP_RANGE: &str = "a time from 1677-09-21T00:12:43.145224192Z to \
-                               2262-04-11T23:47:16.854775807Z";
-    const STAMP_DATE: &str = "a date and time that exist, with seconds from 00 to 59";
-    const SPAN_SYNTAX: &str = "a number and a unit, such as 250us, 1.5s, or 3d";
-    const SPAN_EXACT: &str = "a whole number of nanoseconds";
-    const SPAN_RANGE: &str = "a span that fits in 64-bit nanoseconds";
-
-    fn error(input: &str, expected: &'static str) -> ParseError {
-        ParseError {
-            input: input.into(),
-            expected,
-        }
-    }
-
     fn seconds(s: i64) -> Stamp {
         Stamp::from_nanos(s * NANOS_PER_SECOND)
+    }
+
+    #[test]
+    fn states_each_problem_and_its_fix() {
+        for (error, message, fix) in [
+            (
+                Error::Stamp,
+                "a time is not RFC 3339 with an offset and up to nine fraction digits",
+                "Write a time such as 2026-10-04T12:00:00Z",
+            ),
+            (
+                Error::Date,
+                "a date does not exist, or a field is past its limit",
+                "Use a date that exists, an hour to 23, and minutes and seconds to 59",
+            ),
+            (
+                Error::Era,
+                "a time is outside the range of a stamp",
+                "Use a time from 1677-09-21T00:12:43.145224192Z to \
+                 2262-04-11T23:47:16.854775807Z",
+            ),
+            (
+                Error::Span,
+                "a span is not a number and a unit",
+                "Write a span such as 250us, 1.5s, or 3d",
+            ),
+            (
+                Error::Fraction,
+                "a span is not a whole number of nanoseconds",
+                "Use fewer fraction digits or a smaller unit",
+            ),
+            (
+                Error::Long,
+                "a span does not fit in 64-bit nanoseconds",
+                "Use a span from -106751d to 106751d",
+            ),
+            (
+                Error::Range,
+                "a range has no `/` between two times",
+                "Write a range as `<start>/<end>`",
+            ),
+            (
+                Error::Reversed,
+                "a range ends before it starts",
+                "Put the earlier time first",
+            ),
+            (
+                Error::Zero,
+                "a rate has a zero numerator or denominator",
+                "Use a numerator and a denominator above zero",
+            ),
+            (
+                Error::Period,
+                "the sample period of a rate is under 1 ns or longer than a span",
+                "Use a rate from one sample in 106751d to 1000MHz",
+            ),
+        ] {
+            assert_eq!(error.to_string(), message);
+            assert_eq!(error.fix(), fix, "{error:?}");
+            crate::common::assert_stated(message, fix);
+        }
     }
 
     mod stamp {
@@ -770,7 +861,7 @@ mod tests {
                     "9999-12-31T23:59:59Z",
                     "0000-01-01T00:00:00Z",
                 ] {
-                    assert_eq!(text.parse::<Stamp>(), Err(error(text, STAMP_RANGE)));
+                    assert_eq!(text.parse::<Stamp>(), Err(Error::Era), "{text}");
                 }
             }
 
@@ -791,7 +882,7 @@ mod tests {
                     "+2026-10-04T12:00:00Z",
                     "2026-10-04T12:00:00\u{ff}Z",
                 ] {
-                    assert_eq!(text.parse::<Stamp>(), Err(error(text, STAMP_SYNTAX)));
+                    assert_eq!(text.parse::<Stamp>(), Err(Error::Stamp), "{text}");
                 }
             }
 
@@ -811,19 +902,10 @@ mod tests {
                     "2026-10-04T12:60:00Z",
                     "2026-10-04T12:00:60Z",
                 ] {
-                    assert_eq!(text.parse::<Stamp>(), Err(error(text, STAMP_DATE)));
+                    assert_eq!(text.parse::<Stamp>(), Err(Error::Date), "{text}");
                 }
                 assert_eq!("2000-02-29T00:00:00Z".parse(), Ok(seconds(951_782_400)));
                 assert_eq!("2024-02-29T00:00:00Z".parse(), Ok(seconds(1_709_164_800)));
-            }
-
-            #[test]
-            fn shows_the_input_and_the_expected_form() {
-                assert_eq!(
-                    "noon".parse::<Stamp>().unwrap_err().to_string(),
-                    "cannot read \"noon\": expected an RFC 3339 time with an offset \
-                     and up to nine fraction digits, such as 2026-10-04T12:00:00Z"
-                );
             }
         }
 
@@ -947,6 +1029,7 @@ mod tests {
                 ("0.25h", 15 * Span::MINUTE.0),
                 ("007ms", 7_000_000),
                 ("3d", 3 * Span::DAY.0),
+                ("0.0000000000003125d", 27),
                 ("1.00000000000000000000000000000s", NANOS_PER_SECOND),
                 ("9223372036.854775807s", i64::MAX),
                 ("-9223372036.854775808s", i64::MIN),
@@ -961,11 +1044,7 @@ mod tests {
                 "", "5", "s", "-", "1.s", ".5s", "1.5.5s", "5 s", "5sec", "+5s",
                 "--5s", "5µs", "5S", "1e3s",
             ] {
-                assert_eq!(
-                    text.parse::<Span>(),
-                    Err(error(text, SPAN_SYNTAX)),
-                    "{text}"
-                );
+                assert_eq!(text.parse::<Span>(), Err(Error::Span), "{text}");
             }
         }
 
@@ -973,11 +1052,7 @@ mod tests {
         fn rejects_fractions_of_a_nanosecond() {
             let long = format!("0.{}1s", "0".repeat(38));
             for text in ["0.5ns", "1.0000000001s", "0.000000000000000000001d", &long] {
-                assert_eq!(
-                    text.parse::<Span>(),
-                    Err(error(text, SPAN_EXACT)),
-                    "{text}"
-                );
+                assert_eq!(text.parse::<Span>(), Err(Error::Fraction), "{text}");
             }
         }
 
@@ -988,12 +1063,10 @@ mod tests {
                 "-9223372036.854775809s",
                 "106752d",
                 "999999999999999999999999999999999999999999d",
+                "1000000000000000000000000000000d",
+                "200000000000000000000000000000000000000ns",
             ] {
-                assert_eq!(
-                    text.parse::<Span>(),
-                    Err(error(text, SPAN_RANGE)),
-                    "{text}"
-                );
+                assert_eq!(text.parse::<Span>(), Err(Error::Long), "{text}");
             }
         }
     }
@@ -1160,28 +1233,25 @@ mod tests {
         #[test]
         fn rejects_an_end_before_the_start() {
             let text = "2026-10-04T12:00:00Z/2026-10-04T11:59:59Z";
-            assert_eq!(
-                text.parse::<Range>(),
-                Err(error(text, "a range whose end is not before its start"))
-            );
+            assert_eq!(text.parse::<Range>(), Err(Error::Reversed));
         }
 
         #[test]
         fn rejects_a_missing_slash() {
             let text = "2026-10-04T12:00:00Z";
-            assert_eq!(
-                text.parse::<Range>(),
-                Err(error(text, "a range written <start>/<end>"))
-            );
+            assert_eq!(text.parse::<Range>(), Err(Error::Range));
         }
 
         #[test]
         fn returns_the_error_of_the_stamp_that_does_not_read() {
-            for (text, stamp) in [
-                ("2026-10-04T12:00:00Z/later", "later"),
-                ("later/2026-10-04T12:00:00Z", "later"),
+            for (text, error) in [
+                ("2026-10-04T12:00:00Z/later", Error::Stamp),
+                ("later/2026-10-04T12:00:00Z", Error::Stamp),
+                ("2026-10-04T12:00:00Z/2026-02-30T00:00:00Z", Error::Date),
+                ("9999-01-01T00:00:00Z/2026-10-04T12:00:00Z", Error::Era),
+                ("2026-10-04T12:00:00Z/2026-10-04T12:00:00Z/", Error::Stamp),
             ] {
-                assert_eq!(text.parse::<Range>(), Err(error(stamp, STAMP_SYNTAX)));
+                assert_eq!(text.parse::<Range>(), Err(error), "{text}");
             }
         }
 
@@ -1197,11 +1267,6 @@ mod tests {
 
     mod rate {
         use super::*;
-
-        const RATE_NONZERO: &str =
-            "a rate whose numerator and denominator are above zero";
-        const RATE_PERIOD: &str =
-            "a rate whose sample period is from 1 ns to 9223372036854775807 ns";
 
         fn rate(num: u64, den: u64) -> Rate {
             Rate::new(num, den).unwrap()
@@ -1234,22 +1299,22 @@ mod tests {
 
         #[test]
         fn refuses_a_zero() {
-            for (num, den, input) in [(0, 1, "0/1"), (1, 0, "1/0"), (0, 0, "0/0")] {
-                assert_eq!(Rate::new(num, den), Err(error(input, RATE_NONZERO)));
+            for (num, den) in [(0, 1), (1, 0), (0, 0)] {
+                assert_eq!(Rate::new(num, den), Err(Error::Zero), "{num}/{den}");
             }
         }
 
         #[test]
         fn refuses_a_period_out_of_range() {
-            for (num, den, input) in [
-                (1_000_000_001, 1, "1000000001/1"),
-                (2_000_000_002, 2, "2000000002/2"),
-                (2_000_000_001, 2, "2000000001/2"),
-                (u64::MAX, 1, "18446744073709551615/1"),
-                (1, 9_223_372_037, "1/9223372037"),
-                (1, u64::MAX, "1/18446744073709551615"),
+            for (num, den) in [
+                (1_000_000_001, 1),
+                (2_000_000_002, 2),
+                (2_000_000_001, 2),
+                (u64::MAX, 1),
+                (1, 9_223_372_037),
+                (1, u64::MAX),
             ] {
-                assert_eq!(Rate::new(num, den), Err(error(input, RATE_PERIOD)));
+                assert_eq!(Rate::new(num, den), Err(Error::Period), "{num}/{den}");
             }
             for (num, den) in
                 [(1_000_000_000, 1), (1_999_999_999, 2), (1, 9_223_372_036)]

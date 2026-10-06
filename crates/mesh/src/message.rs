@@ -6,7 +6,10 @@
 use raft::{Body, Position, Term};
 use types::node;
 
-use crate::bytes::{put_key, put_position, take, take_key, take_position};
+use crate::bytes::{
+    put_key, put_optional_proof, put_position, take, take_key, take_position,
+    take_present, take_proof,
+};
 use crate::entry;
 use crate::region::Change;
 
@@ -65,6 +68,7 @@ impl Message {
                 put_key(message.from, &mut out);
                 put_key(message.to, &mut out);
                 out.extend(message.term.0.to_le_bytes());
+                put_optional_proof(message.proof.as_ref(), &mut out);
                 body(&message.body, &mut out);
             }
             Self::Propose { request, change } => {
@@ -93,12 +97,23 @@ impl Message {
     pub(crate) fn decode(mut bytes: &[u8]) -> Option<Self> {
         let bytes = &mut bytes;
         let message = match u8::from_le_bytes(take(bytes)?) {
-            RAFT => Self::Raft(raft::Message {
-                from: take_key(bytes)?,
-                to: take_key(bytes)?,
-                term: Term(u64::from_le_bytes(take(bytes)?)),
-                body: take_body(bytes)?,
-            }),
+            RAFT => {
+                let from = take_key(bytes)?;
+                let to = take_key(bytes)?;
+                let term = Term(u64::from_le_bytes(take(bytes)?));
+                let proof = if take_present(bytes)? {
+                    Some(take_proof(bytes)?)
+                } else {
+                    None
+                };
+                Self::Raft(raft::Message {
+                    from,
+                    to,
+                    term,
+                    body: take_body(bytes)?,
+                    proof,
+                })
+            }
             PROPOSE => {
                 let request = u64::from_le_bytes(take(bytes)?);
                 let change = Change::decode(std::mem::take(bytes)).ok()?;
@@ -221,7 +236,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use proptest::prelude::*;
-    use raft::{Data, Entry, Voters};
+    use raft::{Data, Entry, Grant, Proof, Voters};
     use types::channel;
 
     use super::*;
@@ -279,17 +294,33 @@ mod tests {
         ]
     }
 
+    fn a_proof() -> impl Strategy<Value = Proof> {
+        let grant = any::<bool>()
+            .prop_map(|vote| if vote { Grant::Vote } else { Grant::PreVote });
+        (grant, any::<u128>(), keys()).prop_map(|(grant, candidate, voters)| Proof {
+            grant,
+            candidate: node(candidate),
+            voters,
+        })
+    }
+
     fn a_message() -> impl Strategy<Value = Message> {
-        let raft = (any::<u128>(), any::<u128>(), any::<u64>(), a_body()).prop_map(
-            |(from, to, term, body)| {
-                Message::Raft(raft::Message {
-                    from: node(from),
-                    to: node(to),
-                    term: Term(term),
-                    body,
-                })
-            },
+        let fields = (
+            any::<u128>(),
+            any::<u128>(),
+            any::<u64>(),
+            a_body(),
+            prop::option::of(a_proof()),
         );
+        let raft = fields.prop_map(|(from, to, term, body, proof)| {
+            Message::Raft(raft::Message {
+                from: node(from),
+                to: node(to),
+                term: Term(term),
+                body,
+                proof,
+            })
+        });
         let propose = (any::<u64>(), any::<u128>(), any::<u128>()).prop_map(
             |(request, index, home)| Message::Propose {
                 request,
@@ -326,12 +357,13 @@ mod tests {
             to: node(2),
             term: Term(3),
             body,
+            proof: None,
         })
     }
 
-    /// The bytes of [`raft`] before the body.
+    /// The bytes of [`raft`] before the body, with no proof.
     fn head() -> Vec<u8> {
-        [&[RAFT][..], &key(1), &key(2), &le(3)].concat()
+        [&[RAFT][..], &key(1), &key(2), &le(3), &[0]].concat()
     }
 
     #[test]
@@ -373,6 +405,27 @@ mod tests {
     }
 
     #[test]
+    fn a_proof_has_a_fixed_byte_form() {
+        let message = Message::Raft(raft::Message {
+            from: node(1),
+            to: node(2),
+            term: Term(3),
+            body: Body::Heartbeat { commit: 6 },
+            proof: Some(Proof {
+                grant: Grant::Vote,
+                candidate: node(1),
+                voters: [node(1), node(4)].into(),
+            }),
+        });
+        let voters = [&le(2)[..], &key(1), &key(4)].concat();
+        let proof = [&[1, 1][..], &key(1), &voters].concat();
+        let head = &head()[..head().len() - 1];
+        let expected = [head, &proof, &[5], &le(6)].concat();
+        assert_eq!(message.encode(), expected);
+        assert_eq!(Message::decode(&expected), Some(message));
+    }
+
+    #[test]
     fn a_proposal_and_its_answers_have_a_fixed_byte_form() {
         let propose = Message::Propose {
             request: 9,
@@ -409,42 +462,29 @@ mod tests {
 
     #[test]
     fn decode_refuses_what_is_not_a_message() {
-        let heartbeat = Message::Raft(raft::Message {
-            from: node(1),
-            to: node(2),
-            term: Term(3),
-            body: Body::HeartbeatReply,
-        })
-        .encode();
-        let granted = Message::Raft(raft::Message {
-            from: node(1),
-            to: node(2),
-            term: Term(3),
-            body: Body::VoteReply { granted: true },
-        })
-        .encode();
+        let heartbeat = raft(Body::HeartbeatReply).encode();
+        let granted = raft(Body::VoteReply { granted: true }).encode();
         let mut flag = granted.clone();
         *flag.last_mut().unwrap() = 2;
         let mut body = heartbeat.clone();
         *body.last_mut().unwrap() = 10;
         let mut tail = heartbeat.clone();
         tail.push(0);
+        let proof_at = head().len() - 1;
+        let mut presence = heartbeat.clone();
+        presence[proof_at] = 2;
+        let grant = [&head()[..proof_at], &[1, 2], &key(1), &le(0), &[6]].concat();
         let voters = |keys: [u128; 2]| {
-            Message::Raft(raft::Message {
-                from: node(1),
-                to: node(2),
-                term: Term(3),
-                body: Body::Append {
-                    prev: at(0, 0),
-                    entries: vec![Entry {
-                        at: at(3, 1),
-                        data: Data::Voters(Voters {
-                            incoming: keys.map(node).into(),
-                            outgoing: BTreeSet::new(),
-                        }),
-                    }],
-                    commit: 0,
-                },
+            raft(Body::Append {
+                prev: at(0, 0),
+                entries: vec![Entry {
+                    at: at(3, 1),
+                    data: Data::Voters(Voters {
+                        incoming: keys.map(node).into(),
+                        outgoing: BTreeSet::new(),
+                    }),
+                }],
+                commit: 0,
             })
             .encode()
         };
@@ -457,13 +497,15 @@ mod tests {
         twice.swap(len - 40, len - 24);
         twice[len - 40] = 2;
         twice[len - 24] = 2;
-        let cases: [(&str, &[u8]); 9] = [
+        let cases: [(&str, &[u8]); 11] = [
             ("no bytes", &[]),
             ("an unknown kind", &[0]),
             ("a cut message", &heartbeat[..heartbeat.len() - 1]),
             ("a byte after the end", &tail),
             ("an unknown body", &body),
             ("a flag that is not 0 or 1", &flag),
+            ("a proof byte that is not 0 or 1", &presence),
+            ("a grant that is not 0 or 1", &grant),
             (
                 "a change that is not valid",
                 &[2, 0, 0, 0, 0, 0, 0, 0, 0, 9],

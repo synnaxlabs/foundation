@@ -18,7 +18,9 @@
 //! The voters of a region are in strict name order, and there is at least one.
 //!
 //! `excluded` is 1 for an exclusion, which a file writes with a leading `!`, and 0
-//! otherwise. The stored text has no `!`.
+//! otherwise. The stored text has no `!`. Patterns keep the order and form written,
+//! so a rewrite that matches the same names still changes the bytes, and `plan` shows
+//! it.
 //!
 //! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
 //! admin 5. `authority` is zero when `allow` does not hold write.
@@ -34,11 +36,10 @@ use std::{fmt, str};
 
 use document::encoding;
 use types::authority::Authority;
-use types::name::{self, Name};
+use types::name::{self, Name, Selector, Written};
 
 use crate::access::{Action, Actions, Policy};
 use crate::connector::Connector;
-use crate::patterns::Patterns;
 use crate::region::{Delegation, NoVoters};
 
 const VERSION: u8 = 1;
@@ -131,10 +132,13 @@ impl Definition {
     }
 }
 
-fn patterns(out: &mut Vec<u8>, patterns: &Patterns) {
-    count(out, patterns.texts().len());
-    for text in patterns.texts() {
-        let (excluded, body) = text.strip_prefix('!').map_or((0, text), |b| (1, b));
+fn patterns(out: &mut Vec<u8>, selector: &Selector) {
+    count(out, selector.written().len());
+    for pattern in selector.written() {
+        let (excluded, body) = match pattern {
+            Written::Include(body) => (0, body),
+            Written::Exclude(body) => (1, body),
+        };
         out.push(excluded);
         count(out, body.len());
         out.extend_from_slice(body.as_bytes());
@@ -200,7 +204,7 @@ impl<'a> Reader<'a> {
             .ok_or(Error::Truncated { at })
     }
 
-    fn patterns(&mut self) -> Result<Patterns, Error> {
+    fn patterns(&mut self) -> Result<Selector, Error> {
         let at = self.at();
         let n = self.count(PATTERN_MIN)?;
         let mut texts = Vec::with_capacity(n);
@@ -220,7 +224,7 @@ impl<'a> Reader<'a> {
                 texts.push(text.to_owned());
             }
         }
-        Patterns::new(texts.iter().map(|t| &**t))
+        Selector::new(texts.iter().map(|t| &**t))
             .map_err(|error| Error::Pattern { at, error })
     }
 

@@ -5,15 +5,15 @@ use proptest::sample::Index;
 
 use super::*;
 
-fn patterns(texts: &[&str]) -> Patterns {
-    Patterns::new(texts.iter().copied()).unwrap()
+fn selector(texts: &[&str]) -> Selector {
+    Selector::new(texts.iter().copied()).unwrap()
 }
 
 fn policy() -> Definition {
     let allow = [Action::Read, Action::Write].into_iter().collect();
     Definition::Access(Policy::new(
-        patterns(&["ops.*"]),
-        patterns(&["site_a.**", "!site_a.@secrets.**"]),
+        selector(&["ops.*"]),
+        selector(&["site_a.**", "!site_a.@secrets.**"]),
         allow,
         Authority(9),
     ))
@@ -59,7 +59,7 @@ fn reads_what_it_writes() {
 #[test]
 fn writes_no_authority_without_write() {
     let read = [Action::Read].into_iter().collect();
-    let policy = Policy::new(patterns(&["a"]), patterns(&["b"]), read, Authority(9));
+    let policy = Policy::new(selector(&["a"]), selector(&["b"]), read, Authority(9));
     let bytes = Definition::Access(policy).encode();
     assert_eq!(bytes, access(&[b"a"], &[b"b"], 0b1, 0));
 }
@@ -196,8 +196,8 @@ fn refuses_an_included_pattern_that_starts_with_a_bang() {
 fn stores_an_exclusion_of_the_longest_name() {
     let longest = "a".repeat(Name::MAX_BYTES);
     let excluded = format!("!{longest}");
-    let select = Patterns::new(["**", excluded.as_str()]).unwrap();
-    let policy = Policy::new(patterns(&["a"]), select, Actions::NONE, Authority(0));
+    let select = Selector::new(["**", excluded.as_str()]).unwrap();
+    let policy = Policy::new(selector(&["a"]), select, Actions::NONE, Authority(0));
     let definition = Definition::Access(policy);
     let bytes = definition.encode();
     let stored = [
@@ -237,13 +237,6 @@ fn refuses_an_authority_without_write() {
         error.to_string(),
         "authority 3 at byte 39 is on a policy without write"
     );
-}
-
-#[test]
-fn shows_patterns_as_written() {
-    let patterns = patterns(&["a.**.**", "!a.b"]);
-    assert_eq!(format!("{patterns:?}"), r#"["a.**.**", "!a.b"]"#);
-    assert_eq!(patterns.texts().collect::<Vec<_>>(), ["a.**.**", "!a.b"]);
 }
 
 fn name(text: &str) -> Name {
@@ -419,17 +412,17 @@ fn pattern() -> impl Strategy<Value = String> {
     })
 }
 
-fn patterns_strategy() -> impl Strategy<Value = Patterns> {
+fn selectors() -> impl Strategy<Value = Selector> {
     ("[a-c]{1,3}", prop::collection::vec(pattern(), 0..4)).prop_map(|(first, rest)| {
-        Patterns::new(std::iter::once(first.as_str()).chain(rest.iter().map(|s| &**s)))
+        Selector::new(std::iter::once(first.as_str()).chain(rest.iter().map(|s| &**s)))
             .unwrap()
     })
 }
 
 fn policy_strategy() -> impl Strategy<Value = Definition> {
     (
-        patterns_strategy(),
-        patterns_strategy(),
+        selectors(),
+        selectors(),
         prop::sample::subsequence(Action::ALL.to_vec(), 0..=6),
         any::<u8>(),
     )
