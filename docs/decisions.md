@@ -1733,10 +1733,21 @@ How to read this record:
   are usable from the start: they hold the pool's header, so `Pool::new` makes no
   commit that can fail. A purged page stops counting against the memory the system
   can commit. On Linux with strict overcommit, `madvise` and `mprotect` keep that
-  charge, so `os` purges with a `MAP_FIXED` remap (#475). `block::testing::{Scarce,
-  Switch}`, behind the `sim` feature, is heap memory whose commits a test makes
-  refuse, so a crate above `block` tests a refused commit through its production
-  path (#591).
+  charge, so `os` purges with a `MAP_FIXED` remap (#475). `os::memory::Memory`
+  reserves `PROT_NONE` pages, which take no charge, and commits with `mprotect`;
+  `ENOMEM` gives `Refused`, and a refused commit can leave part of its range
+  committed and charged until a purge or the drop. A failed purge remap panics, and
+  the drop then leaks the reserve: on Linux the remap can leave a hole that another
+  mapping fills, and an unmap would remove that mapping. `os::memory` builds on Linux
+  and macOS only; Windows waits for #477, and `node` adds no cfg for it. On Linux each
+  reserved or purged page has no huge pages (`MADV_NOHUGEPAGE`): the first touch of
+  a huge page takes 2 MiB, and a purge of part of one gives memory back only later.
+  A read and write `MAP_NORESERVE` reserve with a commit that does nothing lost: strict
+  overcommit and Windows charge it in full, and it never refuses (#66). The person
+  approved `unsafe` in `os::memory`, checked by tests on the real OS and not by Miri, on
+  2026-10-05 ("Yeah taht's fine"), #461. `block::testing::{Scarce, Switch}`, behind
+  the `sim` feature, is heap memory whose commits a test makes refuse, so a crate
+  above `block` tests a refused commit through its production path (#591).
 - **BLOCK VIEW (#110)** `Block::skip(self, count)` is a view of the same buffer that
   starts `count` bytes later, with no copy and no count change. `Block` is
   `{ header, start: u32, len: u32 }`, 16 bytes, so the largest block holds 2 GiB; a
@@ -2539,7 +2550,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
-| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. | `env`, `types`, `block` |
+| 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY). | `env`, `types`, `block` |
 | 2 | `transport` | Carries sessions of prioritized, cancellable streams and datagrams over QUIC, TLS over TCP, relays, and diodes on the `env::net` seam; never calls up. | `env`, `types`, `block` |
 | 2 | `buffer` | Stores each index's log durably within the disk budget (write-ahead ring, segments, trimming, floors, `append`) through a per-OS driver. | `env`, `types`, `block`, `codec` |
 | 2 | `clock` | Runs time source adapters and the peer exchange, feeds `estimate`, and serves mesh time as an interval. | `ring`, `env`, `types`, `estimate`, `wire`, `transport` |
