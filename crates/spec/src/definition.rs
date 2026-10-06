@@ -11,8 +11,8 @@
 //! text       := length:u64 UTF-8 bytes
 //! ```
 //!
-//! `allow` holds bit `n` for the `n`th [`Action`](crate::access::Action), in
-//! declaration order. `authority` is zero when `allow` does not hold `Write`.
+//! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
+//! admin 5. `authority` is zero when `allow` does not hold write.
 
 #![deny(
     clippy::indexing_slicing,
@@ -24,12 +24,15 @@
 use std::{fmt, str};
 
 use types::authority::Authority;
-use types::name::{self, Selector};
+use types::name;
 
 use crate::access::{Action, Actions, Policy};
+use crate::patterns::Patterns;
 
 const VERSION: u8 = 1;
 const ACCESS: u8 = 1;
+/// The fewest bytes a pattern text takes: its length.
+const TEXT_MIN: usize = 8;
 
 /// One definition: the value of one name in the spec tree. The name is the tree key,
 /// so it is not part of the definition.
@@ -86,8 +89,8 @@ impl Definition {
 }
 
 fn patterns(out: &mut Vec<u8>, patterns: &Patterns) {
-    count(out, patterns.texts.len());
-    for text in &patterns.texts {
+    count(out, patterns.texts().len());
+    for text in patterns.texts() {
         count(out, text.len());
         out.extend_from_slice(text.as_bytes());
     }
@@ -105,7 +108,9 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn at(&self) -> usize {
-        self.len.saturating_sub(self.rest.len())
+        self.len
+            .checked_sub(self.rest.len())
+            .expect("invariant: the bytes left are a suffix of the input")
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
@@ -125,9 +130,9 @@ impl<'a> Reader<'a> {
         Ok(byte)
     }
 
-    /// Reads a count. A count larger than the bytes left cannot be valid, so it is
-    /// refused before anything is allocated for it.
-    fn count(&mut self) -> Result<usize, Error> {
+    /// Reads a count of items that take at least `size` bytes each. A count whose
+    /// items cannot fit in the bytes left is refused before anything is allocated.
+    fn count(&mut self, size: usize) -> Result<usize, Error> {
         let at = self.at();
         let (&bytes, rest) = self
             .rest
@@ -136,20 +141,22 @@ impl<'a> Reader<'a> {
         self.rest = rest;
         usize::try_from(u64::from_le_bytes(bytes))
             .ok()
-            .filter(|n| *n <= self.rest.len())
+            .filter(|n| n.checked_mul(size).is_some_and(|b| b <= self.rest.len()))
             .ok_or(Error::Truncated { at })
     }
 
     fn patterns(&mut self) -> Result<Patterns, Error> {
         let at = self.at();
-        let n = self.count()?;
+        let n = self.count(TEXT_MIN)?;
         let mut texts = Vec::with_capacity(n);
         for _ in 0..n {
-            let len = self.count()?;
+            let len = self.count(1)?;
             let start = self.at();
             let bytes = self.take(len)?;
             let text = str::from_utf8(bytes).map_err(|e| Error::Utf8 {
-                at: start.saturating_add(e.valid_up_to()),
+                at: start
+                    .checked_add(e.valid_up_to())
+                    .expect("invariant: an offset into the input fits in usize"),
             })?;
             texts.push(text);
         }
@@ -174,60 +181,18 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The patterns of a selector as the file wrote them, in order, and the selector they
-/// read as. Two lists of patterns that select the same names are still two values.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Patterns {
-    texts: Box<[Box<str>]>,
-    selector: Selector,
-}
-
-impl Patterns {
-    /// Reads the patterns. A pattern with a leading `!` excludes names.
-    ///
-    /// # Errors
-    ///
-    /// The error of [`Selector::new`] when the patterns do not read as a selector.
-    pub fn new<'a>(
-        texts: impl IntoIterator<Item = &'a str>,
-    ) -> Result<Self, name::Error> {
-        let texts = texts
-            .into_iter()
-            .map(Box::from)
-            .collect::<Box<[Box<str>]>>();
-        let selector = Selector::new(texts.iter().map(|t| &**t))?;
-        Ok(Self { texts, selector })
-    }
-
-    /// The selector the patterns read as.
-    #[must_use]
-    pub const fn selector(&self) -> &Selector {
-        &self.selector
-    }
-
-    /// The patterns as written, in order.
-    #[must_use]
-    pub fn texts(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.texts.iter().map(|t| &**t)
-    }
-}
-
-impl fmt::Debug for Patterns {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.texts()).finish()
-    }
-}
-
 /// Bytes that are not the encoding of a definition. `at` is a byte offset into the
 /// bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The bytes have a format version newer than this build reads.
+    /// The bytes have a format version newer than this build reads. A newer node
+    /// wrote them; update this node.
     Newer {
         /// The version in the bytes.
         found: u8,
     },
-    /// The bytes have a format version that does not exist.
+    /// The bytes have a format version older than any that exists, so no node wrote
+    /// them: they are corrupt.
     Version {
         /// The version in the bytes.
         found: u8,
@@ -309,7 +274,7 @@ impl fmt::Display for Error {
             }
             Self::Authority { at, found } => write!(
                 f,
-                "authority {found} at byte {at} is on a policy that does not allow write"
+                "authority {found} at byte {at} is on a policy without write"
             ),
         }
     }

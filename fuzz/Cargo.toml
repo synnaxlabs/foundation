@@ -23,6 +23,7 @@ libfuzzer-sys = "0.4.13"
 ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
 sim = { path = "../crates/sim" }
+spec = { path = "../crates/spec" }
 types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
 
@@ -92,6 +93,13 @@ bench = false
 [[bin]]
 name = "ops_mcp"
 path = "fuzz_targets/ops_mcp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spec_definition"
+path = "fuzz_targets/spec_definition.rs"
 test = false
 doc = false
 bench = false

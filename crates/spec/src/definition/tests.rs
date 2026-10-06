@@ -1,4 +1,5 @@
 use proptest::prelude::*;
+use proptest::sample::Index;
 
 use super::*;
 
@@ -63,8 +64,16 @@ fn refuses_a_newer_or_unknown_version() {
     let mut bytes = policy().encode();
     bytes[0] = 2;
     assert_eq!(Definition::decode(&bytes), Err(Error::Newer { found: 2 }));
+    assert_eq!(
+        Error::Newer { found: 2 }.to_string(),
+        "the definition has format version 2, newer than 1"
+    );
     bytes[0] = 0;
     assert_eq!(Definition::decode(&bytes), Err(Error::Version { found: 0 }));
+    assert_eq!(
+        Error::Version { found: 0 }.to_string(),
+        "the definition has format version 0, which does not exist"
+    );
     assert_eq!(Definition::decode(&[]), Err(Error::Truncated { at: 0 }));
 }
 
@@ -96,6 +105,14 @@ fn refuses_bytes_that_end_early_or_run_on() {
         Definition::decode(&longer),
         Err(Error::TrailingBytes { at: end })
     );
+    assert_eq!(
+        Error::Truncated { at: 4 }.to_string(),
+        "the definition ends early at byte 4"
+    );
+    assert_eq!(
+        Error::TrailingBytes { at: 4 }.to_string(),
+        "bytes follow the definition at byte 4"
+    );
 }
 
 #[test]
@@ -106,9 +123,21 @@ fn refuses_a_count_larger_than_the_bytes_left() {
 }
 
 #[test]
+fn refuses_more_patterns_than_the_bytes_left_can_hold() {
+    let mut bytes = vec![VERSION, ACCESS];
+    bytes.extend_from_slice(&8_u64.to_le_bytes());
+    bytes.extend_from_slice(&[0; 8]);
+    assert_eq!(Definition::decode(&bytes), Err(Error::Truncated { at: 2 }));
+}
+
+#[test]
 fn refuses_a_pattern_that_is_not_utf8() {
     let bytes = access(&[b"ab\xff"], &[b"b"], 1, 0);
     assert_eq!(Definition::decode(&bytes), Err(Error::Utf8 { at: 20 }));
+    assert_eq!(
+        Error::Utf8 { at: 20 }.to_string(),
+        "a pattern is not UTF-8 at byte 20"
+    );
 }
 
 #[test]
@@ -156,7 +185,7 @@ fn refuses_an_authority_without_write() {
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        "authority 3 at byte 37 is on a policy that does not allow write"
+        "authority 3 at byte 37 is on a policy without write"
     );
 }
 
@@ -214,7 +243,7 @@ proptest! {
     #[test]
     fn encodes_each_decoded_byte_string_to_the_same_bytes(
         definition in definition(),
-        flips in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 1..4),
+        flips in prop::collection::vec((any::<Index>(), any::<u8>()), 1..4),
     ) {
         let mut bytes = definition.encode();
         for (at, byte) in flips {

@@ -4,4 +4,5 @@
 
 pub mod access;
 pub mod definition;
+pub mod patterns;
 pub mod tree;

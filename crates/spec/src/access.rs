@@ -5,10 +5,10 @@ use std::fmt;
 
 use types::authority::Authority;
 
-use crate::definition::Patterns;
+use crate::patterns::Patterns;
 
 /// What a subject may do on a name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     /// Read values and definitions.
     Read,
@@ -34,13 +34,21 @@ impl Action {
         Self::Admin,
     ];
 
+    /// The bit of the action in a stored set. Changing one changes stored bytes.
     const fn bit(self) -> u8 {
-        1 << self as u8
+        match self {
+            Self::Read => 1,
+            Self::Write => 1 << 1,
+            Self::Plan => 1 << 2,
+            Self::Apply => 1 << 3,
+            Self::Secret => 1 << 4,
+            Self::Admin => 1 << 5,
+        }
     }
 }
 
 /// A set of actions.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Actions(u8);
 
 impl Actions {
