@@ -29,6 +29,8 @@ fn refuses_a_character_that_is_not_printable_ascii() {
         ("k Pa", 1, ' '),
         ("kPa\n", 3, '\n'),
         ("kPa\u{200B}", 3, '\u{200B}'),
+        ("k\u{200D}Pa", 1, '\u{200D}'),
+        ("k\u{AD}Pa", 1, '\u{AD}'),
         ("k\u{202E}aP", 1, '\u{202E}'),
         ("\u{FEFF}kPa", 0, '\u{FEFF}'),
         ("°C", 0, '°'),
