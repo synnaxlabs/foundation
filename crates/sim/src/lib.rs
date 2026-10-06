@@ -90,6 +90,14 @@ impl Default for Config {
 /// sim.run().unwrap();
 /// handle.unwrap().join().unwrap();
 /// ```
+///
+/// # Panics
+///
+/// The drop of a `Sim` drops each task and each thread that has not started, also
+/// those that these drops start. When one of these drops panics, the others still
+/// run, and then the drop panics once with each message, as [`Error::Panicked`]
+/// gives them: those of the tasks first, then those of the threads, each in start
+/// order. It does not panic while the thread already panics.
 pub struct Sim {
     config: Config,
     shared: Shared,
@@ -445,13 +453,25 @@ fn message(payload: &(dyn Any + Send)) -> String {
 }
 
 impl Drop for Sim {
-    /// Drops every task and every thread that has not started. They may hold handles
-    /// to the run, so they are dropped outside its lock.
+    /// Drops every task and every thread that has not started, outside the lock, as
+    /// they may hold handles to the run. A drop may spawn a task or start a thread, so
+    /// it takes them again until none is left.
     fn drop(&mut self) {
-        let starts = lock(&self.shared).unstarted();
-        let futures = self.futures.borrow_mut().clear();
-        drop(starts);
-        drop(futures);
+        let mut panics = Vec::new();
+        loop {
+            let futures = self.futures.borrow_mut().clear();
+            let starts = lock(&self.shared).unstarted();
+            if futures.is_empty() && starts.is_empty() {
+                break;
+            }
+            panics.extend(drop_each(futures));
+            panics.extend(drop_each(starts.into_values()));
+        }
+        assert!(
+            panics.is_empty() || std::thread::panicking(),
+            "{}",
+            panics.join(THEN)
+        );
     }
 }
 

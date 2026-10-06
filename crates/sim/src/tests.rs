@@ -865,6 +865,86 @@ fn two_panics_in_drops_of_unstarted_threads_at_a_crash_give_one_panic() {
     assert_restarts(&mut sim, &node);
 }
 
+/// A run with two waiting tasks that hold a [`Bomb`] "bomb", and a thread that holds a
+/// [`Bomb`] "late" and has not run.
+fn bombed() -> Sim {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let _running = node.shards().start(shard("running"), |tasks| async move {
+        for bomb in [Bomb("bomb"), Bomb("bomb")] {
+            tasks.spawn(async move {
+                let _bomb = bomb;
+                pending::<()>().await;
+            });
+        }
+        pending::<()>().await;
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    let late = Bomb("late");
+    let _unstarted = node
+        .shards()
+        .start(shard("unstarted"), move |_| async move {
+            let _late = late;
+        });
+    sim
+}
+
+/// The message of the panic that dropping `sim` must raise.
+fn drop_panic(sim: Sim) -> String {
+    let dropped = panic::catch_unwind(AssertUnwindSafe(move || drop(sim)));
+    crate::message(&*dropped.unwrap_err())
+}
+
+#[test]
+fn panics_in_drops_when_the_sim_drops_give_one_panic() {
+    let message = "bomb, then a drop panicked: bomb, then a drop panicked: late";
+    assert_eq!(drop_panic(bombed()), message);
+}
+
+#[test]
+fn a_sim_that_drops_in_a_panic_does_not_panic_again() {
+    let sim = bombed();
+    let unwound = panic::catch_unwind(AssertUnwindSafe(move || {
+        let _sim = sim;
+        panic!("failed");
+    }));
+    assert_eq!(crate::message(&*unwound.unwrap_err()), "failed");
+}
+
+/// Spawns a waiting task that holds a [`Bomb`] "spawned", when dropped.
+struct Planter(env::tasks::Tasks);
+
+impl Drop for Planter {
+    fn drop(&mut self) {
+        let bomb = Bomb("spawned");
+        self.0.spawn(async move {
+            let _bomb = bomb;
+            pending::<()>().await;
+        });
+    }
+}
+
+#[test]
+fn a_panic_in_the_drop_of_a_task_that_a_drop_spawns_joins_the_drop_panic() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let _handle = node.shards().start(shard("shard-0"), |tasks| async move {
+        let planter = Planter(tasks.clone());
+        tasks.spawn(async move {
+            let _planter = planter;
+            pending::<()>().await;
+        });
+        let bomb = Bomb("bomb");
+        tasks.spawn(async move {
+            let _bomb = bomb;
+            pending::<()>().await;
+        });
+        pending::<()>().await;
+    });
+    sim.run_for(Span::SECOND).unwrap();
+    assert_eq!(drop_panic(sim), "bomb, then a drop panicked: spawned");
+}
+
 #[test]
 fn a_crash_leaves_an_unstarted_thread_of_another_node() {
     let mut sim = sim(0);
