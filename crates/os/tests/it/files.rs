@@ -318,24 +318,25 @@ fn a_sync_after_a_write_succeeds() {
 }
 
 #[test]
-fn free_drops_by_the_bytes_of_a_synced_write() {
+#[cfg_attr(target_os = "macos", ignore = "#931")]
+fn free_drops_by_the_bytes_of_a_created_file() {
     const LEN: u64 = 64 << 20;
-    // Other tests write to the same disk at the same time, and an attempt counts
-    // their bytes too.
+    // Other jobs on the host write to the same disk, and an attempt counts their bytes
+    // too.
     const ATTEMPTS: usize = 8;
     run(|files, _| async move {
-        let pool = pool();
-        let part = block(&pool, &vec![1; 512 << 10]);
         let mut seen = Vec::new();
         for attempt in 0..ATTEMPTS {
+            let path = attempt.to_string();
             let before = files.free().await.unwrap();
-            let file = create(&files, &attempt.to_string(), LEN).await;
-            file.write_at(0, &vec![part.clone(); 128]).await.unwrap();
-            file.sync().await.unwrap();
-            let taken = before.saturating_sub(files.free().await.unwrap());
+            let file = create(&files, &path, LEN).await;
+            let after = files.free().await.unwrap();
+            file.close().await;
+            let taken = before.saturating_sub(after);
             if taken.abs_diff(LEN) < LEN / 4 {
                 return;
             }
+            files.remove(Path::new(&path)).await.unwrap();
             seen.push(taken);
         }
         panic!("{seen:?} are not {LEN}");
