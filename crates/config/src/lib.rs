@@ -83,6 +83,22 @@ impl<'a> Check<'a> {
     fn key(&mut self, block: &'a Block) -> Option<(Name, Option<Span>)> {
         let keyword = &*block.keyword;
         let label = self.label(block)?;
+        let suffix = format!(".@{keyword}");
+        let most = Name::MAX_BYTES - suffix.len();
+        let bytes = label.text.len();
+        if bytes > most {
+            self.diagnostics.push(Diagnostic::new(
+                LONG_NAME,
+                label.span,
+                format!(
+                    "the name {:?} is {bytes} bytes, and a `{keyword}` name holds at \
+                     most {most}",
+                    label.text
+                ),
+                format!("Shorten the name to at most {most} bytes"),
+            ));
+            return None;
+        }
         let name = self.report(read::name(label))?;
         if name.reserved() {
             self.diagnostics.push(Diagnostic::new(
@@ -93,22 +109,6 @@ impl<'a> Check<'a> {
                     name.as_str()
                 ),
                 "Remove the `@` from each segment".into(),
-            ));
-            return None;
-        }
-        let suffix = format!(".@{keyword}");
-        let most = Name::MAX_BYTES - suffix.len();
-        let bytes = name.as_str().len();
-        if bytes > most {
-            self.diagnostics.push(Diagnostic::new(
-                LONG_NAME,
-                label.span,
-                format!(
-                    "the name {:?} is {bytes} bytes, and a `{keyword}` name holds at \
-                     most {most}",
-                    name.as_str()
-                ),
-                format!("Shorten the name to at most {most} bytes"),
             ));
             return None;
         }
@@ -556,21 +556,35 @@ mod tests {
         let policy = [("select", string("site_a.*")), ("disk", string("1GiB"))];
         let fits = format!("a.{}", "b".repeat(238));
         let long = format!("{fits}c");
+        // Past the 255 bytes of any name, the key limit still names the problem.
+        let longest = format!("{fits}{}", "c".repeat(16));
         let documents = [document(vec![
             settings(0, 0, &fits, &policy),
             settings(0, 100, &long, &policy),
+            settings(0, 200, &longest, &policy),
         ])];
         assert_eq!(
             check(&documents),
-            Err(vec![refused(
-                "config.long-name",
-                at(0, 101),
-                &format!(
-                    "the name {long:?} is 241 bytes, and a `node_settings` name holds \
-                     at most 240"
+            Err(vec![
+                refused(
+                    "config.long-name",
+                    at(0, 101),
+                    &format!(
+                        "the name {long:?} is 241 bytes, and a `node_settings` name \
+                         holds at most 240"
+                    ),
+                    "Shorten the name to at most 240 bytes",
                 ),
-                "Shorten the name to at most 240 bytes",
-            )])
+                refused(
+                    "config.long-name",
+                    at(0, 201),
+                    &format!(
+                        "the name {longest:?} is 256 bytes, and a `node_settings` \
+                         name holds at most 240"
+                    ),
+                    "Shorten the name to at most 240 bytes",
+                ),
+            ])
         );
         let documents = [document(vec![settings(0, 0, &fits, &policy)])];
         let keys = check(&documents).unwrap().into_keys();
