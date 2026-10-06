@@ -61,8 +61,13 @@ impl<const N: usize> Writer<N> {
             next: &mut self.seq,
         };
         let value = f(self.value);
-        for (word, &new) in self.shared.words.iter().zip(&value) {
-            word.store(new, Relaxed);
+        for ((word, &new), &old) in
+            self.shared.words.iter().zip(&value).zip(&self.value)
+        {
+            // A store takes the line from the readers, even with the same value.
+            if new != old {
+                word.store(new, Relaxed);
+            }
         }
         self.value = value;
         drop(update);
@@ -157,6 +162,20 @@ mod tests {
         let (mut writer, reader) = new([]);
         writer.update(|value| value);
         assert_eq!(reader.read(|[]| 7), 7);
+    }
+
+    #[test]
+    fn reads_each_word_after_updates_that_change_only_some() {
+        let (mut writer, reader) = new([0, 0]);
+        writer.update(|_| [1, 0]);
+        writer.update(|_| [0, 0]);
+        assert_eq!(reader.read(|value| value), [0, 0]);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| writer.update(|_| panic!("once"))))
+                .is_err()
+        );
+        writer.update(|_| [0, 2]);
+        assert_eq!(reader.read(|value| value), [0, 2]);
     }
 
     #[test]
@@ -272,6 +291,17 @@ mod model {
             });
             writer.update(|_| [1, 1]);
             reads.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn never_reads_a_torn_value_when_some_words_do_not_change() {
+        bounded(|| {
+            let (mut writer, reader) = new([0, 0, 0]);
+            let reads = thread::spawn(move || reader.read(|value| value));
+            writer.update(|_| [1, 0, 1]);
+            let value = reads.join().unwrap();
+            assert!(value == [0, 0, 0] || value == [1, 0, 1], "torn: {value:?}");
         });
     }
 
