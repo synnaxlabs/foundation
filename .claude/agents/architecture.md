@@ -35,6 +35,9 @@ Check:
 - Structural avoidance: a workaround for a deeper problem. Name the problem.
 - New patterns: a trait with one implementation, a registry, or new machinery where an
   existing mechanism already covers the case.
+- Build or use: a hand-written protocol, parser, or transport where a library takes
+  injected I/O and time, or a choice judged only by its first caller. Name the future
+  users on record.
 - Shape decisions: read the PR's "Shape decisions" section. Challenge any choice where
   a rejected alternative is the better architecture.
 
