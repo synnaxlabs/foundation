@@ -364,6 +364,8 @@ How to read this record:
   encoded form has no padding. `codec` owns the check of the ends, raw and encoded,
   and a view of a raw variable series relies on it. `codec` does not check UTF-8 (the
   owner is #556). Vector numbers in errors count across the ends and the elements.
+  `Decoder` decodes a scalar series one vector at a time, so a reader of a series from
+  a peer needs room for only 1024 samples, whatever the count (#416).
 - **S4 (r2 starting point, not locked)** Per shard: a preallocated write-ahead ring
   (CRC32C per record, one group-commit sync), then immutable columnar segments with one
   chunk group per index. Eviction deletes whole segments. No per-channel files. A failed
@@ -622,9 +624,10 @@ How to read this record:
   the same place in each bracket, so an overlap gains little, and a broken drift bound
   would stay wrong for the life of an overlap, not for 8 exchanges. Decided by the
   coordinator (#84). An error that grows past 36500 days stops at 36500 days ("unknown")
-  and never fails, so a lone Windows node gets OS time as OS CLOCK BOUND says. An error
-  over 36500 days fails only in a new measurement: `Measurement::new` gives `None`. The
-  person decided on 2026-10-05 ("Ok that's fine"), #225. In an `Interval` from
+  and never fails, so a lone Windows node gets OS time as OS CLOCK BOUND says, when it
+  holds no known estimate (CLOCK HOLDOVER). An error over 36500 days fails only in a new
+  measurement: `Measurement::new` gives `None`. The person decided on 2026-10-05 ("Ok
+  that's fine"), #225. In an `Interval` from
   `Measurement::interval`, "unknown" is a half-width of 36500 days, and the true time
   can be outside it. Decided by the `time` builder (#142). `combine` uses each bound
   with its full growth, so an "unknown" bound never cuts another. A bound of 36500 days
@@ -699,9 +702,15 @@ How to read this record:
   by drift. It never follows the largest group or one side of a tie. `Reader::status`
   gives the status on any shard, and `node` publishes it. `push` and `remove` do not
   also return it: one value gets one way to read it (#634). The next majority ends the
-  holdover. Decided by the `time` builder (#142). The coordinator approved
-  `Reader::status` within it (#598). `estimate::discipline` chooses what mesh time
-  follows, and `clock` writes it, so the decision logic is in layer 1 (#635).
+  holdover, but after a known estimate only a known one does. Decided by the `time`
+  builder (#142). The coordinator approved `Reader::status` within it (#598).
+  `estimate::discipline` chooses what mesh time follows, and `clock` writes it, so the
+  decision logic is in layer 1 (#635). An unknown estimate never replaces a known one:
+  after a known estimate, when only unknown bounds agree, the clock holds over until a
+  known estimate. The person decided on 2026-10-05 ("a is fine"), #489. Known is as
+  `combine` sorts a bound: under 36500 days at the estimate's time. So when drift grows
+  the held bound to 36500 days, the clock follows an unknown estimate. Decided by the
+  `time` builder (#835).
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
   not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
@@ -725,11 +734,12 @@ How to read this record:
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
-  `clock` reads that as `Measurement::unknown` (36500 days): a node alone still gets OS
-  time, with an error that says "unknown", and beside a known bound the reading does not
-  vote (ESTIMATE COMBINE). A fixed invented error lost: a wrong value gives a bound that
-  is not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
-  'unknown'"), #144. The split between `env::wall` and `clock` is from #172. When known
+  `clock` reads that as `Measurement::unknown` (36500 days): a node alone with no known
+  estimate (CLOCK HOLDOVER) still gets OS time, with an error that says "unknown", and
+  beside a known bound the reading does not vote (ESTIMATE COMBINE). A fixed invented
+  error lost: a wrong value gives a bound that is not true. Amends ENV SEAMS. The person
+  decided on 2026-10-05 ("Use it, error 'unknown'"), #144. The split between `env::wall`
+  and `clock` is from #172. When known
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
   source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
@@ -1518,9 +1528,12 @@ How to read this record:
   of a front end, a core crate, or a kind. No two producers share a name. A producer
   declares each code as a `const` item, so a bad code fails the build. A code never
   changes between releases. Each producer maps its own errors with `From<&Error>`
-  beside them, so `config`, `ops`, and `node` never match a producer's variants.
-  `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new` breaks
-  no producer. No severity field: the warnings in K2 and R13-10 belong to plan output.
+  beside them, so `config`, `ops`, and `node` never match a producer's variants. An
+  error from a crate below `document` that a producer shows as a diagnostic gives its
+  message with `Display` and its fix with `fix()`; the producer adds the code and the
+  span. `Diagnostic` is `#[non_exhaustive]`, so a new field with a default in `new`
+  breaks no producer. No severity field: the warnings in K2 and R13-10 belong to plan
+  output.
   `ops` operation error codes use `Code` too, so the grammar has one home. A code
   crosses the wire as text, and no reader makes a `Code` from it. Lost: a `Diagnose`
   trait behind `Box<dyn>` (not `Clone`, and a fix is optional); number codes (a
@@ -1569,8 +1582,9 @@ How to read this record:
   tree key is `<name>.@access` (for example `site_a.operators.@access`). The person
   approved the name on 2026-10-06 ("Yes I confirm", #729). Actions: read, write, plan,
   apply, secret, admin. No groups or roles; a group is a selector over subject names. A
-  connector may write channels under its own name by default. `plan` lists access
-  changes separately. SSO comes later.
+  connector may write channels under its own name by default. The connector default
+  caps authority at ABSOLUTE. Decided by the advisor on 2026-10-06, #455. `plan` lists
+  access changes separately. SSO comes later.
 - **K4** Config refers to secrets by name only. Values never appear in files, plans, or
   output. Secrets are write-only (`secret set`, `secret delete`). `plan` checks that
   every reference resolves. Agents wire references but never see values.
@@ -2778,7 +2792,10 @@ conclusion together". Each one is listed below.
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,
   X44, X45; R12-3 error classes without groups; R12-7 vendor code only in dedicated,
   never-detached threads; R12-13 no always-on scan loop; R12-14 one cycle engine per
-  connector; SHARD PIN (#718), the advisor's choice A narrowed to a bool.
+  connector; SHARD PIN (#718), the advisor's choice A narrowed to a bool; an error
+  below `document` that a producer shows as a diagnostic (DIAGNOSTICS) has `Display`
+  and `fix()` and no `Code`, and the grammar of a value has one home, in `types`
+  (advisor, #328).
 
 ### 5.3 Parameters for experiment
 
