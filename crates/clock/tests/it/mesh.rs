@@ -181,6 +181,26 @@ fn holds_over_when_only_an_unknown_source_is_left() {
     assert_eq!(reader.status(), synced(&node, Span::ZERO, ms(1)));
 }
 
+/// A held bound that drift grows to 36500 days is unknown, so the clock follows the
+/// unknown estimate.
+#[test]
+fn follows_an_unknown_estimate_once_drift_makes_the_held_one_unknown() {
+    let (mut sim, node) = node();
+    let (mut clock, reader) = Clock::new(node.clock());
+    let [peer, os] = [clock.add(), clock.add()];
+    let known = measure(&node, Span::ZERO, Span::from_nanos(UNKNOWN.nanos() - 1));
+    let os_offset = Span::from_nanos(5 * Span::SECOND.nanos());
+    clock.push(peer, known);
+    clock.push(os, Measurement::unknown(node.clock().now(), os_offset));
+    assert_eq!(reader.status(), Status::Synced(known));
+    sim.run_for(Span::SECOND).expect("the run ends");
+    clock.push(os, Measurement::unknown(node.clock().now(), os_offset));
+    sim.run_for(Span::HOUR).expect("the run ends");
+    // An hour at 500 ppm slews 1.8 s.
+    let slewed = Measurement::unknown(node.clock().now(), ms(1800));
+    assert_eq!(reader.status(), Status::Synced(slewed));
+}
+
 #[test]
 fn holds_over_while_sources_split_then_follows_the_next_majority() {
     let (mut sim, node) = node();

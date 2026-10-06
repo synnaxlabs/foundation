@@ -622,9 +622,10 @@ How to read this record:
   the same place in each bracket, so an overlap gains little, and a broken drift bound
   would stay wrong for the life of an overlap, not for 8 exchanges. Decided by the
   coordinator (#84). An error that grows past 36500 days stops at 36500 days ("unknown")
-  and never fails, so a lone Windows node gets OS time as OS CLOCK BOUND says. An error
-  over 36500 days fails only in a new measurement: `Measurement::new` gives `None`. The
-  person decided on 2026-10-05 ("Ok that's fine"), #225. In an `Interval` from
+  and never fails, so a lone Windows node gets OS time as OS CLOCK BOUND says, when it
+  holds no known estimate (CLOCK HOLDOVER). An error over 36500 days fails only in a new
+  measurement: `Measurement::new` gives `None`. The person decided on 2026-10-05 ("Ok
+  that's fine"), #225. In an `Interval` from
   `Measurement::interval`, "unknown" is a half-width of 36500 days, and the true time
   can be outside it. Decided by the `time` builder (#142). `combine` uses each bound
   with its full growth, so an "unknown" bound never cuts another. A bound of 36500 days
@@ -699,12 +700,15 @@ How to read this record:
   by drift. It never follows the largest group or one side of a tie. `Reader::status`
   gives the status on any shard, and `node` publishes it. `push` and `remove` do not
   also return it: one value gets one way to read it (#634). The next majority ends the
-  holdover. Decided by the `time` builder (#142). The coordinator approved
-  `Reader::status` within it (#598). `estimate::discipline` chooses what mesh time
-  follows, and `clock` writes it, so the decision logic is in layer 1 (#635). An
-  unknown estimate never replaces a known one: after a known estimate, when only
-  unknown bounds agree, the clock holds over until a known estimate. The person decided
-  on 2026-10-05 ("a is fine"), #489.
+  holdover, but after a known estimate only a known one does. Decided by the `time`
+  builder (#142). The coordinator approved `Reader::status` within it (#598).
+  `estimate::discipline` chooses what mesh time follows, and `clock` writes it, so the
+  decision logic is in layer 1 (#635). An unknown estimate never replaces a known one:
+  after a known estimate, when only unknown bounds agree, the clock holds over until a
+  known estimate. The person decided on 2026-10-05 ("a is fine"), #489. Known is as
+  `combine` sorts a bound: under 36500 days at the estimate's time. So when drift grows
+  the held bound to 36500 days, the clock follows an unknown estimate. Decided by the
+  `time` builder (#835).
 - **MESH SLEW (2026-10-05)** After the first estimate, mesh time moves toward each new
   estimate at no more than 500 ppm (ntpd's maximum slew), in `estimate::Slew`. The part
   not yet applied goes into the error, so a slew of 1 s takes 2000 s and its error says
@@ -728,11 +732,12 @@ How to read this record:
 - **OS CLOCK BOUND (2026-10-05)** The OS wall clock is a source. `env::wall` gives the
   OS error bound with each reading where the OS has one (`adjtimex` on Linux,
   `ntp_adjtime` on macOS). Where it has none (Windows), `env::wall` gives `None`, and
-  `clock` reads that as `Measurement::unknown` (36500 days): a node alone still gets OS
-  time, with an error that says "unknown", and beside a known bound the reading does not
-  vote (ESTIMATE COMBINE). A fixed invented error lost: a wrong value gives a bound that
-  is not true. Amends ENV SEAMS. The person decided on 2026-10-05 ("Use it, error
-  'unknown'"), #144. The split between `env::wall` and `clock` is from #172. When known
+  `clock` reads that as `Measurement::unknown` (36500 days): a node alone with no known
+  estimate (CLOCK HOLDOVER) still gets OS time, with an error that says "unknown", and
+  beside a known bound the reading does not vote (ESTIMATE COMBINE). A fixed invented
+  error lost: a wrong value gives a bound that is not true. Amends ENV SEAMS. The person
+  decided on 2026-10-05 ("Use it, error 'unknown'"), #144. The split between `env::wall`
+  and `clock` is from #172. When known
   peers split, `combine` fails, so the clock is unsynced before its first estimate and
   holds over after it (CLOCK HOLDOVER). A known OS bound still votes. Dropping the OS
   source in `clock` when a peer exists lost: it also drops a narrow OS bound (Linux,
