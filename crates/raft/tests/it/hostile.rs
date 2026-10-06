@@ -1,42 +1,62 @@
 //! What a message from a voter that does not lead does to another node.
 
-use raft::{Body, Data, Entry, Error, Message, Position, Role, Term, Voters};
+use raft::{Body, Data, Entry, Error, Message, Position, Raft, Role, Term, Voters};
 
 use crate::network::{Action, ELECTION, Network};
 
-// An `Append` from `sender` in `term` that makes `victim` the only voter.
-fn alone(network: &Network, sender: usize, victim: usize, term: Term) -> Message {
+// An `Append` from `sender` in `term` that writes and commits one entry, which makes
+// `victim` the only voter. Returns the entry too.
+fn forged_append(
+    network: &Network,
+    sender: usize,
+    victim: usize,
+    term: Term,
+) -> (Message, Entry) {
     let prev = network.disks[victim].entries.last().unwrap().at;
     let voters = Voters {
         incoming: [Network::key(victim)].into_iter().collect(),
         ..Voters::default()
     };
-    let config = Entry {
-        at: Position {
-            term,
-            index: prev.index + 1,
-        },
+    let at = Position {
+        term,
+        index: prev.index + 1,
+    };
+    let entry = Entry {
+        at,
         data: Data::Voters(voters),
     };
-    Message {
+    let append = Message {
         from: Network::key(sender),
         to: Network::key(victim),
         term,
         body: Body::Append {
             prev,
-            entries: vec![config],
-            commit: 0,
+            entries: vec![entry.clone()],
+            commit: at.index,
         },
-    }
+    };
+    (append, entry)
+}
+
+// A known gap until #750: checks that `node` takes `append`. It follows the sender in
+// the append's term, and writes and commits `entry`.
+fn check_taken(node: &mut Raft, append: Message, entry: Entry) {
+    let (term, sender) = (append.term, append.from);
+    node.step(append).unwrap();
+    let state = (node.role(), node.term(), node.leader());
+    assert_eq!(state, (Role::Follower, term, Some(sender)));
+    let ready = node.ready();
+    assert_eq!(ready.entries, [entry]);
+    assert_eq!(ready.committed, ready.entries);
 }
 
 #[test]
-fn a_voter_that_does_not_lead_cannot_make_a_follower_commit_alone() {
+fn a_voter_that_does_not_lead_cannot_make_a_follower_commit_alone_in_its_term() {
     let mut network = Network::new(&[Position::default(); 3], 0);
     let (leader, term) = network.settle(&[]).unwrap();
     let victim = (leader + 1) % 3;
     let sender = (leader + 2) % 3;
-    let append = alone(&network, sender, victim, term);
+    let (append, _) = forged_append(&network, sender, victim, term);
     let err = network.nodes[victim].step(append).unwrap_err();
     let from = Network::key(sender);
     assert_eq!(err, Error::SecondLeader { term, from });
@@ -48,51 +68,32 @@ fn a_voter_that_does_not_lead_cannot_make_a_follower_commit_alone() {
     }
 }
 
-// A known gap until #750: no node can tell the leader of a new term from a voter that
-// does not lead.
 #[test]
-fn a_voter_that_does_not_lead_can_make_a_follower_take_a_term_of_its_own() {
+fn a_voter_that_does_not_lead_can_make_a_follower_commit_alone_in_a_new_term() {
     let mut network = Network::new(&[Position::default(); 3], 0);
     let (leader, term) = network.settle(&[]).unwrap();
     let victim = (leader + 1) % 3;
     let sender = (leader + 2) % 3;
-    let forged = Term(term.0 + 1);
-    let append = alone(&network, sender, victim, forged);
-    let Body::Append { entries, .. } = append.body.clone() else {
-        unreachable!()
-    };
-    network.nodes[victim].step(append).unwrap();
-    let node = &mut network.nodes[victim];
-    assert_eq!(
-        (node.term(), node.leader()),
-        (forged, Some(Network::key(sender)))
-    );
-    assert_eq!(node.ready().entries, entries);
+    let (append, entry) = forged_append(&network, sender, victim, Term(term.0 + 1));
+    check_taken(&mut network.nodes[victim], append, entry);
 }
 
-// A known gap until #750. A leader steps down for a reply of a higher term, since a
-// quorum may have moved on, so a lease cannot close the gap.
+// A reply of a higher term ends the leader's term and its lease, so a lease that drops
+// a forged `Append` cannot close the gap.
 #[test]
-fn a_voter_that_does_not_lead_can_make_the_leader_take_a_term_of_its_own() {
+fn a_voter_that_does_not_lead_can_make_the_leader_commit_alone_in_a_new_term() {
     let mut network = Network::new(&[Position::default(); 3], 0);
     let (leader, term) = network.settle(&[]).unwrap();
     let sender = (leader + 1) % 3;
     let forged = Term(term.0 + 1);
-    let append = alone(&network, sender, leader, forged);
-    let Body::Append { entries, .. } = append.body.clone() else {
-        unreachable!()
-    };
+    let (append, entry) = forged_append(&network, sender, leader, forged);
     let reply = Message {
         body: Body::HeartbeatReply,
         ..append.clone()
     };
-    network.nodes[leader].step(reply).unwrap();
-    network.nodes[leader].step(append).unwrap();
     let node = &mut network.nodes[leader];
-    assert_eq!(node.role(), Role::Follower);
-    assert_eq!(
-        (node.term(), node.leader()),
-        (forged, Some(Network::key(sender)))
-    );
-    assert_eq!(node.ready().entries, entries);
+    node.step(reply).unwrap();
+    let state = (node.role(), node.term(), node.leader());
+    assert_eq!(state, (Role::Follower, forged, None));
+    check_taken(node, append, entry);
 }
