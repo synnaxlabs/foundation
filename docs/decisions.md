@@ -976,7 +976,7 @@ How to read this record:
   as it is. It trusts its voters: one that lies can already break safety, because a
   false `AppendReply` counts as held, so a bound on the term would guard nothing. No
   bound on a term jump spares an honest node that was down, either. Lost: a sender
-  proves a term jump with a signed term, which needs `mesh`. The person decided on
+  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
   2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
   `hard.term`, `Raft::new` starts at that term with no vote. The node sends nothing
   before its write, so no peer counted a vote or an answer that a lost `hard` held. The
@@ -1001,7 +1001,11 @@ How to read this record:
   leader, and a node keeps the leader of its term until the term ends, through a
   step-down and a campaign. A node that knows no leader of its term, after a restart or
   its vote, takes the first. The person approved it on 2026-10-05 ("Yeah that's fine",
-  #391). A bad message changes nothing.
+  #391). A bad message changes nothing. A voter that does not lead can still move a
+  node to a term of its own: an `Append` of a higher term, or a reply of a higher term
+  and then an `Append`, makes the node follow the sender. A lease does not stop it,
+  because a leader steps down for a reply of a higher term. Tests pin this gap until
+  #750. Decided by the `consensus` builder; the coordinator approved it on #391.
   `Body::Heartbeat { commit }` carries the commit index, capped at what that follower
   is known to hold. A leader commits an index only when a quorum holds it and its
   entry is of the leader's own term. A follower commits no further than the last
