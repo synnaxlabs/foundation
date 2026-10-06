@@ -7,9 +7,4 @@
     clippy::string_slice
 )]
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the InfluxDB client of #341 is the first user")
-)]
-mod http;
 pub mod line;
