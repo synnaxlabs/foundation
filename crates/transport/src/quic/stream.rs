@@ -13,7 +13,7 @@ use noq_proto::{
     WriteError,
 };
 
-use super::{Event, connection};
+use super::{Body, Event, connection};
 use crate::message::{Prefix, Reader};
 use crate::{Class, Code, Error};
 
@@ -117,15 +117,6 @@ struct Claim {
 /// A fault of the peer's that closes the connection, with the reason.
 #[derive(Debug)]
 pub(super) struct Fault(pub(super) String);
-
-/// A message body that the stream holds until the peer acknowledges it.
-struct Body(Block);
-
-impl AsRef<[u8]> for Body {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
 
 impl Sender {
     /// A sender for `key` that starts the stream with `class`'s byte.
