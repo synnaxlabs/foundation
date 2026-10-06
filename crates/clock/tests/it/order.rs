@@ -249,3 +249,21 @@ fn a_status_read_during_a_push_never_goes_back() {
         );
     }
 }
+
+/// A push in holdover that leaves the discipline as it is writes nothing, so a status
+/// read that overlaps it does not run again.
+#[test]
+fn a_push_that_changes_nothing_does_not_make_a_read_run_again() {
+    let (paused, mut clock, reader, source) = clock();
+    clock.push(source, exact(SECOND, 0));
+    let _ = clock.add();
+    let before = paused.reads.load(SeqCst);
+    let (status, ()) = overlap(
+        &paused,
+        || reader.status(),
+        || clock.push(source, exact(SECOND, 0)),
+    );
+    let reads = paused.reads.load(SeqCst) - before;
+    assert!(matches!(status, Status::Holdover(..)), "{status:?}");
+    assert_eq!(reads, 2, "one read in the status and one in the push");
+}

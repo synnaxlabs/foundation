@@ -115,9 +115,7 @@ impl Index {
             live,
             backfill: None,
         });
-        let key = self.readers.open(Reader::Unnamed, start).key;
-        self.readers.grant(key, limit_bytes);
-        key
+        self.readers.open(Reader::Unnamed, start, limit_bytes).key
     }
 
     /// Spends the seq of `accepted`, whose frame is in the buffer, and renews the
@@ -440,8 +438,7 @@ mod tests {
                 live: 0,
                 backfill: None,
             });
-            let session = index.readers.open(Reader::Unnamed, start).key;
-            index.readers.grant(session, u64::MAX);
+            let session = index.readers.open(Reader::Unnamed, start, u64::MAX).key;
             let series = stamps(&[1, 2]);
             let mut accepted = index
                 .check(key, Path::Live, Ok(&series), at(1), mesh())
@@ -517,8 +514,7 @@ mod tests {
                 live: 0,
                 backfill: None,
             });
-            let complete = index.readers.open(Reader::Unnamed, start).key;
-            index.readers.grant(complete, u64::MAX);
+            index.readers.open(Reader::Unnamed, start, u64::MAX);
             let series = stamps(&[1, 2]);
             let mut accepted = index
                 .check(key, Path::Live, Ok(&series), at(1), mesh())
