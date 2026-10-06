@@ -1427,6 +1427,17 @@ How to read this record:
   writing the whole file with comments attached to items, which loses the layout; and
   moving the bytes of a moved block, which a caller that changes the Document it read
   never needs. Decided by the `config` builder; approved by the coordinator (#249).
+- **HCL ERRORS (2026-10-05)** Each function of `config-hcl` gives only the errors it
+  can have. `read` gives a list of `Error`, `write` a list of `Unwritable`, and
+  `update` a `Refusal`: the problems in the old text, or else the parts of the new
+  Document that HCL text cannot hold. Nesting past the depth limit is
+  `Error::TooDeep` from `read` and `Unwritable::TooDeep` from `write`, and both give
+  `document`'s diagnostic. Lost: one `Error` for all three, so each caller of `read`
+  handled a variant that `read` never gives; one `TooDeep` for both, which needs that
+  shared type (#370); a checked Document type, which gives each caller two calls; and
+  an `update` that takes the Document that `read` gave for the text, so it gives only
+  `Unwritable`, but writes wrong text with no error when a caller gives another
+  Document. Decided by the `config` builder; approved by the coordinator (#330).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
