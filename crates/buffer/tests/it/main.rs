@@ -228,7 +228,11 @@ fn a_new_ring_keeps_its_layout_across_opens() {
         let other = layout(2 * AREA, 2 * BODY_MAX);
         let buffer = shard.open(other, &mut Slots::new()).await.expect("reopens");
         assert_eq!(buffer.layout(), first);
-        assert_eq!(shard.memory.syncs(), 1, "a reopen with no data syncs nothing");
+        assert_eq!(
+            shard.memory.syncs(),
+            1,
+            "a reopen with no data syncs nothing"
+        );
     });
     let bytes = memory.bytes(RING);
     assert_eq!(bytes.len(), to_usize(AREA_START + AREA));
