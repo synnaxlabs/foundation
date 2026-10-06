@@ -143,6 +143,11 @@ state on `main`.
   newest configuration (RAFT VOTERS, #654). Not built (`mesh`). A voter that lies can
   also break safety, because a false `AppendReply` counts as held, so `raft` trusts
   its voters. No change in `raft` (RAFT SURFACE, #352 item 2).
+- A voter that does not lead can make a follower commit a voter set alone: it sends
+  one `Append` with a configuration entry in a term the follower has not seen, or in
+  its term before the follower hears that term's leader. The two logs then differ at
+  one index. Open by decision; tests pin both sequences (#391). The long-term fix is
+  a proof of election.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
