@@ -1520,7 +1520,7 @@ How to read this record:
   (#37) gives files under one data directory, with owned blocks and a sync that
   poisons the file on failure (S4). One handle at a time holds a file open to write,
   until it drops and its calls end; another write open fails with `Busy` (#392).
-  `File::close` ends after the calls of the file end; a drop closes without a wait
+  `File::close` ends after the calls of its handle end; a drop closes without a wait
   (#516). Each `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP
   sockets that move GSO and GRO batches with ECN and the local address, TCP streams, and
   listeners. `env::serial` (#431) gives serial ports that move bytes at the line rate,

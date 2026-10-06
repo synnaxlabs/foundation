@@ -6,8 +6,9 @@ use std::future::poll_fn;
 use std::path::Path;
 use std::pin::{Pin, pin};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Pool};
 use env::files::{Error, File, Mode, Operation};
@@ -1101,4 +1102,36 @@ fn a_dropped_close_closes_the_file_without_a_wait() {
     let opens: Vec<_> = (0..32).map(open_after_dropped_close).collect();
     assert!(opens.iter().all(|open| both.contains(open)), "{opens:?}");
     assert!(both.iter().all(|end| opens.contains(end)), "{opens:?}");
+}
+
+/// A waker that counts its wakes.
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn a_dropped_close_is_not_woken_when_its_calls_end() {
+    for value in 0..8 {
+        let woken = run(value, MIB, |node, _| async move {
+            let pool = pool();
+            let file = create(&node, "a", 1_024).await;
+            let parts = [block(&pool, &[1; 1_024])];
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(write.as_mut()).await;
+            drop(write);
+            let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&wakes));
+            let mut close = Box::pin(file.close());
+            let poll = close.as_mut().poll(&mut Context::from_waker(&waker));
+            assert!(poll.is_pending());
+            drop(close);
+            node.clock().sleep(Span::MILLISECOND).await;
+            wakes.0.load(Ordering::Relaxed)
+        });
+        assert_eq!(woken, 0, "value {value}");
+    }
 }

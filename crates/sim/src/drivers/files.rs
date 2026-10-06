@@ -187,7 +187,7 @@ impl Drop for Descriptor {
     fn drop(&mut self) {
         let unused = lock(&self.node.shared)
             .files()
-            .close(self.node.node, self.handle);
+            .release(self.node.node, self.handle);
         drop(unused);
     }
 }
@@ -204,10 +204,11 @@ impl Future for Close {
         let waker = cx.waker().clone();
         let (poll, unused) = lock(&descriptor.node.shared)
             .files()
-            .settle(descriptor.handle, waker);
+            .poll_close(descriptor.handle, waker);
         drop(unused);
         if poll.is_ready() {
-            self.0 = None;
+            // The drop closes the descriptor, which locks the state.
+            drop(self.0.take());
         }
         poll
     }

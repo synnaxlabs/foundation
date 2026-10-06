@@ -386,11 +386,11 @@ impl File {
         result
     }
 
-    /// Closes the file. The future ends after every call of the file ends, those of
-    /// dropped futures too, and the file is closed. A write open of the same path
-    /// then succeeds, unless another handle holds the file. A drop closes the file
-    /// too, but without a wait, so a reopen before its calls end gives
-    /// [`Error::Busy`].
+    /// Closes the file. The future ends after every call of this handle ends, those
+    /// of dropped futures too, and the file is closed. A write open of the same path
+    /// then succeeds, unless another handle holds the file. A drop closes the handle
+    /// too, but without a wait. After the drop of a write handle, a write open before
+    /// its calls end gives [`Error::Busy`].
     ///
     /// It gives no error: [`File::sync`] makes the bytes durable, and a close after
     /// it loses nothing. A drop of the future closes the file without a wait.

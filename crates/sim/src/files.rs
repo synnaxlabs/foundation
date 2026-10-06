@@ -396,7 +396,7 @@ impl Files {
     /// Polls the close of descriptor `handle`: ready when none of its calls is in
     /// flight. Else it keeps `waker` to wake when one of them ends. Returns the waker
     /// to drop after the lock is released.
-    pub(crate) fn settle(
+    pub(crate) fn poll_close(
         &mut self,
         handle: Handle,
         waker: Waker,
@@ -413,7 +413,7 @@ impl Files {
 
     /// Closes descriptor `handle` of `node`. Returns the waker of its close, to drop
     /// after the lock is released.
-    pub(crate) fn close(&mut self, node: usize, handle: Handle) -> Option<Waker> {
+    pub(crate) fn release(&mut self, node: usize, handle: Handle) -> Option<Waker> {
         self.disks[node].release(handle);
         self.closes.remove(&handle.key)
     }

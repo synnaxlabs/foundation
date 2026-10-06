@@ -37,7 +37,8 @@ pub(crate) enum Cause {
 pub(crate) struct Handle {
     pub(crate) inode: u64,
     pub(crate) writable: bool,
-    /// The key of the open that made it. No other handle of the run has it.
+    /// The key of the open that made it. No other handle of the run has it. `files`
+    /// finds the calls and the close of a descriptor by it.
     pub(crate) key: u64,
 }
 
