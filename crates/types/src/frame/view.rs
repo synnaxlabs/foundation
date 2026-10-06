@@ -6,7 +6,7 @@ use std::iter;
 use super::key_set::{self, KeySet};
 use super::{
     Form, Frame, Path, Range, SERIES_ALIGN, body_start, bounds, charge_of, end_of,
-    lead, parts, to_u32, to_usize,
+    lead, next_end, parts, to_u32, to_usize,
 };
 use crate::channel;
 
@@ -51,7 +51,7 @@ impl List {
         }
     }
 
-    fn holds_group(&self, group: u32) -> bool {
+    fn has_group(&self, group: u32) -> bool {
         self.groups.binary_search(&group).is_ok()
     }
 }
@@ -145,8 +145,8 @@ impl<'a> View<'a> {
     pub fn range(&self, group: u32) -> Option<Range> {
         let held = match &self.mask.held {
             Held::Every => true,
-            Held::Only(list) => list.holds_group(group),
-            Held::Except(list) => !list.holds_group(group),
+            Held::Only(list) => list.has_group(group),
+            Held::Except(list) => !list.has_group(group),
         };
         if held { self.frame.range(group) } else { None }
     }
@@ -184,33 +184,65 @@ impl<'a> View<'a> {
     /// complete reader spends. Equal to [`Frame::charge`] when the mask holds every
     /// present series. Time is constant when the mask holds every entry, else
     /// O(m log(n/m)) for the smaller m and larger n of the frame's series and the
-    /// entries the mask lists: those it holds, or those it leaves out when it holds
-    /// more than half the key set.
+    /// mask's list, which has at most half the key set.
     #[must_use]
     pub fn charge(&self) -> u64 {
-        let list = match &self.mask.held {
-            Held::Every => return self.frame.charge(),
-            Held::Only(list) | Held::Except(list) => list,
-        };
-        let (ranges, descriptors, _) = parts(&self.frame.0);
-        // Each block size class is a multiple of SERIES_ALIGN, so a frame padded to it
-        // has the same charge.
-        let padded = |end: usize| end.next_multiple_of(SERIES_ALIGN);
-        let groups = join(ranges, &list.groups).count();
-        let (mut series, mut bytes) = (0, 0);
-        for n in join(descriptors, &list.entries) {
-            let (start, end) = bounds(descriptors, n);
-            series += 1;
-            bytes += padded(end) - start;
-        }
-        let len = if let Held::Except(_) = self.mask.held {
-            let all = descriptors.last().map_or(0, |&last| padded(end_of(last)));
-            body_start(ranges.len() - groups, descriptors.len() - series) + all - bytes
-        } else {
-            body_start(groups, series) + bytes
-        };
-        charge_of(len)
+        charge_of(self.len())
     }
+
+    /// The length of a frame of only the view's series.
+    fn len(&self) -> usize {
+        match &self.mask.held {
+            Held::Every => self.frame.0.len(),
+            Held::Only(list) => len_of_only(self.frame, list),
+            Held::Except(list) => len_without(self.frame, list),
+        }
+    }
+}
+
+/// The length of a frame of only the series of `frame` that `list` holds.
+fn len_of_only(frame: &Frame, list: &List) -> usize {
+    let (ranges, descriptors, _) = parts(&frame.0);
+    let groups = join(ranges, &list.groups).count();
+    let (mut series, mut bytes) = (0, 0);
+    for n in join(descriptors, &list.entries) {
+        let (start, end) = bounds(descriptors, n);
+        series += 1;
+        bytes = next_end(bytes, end - start);
+    }
+    body_start(groups, series) + bytes
+}
+
+/// The length of `frame` without the series that `list` holds.
+fn len_without(frame: &Frame, list: &List) -> usize {
+    let (ranges, descriptors, _) = parts(&frame.0);
+    let groups = join(ranges, &list.groups).count();
+    let (mut series, mut cut, mut after) = (0, 0, 0);
+    // The latest run of series left out: where it starts, and its part of `cut`.
+    let (mut run, mut run_cut) = (0, 0);
+    for n in join(descriptors, &list.entries) {
+        let (start, end) = bounds(descriptors, n);
+        let padded = end.next_multiple_of(SERIES_ALIGN) - start;
+        if n != after {
+            (run, run_cut) = (n, 0);
+        }
+        series += 1;
+        cut += padded;
+        run_cut += padded;
+        after = n + 1;
+    }
+    // A frame that ends with series left out gives a view that ends at the last series
+    // kept, without its padding.
+    let (tail, tail_cut) = if after == descriptors.len() {
+        (run, run_cut)
+    } else {
+        (descriptors.len(), 0)
+    };
+    let end = tail
+        .checked_sub(1)
+        .map_or(0, |last| end_of(descriptors[last]));
+    body_start(ranges.len() - groups, descriptors.len() - series) + end
+        - (cut - tail_cut)
 }
 
 /// The series of a view, as [`Held`] gives them.
@@ -240,7 +272,7 @@ where
         match self {
             Self::Every(series) => series.fold(init, f),
             Self::Only(series) => series.fold(init, f),
-            Self::Except(series) => fold_apart(series, init, f),
+            Self::Except(series) => fold_out_of_line(series, init, f),
         }
     }
 }
@@ -248,7 +280,7 @@ where
 /// Folds `series` out of line. Inline, its state takes the caller's registers, and
 /// the walk of a narrow view takes about 15% longer.
 #[inline(never)]
-fn fold_apart<T, B>(
+fn fold_out_of_line<T, B>(
     series: impl Iterator<Item = T>,
     init: B,
     f: impl FnMut(B, T) -> B,
@@ -310,13 +342,14 @@ mod tests {
     use crate::frame::Draft;
     use crate::frame::key_set::Group;
     use crate::frame::tests::{Case, cases, frame_of, interner, key, pool, two_groups};
+    use crate::sample::{Scalar, Type};
 
     /// The entries of `set` that `mask` holds.
     fn held(set: &KeySet, mask: &Mask) -> Vec<usize> {
-        let listed = |entry: &usize| listed(mask).contains(&to_u32(*entry));
+        let is_listed = |entry: &usize| listed(mask).contains(&to_u32(*entry));
         let only = matches!(mask.held, Held::Only(_));
         (0..set.entries().len())
-            .filter(|entry| listed(entry) == only)
+            .filter(|entry| is_listed(entry) == only)
             .collect()
     }
 
@@ -410,15 +443,20 @@ mod tests {
         assert_eq!(view.range(1), Some(Range::default()));
     }
 
+    /// The charge of a frame of `len` bytes.
+    fn charge(len: usize) -> u64 {
+        u64::try_from(block::footprint(len)).unwrap()
+    }
+
     /// One range, two descriptors, and 5 bytes, 3 of padding, and 1 byte of series.
     #[test]
     fn charges_a_frame_of_only_its_series() {
         let set = two_groups();
         let frame = full(&set);
         let mask = Mask::new(&set, [Slot::new(4)]);
-        let len = 16 + 16 + 2 * 8 + 8 + 1;
-        let charge = u64::try_from(block::footprint(len)).unwrap();
-        assert_eq!(View::new(&frame, &mask).charge(), charge);
+        let view = View::new(&frame, &mask);
+        assert_eq!(view.len(), 16 + 16 + 2 * 8 + 8 + 1);
+        assert_eq!(view.charge(), charge(view.len()));
     }
 
     /// Two ranges, three descriptors, and 3 bytes and 5 of padding, 5 bytes and 3 of
@@ -428,8 +466,9 @@ mod tests {
         let set = two_groups();
         let frame = full(&set);
         let mask = Mask::new(&set, [1, 3, 4].map(Slot::new));
-        let charge = u64::try_from(block::footprint(89)).unwrap();
-        assert_eq!(View::new(&frame, &mask).charge(), charge);
+        let view = View::new(&frame, &mask);
+        assert_eq!(view.len(), 89);
+        assert_eq!(view.charge(), charge(89));
     }
 
     /// Two ranges, three descriptors, and 3 bytes and 5 of padding, 10 bytes and 6 of
@@ -440,16 +479,43 @@ mod tests {
         let frame = full(&set);
         let mask = Mask::new(&set, [1, 2, 3].map(Slot::new));
         assert_eq!(listed(&mask), [3]);
-        let charge = u64::try_from(block::footprint(101)).unwrap();
-        assert_eq!(View::new(&frame, &mask).charge(), charge);
+        let view = View::new(&frame, &mask);
+        assert_eq!(view.len(), 101);
+        assert_eq!(view.charge(), charge(101));
     }
 
+    /// Three groups: index 1 with 2 and 3, index 4 with 5, and index 6 alone. The view
+    /// leaves out the third group, and its frame fills a size class to the byte.
     #[test]
-    fn charges_the_same_for_a_series_padded_to_its_alignment() {
-        for len in 0..=1_usize << 16 {
-            let padded = len.next_multiple_of(SERIES_ALIGN);
-            assert_eq!(block::footprint(len), block::footprint(padded), "{len}");
-        }
+    fn charges_a_view_that_leaves_out_a_present_group() {
+        const F64: Type = Type::Scalar(Scalar::F64);
+        let set = interner().intern(&[
+            Group {
+                index: key(1),
+                data: &[(key(2), F64), (key(3), F64)],
+            },
+            Group {
+                index: key(4),
+                data: &[(key(5), F64)],
+            },
+            Group {
+                index: key(6),
+                data: &[],
+            },
+        ]);
+        let series = [(0, 8), (1, 8), (2, 8), (3, 8), (4, 136), (5, 8)];
+        let frame = |series| {
+            let draft = Draft::new(&pool(1 << 16), &set, Form::Raw, series).unwrap();
+            draft.freeze(Path::Live)
+        };
+        let (whole, narrow) = (frame(&series), frame(&series[..5]));
+        let mask = Mask::new(&set, [2, 3, 5].map(Slot::new));
+        assert_eq!(listed(&mask), [5]);
+        let view = View::new(&whole, &mask);
+        assert_eq!(view.len(), 256);
+        assert_eq!(narrow.0.len(), 256);
+        assert_eq!(view.charge(), charge(256));
+        assert_ne!(view.charge(), whole.charge());
     }
 
     #[test]
@@ -576,6 +642,7 @@ mod tests {
             let narrow = Draft::new(&pool, &set, frame.form(), &series)
                 .map_err(|error| TestCaseError::fail(error.to_string()))?
                 .freeze(frame.path());
+            prop_assert_eq!(view.len(), narrow.0.len());
             prop_assert_eq!(view.charge(), narrow.charge());
             if wanted.iter().all(|&wanted| wanted) {
                 prop_assert_eq!(view.charge(), frame.charge());

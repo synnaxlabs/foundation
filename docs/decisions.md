@@ -503,12 +503,13 @@ How to read this record:
 - **M2 (revised 2026-10-06)** Readers get a view: the frame plus a mask cached per
   key set and reader. The home routes by key set. A mask holds the index of each
   channel it holds, so the series of a view make a frame, and `View::charge` is its
-  charge (CREDIT RULES). A mask is a sorted list of the entries it holds, or of the
-  entries it leaves out when it holds more than half of its key set. A view's walk
-  grows with the smaller of its frame's series and its mask's entries, and its charge
-  with the list (rule 11). A view borrows its frame and mask, so making one takes no
-  reference count. Approved by the coordinator (#157). The list of entries left out:
-  #755.
+  charge (CREDIT RULES). A mask is a sorted list of the entries it holds, a sorted
+  list of the entries it leaves out when it holds more than half of its key set, or
+  no list when it holds every entry. A view's walk grows with the smaller of its
+  frame's series and its mask's entries, and its charge with the smaller of its
+  frame's series and the list (rule 11). A view borrows its frame and mask, so making
+  one takes no reference count. Approved by the coordinator (#157). The list of
+  entries left out (#755) is approved at the gate of PR #873.
 - **M3 (revised 2026-10-05)** One pool block per frame: a header (key set key, form,
   path), a range for each present index group, a descriptor for each present series,
   and series bytes back to back. Ranges are sorted by group and descriptors by entry.
