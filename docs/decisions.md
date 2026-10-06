@@ -949,19 +949,23 @@ How to read this record:
   header has one length (a request then sends 32 zero bytes); `encode` into a
   `&mut [u8]` that returns a length (a short buffer then needs an error); a second byte
   for the kind of time (two checks where one kind byte does the work).
-- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port,
-  however many shards it runs, so each site's firewall needs one known port per
-  conduit. Each QUIC connection belongs to one shard, and every connection ID a node
-  issues encodes that shard. A receive loop on one shard reads the UDP socket in
-  batches and hands each batch to the owning shard over the C2 ring; every shard
-  sends on the same socket. The TCP listener accepts and moves each stream to its
-  shard. `env::net` therefore splits a UDP socket into a receive half with one owner
-  and a send half that any shard may use, and `sim` models the split. Rejected: a
-  port per shard (a port range in every firewall), kernel reuse-port hashing (routes
-  by address, breaks on NAT rebinding), and one shard doing all network work. If the
-  receive loop saturates on Linux, add a reuse-port group steered by the same
-  connection ID. Decided by the design session under the architecture delegation
-  (#53).
+- **ONE PORT PER NODE (2026-10-04)** A node listens on one UDP port and one TCP port on
+  the same port number, however many shards it runs, so each site's firewall needs one
+  known port per conduit. Each QUIC connection belongs to one shard, and every
+  connection ID a node issues encodes that shard. A receive loop on one shard reads the
+  UDP socket in batches and hands each batch to the owning shard over the C2 ring; every
+  shard sends on the same socket. The TCP listener accepts and moves each stream to its
+  shard. `env::net` therefore splits a UDP socket into a receive half with one owner and
+  a send half that any shard may use, and `sim` models the split. Rejected: a port per
+  shard (a port range in every firewall), kernel reuse-port hashing (routes by address,
+  breaks on NAT rebinding), and one shard doing all network work. If the receive loop
+  saturates on Linux, add a reuse-port group steered by the same connection ID. Decided
+  by the design session under the architecture delegation (#53). The same port number
+  (2026-10-06): with port 0, UDP takes a free port and TCP binds the same one. When TCP
+  finds it in use, the node closes the UDP socket and tries a new port, up to 8 tries,
+  then gives the last error: TCP and UDP have separate port spaces, and no OS call gives
+  a port free in both. A fixed port that fails gives its error at once. Approved by the
+  coordinator on #990.
 - **TLS RANDOMNESS (2026-10-04)** All randomness inside TLS (key shares, client
   random, nonces) comes from aws-lc, not from `env`. rustls holds its random source
   as a `&'static` value, and aws-lc makes X25519 key shares with its own randomness,
@@ -973,7 +977,8 @@ How to read this record:
 - **R14** Do not build on Zenoh; a Zenoh connector may come later. Measure QUIC against
   TLS over TCP on Linux early.
 - **TRANSPORT SURFACE (#45, 2026-10-04)** One `Transport` per shard dials and accepts;
-  the node's sockets and relays sit in one node-level part (ONE PORT PER NODE). A
+  the node's sockets and relays sit in one node-level part, `transport::Port` (ONE
+  PORT PER NODE), which `node` binds once and splits into one part for each shard. A
   `Session` goes to one peer over one path, direct or relayed, fixed for its life, and
   runs every class on one carrier. A second carrier for some classes waits for the
   measurement in TRANSPORT SHAPE LOCKED, which must show that `Latest` p99 holds while
