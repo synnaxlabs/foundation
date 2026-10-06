@@ -279,7 +279,7 @@ impl Shard {
             mesh,
         );
         let entries = &mut scratch.entries;
-        let made = store(
+        let made = freeze(
             entries,
             &self.pool,
             &mut split,
@@ -298,6 +298,7 @@ impl Shard {
             Err(block::Error::TooLarge { .. }) if recorded == Ok(true) => {
                 Err(Error::Large)
             }
+            // An empty append still reports a failed commit.
             _ => room(self.buffer.append(entries.drain(..))),
         };
         let room =
@@ -359,13 +360,13 @@ impl Session {
     }
 }
 
-/// Pushes onto `entries` the stored entry of each accepted group of `checks`, in group
-/// order, with its index frame from `split`, at mesh time `stored_at`.
+/// Freezes the index frame from `split` of each accepted group of `checks`, and pushes
+/// its stored entry onto `entries`, in group order, at mesh time `stored_at`.
 ///
 /// # Errors
 ///
 /// [`block::Error`] when `pool` has no block for an index frame or a header.
-fn store(
+fn freeze(
     entries: &mut Vec<Entry>,
     pool: &block::Pool,
     split: &mut Split<'_>,
@@ -408,7 +409,7 @@ fn record(
             continue;
         };
         let appended = match handoff::entry(pool, handoff, entry, first, mesh.latest) {
-            Ok(entry) => buffer.append([entry]),
+            Ok(handoff) => buffer.append([handoff]),
             Err(block::Error::Exhausted { .. } | block::Error::Refused { .. }) => {
                 all = false;
                 continue;
@@ -1636,6 +1637,30 @@ mod tests {
                     (zero, 0, 0, 1, 0),
                     (two, 0, 0, 1, 0),
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn stores_a_body_under_its_index_when_a_data_channel_has_a_lower_slot() {
+        run(46, |test| async move {
+            let set = interner().intern(&[Group {
+                index: key(Slot::new(2)),
+                data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
+            }]);
+            let mut shard = test.open(AREA, 4).await;
+            shard.carry(Slot::new(2));
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MARKED);
+            let write = frame(&test.pool, &set, &[(0, &[1, 2]), (1, &[10, 20])]);
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MARKED),
+                Ok(&[applied(2, 0, 2)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let two = key(Slot::new(2)).as_u128();
+            assert_eq!(
+                headers(&test.ring().await, MARKED.latest),
+                [(two, 0, 0, 0, 1), (two, 0, 0, 2, 0)]
             );
         });
     }

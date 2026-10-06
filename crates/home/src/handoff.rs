@@ -1,5 +1,5 @@
-//! The bytes of a handoff record: the writer that holds control of an index from the
-//! record's place in the index log.
+//! The handoff entry of an index. Its body names the writer that holds control of the
+//! index from the entry's place in the index log.
 
 use std::str;
 
