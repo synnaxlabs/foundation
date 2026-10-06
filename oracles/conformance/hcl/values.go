@@ -71,7 +71,17 @@ func value(name string, src []byte, expr hclsyntax.Expression) string {
 	case *hclsyntax.ScopeTraversalExpr:
 		steps := []string{expr.Traversal.RootName()}
 		for _, step := range expr.Traversal[1:] {
-			steps = append(steps, step.(hcl.TraverseAttr).Name)
+			switch step := step.(type) {
+			case hcl.TraverseAttr:
+				steps = append(steps, step.Name)
+			case hcl.TraverseIndex:
+				// The escapes of a string, so a line end stays on one line.
+				key := quote(step.Key.AsString())
+				steps = append(steps, key[1:len(key)-1])
+			default:
+				log.Fatalf("%s: %T at %s has no form for its value", name, step,
+					step.SourceRange())
+			}
 		}
 		return "$" + strings.Join(steps, ".")
 	case *hclsyntax.FunctionCallExpr:

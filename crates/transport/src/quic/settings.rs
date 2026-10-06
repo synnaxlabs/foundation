@@ -17,7 +17,7 @@ use noq_proto::{
 use types::node::{PrivateKey, PublicKey};
 use types::time::Span;
 
-use super::cid;
+use super::{cid, hello};
 use crate::tls::{Epoch, Tls};
 use crate::{Config, PAYLOAD_IPV4};
 
@@ -42,6 +42,11 @@ const _: () = assert!(
     "noq-proto refuses a datagram over the queue, so it must hold the path's largest"
 );
 
+const _: () = assert!(
+    PAYLOAD_IPV4 as usize >= hello::BYTES_MAX,
+    "a stream window of at least message_bytes_max must take the peer's whole hello"
+);
+
 /// What each dial from one shard needs.
 pub(super) struct Settings {
     transport: Arc<TransportConfig>,
@@ -57,7 +62,28 @@ impl Settings {
     ///
     /// When `config.idle` is not positive.
     pub(super) fn new(config: &Config, shard: u8) -> (Self, Endpoint) {
-        let transport = Arc::new(transport(config));
+        Self::with(config, shard, transport(config))
+    }
+
+    /// As [`Settings::new`], with `change` made to the transport parameters, for a
+    /// peer that is not a Foundation node.
+    #[cfg(test)]
+    pub(super) fn foreign(
+        config: &Config,
+        shard: u8,
+        change: impl FnOnce(&mut TransportConfig),
+    ) -> (Self, Endpoint) {
+        let mut transport = transport(config);
+        change(&mut transport);
+        Self::with(config, shard, transport)
+    }
+
+    fn with(
+        config: &Config,
+        shard: u8,
+        transport: TransportConfig,
+    ) -> (Self, Endpoint) {
+        let transport = Arc::new(transport);
         let tls = Tls::new(&config.private_key);
         let server = Arc::new(server(&tls, Arc::clone(&transport)));
         // `true`: `env::net` sets don't-fragment, so MTU discovery may run.
@@ -74,7 +100,16 @@ impl Settings {
 
     /// The settings for a dial that expects `expected`.
     pub(super) fn client(&self, expected: PublicKey) -> ClientConfig {
-        let crypto = QuicClientConfig::try_from(self.tls.client(expected))
+        self.dial(self.tls.client(expected))
+    }
+
+    /// The settings for a dial with `tls`.
+    ///
+    /// # Panics
+    ///
+    /// When `tls` has no AES-128-GCM suite.
+    pub(super) fn dial(&self, tls: Arc<rustls::ClientConfig>) -> ClientConfig {
+        let crypto = QuicClientConfig::try_from(tls)
             .expect("invariant: the TLS suites include AES-128-GCM");
         let entropy = self.entropy.clone();
         #[expect(
@@ -146,6 +181,9 @@ fn transport(config: &Config) -> TransportConfig {
     let idle_ms = idle_ms(config.idle);
     let window = VarInt::try_from(config.window_bytes).unwrap_or(VarInt::MAX);
     let streams = VarInt::from_u32(config.streams_max.get());
+    // One more for the peer's hello, whose credit does not come back when it ends.
+    let uni = u64::from(config.streams_max.get()) + 1;
+    let uni = VarInt::from_u64(uni).expect("invariant: a u32 and one fit a varint");
     let mut mtu = MtuDiscoveryConfig::default();
     mtu.upper_bound(PAYLOAD_IPV6)
         .interval(Duration::from_secs(600))
@@ -154,7 +192,7 @@ fn transport(config: &Config) -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport
         .max_concurrent_bidi_streams(streams)
-        .max_concurrent_uni_streams(streams)
+        .max_concurrent_uni_streams(uni)
         .stream_receive_window(window)
         .receive_window(window)
         .send_window(window.into_inner())

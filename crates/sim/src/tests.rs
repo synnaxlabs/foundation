@@ -7,9 +7,11 @@ mod net;
 mod run_on;
 mod serial;
 mod shards;
+mod tcp;
 
 use std::collections::BTreeSet;
 use std::future::pending;
+use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use crate::drivers::yield_now;
-use crate::{Config, Error, Sim, node};
+use crate::{Config, Error, Sim, link, node};
 use env::thread;
 use proptest::prelude::*;
 use types::time::{Monotonic, Span, Stamp};
@@ -36,6 +38,42 @@ fn sim(seed: u64) -> Sim {
         steps_max: 10_000,
         ..Config::default()
     })
+}
+
+/// A run of two nodes, `a` and `b`, with `link` between them.
+fn pair(seed: u64, link: link::Config) -> (Sim, node::Node, node::Node) {
+    let mut sim = Sim::new(Config {
+        seed,
+        steps_max: 1_000_000,
+        link,
+    });
+    let a = sim.node(node::Config::default());
+    let b = sim.node(node::Config::default());
+    (sim, a, b)
+}
+
+/// The address of `port` on the IPv4 address of `node`.
+fn at(node: &node::Node, port: u16) -> SocketAddr {
+    SocketAddr::new(node.addresses()[0], port)
+}
+
+/// The receiver's clock `span` after the run starts.
+fn after(span: Span) -> Monotonic {
+    node::Config::default().monotonic + span
+}
+
+/// The default delay.
+fn delay() -> Span {
+    link::Config::default().delay
+}
+
+/// The error of a run whose thread `thread` panicked with `message`.
+fn panicked(thread: &str, message: &str) -> Error {
+    Error::Panicked {
+        thread: thread.into(),
+        message: message.into(),
+        seed: 0,
+    }
 }
 
 /// Runs `tasks` tasks on each of two nodes. Each task logs three steps.
@@ -608,16 +646,47 @@ fn a_dropped_sleep_does_not_move_time() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
     let clock = node.clock();
-    let handle = node.shards().start(shard("shard-0"), move |_| async move {
+    let _waits = node.shards().start(shard("shard-0"), move |_| async move {
         let mut sleep = clock.sleep(Span::SECOND);
         let poll =
             std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut sleep).poll(cx)));
         assert_eq!(poll.await, Poll::Pending, "the sleep is not due");
+        drop(sleep);
+        pending::<()>().await;
     });
     let start = node.clock().now();
-    sim.run().unwrap();
-    handle.unwrap().join().unwrap();
+    let stuck = Error::Stuck {
+        threads: vec!["shard-0".into()],
+        seed: 0,
+    };
+    assert_eq!(sim.run(), Err(stuck));
     assert_eq!(node.clock().now(), start, "no timer waits");
+}
+
+#[test]
+fn a_leaked_sleep_stops_at_the_end_of_its_thread() {
+    for panics in [false, true] {
+        let mut sim = sim(0);
+        let node = sim.node(node::Config::default());
+        let clock = node.clock();
+        let handle = node.shards().start(shard("shard-0"), move |_| async move {
+            let sleep = Box::leak(Box::new(clock.sleep(Span::SECOND)));
+            let poll =
+                std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *sleep).poll(cx)));
+            assert_eq!(poll.await, Poll::Pending, "the sleep is not due");
+            assert!(!panics, "boom");
+        });
+        let start = node.clock().now();
+        let panicked = Error::Panicked {
+            thread: "shard-0".into(),
+            message: "boom".into(),
+            seed: 0,
+        };
+        assert_eq!(sim.run(), if panics { Err(panicked) } else { Ok(()) });
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(handle.unwrap().join().is_ok(), !panics);
+        assert_eq!(node.clock().now(), start, "panics: {panics}");
+    }
 }
 
 #[test]

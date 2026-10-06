@@ -5,7 +5,7 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use delivery::{Key, Position, Reader, Readers, Start};
+use delivery::{Position, Reader, Readers, Start, complete, latest};
 use types::channel;
 use types::frame::key_set::{Group, Interner};
 use types::frame::{Draft, Form, Frame, Path};
@@ -117,13 +117,13 @@ fn complete(frame: &impl Fn() -> Frame) {
 /// Returns the frames taken plus the sessions woken.
 fn flow(
     readers: &mut Readers,
-    keys: &[Key],
+    keys: &[complete::Key],
     frame: &impl Fn() -> Frame,
     seq: &mut u64,
 ) -> usize {
     let taken: usize = keys
         .iter()
-        .map(|&key| std::iter::from_fn(|| readers.take(key)).count())
+        .map(|&key| std::iter::from_fn(|| readers.take(key.into())).count())
         .sum();
     for _ in 0..2 {
         readers.queue(&frame(), *seq..*seq + 1);
@@ -134,10 +134,14 @@ fn flow(
 
 /// Takes each session's frame, then puts two frames. Returns the frames taken plus the
 /// sessions woken.
-fn round(readers: &mut Readers, keys: &[Key], frame: &impl Fn() -> Frame) -> usize {
+fn round(
+    readers: &mut Readers,
+    keys: &[latest::Key],
+    frame: &impl Fn() -> Frame,
+) -> usize {
     let taken: usize = keys
         .iter()
-        .map(|&key| usize::from(readers.take(key).is_some()))
+        .map(|&key| usize::from(readers.take(key.into()).is_some()))
         .sum();
     taken + readers.put(frame()).len() + readers.put(frame()).len()
 }
