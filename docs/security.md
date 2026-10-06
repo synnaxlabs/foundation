@@ -142,6 +142,12 @@ state on `main`.
 - The joint quorum math of `raft::Voters` held against a direct count (the run is
   in #352). Voters do not change through the log yet (#193); attack that when it
   lands.
+- A disk that lost entries it synced can break Raft safety: the leader still counts
+  them toward a commit, and the node can grant a vote to a candidate that lacks a
+  committed entry. `raft` does not find the loss: the disk owns durability
+  (`env::files`, RAFT DURABILITY, #352 item 3). The node gets `Error::IndexPastLog`
+  only once the leader's commit passes its last entry. Not built (#648): the node
+  shows the error in its status.
 - The `clock`, `replica`, and `blob` protocols are not built. To attack when they
   land: who may be a time source, and a binary that a peer serves under a hash it
   does not match (C9d).
@@ -149,10 +155,11 @@ state on `main`.
 ### Time source to `estimate`
 
 - `estimate` combines one bound per source and does not know what a source is
-  (ESTIMATE COMBINE). The result holds the truth only when every bound outside the
-  majority misses it. Open, needs a decision on ESTIMATE COMBINE: #344 (one lying
-  source of three puts a small bound inside the honest overlap, and the estimate
-  follows it). This is the attack of R6.
+  (ESTIMATE COMBINE). A known result holds the truth when more than half of the bounds
+  that vote hold it, whatever the others are. So a small bound from a lying minority
+  cannot steer it off the truth (the attack of R6, #344). A lying majority can. So can
+  one known bound beside unknown bounds alone, because an unknown bound does not vote
+  beside a known one.
 
 ### Files to the spec
 
