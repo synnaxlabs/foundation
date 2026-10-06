@@ -129,8 +129,10 @@ func forms(name string, src []byte, node hclsyntax.Node) []string {
 	case *hclsyntax.RelativeTraversalExpr:
 		return index(node.Source)
 	case *hclsyntax.ScopeTraversalExpr:
+		// A string index is one more segment of the name.
 		for _, step := range node.Traversal {
-			if _, index := step.(hcl.TraverseIndex); index {
+			index, ok := step.(hcl.TraverseIndex)
+			if ok && index.Key.Type() != cty.String {
 				return []string{"hcl.index"}
 			}
 		}

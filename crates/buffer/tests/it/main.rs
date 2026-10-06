@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Error, Layout, Limit, Parts, Tail, Unfit};
+use buffer::{
+    Buffer, Config, Entry, Error, Layout, Limit, Parts, Rejected, Tail, Unfit,
+};
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{Error as FileError, Mode, Operation, SECTOR};
@@ -568,7 +570,7 @@ fn a_full_ring_queues_nothing() {
         let full = buffer.append([entry(1, a, Path::Live, 2, 1, None, parts.clone())]);
         assert_eq!(
             full,
-            Err(Error::Full {
+            Err(Rejected::Full {
                 needed: 4096,
                 free: 0
             })
@@ -599,7 +601,7 @@ fn a_batch_is_queued_whole_or_not_at_all() {
         ]);
         assert_eq!(
             full,
-            Err(Error::Full {
+            Err(Rejected::Full {
                 needed: 12288,
                 free: 4096
             }),
@@ -658,8 +660,8 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
         ];
         for (batch, limit, message) in cases {
             let large = buffer.append(batch);
-            assert_eq!(large, Err(Error::Large(limit)));
-            assert_eq!(Error::Large(limit).to_string(), message);
+            assert_eq!(large, Err(Rejected::Large(limit)));
+            assert_eq!(Rejected::Large(limit).to_string(), message);
             assert_eq!(buffer.tail(a, Path::Live), tail(1, None));
         }
         buffer
@@ -701,7 +703,7 @@ fn a_failed_append_holds_no_part() {
         let large = buffer.append([entry(1, a, Path::Live, 0, 1, None, body)]);
         assert_eq!(
             large,
-            Err(Error::Large(Limit::Body {
+            Err(Rejected::Large(Limit::Body {
                 len: 200_055,
                 max: BODY_MAX,
             }))
@@ -769,20 +771,25 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
-        let failed = Err(Error::Files(FileError::Io {
+        let failed = FileError::Io {
             path: PathBuf::from(RING),
             operation: Operation::Sync,
             code: 5,
-        }));
-        assert_eq!(buffer.committed().await, failed);
+        };
+        let ended = Err(failed.clone());
+        assert_eq!(buffer.committed().await, ended);
         assert_eq!(buffer.durable(a, Path::Live), Tail::default());
         assert_eq!(
             buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
-            failed
+            Err(Rejected::Files(failed.clone()))
         );
-        assert_eq!(buffer.append(Vec::new()), failed, "an empty append");
+        assert_eq!(
+            buffer.append(Vec::new()),
+            Err(Rejected::Files(failed)),
+            "an empty append"
+        );
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
-        assert_eq!(buffer.committed().await, failed);
+        assert_eq!(buffer.committed().await, ended);
         assert_eq!(shard.memory.syncs(), 3, "the task ended at the failed sync");
     });
 }
@@ -822,11 +829,11 @@ fn commits_counts_the_commits_that_ended() {
         buffer
             .append([entry(1, a, Path::Live, 6, 1, None, Parts::default())])
             .expect("queues");
-        let failed = Err(Error::Files(FileError::Io {
+        let failed = Err(FileError::Io {
             path: PathBuf::from(RING),
             operation: Operation::Sync,
             code: 5,
-        }));
+        });
         assert_eq!(buffer.committed().await, failed);
         assert_eq!(buffer.commits(), 2, "the failed commit did not count");
     });
@@ -1397,15 +1404,9 @@ fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
             let buffer = Buffer::open(config, &mut slots).await?;
             let a = slots.assign(key(1));
             let recovered = buffer.tail(a, Path::Live);
-            buffer.append([entry(
-                1,
-                a,
-                Path::Live,
-                3,
-                2,
-                Some(50),
-                Parts::default(),
-            )])?;
+            buffer
+                .append([entry(1, a, Path::Live, 3, 2, Some(50), Parts::default())])
+                .expect("queues");
             buffer.committed().await?;
             Ok::<_, Error>(recovered)
         });
@@ -1788,6 +1789,62 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
 }
 
 #[test]
+fn a_failed_record_write_ends_the_buffer_with_its_error() {
+    let (mut sim, node) = one_node(111);
+    let own = node.clone();
+    run_on(&mut sim, &node, "write", move |tasks| async move {
+        let config = node_config(&own, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.assign(key(1));
+        own.fail_file(FilePath::new(RING), Operation::WriteAt);
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        };
+        assert_eq!(buffer.committed().await, Err(failed.clone()));
+        assert_eq!(buffer.durable(a, Path::Live), Tail::default());
+        assert_eq!(
+            buffer.append([entry(1, a, Path::Live, 3, 1, None, Parts::default())]),
+            Err(Rejected::Files(failed))
+        );
+    });
+}
+
+#[test]
+fn an_append_with_no_block_for_its_record_header_is_refused() {
+    run(112, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        let refused =
+            buffer.append([entry(1, a, Path::Live, 0, 1, None, Parts::default())]);
+        let header = block::Error::Exhausted {
+            requested: 52186,
+            available: 0,
+        };
+        assert_eq!(refused, Err(Rejected::Pool(header)));
+        assert_eq!(buffer.tail(a, Path::Live), tail(0, None));
+        drop(held);
+    });
+}
+
+#[test]
 fn an_error_says_what_went_wrong() {
     let pool = Error::Pool(block::Error::TooLarge {
         requested: 1,
@@ -1803,7 +1860,8 @@ fn an_error_says_what_went_wrong() {
     let texts = [
         (
             Error::Full { needed: 1, free: 0 },
-            "the ring has no room for the batch: it needs 1 bytes and 0 are free",
+            "the ring has no room for its restart record: it needs 1 bytes and 0 \
+             are free",
         ),
         (
             pool,
@@ -1842,6 +1900,33 @@ fn an_error_says_what_went_wrong() {
     ];
     for (error, text) in texts {
         assert_eq!(error.to_string(), text);
+    }
+}
+
+/// The text of `Large` is the text of its limit, checked with each limit above.
+#[test]
+fn a_rejected_append_says_why() {
+    let pool = Rejected::Pool(block::Error::TooLarge {
+        requested: 1,
+        largest: 0,
+    });
+    let files = Rejected::Files(FileError::NotFound {
+        path: PathBuf::from(RING),
+    });
+    let texts = [
+        (
+            Rejected::Full { needed: 1, free: 0 },
+            "the ring has no room for the batch: it needs 1 bytes and 0 are free",
+        ),
+        (
+            pool,
+            "the pool has no block: block of 1 bytes is above the largest block of \
+             0 bytes",
+        ),
+        (files, "a file call failed: path shard-0/ring is not there"),
+    ];
+    for (rejected, text) in texts {
+        assert_eq!(rejected.to_string(), text);
     }
 }
 
@@ -2122,11 +2207,11 @@ fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
         shard.clock.sleep(commits(3)).await;
         assert_eq!(shard.memory.syncs(), 4, "the second commit failed its sync");
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
-        let ended = Err(Error::Files(FileError::Io {
+        let ended = Err(FileError::Io {
             path: PathBuf::from(RING),
             operation: Operation::Sync,
             code: 5,
-        }));
+        });
         assert_eq!(buffer.committed().await, ended, "the buffer ended");
         assert_eq!(first.await, Ok(()), "its entries are durable");
     });

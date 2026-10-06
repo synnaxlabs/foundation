@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use block::{Block, Heap, Pool};
-use buffer::{Buffer, Config, Entry, Error, Layout, Parts, Tail};
+use buffer::{Buffer, Config, Entry, Error, Layout, Parts, Rejected, Tail};
 use env::files::{File, Mode};
 use env::tasks::Tasks;
 use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
@@ -223,7 +223,7 @@ async fn build(
             .collect();
         match buffer.append(entries) {
             Ok(()) => next = firsts,
-            Err(Error::Full { .. }) => break,
+            Err(Rejected::Full { .. }) => break,
             Err(other) => panic!("append failed: {other}"),
         }
         buffer.committed().await.expect("the batch commits");
@@ -321,7 +321,7 @@ async fn check(
     }
     match buffer.append(entries) {
         Ok(()) => {}
-        Err(Error::Full { .. }) => return,
+        Err(Rejected::Full { .. }) => return,
         Err(other) => panic!("append failed: {other}"),
     }
     buffer.committed().await.expect("the entries commit");

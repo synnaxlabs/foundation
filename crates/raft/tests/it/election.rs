@@ -92,6 +92,7 @@ proptest! {
             to: Network::key(cut),
             term: Term(term.0 + 1),
             body: Body::PreVoteReply { granted: true },
+            proof: None,
         });
         prop_assert_eq!(network.nodes[cut].role(), Role::Candidate);
         for _ in 0..4 * ELECTION {
@@ -113,6 +114,7 @@ fn one_message_in_the_last_term_stops_the_group_for_good() {
         to: Network::key(follower),
         term: Term(u64::MAX),
         body: Body::Heartbeat { commit: 0 },
+        proof: None,
     });
     for _ in 0..10 * ELECTION {
         network.round();
@@ -145,6 +147,7 @@ fn a_prevote_grant_from_an_earlier_term_does_not_depose_the_leader() {
         to: Network::key(cut),
         term: agreed.1,
         body: Body::PreVoteReply { granted: true },
+        proof: None,
     });
     assert_eq!(network.nodes[cut].role(), Role::PreCandidate);
     for _ in 0..4 * ELECTION {
