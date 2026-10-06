@@ -527,9 +527,9 @@ How to read this record:
   their order and padding are part of the disk and wire format version (C9d). A change
   to either needs a new version. The padding is at most 7 bytes for each present
   series: at most 1% of encoded bytes at 1024 samples, and up to 34% at 10 samples
-  (measured on #317). `frame::series` reads a body from `(entry, end)` pairs and panics
-  on ends that do not fit. Copy mode runs `frame::check` once where remote records
-  enter (X43). Decided by the coordinator (#306).
+  (measured on #317). `frame::split` cuts a body at its `(tag, end)` pairs and
+  panics on ends that do not fit. Copy mode runs `frame::check` once where remote
+  records enter (X43). Decided by the coordinator (#306).
 - **MEMORY BOUNDS** A hard pool budget per node. Pools reserve address space, commit
   pages lazily, and purge after idle. Credits cap the blocks a reader can pin. A reader
   that falls behind is served from disk. When the pool is full, a live write records a
@@ -1134,6 +1134,15 @@ How to read this record:
   search past the end for a record lost: a body can hold the bytes of a record, so a
   power cut could then stop the node. Nothing trims the log until snapshots (#253).
   `mesh` depends on `block` for the blocks of its file calls. Decided by `consensus`.
+- **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
+  `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a
+  proposal that a follower forwards to the leader, and its two answers (the position
+  of the entry, or "not the leader" with the leader the receiver knows). `wire` does
+  not carry them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and
+  `wire` must not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the
+  format version. A message has one byte form, and a decode takes nothing else. The
+  log (MESH LOG) and the messages share the byte form of an entry. Decided by
+  `consensus`, approved by the coordinator (#471).
 - **SPEC TREE (#6)** `spec::tree` is the prolly tree of one region. A key is a full
   name in byte order, so the descendants of one name are one range. A value is opaque
   bytes. A chunk is a level byte, then entries: a leaf entry is a key and a value, and
@@ -1431,6 +1440,17 @@ How to read this record:
   writing the whole file with comments attached to items, which loses the layout; and
   moving the bytes of a moved block, which a caller that changes the Document it read
   never needs. Decided by the `config` builder; approved by the coordinator (#249).
+- **HCL ERRORS (2026-10-05)** Each function of `config-hcl` gives only the errors it
+  can have. `read` gives a list of `Error`, `write` a list of `Unwritable`, and
+  `update` a `Refusal`: the problems in the old text, or else the parts of the new
+  Document that HCL text cannot hold. Nesting past the depth limit is
+  `Error::TooDeep` from `read` and `Unwritable::TooDeep` from `write`, and both give
+  `document`'s diagnostic. Lost: one `Error` for all three, so each caller of `read`
+  handled a variant that `read` never gives; one `TooDeep` for both, which needs that
+  shared type (#370); a checked Document type, which gives each caller two calls; and
+  an `update` that takes the Document that `read` gave for the text, so it gives only
+  `Unwritable`, but writes wrong text with no error when a caller gives another
+  Document. Decided by the `config` builder; approved by the coordinator (#330).
 - **DIAGNOSTICS (2026-10-05)** A problem that a person or an agent fixes in a
   Document or its file is a `document::diagnostic::Diagnostic`: a stable `Code`, a
   span, a message, a fix, and notes (other places that explain it). The span is `None`
@@ -1841,7 +1861,12 @@ How to read this record:
   price cap of 0.20 USD/h, and a hard stop on 2026-10-08 at 03:00 UTC. With it, the
   hosts and the factory host cost at most 99.73 USD a day (#15). The person said:
   "Once you are sure of costs provision and set strict limits on whatever you need
-  please".
+  please". With 51 runs still queued, a fourth host joined with twelve runners
+  (`foundation-arm-m` to `-x`): one 32-vCPU spot machine from a fleet over eight
+  Graviton types and five zones (launch template `foundation-arm-spot-32`). Limits: a
+  spot price cap of 0.60 USD/h, a hard stop with the factory host on 2026-10-07 at
+  07:03 UTC, and a cap of 18 USD (#15). Until that stop, the daily cap is 115 USD; then
+  it is 100 USD again. The person said: "Yes thats fine".
 - **LINUX CI (2026-10-05)** For the alpha, tests run only on Linux (x86-64 and ARM).
   No CI job runs on macOS or Windows. The design stays cross-OS: each C9d target must
   still be a valid build, so OS-specific code goes only in `os`. The person said: "As
@@ -2613,7 +2638,7 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 1 | `control` | Decides who holds control of an index: authority, ties, control leases, handoffs, start state after failover. | `types` |
 | 1 | `delivery` | Keeps each reader's state per index: positions, credits, live frames for complete readers, latest mailbox, holds, floors, position records, masks. | `types`, `block` |
 | 1 | `codec` | Compresses and checks one series: per-vector selection, codecs, header validation, format version. | `types`, `block` |
-| 1 | `wire` | Defines every message between two nodes: per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
+| 1 | `wire` | Defines every message between two nodes, except the bodies of the mesh protocol, which `mesh` encodes (MESH WIRE): per-connection short numbers, predicted seq and counts, session, credit, and replication messages, format version. | `types`, `block`, `codec` |
 | 1 | `spec` | Defines the definitions (channels, types, units, connectors with opaque config, regions, policies, open folders), the prolly tree, hashes, diffs, and `spec::resolve`. | `types`, `document` |
 | 1 | `access` | Decides whether a subject may do an action on a name: union of allows, authority cap. | `types`, `spec` |
 | 2 | `os` | Implements the `env` seams and `block::Memory` on the real operating system: monotonic and wall clocks, files, sockets, serial ports, memory, randomness, and threads. The only crate allowed to call them. Holds its own unsafe memory code in `os::memory` (BLOCK MEMORY). | `env`, `types`, `block` |
@@ -2682,7 +2707,8 @@ Parameters and later choices, recorded and not asked:
   after sync vs on receipt), #719 ("A PreVote answer, grant or refusal, shows the
   voter's state when it sent the answer.").
 - Names: X11 (`estimate`, `stamp`), X12, X29 (`@changes`), X47 to X50, X52, the
-  tree key `<label>.@<kind>` of a policy (#729), HCL REFERENCES first segment (#536),
+  tree key `<label>.@<kind>` of a policy (#729), `frame::split`, which cuts a frame
+  body at its ends and gives each part (#632), HCL REFERENCES first segment (#536),
   and generated names as strings (#701).
 - Delivery and wire internals: RECV WAITS (#581), the STREAM WIRE room order (#611).
 - Architecture: X17 and section 4 (`env`, `document`, `estimate`, `secret` crates), X21,

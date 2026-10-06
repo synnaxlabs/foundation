@@ -90,6 +90,15 @@ impl Default for Config {
 /// sim.run().unwrap();
 /// handle.unwrap().join().unwrap();
 /// ```
+///
+/// # Panics
+///
+/// The drop of a `Sim` ends every thread as [`Sim::crash`] does, so it drops each task
+/// and each thread that has not started, and a task or thread that one of these drops
+/// starts is dropped in that drop. When one of these drops panics, the others still
+/// run, and then the drop panics once with each message, as [`Error::Panicked`] gives
+/// them: those of the tasks first, then those of the threads, each in start order. It
+/// does not panic while the thread already panics.
 pub struct Sim {
     config: Config,
     shared: Shared,
@@ -203,9 +212,7 @@ impl Sim {
     ///   those of the futures first, then those of the threads, each in start order.
     pub fn crash(&mut self, node: &Node, crash: Crash) {
         let node = self.own(node);
-        let (tasks, starts) = lock(&self.shared).stop(node);
-        let mut panics = self.drop_futures(&tasks);
-        panics.extend(drop_each(starts));
+        let panics = self.stop(|key| key == node);
         let orphans = lock(&self.shared).crash(node, crash);
         drop(orphans);
         assert!(panics.is_empty(), "{}", panics.join(THEN));
@@ -414,6 +421,17 @@ impl Sim {
         node.0.node
     }
 
+    /// Ends each live thread of the nodes whose index `stopped` picks, as
+    /// [`State::stop`] does, and drops their tasks, then the threads that have not
+    /// started, outside the lock. Returns the message of each drop that panicked, in
+    /// order.
+    fn stop(&self, stopped: impl Fn(usize) -> bool) -> Vec<String> {
+        let (tasks, starts) = lock(&self.shared).stop(stopped);
+        let mut panics = self.drop_futures(&tasks);
+        panics.extend(drop_each(starts));
+        panics
+    }
+
     /// Drops the futures of `tasks`, outside the borrow, since a drop may spawn.
     /// Returns the message of each drop that panicked, in order.
     fn drop_futures(&self, tasks: &[u64]) -> Vec<String> {
@@ -449,13 +467,15 @@ fn message(payload: &(dyn Any + Send)) -> String {
 }
 
 impl Drop for Sim {
-    /// Drops every task and every thread that has not started. They may hold handles
-    /// to the run, so they are dropped outside its lock.
+    /// Stops every node first, so a task that a drop spawns or a thread that it starts
+    /// is born ended and dropped in that drop.
     fn drop(&mut self) {
-        let starts = lock(&self.shared).unstarted();
-        let futures = self.futures.borrow_mut().clear();
-        drop(starts);
-        drop(futures);
+        let panics = self.stop(|_| true);
+        assert!(
+            panics.is_empty() || std::thread::panicking(),
+            "{}",
+            panics.join(THEN)
+        );
     }
 }
 
