@@ -43,8 +43,7 @@ impl Stop {
     }
 
     /// The number of guards that wait for the signal.
-    #[cfg(test)]
-    #[cfg(not(loom))]
+    #[cfg(all(test, not(loom)))]
     pub(crate) fn waiting(&self) -> usize {
         self.lock().wakers.len()
     }
