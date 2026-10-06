@@ -31,6 +31,7 @@ fn a_voter_that_does_not_lead_cannot_make_a_follower_commit_alone() {
             entries: vec![config],
             commit: 0,
         },
+        proof: None,
     };
     let err = network.nodes[victim].step(append).unwrap_err();
     let from = Network::key(sender);

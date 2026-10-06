@@ -94,6 +94,7 @@ fn sent(round: u32, from: u8, to: u8, term: u64, body: Body) -> Sent {
             to,
             term,
             body,
+            proof: None,
         },
     )
 }
@@ -275,6 +276,7 @@ fn lose_the_release(count: u8) -> BTreeMap<node::Key, Raft> {
             to: removed,
             term: Term(1),
             body: release,
+            proof: None,
         }]
     );
     let new = Voters {

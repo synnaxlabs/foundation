@@ -20,10 +20,11 @@ use std::rc::Rc;
 
 use block::{Block, Pool};
 use env::files::{self, File, Files, Mode};
-use raft::{Entry, Hard, Term};
+use raft::{Entry, Grant, Hard, Proof, Term};
 use types::digest::Digest;
+use types::node;
 
-use crate::entry::{self, key, take};
+use crate::entry::{self, key, keys, put_keys, take};
 
 const VERSION: u16 = 1;
 const CHECK: usize = 8;
@@ -39,7 +40,10 @@ const CHUNK: usize = 64 << 10;
 
 const NO_HARD: u8 = 0;
 const HARD: u8 = 1;
-const HARD_WITH_VOTE: u8 = 2;
+const ABSENT: u8 = 0;
+const PRESENT: u8 = 1;
+const PRE_VOTE: u8 = 0;
+const VOTE: u8 = 1;
 
 /// What a [`Log`] holds: the input of `raft::Raft::new` after a restart.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -540,10 +544,23 @@ fn encode(number: u64, hard: Option<Hard>, entries: &[Entry]) -> Vec<u8> {
     let mut body = Vec::new();
     match hard {
         None => body.push(NO_HARD),
-        Some(Hard { term, vote }) => {
-            body.push(vote.map_or(HARD, |_| HARD_WITH_VOTE));
-            body.extend(term.0.to_le_bytes());
-            body.extend(vote.iter().flat_map(|key| key.as_u128().to_le_bytes()));
+        Some(hard) => {
+            body.push(HARD);
+            body.extend(hard.term.0.to_le_bytes());
+            put_key(hard.vote, &mut body);
+            put_key(hard.leader, &mut body);
+            match &hard.proof {
+                None => body.push(ABSENT),
+                Some(proof) => {
+                    body.push(PRESENT);
+                    body.push(match proof.grant {
+                        Grant::PreVote => PRE_VOTE,
+                        Grant::Vote => VOTE,
+                    });
+                    body.extend(proof.candidate.as_u128().to_le_bytes());
+                    put_keys(&proof.voters, &mut body);
+                }
+            }
         }
     }
     for entry in entries {
@@ -566,13 +583,37 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
     let body = &mut body;
     match u8::from_le_bytes(take(body)?) {
         NO_HARD => {}
-        kind @ (HARD | HARD_WITH_VOTE) => {
+        HARD => {
             let term = Term(u64::from_le_bytes(take(body)?));
-            let vote = match kind {
-                HARD_WITH_VOTE => Some(key(body)?),
-                _ => None,
+            let vote = if present(body)? {
+                Some(key(body)?)
+            } else {
+                None
             };
-            stored.hard = Hard { term, vote };
+            let leader = if present(body)? {
+                Some(key(body)?)
+            } else {
+                None
+            };
+            let proof = if present(body)? {
+                Some(Proof {
+                    grant: match u8::from_le_bytes(take(body)?) {
+                        PRE_VOTE => Grant::PreVote,
+                        VOTE => Grant::Vote,
+                        _ => return None,
+                    },
+                    candidate: key(body)?,
+                    voters: keys(body)?,
+                })
+            } else {
+                None
+            };
+            stored.hard = Hard {
+                term,
+                vote,
+                leader,
+                proof,
+            };
         }
         _ => return None,
     }
@@ -589,6 +630,25 @@ fn apply(stored: &mut Stored, mut body: &[u8]) -> Option<()> {
     }
     stored.entries.extend(entries);
     Some(())
+}
+
+fn put_key(key: Option<node::Key>, out: &mut Vec<u8>) {
+    match key {
+        None => out.push(ABSENT),
+        Some(key) => {
+            out.push(PRESENT);
+            out.extend(key.as_u128().to_le_bytes());
+        }
+    }
+}
+
+// Takes a presence byte. `None` for a byte that is neither value.
+fn present(bytes: &mut &[u8]) -> Option<bool> {
+    match u8::from_le_bytes(take(bytes)?) {
+        ABSENT => Some(false),
+        PRESENT => Some(true),
+        _ => None,
+    }
 }
 
 // Whether `entries` can follow a log whose last entry has index `last`: the first at
@@ -614,7 +674,6 @@ mod tests {
     use proptest::prelude::*;
     use raft::{Data, Voters};
     use sim::{Crash, Sim};
-    use types::node;
     use types::time::Span;
 
     use super::*;
@@ -693,6 +752,16 @@ mod tests {
         Hard {
             term: Term(term),
             vote: vote.map(key),
+            leader: None,
+            proof: None,
+        }
+    }
+
+    fn proof(grant: Grant, candidate: u128, voters: &[u128]) -> Proof {
+        Proof {
+            grant,
+            candidate: key(candidate),
+            voters: voters.iter().copied().map(key).collect(),
         }
     }
 
@@ -1062,6 +1131,25 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_record_has_one_byte_form() {
+        let hard = Hard {
+            leader: Some(key(2)),
+            proof: Some(proof(Grant::Vote, 2, &[2, 3])),
+            ..hard(5, Some(2))
+        };
+        let record = encode(0, Some(hard), &[]);
+        let two = 2_u128.to_le_bytes();
+        let mut expected = vec![HARD];
+        expected.extend(5_u64.to_le_bytes());
+        expected.extend([PRESENT].into_iter().chain(two));
+        expected.extend([PRESENT].into_iter().chain(two));
+        expected.extend([PRESENT, VOTE].into_iter().chain(two));
+        expected.extend(2_u64.to_le_bytes());
+        expected.extend(two.into_iter().chain(3_u128.to_le_bytes()));
+        assert_eq!(record[HEADER..], expected);
+    }
+
+    #[test]
     fn refuses_a_record_of_another_format_version() {
         let (mut sim, node) = sim(0);
         on(&mut sim, &node, |node| async move {
@@ -1416,9 +1504,30 @@ mod tests {
         })
     }
 
+    fn proofs() -> impl Strategy<Value = Option<Proof>> {
+        let grant = prop::bool::ANY
+            .prop_map(|vote| if vote { Grant::Vote } else { Grant::PreVote });
+        let voters = prop::collection::btree_set(any::<u128>(), 0..4);
+        prop::option::of((grant, any::<u128>(), voters)).prop_map(|proof| {
+            proof.map(|(grant, candidate, voters)| Proof {
+                grant,
+                candidate: key(candidate),
+                voters: voters.into_iter().map(key).collect(),
+            })
+        })
+    }
+
     fn hards() -> impl Strategy<Value = Option<Hard>> {
-        prop::option::of((any::<u64>(), prop::option::of(any::<u128>())))
-            .prop_map(|hard| hard.map(|(term, vote)| self::hard(term, vote)))
+        let keys = prop::option::of(any::<u128>());
+        prop::option::of((any::<u64>(), keys.clone(), keys, proofs())).prop_map(
+            |hard| {
+                hard.map(|(term, vote, leader, proof)| Hard {
+                    leader: leader.map(key),
+                    proof,
+                    ..self::hard(term, vote)
+                })
+            },
+        )
     }
 
     proptest! {
@@ -1428,7 +1537,7 @@ mod tests {
             hard in hards(),
             entries in entries(),
         ) {
-            let bytes = encode(number, hard, &entries);
+            let bytes = encode(number, hard.clone(), &entries);
             let At::Header(head) = header(&bytes) else {
                 panic!("a record starts with a header");
             };

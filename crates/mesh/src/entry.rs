@@ -24,10 +24,8 @@ pub(crate) fn encode(entry: &Entry, out: &mut Vec<u8>) {
         }
         Data::Voters(voters) => {
             out.push(VOTERS);
-            for keys in [&voters.incoming, &voters.outgoing] {
-                out.extend(wide(keys.len()).to_le_bytes());
-                out.extend(keys.iter().flat_map(|key| key.as_u128().to_le_bytes()));
-            }
+            put_keys(&voters.incoming, out);
+            put_keys(&voters.outgoing, out);
         }
     }
 }
@@ -71,8 +69,14 @@ fn wide(len: usize) -> u64 {
     u64::try_from(len).expect("invariant: a length fits in 64 bits")
 }
 
-// A count, then the keys in rising order.
-fn keys(bytes: &mut &[u8]) -> Option<BTreeSet<node::Key>> {
+/// Adds a count, then the keys in rising order, to `out`.
+pub(crate) fn put_keys(keys: &BTreeSet<node::Key>, out: &mut Vec<u8>) {
+    out.extend(wide(keys.len()).to_le_bytes());
+    out.extend(keys.iter().flat_map(|key| key.as_u128().to_le_bytes()));
+}
+
+/// Takes what [`put_keys`] gives from the start of `bytes`.
+pub(crate) fn keys(bytes: &mut &[u8]) -> Option<BTreeSet<node::Key>> {
     let count = u64::from_le_bytes(take(bytes)?);
     let mut keys = BTreeSet::new();
     for _ in 0..count {
