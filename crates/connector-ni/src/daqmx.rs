@@ -9,6 +9,7 @@ use std::sync::Arc;
 use types::time::Span;
 
 pub mod analog;
+pub mod digital;
 mod ffi;
 
 use ffi::{Functions, Handle};
@@ -91,8 +92,8 @@ impl Library {
     }
 }
 
-/// A task of the driver, which [`analog`] wraps by direction. Dropping it clears it
-/// in the driver.
+/// A task of the driver, which each public task type wraps. Dropping it clears it in
+/// the driver.
 #[derive(Debug)]
 struct Task {
     library: Library,
@@ -129,6 +130,30 @@ impl Task {
     fn start(&mut self) -> Result<(), Error> {
         // SAFETY: a live handle.
         self.check(unsafe { (self.functions().start_task)(self.handle) })
+    }
+
+    fn clock(&mut self, rate: f64, buffer: u64) -> Result<(), Error> {
+        // SAFETY: a live handle and a NUL-terminated string.
+        let code = unsafe {
+            (self.functions().clock)(
+                self.handle,
+                c"".as_ptr(),
+                rate,
+                ffi::RISING,
+                ffi::CONTINUOUS,
+                buffer,
+            )
+        };
+        self.check(code)
+    }
+
+    /// Adds the lines `lines` names with `create`, one channel for each line.
+    fn lines(&self, create: ffi::Lines, lines: &str) -> Result<(), Error> {
+        let lines = text(lines);
+        // SAFETY: a live handle and NUL-terminated strings.
+        let code =
+            unsafe { create(self.handle, lines.as_ptr(), c"".as_ptr(), ffi::PER_LINE) };
+        self.check(code)
     }
 
     fn stop(&mut self) -> Result<(), Error> {

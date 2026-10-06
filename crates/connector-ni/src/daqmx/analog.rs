@@ -5,7 +5,7 @@ use std::ptr;
 
 use types::time::Span;
 
-use super::ffi::{BY_SCAN, CONTINUOUS, DEFAULT, RISING, VOLTS};
+use super::ffi::{BY_SCAN, DEFAULT, VOLTS};
 use super::{Error, Library, Task, scans, seconds, size, text, values};
 
 /// A task that reads voltages. Dropping it clears it in the driver.
@@ -63,19 +63,7 @@ impl Input {
     ///
     /// [`Error::Daqmx`] when the driver refuses, as for a rate the device cannot do.
     pub fn clock(&mut self, rate: f64, buffer: u64) -> Result<(), Error> {
-        let task = &self.0;
-        // SAFETY: a live handle and a NUL-terminated string.
-        let code = unsafe {
-            (task.functions().clock)(
-                task.handle,
-                c"".as_ptr(),
-                rate,
-                RISING,
-                CONTINUOUS,
-                buffer,
-            )
-        };
-        task.check(code)
+        self.0.clock(rate, buffer)
     }
 
     /// Starts sampling.

@@ -1926,6 +1926,7 @@ name = "wire"
 version = "0.0.0"
 dependencies = [
  "proptest",
+ "types",
 ]
 
 [[package]]

@@ -12,6 +12,5 @@ mod wal;
 
 pub use buffer::{Buffer, Commit, Config, Error, Rejected};
 pub use entry::{Entry, PARTS_MAX, Parts};
-pub use group::Limit;
 pub use log::Tail;
-pub use wal::{Layout, Unfit};
+pub use wal::{Layout, Limit, Unfit};
