@@ -262,7 +262,7 @@ impl Shard {
         };
         let scratch = &mut self.scratch;
         let mut split = scratch.split.split(&session.set, frame);
-        for (group, stamps) in split.groups() {
+        while let Some((group, stamps)) = split.next() {
             let (claim, _) = session.claim(group);
             let index = &mut self.indexes[claim.place];
             let checked = index.check(claim.key, path, stamps, now, mesh);
@@ -1060,6 +1060,29 @@ mod tests {
             assert_eq!(
                 shard.write(a, LIVE, write, NOW, MESH),
                 Ok(&[refused(0, Refusal::Order(backwards)), applied(2, 1, 1)][..])
+            );
+        });
+    }
+
+    #[test]
+    fn refuses_a_backwards_stamp_in_a_later_vector_of_its_index() {
+        run(46, |test| async move {
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set), NOW, MESH);
+            let mut stamps: Vec<i64> = (10..2510).collect();
+            stamps[2100] = 5;
+            let data = vec![0; stamps.len()];
+            let series = [(0, &stamps[..]), (1, &data[..]), (2, &[10][..])];
+            let write = frame(&test.pool, &set, &series);
+            let backwards = order::Error::Backwards {
+                path: Path::Live,
+                before: Stamp::from_nanos(2109),
+                stamp: Stamp::from_nanos(5),
+            };
+            assert_eq!(
+                shard.write(a, LIVE, write, NOW, MESH),
+                Ok(&[refused(0, Refusal::Order(backwards)), applied(2, 0, 1)][..])
             );
         });
     }
