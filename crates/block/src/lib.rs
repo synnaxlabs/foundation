@@ -1134,6 +1134,7 @@ mod tests {
         }
 
         #[test]
+        #[cfg_attr(miri, ignore = "Miri stops at an allocation it cannot make")]
         #[should_panic(expected = "heap memory of 9223372036854775743 bytes is too")]
         fn panics_when_the_padded_layout_fits_but_cannot_be_allocated() {
             drop(Heap::new(isize::MAX as usize - ALIGN));

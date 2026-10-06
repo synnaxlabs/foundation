@@ -69,10 +69,10 @@ impl Heap {
     #[must_use]
     pub fn new(len: usize) -> Self {
         assert!(len > 0, "heap memory must be more than 0 bytes");
-        // Std reaches `calloc`, which leaves the pages untouched, only at the
-        // allocator's own alignment. At `ALIGN` it writes zero over every page.
         let too_large =
             || -> ! { panic!("heap memory of {len} bytes is too large to allocate") };
+        // Std reaches `calloc`, which leaves the pages untouched, only at the
+        // allocator's own alignment. At `ALIGN` it writes zero over every page.
         let Some(layout) = len
             .checked_add(ALIGN)
             .and_then(|size| Layout::from_size_align(size, 1).ok())
