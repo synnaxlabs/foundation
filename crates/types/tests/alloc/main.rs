@@ -37,6 +37,34 @@ fn main() {
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     read_a_frame(&pool, &set);
     read_a_view(&pool, &set);
+    check_a_search();
+}
+
+/// The index slots of both groups come first, so the data of group 0 search for their
+/// index.
+fn check_a_search() {
+    let keys = [10, 11, 12].map(Key::from_u128);
+    let mut interner = Interner::new();
+    for key in keys {
+        interner.slots().assign(key);
+    }
+    let data = [(keys[2], F64)];
+    let set = interner.intern(&[
+        Group {
+            index: keys[0],
+            data: &data,
+        },
+        Group {
+            index: keys[1],
+            data: &[],
+        },
+    ]);
+    assert_eq!(set.index(2), 0, "entry 2 is data of group 0");
+    let series = [(0, 8), (1, 8), (2, 8)];
+    let (body, allocations) = ALLOCATOR
+        .count(|| frame::Layout::new(&set, &series).map(|layout| layout.body_len()));
+    assert_eq!(allocations, 0, "the search allocated");
+    assert_eq!(body, Ok(24), "the layout holds each series");
 }
 
 const SERIES: [(usize, usize); 2] = [(0, 16), (2, 16)];

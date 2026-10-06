@@ -113,7 +113,9 @@ fn cases() -> Vec<Case> {
 
 /// Frames whose data take turns among groups.
 fn turns(interner: &mut Interner) -> Vec<Case> {
-    let (spread, apart) = (spread(interner), apart(interner));
+    let apart = apart(interner);
+    let [few, some, many] = [(16, 900_000), (32, 500_000), (1_024, 1_000_000)]
+        .map(|(count, first)| spread(interner, count, first));
     vec![
         case(
             "100k of 100k in two groups, data in turn",
@@ -127,16 +129,20 @@ fn turns(interner: &mut Interner) -> Vec<Case> {
         ),
         case(
             "99,999 of 100k in 32 groups, data in turn, indexes spread",
-            Arc::clone(&spread),
+            Arc::clone(&some),
             (0..99_999).map(|entry| (entry, 8)).collect(),
         ),
-        case(
+        half(
+            "half of 100k in 16 groups, data in turn, indexes spread",
+            few,
+        ),
+        half(
             "half of 100k in 32 groups, data in turn, indexes spread",
-            Arc::clone(&spread),
-            (0..100_000)
-                .filter(|entry| entry % 2 == 0 || entry % 3_125 == 0)
-                .map(|entry| (entry, 8))
-                .collect(),
+            Arc::clone(&some),
+        ),
+        half(
+            "half of 100k in 1,024 groups, data in turn, indexes spread",
+            many,
         ),
         case(
             "groups 0 and 16 in turn, indexes apart",
@@ -195,15 +201,26 @@ fn in_turn(interner: &mut Interner, count: usize) -> Arc<KeySet> {
     interner.intern(&groups)
 }
 
-/// 32 groups of 100,000 entries in all: the data slots of the groups in turn, with
-/// each index slot 3,125 slots after the one before.
-fn spread(interner: &mut Interner) -> Arc<KeySet> {
-    let mut data = vec![Vec::new(); 32];
+/// Each even entry of a set from [`spread`], and each index.
+fn half(name: &'static str, set: Arc<KeySet>) -> Case {
+    let step = 100_000 / set.groups().len();
+    let series = (0..100_000)
+        .filter(|entry| entry % 2 == 0 || entry % step == 0)
+        .map(|entry| (entry, 8))
+        .collect();
+    case(name, set, series)
+}
+
+/// `count` groups of 100,000 entries in all, keyed from `first`: the data slots of
+/// the groups in turn, with an index slot each 100,000 / `count` slots.
+fn spread(interner: &mut Interner, count: usize, first: usize) -> Arc<KeySet> {
+    let step = 100_000 / count;
+    let mut data = vec![Vec::new(); count];
     let mut turn = 0;
-    for n in 500_000..600_000 {
-        interner.slots().assign(key(n));
-        if (n - 500_000) % 3_125 != 0 {
-            data[turn % 32].push((key(n), F64));
+    for n in 0..100_000 {
+        interner.slots().assign(key(first + n));
+        if n % step != 0 || n / step >= count {
+            data[turn % count].push((key(first + n), F64));
             turn += 1;
         }
     }
@@ -211,7 +228,7 @@ fn spread(interner: &mut Interner) -> Arc<KeySet> {
         .iter()
         .enumerate()
         .map(|(group, data)| Group {
-            index: key(500_000 + group * 3_125),
+            index: key(first + group * step),
             data,
         })
         .collect();

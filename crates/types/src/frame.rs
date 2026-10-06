@@ -215,9 +215,9 @@ impl<'a> Layout<'a> {
     /// Checks `series` for a frame of `set`: each present entry and the byte length
     /// of its series, in increasing entry order. Each data entry needs the index of
     /// its group in `series`. A group is present when its index is. Takes no block.
-    /// Time is linear in `series` when each group's data come right after its index,
-    /// and O(n log(m + 1)) at worst, for n series and the m entries of `set` that
-    /// `series` lacks.
+    /// Time is linear in `series` when it holds each entry of `set` or each group's
+    /// data come right after its index. At worst it is O(n log(2 + min(n, m))), for n
+    /// series and the m entries of `set` that `series` lacks.
     ///
     /// # Errors
     ///
@@ -228,9 +228,9 @@ impl<'a> Layout<'a> {
         let (mut groups, mut bytes, mut last) = (0, 0_usize, None);
         // An index usually comes just before its data. Other data search `series`, once
         // per group while `found` holds its index. In a valid `series`, entry e is at a
-        // position from e - `lacks` to e, so a search looks only there. An absent index
-        // waits for the order checks, without which the search means nothing.
-        let lacks = entries.saturating_sub(series.len());
+        // position from e - `missing` to e, so a search looks only there. An absent
+        // index waits for the order checks, without which the search means nothing.
+        let missing = entries.saturating_sub(series.len());
         let (mut last_index, mut found, mut absent) = (None, [usize::MAX; 16], None);
         for &(entry, len) in series {
             if entry >= entries {
@@ -251,7 +251,7 @@ impl<'a> Layout<'a> {
                 let memo = &mut found[group % found.len()];
                 if *memo != index {
                     let window =
-                        index.saturating_sub(lacks)..series.len().min(index + 1);
+                        index.saturating_sub(missing)..series.len().min(index + 1);
                     if series[window]
                         .binary_search_by_key(&index, |&(entry, _)| entry)
                         .is_err()
@@ -1310,6 +1310,35 @@ mod tests {
     }
 
     #[test]
+    fn refuses_an_index_absent_between_present_indexes() {
+        // Entries 0 to 4 are the indexes of groups 0 to 4, and entry 5 is the data of
+        // group 2.
+        let data = [(key(900), F64)];
+        let groups: Vec<_> = (1..=5)
+            .map(|n| Group {
+                index: key(n),
+                data: if n == 3 { &data[..] } else { &[] },
+            })
+            .collect();
+        let set = interner().intern(&groups);
+        let series = [(0, 1), (1, 1), (3, 1), (4, 1), (5, 1)];
+        let error = Draft::new(&pool(1 << 16), &set, Form::Raw, &series).unwrap_err();
+        assert_eq!(error, Error::IndexAbsent { entry: 5, index: 2 });
+    }
+
+    #[test]
+    fn refuses_more_series_than_the_key_set_has_entries() {
+        assert_eq!(
+            refusal(&[(0, 1), (1, 1), (2, 1), (2, 1)]),
+            Error::Unordered { entry: 2, last: 2 }
+        );
+        assert_eq!(
+            refusal(&[(1, 1), (2, 1), (0, 1), (0, 1)]),
+            Error::Unordered { entry: 0, last: 2 }
+        );
+    }
+
+    #[test]
     fn finds_an_index_far_after_its_data() {
         // Entries 0 to 99 are the data of group 1, whose index is entry 101. Entry 100
         // is the index of group 0, which has no data.
@@ -1780,11 +1809,11 @@ mod tests {
         /// than [`Layout::new`] remembers.
         #[test]
         fn refuses_the_first_entry_whose_index_is_absent(
-            sizes in vec(0_usize..10, 1..20),
+            sizes in vec(0_usize..10, 1..65),
             keys in Just((0..1000).collect::<Vec<u32>>()).prop_shuffle(),
-            kept in vec(any::<bool>(), 200),
+            kept in vec(any::<bool>(), 640),
         ) {
-            let set = key_set(&sizes, keys);
+            let set = create_key_set(&sizes, keys);
             let series: Vec<(usize, usize)> = (0..set.entries().len())
                 .filter(|&entry| kept[entry])
                 .map(|entry| (entry, 1))
@@ -1803,7 +1832,7 @@ mod tests {
             kept in vec(any::<bool>(), 640),
             group in proptest::option::of(0_usize..64),
         ) {
-            let set = key_set(&sizes, keys);
+            let set = create_key_set(&sizes, keys);
             let dropped = group.map(|group| set.groups()[group % set.groups().len()]);
             let series: Vec<(usize, usize)> = (0..set.entries().len())
                 .filter(|&entry| {
@@ -1822,7 +1851,7 @@ mod tests {
 
     /// A key set with a group of `sizes[g]` data for each `g`, keyed from `keys` in
     /// turn: each group's data, then its index.
-    fn key_set(sizes: &[usize], keys: Vec<u32>) -> std::sync::Arc<KeySet> {
+    fn create_key_set(sizes: &[usize], keys: Vec<u32>) -> std::sync::Arc<KeySet> {
         let mut keys = keys.into_iter().map(key);
         let data: Vec<Vec<(channel::Key, Type)>> = sizes
             .iter()
