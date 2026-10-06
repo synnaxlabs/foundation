@@ -27,6 +27,9 @@ pub(super) struct Node<'a> {
     pub digest: Digest,
     pub level: u8,
     pub entries: Vec<Entry<'a>>,
+    /// The key that each key of the chunk is above, from the chunks above it.
+    /// `None` for a root.
+    pub floor: Option<&'a [u8]>,
 }
 
 impl<'a> Node<'a> {
@@ -58,6 +61,7 @@ impl<'a> Node<'a> {
             digest,
             level,
             entries,
+            floor: None,
         })
     }
 

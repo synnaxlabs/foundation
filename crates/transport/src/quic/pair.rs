@@ -1,22 +1,17 @@
-//! A sim shard for a [`Config`], and two endpoints over a link in virtual time.
+//! Two endpoints over a link in virtual time.
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::num::{NonZeroU32, NonZeroUsize};
-use std::rc::Rc;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use block::{Block, Heap, Pool};
-use env::clock::Clock;
-use env::entropy::Entropy;
 use env::net::udp::Meta;
-use env::tasks::Tasks;
 use types::node::{PrivateKey, PublicKey};
 use types::time::{Monotonic, Span};
 
 use super::settings::MTU_MIN;
 use super::{Endpoint, Event, cid, connection, find, queue};
-use crate::Config;
+use crate::testing::Shard;
 
 /// The client's address. The server's is [`SERVER`].
 pub(super) const CLIENT: SocketAddr =
@@ -28,8 +23,6 @@ pub(super) const SERVER: SocketAddr =
 pub(super) const CLIENT_SHARD: u8 = 3;
 /// The server's shard.
 pub(super) const SERVER_SHARD: u8 = 5;
-/// The most streams of each kind a peer may open, in [`Shard::config`].
-pub(super) const STREAMS_MAX: u32 = 16;
 /// The client's node key. The server's is [`SERVER_KEY`].
 pub(super) const CLIENT_KEY: PrivateKey = PrivateKey([1; 32]);
 /// The server's node key.
@@ -73,68 +66,6 @@ pub(super) fn connection(
 /// The time `elapsed` after the start of a run.
 pub(super) fn at(elapsed: Duration) -> Monotonic {
     Monotonic(u64::try_from(elapsed.as_nanos()).expect("fits"))
-}
-
-/// What one sim shard gives a [`Config`].
-pub(super) struct Shard {
-    clock: Clock,
-    entropy: Entropy,
-    tasks: Tasks,
-    /// The pool of each config.
-    pool: Rc<Pool>,
-}
-
-impl Shard {
-    /// A config for a node with `private_key` and `idle`, on this shard.
-    pub(super) fn config(&self, private_key: PrivateKey, idle: Span) -> Config {
-        Config {
-            private_key,
-            message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
-            window_bytes: 1 << 20,
-            streams_max: NonZeroU32::new(STREAMS_MAX).expect("not zero"),
-            idle,
-            clock: self.clock.clone(),
-            entropy: self.entropy.clone(),
-            tasks: self.tasks.clone(),
-            pool: Rc::clone(&self.pool),
-        }
-    }
-
-    /// A block from [`Shard::pool`] that holds `bytes`.
-    pub(super) fn block(&self, bytes: &[u8]) -> Block {
-        let mut block = self.pool.alloc(bytes.len()).expect("room");
-        block.copy_from_slice(bytes);
-        block.freeze()
-    }
-
-    /// The bytes of [`Shard::pool`] that blocks hold or keep for the next alloc.
-    pub(super) fn committed(&self) -> usize {
-        self.pool.committed()
-    }
-}
-
-/// Runs `test` on one shard of a sim run made from `value`, and gives its result.
-pub(super) fn run<T: Send + 'static>(
-    value: u64,
-    test: impl FnOnce(&Shard) -> T + Send + 'static,
-) -> T {
-    let mut sim = sim::Sim::new(sim::Config {
-        seed: value,
-        ..sim::Config::default()
-    });
-    let node = sim.node(sim::node::Config::default());
-    sim.run_on(&node, |node, tasks| async move {
-        let config = block::Config { budget: 1 << 22 };
-        let memory = Heap::new(config.reservation());
-        let shard = Shard {
-            clock: node.clock(),
-            entropy: node.entropy(),
-            tasks,
-            pool: Rc::new(Pool::new(config, memory)),
-        };
-        test(&shard)
-    })
-    .expect("the test passes")
 }
 
 /// An endpoint on [`CLIENT_SHARD`] and one on [`SERVER_SHARD`], over a link that
