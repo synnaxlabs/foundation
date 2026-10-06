@@ -87,7 +87,11 @@ mod tests {
             let mut expected = texts.clone();
             expected.sort();
             expected.dedup();
-            let voters = made.initial_voters().iter().map(Name::as_str).collect::<Vec<_>>();
+            let voters = made
+                .initial_voters()
+                .iter()
+                .map(Name::as_str)
+                .collect::<Vec<_>>();
             prop_assert_eq!(voters, expected);
         }
     }

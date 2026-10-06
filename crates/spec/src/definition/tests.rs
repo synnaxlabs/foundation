@@ -320,7 +320,8 @@ fn refuses_a_name_that_does_not_read() {
     assert_eq!(Definition::decode(&bytes), Err(error.clone()));
     assert_eq!(
         error.to_string(),
-        r#"the name at byte 16 does not read: "gw 1" has a segment that is not valid: "gw 1""#
+        "the name at byte 16 does not read: \"gw 1\" has a segment that is not valid: \
+         \"gw 1\""
     );
     let bytes = region_bytes(1, &[b"n.*"]);
     let error = Error::Name {
