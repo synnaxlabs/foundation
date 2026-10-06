@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::mem;
 use std::path::{Path, PathBuf};
 use std::task::{Poll, Waker};
 
@@ -53,8 +52,6 @@ enum Fate {
 struct Open {
     /// The path of the port, for its error.
     path: PathBuf,
-    /// Each read and write gives `EIO`.
-    failed: bool,
     settings: Settings,
     /// The rate of `settings`.
     rate: Rate,
@@ -101,8 +98,8 @@ struct Line {
     config: line::Config,
     rng: Rng,
     ends: [Option<Open>; 2],
-    /// Whether the next open of each end fails.
-    failing: [bool; 2],
+    /// Whether each end fails: from a fault until its next port closes.
+    failed: [bool; 2],
 }
 
 /// A fault of the line, drawn as a byte is sent.
@@ -168,7 +165,7 @@ impl Serial {
                     config,
                     rng: Rng::from_seed(self.rng.next_u64()),
                     ends: [None, None],
-                    failing: [false, false],
+                    failed: [false, false],
                 });
                 self.ends.insert(a, End { line, side: 0 });
                 self.ends.insert(b, End { line, side: 1 });
@@ -195,7 +192,6 @@ impl Serial {
         }
         line.ends[end.side] = Some(Open {
             path: port.1,
-            failed: mem::take(&mut line.failing[end.side]),
             settings: config.settings,
             rate: config.settings.rate(),
             queue: VecDeque::new(),
@@ -212,7 +208,9 @@ impl Serial {
     /// to drop after it releases the lock.
     pub(crate) fn close(&mut self, end: End) -> [Option<Waker>; 2] {
         self.flights.retain(|_, byte| byte.from != end);
-        let open = self.lines[end.line].ends[end.side].take().expect(OPEN);
+        let line = &mut self.lines[end.line];
+        line.failed[end.side] = false;
+        let open = line.ends[end.side].take().expect(OPEN);
         [open.reader, open.writer]
     }
 
@@ -227,11 +225,10 @@ impl Serial {
     ) -> Option<[Option<Waker>; 2]> {
         let &end = self.ends.get(&(node, path.to_path_buf()))?;
         let line = &mut self.lines[end.line];
+        line.failed[end.side] = true;
         let Some(open) = &mut line.ends[end.side] else {
-            line.failing[end.side] = true;
             return Some([None, None]);
         };
-        open.failed = true;
         self.flights.retain(|_, byte| byte.from != end);
         Some([open.reader.take(), open.writer.take()])
     }
@@ -244,8 +241,9 @@ impl Serial {
         waker: Waker,
         buffer: &mut [u8],
     ) -> (Poll<Result<usize, Error>>, Option<Waker>) {
-        let open = self.lines[end.line].ends[end.side].as_mut().expect(OPEN);
-        if open.failed {
+        let Line { ends, failed, .. } = &mut self.lines[end.line];
+        let open = ends[end.side].as_mut().expect(OPEN);
+        if failed[end.side] {
             return (Poll::Ready(Err(open.error())), Some(waker));
         }
         if open.queue.is_empty() {
@@ -269,10 +267,13 @@ impl Serial {
         bytes: &[u8],
     ) -> (Poll<Result<usize, Error>>, Option<Waker>) {
         let Line {
-            config, rng, ends, ..
+            config,
+            rng,
+            ends,
+            failed,
         } = &mut self.lines[end.line];
         let open = ends[end.side].as_mut().expect(OPEN);
-        if open.failed {
+        if failed[end.side] {
             return (Poll::Ready(Err(open.error())), Some(waker));
         }
         let count = bytes.len().min(QUEUE - open.unsent);
@@ -318,7 +319,7 @@ impl Serial {
                 break;
             }
             let byte = flight.remove();
-            let ends = &mut self.lines[byte.from.line].ends;
+            let Line { ends, failed, .. } = &mut self.lines[byte.from.line];
             let sender = ends[byte.from.side].as_mut();
             let sender =
                 sender.expect("invariant: a close removes the bytes of its end");
@@ -326,7 +327,8 @@ impl Serial {
             wakers.extend(sender.writer.take());
             let to = byte.from.other();
             let fate = match (&mut ends[to.side], byte.fault) {
-                (None | Some(Open { failed: true, .. }), _) => Fate::Dropped,
+                (None, _) => Fate::Dropped,
+                _ if failed[to.side] => Fate::Dropped,
                 (Some(_), Some(Fault::Lost)) => Fate::Lost,
                 (Some(open), _) if open.settings != byte.settings => {
                     push(open, byte.noise, &mut wakers)

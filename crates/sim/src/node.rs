@@ -115,7 +115,8 @@ impl Node {
     /// out: the open port, or else the next one to open. Each read and write of it
     /// then gives `Error::Io` with code 5 (`EIO`), also one that waits. The bytes it
     /// has not read, the bytes it sent that have not arrived, and the bytes that
-    /// arrive at it are lost. The next port to open after it drops works.
+    /// arrive at it are lost. The next port to open after it drops works. A fault
+    /// on a port that already failed does nothing.
     ///
     /// # Panics
     ///
