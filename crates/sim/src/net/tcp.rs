@@ -37,7 +37,7 @@ pub(crate) struct Pair {
 pub(super) struct Segment {
     source: SocketAddr,
     destination: SocketAddr,
-    /// The key of its stream. Only the end of that stream takes it.
+    /// The key of its stream.
     stream: u64,
     kind: Kind,
 }
@@ -102,7 +102,7 @@ enum Fin {
 
 struct End {
     pair: Pair,
-    /// The key of its stream, which each segment of the stream carries.
+    /// The key of its stream.
     stream: u64,
     phase: Phase,
     options: tcp::Options,
@@ -252,12 +252,12 @@ impl Lanes {
 #[derive(Default)]
 pub(super) struct Sockets {
     ends: BTreeMap<u64, End>,
-    /// The key of the end that takes the segments to each pair.
+    /// The key of the end on each pair.
     routes: BTreeMap<Pair, u64>,
     listeners: BTreeMap<u64, Listening>,
     /// The port of the last connect of each node.
     ports: BTreeMap<usize, u16>,
-    /// The last key given to an end or a listener.
+    /// The last key given to an end, a listener, or a stream.
     last: u64,
     lanes: Lanes,
 }
@@ -274,7 +274,7 @@ impl Sockets {
         self.last
     }
 
-    /// Adds `end`, which takes the segments to its pair, and gives its key.
+    /// Adds `end` and gives its key.
     fn insert(&mut self, end: End) -> u64 {
         let key = self.key();
         let routed = self.routes.insert(end.pair, key);
@@ -612,16 +612,16 @@ impl<'a> Tcp<'a> {
             local: destination,
             peer: source,
         };
-        let route = self.sockets.routes.get(&pair).copied();
-        let own = route.filter(|&key| self.end(key).stream == stream);
-        let receiver = own.filter(|&key| self.end(key).live());
+        let end = (self.sockets.routes.get(&pair).copied())
+            .filter(|&key| self.end(key).stream == stream);
+        let receiver = end.filter(|&key| self.end(key).live());
         match (kind, receiver) {
             (Kind::Syn { edge }, _) => {
-                self.syn(at, pair, stream, route, edge);
+                self.syn(at, pair, stream, edge);
                 Vec::new()
             }
-            (Kind::SynAck { edge }, _) => self.syn_ack(at, pair, stream, own, edge),
-            (Kind::Rst, _) => own.map_or_else(Vec::new, |key| self.rst(key)),
+            (Kind::SynAck { edge }, _) => self.syn_ack(at, pair, stream, end, edge),
+            (Kind::Rst, _) => end.map_or_else(Vec::new, |key| self.rst(key)),
             (_, None) => {
                 self.sockets
                     .lanes
@@ -641,17 +641,10 @@ impl<'a> Tcp<'a> {
         }
     }
 
-    /// Takes a SYN of `stream` to `pair` from its peer, which `route` has: a
-    /// listener that receives it answers, and otherwise an RST does.
-    fn syn(
-        &mut self,
-        at: Monotonic,
-        pair: Pair,
-        stream: u64,
-        route: Option<u64>,
-        edge: usize,
-    ) {
-        if route.is_some() {
+    /// Takes a SYN of `stream` to `pair` from its peer: a listener that receives it
+    /// answers, and otherwise an RST does.
+    fn syn(&mut self, at: Monotonic, pair: Pair, stream: u64, edge: usize) {
+        if self.sockets.routes.contains_key(&pair) {
             self.sockets.lanes.yet.get_or_insert(REOPENED);
             return;
         }
@@ -679,17 +672,17 @@ impl<'a> Tcp<'a> {
             .send(self.wire, at, pair, stream, Kind::SynAck { edge });
     }
 
-    /// Takes the SYN-ACK of `stream` to `pair`, whose end `own` is. With no connect
-    /// there, an RST answers.
+    /// Takes the SYN-ACK of `stream` to `pair`, where `end` is the end of the stream.
+    /// With no connect there, an RST answers.
     fn syn_ack(
         &mut self,
         at: Monotonic,
         pair: Pair,
         stream: u64,
-        own: Option<u64>,
+        end: Option<u64>,
         edge: usize,
     ) -> Vec<Waker> {
-        let key = own.filter(|&key| self.end(key).phase == Phase::Connecting);
+        let key = end.filter(|&key| self.end(key).phase == Phase::Connecting);
         let Some(key) = key else {
             self.sockets
                 .lanes
@@ -833,6 +826,41 @@ mod tests {
 
     use super::*;
     use crate::link;
+
+    /// Takes the first segment in flight, and gives when it arrives.
+    fn next(wire: &mut Wire) -> (Monotonic, Segment) {
+        let at = wire.first().expect("a segment is in flight");
+        let Some(Packet::Segment(segment)) = wire.pop(at) else {
+            unreachable!("a segment is first");
+        };
+        (at, segment)
+    }
+
+    #[test]
+    fn bytes_of_another_stream_on_the_pair_meet_a_closed_port() {
+        let mut wire = Wire::new(link::Config::default(), Rng::from_seed(0));
+        let mut sockets = Sockets::default();
+        let [local, peer] = [0, 1].map(|node| SocketAddr::new(addresses(node)[0], 1));
+        let options = tcp::Options {
+            send_buffer_bytes: 1,
+            recv_buffer_bytes: 1,
+            unsent_bytes_max: 1,
+            delayed: false,
+        };
+        let end = End::new(Pair { local, peer }, 2, Phase::Open, options, 1);
+        let key = sockets.insert(end);
+        let back = Pair {
+            local: peer,
+            peer: local,
+        };
+        (sockets.lanes).send(&mut wire, Monotonic(0), back, 1, Kind::Data(vec![7]));
+        let (at, bytes) = next(&mut wire);
+        Tcp::new(&mut sockets, &mut wire).arrive(at, bytes);
+        assert!(sockets.ends[&key].inbox.is_empty());
+        let (_, answer) = next(&mut wire);
+        assert!(matches!(answer.kind, Kind::Rst));
+        assert_eq!(answer.stream, 1);
+    }
 
     #[test]
     fn a_direction_keeps_its_floor_only_while_a_segment_is_in_flight() {

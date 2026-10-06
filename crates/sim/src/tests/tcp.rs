@@ -730,6 +730,35 @@ fn a_finished_stream_frees_its_port_for_a_connect_after_the_ports_wrap() {
 }
 
 #[test]
+fn a_late_syn_ack_of_an_old_stream_opens_no_newer_connect() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let listener = listen(&b, 4433);
+    let server = start(&b, "server", move |node| async move {
+        let half = Span::from_nanos(delay().nanos() / 2);
+        node.clock().sleep_until(legs(1) + half).await;
+        drop(listener);
+        let mut listener = listen(&node, 4433);
+        let mut tcp = accept(&mut listener).await;
+        write_all(&mut tcp, b"y").await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        tcp.peer()
+    });
+    let (remote, closed) = (at(&b, 4433), at(&b, 9));
+    let client = start(&a, "client", move |node| async move {
+        assert!(poll_once(connect(&node, remote, options())).await.is_none());
+        node.clock().sleep_until(legs(1)).await;
+        wrap(&node, closed).await;
+        let mut tcp = connect(&node, remote, options()).await?;
+        let ready = node.clock().now();
+        Ok::<_, Net>((ready, read(&mut tcp, 1).await))
+    });
+    let ran = sim.run();
+    assert_eq!(take(&client), Ok((legs(3), Ok(b"y".to_vec()))));
+    ran.unwrap();
+    assert_eq!(take(&server), at(&a, 49_152));
+}
+
+#[test]
 fn a_late_segment_of_an_old_stream_reaches_no_newer_stream_on_its_pair() {
     let (mut sim, a, b) = pair(0, link::Config::default());
     let mut listener = listen(&b, 4433);
