@@ -89,8 +89,8 @@ pub struct Raft {
     voters: Voters,
     // Where the log holds `voters`: the zero position for `Start.voters`.
     in_force: Position,
-    // Whether this node is a voter of the configuration before `voters`.
-    voter_before: bool,
+    // The configuration before `voters`.
+    before: Voters,
     // The other voters in force, plus the nodes that the configuration in force
     // removed, until a release, a quorum check, or the next configuration drops them.
     // Never this node.
@@ -159,7 +159,7 @@ impl Raft {
         let last = log.last();
         let (in_force, voters) = log.voters();
         let voters = voters.clone();
-        let voter_before = log.voters_before(in_force.index).contains(key);
+        let before = log.voters_before(in_force.index).clone();
         let peers = others(&log, key)
             .into_iter()
             .map(|key| (key, Peer::new(last.index)))
@@ -173,7 +173,7 @@ impl Raft {
             key,
             voters,
             in_force,
-            voter_before,
+            before,
             peers,
             answers: BTreeMap::new(),
             votes: None,
@@ -668,7 +668,7 @@ impl Raft {
             return;
         }
         self.in_force = at;
-        self.voter_before = self.log.voters_before(at.index).contains(self.key);
+        self.before = self.log.voters_before(at.index).clone();
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
         let keep = others(&self.log, self.key);
@@ -1075,12 +1075,11 @@ impl Raft {
         self.leader.is_some() && self.election_elapsed < self.election_ticks
     }
 
-    // Whether this node may campaign: it is a voter of the configuration in force,
-    // or, while that configuration is not committed, of the one before it. An
-    // uncommitted configuration may still be truncated, and a removed leader whose
-    // leave is not committed must be able to win the election that commits it.
+    // An uncommitted configuration may still be truncated, and a removed leader
+    // must be able to win the election that commits its leave.
     fn promotable(&self) -> bool {
-        self.voters.contains(self.key) || (!self.log.settled() && self.voter_before)
+        self.voters.contains(self.key)
+            || (!self.log.settled() && self.before.contains(self.key))
     }
 
     fn peer(&self, key: node::Key) -> &Peer {

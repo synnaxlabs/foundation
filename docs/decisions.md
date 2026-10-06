@@ -1119,8 +1119,8 @@ How to read this record:
   its voter got a lease back still counts, and costs one needless election; safety
   holds. etcd/raft counts such a grant too. Lost: a round number in `PreVote`, which
   changes the message format and closes only the case of two pre-campaigns. Decided by
-  the advisor under the failover delegation on 2026-10-05 (#719). A node that is not a
-  voter votes and follows, but never campaigns (who may campaign: RAFT VOTERS).
+  the advisor under the failover delegation on 2026-10-05 (#719). A node that may not
+  campaign (RAFT VOTERS) still votes and follows.
   `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
   may send. `step` drops a reply with no check when its sender is not in `voters()`,

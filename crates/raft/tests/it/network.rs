@@ -668,8 +668,13 @@ impl Network {
     // a leader must hold only the entries committed in a term below its own.
     fn check_leader(&mut self, at: usize) {
         let node = &self.nodes[at];
+        let key = node.key();
+        let voter = |voters: &Voters| {
+            voters.incoming.contains(&key) || voters.outgoing.contains(&key)
+        };
         assert!(
-            node.voters().incoming.contains(&node.key()) || self.pending(at).is_some(),
+            node.voters().incoming.contains(&key)
+                || (self.pending(at).is_some() && voter(&self.committed_voters(at))),
             "node {at} leads outside its committed configuration"
         );
         let term = node.term();
