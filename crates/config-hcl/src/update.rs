@@ -86,8 +86,8 @@ struct File<'a> {
     marks: Vec<Mark>,
     /// The start of the text after its byte order mark.
     floor: usize,
-    /// `\r\n` when the first line ends so, and `\n` when not.
-    line_end: &'static str,
+    /// The first line ends in `\r\n`.
+    crlf: bool,
 }
 
 impl<'a> File<'a> {
@@ -116,7 +116,7 @@ impl<'a> File<'a> {
                 floor: text
                     .strip_prefix('\u{feff}')
                     .map_or(0, |_| '\u{feff}'.len_utf8()),
-                line_end: if crlf { "\r\n" } else { "\n" },
+                crlf,
             };
         }
         unreachable!("invariant: each token but the last covers a byte")
@@ -253,12 +253,13 @@ impl<'a> File<'a> {
         // At one place, inserts after the item above come first, then inserts before
         // the item below, each in the order made, then a cut.
         edits.sort_by_key(|edit| (edit.range.start, edit.range.end, edit.below));
+        let line_end = if self.crlf { "\r\n" } else { "\n" };
         let mut out = String::with_capacity(self.text.len());
         let mut at = 0;
         for Edit { range, text, .. } in edits {
             let kept = self.text.get(at..range.start);
             out.push_str(kept.expect("invariant: edits do not overlap"));
-            out.push_str(&text.replace('\n', self.line_end));
+            out.push_str(&text.replace('\n', line_end));
             at = range.end;
         }
         out.push_str(
@@ -359,7 +360,7 @@ impl Diff<'_, '_> {
         if pending.attributes.is_empty() && pending.blocks.is_empty() {
             return;
         }
-        let mut writer = Writer::new(&body.margin, 0);
+        let mut writer = Writer::new(&body.margin, 0, self.file.crlf);
         let (attributes, blocks) =
             (pending.attributes.drain(..), pending.blocks.drain(..));
         writer.body(attributes, blocks, 0, pending.ends.contains(&at));
@@ -397,7 +398,8 @@ impl Diff<'_, '_> {
         } else {
             After::Other
         };
-        let mut writer = Writer::new(file.margin(old.key_span), column(old.value.span));
+        let mut writer =
+            Writer::new(file.margin(old.key_span), column(old.value.span), file.crlf);
         writer.value(&new.value, 0, after);
         self.edits.push(Edit {
             range: start..end,
@@ -438,7 +440,7 @@ impl Diff<'_, '_> {
             self.body(&old.body, &new.body, &body);
         } else {
             // A block on one line holds one attribute or none, so it is written again.
-            let mut writer = Writer::new(margin, column(old.span));
+            let mut writer = Writer::new(margin, column(old.span), file.crlf);
             writer.block(new, 0);
             self.edits.push(Edit {
                 range: start..end,
@@ -608,6 +610,7 @@ mod tests {
         let mut out = String::new();
         let mut at = 0;
         let mut heredoc = false;
+        let mut ends_at_closer = false;
         loop {
             let token = tokens.next();
             let (start, end) = (offset(token.span.start()), offset(token.span.end()));
@@ -624,12 +627,15 @@ mod tests {
             }
             out.push('\n');
             let lines = ["", "", "\n", "# c\n", "  // c\n", "/* c\nc */\n"];
-            out.push_str(lines.get(usize::from(picks.pick(6))).unwrap());
+            let line = lines.get(usize::from(picks.pick(6))).unwrap();
+            out.push_str(line);
+            ends_at_closer = heredoc && line.is_empty();
             at = end;
             heredoc = false;
         }
         out.push_str(text.get(at..).unwrap());
-        if picks.pick(4) == 0 && out.ends_with('\n') {
+        // A heredoc needs the line end after its closer.
+        if !ends_at_closer && picks.pick(4) == 0 && out.ends_with('\n') {
             out.pop();
         }
         if picks.pick(4) == 0 {
@@ -925,6 +931,20 @@ mod tests {
     }
 
     #[test]
+    fn writes_no_heredoc_in_a_text_with_crlf_line_ends() {
+        // HCL keeps the `\r` of each line end in the value of a heredoc.
+        assert_eq!(updated("a = 1\r\n", "a = \"x\\n\""), "a = \"x\\n\"\r\n");
+        assert_eq!(
+            updated("a = 1\r\n", "a = { k = \"x\\n\" }"),
+            "a = { k = \"x\\n\" }\r\n"
+        );
+        assert_eq!(
+            updated("b { a = 1 }\r\n", "b {\na = \"x\\n\"\n}"),
+            "b {\r\n  a = \"x\\n\"\r\n}\r\n"
+        );
+    }
+
+    #[test]
     fn quotes_a_value_at_the_end_of_a_text_with_no_line_end() {
         assert_eq!(updated("a = 1", "a = \"x\\n\""), "a = \"x\\n\"");
         assert_eq!(updated("a = 1  ", "a = \"x\\n\""), "a = \"x\\n\"  ");
@@ -946,11 +966,11 @@ mod tests {
                 "a = 1\r\nb {\r\n  c = 2\r\n}\r\n",
                 "a = 1\nd = \"x\\n\"\nb {\nc = 2\ne = 3\n}"
             ),
-            "a = 1\r\nd = <<EOT\r\nx\r\nEOT\r\nb {\r\n  c = 2\r\n  e = 3\r\n}\r\n"
+            "a = 1\r\nd = \"x\\n\"\r\nb {\r\n  c = 2\r\n  e = 3\r\n}\r\n"
         );
         assert_eq!(updated("a = 1", "a = 1\nb = 2"), "a = 1\nb = 2\n");
         assert_eq!(
-            updated("a = <<EOT\r\nx\r\nEOT", "a = \"x\\n\"\nb = 2"),
+            updated("a = <<EOT\r\nx\r\nEOT\r\n", "a = \"x\\n\"\nb = 2"),
             "a = <<EOT\r\nx\r\nEOT\r\nb = 2\r\n"
         );
         assert_eq!(
