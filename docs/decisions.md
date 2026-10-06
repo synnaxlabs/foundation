@@ -1714,6 +1714,12 @@ How to read this record:
   not run drops the same way, after the futures. A thread that a drop starts on the
   crashing node ends in the crash and never runs. Built by `simulation` in #548 and
   #666.
+- **SIM DROP (2026-10-06)** The drop of a `Sim` drops each live future in its own
+  `catch_unwind`. If any panicked, it then panics once with every message, the first
+  one first, but only when the thread is not already panicking. This is the one
+  exception to the rust.md rule "`Drop` never panics": to print the messages and not
+  fail would hide a defect. The person said: "An exception for the simualtor is fine"
+  (#555).
 - **BLOCK MEMORY (2026-10-04)** A `block::Pool` gets its address space through
   `block::Memory`, a small `unsafe` trait in `block`, because `block` sits below
   `env`. `os` implements it over `mmap` (reserve, commit, purge); `block::Heap`
@@ -1757,7 +1763,12 @@ How to read this record:
   machine?" ARM skips docs-only changes. The coordinator owns it. On 2026-10-05 the
   host ran at 80 to 86% CPU with 14 runs queued, so a second host, an m7g.4xlarge (16
   vCPU, 300 GB) with six runners (`foundation-arm-d` to `-i`), joined it. The person
-  chose "m7g.4xlarge, 6 runners".
+  chose "m7g.4xlarge, 6 runners". On 2026-10-06, with 55 runs queued, a third host
+  joined: an m7g.2xlarge spot with three runners (`foundation-arm-j` to `-l`), a spot
+  price cap of 0.20 USD/h, and a hard stop on 2026-10-08 at 03:00 UTC. With it, the
+  hosts and the factory host cost at most 99.73 USD a day (#15). The person said:
+  "Once you are sure of costs provision and set strict limits on whatever you need
+  please".
 - **LINUX CI (2026-10-05)** For the alpha, tests run only on Linux (x86-64 and ARM).
   No CI job runs on macOS or Windows. The design stays cross-OS: each C9d target must
   still be a valid build, so OS-specific code goes only in `os`. The person said: "As
