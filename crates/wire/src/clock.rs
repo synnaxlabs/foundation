@@ -50,8 +50,8 @@ pub struct Answer {
 /// The time of the node that answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Time {
-    /// Its time with a known bound, as it sent them: nothing checks the order of either
-    /// interval.
+    /// Its time with a known bound: two intervals, as it sent them. Nothing checks the
+    /// order of either.
     Known {
         /// Its time, read after the request arrived and not after `answered`.
         received: Interval,
