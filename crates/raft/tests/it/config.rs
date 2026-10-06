@@ -128,7 +128,7 @@ fn restarted(id: u8, old: Voters, log: &[Entry]) -> Raft {
         proof: Some(Proof {
             grant: Grant::Vote,
             candidate: key(1),
-            voters: set(&[1, 2]),
+            voters: [1, 2].map(|id| (key(id), None)).into(),
         }),
     };
     raft.step(append).unwrap();

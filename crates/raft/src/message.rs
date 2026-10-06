@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use types::node;
 
@@ -33,18 +33,115 @@ pub enum Grant {
     Vote,
 }
 
-/// A quorum of signed pre-votes or votes for one candidate in one term. A `Raft`
-/// counts the keys against its own configuration. The caller holds the signatures:
-/// it adds them to a message it sends and checks them on a message it steps, so the
-/// voters of a stepped proof are only the ones whose signature held.
+/// A voter's signature of its [`Claim`]. A `Raft` carries it and never reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Signature(pub [u8; 64]);
+
+/// What a voter's signature attests: `voter` grants `grant` to `candidate` in
+/// `term`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Claim {
+    /// The voter that signs.
+    pub voter: node::Key,
+    /// What it grants.
+    pub grant: Grant,
+    /// The term of the grant.
+    pub term: Term,
+    /// The node it grants it to.
+    pub candidate: node::Key,
+}
+
+/// A voter's answer to a [`Body::PreVote`] or a [`Body::Vote`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// The voter does not grant it.
+    Refused,
+    /// The voter grants it, with its signature. A `Raft` gives its own grant with
+    /// `None`, for the caller to sign.
+    Granted(Option<Signature>),
+}
+
+/// A quorum of signed pre-votes or votes for one candidate in one term: the term of
+/// the message or hard state that holds it. A `Raft` counts the keys against its
+/// own configuration and carries the signatures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof {
     /// What the voters granted.
     pub grant: Grant,
     /// The node they granted it to.
     pub candidate: node::Key,
-    /// The voters that signed, the candidate included.
-    pub voters: BTreeSet<node::Key>,
+    /// The voters, the candidate included, each with its signature. A `Raft` gives
+    /// its own entry with `None`, for the caller to sign.
+    pub voters: BTreeMap<node::Key, Option<Signature>>,
+}
+
+impl Proof {
+    // Gives each entry with no signature the signature `sign` makes for its claim.
+    pub(crate) fn sign(
+        &mut self,
+        term: Term,
+        sign: &mut impl FnMut(&Claim) -> Signature,
+    ) {
+        for (&voter, signature) in &mut self.voters {
+            if signature.is_none() {
+                *signature = Some(sign(&Claim {
+                    voter,
+                    grant: self.grant,
+                    term,
+                    candidate: self.candidate,
+                }));
+            }
+        }
+    }
+}
+
+impl Message {
+    /// Each grant the message carries, with its signature: the entries of its proof
+    /// in rising key order, then the sender's grant when the body grants. The caller
+    /// checks each signature against its voter's key before `step`, and refuses a
+    /// `None`: `step` keeps each signature as it came.
+    pub fn claims(&self) -> impl Iterator<Item = (Claim, Option<Signature>)> + '_ {
+        let proof = self.proof.iter().flat_map(|proof| {
+            proof.voters.iter().map(|(&voter, &signature)| {
+                let claim = Claim {
+                    voter,
+                    grant: proof.grant,
+                    term: self.term,
+                    candidate: proof.candidate,
+                };
+                (claim, signature)
+            })
+        });
+        let granted = self
+            .body
+            .granted()
+            .map(|(grant, signature)| (self.claim(grant), signature));
+        proof.chain(granted)
+    }
+
+    // Gives each grant with no signature the signature `sign` makes for its claim.
+    pub(crate) fn sign(&mut self, sign: &mut impl FnMut(&Claim) -> Signature) {
+        if let Some(proof) = &mut self.proof {
+            proof.sign(self.term, sign);
+        }
+        if let Some((grant, None)) = self.body.granted() {
+            let answer = Answer::Granted(Some(sign(&self.claim(grant))));
+            self.body = match grant {
+                Grant::PreVote => Body::PreVoteReply { answer },
+                Grant::Vote => Body::VoteReply { answer },
+            };
+        }
+    }
+
+    // The sender's claim of a grant to the receiver.
+    fn claim(&self, grant: Grant) -> Claim {
+        Claim {
+            voter: self.from,
+            grant,
+            term: self.term,
+            candidate: self.to,
+        }
+    }
 }
 
 /// What a [`Message`] says.
@@ -57,8 +154,8 @@ pub enum Body {
     },
     /// Answers a [`Body::PreVote`].
     PreVoteReply {
-        /// Whether the receiver would vote for the sender.
-        granted: bool,
+        /// Whether the sender would vote for the receiver.
+        answer: Answer,
     },
     /// Asks for the receiver's vote in the message's term.
     Vote {
@@ -67,8 +164,8 @@ pub enum Body {
     },
     /// Answers a [`Body::Vote`].
     VoteReply {
-        /// Whether the sender has the vote.
-        granted: bool,
+        /// Whether the receiver has the sender's vote.
+        answer: Answer,
     },
     /// A leader states that it leads the message's term.
     Heartbeat {
@@ -105,6 +202,31 @@ impl Body {
     /// Whether only a leader sends this body.
     pub(crate) fn leads(&self) -> bool {
         matches!(self, Self::Heartbeat { .. } | Self::Append { .. })
+    }
+
+    /// What this body grants, with its signature: `None` unless it grants.
+    pub(crate) fn granted(&self) -> Option<(Grant, Option<Signature>)> {
+        match *self {
+            Self::PreVoteReply {
+                answer: Answer::Granted(signature),
+            } => Some((Grant::PreVote, signature)),
+            Self::VoteReply {
+                answer: Answer::Granted(signature),
+            } => Some((Grant::Vote, signature)),
+            Self::PreVoteReply {
+                answer: Answer::Refused,
+            }
+            | Self::VoteReply {
+                answer: Answer::Refused,
+            }
+            | Self::PreVote { .. }
+            | Self::Vote { .. }
+            | Self::Heartbeat { .. }
+            | Self::HeartbeatReply
+            | Self::Append { .. }
+            | Self::AppendReply { .. }
+            | Self::AppendReject { .. } => None,
+        }
     }
 
     /// Whether this body answers a request.

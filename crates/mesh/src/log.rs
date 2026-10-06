@@ -632,7 +632,7 @@ mod tests {
 
     use env::files::Operation;
     use proptest::prelude::*;
-    use raft::{Data, Grant, Proof, Voters};
+    use raft::{Data, Grant, Proof, Signature, Voters};
     use sim::{Crash, Sim};
     use types::node;
     use types::time::Span;
@@ -703,11 +703,16 @@ mod tests {
         }
     }
 
+    // Each voter signs with its key's low byte, 64 times.
     fn proof(grant: Grant, candidate: u128, voters: &[u128]) -> Proof {
+        let signed = |&voter: &u128| {
+            let signature = Signature([voter.to_le_bytes()[0]; 64]);
+            (key(voter), Some(signature))
+        };
         Proof {
             grant,
             candidate: key(candidate),
-            voters: voters.iter().copied().map(key).collect(),
+            voters: voters.iter().map(signed).collect(),
         }
     }
 
@@ -1133,8 +1138,21 @@ mod tests {
         expected.extend([PRESENT].into_iter().chain(two));
         expected.extend([PRESENT, VOTE].into_iter().chain(two));
         expected.extend(2_u64.to_le_bytes());
-        expected.extend(two.into_iter().chain(3_u128.to_le_bytes()));
+        expected.extend(two.into_iter().chain([2; 64]));
+        expected.extend(3_u128.to_le_bytes().into_iter().chain([3; 64]));
         assert_eq!(record[HEADER..], expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: a grant is signed before it is encoded")]
+    fn encode_panics_on_an_unsigned_proof_entry() {
+        let mut proof = proof(Grant::Vote, 2, &[2, 3]);
+        proof.voters.insert(key(2), None);
+        let hard = Hard {
+            proof: Some(proof),
+            ..hard(5, Some(2))
+        };
+        encode(0, Some(hard), &[]);
     }
 
     #[test]
@@ -1523,12 +1541,16 @@ mod tests {
     fn proofs() -> impl Strategy<Value = Option<Proof>> {
         let grant = prop::bool::ANY
             .prop_map(|vote| if vote { Grant::Vote } else { Grant::PreVote });
-        let voters = prop::collection::btree_set(any::<u128>(), 0..4);
+        let signature = prop::array::uniform(any::<u8>()).prop_map(Signature);
+        let voters = prop::collection::btree_map(any::<u128>(), signature, 0..4);
         prop::option::of((grant, any::<u128>(), voters)).prop_map(|proof| {
             proof.map(|(grant, candidate, voters)| Proof {
                 grant,
                 candidate: key(candidate),
-                voters: voters.into_iter().map(key).collect(),
+                voters: voters
+                    .into_iter()
+                    .map(|(voter, signature)| (key(voter), Some(signature)))
+                    .collect(),
             })
         })
     }
