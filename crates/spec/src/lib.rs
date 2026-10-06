@@ -3,5 +3,7 @@
 //! `spec::resolve`.
 
 pub mod access;
+pub mod connector;
 pub mod definition;
+pub mod region;
 pub mod tree;
