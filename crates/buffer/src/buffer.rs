@@ -409,9 +409,11 @@ impl Buffer {
     }
 
     /// How many group commits ended since the open. It moves before the [`Commit`]
-    /// futures that the commit resolves wake, and a failed commit does not move it. A
-    /// move does not make every entry durable: an entry appended while a commit runs
-    /// goes in the next one, so read [`durable`](Self::durable) after a move.
+    /// futures that the commit resolves wake, and a failed commit does not move it.
+    /// [`durable`](Self::durable) changes only at a commit that moves the count, and
+    /// before the count moves. A move does not make every entry durable: an entry
+    /// appended while a commit runs goes in the next one, so read
+    /// [`durable`](Self::durable) after a move.
     #[must_use]
     pub fn commits(&self) -> u64 {
         self.shared.state.borrow().commits
