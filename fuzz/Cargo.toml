@@ -22,6 +22,7 @@ env = { path = "../crates/env" }
 libfuzzer-sys = "0.4.13"
 ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
+spec = { path = "../crates/spec" }
 sim = { path = "../crates/sim" }
 types = { path = "../crates/types" }
 wire = { path = "../crates/wire" }
@@ -106,6 +107,13 @@ bench = false
 [[bin]]
 name = "secret_sealed"
 path = "fuzz_targets/secret_sealed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spec_tree"
+path = "fuzz_targets/spec_tree.rs"
 test = false
 doc = false
 bench = false
