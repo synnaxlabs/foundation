@@ -267,6 +267,8 @@ struct State {
     parked: Option<Waker>,
     /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
+    /// Whether the task ended after a drop. A [`Commit`] waits for it.
+    ended: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
 }
@@ -381,6 +383,7 @@ impl Buffer {
                 wakers: Vec::new(),
                 parked: None,
                 closed: false,
+                ended: false,
                 failed: None,
             }),
         });
@@ -483,7 +486,8 @@ impl Buffer {
     /// Resolves when every entry appended before the call is durable: at once when
     /// none waits, else at the end of the group commit that holds the last of them.
     /// Gives the file error that ended the buffer when it ended before they were
-    /// durable.
+    /// durable. Held past the drop, it resolves once the task ended, after it wrote
+    /// the entries queued at the drop.
     #[must_use]
     pub fn committed(&self) -> Commit {
         Commit {
@@ -661,6 +665,13 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         })
         .await;
         if ended {
+            let mut state = shared.state.borrow_mut();
+            state.ended = true;
+            woken.append(&mut state.wakers);
+            drop(state);
+            for waker in woken.drain(..) {
+                waker.wake();
+            }
             return;
         }
         // After an idle span a passed deadline restarts, so the first entry of a burst
@@ -726,7 +737,7 @@ impl Future for Commit {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.shared.state.borrow_mut();
         // Before `failed`: a commit that synced stays well after a later sync fails.
-        if state.commits >= self.until {
+        if state.commits >= self.until && (!state.closed || state.ended) {
             return Poll::Ready(Ok(()));
         }
         if let Some(error) = &state.failed {

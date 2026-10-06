@@ -2493,3 +2493,45 @@ fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
         );
     });
 }
+
+/// A `Commit` taken before a later append and held past the drop resolves only when
+/// the task wrote that append and ended, so a reopen after it recovers everything.
+#[test]
+fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
+    run(137, Memory::default(), |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.assign(key(1));
+        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
+            .expect("queues");
+        let commit = buffer.committed();
+        shard.clock.sleep(tenths(12)).await;
+        buffer
+            .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
+            .expect("queues while the first sync runs");
+        drop(buffer);
+        let dropped = shard.clock.now();
+        assert_eq!(commit.await, Ok(()), "the task wrote both entries");
+        assert_eq!(
+            shard.clock.now() - dropped,
+            tenths(12),
+            "after the second sync"
+        );
+        assert_eq!(shard.memory.syncs(), 4);
+        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        assert_eq!(
+            buffer.tail(slots.assign(key(1)), Path::Live),
+            tail(2, Some(2))
+        );
+    });
+}
