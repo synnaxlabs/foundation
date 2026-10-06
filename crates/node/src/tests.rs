@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use env::thread;
 use sim::shard::Fault;
+use types::time::Span;
 
 use crate::{Config, Error, Node};
 
@@ -63,6 +64,8 @@ fn start_with(
     }
     let node = Node::start(Config {
         shards: host.shards(),
+        clock: host.clock(),
+        wall: host.wall(),
         budget,
         memory,
     });
@@ -90,16 +93,32 @@ fn named(cores: &[usize]) -> Vec<(String, Option<usize>)> {
 fn starts_one_pinned_shard_per_core_and_runs_until_stopped() {
     let mut run = start(7, 3, &[]);
     assert_eq!(starts(&run), named(&[0, 1, 2]));
-    assert_eq!(
-        run.sim.run(),
-        Err(sim::Error::Stuck {
-            threads: vec!["shard-0".into(), "shard-1".into(), "shard-2".into()],
-            seed: 7,
-        })
-    );
+    assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
+    assert_eq!(run.node.stop.waiting(), 3);
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
+}
+
+#[test]
+fn shard_0_runs_the_mesh_clock_on_the_os_clock() {
+    let mut run = start(7, 3, &[]);
+    run.host.set_wall_error(Some(Span::from_nanos(-1)));
+    assert_eq!(
+        run.sim.run(),
+        Err(sim::Error::Panicked {
+            thread: "shard-0".into(),
+            message: "invariant: the OS error bound -1ns is negative".into(),
+            seed: 7,
+        })
+    );
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(
+        run.node.join(),
+        Err(Error::Panicked(thread::Panicked {
+            name: "shard-0".into()
+        }))
+    );
 }
 
 #[test]
@@ -300,14 +319,18 @@ fn join_gives_a_shard_with_no_memory_over_one_that_panicked() {
 fn a_config_shows_its_budget_but_not_its_memory() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let host = sim.node(sim::node::Config::default());
+    let (clock, wall) = (host.clock(), host.wall());
+    let parts = format!("clock: {clock:?}, wall: {wall:?}");
     let config = Config {
         shards: host.shards(),
+        clock,
+        wall,
         budget: 4096,
         memory: Box::new(heap),
     };
     assert_eq!(
         format!("{config:?}"),
-        "Config { shards: Shards { .. }, budget: 4096, .. }"
+        format!("Config {{ shards: Shards {{ .. }}, {parts}, budget: 4096, .. }}")
     );
 }
 

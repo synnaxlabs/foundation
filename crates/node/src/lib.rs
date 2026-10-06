@@ -23,6 +23,10 @@ use crate::stop::Stop;
 pub struct Config<M> {
     /// Where shards run. One shard starts per core.
     pub shards: env::shards::Shards,
+    /// The monotonic clock. Mesh time runs on it.
+    pub clock: env::clock::Clock,
+    /// The OS clock, a source of mesh time.
+    pub wall: env::wall::Wall,
     /// The most bytes the node's pools may commit, split evenly across its shards.
     pub budget: usize,
     /// Reserves `len` bytes of address space for one shard's pool. `node` calls it
@@ -34,6 +38,8 @@ impl<M> fmt::Debug for Config<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("shards", &self.shards)
+            .field("clock", &self.clock)
+            .field("wall", &self.wall)
             .field("budget", &self.budget)
             .finish_non_exhaustive()
     }
@@ -61,9 +67,13 @@ impl Node {
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let Config {
             shards,
+            clock: monotonic,
+            wall,
             budget,
             mut memory,
         } = config;
+        let (mesh, _reader) = clock::Clock::new(monotonic);
+        let mut mesh = Some((mesh, wall));
         let stop = Stop::default();
         let mut node = Self {
             stop: stop.clone(),
@@ -86,10 +96,17 @@ impl Node {
                 name: format!("shard-{core}"),
                 core: Some(core),
             };
+            // Only the first shard gets the mesh clock.
+            let mesh = mesh.take();
             let guard = stop.guard();
-            let main = move |_tasks| async move {
-                guard.await;
-                drop(pool);
+            let main = move |tasks: env::tasks::Tasks| {
+                if let Some((mesh, wall)) = mesh {
+                    tasks.spawn(async { mesh.run(wall).await });
+                }
+                async move {
+                    guard.await;
+                    drop(pool);
+                }
             };
             match shards.start(shard, main) {
                 Ok(handle) => node.handles.push(handle),

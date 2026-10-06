@@ -1782,14 +1782,16 @@ How to read this record:
 - **SIM CRASH (2026-10-05)** `Sim::crash(&node, Crash)` ends each thread of a node
   between runs; a test restarts the node with new threads on the same disk. A `Process`
   crash keeps each file call that ended, and ends each call in flight at the crash, so a
-  restart finds no file held (#392), not even by a leaked handle (#535). A `Power` crash
-  keeps, for each 512-byte sector, its durable bytes or the bytes of any one write since
-  then, a write in flight too. A `sync` makes durable the writes that ended before it
-  started. A failed `sync` makes each sector keep its durable bytes or those of one such
-  write, at random. A `sync_dir` makes durable the entries at its end. A removed file
-  takes space until the removal is durable. The monotonic clock starts again and the
-  wall runs on. `join` on a thread that a crash ended panics, because no process joins
-  its own threads after it dies. Built by `simulation` in #114 and #535.
+  restart finds no file held (#392), not even by a leaked handle (#535). The blocks of
+  each file call of the node go back to their pools, those of a leaked call too (#763).
+  A `Power` crash keeps, for each 512-byte sector, its durable bytes or the bytes of any
+  one write since then, a write in flight too. A `sync` makes durable the writes that
+  ended before it started. A failed `sync` makes each sector keep its durable bytes or
+  those of one such write, at random. A `sync_dir` makes durable the entries at its end.
+  A removed file takes space until the removal is durable. The monotonic clock starts
+  again and the wall runs on. `join` on a thread that a crash ended panics, because no
+  process joins its own threads after it dies. Built by `simulation` in #114, #535, and
+  #763.
 - **SIM SERIAL (2026-10-05)** `Sim::line` joins two node ports with a serial line.
   Bytes go at the sender's `Settings::rate`, and an end with other settings gets
   random bytes. Each line draws its faults (loss, a flipped bit) and its random bytes
@@ -2350,10 +2352,10 @@ an opaque document in `spec` (layer 1). KINDS OWN THEIR CONFIG gives kinds (laye
 shared Document reader with positions, name and unit parsing, and diagnostics. KINDS
 OWN also says "`config` parses files to Documents", but K1 says front ends parse.
 Resolution: a layer-1 crate `document` holds the Document, source positions,
-diagnostics, and readers for durations, rates, and byte sizes. Channel unit names live
-in `spec::unit`, name syntax in `types::name`. Front ends (`config-hcl`) parse files;
-`config` reads only Documents. Basis: K1, BQ2, KINDS OWN, "decide the best
-architecture".
+diagnostics, and readers for durations, rates, byte sizes, names, and selectors.
+Channel unit names live in `spec::unit`, name syntax in `types::name`. Front ends
+(`config-hcl`) parse files; `config` reads only Documents. Basis: K1, BQ2, KINDS OWN,
+"decide the best architecture".
 
 **X22. Where a connector runs: the connector's `node` vs placement.**
 Conflict: C3 and C5 SHAPE give each connector a `node` attribute. BQ10 says a placement
