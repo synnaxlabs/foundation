@@ -19,7 +19,11 @@ pub(crate) enum Deps {
 
 /// Crates any crate may use as a dev-dependency, for tests. A normal dependency on
 /// one must be named in the crate's [`Deps`].
-pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting", "connector-ni-stub"];
+pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
+
+/// Stand-ins for a vendor library, each as `(user, stand-in)`: only `user` may take
+/// `stand-in`, and only as a dev-dependency.
+pub(crate) const STUBS: &[(&str, &str)] = &[("connector-ni", "daqmx-stub")];
 
 /// Every crate with its layer and the workspace crates it may depend on.
 pub(crate) const CRATES: &[Crate] = &[
@@ -188,6 +192,11 @@ pub(crate) const CRATES: &[Crate] = &[
         name: "connector",
         layer: 3,
         deps: Deps::Layer1And(&["hub", "secret"]),
+    },
+    Crate {
+        name: "daqmx-stub",
+        layer: 3,
+        deps: Deps::Only(&[]),
     },
     // Layer 4: surfaces.
     Crate {

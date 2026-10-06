@@ -1,5 +1,5 @@
 [package]
-name = "connector-ni-stub"
+name = "daqmx-stub"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,13 +1,19 @@
-//! A stand-in for NI's `libnidaqmx.so`, for tests: the driver functions that
-//! `connector-ni` calls, over a fake device. Its error codes are its own.
+//! A stand-in for NI's `libnidaqmx.so`, for the tests of `connector-ni`: the driver
+//! functions it calls, over a fake device. Its error codes are its own.
 //!
 //! - Analog input `i` of a task reads `1000 i + n` at sample `n`.
 //! - Reads and writes lay out samples by scan: each channel of the first sample, then
-//!   each channel of the next. The stub ignores the layout argument.
-//! - A physical channel `name<a:b>` holds the channels `a` to `b`, as NI's `ai0:3`
-//!   does. Any other name holds one channel.
+//!   each channel of the next.
+//! - A physical channel `Dev1/ai0:3` holds the channels 0 to 3, `Dev1/ai3:0` holds
+//!   them in the other order, and `Dev1/ai0,Dev1/ai2` holds the two named.
 //! - A physical channel that starts with `fail/` fails the call that adds it with
-//!   [`FAIL`].
+//!   [`FAIL`]. One that starts with `warn/` makes each read give [`WARN`], and one
+//!   that starts with `short/` makes each read give half the samples asked for.
+//! - A task holds inputs or outputs, never both: [`DIRECTION`].
+//! - An argument value the stub does not model fails with [`ARGUMENT`]: a terminal
+//!   other than the default, units other than volts, a range with `min >= max`, a
+//!   clock other than continuous on the rising edge with a rate above zero, and a
+//!   layout other than by scan.
 //! - A read or write on a task that is not running fails with [`STOPPED`].
 //! - A written value outside its channel's range fails with [`RANGE`].
 //! - A buffer smaller than the request fails with [`SIZE`].
@@ -29,8 +35,21 @@ pub const STOPPED: i32 = -201_001;
 pub const RANGE: i32 = -201_002;
 /// The code of a buffer smaller than the request.
 pub const SIZE: i32 = -201_003;
+/// The code of an argument value the stub does not model.
+pub const ARGUMENT: i32 = -201_004;
+/// The code of an input added to outputs, or the other way, or a read of outputs or
+/// a write of inputs.
+pub const DIRECTION: i32 = -201_005;
+/// The warning code of a read on a task with a `warn/` channel.
+pub const WARN: i32 = 201_000;
 /// The message of each failure.
 pub const MESSAGE: &CStr = c"the stub refused the call";
+
+const DEFAULT: i32 = -1;
+const VOLTS: i32 = 10_348;
+const RISING: i32 = 10_280;
+const CONTINUOUS: i32 = 10_123;
+const BY_SCAN: u32 = 1;
 
 #[derive(Debug, Default)]
 struct Task {
@@ -38,21 +57,23 @@ struct Task {
     /// The range of each output channel, or `None` for an input.
     channels: Vec<Option<(f64, f64)>>,
     sample: u64,
+    warn: bool,
+    short: bool,
 }
 
 /// The number of channels that `physical` names.
 fn count(physical: &CStr) -> usize {
     let name = physical.to_str().unwrap_or_default();
-    let range = name.rsplit_once(':').and_then(|(head, last)| {
-        let first: usize = head
-            .rsplit(|c: char| !c.is_ascii_digit())
-            .next()?
-            .parse()
-            .ok()?;
-        let last: usize = last.parse().ok()?;
-        last.checked_sub(first)?.checked_add(1)
-    });
-    range.unwrap_or(1)
+    let one = |name: &str| {
+        let range = name.rsplit_once(':').and_then(|(head, last)| {
+            let first = head.rsplit(|c: char| !c.is_ascii_digit()).next()?;
+            let (first, last): (usize, usize) =
+                (first.parse().ok()?, last.parse().ok()?);
+            first.abs_diff(last).checked_add(1)
+        });
+        range.unwrap_or(1)
+    };
+    name.split(',').map(one).fold(0, usize::saturating_add)
 }
 
 /// Gives the task behind `handle`.
@@ -73,17 +94,29 @@ unsafe fn task<'a>(handle: *mut c_void) -> &'a mut Task {
 unsafe fn add(
     handle: *mut c_void,
     physical: *const c_char,
-    range: Option<(f64, f64)>,
+    min: f64,
+    max: f64,
+    output: bool,
 ) -> i32 {
     // SAFETY: the caller's contract.
     let physical = unsafe { CStr::from_ptr(physical) };
-    if physical.to_bytes().starts_with(b"fail/") {
+    let name = physical.to_bytes();
+    if name.starts_with(b"fail/") {
         return FAIL;
+    }
+    if min >= max {
+        return ARGUMENT;
     }
     // SAFETY: the caller's contract.
     let task = unsafe { task(handle) };
-    let n = count(physical);
-    task.channels.extend(std::iter::repeat_n(range, n));
+    if task.channels.iter().any(|range| range.is_some() != output) {
+        return DIRECTION;
+    }
+    task.warn |= name.starts_with(b"warn/");
+    task.short |= name.starts_with(b"short/");
+    let range = output.then_some((min, max));
+    task.channels
+        .extend(std::iter::repeat_n(range, count(physical)));
     0
 }
 
@@ -93,7 +126,7 @@ unsafe fn add(
 ///
 /// `out` is valid for one write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxCreateTask(
+pub unsafe extern "system" fn DAQmxCreateTask(
     _name: *const c_char,
     out: *mut *mut c_void,
 ) -> i32 {
@@ -109,7 +142,7 @@ pub unsafe extern "C" fn DAQmxCreateTask(
 ///
 /// As [`task`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxStartTask(handle: *mut c_void) -> i32 {
+pub unsafe extern "system" fn DAQmxStartTask(handle: *mut c_void) -> i32 {
     // SAFETY: the caller's contract.
     unsafe { task(handle) }.running = true;
     0
@@ -121,7 +154,7 @@ pub unsafe extern "C" fn DAQmxStartTask(handle: *mut c_void) -> i32 {
 ///
 /// As [`task`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxStopTask(handle: *mut c_void) -> i32 {
+pub unsafe extern "system" fn DAQmxStopTask(handle: *mut c_void) -> i32 {
     // SAFETY: the caller's contract.
     unsafe { task(handle) }.running = false;
     0
@@ -133,7 +166,7 @@ pub unsafe extern "C" fn DAQmxStopTask(handle: *mut c_void) -> i32 {
 ///
 /// As [`task`]. The handle is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxClearTask(handle: *mut c_void) -> i32 {
+pub unsafe extern "system" fn DAQmxClearTask(handle: *mut c_void) -> i32 {
     // SAFETY: the caller's contract; `DAQmxCreateTask` boxed the task.
     drop(unsafe { Box::from_raw(handle.cast::<Task>()) });
     0
@@ -145,7 +178,7 @@ pub unsafe extern "C" fn DAQmxClearTask(handle: *mut c_void) -> i32 {
 ///
 /// As [`task`], and `out` is valid for one write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxGetTaskNumChans(
+pub unsafe extern "system" fn DAQmxGetTaskNumChans(
     handle: *mut c_void,
     out: *mut u32,
 ) -> i32 {
@@ -162,18 +195,21 @@ pub unsafe extern "C" fn DAQmxGetTaskNumChans(
 ///
 /// As [`add`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxCreateAIVoltageChan(
+pub unsafe extern "system" fn DAQmxCreateAIVoltageChan(
     handle: *mut c_void,
     physical: *const c_char,
     _name: *const c_char,
-    _terminal: i32,
-    _min: f64,
-    _max: f64,
-    _units: i32,
+    terminal: i32,
+    min: f64,
+    max: f64,
+    units: i32,
     _scale: *const c_char,
 ) -> i32 {
+    if terminal != DEFAULT || units != VOLTS {
+        return ARGUMENT;
+    }
     // SAFETY: the caller's contract.
-    unsafe { add(handle, physical, None) }
+    unsafe { add(handle, physical, min, max, false) }
 }
 
 /// Adds analog output channels with the range `min` to `max`.
@@ -182,34 +218,41 @@ pub unsafe extern "C" fn DAQmxCreateAIVoltageChan(
 ///
 /// As [`add`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxCreateAOVoltageChan(
+pub unsafe extern "system" fn DAQmxCreateAOVoltageChan(
     handle: *mut c_void,
     physical: *const c_char,
     _name: *const c_char,
     min: f64,
     max: f64,
-    _units: i32,
+    units: i32,
     _scale: *const c_char,
 ) -> i32 {
+    if units != VOLTS {
+        return ARGUMENT;
+    }
     // SAFETY: the caller's contract.
-    unsafe { add(handle, physical, Some((min, max))) }
+    unsafe { add(handle, physical, min, max, true) }
 }
 
-/// Accepts any timing.
+/// Accepts a continuous clock on the rising edge with a rate above zero.
 ///
 /// # Safety
 ///
-/// None: it reads no argument.
+/// None: it reads no pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxCfgSampClkTiming(
+pub unsafe extern "system" fn DAQmxCfgSampClkTiming(
     _handle: *mut c_void,
     _source: *const c_char,
-    _rate: f64,
-    _edge: i32,
-    _mode: i32,
+    rate: f64,
+    edge: i32,
+    mode: i32,
     _buffer: u64,
 ) -> i32 {
-    0
+    if rate > 0.0 && edge == RISING && mode == CONTINUOUS {
+        0
+    } else {
+        ARGUMENT
+    }
 }
 
 /// Reads `per_channel` samples of each channel into `out`.
@@ -218,11 +261,11 @@ pub unsafe extern "C" fn DAQmxCfgSampClkTiming(
 ///
 /// As [`task`]. `out` is valid for `size` writes, and `read` for one.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxReadAnalogF64(
+pub unsafe extern "system" fn DAQmxReadAnalogF64(
     handle: *mut c_void,
     per_channel: i32,
     _timeout: f64,
-    _layout: u32,
+    layout: u32,
     out: *mut f64,
     size: u32,
     read: *mut i32,
@@ -233,32 +276,39 @@ pub unsafe extern "C" fn DAQmxReadAnalogF64(
     if !task.running {
         return STOPPED;
     }
-    let (Ok(n), Ok(size)) = (u64::try_from(per_channel), usize::try_from(size)) else {
-        return SIZE;
-    };
-    let channels = task.channels.len();
-    let Some(want) = usize::try_from(n)
-        .ok()
-        .and_then(|n| n.checked_mul(channels))
+    if layout != BY_SCAN {
+        return ARGUMENT;
+    }
+    if task.channels.iter().any(Option::is_some) {
+        return DIRECTION;
+    }
+    let (Ok(asked), Ok(size)) = (usize::try_from(per_channel), usize::try_from(size))
     else {
         return SIZE;
     };
-    if want > size {
+    let channels = task.channels.len();
+    if asked.checked_mul(channels).is_none_or(|want| want > size) {
         return SIZE;
     }
+    let n = if task.short { asked / 2 } else { asked };
+    let want = n.saturating_mul(channels);
     // SAFETY: the caller's contract, and `want` is at most `size`.
     let out = unsafe { std::slice::from_raw_parts_mut(out, want) };
     let channel = (0..channels).cycle();
     let sample = (0..n).flat_map(|offset| std::iter::repeat_n(offset, channels));
     for ((slot, channel), offset) in out.iter_mut().zip(channel).zip(sample) {
-        let sample = task.sample.saturating_add(offset);
+        let sample = task
+            .sample
+            .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX));
         *slot = f64::from(u32::try_from(channel).unwrap_or(u32::MAX)) * 1000.0
             + f64::from(u32::try_from(sample).unwrap_or(u32::MAX));
     }
-    task.sample = task.sample.saturating_add(n);
+    task.sample = task
+        .sample
+        .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
     // SAFETY: the caller's contract.
-    unsafe { read.write(per_channel) };
-    0
+    unsafe { read.write(i32::try_from(n).unwrap_or(i32::MAX)) };
+    if task.warn { WARN } else { 0 }
 }
 
 /// Writes `per_channel` samples of each channel from `values`.
@@ -268,12 +318,12 @@ pub unsafe extern "C" fn DAQmxReadAnalogF64(
 /// As [`task`]. `values` is valid for `per_channel` reads per channel, and
 /// `written` for one write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxWriteAnalogF64(
+pub unsafe extern "system" fn DAQmxWriteAnalogF64(
     handle: *mut c_void,
     per_channel: i32,
     _start: u32,
     _timeout: f64,
-    _layout: u32,
+    layout: u32,
     values: *const f64,
     written: *mut i32,
     _reserved: *mut u32,
@@ -283,6 +333,9 @@ pub unsafe extern "C" fn DAQmxWriteAnalogF64(
     if !task.running {
         return STOPPED;
     }
+    if layout != BY_SCAN {
+        return ARGUMENT;
+    }
     let Ok(n) = usize::try_from(per_channel) else {
         return SIZE;
     };
@@ -291,10 +344,9 @@ pub unsafe extern "C" fn DAQmxWriteAnalogF64(
     };
     // SAFETY: the caller's contract.
     let values = unsafe { std::slice::from_raw_parts(values, len) };
-    let ranges = task.channels.iter().cycle();
-    for (value, range) in values.iter().zip(ranges) {
+    for (value, range) in values.iter().zip(task.channels.iter().cycle()) {
         let Some((min, max)) = range else {
-            return RANGE;
+            return DIRECTION;
         };
         if !(min..=max).contains(&value) {
             return RANGE;
@@ -311,7 +363,10 @@ pub unsafe extern "C" fn DAQmxWriteAnalogF64(
 ///
 /// `out` is valid for `size` writes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn DAQmxGetExtendedErrorInfo(out: *mut c_char, size: u32) -> i32 {
+pub unsafe extern "system" fn DAQmxGetExtendedErrorInfo(
+    out: *mut c_char,
+    size: u32,
+) -> i32 {
     let Some(room) = usize::try_from(size)
         .ok()
         .and_then(|size| size.checked_sub(1))

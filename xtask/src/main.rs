@@ -86,7 +86,9 @@ fn layers(root: &Path) -> Result<(), Vec<String>> {
                 continue;
             }
             let dev = dep["kind"].as_str() == Some("dev");
-            if entry.allows(dep_name) || (dev && map::TEST_ONLY.contains(&dep_name)) {
+            let test_only = map::TEST_ONLY.contains(&dep_name)
+                || map::STUBS.contains(&(name, dep_name));
+            if entry.allows(dep_name) || (dev && test_only) {
                 continue;
             }
             problems.push(violation(entry, dep_name));

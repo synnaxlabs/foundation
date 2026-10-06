@@ -10,7 +10,7 @@ libloading.workspace = true
 types = { path = "../types" }
 
 [dev-dependencies]
-connector-ni-stub = { path = "../connector-ni-stub" }
+daqmx-stub = { path = "../daqmx-stub" }
 
 [lints]
 workspace = true

@@ -336,14 +336,10 @@ dependencies = [
 name = "connector-ni"
 version = "0.0.0"
 dependencies = [
- "connector-ni-stub",
+ "daqmx-stub",
  "libloading",
  "types",
 ]
-
-[[package]]
-name = "connector-ni-stub"
-version = "0.0.0"
 
 [[package]]
 name = "constant_time_eq"
@@ -430,6 +426,10 @@ checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
 dependencies = [
  "cipher",
 ]
+
+[[package]]
+name = "daqmx-stub"
+version = "0.0.0"
 
 [[package]]
 name = "delivery"
